@@ -1552,25 +1552,6 @@ mod tests {
         }
     }
 
-    struct ScalarOnlyFactory;
-    impl NativeEffectFactory for ScalarOnlyFactory {
-        fn descriptor(&self) -> &'static effect_contract::EffectDescriptor {
-            DualAccumulatorDelayFactory::correct().descriptor()
-        }
-        fn prepare(
-            &self,
-            request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-            DualAccumulatorDelayFactory::correct().prepare(request)
-        }
-        fn bind_homogeneous_bank(
-            &self,
-            _request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-            Ok(None)
-        }
-    }
-
     /// Test-only scalar fallback for an otherwise identical launch factory. This keeps the
     /// session descriptor and scalar processor identical while exercising graph bank selection.
     struct ScalarOnlyDelegateFactory {
@@ -2788,8 +2769,9 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics));
 
         assert_eq!(plain.graph().prepared_bank_count(), 0);
-        let expected_banked =
-            BankWidth::for_backend(host_dispatch()).map_or(0, |width| 12 / width.lanes() as usize);
+        // The delay double is the `console.pre_insert` slot, so its remainder binds padded (#1098).
+        let expected_banked = BankWidth::for_backend(host_dispatch())
+            .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
         assert_eq!(banked.graph().prepared_bank_count(), expected_banked);
         // #964: the builtins are banks too, and the scalar dispatch forms none of them either,
         // while the host dispatch banks each of the three builtin stages once per cohort.
@@ -2803,7 +2785,7 @@ mod tests {
         // Non-vacuity: on a host that cannot bank at all, both compiles bind zero banks and the
         // comparison proves nothing. Recorded rather than skipped, so a scalar CI host is visible
         // as a gap in the evidence instead of a silent pass. The delivery host is x86-64-v3
-        // (AVX2+FMA), where this is 1 bank of 8 plus a 4-track scalar tail.
+        // (AVX2+FMA), where this is 1 bank of 8 plus a padded bank of the other 4.
         assert!(
             expected_banked > 0,
             "host cannot form banks; scalar_dispatch_compiles_without_banks_on_any_host is \
@@ -5081,8 +5063,10 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|_| panic!("graph"));
+        // The one shared effect is a console slot, so the remainder binds as a padded bank
+        // (#1098) and nothing renders per node on a vector host.
         let expected = BankWidth::for_backend(Backend::current())
-            .map_or(0, |width| 12 / width.lanes() as usize);
+            .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
         assert_eq!(artifact.graph().prepared_bank_count(), expected);
         let canonical = GraphCompiler::evidence(artifact.graph(), artifact.report())
             .canonical_bytes
@@ -5158,14 +5142,11 @@ mod tests {
         assert_eq!(observer_order.load(Ordering::SeqCst), 2);
         assert!(observed_post_bank_audio.load(Ordering::SeqCst));
 
-        let scalar_registry =
-            NativeEffectRegistry::new(
-                [Box::new(ScalarOnlyFactory) as Box<dyn NativeEffectFactory>],
-            )
-            .expect("scalar registry");
+        // #1098: a console slot never renders per node on a vector backend, so the per-node arm
+        // is the test-only `Scalar` oracle.
         let scalar_effects = prepare_native_session_effects(
             &session,
-            &scalar_registry,
+            &registry,
             EffectCompileCaps {
                 maximum_total_state_bytes: 1 << 20,
                 maximum_scratch_bytes: 1 << 20,
@@ -5174,7 +5155,7 @@ mod tests {
         )
         .expect("scalar effects");
         let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
+            dispatch: Backend::Scalar,
             plan_id: 999,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -5255,24 +5236,30 @@ mod tests {
                 &mut SessionPoolClasses::default(),
             )
             .expect("off-render factory bind");
-            assert_eq!(banks.len(), 12 / lanes);
-            assert!(banks.iter().all(|bank| {
-                bank.members.len() == lanes && bank.active_mask.iter().all(|active| *active)
+            // A console slot's remainder binds as one padded bank (#1098): members first, the
+            // mask `true` on exactly their lanes. Before #1098 it was planned but left unbound
+            // (#96 F6/F7).
+            assert_eq!(banks.len(), 12_usize.div_ceil(lanes));
+            assert!(banks.iter().enumerate().all(|(index, bank)| {
+                let members = (12 - index * lanes).min(lanes);
+                bank.members.len() == members
+                    && bank
+                        .active_mask
+                        .iter()
+                        .enumerate()
+                        .all(|(lane, active)| *active == (lane < members))
             }));
-            // The report is the bound plan: one entry per bank actually bound, and the padded
-            // remainder group is planned but deliberately left unbound (#96 F6/F7).
+            // The report is the bound plan: one entry per bank actually bound.
             assert_eq!(report.bound_slots.len(), banks.len());
             assert!(
-                report
-                    .bound_slots
-                    .iter()
-                    .all(|bound| bound.slot == 0 && bound.members.len() == lanes),
+                report.bound_slots.iter().all(|bound| bound.slot == 0),
                 "each track here has a one-slot rack chain"
             );
             assert_eq!(
                 report.scalar_in(RackLocation::Simd1).len()
                     + report.scalar_in(RackLocation::Simd2).len(),
-                12 % lanes
+                0,
+                "no console slot renders per node"
             );
         }
 
@@ -5292,27 +5279,26 @@ mod tests {
             required: false,
         };
         let (connected_index, connected_ids) = indexed_effect_ids(&connected_fallback);
-        let connected_banks = bind_rack_banks_indexed(
+        // A connected sidechain never banks (#96 F9). A console slot takes none in a valid
+        // session (decision 12); planted here, the slot cannot bank, and since #1098 that fails
+        // the compile rather than rendering the slot per node.
+        let Err(connected) = bind_rack_banks_indexed(
             &connected_fallback,
             &connected_index,
             &connected_ids,
             &dependency_levels,
             eight,
             &mut SessionPoolClasses::default(),
-        )
-        .expect("connected sidechain is scalar fallback, not failure");
-        assert!(connected_banks.0.iter().all(|bank| {
-            bank.members
-                .iter()
-                .all(|member| member.track_id.as_str() != "bank0")
-        }));
+        ) else {
+            panic!("a sidechained console slot rendered per node");
+        };
+        assert_eq!(connected.code, "console.slot.unbanked");
         assert!(
-            connected_banks
-                .1
-                .scalar_in(RackLocation::Simd1)
-                .iter()
-                .any(|member| member.track_id.as_str() == "bank0"),
-            "a connected sidechain never banks, and the report says so"
+            connected
+                .path
+                .starts_with("$.console.pre_insert[slot=bank-delay].bank[pool=stereo,level="),
+            "the diagnostic names the slot, the pool and the level: {}",
+            connected.path
         );
 
         let same_wave = prepare_native_session_effects(
@@ -5334,12 +5320,28 @@ mod tests {
             .clone();
         let first = GraphNodeId::Effect(first_id.clone());
         let mut incompatible_levels = dependency_levels.clone();
-        for level in &mut incompatible_levels {
-            level.nodes.retain(|node| node != &first);
-        }
+        let first_level = incompatible_levels
+            .iter()
+            .position(|level| level.nodes.contains(&first))
+            .expect("the first effect is scheduled");
+        incompatible_levels[first_level]
+            .nodes
+            .retain(|node| node != &first);
+        let lifted = incompatible_levels
+            .iter()
+            .map(|level| level.level)
+            .max()
+            .expect("a level")
+            + 1;
+        incompatible_levels.push(DependencyLevel {
+            level: lifted,
+            nodes: vec![first.clone()],
+        });
         // F12: a bank never crosses a dependency level. Before #96 the whole chunk holding a
         // level-incompatible member was dropped; the planner now partitions by level *before*
-        // chunking, so the member itself never banks while its level-compatible peers still do.
+        // chunking, so the member never joins its peers' bank while they still bank together.
+        // It is a console slot, so its own group, alone at its level, binds padded (#1098, H2):
+        // a level split costs a group, never a per-node render.
         let (split_banks, split_report) = bind_rack_banks_indexed(
             &same_wave,
             &same_wave_index,
@@ -5348,12 +5350,19 @@ mod tests {
             eight,
             &mut SessionPoolClasses::default(),
         )
-        .expect("a level split is a scalar fallback, not a failure");
+        .expect("a level split binds another padded group");
+        assert!(
+            split_banks.iter().all(|bank| {
+                bank.members == [first_id.clone()].into()
+                    || bank.members.iter().all(|member| member != &first_id)
+            }),
+            "an effect at another level never joins its peers' bank"
+        );
         assert!(
             split_banks
                 .iter()
-                .all(|bank| bank.members.iter().all(|member| member != &first_id)),
-            "an unscheduled effect never joins a bank"
+                .any(|bank| bank.members == [first_id.clone()].into()),
+            "it banks alone, padded"
         );
         let split_levels: BTreeMap<_, _> = incompatible_levels
             .iter()
@@ -5455,10 +5464,10 @@ mod tests {
                 })
                 .unwrap_or_else(|_| panic!("audit graph"));
             let audit_backend = Backend::current();
+            // The delay double is a console slot, so its remainder binds padded (#1098).
             let expected_effect_banks = BankWidth::for_backend(audit_backend)
-                .map_or(0, |width| 12 / width.lanes() as usize);
-            let expected_scalar_tails = BankWidth::for_backend(audit_backend)
-                .map_or(12, |width| 12 % width.lanes() as usize);
+                .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
+            let expected_scalar_tails = BankWidth::for_backend(audit_backend).map_or(12, |_| 0);
             // #86 F3: every post-input node is a bank member, so the count is `T.div_ceil(W)`
             // (12 tracks: 2 banks at W8, one of them padded to 8 with 4 identity lanes;
             // 3 banks at W4) and there is no scalar tail at all on a vector host.
@@ -5470,11 +5479,16 @@ mod tests {
                 expected_builtin_banks
             );
             assert_eq!(
+                audit_artifact.graph().prepared_bank_count(),
                 expected_effect_banks
-                    * BankWidth::for_backend(audit_backend)
-                        .map_or(0, |width| width.lanes() as usize)
-                    + expected_scalar_tails,
-                12
+            );
+            assert_eq!(
+                audit_artifact
+                    .report()
+                    .rack_cohorts
+                    .scalar_in(RackLocation::Simd1)
+                    .len(),
+                expected_scalar_tails
             );
             assert!(
                 expected_builtin_banks != 0,
@@ -6063,13 +6077,13 @@ mod tests {
             // its three builtin stages -- post-input, fader, matrix -- and the input stage fuses
             // into the EQ's chain, so the two readings now differ here too:
             //
-            // * Slots: the EQ binds only in a *full* cohort (the ninth track's padded group is
-            //   planned but left unbound), and each builtin stage binds in every cohort, padded
-            //   or not.
-            // * Chains: two per cohort, `[post-input, EQ]` (or `[post-input]` where the EQ stays
-            //   scalar) and `[fader, matrix]`. The `PostSimd1` observers below read the EQ's output,
-            //   which declines the EQ -> fader merge
-            //   (`a_leased_stage_meter_declines_the_merge_and_still_meters`).
+            // * Slots: the EQ is a console slot, so it binds in every cohort, the ninth track's
+            //   padded (#1098; before it, that padded group was planned but left unbound), and
+            //   each builtin stage binds in every cohort, padded or not.
+            // * Chains: two per observed cohort, `[post-input, EQ]` and `[fader, matrix]`. The
+            //   `PostSimd1` observers below read the EQ's output, which declines the EQ -> fader
+            //   merge (`a_leased_stage_meter_declines_the_merge_and_still_meters`). They sit on the
+            //   first eight tracks only, so the ninth track's padded cohort fuses into one chain.
             //
             // A runtime that regressed to one chain per slot would now fail the transpose law, which
             // `chains == slots` could not show.
@@ -6078,16 +6092,19 @@ mod tests {
                 .lanes() as usize;
             let tracks = model.tracks.len();
             let cohorts = tracks.div_ceil(lanes);
-            let full_cohorts = tracks / lanes;
             assert_eq!(
                 (effect_banks, builtin_banks),
-                (full_cohorts, BANKABLE_TRACK_STAGES as usize * cohorts),
-                "{tracks} tracks: one EQ bank per full cohort, three builtin banks per cohort"
+                (cohorts, BANKABLE_TRACK_STAGES as usize * cohorts),
+                "{tracks} tracks: one EQ bank and three builtin banks per cohort"
             );
+            // The observers sit on `eq0..=eq7`. A cohort without one -- the ninth track's padded
+            // one -- fuses its whole strip, `[post-input, EQ, fader, matrix]`, into one chain.
+            let observed_cohorts = 8 / lanes;
             assert_eq!(
                 chains,
-                2 * cohorts as u64,
-                "{tracks} tracks: [post-input, EQ] and [fader, matrix] per cohort"
+                (2 * observed_cohorts + (cohorts - observed_cohorts)) as u64,
+                "{tracks} tracks: [post-input, EQ] and [fader, matrix] per observed cohort, one \
+                 chain per other cohort"
             );
             assert!(chains < slots, "the builtins fuse into multi-slot chains");
             assert!(bank_count > 0, "the eight-lane cohort must actually bank");
@@ -6162,9 +6179,6 @@ mod tests {
         };
         let bank_effects = prepare_native_session_effects(&session, &registry, effect_caps)
             .expect("prepared bank-capable effects");
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar effects");
         let bank_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_042,
@@ -6172,18 +6186,42 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
-        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
+        // #1098: a console slot never renders per node on a vector backend. A factory that
+        // declines the console group fails the compile rather than falling back per node, so the
+        // per-node reference is the test-only `Scalar` oracle, where nothing banks.
+        let declined = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_043,
-            effects: scalar_effects,
+            effects: prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared declining effects"),
+            caps: integration_caps(),
+        });
+        let Err(declined) = declined else {
+            panic!("a declined console group rendered per node on a vector backend");
+        };
+        assert_eq!(
+            declined
+                .diagnostics
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            ["console.slot.unbanked"],
+            "a declined console group fails the compile"
+        );
+        let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
+            dispatch: Backend::Scalar,
+            plan_id: 1_043,
+            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+                .expect("prepared scalar effects"),
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar graph: {:?}", failure.diagnostics));
 
+        // #1098: the ninth track's EQ binds as a padded bank of one, so nothing renders per node.
         let width = BankWidth::for_backend(bank_artifact.report().rack_cohorts.dispatch);
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 9), |width| {
-            let lanes = width.lanes() as usize;
-            (9 / lanes, 9 % lanes)
+            (9_usize.div_ceil(width.lanes() as usize), 0)
         });
         assert_eq!(bank_artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
@@ -6203,15 +6241,6 @@ mod tests {
             expected_scalar_tails
         );
         assert_eq!(scalar_artifact.graph().prepared_bank_count(), 0);
-        // #96: the report is the *bound* plan. Cohort planning is still independent of the
-        // factory's legal scalar fallback -- the planned groups are identical -- but a group the
-        // factory declined is now reported as unbound, so its members show up in the scalar set
-        // instead of being invisible there.
-        assert_eq!(
-            scalar_artifact.report().rack_cohorts.plan.groups,
-            bank_artifact.report().rack_cohorts.plan.groups,
-            "cohort planning is independent of the factory's legal scalar fallback"
-        );
         assert!(scalar_artifact.report().rack_cohorts.bound_slots.is_empty());
         assert_eq!(
             scalar_artifact
@@ -6220,7 +6249,7 @@ mod tests {
                 .scalar_in(RackLocation::Simd1)
                 .len(),
             9,
-            "a declined bind puts every member on the per-node scalar path"
+            "the Scalar oracle puts every member on the per-node path"
         );
         assert_eq!(
             bank_artifact.graph().sequential_schedule,
@@ -7620,22 +7649,24 @@ mod tests {
         );
     }
 
-    /// Rack placement decides where an effect sits in the signal chain. It must never decide what
-    /// the arithmetic produces -- and, after phase 1b, it no longer decides how wide that
-    /// arithmetic is either.
+    /// Rack placement decides where an effect sits in the signal chain, and since decision 12
+    /// whether its remainder banks. It must never decide what the arithmetic produces.
     ///
     /// The same ten compressors are compiled twice, once as the `console.pre_insert` slot
     /// (lowered to SIMD-1) and once as every track's insert (the dynamic rack): decision 12's
     /// console-versus-insert placement witness. Both racks a compressor is not in are empty
-    /// identity boundaries, so the two sessions are the same chain; both bank the same number of
-    /// lanes, and every rendered bit agrees. This is the gate that would catch a bank kernel, or a
-    /// console lowering, that silently depended on rack identity. The pair is keyless, since a
-    /// console slot takes no sidechain, so every compressor is bankable in both.
+    /// identity boundaries, so the two sessions are the same chain, and every rendered bit
+    /// agrees. This is the gate that would catch a bank kernel, a padded bank, or a console
+    /// lowering that silently depended on rack identity. The pair is keyless, since a console slot
+    /// takes no sidechain, so every compressor is bankable in both.
+    ///
+    /// The one thing placement decides is the remainder's width (#1098): a console slot binds it
+    /// as one padded bank, and an insert renders it per node.
     #[test]
     fn rack_placement_changes_the_bank_but_never_the_samples() {
         let (simd1_model, dynamic_model) = keyless_compressor_placements();
-        let (simd1, _) = compile_bank_and_per_node(&simd1_model, "miso.compressor", 1_620);
-        let (dynamic, _) = compile_bank_and_per_node(&dynamic_model, "miso.compressor", 1_630);
+        let simd1 = compile_bank_only(&simd1_model, 1_620);
+        let dynamic = compile_bank_only(&dynamic_model, 1_630);
         // The witness is not vacuous: each placement's compressors are planned in its own rack.
         for (artifact, planned, empty) in [
             (&simd1, RackLocation::Simd1, RackLocation::Dynamic),
@@ -7646,35 +7677,33 @@ mod tests {
             assert_eq!(cohorts.groups_in(empty).count(), 0, "{empty:?}");
         }
 
+        let lanes = BankWidth::for_backend(host_dispatch())
+            .expect("a vector host")
+            .lanes() as usize;
+        let (console_banks, insert_banks) = (10_usize.div_ceil(lanes), 10 / lanes);
         assert_eq!(
-            simd1.graph().prepared_bank_count(),
-            dynamic.graph().prepared_bank_count(),
-            "the same session banks the same width wherever it is placed"
+            [
+                simd1.graph().prepared_bank_count(),
+                dynamic.graph().prepared_bank_count()
+            ],
+            [console_banks, insert_banks],
+            "a console slot pads its remainder into one more bank; an insert does not"
         );
         assert_eq!(
-            simd1
-                .report()
-                .rack_cohorts
-                .bound_slots_in(RackLocation::Simd1)
-                .count(),
-            dynamic
-                .report()
-                .rack_cohorts
-                .bound_slots_in(RackLocation::Dynamic)
-                .count(),
-        );
-        assert_eq!(
-            simd1
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Simd1)
-                .len(),
-            dynamic
-                .report()
-                .rack_cohorts
-                .scalar_in(RackLocation::Dynamic)
-                .len(),
-            "the same tracks fall back, for the same reasons"
+            [
+                simd1
+                    .report()
+                    .rack_cohorts
+                    .scalar_in(RackLocation::Simd1)
+                    .len(),
+                dynamic
+                    .report()
+                    .rack_cohorts
+                    .scalar_in(RackLocation::Dynamic)
+                    .len()
+            ],
+            [0, 10 % lanes],
+            "only the insert remainder renders per node"
         );
         assert_eq!(
             simd1.report().output_latency,
@@ -7684,22 +7713,26 @@ mod tests {
 
         // #96 state payloads are placement-independent *by construction*: a bank is built from
         // `PrepareEffectBankRequest`, which carries a backend, a width and one
-        // `PrepareEffectRequest` per member -- and neither type has a rack in it. These pin the
-        // observable consequence: the same session retains byte-for-byte the same bank state,
-        // scratch and metadata under either placement, so a snapshot taken under one restores
-        // under the other.
-        assert_eq!(
-            simd1.report().estimate.effect_bank_scratch_bytes,
-            dynamic.report().estimate.effect_bank_scratch_bytes,
-        );
-        assert_eq!(
-            simd1.report().estimate.effect_bank_runtime_buffer_bytes,
-            dynamic.report().estimate.effect_bank_runtime_buffer_bytes,
-        );
-        assert_eq!(
-            simd1.report().estimate.effect_bank_metadata_bytes,
-            dynamic.report().estimate.effect_bank_metadata_bytes,
-        );
+        // `PrepareEffectRequest` per lane -- and neither type has a rack in it. These pin the
+        // observable consequence: every bank retains the same scratch under either placement
+        // (the console placement's padded one included, which charges every lane), so a
+        // snapshot taken under one restores under the other.
+        for (simd1_bytes, dynamic_bytes) in [
+            (
+                simd1.report().estimate.effect_bank_scratch_bytes,
+                dynamic.report().estimate.effect_bank_scratch_bytes,
+            ),
+            (
+                simd1.report().estimate.effect_bank_runtime_buffer_bytes,
+                dynamic.report().estimate.effect_bank_runtime_buffer_bytes,
+            ),
+        ] {
+            assert_eq!(
+                simd1_bytes * insert_banks as u64,
+                dynamic_bytes * console_banks as u64,
+                "the same bytes per bank under either placement"
+            );
+        }
         assert_eq!(
             simd1.report().estimate.declared_effect_bytes,
             dynamic.report().estimate.declared_effect_bytes,
@@ -7973,6 +8006,14 @@ mod tests {
     /// and releases its eight input slots as it closes: 64 input slots + 8 new post-input + 56 new
     /// EQ + 64 compressor outputs + the output = 193.
     ///
+    /// **#1098 moved the per-node arm, not the banked one.** The EQ is a console slot, and a console
+    /// slot never renders per node on a vector backend, so the per-node plan of this chain is now the
+    /// EQ folded into every track's inserts, beside the compressor. There the two are one insert
+    /// chain and the compressor, the EQ's sole reader, runs in place over the EQ's output: 64 input
+    /// slots + 8 new post-input + 56 new EQ + the output = **129**. The 193 above is the per-node
+    /// plan with the EQ in the console, which no vector backend compiles any more; 256 - 193 = 63
+    /// is still what the hold costs over it.
+    ///
     /// Until #964 this test also pinned the builtins-less compile (192 banked against 129 per node
     /// since #925, where the post-input stage was an alias and the EQ banks read the `Input`
     /// buffers directly). That compile is gone, and its arm with it.
@@ -7997,15 +8038,6 @@ mod tests {
         )
         .expect("compiled console fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
-        let per_node_registry =
-            NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
-                Box::new(ScalarOnlyDelegateFactory {
-                    delegate: registry
-                        .get_shared_ascii(id)
-                        .expect("registered launch effect"),
-                }) as Box<dyn NativeEffectFactory>
-            }))
-            .expect("per-node registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -8046,14 +8078,21 @@ mod tests {
         // The plan every host renders: the merged post-input-to-matrix span holds the inputs'
         // 64 slots, one of which the session output reuses. Unchanged by #925.
         let banked = with_builtins(1_692, &registry);
-        let per_node = with_builtins(1_693, &per_node_registry);
+        // #1098: the EQ is a console slot, which never renders per node on a vector backend, so
+        // the per-node plan is the same chain with the EQ folded into every track's inserts.
+        let per_node =
+            per_node_inserts_artifact(&model, &["miso.parametric-eq", "miso.compressor"], 1_693)
+                .graph()
+                .program()
+                .expect("lowers")
+                .buffers;
         assert_eq!(
             banked, 256,
             "64 held inputs + 64 post-input + 64 EQ + 64 compressor outputs"
         );
         assert_eq!(
-            per_node, 193,
-            "64 input slots + 8 post-input + 56 EQ + 64 compressor outputs + the session output"
+            per_node, 129,
+            "64 input slots + 8 post-input + 56 EQ outputs, the compressor in place, + the output"
         );
     }
 
@@ -8106,15 +8145,6 @@ mod tests {
         )
         .expect("compiled console fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
-        let per_node_registry =
-            NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
-                Box::new(ScalarOnlyDelegateFactory {
-                    delegate: registry
-                        .get_shared_ascii(id)
-                        .expect("registered launch effect"),
-                }) as Box<dyn NativeEffectFactory>
-            }))
-            .expect("per-node registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -8128,14 +8158,20 @@ mod tests {
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics));
-        let per_node = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_651,
-            effects: prepare_native_session_effects(&session, &per_node_registry, effect_caps)
-                .expect("prepared per-node console effects"),
+        // #1098: the EQ is a console slot, which never renders per node on a vector backend. The
+        // per-node arm is the same chain with the EQ folded into every track's inserts, on the
+        // same backend; the graph it must not move is the `Scalar` oracle's, which compiles the
+        // session as written.
+        let per_node =
+            per_node_inserts_artifact(&model, &["miso.parametric-eq", "miso.compressor"], 1_651);
+        let scalar_graph = compile_with_session_builtins(SessionBuiltinsCompile {
+            dispatch: Backend::Scalar,
+            plan_id: 1_652,
+            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+                .expect("prepared Scalar console effects"),
             caps: integration_caps(),
         })
-        .unwrap_or_else(|failure| panic!("per-node console graph: {:?}", failure.diagnostics));
+        .unwrap_or_else(|failure| panic!("Scalar console graph: {:?}", failure.diagnostics));
 
         let width = BankWidth::for_backend(bank.report().rack_cohorts.dispatch);
         let Some(width) = width else {
@@ -8164,8 +8200,12 @@ mod tests {
         assert_eq!(per_node.graph().prepared_bank_count(), 0);
         assert_eq!(
             bank.graph().sequential_schedule,
-            per_node.graph().sequential_schedule,
+            scalar_graph.graph().sequential_schedule,
             "banking is an execution decision and must not move the graph"
+        );
+        assert_eq!(
+            bank.report().output_latency,
+            scalar_graph.report().output_latency
         );
         assert_eq!(
             bank.report().output_latency,
@@ -8539,32 +8579,20 @@ mod tests {
         );
         assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
 
-        // And the meter reads what it is supposed to read. The oracle is the same session with
-        // every effect on the per-node scalar path: no bank binds there, so no merge is even
-        // expressible, and the meter can only be reading the compressor's output.
-        let scalar_artifact = compile_console_model_with_builtins(
-            &intended,
-            2_031,
-            &meters,
-            &scalar_console_registry(),
-        );
+        // And the meter reads what it is supposed to read. The oracle is the same session at the
+        // test-only `Scalar` backend (#1059): no bank binds there, effect or builtin, so no merge
+        // is even expressible, and the meter can only be reading the compressor's output. (Before
+        // #1098 the oracle was a registry that declined every effect bank on the host's backend;
+        // a console slot no longer renders per node there.)
+        let scalar_artifact = compile_console_oracle(&intended, 2_031, &meters);
         assert_eq!(
             scalar_artifact.graph().prepared_bank_count(),
             0,
             "the oracle arm must bind no effect bank at all"
         );
-        let (scalar_pcm, _, scalar_chains, _, scalar_frames, scalar_redirects, _) =
+        let (scalar_pcm, _, scalar_chains, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
-        // Two chains per cohort on the oracle arm, not one. The three bankable track stages still
-        // bind their banks -- only the *effects* are on the scalar path here -- and the fader bank
-        // chains into the matrix bank because nothing planar reads between them. The post-input
-        // bank cannot join them: its successor is a per-node EQ op, which is not a bank slot.
-        const ORACLE_CHAINS_PER_COHORT: u64 = 2;
-        assert_eq!(
-            scalar_chains,
-            ORACLE_CHAINS_PER_COHORT * cohorts,
-            "the oracle arm realises its builtin banks and fuses the fader into the matrix"
-        );
+        assert_eq!(scalar_chains, 0, "the oracle arm realises no chain");
         assert_pcm_bits_equal(
             &pcm,
             &scalar_pcm,
@@ -8582,10 +8610,6 @@ mod tests {
             redirects, 0,
             "a meter at `PostSimd1` is upstream of the limiter: it declines the chain merge and \
              leaves the scatter accounting at the far end of the strip alone"
-        );
-        assert!(
-            scalar_redirects > 0,
-            "the bank-free arm still redirects its builtin banks' scatters"
         );
         assert!(
             frames
@@ -8642,8 +8666,7 @@ mod tests {
             "ch00's cohort splits at the sent boundary; every other cohort stays one chain"
         );
         assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
-        let scalar_artifact =
-            compile_console_model_with_builtins(&sent, 2_041, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&sent, 2_041, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-simd1 send");
         assert!(
@@ -8767,27 +8790,28 @@ mod tests {
         assert!(pcm.iter().flatten().any(|sample| *sample != 0.0));
     }
 
-    /// Mono-collapse M1, then issue #971: a single odd track no longer strands a pool's remainder.
+    /// Mono-collapse M1, then issues #971 and #1098: a single odd track strands no pool remainder.
     ///
     /// # What M1 measured here
     ///
-    /// An effect bank binds only when its group is **full**: every launch effect factory refuses
-    /// `requests.len() != lanes` (#96 F7), so a group of fewer than `lanes` members renders on the
-    /// per-node scalar path. Pooling by class therefore has a remainder cost that pooling by rack
-    /// and level did not: a class whose pool is not a multiple of the lane width strands its tail.
-    /// Under M1 alone, 63 mono tracks and one stereo one bound seven full eight-lane cohorts and
-    /// stranded seven tracks, and the lone stereo track stranded too: 21 effect banks against the
-    /// unsplit session's 24, one cohort in eight lost to a single odd track.
+    /// An effect bank bound only when its group was **full**, so pooling by class had a remainder
+    /// cost that pooling by rack and level did not: a class whose pool is not a multiple of the lane
+    /// width stranded its tail on the per-node path. Under M1 alone, 63 mono tracks and one stereo
+    /// one bound seven full eight-lane cohorts and stranded seven tracks, and the lone stereo track
+    /// stranded too: 21 effect banks against the unsplit session's 24.
     ///
-    /// # What issue #971 changes
+    /// # What issue #971 changed, and what #1098 changes
     ///
-    /// The mono remainder sits in nothing but partial mono groups in the trial plan, so it is
-    /// pooled as stereo, where it fills the odd track's cohort: the pools become 56 and 8 at eight
-    /// lanes (60 and 4 at four), nothing strands, and the bank count and the strip's chain shape
-    /// equal the unsplit session's.
+    /// #971 pooled the mono remainder as stereo, where it filled the odd track's cohort: pools of 56
+    /// and 8, and 24 banks. The strip is the session's console, and since #1098 every console group
+    /// binds, padded when partial, so no remainder strands and none is moved: the mono pool keeps
+    /// all 63 tracks, `ceil(63 / W)` cohorts, every one of which collapses, and the odd track banks
+    /// alone in a padded stereo cohort. That is one more group per slot than the unsplit session,
+    /// `3 * (ceil(63 / W) + 1)` banks: the padded bank the owner accepted (decision 12, H5), paid
+    /// for the collapse of the seven tracks #971 used to move.
     ///
     /// It regroups lanes and never changes what a lane computes, so the digest assertions stand:
-    /// both sessions render the bits the bank-free registry renders.
+    /// both sessions render the bits the `Scalar` oracle renders.
     #[test]
     fn a_single_odd_track_no_longer_strands_a_pool_remainder() {
         const BLOCKS: u64 = 12;
@@ -8807,49 +8831,53 @@ mod tests {
         let unsplit_slots = unsplit.graph().prepared_bank_count();
         let split_slots = split.graph().prepared_bank_count();
 
-        // Three effect slots per full cohort (EQ, compressor, limiter).
+        // Three effect slots per cohort (EQ, compressor, limiter).
         assert_eq!(
             unsplit_slots,
             3 * (64 / lanes),
             "every cohort of 64 is full"
         );
         assert_eq!(
-            split_slots, unsplit_slots,
-            "the mono remainder fills the odd track's cohort, so no cohort is lost"
+            split_slots,
+            3 * (63_usize.div_ceil(lanes) + 1),
+            "every mono cohort, the padded remainder's included, and the odd track's padded one"
         );
-        let kept_mono = (63 / lanes) * lanes;
         let pooled = pooled_tracks(&split);
         assert_eq!(
-            pooled[0].len(),
-            kept_mono,
-            "the mono pool keeps a whole number of cohorts"
+            pooled[0],
+            BTreeSet::from_iter(
+                (0..64)
+                    .filter(|index| *index != 7)
+                    .map(|index| format!("ch{index:02}"))
+            ),
+            "the mono pool keeps every mono track"
         );
         assert_eq!(
             pooled[1],
-            BTreeSet::from_iter(
-                (kept_mono + 1..64)
-                    .chain([7])
-                    .map(|index| format!("ch{index:02}"))
-            ),
-            "the stereo pool is the odd track and the mono remainder, the highest ids"
+            BTreeSet::from(["ch07".to_owned()]),
+            "the stereo pool is the odd track alone"
         );
 
-        // Class A: the tracks that moved pool render the same bits per lane.
+        // Class A: splitting the pools regroups lanes and moves no bit.
         let (unsplit_pcm, _, unsplit_chains, unsplit_shape_slots, ..) =
             render_console_builtins_blocks(unsplit, BLOCKS, Vec::new());
-        let scalar =
-            compile_console_model_with_builtins(&uniform, 2_076, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&uniform, 2_076, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&unsplit_pcm, &scalar_pcm, "uniform mono strip");
         let (split_pcm, _, split_chains, split_shape_slots, ..) =
             render_console_builtins_blocks(split, BLOCKS, Vec::new());
+        let cohorts = (64 / lanes) as u64;
+        assert_eq!(
+            [unsplit_chains, unsplit_shape_slots],
+            [cohorts, STRIP_SLOTS_PER_COHORT * cohorts]
+        );
+        let cohorts = (63_usize.div_ceil(lanes) + 1) as u64;
         assert_eq!(
             [split_chains, split_shape_slots],
-            [unsplit_chains, unsplit_shape_slots],
-            "both planners pooled the moved tracks alike: one strip chain per cohort"
+            [cohorts, STRIP_SLOTS_PER_COHORT * cohorts],
+            "both planners pooled the tracks alike: one strip chain per cohort, padded ones too"
         );
-        let scalar_split =
-            compile_console_model_with_builtins(&odd, 2_077, &[], &scalar_console_registry());
+        let scalar_split = compile_console_oracle(&odd, 2_077, &[]);
         let (scalar_split_pcm, ..) =
             render_console_builtins_blocks(scalar_split, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&split_pcm, &scalar_split_pcm, "one-odd-track strip");
@@ -8996,26 +9024,27 @@ mod tests {
         }
     }
 
-    /// Issue #971's gate: on the dogfood session's layout the mono pool keeps a whole number of
-    /// cohorts, and the session binds exactly what it would bind with no mono track at all.
+    /// Issues #971 and #1098: on the dogfood session's layout every mono track stays mono, and the
+    /// session binds exactly what it would bind with no mono track at all.
     ///
     /// The session is the 64-track mono fixture cloned to 81 tracks with every track stereo but
     /// the 18 [`DOGFOOD_MONO_POSITIONS`]: the dogfood first-listen mix with its bit-identical
-    /// dual-mono stems folded to one channel and the standing EQ + compressor + limiter strip on
-    /// every track. Before #971 the 18 mono tracks pooled apart, and both pools stranded a tail
-    /// (18 and 63 are not multiples of the width): 27 effect banks at eight lanes where the
-    /// all-stereo session binds 30, so folding the stems made the mix slower than leaving them
-    /// declared stereo. Now the two tracks past the last whole mono cohort pool as stereo and
-    /// complete the stereo pool's partial cohort; the one track left over strands exactly as it
-    /// does in the all-stereo session, whose 81 tracks are not a multiple of the width either.
+    /// dual-mono stems folded to one channel and the standing EQ + compressor + limiter strip,
+    /// the session's console, on every track. Before #971 the 18 mono tracks pooled apart and both
+    /// pools stranded a tail (18 and 63 are not multiples of the width): 27 effect banks at eight
+    /// lanes where the all-stereo session bound 30. #971 then moved the two tracks past the last
+    /// whole mono cohort to the stereo pool. Since #1098 every console group binds, padded when
+    /// partial, so nothing strands and nothing moves (the demotion is retired for console slots,
+    /// `banks::stranded_mono_tracks`):
     ///
-    /// * The bank count **and** the chain shape equal the all-stereo session's. The shape is what
-    ///   sees a move applied to one planner only: the rack planner's banks would count the same,
-    ///   and the strip's chain merges would decline silently.
-    /// * The kept mono tracks are the first `16` in track order (at 8 or 4 lanes), and exactly
-    ///   their cohorts arm: `16 / lanes` chains.
+    /// * The bank count **and** the chain shape equal the all-stereo session's:
+    ///   `ceil(18 / W) + ceil(63 / W)` cohorts per slot is `ceil(81 / W)` at eight lanes and at
+    ///   four. The shape is what sees a pool applied to one planner only: the rack planner's banks
+    ///   would count the same, and the strip's chain merges would decline silently.
+    /// * All 18 mono tracks stay mono, and every one of their `ceil(18 / W)` cohorts arms, the
+    ///   padded one included.
     /// * The render is the all-stereo session's, bit for bit (the same feed; pooling and the
-    ///   collapse move no bit), and the bank-free registry's.
+    ///   collapse move no bit), and the `Scalar` oracle's.
     /// * A builtins-only strip is left alone: builtin banks pad a partial cohort, so all 18 stay
     ///   mono and every one of their `ceil(18 / lanes)` cohorts arms.
     ///
@@ -9046,27 +9075,19 @@ mod tests {
         let stereo_artifact = compile_console_model_with_builtins(&stereo, 2_078, &[], &registry);
         let folded_artifact = compile_console_model_with_builtins(&folded, 2_079, &[], &registry);
         let stereo_banks = stereo_artifact.graph().prepared_bank_count();
-        assert_eq!(stereo_banks, 3 * (81 / lanes), "the all-stereo reference");
+        assert_eq!(
+            stereo_banks,
+            3 * 81_usize.div_ceil(lanes),
+            "the all-stereo reference"
+        );
         assert_eq!(
             folded_artifact.graph().prepared_bank_count(),
             stereo_banks,
-            "no effect bank is lost to the mono pool's remainder"
+            "no effect bank is added by the mono pool's remainder"
         );
-        let kept = (18 / lanes) * lanes;
         let pooled = pooled_tracks(&folded_artifact);
-        assert_eq!(
-            pooled[0],
-            DOGFOOD_MONO_POSITIONS[..kept]
-                .iter()
-                .map(|index| format!("ch{index:02}"))
-                .collect::<BTreeSet<_>>(),
-            "the mono pool keeps the first whole cohorts in track order"
-        );
-        assert_eq!(
-            pooled[1].len(),
-            81 - kept,
-            "everything else pools as stereo"
-        );
+        assert_eq!(pooled[0], mono, "every mono track stays in the mono pool");
+        assert_eq!(pooled[1].len(), 81 - 18, "everything else pools as stereo");
         // Issue #1002: the move shifts the group indices, and the banks of the groups it did not
         // change are reused from the trial plan with their index renumbered. Every bound slot of
         // the report must still name the plan group whose lanes it binds.
@@ -9095,7 +9116,7 @@ mod tests {
         let folded_render = render_armed_console_blocks(folded_artifact, BLOCKS, &mono, &mono);
         assert_eq!(
             folded_render.shape, reference.shape,
-            "both planners moved the remainder alike, so every strip chain merges as it does \
+            "both planners pooled the mono tracks alike, so every strip chain merges as it does \
              with no mono track"
         );
         assert_eq!(
@@ -9104,8 +9125,8 @@ mod tests {
         );
         assert_eq!(
             folded_render.collapse[1],
-            (kept / lanes) as u64,
-            "each kept mono cohort's strip chain arms"
+            18_usize.div_ceil(lanes) as u64,
+            "each mono cohort's strip chain arms, the padded one included"
         );
         assert!(folded_render.collapse[0] > 0, "and collapses");
         assert_pcm_bits_equal(
@@ -9117,13 +9138,12 @@ mod tests {
             reference.pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the dogfood layout rendered audio"
         );
-        let scalar =
-            compile_console_model_with_builtins(&folded, 2_080, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&folded, 2_080, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(
             &folded_render.pcm,
             &scalar_render.pcm,
-            "folded dogfood layout against the bank-free registry",
+            "folded dogfood layout against the Scalar oracle",
         );
 
         // A builtins-only strip: no effect group, so nothing moves.
@@ -9221,8 +9241,7 @@ mod tests {
         // Mono PIB + stereo PIB, then the fader and matrix per level (the tracks without a
         // limiter reach them a level early): 8 builtin banks and 5 effect banks in 4 chains.
         assert_eq!(render.shape, [4, 13], "the strip's chains");
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_083, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_083, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "mixed strip");
     }
@@ -9279,8 +9298,7 @@ mod tests {
             render.collapse[1] > 0,
             "the mono cohort's builtin chain arms"
         );
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_085, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_085, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "disjoint stereo programs");
     }
@@ -9446,8 +9464,7 @@ mod tests {
         );
         let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
         assert!(render.collapse[0] > 0, "a kept mono cohort collapses");
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_087, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_087, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "discriminating session");
     }
@@ -9507,8 +9524,7 @@ mod tests {
             "a delay never banks"
         );
         let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_089, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_089, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "delay-only session");
     }
@@ -9569,8 +9585,7 @@ mod tests {
             "the stereo EQ cohort and the stereo compressor cohort, as with no move"
         );
         let render = render_armed_console_blocks(artifact, BLOCKS, &mono, &mono);
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_091, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_091, &[]);
         let scalar_render = render_armed_console_blocks(scalar, BLOCKS, &mono, &mono);
         assert_pcm_bits_equal(&render.pcm, &scalar_render.pcm, "phantom-loss session");
     }
@@ -10050,8 +10065,7 @@ mod tests {
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the subsequence session rendered audio"
         );
-        let scalar =
-            compile_console_model_with_builtins(&model, 2_061, &[], &scalar_console_registry());
+        let scalar = compile_console_oracle(&model, 2_061, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar, BLOCKS, Vec::new());
         assert_pcm_bits_equal(
             &pcm,
@@ -10164,8 +10178,7 @@ mod tests {
             redirects > 0,
             "a fixture that redirects nothing cannot defend the redirect's clauses"
         );
-        let scalar_artifact =
-            compile_console_model_with_builtins(&ragged, 2_051, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&ragged, 2_051, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with four bare tracks");
         assert!(
@@ -10203,8 +10216,12 @@ mod tests {
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
         }
-        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
+        // The shape needs a per-node EQ after the post-input bank. Since #1098 a console slot never
+        // renders per node on a vector backend, so the strip is folded into every track's inserts,
+        // where the declining registry leaves it per node: the same chain, in another rack.
+        fold_console_into_inserts(&mut intended);
         // A late track on purpose: the *first* cohort's chain has every other cohort's ops between
         // its scatter and its consumer, so the in-between clause already declines all eight of its
         // lanes and a meter there would decide nothing. Metering a lane that is admitted is what
@@ -10394,12 +10411,7 @@ mod tests {
 
         // And the meter reads the limiter's output. The oracle is the same session with every
         // effect on the per-node scalar path, where no chain -- and so no redirect -- exists.
-        let scalar_artifact = compile_console_model_with_builtins(
-            &intended,
-            2_061,
-            &meters,
-            &scalar_console_registry(),
-        );
+        let scalar_artifact = compile_console_oracle(&intended, 2_061, &meters);
         let (scalar_pcm, _, _, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(
@@ -10472,8 +10484,7 @@ mod tests {
             redirects, 0,
             "the strip's chains still end in buffers their consumers read in place, sent or not"
         );
-        let scalar_artifact =
-            compile_console_model_with_builtins(&sent, 2_071, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&sent, 2_071, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a pre-fader send");
         assert!(
@@ -10485,13 +10496,14 @@ mod tests {
     /// Issue #218: the intended strip folds every route and the whole master reduction into its
     /// cohorts' epilogues, and the bits do not move.
     ///
-    /// # Two oracles, because the obvious one is not one
+    /// # Two oracles
     ///
-    /// `scalar_console_registry` is this file's standing oracle: it puts every *effect* on the
-    /// per-node path. It does **not** put the strip's builtins, fader and matrix there -- those
-    /// bank on any backend that has a width -- so the scalar arm still forms cohort chains and
-    /// still folds all sixty-four routes. It is an oracle for the effects and not for the fold, and
-    /// saying so is the point of asserting its fold count rather than assuming it.
+    /// The standing one is the test-only `Scalar` backend (#1059), where nothing banks, effect or
+    /// builtin, so it forms no chain and folds no route. Until #1098 it was a registry that put
+    /// every *effect* on the per-node path while the builtins, fader and matrix still banked and
+    /// folded all sixty-four routes: an oracle for the effects and not for the fold. A console slot
+    /// no longer renders per node on a vector backend, so that arm is gone, and its fold count is
+    /// asserted here as zero rather than assumed.
     ///
     /// The fold's own oracle is the same session bound with the fold **declined**
     /// (`graph::test_only_set_route_fold_declined`). That arm renders the route ops and the D9
@@ -10522,13 +10534,12 @@ mod tests {
             folds, 64,
             "every track's route folds into its cohort's epilogue"
         );
-        let scalar_artifact =
-            compile_console_model_with_builtins(&intended, 2_181, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&intended, 2_181, &[]);
         let (scalar_pcm, _, _, _, _, _, scalar_folds) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_eq!(
-            scalar_folds, 64,
-            "the per-node arm still banks the strip's builtins, fader and matrix, so it folds too"
+            scalar_folds, 0,
+            "the Scalar oracle banks nothing, so it folds nothing"
         );
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with the route fold");
 
@@ -10589,8 +10600,7 @@ mod tests {
             folds, 0,
             "a second reader of one matrix declines the whole reduction's fold"
         );
-        let scalar_artifact =
-            compile_console_model_with_builtins(&doubled, 2_183, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&doubled, 2_183, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with ch00 routed twice");
         assert!(
@@ -10650,12 +10660,7 @@ mod tests {
             "the meter reads the folded lane's resident words on every block, never a planar block"
         );
 
-        let scalar_artifact = compile_console_model_with_builtins(
-            &intended,
-            2_185,
-            &meters,
-            &scalar_console_registry(),
-        );
+        let scalar_artifact = compile_console_oracle(&intended, 2_185, &meters);
         let (scalar_pcm, _, _, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-matrix meter");
@@ -11681,8 +11686,7 @@ mod tests {
             folds, 0,
             "the chains accumulate in track order and the reduction sums in reverse: no fold"
         );
-        let scalar_artifact =
-            compile_console_model_with_builtins(&reversed, 2_187, &[], &scalar_console_registry());
+        let scalar_artifact = compile_console_oracle(&reversed, 2_187, &[]);
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with reversed route ids");
         assert!(
@@ -12004,12 +12008,7 @@ mod tests {
         // And the meter reads the fader's output. The oracle is the same session with every effect
         // on the per-node scalar path, where the strip's effect banks do not exist and the meter
         // can only be reading the fader.
-        let scalar_artifact = compile_console_model_with_builtins(
-            &intended,
-            2_121,
-            &meters,
-            &scalar_console_registry(),
-        );
+        let scalar_artifact = compile_console_oracle(&intended, 2_121, &meters);
         let (scalar_pcm, _, _, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-fader meter");
@@ -12182,6 +12181,81 @@ mod tests {
             .unwrap_or_else(|_| panic!("production console graph"))
     }
 
+    /// The per-node oracle for a console session: `model` compiled at the test-only
+    /// `Backend::Scalar` (#1059), where no bank binds -- effect or builtin -- and every track
+    /// renders one at a time.
+    ///
+    /// Since #1098 a console slot never renders per node on a vector backend (a factory that
+    /// declines a console group fails the compile with `console.slot.unbanked`), so a registry
+    /// that refuses every bank is no longer an oracle there. `Scalar` is the one backend that is
+    /// exempt, because it is this reference.
+    fn compile_console_oracle(
+        model: &session::SessionModel,
+        plan_id: u64,
+        meters: &[MeterRequest],
+    ) -> PreparedGraphBuiltinsArtifact {
+        try_compile_console_model_at(
+            model,
+            plan_id,
+            meters,
+            Backend::Scalar,
+            &launch_native_effect_registry().expect("launch registry"),
+        )
+        .unwrap_or_else(|diagnostics| panic!("the Scalar oracle compiles: {diagnostics:?}"))
+    }
+
+    /// A console session's bank-free arm on the host's backend (#1098): `model` with its console
+    /// folded into every track's inserts, prepared against a registry of `effect_ids` whose every
+    /// factory declines every bank, and compiled at the host's dispatch. A console slot never
+    /// renders per node on a vector backend, but an insert does, so this is the per-node plan of
+    /// the same chain there; only the rack its effect nodes name moves (#163).
+    fn per_node_inserts_artifact(
+        model: &session::SessionModel,
+        effect_ids: &[&str],
+        plan_id: u64,
+    ) -> PreparedGraphBuiltinsArtifact {
+        let mut folded = model.clone();
+        fold_console_into_inserts(&mut folded);
+        let session = compile_session(
+            &folded,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("the folded fixture compiles");
+        let launch = launch_native_effect_registry().expect("launch registry");
+        let registry = NativeEffectRegistry::new(effect_ids.iter().map(|id| {
+            Box::new(ScalarOnlyDelegateFactory {
+                delegate: launch
+                    .get_shared_ascii(id)
+                    .expect("registered launch effect"),
+            }) as Box<dyn NativeEffectFactory>
+        }))
+        .expect("declining registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("prepared per-node effects");
+        compile_with_session_builtins(SessionBuiltinsCompile {
+            dispatch: host_dispatch(),
+            plan_id,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("per-node inserts graph: {:?}", failure.diagnostics))
+    }
+
     /// [`compile_console_model_with_builtins`] at an explicit bank `dispatch`, handing back the
     /// graph compile's diagnostics instead of panicking on a refusal.
     fn try_compile_console_model_at(
@@ -12242,6 +12316,11 @@ mod tests {
     /// two selected entry points a host prepares them with: the concurrent live-control path, or
     /// `between_render_calls`, which is what host-core calls for the browser. `dispatch` is the
     /// bank backend, so a test can bind the browser's four-lane banks on an eight-lane host.
+    ///
+    /// At a width other than the host's, this build's effect factories decline their banks (D4),
+    /// and a console slot never renders per node on a vector backend (#1098), so there the console
+    /// is folded into every track's inserts first: the same chain, whose declined groups render per
+    /// node around the builtin banks under test, as the console did before #1098.
     fn compile_console_model_with_selected_meters(
         model: &session::SessionModel,
         plan_id: u64,
@@ -12250,6 +12329,11 @@ mod tests {
         dispatch: Backend,
         registry: &NativeEffectRegistry,
     ) -> PreparedGraphBuiltinsArtifact {
+        let mut folded = model.clone();
+        if dispatch != host_dispatch() {
+            fold_console_into_inserts(&mut folded);
+        }
+        let model = &folded;
         let session = compile_session(
             model,
             CompileCaps {
@@ -12464,12 +12548,12 @@ mod tests {
         .unwrap_or_else(|_| panic!("production scalar live-control graph"))
     }
 
-    /// The registry that forces every console effect onto the per-node scalar path.
+    /// The registry that forces every strip effect onto the per-node scalar path.
     ///
-    /// The bank-free arm is the oracle a merged chain is compared against: it binds no bank at
-    /// all, so no merge is expressible in it and the audio it renders is the strip's arithmetic
-    /// with none of this machinery in the way. The delay, which never banks anyway, is here for
-    /// issue #971's sessions that carry one.
+    /// On a vector backend that is legal for inserts only since #1098: a console slot never
+    /// renders per node there, and a console session's oracle is [`compile_console_oracle`], at
+    /// the test-only `Scalar` backend. The delay, which never banks anyway, is here for issue
+    /// #971's sessions that carry one.
     fn scalar_console_registry() -> NativeEffectRegistry {
         let registry = launch_native_effect_registry().expect("launch registry");
         NativeEffectRegistry::new(
@@ -12667,9 +12751,7 @@ mod tests {
 
         // Bits: the merged strip renders exactly what the bank-free strip renders. Necessary, and
         // on its own not sufficient -- which is why the chain count above is asserted too.
-        let scalar_registry = scalar_console_registry();
-        let scalar_artifact =
-            compile_console_model_with_builtins(&intended, 2_021, &[], &scalar_registry);
+        let scalar_artifact = compile_console_oracle(&intended, 2_021, &[]);
         assert_eq!(
             scalar_artifact.graph().prepared_bank_count(),
             0,
@@ -12959,13 +13041,6 @@ mod tests {
         assert_eq!(session.quantum().0, 128);
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let limiter = registry
-            .get_shared_ascii("miso.true-peak-limiter")
-            .expect("registered true-peak limiter");
-        let scalar_registry =
-            NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory { delegate: limiter })
-                as Box<dyn NativeEffectFactory>])
-            .expect("scalar limiter registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -12978,9 +13053,10 @@ mod tests {
             entry.metadata.latency == LatencySamples(486)
                 && entry.metadata.tail == TailSamples::Infinite
         }));
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar limiter effects");
+        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
+        // is the test-only `Scalar` oracle, where nothing banks.
+        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared scalar limiter effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_050,
@@ -12989,17 +13065,23 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("true-peak limiter graph: {:?}", failure.diagnostics));
         let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
+            dispatch: Backend::Scalar,
             plan_id: 1_051,
             effects: scalar_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar limiter graph: {:?}", failure.diagnostics));
+        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
+        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
+        // another rack, so the two are compared above their dispatch-independent semantic
+        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
+        // The effect banks are all that separate the two.
+        let per_node = per_node_inserts_artifact(&model, &["miso.true-peak-limiter"], 1_051);
 
         let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
+        // #1098: the remainder binds as one padded bank, so nothing renders per node.
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            let lanes = width.lanes() as usize;
-            (10 / lanes, 10 % lanes)
+            (10_usize.div_ceil(width.lanes() as usize), 0)
         });
         assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
@@ -13034,7 +13116,7 @@ mod tests {
             let lanes = width.lanes() as usize;
             (0..expected_banks)
                 .map(|bank| {
-                    (bank * lanes..(bank + 1) * lanes)
+                    (bank * lanes..((bank + 1) * lanes).min(10))
                         .map(|index| format!("eq{index}"))
                         .collect()
                 })
@@ -13109,33 +13191,41 @@ mod tests {
             0
         );
         assert_eq!(
-            artifact.report().estimate.audio_buffer_samples,
-            scalar_artifact.report().estimate.audio_buffer_samples
+            artifact.report().estimate.audio_buffer_samples
+                - artifact.report().semantic_estimate.audio_buffer_samples,
+            per_node.report().estimate.audio_buffer_samples
+                - per_node.report().semantic_estimate.audio_buffer_samples
                 + (expected_bank_scratch_bytes + expected_bank_runtime_buffer_bytes) / 4
         );
         assert_eq!(
-            artifact.report().estimate.graph_metadata_bytes,
-            scalar_artifact.report().estimate.graph_metadata_bytes
+            artifact.report().estimate.graph_metadata_bytes
+                - artifact.report().semantic_estimate.graph_metadata_bytes,
+            per_node.report().estimate.graph_metadata_bytes
+                - per_node.report().semantic_estimate.graph_metadata_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes,
-            scalar_artifact.report().estimate.incremental_plan_bytes
+            artifact.report().estimate.incremental_plan_bytes
+                - artifact.report().semantic_estimate.incremental_plan_bytes,
+            per_node.report().estimate.incremental_plan_bytes
+                - per_node.report().semantic_estimate.incremental_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes,
-            scalar_artifact.report().estimate.session_plus_plan_bytes
+            artifact.report().estimate.session_plus_plan_bytes
+                - artifact.report().semantic_estimate.session_plus_plan_bytes,
+            per_node.report().estimate.session_plus_plan_bytes
+                - per_node.report().semantic_estimate.session_plus_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
-        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "limiter");
+        assert_builtin_attachment_matches(&artifact, &per_node, "limiter");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -13719,14 +13809,6 @@ mod tests {
         assert_eq!(session.quantum().0, 128);
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let soft_clip = registry
-            .get_shared_ascii("miso.soft-clip")
-            .expect("registered soft clip");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: soft_clip,
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar soft-clip registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -13740,9 +13822,10 @@ mod tests {
                 && entry.metadata.tail == TailSamples::Finite(29)
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
         }));
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar soft-clip effects");
+        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
+        // is the test-only `Scalar` oracle, where nothing banks.
+        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared scalar soft-clip effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_100,
@@ -13751,17 +13834,23 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("soft-clip graph: {:?}", failure.diagnostics));
         let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
+            dispatch: Backend::Scalar,
             plan_id: 1_101,
             effects: scalar_effects,
             caps: integration_caps(),
         })
         .unwrap_or_else(|failure| panic!("scalar soft-clip graph: {:?}", failure.diagnostics));
+        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
+        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
+        // another rack, so the two are compared above their dispatch-independent semantic
+        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
+        // The effect banks are all that separate the two.
+        let per_node = per_node_inserts_artifact(&model, &["miso.soft-clip"], 1_101);
 
         let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
+        // #1098: the remainder binds as one padded bank, so nothing renders per node.
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            let lanes = width.lanes() as usize;
-            (10 / lanes, 10 % lanes)
+            (10_usize.div_ceil(width.lanes() as usize), 0)
         });
         assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
@@ -13796,7 +13885,7 @@ mod tests {
             let lanes = width.lanes() as usize;
             (0..expected_banks)
                 .map(|bank| {
-                    (bank * lanes..(bank + 1) * lanes)
+                    (bank * lanes..((bank + 1) * lanes).min(10))
                         .map(|index| format!("eq{index}"))
                         .collect::<Vec<_>>()
                 })
@@ -13856,22 +13945,26 @@ mod tests {
         );
         assert_eq!(scalar_artifact.report().estimate.effect_bank_count, 0);
         assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes,
-            scalar_artifact.report().estimate.incremental_plan_bytes
+            artifact.report().estimate.incremental_plan_bytes
+                - artifact.report().semantic_estimate.incremental_plan_bytes,
+            per_node.report().estimate.incremental_plan_bytes
+                - per_node.report().semantic_estimate.incremental_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
         assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes,
-            scalar_artifact.report().estimate.session_plus_plan_bytes
+            artifact.report().estimate.session_plus_plan_bytes
+                - artifact.report().semantic_estimate.session_plus_plan_bytes,
+            per_node.report().estimate.session_plus_plan_bytes
+                - per_node.report().semantic_estimate.session_plus_plan_bytes
                 + expected_bank_scratch_bytes
                 + expected_bank_runtime_buffer_bytes
                 + expected_bank_metadata_bytes
                 + expected_bank_slot_bytes
         );
-        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "soft clip");
+        assert_builtin_attachment_matches(&artifact, &per_node, "soft clip");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule
@@ -14083,14 +14176,6 @@ mod tests {
         assert_eq!(session.quantum().0, 128);
 
         let registry = launch_native_effect_registry().expect("launch registry");
-        let transient_shaper = registry
-            .get_shared_ascii("miso.transient-shaper")
-            .expect("registered transient shaper");
-        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
-            delegate: transient_shaper,
-        })
-            as Box<dyn NativeEffectFactory>])
-        .expect("scalar transient-shaper registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -14104,9 +14189,10 @@ mod tests {
                 && entry.metadata.tail == TailSamples::Finite(0)
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
         }));
-        let scalar_effects =
-            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
-                .expect("prepared scalar transient-shaper effects");
+        // #1098: a console slot never renders per node on a vector backend, so the bank-free arm
+        // is the test-only `Scalar` oracle, where nothing banks.
+        let scalar_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared scalar transient-shaper effects");
         let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
             dispatch: host_dispatch(),
             plan_id: 1_120,
@@ -14115,7 +14201,7 @@ mod tests {
         })
         .unwrap_or_else(|failure| panic!("transient-shaper graph: {:?}", failure.diagnostics));
         let scalar_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
+            dispatch: Backend::Scalar,
             plan_id: 1_121,
             effects: scalar_effects,
             caps: integration_caps(),
@@ -14123,11 +14209,17 @@ mod tests {
         .unwrap_or_else(|failure| {
             panic!("scalar transient-shaper graph: {:?}", failure.diagnostics)
         });
+        // The estimate's bank-free arm, on the same backend: the strip folded into every track's
+        // inserts, where a declined group renders per node (#1098). Its node and edge IDs name
+        // another rack, so the two are compared above their dispatch-independent semantic
+        // estimates: what each compile adds for its banks, per-node owners and runtime metadata.
+        // The effect banks are all that separate the two.
+        let per_node = per_node_inserts_artifact(&model, &["miso.transient-shaper"], 1_121);
 
         let width = BankWidth::for_backend(artifact.report().rack_cohorts.dispatch);
+        // #1098: the remainder binds as one padded bank, so nothing renders per node.
         let (expected_banks, expected_scalar_tails) = width.map_or((0, 10), |width| {
-            let lanes = width.lanes() as usize;
-            (10 / lanes, 10 % lanes)
+            (10_usize.div_ceil(width.lanes() as usize), 0)
         });
         assert_eq!(artifact.graph().prepared_bank_count(), expected_banks);
         assert_eq!(
@@ -14162,7 +14254,7 @@ mod tests {
             let lanes = width.lanes() as usize;
             (0..expected_banks)
                 .map(|bank| {
-                    (bank * lanes..(bank + 1) * lanes)
+                    (bank * lanes..((bank + 1) * lanes).min(10))
                         .map(|index| format!("eq{index}"))
                         .collect::<Vec<_>>()
                 })
@@ -14226,14 +14318,20 @@ mod tests {
             + expected_bank_metadata_bytes
             + expected_bank_slot_bytes;
         assert_eq!(
-            artifact.report().estimate.incremental_plan_bytes,
-            scalar_artifact.report().estimate.incremental_plan_bytes + bank_overhead
+            artifact.report().estimate.incremental_plan_bytes
+                - artifact.report().semantic_estimate.incremental_plan_bytes,
+            per_node.report().estimate.incremental_plan_bytes
+                - per_node.report().semantic_estimate.incremental_plan_bytes
+                + bank_overhead
         );
         assert_eq!(
-            artifact.report().estimate.session_plus_plan_bytes,
-            scalar_artifact.report().estimate.session_plus_plan_bytes + bank_overhead
+            artifact.report().estimate.session_plus_plan_bytes
+                - artifact.report().semantic_estimate.session_plus_plan_bytes,
+            per_node.report().estimate.session_plus_plan_bytes
+                - per_node.report().semantic_estimate.session_plus_plan_bytes
+                + bank_overhead
         );
-        assert_builtin_attachment_matches(&artifact, &scalar_artifact, "transient shaper");
+        assert_builtin_attachment_matches(&artifact, &per_node, "transient shaper");
         assert_eq!(
             artifact.graph().sequential_schedule,
             scalar_artifact.graph().sequential_schedule

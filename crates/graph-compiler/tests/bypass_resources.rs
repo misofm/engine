@@ -14,7 +14,9 @@
 //!   without a single allocator call after warm-up, at `Simd8`, `Simd4` and `Scalar`.
 //!
 //! The session is the standing console strip (`eq -> comp` in SIMD rack 1, the true-peak limiter in
-//! SIMD rack 2) from the intended 64-track fixture, cut to the tracks each case needs.
+//! SIMD rack 2) from the intended 64-track fixture, cut to the tracks each case needs. A console slot
+//! always banks on a vector backend (#1098), so a case that needs a per-node instance there folds the
+//! strip into every track's inserts ([`inserts`]), whose remainder renders per node.
 
 use core::num::NonZeroUsize;
 
@@ -118,6 +120,31 @@ fn console(tracks: usize, masks: [u64; 3]) -> SessionModel {
                 .expect("strip slot");
             entry.bypass = masks[slot] >> index & 1 == 1;
         }
+    }
+    model
+}
+
+/// [`console`] with the strip folded into every track's inserts, in chain order: the same chain and
+/// the same bypasses, but in the dynamic rack, where a group that does not fill renders per node
+/// (decision 12, "Inserts bank opportunistically").
+fn inserts(tracks: usize, masks: [u64; 3]) -> SessionModel {
+    let mut model = console(tracks, masks);
+    let lowered: Vec<Vec<session::Effect>> = model
+        .tracks
+        .iter()
+        .map(|track| {
+            let racks = model.lower_track(track);
+            let mut chain = racks.pre_insert;
+            chain.extend_from_slice(racks.inserts);
+            chain.extend(racks.post_insert);
+            chain
+        })
+        .collect();
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for (track, chain) in model.tracks.iter_mut().zip(lowered) {
+        track.console.clear();
+        track.inserts.effects = chain;
     }
     model
 }
@@ -311,16 +338,16 @@ fn render_blocks(plan: &mut PreparedRenderPlan, pcm: &mut [f32], first: u64, blo
 #[test]
 fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
     let lanes = host_lanes();
-    for (label, tracks, eq_mask) in [
-        ("one per-node bypassed EQ", 1, 1_u64),
-        ("one bypassed lane of an EQ bank", lanes, 1 << (lanes - 1)),
+    // The per-node leg is an insert: a lone console slot would bind a padded bank (#1098).
+    for (label, model) in [
+        ("one per-node bypassed EQ", inserts(1, [1, 0, 0])),
+        (
+            "one bypassed lane of an EQ bank",
+            console(lanes, [1 << (lanes - 1), 0, 0]),
+        ),
     ] {
-        let mut bound = bind(
-            &console(tracks, [eq_mask, 0, 0]),
-            Backend::current(),
-            u32::MAX,
-            false,
-        );
+        let tracks = model.tracks.len();
+        let mut bound = bind(&model, Backend::current(), u32::MAX, false);
         if tracks == 1 {
             assert_eq!(bound.shape.banks, 0, "{label}: one track banks nothing");
             assert_eq!(bound.shape.bypassed_per_node, 1, "{label}: per node");
@@ -369,6 +396,7 @@ fn a_live_control_free_bypass_binds_at_any_automation_capacity() {
 fn a_bypass_or_live_controls_are_charged_at_least_what_they_retain() {
     const SPANS: u32 = 128;
     let lanes = host_lanes();
+    // The per-node cases are inserts: a lone console slot would bind a padded bank (#1098).
     let cases: [(&str, usize, [u64; 3], bool); 4] = [
         ("one per-node bypassed EQ", 1, [1, 0, 0], false),
         (
@@ -381,14 +409,16 @@ fn a_bypass_or_live_controls_are_charged_at_least_what_they_retain() {
         ("banked live controls", lanes, [0, 0, 0], true),
     ];
     for (label, tracks, masks, live_controls_attached) in cases {
-        let plain = bind(
-            &console(tracks, [0, 0, 0]),
-            Backend::current(),
-            SPANS,
-            false,
-        );
+        let session = |masks| {
+            if tracks == 1 {
+                inserts(tracks, masks)
+            } else {
+                console(tracks, masks)
+            }
+        };
+        let plain = bind(&session([0, 0, 0]), Backend::current(), SPANS, false);
         let owned = bind(
-            &console(tracks, masks),
+            &session(masks),
             Backend::current(),
             SPANS,
             live_controls_attached,
@@ -432,15 +462,18 @@ impl Drop for RestoreMode {
 }
 
 /// Gate 4: mixed session bypass renders without a single allocator call after warm-up, banked
-/// and per node, at `Simd8`, `Simd4` and `Scalar`.
+/// and per node, at `Simd8`, `Simd4` and `Scalar`, and in padded console banks.
 ///
-/// Thirteen tracks: at eight lanes one bank per slot plus a five-track per-node remainder, at four
-/// lanes the limiter's three banks plus a per-node remainder (and every EQ and compressor per node
-/// on hosts that bind no four-lane bank for them), and at `Scalar` every instance per node. Each
-/// slot bypasses a different mix of tracks, so every leg that binds a bank has bypassed lanes in
-/// it, and every leg has bypassed instances per node. The counters are this thread's, so another test's
-/// allocations cannot reach them; the audited allocator counts in `Count` mode, so an allocation
-/// inside the render scope is reported here rather than aborting the process.
+/// Thirteen tracks with the strip as inserts: at eight lanes one bank per slot plus a five-track
+/// per-node remainder, at four lanes the limiter's three banks plus a per-node remainder (and every
+/// EQ and compressor per node on hosts that bind no four-lane bank for them), and at `Scalar` every
+/// instance per node. Then the same thirteen tracks with the strip as the console, at the host's
+/// width, where every slot binds and the remainder is a padded bank (#1098): no instance renders
+/// per node, and the padded banks carry bypassed lanes. Each slot bypasses a different mix of
+/// tracks, so every leg that binds a bank has bypassed lanes in it, and every inserts leg has
+/// bypassed instances per node. The counters are this thread's, so another test's allocations
+/// cannot reach them; the audited allocator counts in `Count` mode, so an allocation inside the
+/// render scope is reported here rather than aborting the process.
 ///
 /// Red mutation: `black_box(Vec::<u8>::with_capacity(1))` in `BypassShunt::capture` -> every leg
 /// counts allocations.
@@ -452,25 +485,46 @@ fn a_mixed_session_bypass_renders_without_allocating() {
     assert_installed();
     let _restore = RestoreMode(bench_alloc::mode());
     bench_alloc::set_mode(Mode::Count);
-    let model = console(
-        TRACKS,
-        [0b1_0010_1001_0110, 0b0_1101_0010_0101, 0b1_0100_1010_1001],
-    );
-    for dispatch in [Backend::Simd8, Backend::Simd4, Backend::Scalar] {
+    const MASKS: [u64; 3] = [0b1_0010_1001_0110, 0b0_1101_0010_0101, 0b1_0100_1010_1001];
+    let legs = [
+        ("inserts", Backend::Simd8),
+        ("inserts", Backend::Simd4),
+        ("inserts", Backend::Scalar),
+        ("console", Backend::current()),
+    ];
+    for (placement, dispatch) in legs {
+        let console_leg = placement == "console";
+        let model = if console_leg {
+            console(TRACKS, MASKS)
+        } else {
+            inserts(TRACKS, MASKS)
+        };
         let mut bound = bind(&model, dispatch, 32, false);
         let shape = &bound.shape;
-        assert!(
-            shape.bypassed_per_node > 0,
-            "{dispatch:?}: a bypassed instance renders per node ({shape:?})"
-        );
+        if console_leg {
+            assert_eq!(
+                shape.bypassed_per_node, 0,
+                "{placement} at {dispatch:?}: every console slot banks, padded ({shape:?})"
+            );
+            assert_eq!(
+                shape.banks,
+                3 * TRACKS.div_ceil(host_lanes()),
+                "{placement} at {dispatch:?}: one bank per slot per cohort"
+            );
+        } else {
+            assert!(
+                shape.bypassed_per_node > 0,
+                "{placement} at {dispatch:?}: a bypassed instance renders per node ({shape:?})"
+            );
+        }
         // A build binds no bank wider than its own backend (decision D4), so on a four-lane host
-        // the `Simd8` leg is all per node, like `Scalar`.
+        // the `Simd8` inserts leg is all per node, like `Scalar`.
         match BankWidth::for_backend(dispatch) {
             Some(width) if width.lanes() as usize <= host_lanes() => assert!(
                 shape.banks_with_a_bypassed_lane > 0,
-                "{dispatch:?}: a bypassed lane renders in a bank ({shape:?})"
+                "{placement} at {dispatch:?}: a bypassed lane renders in a bank ({shape:?})"
             ),
-            _ => assert_eq!(shape.banks, 0, "{dispatch:?}: nothing binds"),
+            _ => assert_eq!(shape.banks, 0, "{placement} at {dispatch:?}: nothing binds"),
         }
         let mut pcm = vec![0.0_f32; 2 * 128];
         render_blocks(&mut bound.plan, &mut pcm, 0, WARM_UP);
@@ -480,11 +534,12 @@ fn a_mixed_session_bypass_renders_without_allocating() {
         assert_eq!(
             (counted.allocations, counted.deallocations),
             (0, 0),
-            "{dispatch:?}: mixed session bypass must render without allocating or freeing"
+            "{placement} at {dispatch:?}: mixed session bypass must render without allocating or \
+             freeing"
         );
         assert!(
             pcm.iter().any(|sample| *sample != 0.0),
-            "{dispatch:?}: the plan renders"
+            "{placement} at {dispatch:?}: the plan renders"
         );
     }
 }
