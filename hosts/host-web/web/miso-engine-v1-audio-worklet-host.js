@@ -136,7 +136,7 @@ const LIVE_RESPONSE_MAXIMUM_BYTES = 1 << 20;
 const SPECTRUM_BOOT_FIELDS = ["target", "targetId", "channels", "maximumCaptureBytes"];
 const SPECTRUM_COLLECTION_ENTRY_FIELDS = ["target", "targetId", "channels"];
 const SPECTRUM_COLLECTION_FIELDS = ["entries", "maximumCaptureBytes"];
-const SPECTRUM_TARGETS = new Set(["trackPostInputBuiltins", "trackPostMatrix", "output"]);
+const SPECTRUM_TARGETS = new Set(["trackPostInput", "trackPostPan", "output"]);
 const SPECTRUM_CHANNELS = new Set(["left", "right", "both"]);
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
 const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
@@ -157,10 +157,18 @@ const SPECTRUM_STREAM_READ_REPLY_FIELDS = [
   "tag", "requestId", "operation", "result", "byteLength", "buffer", "metadata",
 ];
 
+// Decision 12 (#1096): an effect is addressed as `1` inserts, by its index in the track's inserts,
+// or `3` console, by the slot's index in the session's slot order (`pre_insert`, then
+// `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`) codes are refused and never
+// reallocated.
+const RACK_INSERTS = 1;
+const RACK_CONSOLE = 3;
+const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
+
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
     && validU32(subscription.trackIndex)
-    && Number.isSafeInteger(subscription.rack) && subscription.rack >= 0 && subscription.rack <= 2
+    && effectRack(subscription.rack)
     && validU32(subscription.effectIndex)
     && validU32(subscription.tapId) && subscription.tapId > 0
     && validU32(subscription.windowBlocks)
@@ -170,7 +178,7 @@ function validSubscription(subscription) {
 function validObservationAddress(address) {
   return hasExactFields(address, OBSERVATION_ADDRESS_FIELDS)
     && validU32(address.trackIndex)
-    && validU32(address.rack) && address.rack <= 2
+    && effectRack(address.rack)
     && validU32(address.effectIndex)
     && validU32(address.tapId) && address.tapId > 0
     && validU32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
@@ -179,7 +187,7 @@ function validObservationAddress(address) {
 function validObservationMapBinding(binding) {
   return hasExactFields(binding, OBSERVATION_MAP_FIELDS)
     && validU32(binding.trackIndex)
-    && validU32(binding.rack) && binding.rack <= 2
+    && effectRack(binding.rack)
     && validU32(binding.effectIndex)
     && typeof binding.effectSlotId === "string" && binding.effectSlotId.length > 0
     && typeof binding.nativeEffectId === "string" && binding.nativeEffectId.length > 0
@@ -190,7 +198,7 @@ function validObservationMapBinding(binding) {
 function validObservationRow(row) {
   return hasExactFields(row, OBSERVATION_ROW_FIELDS)
     && validU32(row.trackIndex)
-    && validU32(row.rack) && row.rack <= 2
+    && effectRack(row.rack)
     && validU32(row.effectIndex)
     && validU32(row.tapId) && row.tapId > 0
     && validU32(row.channels) && OBSERVATION_CHANNELS.has(row.channels)
@@ -252,7 +260,7 @@ const NOT_APPLICABLE = 255;
 function validCommand(command) {
   return hasExactFields(command, COMMAND_FIELDS)
     && COMMAND_KINDS.has(command.kind)
-    && (validU32(command.rack) && (command.rack <= 2 || command.rack === NOT_APPLICABLE))
+    && (effectRack(command.rack) || command.rack === NOT_APPLICABLE)
     && (validU32(command.channel) && (command.channel <= 2 || command.channel === NOT_APPLICABLE))
     && validU32(command.trackIndex) && validU32(command.effectIndex)
     && validU32(command.parameterId) && validU32(command.smoothingSamples)

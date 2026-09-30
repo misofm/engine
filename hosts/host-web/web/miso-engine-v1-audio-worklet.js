@@ -61,8 +61,8 @@ const SPECTRUM_COLLECTION_ENTRY_BYTES = 24;
 const SPECTRUM_MAXIMUM_ID_BYTES = 127;
 const SPECTRUM_MAXIMUM_BYTES = 1 << 20;
 const SPECTRUM_STREAM_METADATA_BYTES = 120;
-const SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS = 1;
-const SPECTRUM_TARGET_TRACK_POST_MATRIX = 2;
+const SPECTRUM_TARGET_TRACK_POST_INPUT = 1;
+const SPECTRUM_TARGET_TRACK_POST_PAN = 2;
 const SPECTRUM_TARGET_OUTPUT = 3;
 const SPECTRUM_CHANNEL_LEFT = 1;
 const SPECTRUM_CHANNEL_RIGHT = 2;
@@ -100,10 +100,16 @@ const SPECTRUM_STREAM_SELECT_FIELDS = [
   "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
 ];
 
+// Decision 12 (#1096): an effect is addressed as `1` inserts or `3` console. The retired `simd1`
+// (`0`) and `simd2` (`2`) codes are refused and never reallocated.
+const RACK_INSERTS = 1;
+const RACK_CONSOLE = 3;
+const effectRack = (rack) => rack === RACK_INSERTS || rack === RACK_CONSOLE;
+
 function validObservationAddress(address) {
   return exactFields(address, OBSERVATION_ADDRESS_FIELDS)
     && u32(address.trackIndex)
-    && u32(address.rack) && address.rack <= 2
+    && effectRack(address.rack)
     && u32(address.effectIndex)
     && u32(address.tapId) && address.tapId > 0
     && u32(address.channels) && OBSERVATION_CHANNELS.has(address.channels);
@@ -426,10 +432,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
 
   stageSpectrumRequest(options) {
     if (options === null || options === undefined) return RESULT_OK;
-    const target = options?.target === "trackPostInputBuiltins"
-      ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
-      : options?.target === "trackPostMatrix"
-        ? SPECTRUM_TARGET_TRACK_POST_MATRIX
+    const target = options?.target === "trackPostInput"
+      ? SPECTRUM_TARGET_TRACK_POST_INPUT
+      : options?.target === "trackPostPan"
+        ? SPECTRUM_TARGET_TRACK_POST_PAN
         : options?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
     const channels = options?.channels === "left"
       ? SPECTRUM_CHANNEL_LEFT
@@ -502,10 +508,10 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     const encodedIds = [];
     for (let index = 0; index < options.entries.length; index += 1) {
       const entry = options.entries[index];
-      const target = entry?.target === "trackPostInputBuiltins"
-        ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
-        : entry?.target === "trackPostMatrix"
-          ? SPECTRUM_TARGET_TRACK_POST_MATRIX
+      const target = entry?.target === "trackPostInput"
+        ? SPECTRUM_TARGET_TRACK_POST_INPUT
+        : entry?.target === "trackPostPan"
+          ? SPECTRUM_TARGET_TRACK_POST_PAN
           : entry?.target === "output" ? SPECTRUM_TARGET_OUTPUT : 0;
       const channels = entry?.channels === "left"
         ? SPECTRUM_CHANNEL_LEFT
@@ -666,7 +672,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.exports.miso_engine_web_v1_observation_native_effect_id(this.handle, index),
       );
       const tapCount = this.exports.miso_engine_web_v1_observation_tap_count(this.handle, index);
-      if (!u32(trackIndex) || !u32(rack) || rack > 2 || !u32(effectIndex)
+      if (!u32(trackIndex) || !effectRack(rack) || !u32(effectIndex)
           || effectSlotId === null || nativeEffectId === null || !u32(tapCount)
           || tapCount === 0 || tapCount > 32) return false;
       const tapIds = [];
@@ -1175,8 +1181,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
               "tag", "requestId", "operation", "target", "targetId", "channels", "smoothingMs",
             ] : ["tag", "requestId", "operation", "target", "targetId", "channels"],
           )
-          || (message.target !== "trackPostInputBuiltins"
-            && message.target !== "trackPostMatrix" && message.target !== "output")
+          || (message.target !== "trackPostInput"
+            && message.target !== "trackPostPan" && message.target !== "output")
           || typeof message.targetId !== "string" || message.targetId.length === 0
           || (message.channels !== "left" && message.channels !== "right" && message.channels !== "both")
           || (streamSelection
@@ -1185,9 +1191,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
         return;
       }
-      const target = message.target === "trackPostInputBuiltins"
-        ? SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
-        : message.target === "trackPostMatrix" ? SPECTRUM_TARGET_TRACK_POST_MATRIX : SPECTRUM_TARGET_OUTPUT;
+      const target = message.target === "trackPostInput"
+        ? SPECTRUM_TARGET_TRACK_POST_INPUT
+        : message.target === "trackPostPan"
+          ? SPECTRUM_TARGET_TRACK_POST_PAN
+          : SPECTRUM_TARGET_OUTPUT;
       const channels = message.channels === "left"
         ? SPECTRUM_CHANNEL_LEFT
         : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;
@@ -1383,7 +1391,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (metadata.structSize !== SPECTRUM_STREAM_METADATA_BYTES
         || metadata.abiVersion !== ABI_VERSION
         || !SPECTRUM_STREAM_STATUSES.has(metadata.status)
-        || metadata.target < SPECTRUM_TARGET_TRACK_POST_INPUT_BUILTINS
+        || metadata.target < SPECTRUM_TARGET_TRACK_POST_INPUT
         || metadata.target > SPECTRUM_TARGET_OUTPUT
         || ![SPECTRUM_CHANNEL_LEFT, SPECTRUM_CHANNEL_RIGHT, SPECTRUM_CHANNEL_BOTH].includes(metadata.channels)
         || metadata.sourceUnderrun > 1
@@ -1519,7 +1527,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     if (result === RESULT_INVALID_ARGUMENT) {
       reason = message.trackIndex >= this.trackCount
         ? COMMAND_REASON_UNKNOWN_TRACK
-        : message.rack > 2
+        : !effectRack(message.rack)
           ? COMMAND_REASON_UNKNOWN_RACK
           : COMMAND_REASON_UNKNOWN_EFFECT;
     }

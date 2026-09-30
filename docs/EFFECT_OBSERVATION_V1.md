@@ -25,7 +25,11 @@ of truth that goes stale the moment a kernel changes.
 * every declared float is finite, ordered and free of `-0.0`, so an identity comparison never
   depends on a zero's sign.
 
-Addressing mirrors `miso.command.v1` exactly: `(track_index, rack, effect_index, tap_id)`.
+Addressing mirrors `miso.command.v1` exactly: `(track_index, rack, effect_index, tap_id)`. The rack
+is the session's (decision 12, #1096): `1` for an insert, with `effect_index` its position in the
+track's `inserts`, and `3` for a console slot, with `effect_index` the slot's position in the
+session's slot order (`pre_insert`, then `post_insert`). The retired `simd1` (`0`) and `simd2` (`2`)
+codes are refused and never reallocated.
 
 ## The two cost classes
 

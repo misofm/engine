@@ -34,7 +34,7 @@
 //! limiter track that cannot engage at any ceiling.
 
 use bench_support::digest::Sha256Sink;
-use effect_compiler::EffectRack;
+use effect_compiler::LiveEffectRack;
 use effect_contract::{EffectDescriptor, ParameterChannel};
 use lane::Backend;
 use session::ParameterChannel as SessionChannel;
@@ -243,6 +243,12 @@ impl Arm {
     }
 }
 
+/// The browser `miso.command.v1` record's `rack` byte for a console slot (decision 12, issue
+/// #1096; `host_web::RACK_CONSOLE`). Spelled here because this crate does not link the web host.
+pub const WIRE_RACK_CONSOLE: u8 = 3;
+/// The record's `rack` byte for an insert (`host_web::RACK_INSERTS`), the code `dynamic` had.
+pub const WIRE_RACK_INSERTS: u8 = 1;
+
 /// One control resolved against a prepared runtime.
 #[derive(Clone, Debug)]
 pub struct ResolvedControl {
@@ -254,9 +260,11 @@ pub struct ResolvedControl {
     pub track_index: usize,
     /// The effect's session slot id.
     pub slot_id: String,
-    /// The rack the effect sits in: `0` simd1, `1` dynamic, `2` simd2 (the wire's `rack`).
+    /// The browser record's `rack` byte (decision 12, issue #1096): [`WIRE_RACK_CONSOLE`] for a
+    /// console slot, [`WIRE_RACK_INSERTS`] for an insert.
     pub rack: u8,
-    /// The effect's position within its rack (the wire's `effectIndex`).
+    /// The record's `effectIndex`: a console slot's index in the session's slot order
+    /// (`pre_insert`, then `post_insert`), or an insert's index in the track's `inserts`.
     pub effect_index: u32,
     /// The parameter's wire id (the wire's `parameterId`).
     pub parameter_id: u32,
@@ -369,23 +377,32 @@ impl MixingAutomation {
                 .enumerate()
                 .find(|(_, track)| track.id.as_str() == control.track_id)
                 .ok_or_else(|| missing_slot.clone())?;
-            // The lowered racks (decision 12): `pre_insert` is wire rack `0`, the inserts `1` and
-            // `post_insert` `2`, each indexed within its section, until #1096 (S1c) gives the
-            // browser record its console rack byte.
-            let lowered = model.lower_track(track);
-            let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
-            let rack = match producer.rack {
-                EffectRack::Simd1 => (0, pre_insert),
-                EffectRack::Dynamic => (1, inserts),
-                EffectRack::Simd2 => (2, post_insert),
+            // The live address, read back against the session itself rather than through the
+            // lowering (decision 12, issue #1096): console slot `k` is the track's `console[k]`
+            // entry, whose knobs it carries, and insert `i` is `inserts.effects[i]`.
+            let index = producer.address.index as usize;
+            let (rack, slot_id, params) = match producer.address.rack {
+                LiveEffectRack::Console => {
+                    let entry = track
+                        .console
+                        .get(index)
+                        .ok_or_else(|| missing_slot.clone())?;
+                    (WIRE_RACK_CONSOLE, &entry.slot, &entry.params)
+                }
+                LiveEffectRack::Inserts => {
+                    let effect = track
+                        .inserts
+                        .effects
+                        .get(index)
+                        .ok_or_else(|| missing_slot.clone())?;
+                    (WIRE_RACK_INSERTS, &effect.id, &effect.params)
+                }
             };
-            let slot = rack
-                .1
-                .get(producer.effect_index as usize)
-                .filter(|slot| slot.id.as_str() == &*producer.effect_id)
-                .ok_or(missing_slot)?;
+            if slot_id.as_str() != &*producer.effect_id {
+                return Err(missing_slot);
+            }
             let held = |lane: SessionChannel| {
-                slot.params
+                params
                     .iter()
                     .find(|param| {
                         param.parameter_id == parameter.id.0
@@ -417,8 +434,8 @@ impl MixingAutomation {
                 channel,
                 track_index,
                 slot_id: producer.effect_id.to_string(),
-                rack: rack.0,
-                effect_index: producer.effect_index,
+                rack,
+                effect_index: producer.address.index,
                 parameter_id: parameter.id.0,
                 base: left,
                 values,

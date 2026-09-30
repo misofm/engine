@@ -383,9 +383,10 @@ fn stage_prepared_eq(
     host.submit_prepared_commands(1, 104)
 }
 
-/// Red mutation: delete the `command.effect_index >= counts[rack]` leg in `admit_commands`
-/// -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the completeness assertion
-/// below stops distinguishing "resolved" from "did not resolve", and the negative case fails.
+/// Red mutation: drop the index bound from `LiveEffectAddress::lower` and the table-length check
+/// from `effect_slot` -> an out-of-range effect index is refused as `UNSUPPORTED_KIND`, the
+/// completeness assertion below stops distinguishing "resolved" from "did not resolve", and the
+/// negative case fails.
 #[test]
 fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     let document = parameter_metadata::render();

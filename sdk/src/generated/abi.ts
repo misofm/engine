@@ -2172,6 +2172,34 @@ export const ABI_LAYOUT = deepFreeze(
         "name": "observationUnbound"
       }
     ],
+    "racks": [
+      {
+        "value": 1,
+        "name": "inserts"
+      },
+      {
+        "value": 3,
+        "name": "console"
+      },
+      {
+        "value": 255,
+        "name": "notApplicable"
+      }
+    ],
+    "liveResponseRacks": [
+      {
+        "value": 0,
+        "name": "inputFilters"
+      },
+      {
+        "value": 2,
+        "name": "inserts"
+      },
+      {
+        "value": 4,
+        "name": "console"
+      }
+    ],
     "observationChannels": [
       {
         "value": 1,
@@ -2259,11 +2287,11 @@ export const ABI_LAYOUT = deepFreeze(
     "spectrumTargets": [
       {
         "value": 1,
-        "name": "trackPostInputBuiltins"
+        "name": "trackPostInput"
       },
       {
         "value": 2,
-        "name": "trackPostMatrix"
+        "name": "trackPostPan"
       },
       {
         "value": 3,

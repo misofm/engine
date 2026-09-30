@@ -101,11 +101,91 @@ impl EffectBankPreparation {
 /// The internal rack an effect instance was lowered into (decision 12, class A by lowering):
 /// `Simd1` holds the session's `console.pre_insert` slots, `Dynamic` the track's `inserts` and
 /// `Simd2` the `console.post_insert` slots.
+///
+/// This is the graph's identity for a prepared instance, never a live-control address: live
+/// controls name an instance by its [`LiveEffectAddress`], in the session's own terms, and
+/// [`LiveEffectAddress::lower`] is the one translation back (issue #1096).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EffectRack {
     Simd1,
     Dynamic,
     Simd2,
+}
+
+/// The rack a live control names, in the session's vocabulary (decision 12, issue #1096).
+///
+/// The session addresses a console slot as `rack: "console"` and an insert as
+/// `rack: "inserts"`. The builtins chassis has no effect index and is not a live effect rack.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum LiveEffectRack {
+    /// A session console slot, in either section.
+    Console,
+    /// One of the track's inserts.
+    Inserts,
+}
+
+/// Where a live control addresses one effect instance of a track (decision 12, issue #1096).
+///
+/// - A console slot is `(console, slot index)`. The slot index is the slot's position in the
+///   session's slot order, `pre_insert` then `post_insert`, which is exactly its index in the
+///   track's `console` array. Like the automation target `(track, console, slot)`, the address
+///   does not name the section (L6).
+/// - An insert is `(inserts, index)`, its position in the track's `inserts`.
+///
+/// This is what the browser's `miso.command.v1` record carries in its `rack` byte and
+/// `effect_index` word, what the observation records carry, and what a native host looks a
+/// channel up by ([`EffectControlProducer::address`]). Internally it maps through the lowering
+/// ([`Self::lower`]).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LiveEffectAddress {
+    /// The session rack.
+    pub rack: LiveEffectRack,
+    /// The console slot index or the insert index.
+    pub index: u32,
+}
+
+impl LiveEffectAddress {
+    /// A console slot, by its position in the session's slot order (`pre_insert`, then
+    /// `post_insert`).
+    #[must_use]
+    pub const fn console(slot_index: u32) -> Self {
+        Self {
+            rack: LiveEffectRack::Console,
+            index: slot_index,
+        }
+    }
+
+    /// One of the track's inserts, by its position in `inserts`.
+    #[must_use]
+    pub const fn insert(index: u32) -> Self {
+        Self {
+            rack: LiveEffectRack::Inserts,
+            index,
+        }
+    }
+
+    /// Lower this address to the internal rack and the position within it.
+    ///
+    /// `lengths` are one track's lowered rack lengths in chain order, `[pre_insert, inserts,
+    /// post_insert]`, as [`session::LoweredRacks::in_chain_order`] gives them. Console slot `k`
+    /// is `(Simd1, k)` while `k` is below the `pre_insert` length and `(Simd2, k - pre_insert)`
+    /// from there; insert `i` is `(Dynamic, i)`. `None` when the address names no instance.
+    #[must_use]
+    pub const fn lower(self, lengths: [u32; 3]) -> Option<(EffectRack, u32)> {
+        let [pre_insert, inserts, post_insert] = lengths;
+        match self.rack {
+            LiveEffectRack::Inserts if self.index < inserts => {
+                Some((EffectRack::Dynamic, self.index))
+            }
+            LiveEffectRack::Console if self.index < pre_insert => {
+                Some((EffectRack::Simd1, self.index))
+            }
+            LiveEffectRack::Console if self.index - pre_insert < post_insert => {
+                Some((EffectRack::Simd2, self.index - pre_insert))
+            }
+            LiveEffectRack::Console | LiveEffectRack::Inserts => None,
+        }
+    }
 }
 pub struct EffectPreparedSession {
     pub session: CompiledSession,
@@ -579,14 +659,13 @@ fn prepare_with_console_eligibility(
 pub struct EffectControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
-    /// Which rack the effect sits in.
-    pub rack: EffectRack,
-    /// Zero-based position of the effect **within its rack, in session declaration order**.
+    /// The instance's live address within its track: a console slot by its slot index, an insert
+    /// by its index (decision 12, issue #1096).
     ///
-    /// This is the `effect_index` the `miso.command.v1` wire addresses, and it is derived from the
-    /// normalized session model here rather than from `EffectPreparedSession::entries`, which is
-    /// sorted by effect id.
-    pub effect_index: u32,
+    /// This is the `(rack, effect_index)` the `miso.command.v1` wire addresses. It is derived from
+    /// the normalized session model here rather than from `EffectPreparedSession::entries`, which
+    /// is sorted by effect id.
+    pub address: LiveEffectAddress,
     /// Session-stable effect instance identity.
     pub effect_id: Box<str>,
     /// The effect's declared parameter table, so an admitting host can map a wire `parameter_id`
@@ -971,6 +1050,42 @@ mod control_producer_tests {
 }
 
 #[cfg(test)]
+mod live_address_tests {
+    use super::{EffectRack, LiveEffectAddress};
+
+    /// Decision 12's lowering of a live address (issue #1096), on a track with two `pre_insert`
+    /// slots, three inserts and one `post_insert` slot.
+    ///
+    /// Red mutations: lower console slot `k >= pre_insert` into `Simd1` (the `post_insert` slot
+    /// addressed as `pre_insert`), or into `Simd2` at `k` rather than `k - pre_insert`; let an
+    /// insert index reach past the inserts; or accept a console index past the last slot.
+    #[test]
+    fn a_live_address_lowers_through_the_section_split() {
+        let lengths = [2, 3, 1];
+        let cases = [
+            (LiveEffectAddress::console(0), Some((EffectRack::Simd1, 0))),
+            (LiveEffectAddress::console(1), Some((EffectRack::Simd1, 1))),
+            (LiveEffectAddress::console(2), Some((EffectRack::Simd2, 0))),
+            (LiveEffectAddress::console(3), None),
+            (LiveEffectAddress::console(u32::MAX), None),
+            (LiveEffectAddress::insert(0), Some((EffectRack::Dynamic, 0))),
+            (LiveEffectAddress::insert(2), Some((EffectRack::Dynamic, 2))),
+            (LiveEffectAddress::insert(3), None),
+        ];
+        for (address, lowered) in cases {
+            assert_eq!(address.lower(lengths), lowered, "{address:?}");
+        }
+        // An empty console lowers no console address; an empty `pre_insert` puts slot 0 after the
+        // inserts.
+        assert_eq!(LiveEffectAddress::console(0).lower([0, 1, 0]), None);
+        assert_eq!(
+            LiveEffectAddress::console(0).lower([0, 1, 1]),
+            Some((EffectRack::Simd2, 0))
+        );
+    }
+}
+
+#[cfg(test)]
 mod owner_tests {
     use super::*;
     use crate::EffectControlOwnerPhase;
@@ -1071,8 +1186,7 @@ mod owner_tests {
         .expect("queue");
         EffectControlProducer {
             track_id: track_id.into(),
-            rack: EffectRack::Dynamic,
-            effect_index: 0,
+            address: LiveEffectAddress::insert(0),
             effect_id: effect_id.into(),
             descriptor: &PARAMETRIC_EQ_DESCRIPTOR,
             producer: EffectControlProducerHandle::new(producer, owner.is_some()),
@@ -1404,7 +1518,7 @@ pub fn attach_effect_live_controls(
     prepared: &mut EffectPreparedSession,
     depth: NonZeroUsize,
 ) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
-    let declared = declared_effect_indices(&prepared.session);
+    let declared = declared_live_addresses(&prepared.session);
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
@@ -1419,7 +1533,7 @@ pub fn attach_effect_live_controls(
             });
             continue;
         };
-        let Some(&effect_index) =
+        let Some(&address) =
             declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
         else {
             diagnostics.push(EffectDiagnostic {
@@ -1457,8 +1571,7 @@ pub fn attach_effect_live_controls(
         };
         producers.push(EffectControlProducer {
             track_id: entry.track_id.as_str().into(),
-            rack: entry.rack,
-            effect_index,
+            address,
             effect_id: entry.effect_id.as_str().into(),
             descriptor: entry.factory.descriptor(),
             producer: EffectControlProducerHandle::new(producer, owner.is_some()),
@@ -1483,16 +1596,14 @@ pub fn attach_effect_live_controls(
 
 /// The control-side reader half of one prepared effect instance's observation taps (issue #143).
 ///
-/// Addressed exactly as an [`EffectControlProducer`] is -- by `(track_id, rack, effect_index)` --
-/// because a subscription and the parameter commands it correlates with address the same instance
-/// through the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
+/// Addressed exactly as an [`EffectControlProducer`] is -- by `(track_id, address)` -- because a
+/// subscription and the parameter commands it correlates with address the same instance through
+/// the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
 pub struct EffectObservationHandle {
     /// Normalized track identity this instance belongs to.
     pub track_id: Box<str>,
-    /// Which rack of that track.
-    pub rack: EffectRack,
-    /// Declared position within the rack, in session declaration order.
-    pub effect_index: u32,
+    /// The instance's live address within its track (issue #1096).
+    pub address: LiveEffectAddress,
     /// The instance's session-declared identifier.
     pub effect_id: Box<str>,
     /// The effect's declared menu, so an admitting host maps a wire `tap_id` to a `tap_index` and
@@ -1529,7 +1640,7 @@ pub fn attach_effect_observation(
     maximum_taps: u32,
     window_blocks: u32,
 ) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
-    let declared = declared_effect_indices(&prepared.session);
+    let declared = declared_live_addresses(&prepared.session);
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
@@ -1548,7 +1659,7 @@ pub fn attach_effect_observation(
             });
             continue;
         }
-        let Some(&effect_index) =
+        let Some(&address) =
             declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
         else {
             diagnostics.push(EffectDiagnostic {
@@ -1574,8 +1685,7 @@ pub fn attach_effect_observation(
         };
         handles.push(EffectObservationHandle {
             track_id: entry.track_id.as_str().into(),
-            rack: entry.rack,
-            effect_index,
+            address,
             effect_id: entry.effect_id.as_str().into(),
             descriptor,
             readers: readers.into_boxed_slice(),
@@ -1589,28 +1699,39 @@ pub fn attach_effect_observation(
     }
 }
 
-/// Declared position within each `(track, rack)`, from the normalized model.
+/// The live address of every lowered instance, from the normalized model (issue #1096).
 ///
-/// The same order the `miso.command.v1` `effect_index` names and the same order the browser host
-/// counts, extracted once so the live-control attach and the observation attach cannot disagree
-/// about what "effect 2 of the dynamic rack" means.
-fn declared_effect_indices(
+/// Keyed by the prepared entry's graph identity `(track, internal rack, effect id)`. A
+/// `pre_insert` slot at position `k` is console slot `k`, a `post_insert` slot at position `j` is
+/// console slot `pre_insert.len() + j` -- its index in the track's `console` array -- and an insert
+/// at position `i` is insert `i`. Extracted once so the live-control attach and the observation
+/// attach cannot disagree about what "console slot 2" means.
+fn declared_live_addresses(
     session: &CompiledSession,
-) -> BTreeMap<(String, EffectRack, String), u32> {
-    let mut declared: BTreeMap<(String, EffectRack, String), u32> = BTreeMap::new();
+) -> BTreeMap<(String, EffectRack, String), LiveEffectAddress> {
+    let mut declared = BTreeMap::new();
     let model = session.normalized_model();
     for track in &model.tracks {
         let lowered = model.lower_track(track);
         let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
-        for (rack, effects) in [
-            (EffectRack::Simd1, pre_insert),
-            (EffectRack::Dynamic, inserts),
-            (EffectRack::Simd2, post_insert),
+        // `(internal rack, its instances, the live rack, the live index of its first instance)`.
+        for (rack, effects, live_rack, base) in [
+            (EffectRack::Simd1, pre_insert, LiveEffectRack::Console, 0),
+            (EffectRack::Dynamic, inserts, LiveEffectRack::Inserts, 0),
+            (
+                EffectRack::Simd2,
+                post_insert,
+                LiveEffectRack::Console,
+                pre_insert.len(),
+            ),
         ] {
             for (index, effect) in effects.iter().enumerate() {
                 declared.insert(
                     (track.id.to_string(), rack, effect.id.to_string()),
-                    index as u32,
+                    LiveEffectAddress {
+                        rack: live_rack,
+                        index: (base + index) as u32,
+                    },
                 );
             }
         }

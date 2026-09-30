@@ -16,8 +16,8 @@ use builtins_compiler::{
 };
 use effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectControlResources, EffectObservationHandle,
-    attach_effect_live_controls, attach_effect_observation, effect_control_resources,
-    launch_native_effect_registry, prepare_native_session_effects,
+    LiveEffectAddress, attach_effect_live_controls, attach_effect_observation,
+    effect_control_resources, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::TailSamples;
 use engine::realtime::PreparedRenderPlan;
@@ -348,19 +348,37 @@ pub struct HostLiveControlHandles {
     /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3).
     pub track_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared effect instance (#140 A); empty when no channel was
-    /// requested. Addressed by `(track_id, rack, effect_index)`, where `effect_index` is the
-    /// effect's position within its rack in session declaration order.
+    /// requested. Addressed by `(track_id, address)` in the session's own terms (decision 12,
+    /// issue #1096): a console slot by its index in the session's slot order (`pre_insert`, then
+    /// `post_insert`), an insert by its index in the track's `inserts`
+    /// ([`Self::effect_control_mut`]).
     pub effect_controls: Vec<EffectControlProducer>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
     /// One reader set per prepared effect instance that declares an observation tap (issue #143).
     ///
     /// Empty when the request named no observation capacity, and empty for every effect whose
-    /// descriptor declares no tap. Addressed by `(track_id, rack, effect_index)`, exactly as
+    /// descriptor declares no tap. Addressed by `(track_id, address)`, exactly as
     /// [`Self::effect_controls`] is.
     pub effect_observations: Vec<EffectObservationHandle>,
     /// The designated master track index, echoed back after validation against `tracks`.
     pub master_track: Option<u32>,
+}
+
+impl HostLiveControlHandles {
+    /// The live-control channel of one effect instance, by its session address (issue #1096).
+    ///
+    /// `None` when the track has no such console slot or insert, or when no channel was
+    /// requested.
+    pub fn effect_control_mut(
+        &mut self,
+        track_id: &str,
+        address: LiveEffectAddress,
+    ) -> Option<&mut EffectControlProducer> {
+        self.effect_controls
+            .iter_mut()
+            .find(|producer| &*producer.track_id == track_id && producer.address == address)
+    }
 }
 
 /// One prepared session: the render plan, the control-side source set, and the resource report.
