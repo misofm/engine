@@ -11,13 +11,30 @@
 
 use super::*;
 use crate::banks::{BankPadding, effect_bank_resource, test_only_with_bank_padding};
-use std::sync::Mutex;
 
 /// Past the limiter's latency line, with room for its release.
 const BLOCKS: u64 = 12;
 
-/// Every mask a [`PaddingDouble`] was asked to bind, in bind order.
-type SeenMasks = Arc<Mutex<Vec<Vec<bool>>>>;
+/// How many times a [`PaddingDouble`] was asked to bind each mask, indexed by the mask's bits
+/// (lane `l` is bit `l`; a bank has at most eight lanes).
+type SeenMasks = Arc<[AtomicU64; 256]>;
+
+/// A mask's index in [`SeenMasks`].
+fn mask_bits(mask: &[bool]) -> usize {
+    mask.iter()
+        .enumerate()
+        .map(|(lane, active)| usize::from(*active) << lane)
+        .sum()
+}
+
+/// The masks that were asked for, as `(mask bits, times)`.
+fn asked(seen: &SeenMasks) -> Vec<(usize, u64)> {
+    seen.iter()
+        .enumerate()
+        .map(|(bits, count)| (bits, count.load(Ordering::SeqCst)))
+        .filter(|(_, count)| *count != 0)
+        .collect()
+}
 
 /// A launch effect whose bank bind accepts padded requests.
 struct PaddingDouble {
@@ -75,10 +92,7 @@ impl NativeEffectFactory for PaddingDouble {
                 "padded lane {lane} carries a clone of an active member's request, never zeros"
             );
         }
-        self.seen
-            .lock()
-            .expect("mask log")
-            .push(request.active_mask.to_vec());
+        self.seen[mask_bits(request.active_mask)].fetch_add(1, Ordering::SeqCst);
         self.delegate
             .bind_homogeneous_bank(PrepareEffectBankRequest {
                 active_mask: request.width.full_mask(),
@@ -90,7 +104,7 @@ impl NativeEffectFactory for PaddingDouble {
 /// The intended console's three strip effects, each behind a [`PaddingDouble`] sharing one log.
 fn padding_registry() -> (NativeEffectRegistry, SeenMasks) {
     let launch = launch_native_effect_registry().expect("launch registry");
-    let seen = SeenMasks::default();
+    let seen: SeenMasks = Arc::new(core::array::from_fn(|_| AtomicU64::new(0)));
     let registry = NativeEffectRegistry::new(
         [
             "miso.parametric-eq",
@@ -212,12 +226,11 @@ fn a_partial_group_binds_one_padded_bank_and_renders_the_per_node_bits() {
         let (registry, seen) = padding_registry();
         let production = compile_console_model_with_builtins(&model, 1_088, &[], &registry);
         let report = &production.report().rack_cohorts;
+        let full = (1_usize << lanes) - 1;
         assert!(
-            seen.lock()
-                .expect("mask log")
-                .iter()
-                .all(|mask| mask.iter().all(|active| *active)),
-            "{what}: no group asks for padding, so no padded request is made"
+            asked(&seen).iter().all(|(bits, _)| *bits == full),
+            "{what}: no group asks for padding, so no padded request is made: {:?}",
+            asked(&seen)
         );
         assert_eq!(
             report.scalar_in(RackLocation::Simd1).len()
@@ -247,21 +260,16 @@ fn a_partial_group_binds_one_padded_bank_and_renders_the_per_node_bits() {
             .map(|group| group.program.len())
             .sum();
         assert_eq!(report.bound_slots.len(), slots, "{what}: one bank per slot");
-        let masks = seen.lock().expect("mask log").clone();
-        let padded_mask: Vec<bool> = (0..lanes).map(|lane| lane < partial).collect();
-        assert_eq!(
-            masks.iter().filter(|mask| **mask == padded_mask).count(),
-            if partial == 0 { 0 } else { 3 },
-            "{what}: the partial group's three slots are asked for with its mask, {masks:?}"
-        );
-        assert_eq!(
-            masks
-                .iter()
-                .filter(|mask| mask.iter().all(|active| *active))
-                .count(),
-            3 * (tracks / lanes),
-            "{what}: every full group's slots are asked for full, {masks:?}"
-        );
+        // The partial group's three slots are asked for with its mask, `true` on lanes
+        // `0..partial`, and every full group's slots with the full mask; nothing else is asked.
+        let mut expected = Vec::new();
+        if partial != 0 {
+            expected.push(((1_usize << partial) - 1, 3));
+        }
+        if tracks >= lanes {
+            expected.push((full, 3 * (tracks / lanes) as u64));
+        }
+        assert_eq!(asked(&seen), expected, "{what}: the masks asked for");
         let padded =
             render_armed_console_blocks(padded, BLOCKS, &BTreeSet::new(), &BTreeSet::new());
         assert_pcm_bits_equal(&padded.pcm, &oracle.pcm, &format!("{what}, padded"));
