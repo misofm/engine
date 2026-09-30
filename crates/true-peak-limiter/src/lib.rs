@@ -628,6 +628,12 @@ impl ChannelState {
     /// The box ring rests at `1.0` and the box sum at `Wb`, which is the only pair consistent with
     /// "nothing has ever been limited": `S / Wb` is then exactly `1.0`, `d` is exactly `+0.0` and
     /// the first output sample is the delayed input bit for bit.
+    ///
+    /// Out of line (#1091): it runs at preparation, at a reset and on a failed block, never in the
+    /// frame loop, and each of its three `1.0` fills lowers to a `memset_pattern16` call on Apple
+    /// targets (#1018). One copy keeps that count where it was when the per-lane recovery moved
+    /// the call sites.
+    #[inline(never)]
     fn clear_runtime(&mut self, shape: &Shape) {
         debug_assert_eq!(self.main_ring.len(), shape.main * self.width);
         self.history.fill(0.0);
