@@ -431,8 +431,8 @@ impl Drop for RestoreMode {
 /// Thirteen tracks: at eight lanes one bank per slot plus a five-track per-node remainder, at four
 /// lanes the limiter's three banks plus a per-node remainder (and every EQ and compressor per node
 /// on hosts that bind no four-lane bank for them), and at `Scalar` every instance per node. Each
-/// slot bypasses a different mix of tracks, so every leg has bypassed lanes in banks and bypassed
-/// instances per node wherever a bank binds. The counters are this thread's, so another test's
+/// slot bypasses a different mix of tracks, so every leg that binds a bank has bypassed lanes in
+/// it, and every leg has bypassed instances per node. The counters are this thread's, so another test's
 /// allocations cannot reach them; the audited allocator counts in `Count` mode, so an allocation
 /// inside the render scope is reported here rather than aborting the process.
 ///
@@ -450,7 +450,6 @@ fn a_mixed_session_bypass_renders_without_allocating() {
         TRACKS,
         [0b1_0010_1001_0110, 0b0_1101_0010_0101, 0b1_0100_1010_1001],
     );
-    let mut banked_legs = 0;
     for dispatch in [Backend::Simd8, Backend::Simd4, Backend::Scalar] {
         let mut bound = bind(&model, dispatch, 32, false);
         let shape = &bound.shape;
@@ -458,11 +457,14 @@ fn a_mixed_session_bypass_renders_without_allocating() {
             shape.bypassed_per_node > 0,
             "{dispatch:?}: a bypassed instance renders per node ({shape:?})"
         );
-        if shape.banks_with_a_bypassed_lane > 0 {
-            banked_legs += 1;
-        }
-        if dispatch == Backend::Scalar {
-            assert_eq!(shape.banks, 0, "the scalar oracle binds nothing");
+        // A build binds no bank wider than its own backend (decision D4), so on a four-lane host
+        // the `Simd8` leg is all per node, like `Scalar`.
+        match BankWidth::for_backend(dispatch) {
+            Some(width) if width.lanes() as usize <= host_lanes() => assert!(
+                shape.banks_with_a_bypassed_lane > 0,
+                "{dispatch:?}: a bypassed lane renders in a bank ({shape:?})"
+            ),
+            _ => assert_eq!(shape.banks, 0, "{dispatch:?}: nothing binds"),
         }
         let mut pcm = vec![0.0_f32; 2 * 128];
         render_blocks(&mut bound.plan, &mut pcm, 0, WARM_UP);
@@ -479,8 +481,4 @@ fn a_mixed_session_bypass_renders_without_allocating() {
             "{dispatch:?}: the plan renders"
         );
     }
-    assert!(
-        banked_legs >= 2,
-        "a bypassed lane rendered in a bank at both SIMD widths"
-    );
 }
