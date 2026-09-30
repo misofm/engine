@@ -4170,8 +4170,8 @@ mod tests {
 
     /// A session-bypassed slot keeps its chain in the cohort (issue #1087).
     ///
-    /// A session's `bypass` lowers to a prepared `bypass = false` plus a bypassed channel-less
-    /// lane, so a bypassed and an active instance of one effect share one `EffectProgramKey`, and
+    /// A session's `bypass` on an effect that lowers it (not the delay or the multiband) becomes a
+    /// prepared `bypass = false` plus a bypassed channel-less lane, so a bypassed and an active instance of one effect share one `EffectProgramKey`, and
     /// a bypassed track no longer leaves its bank. One slot id used in two racks of one track still
     /// prepares as two entries, each with its own lane.
     ///

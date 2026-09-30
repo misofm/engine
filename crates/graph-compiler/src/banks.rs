@@ -138,7 +138,9 @@ pub(crate) fn test_only_with_bank_padding<R>(padding: BankPadding, body: impl Fn
 /// onto the bound bank, so the rack gathers and scatters the active lanes only.
 ///
 /// A *bypassed* slot is not a skipped one (issue #1087). It has its node and its latency, and a
-/// session bypass never reaches the program key this planner compares: preparation lowers it to
+/// lowered session bypass (every effect but the delay and the multiband;
+/// `effect_compiler::lowers_session_bypass`) never reaches the program key this planner compares:
+/// preparation lowers it to
 /// a prepared `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt
 /// (`EffectControlLane::without_channel`), so a cohort's tracks group, and its slots bind, whatever
 /// mix of them is bypassed. The runtime builds the bank's `rack::ConsoleEffectBankStage` from those
@@ -208,8 +210,9 @@ pub(crate) fn bind_rack_banks_indexed(
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };
                 nodes.push(node.clone());
-                // Issue #1087: a session bypass is not in this key -- preparation lowered it to
-                // shunt state -- so a bypassed track keeps its cohort.
+                // Issue #1087: a lowered session bypass is not in this key -- preparation turned
+                // it into shunt state -- so a bypassed track keeps its cohort. A bypass that stays
+                // prepared (the multiband's, issue #1100, and the delay's) is in the key.
                 slots.push(entry.metadata.program_key());
             }
             programs.insert(chain.clone(), RackProgram::new(location, slots));

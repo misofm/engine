@@ -1064,7 +1064,8 @@ pub struct PreparedEffectMetadata {
 /// grouping identity meant they could never share a bank, so toggling bypass on one track of an
 /// eight-track cohort split it and cost the bypassed track its bank.
 ///
-/// So preparation never hands a session's bypass to the effect. `effect-compiler` lowers it to a
+/// So preparation does not hand a session's bypass to an effect that can bank (with one exception,
+/// below). `effect-compiler` lowers it to a
 /// prepared `bypass = false` plus the initial state of that lane's [`BypassShunt`], carried by an
 /// [`EffectControlLane`] (`EffectControlLane::without_channel` when no live console is attached):
 ///
@@ -1079,10 +1080,13 @@ pub struct PreparedEffectMetadata {
 /// * **PDC exact by construction.** `graph-compiler` derives route timings solely from
 ///   `PreparedEffectMetadata.latency`, which depends on the quality row and never on bypass.
 ///
-/// Every session effect that can bank is therefore prepared with `bypass = false`, and every key
-/// the cohort planner compares for it carries `bypass: false`: mixed-bypass cohorts share one key
-/// and bind one bank. An effect whose factory never binds a bank (`effect_compiler`'s
-/// `NEVER_BANKED_EFFECTS`, the delay) has no bank to keep, and keeps its prepared bypass.
+/// Every session effect whose bypass is lowered is therefore prepared with `bypass = false`, and
+/// every key the cohort planner compares for it carries `bypass: false`: mixed-bypass cohorts share
+/// one key and bind one bank. Two effects keep their prepared bypass
+/// (`effect_compiler::lowers_session_bypass`): the delay (`NEVER_BANKED_EFFECTS`), whose factory
+/// never binds a bank, and the multiband compressor (`PREPARED_BYPASS_EFFECTS`, issue #1100), whose
+/// whole-bank D7 recovery would let a bypassed lane silence its enabled bank-mates. A mixed-bypass
+/// multiband cohort therefore declines a bank, as before #1087.
 ///
 /// # Why the prepared field stays in the key
 ///

@@ -129,7 +129,8 @@ pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryE
 /// Launch effects whose factory binds no homogeneous bank at any width (issue #1087).
 ///
 /// A session bypass is lowered to per-lane shunt state so that a bypassed track keeps its effect
-/// bank. An effect that never banks has no bank to keep, so its session bypass stays a prepared
+/// bank, except on the effects this list and [`PREPARED_BYPASS_EFFECTS`] name
+/// ([`lowers_session_bypass`]). An effect that never banks has no bank to keep, so its session bypass stays a prepared
 /// bypass and it renders the per-node path it always did. For the delay that is also the only
 /// exact choice: its block-boundary check (D7) reads its ring and damping state as well as its
 /// output, so on a block where a runaway feedback ring trips it, its prepared bypass zeroes the dry
@@ -1391,9 +1392,10 @@ pub fn attach_effect_console(
             producer: EffectControlProducerHandle::new(producer, owner.is_some()),
             owner,
         });
-        // Seeded from the session's bypass, not the prepared one: an effect that can bank is
-        // prepared enabled (issue #1087), and this channel replaces the channel-less lane that
-        // carried the same bit.
+        // Seeded from the session's bypass, not the prepared one: an effect whose bypass is
+        // lowered is prepared enabled (issue #1087), and this channel replaces the channel-less
+        // lane that carried the same bit. For the delay and the multiband (`lowers_session_bypass`
+        // is false) the prepared bypass stays in force, so a live toggle cannot lift it.
         entry.control = Some(Box::new(if target_capable {
             EffectControlLane::new_with_target_staging(consumer, entry.initial_bypass)
         } else {

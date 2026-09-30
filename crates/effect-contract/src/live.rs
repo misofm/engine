@@ -113,8 +113,9 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 ///
 /// # A lane without a channel (issue #1087)
 ///
-/// A session `bypass` is per-lane state, not a prepared program: preparation lowers it to a
-/// prepared `bypass = false` plus this lane's initial bypass, so a bypassed track keeps its place
+/// A session `bypass` is per-lane state, not a prepared program, for every effect whose bypass
+/// `effect_compiler::lowers_session_bypass` (all but the delay and the multiband): preparation
+/// lowers it to a prepared `bypass = false` plus this lane's initial bypass, so a bypassed track keeps its place
 /// in its effect bank and the rack's [`BypassShunt`] selects the dry signal for exactly that lane.
 /// A session with no live console still needs somewhere to hold that bit, so
 /// [`without_channel`](Self::without_channel) builds a lane with no queue: nothing can ever be
@@ -842,8 +843,9 @@ impl ObservationLane {
 ///
 /// # When a shunt exists (issue #1087)
 ///
-/// A session `bypass` is per-lane shunt state, never a prepared program: preparation lowers it to
-/// a prepared `bypass = false` plus the lane's initial bypass, carried by an
+/// A session `bypass` is per-lane shunt state, not a prepared program, for every effect whose
+/// bypass `effect_compiler::lowers_session_bypass`: preparation lowers it to a prepared
+/// `bypass = false` plus the lane's initial bypass, carried by an
 /// [`EffectControlLane`] (a live channel, or [`EffectControlLane::without_channel`] when no console
 /// is attached). A shunt is built for every instance, and every bank slot, that holds such a lane:
 /// a live channel, or a lane bypassed at preparation. A session with neither allocates none of
@@ -858,7 +860,9 @@ impl ObservationLane {
 /// in a compiled plan, because the track's input stage sanitises every such sample to `+0.0` and
 /// every stage after it zeroes a block that leaves that range. The delay, whose D7 check also
 /// reads its state, never banks and keeps its prepared bypass
-/// (`effect_compiler::NEVER_BANKED_EFFECTS`). `graph-compiler`'s `bypass_shunt_identity` and
+/// (`effect_compiler::NEVER_BANKED_EFFECTS`), and so does the multiband, whose D7 recovery is
+/// whole-bank (`effect_compiler::PREPARED_BYPASS_EFFECTS`, issue #1100). `graph-compiler`'s
+/// `bypass_shunt_identity` and
 /// `bypass_cohorts` tests are the gates.
 pub struct BypassShunt {
     /// Dry copy of this block's input, taken before the effect runs.

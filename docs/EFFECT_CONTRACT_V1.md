@@ -44,11 +44,13 @@ three separate mechanisms, each where its hazard is:
 Signed finite zero is retained on every non-recursive path. A prepared bypass is an immutable
 configuration and outputs the dry input delayed by exactly the declared latency. Every bank reads
 one bypass flag for all its lanes, so the prepared flag stays in `EffectProgramKey`. A session's
-bypass is not prepared (issue #1087): `effect-compiler` prepares every effect that can bank
+bypass is not prepared (issue #1087): `effect-compiler` prepares an effect that can bank
 enabled and carries the bypass as per-lane state to the rack's latency-preserving shunt
 (`BypassShunt`), which copies the same delayed dry words into exactly the bypassed lanes, so a
-bypassed track keeps its bank. An effect that never banks (the delay) keeps its session bypass as
-a prepared one.
+bypassed track keeps its bank. Two effects keep their session bypass as a prepared one
+(`effect_compiler::lowers_session_bypass`): the delay, which never banks, and the multiband
+compressor, whose whole-bank D7 recovery would let a bypassed lane silence its bank-mates
+(issue #1100).
 
 Class-A identity, the same bits on every lane width and target, treats every NaN as one value
 (owner decision 10, #1065): tests fold each NaN to `0x7FC00000` through `dsp_reference::class_a`

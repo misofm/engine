@@ -894,7 +894,8 @@ pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
 ///
 /// # A session bypass is a lane of this stage (issue #1087)
 ///
-/// A session's `bypass` is lowered to a prepared `bypass = false` plus a lane
+/// A session's `bypass`, on every effect but the delay and the multiband (which keep a prepared
+/// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
 /// ([`EffectControlLane::without_channel`] when no console is attached) whose bypass is set, so a
 /// bypassed track keeps its bank. Its lane runs the wet path with the others and step 4 restores
 /// its latency-matched dry signal: the same words the effect's own prepared bypass emits, by

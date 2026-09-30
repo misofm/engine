@@ -3,7 +3,8 @@
 //! A session's `bypass` used to become the effect's prepared bypass, which is part of its
 //! `EffectProgramKey`, so a bypassed track left its cohort. It now lowers to a prepared
 //! `bypass = false` plus a bypassed lane on the rack's latency-preserving shunt, so a cohort binds
-//! one bank per slot whatever mix of its tracks is bypassed.
+//! one bank per slot whatever mix of its tracks is bypassed. The delay, which never banks, and the
+//! multiband (issue #1100, gate 3 below) keep their prepared bypass.
 //!
 //! "Today's render" is reconstructed here exactly: every lowered entry is prepared again with the
 //! session's bypass as its prepared flag and without a lane, which is what

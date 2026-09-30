@@ -2,7 +2,8 @@
 //! instance prepared with `bypass = true` and rendered per node, which is how every session bypass
 //! rendered before #1087.
 //!
-//! Preparation now lowers a session's `bypass` to a prepared `bypass = false` plus the lane's
+//! Preparation now lowers a session's `bypass` (on every effect but the delay and, since #1100,
+//! the multiband) to a prepared `bypass = false` plus the lane's
 //! initial shunt state (`EffectControlLane::without_channel`), so a bypassed track stays in its
 //! effect bank. The bank runs every lane's wet path and the rack's `ConsoleEffectBankStage`
 //! restores the latency-matched dry signal into exactly the bypassed lanes; a lane that ends up per
@@ -520,7 +521,8 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
 
 /// Gate 2, per-node leg: every launch effect that can bank, rendered per node.
 ///
-/// A session-bypassed instance of an effect that can bank is prepared `bypass = false` and carries
+/// A session-bypassed instance of an effect whose bypass is lowered (every effect that can bank but
+/// the multiband, issue #1100) is prepared `bypass = false` and carries
 /// a channel-less lane, so where it ends up per node -- a partial cohort, a chain with a
 /// sidechained slot, a scalar build -- the graph renders it as a `runtime::ConsoleEffect`: capture
 /// the dry block into the shunt when the lane is bypassed or the shunt feeds a latency line, run
