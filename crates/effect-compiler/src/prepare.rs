@@ -189,12 +189,7 @@ pub fn prepare_native_session_effects(
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,
 ) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
-    prepare_native_session_effects_with_console_eligibility(
-        session,
-        registry,
-        caps,
-        &CONSOLE_ELIGIBLE_EFFECTS,
-    )
+    prepare_with_console_eligibility(session, registry, caps, &CONSOLE_ELIGIBLE_EFFECTS)
 }
 
 /// [`prepare_native_session_effects`] with the console eligibility list supplied by the caller.
@@ -204,7 +199,23 @@ pub fn prepare_native_session_effects(
 /// (the conformance crate's `conformance.delay`, which no production registry carries) must occupy
 /// a lowered console rack to exercise the graph's internal stages. It changes the list for that
 /// caller and nothing else: identity resolution, parameters and every other refusal are the same.
+///
+/// Compiled only for this crate's tests and under `test-support` (#1093 verdict L2), so no
+/// production build can reach a console slot the fixed list refuses.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
 pub fn prepare_native_session_effects_with_console_eligibility(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    caps: EffectCompileCaps,
+    console_eligible: &[&str],
+) -> Result<EffectPreparedSession, EffectDiagnosticSet> {
+    prepare_with_console_eligibility(session, registry, caps, console_eligible)
+}
+
+/// The one preparation behind both entries: the console slots whose native identity is not in
+/// `console_eligible` are refused, and everything else is prepared.
+fn prepare_with_console_eligibility(
     session: &CompiledSession,
     registry: &NativeEffectRegistry,
     caps: EffectCompileCaps,

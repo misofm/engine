@@ -230,8 +230,12 @@ fn validate_console(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
 
 /// One track's console entries against the session's slots: exactly one entry per slot, in slot
 /// order (`pre_insert`, then `post_insert`), each carrying valid params.
+///
+/// `declared` is the session's slot IDs, built once for every track, so a track costs one lookup
+/// per entry and per slot rather than a scan of the other side (#1093 verdict L3).
 fn validate_console_entries<'a>(
     session: &SessionModel,
+    declared: &HashSet<&str>,
     track: &'a Track,
     path: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -244,7 +248,7 @@ fn validate_console_entries<'a>(
         let entry_path = console_path.index(position);
         let slot_path = entry_path.key("slot");
         let expected_slot = expected.next();
-        if !session.console.slots().any(|slot| slot.slot == entry.slot) {
+        if !declared.contains(entry.slot.as_str()) {
             error(
                 diagnostics,
                 DiagnosticCode::MissingEntityReference,
@@ -268,8 +272,10 @@ fn validate_console_entries<'a>(
         }
         validate_params(diagnostics, &entry.params, &entry_path.key("params"), local);
     }
+    // Every entry that names a declared slot is in `local.effect_ids` now, so a slot missing from
+    // it has no entry.
     for slot in session.console.slots() {
-        if !track.console.iter().any(|entry| entry.slot == slot.slot) {
+        if !local.effect_ids.contains(slot.slot.as_str()) {
             error(
                 diagnostics,
                 DiagnosticCode::ConsoleEntryMissing,
@@ -288,6 +294,11 @@ fn validate_tracks<'a>(
     local: &mut LocalUniqueness<'a>,
 ) {
     let tracks_path = root.key("tracks");
+    let declared: HashSet<&str> = session
+        .console
+        .slots()
+        .map(|slot| slot.slot.as_str())
+        .collect();
     for (position, track) in session.tracks.iter().enumerate() {
         let path = tracks_path.index(position);
         let source = index.sources.get(track.source_id.as_str()).copied();
@@ -357,7 +368,7 @@ fn validate_tracks<'a>(
                 }
             }
         }
-        validate_console_entries(session, track, &path, diagnostics, local);
+        validate_console_entries(session, &declared, track, &path, diagnostics, local);
         validate_rack(
             diagnostics,
             index,
