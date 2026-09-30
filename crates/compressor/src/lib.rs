@@ -913,7 +913,7 @@ impl NativeEffectFactory for CompressorFactory {
     }
 
     /// Binds a full or a padded bank (issue #1090: the compressor accepts the padding contract on
-    /// [`PrepareEffectBankRequest`]; see [`PreparedCompressorBank`] for how it keeps it).
+    /// [`PrepareEffectBankRequest`]; the private bank type's documentation says how it keeps it).
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
