@@ -856,28 +856,41 @@ impl NativeEffectFactory for TransientShaperFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        // There is no runtime SIMD dispatch (D4): this build has exactly one production width, and
-        // a plan asking for another one is refused as unavailable rather than quietly served by it.
-        let native = request.width.lanes() as usize == Backend::current().width();
-        bind_bank(self, request, native)
+        bind_bank::<true>(self, request)
     }
 }
 
-/// `bind_homogeneous_bank` once the build's native width is known: `native` says whether this
-/// artifact executes `request.width` (D4). The unit tests pass `true` to bind the other width's
-/// bank on this host through the same code.
-fn bind_bank(
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
+fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &TransientShaperFactory,
     request: PrepareEffectBankRequest<'_>,
-    native: bool,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
     Ok(match request.width {
-        BankWidth::Four => bind::<Simd4, 4>(factory, request, native)?
-            .map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>),
-        BankWidth::Eight => bind::<Simd8, 8>(factory, request, native)?
-            .map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>),
+        BankWidth::Four => {
+            boxed::<Simd4, 4, NATIVE_ONLY>(bind::<_, 4, NATIVE_ONLY>(factory, request)?)
+        }
+        BankWidth::Eight => {
+            boxed::<Simd8, 8, NATIVE_ONLY>(bind::<_, 8, NATIVE_ONLY>(factory, request)?)
+        }
     })
+}
+
+/// Boxes a bank bound at `W` lanes.
+///
+/// The D4 check of [`bind`] is repeated here, where it is a compile-time constant ahead of the
+/// only reference to the bank's vtable, so a production build never links the render code of a
+/// width it does not execute. `bind` cannot promise that alone: it returns the bank by value, and
+/// the eight-lane shaper would otherwise stay in the four-lane browser artifact.
+fn boxed<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
+    bank: Option<PreparedTransientShaperBank<L, W>>,
+) -> Option<Box<dyn PreparedNativeEffectBank>> {
+    if NATIVE_ONLY && W != Backend::current().width() {
+        return None;
+    }
+    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
 }
 
 /// Binds one bank of `W` lanes.
@@ -891,10 +904,9 @@ fn bind_bank(
 /// is exactly zero and the shape-zero identity selects the input word. The shaper never reads
 /// across lanes, and its one whole-bank decision, the ramp prefix, is partition-invariant, so an
 /// active lane's bits depend neither on the padded lanes nor on which member they clone.
-fn bind<L: Lane, const W: usize>(
+fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
     factory: &TransientShaperFactory,
     request: PrepareEffectBankRequest<'_>,
-    native: bool,
 ) -> Result<Option<PreparedTransientShaperBank<L, W>>, EffectPrepareError> {
     let first = request
         .requests
@@ -920,8 +932,11 @@ fn bind<L: Lane, const W: usize>(
         left[track] = item_left;
         right[track] = item_right;
     }
-    // `has_matching_backend_width` has already tied the request's backend to its width.
-    if !same_program || !native {
+    // There is no runtime SIMD dispatch (D4): this build has exactly one production width, and a
+    // plan asking for another one is refused as unavailable rather than quietly served by it.
+    // `has_matching_backend_width` has already tied the request's backend to its width `W`, a
+    // compile-time constant here, so a production build never links the other width's bank.
+    if !same_program || (NATIVE_ONLY && W != Backend::current().width()) {
         return Ok(None);
     }
     let mut shaper = Shaper::new(metadata, row, left, right);

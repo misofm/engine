@@ -14,7 +14,7 @@
 //!
 //! (Gate 2 is the gate/expander's.) Every test runs at both bank widths on every host. The build's
 //! native width binds through the public `bind_homogeneous_bank`; the other width binds through
-//! `bind_bank` with `native = true`, the same code without the D4 width check. So the four-lane
+//! `bind_bank::<false>`, the same code without the D4 width check. So the four-lane
 //! bank runs on x86-64 as well as on AArch64, and the eight-lane one on AArch64 as well as on
 //! x86-64.
 //!
@@ -93,7 +93,7 @@ fn bind(
     if native(width) {
         SoftClipFactory.bind_homogeneous_bank(request)
     } else {
-        bind_bank(&SoftClipFactory, request, true)
+        bind_bank::<false>(&SoftClipFactory, request)
     }
 }
 
@@ -771,7 +771,7 @@ fn concrete<L: Lane>(
             )
         })
         .collect();
-    prepare_bank::<L>(
+    prepare_bank::<L, false>(
         &SoftClipFactory,
         PrepareEffectBankRequest {
             backend: backend(width),
@@ -779,7 +779,6 @@ fn concrete<L: Lane>(
             requests: &requests,
             active_mask: mask,
         },
-        true,
     )
     .expect("a well-formed request")
     .expect("the bank binds")

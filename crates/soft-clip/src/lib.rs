@@ -932,25 +932,53 @@ impl NativeEffectFactory for SoftClipFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        bind_bank(self, request, width_is_native(request.width))
+        bind_bank::<true>(self, request)
     }
 }
 
-/// `bind_homogeneous_bank` once the build's native width is known: `native` says whether this
-/// artifact executes `request.width` (D4). The unit tests pass `true` to bind the other width's
-/// bank on this host through the same code.
-fn bind_bank(
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
+fn bind_bank<const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-    native: bool,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
     Ok(match request.width {
-        BankWidth::Four => prepare_bank::<Simd4>(factory, request, native)?
-            .map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>),
-        BankWidth::Eight => prepare_bank::<Simd8>(factory, request, native)?
-            .map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>),
+        BankWidth::Four => {
+            boxed::<Simd4, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
+        }
+        BankWidth::Eight => {
+            boxed::<Simd8, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
+        }
     })
+}
+
+/// The width a bank of `L` runs at: a compile-time constant for each `L`.
+const fn lane_width<L: Lane>() -> BankWidth {
+    if L::WIDTH == 4 {
+        BankWidth::Four
+    } else {
+        BankWidth::Eight
+    }
+}
+
+/// Boxes a bank bound at `L::WIDTH` lanes.
+///
+/// The D4 check of [`prepare_bank`] is repeated here, where it is a compile-time constant ahead of
+/// the only reference to the bank's vtable, so a production build never links the render code of
+/// a width it does not execute. `prepare_bank` cannot promise that alone: it returns the bank by
+/// value, and the eight-lane soft clip would otherwise stay in the four-lane browser artifact.
+fn boxed<L: Lane, const NATIVE_ONLY: bool>(
+    bank: Option<PreparedSoftClipBank<L>>,
+) -> Option<Box<dyn PreparedNativeEffectBank>>
+where
+    PreparedSoftClipBank<L>: PreparedNativeEffectBank,
+{
+    if NATIVE_ONLY && !width_is_native(lane_width::<L>()) {
+        return None;
+    }
+    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
 }
 
 /// `true` if this artifact executes `width` lanes natively.
@@ -981,10 +1009,9 @@ const fn width_is_native(width: BankWidth) -> bool {
 /// never reads across lanes, and its one whole-bank decision, the ramp segmentation, is
 /// partition-invariant (`tests/ramp_law.rs`), so an active lane's bits depend neither on the
 /// padded lanes nor on which member they clone.
-fn prepare_bank<L: Lane>(
+fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-    native: bool,
 ) -> Result<Option<PreparedSoftClipBank<L>>, EffectPrepareError> {
     let first = request
         .requests
@@ -1007,7 +1034,8 @@ fn prepare_bank<L: Lane>(
         left_defaults[track] = left;
         right_defaults[track] = right;
     }
-    if !same_program || !native {
+    // `L::WIDTH` is a compile-time constant here, so the D4 check folds (see [`boxed`]).
+    if !same_program || (NATIVE_ONLY && !width_is_native(lane_width::<L>())) {
         return Ok(None);
     }
     let mut inner = SoftClip::new(

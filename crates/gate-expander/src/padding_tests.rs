@@ -14,8 +14,8 @@
 //!   a bypassed track, which the rack's `BypassShunt` later discards) leaves its bank-mates' bits.
 //!
 //! Every test runs at both bank widths on every host. The build's native width binds through the
-//! public `bind_homogeneous_bank`; the other width binds through `bind_bank` with `native = true`,
-//! the same code without the D4 width check. So the four-lane bank runs on x86-64 as well as on
+//! public `bind_homogeneous_bank`; the other width binds through `bind_bank::<false>`, the same
+//! code without the D4 width check. So the four-lane bank runs on x86-64 as well as on
 //! AArch64, and the eight-lane one on AArch64 as well as on x86-64.
 //!
 //! NaNs fold to one word before any comparison (decision 10).
@@ -95,7 +95,7 @@ fn bind(
     if native(width) {
         GateExpanderFactory.bind_homogeneous_bank(request)
     } else {
-        bind_bank(request, true)
+        bind_bank::<false>(request)
     }
 }
 

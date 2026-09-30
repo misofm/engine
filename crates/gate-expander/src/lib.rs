@@ -1077,20 +1077,13 @@ impl NativeEffectFactory for GateExpanderFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        // There is no runtime SIMD dispatch (master plan #83 D4, revision 4): `wide` picks its
-        // instruction set at compile time and the workspace pins `x86-64-v3`, so the available
-        // width is a compile-time constant and an unavailable backend is a scalar fallback.
-        let native = match request.width {
-            BankWidth::Four => Backend::current() == Backend::Simd4,
-            BankWidth::Eight => Backend::current() == Backend::Simd8,
-        };
-        bind_bank(request, native)
+        bind_bank::<true>(request)
     }
 }
 
-/// `bind_homogeneous_bank` once the build's native width is known: `native` says whether this
-/// artifact executes `request.width` (D4). The unit tests pass `true` to bind the other width's
-/// bank on this host through the same code.
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
 ///
 /// # Padding (issue #1092; decision 12)
 ///
@@ -1103,9 +1096,8 @@ impl NativeEffectFactory for GateExpanderFactory {
 /// ([`PreparedGate::with_active_lanes`]). Fed `+0.0` it writes `+0.0` (`dry * gain`, or the dry
 /// word), and the gate never reads across lanes, so an active lane's bits depend neither on the
 /// padded lanes nor on which member they clone.
-fn bind_bank(
+fn bind_bank<const NATIVE_ONLY: bool>(
     request: PrepareEffectBankRequest<'_>,
-    native: bool,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
     // Members come first (`validate_shape`), so lane 0 carries one.
@@ -1133,25 +1125,36 @@ fn bind_bank(
     {
         return Ok(None);
     }
-    if !native {
-        return Ok(None);
-    }
     let invalid = EffectPrepareError {
         code: "effect.parameter.initial",
     };
     let width = Some(request.width);
     let active = active_bits(request.active_mask);
+    // There is no runtime SIMD dispatch (master plan #83 D4, revision 4): `wide` picks its
+    // instruction set at compile time and the workspace pins `x86-64-v3`, so an unavailable width
+    // is a scalar fallback. Each arm's check is a compile-time constant, so a production build
+    // never links the bank of a width it does not execute.
     Ok(Some(match request.width {
-        BankWidth::Four => Box::new(
-            PreparedGate::<Simd4, false>::new(metadata, width, defaults)
-                .ok_or(invalid)?
-                .with_active_lanes(active),
-        ) as Box<dyn PreparedNativeEffectBank>,
-        BankWidth::Eight => Box::new(
-            PreparedGate::<Simd8, false>::new(metadata, width, defaults)
-                .ok_or(invalid)?
-                .with_active_lanes(active),
-        ) as Box<dyn PreparedNativeEffectBank>,
+        BankWidth::Four => {
+            if NATIVE_ONLY && Backend::current() != Backend::Simd4 {
+                return Ok(None);
+            }
+            Box::new(
+                PreparedGate::<Simd4, false>::new(metadata, width, defaults)
+                    .ok_or(invalid)?
+                    .with_active_lanes(active),
+            ) as Box<dyn PreparedNativeEffectBank>
+        }
+        BankWidth::Eight => {
+            if NATIVE_ONLY && Backend::current() != Backend::Simd8 {
+                return Ok(None);
+            }
+            Box::new(
+                PreparedGate::<Simd8, false>::new(metadata, width, defaults)
+                    .ok_or(invalid)?
+                    .with_active_lanes(active),
+            ) as Box<dyn PreparedNativeEffectBank>
+        }
     }))
 }
 
