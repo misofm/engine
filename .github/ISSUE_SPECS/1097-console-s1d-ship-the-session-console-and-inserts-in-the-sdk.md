@@ -420,3 +420,113 @@ I booted each builder document in the wasm engine:
 - **Note (S1a, out of scope).** Prepare-stage diagnostics for a console slot point at
   `$.tracks[id=<track>].effects[id=<slot>]` (`crates/effect-compiler/src/prepare.rs:342`), a path
   the document does not have, rather than at `$.console.<section>[...]`.
+
+## Post-verdict fixes (root-directed)
+
+Terra, a bounded fix of Sol's two mediums and five lows before the C3 push, not a new attempt. On
+`codex/1097-sdk-console` from `9ae38fed`: commit `9ed17b58`. Every gate below ran on `9ed17b58`,
+x86-64-v3, from a clean `npm ci`.
+
+### What changed
+
+- **M1. `withSession()` is held to the booted document, byte for byte.**
+  - Both SDK engines keep the document they staged. `OfflineEngine` copies it at boot and
+    replaces it in `loadSession()`. `createEngine` copies it before the scratch boot. Each hands it
+    to `EngineLiveControls` (a new optional fifth argument; `createBrowserLiveControls`' fourth).
+  - `withSession(session)` writes the session through the canonical writer. Unless that equals the
+    booted bytes, it throws a `MisoUsageError` ("not the document this engine booted", naming the
+    first differing byte) before any edit is built. Live controls constructed without the booted
+    document refuse `withSession()` rather than trust it.
+  - **Choice recorded:** byte identity, the preferred form. It needs no parser (ruling 5438024085),
+    S1d proved the builder's output is the engine's canonical output, and it covers every way two
+    sessions can differ, not only the console and the insert chains. The cost: a booted text that
+    is not canonical cannot be matched, and is refused (tested). Boot the builder's `toJson()` or
+    the engine's canonical text.
+- **M2. A live un-bypass the engine would ack and ignore is refused before it is sent.**
+  - `PREPARED_BYPASS_EFFECTS` is `miso.delay` and `miso.multiband-compressor`: the engine's
+    `NEVER_BANKED_EFFECTS` plus its `PREPARED_BYPASS_EFFECTS`.
+  - The layout now carries each track's instances with their authored bypass.
+    `TrackEdits.console()`, `insert()` and `effect()` hand the addressed instance to `EffectEdits`
+    as an `AuthoredInstance` (a new optional fifth constructor argument). The instance is the one
+    at the address, whatever effect the caller claims for it.
+  - `bypass(false)` on a session-bypassed listed effect throws a `MisoUsageError` ("keeps its
+    prepared bypass"). Setting a bypass, and lifting one on any other effect, still go through.
+  - Documented on `EffectEdits.bypass()`, in the README's live-control section and in the handoff.
+    The author-session skill teaches no live bypass, so it has nothing to change.
+  - What remains: with no session (index addressing on a text boot, no `withSession()`) the SDK
+    cannot know, and the lift is sent, acked and ignored, as the README says. That is the only
+    place left where an ack can precede a no-op on this surface.
+- **L1.** `EFFECT_LINK_MODES` holds each effect's `supported_link_modes`, keyed by every catalog
+  effect so a new one does not typecheck without a row. The metadata does not publish it, so it is
+  held like `CONSOLE_ELIGIBLE_EFFECTS`. The builder refuses any other mode, on a slot or an insert,
+  with `effect.link_mode.unsupported`.
+- **L2.**
+  - In the builder, each refusal now has the engine's code:
+    - quality `draft`/`high` is `effect.quality.unsupported`, and any other token is
+      `schema.invalid_enum`;
+    - a non-boolean entry or insert `bypass` is `schema.wrong_type`;
+    - a console or insert automation target naming no instance, or a parameter/channel its
+      instance does not declare, is `reference.missing_entity`.
+  - `enginectl`'s own key check names `schema.unknown_field` for a console slot, the console,
+    an entry and a track spec, including the retired rack keys.
+  - `SKILL.md` now says the builder and `enginectl` refuse every defect in its table that they can
+    express with the same code, and that a `cid` slot is not expressible. It also states the
+    link-mode subsets.
+- **L3.** `addressedStrip` runs track `a`'s inserts in reverse, so `ins-eq` is insert 1 on `a`
+  and 0 on `b`. The address test reads both tracks.
+- **L4.** The handoff names `index.ts`'s five `ENGINE_DYNAMIC_RACK` comparisons (verified at app
+  `0757a84`). It gives the two-walk replacement for `projectedEffects`' hard-coded table, and it
+  notes the renamed qualification fixture. It also lists the new SDK names and refusals (M1, M2,
+  L1, L2).
+- **L5.** `run.mjs` prints which bundle it qualifies. One of: the source (CI's mode); the
+  repository's built `sdk/dist`, with how to get CI's mode; or a selected package's distribution.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| `check-sdk-generated.sh ARTIFACTS`, `check-sdk-deletions.py` (and `--self-test`), `check-sdk-types.sh` | pass |
+| `check-sdk-headless.sh ARTIFACTS` | **329 passed, 0 failed** (was 313; 16 new) |
+| `sdk-package.sh check ARTIFACTS` | pass: `enginectl` **14 of 14** (one new), tarball gate |
+| Browser, `--sdk-root --check-matrix --self-test-mutations`, CI source mode (no `sdk/dist`; the runner prints "sdk bundle: the source ... (CI's mode)"), private PulseAudio null sink | chromium 151.0.7922.34, firefox 153.0, webkit 26.5: each "all qualification gates passed", each row equal to `results.json`, the 7-file set pinned |
+| Artifact job (`build-web-audioworklet.sh`) | unchanged: module `e7f2ad31...cdc80be`, 3,283,569 B, closure `19783d70...fa56`. `git diff 9ae38fed HEAD` touches no `crates`, `tools`, `scripts`, `fixtures`, `hosts/host-web/src` or `hosts/host-web/web` |
+| `cargo fmt --all --check` | pass |
+| `test-ci-path-routing.py`, `check-ci-path-routing.py` | pass |
+| Lint-job steps reading `sdk/**` or the skill (`TMPDIR` unset): `check-`/`test-workspace-policy.sh`, `check-`/`test-bench-policy.sh`, `check-`/`test-script-reachability.py`, `test-npm-publish-modes.py`; docs job `check-dsp-research.sh`, `check-builtins-listening.sh` | pass |
+
+### Mutations (each planted once and reverted)
+
+| Mutation | Result |
+|---|---|
+| `withSession()` skips the booted check | red: the three `withSession` tests |
+| `loadSession()` keeps the first boot's bytes | red: "loadSession() moves the document..." only |
+| `withSession()` trusts when the booted document is absent | red: "...built without the booted document..." only |
+| `bypass()` without the prepared-bypass refusal | red: both M2 tests |
+| The multiband dropped from `PREPARED_BYPASS_EFFECTS` | red: both M2 tests |
+| The soft-clip added to it | red: the engine-agreement sweep only |
+| `effect()` does not carry the addressed instance | red: both M2 tests (the index and `effect()` rows) |
+| The EQ admits `maximum` | red: the link-mode sweep and its twin row |
+| The limiter loses `maximum` | red: the sweep, and every test built on the strip's `maximum` limiter |
+| Each L2 builder code removed, one at a time (quality, entry bypass, insert bypass, three automation targets) | red: exactly that code's twin row(s) |
+| `enginectl`'s key check without `schema.unknown_field` | red: the new `enginectl-cli` test only |
+| `insert()` resolves against the first track's chain (Sol's L3 mutation, green before) | red: the address test, the `withSession` text test and the native live-bypass render twin |
+
+### Test value (one line each)
+
+- **`withSession()` refuses any session but the booted one:** a builder whose console is reordered,
+  a slot renamed or a track's chain changed is accepted, so IDs resolve to other instances.
+- **`loadSession()` moves the document:** `withSession()` still holds builders to the replaced
+  session.
+- **Constructed without the booted document:** `withSession()` silently trusts any builder.
+- **Prepared-bypass refusal:** `bypass(false)` on a session-bypassed delay or multiband is sent,
+  and acked as a no-op, by ID, by index, through `effect()` or through `withSession()`.
+- **Engine-agreement sweep:** the SDK's `PREPARED_BYPASS_EFFECTS` drifts from which effects the
+  engine keeps bypassed on a live lift, or a lift on another effect is refused or does not render
+  the authored-unbypassed session bit for bit.
+- **Link-mode sweep:** `EFFECT_LINK_MODES` drifts from any effect's `supported_link_modes`, as an
+  insert or as a slot.
+- **The ten new twin rows:** each refusal's builder code drifts from the engine's first
+  diagnostic.
+- **`enginectl` key codes:** the request's own key check loses the engine's
+  `schema.unknown_field`.
+- **Two tracks' chains:** an insert ID resolved against another track's chain.
