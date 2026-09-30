@@ -122,7 +122,7 @@ written into `EngineTrackEffect.rack` in `session-document.ts`. The layout JSON'
 
 | Record | Old | New |
 |---|---|---|
-| `MisoCommand.rack` (48-byte record), observation selections, map bindings and rows | `0` simd1, `1` dynamic, `2` simd2 | `1` inserts, `3` console; `0` and `2` refused with `unknownRack` / `RESULT_INVALID_ARGUMENT`; `255` still not applicable |
+| `MisoCommand.rack` (48-byte record), observation selections, map bindings and rows | `0` simd1, `1` dynamic, `2` simd2 | `1` inserts, `3` console; `255` still not applicable. `0` and `2` are refused: the shipped host's `command()`, `observe()` and observation reads reject them locally with a `miso.error.v1` invalid argument before the port, and a raw-export caller gets `unknownRack` / `RESULT_INVALID_ARGUMENT` |
 | `effectIndex` with an effect rack | index within the rack | console: index in `pre_insert`-then-`post_insert` order; inserts: index in the track's chain |
 | Live-response owner `rack` | `0` input filters, `1` simd1, `2` dynamic, `3` simd2 | `0` input filters, `2` inserts, `4` console (either section); `1` and `3` refused |
 | Spectrum targets | `trackPostInputBuiltins` (1), `trackPostMatrix` (2), `output` (3) | `trackPostInput` (1), `trackPostPan` (2), `output` (3) |
