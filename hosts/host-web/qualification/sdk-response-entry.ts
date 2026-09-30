@@ -250,7 +250,7 @@ async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
       quantumFrames: 128,
       sourceRingFrames: SPECTRUM_FRAMES,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(SPECTRUM_FRAMES) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(SPECTRUM_FRAMES) }],
       tracks: ["track"],
     }),
     createContext: () => {
@@ -272,7 +272,7 @@ async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
 
 function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array {
   const document = JSON.parse(raw);
-  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "console-source");
+  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "live-control-source");
   const track = document.tracks?.find((candidate: { id?: string }) => candidate.id === "track");
   if (source === undefined || track === undefined) throw new Error("spectrum fixture is unavailable");
   source.frames = String(frames);
@@ -312,7 +312,7 @@ function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array
 /** Build the same known-signal fixture with two prepared, differently tuned track boundaries. */
 function spectrumCollectionDocument(raw: string, frames: number): Uint8Array {
   const document = JSON.parse(new TextDecoder().decode(spectrumDocument(raw, frames, true)));
-  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "console-source");
+  const source = document.sources?.find((candidate: { id?: string }) => candidate.id === "live-control-source");
   const original = document.tracks?.find((candidate: { id?: string }) => candidate.id === "track");
   const route = document.routes?.[0];
   if (source === undefined || original === undefined || route === undefined) {
@@ -362,7 +362,7 @@ async function createContinuousSpectrumBrowser(
       quantumFrames: 128,
       sourceRingFrames: frames,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(frames) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(frames) }],
       tracks: ["track"],
     }),
     createContext: () => {
@@ -417,7 +417,7 @@ async function createSpectrumCollectionBrowser() {
       quantumFrames: 128,
       sourceRingFrames: frames,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(frames) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(frames) }],
       tracks: ["track-a", "track-b"],
     }),
     createContext: () => {
@@ -441,7 +441,7 @@ async function createSpectrumCollectionBrowser() {
 async function submitSpectrumSource(browser, frames = SPECTRUM_FRAMES, planeForBlock = spectrumPlanes) {
   for (let block = 0; block < frames / 128; block += 1) {
     const acknowledgement = await browser.host.submitSource({
-      sourceId: "console-source",
+      sourceId: "live-control-source",
       generation: 1n,
       startFrame: BigInt(block * 128),
       sampleRateHz: 48_000,
@@ -917,7 +917,7 @@ async function runSpectrumCollectionQualification(): Promise<Record<string, unkn
       let acknowledgement;
       for (let retry = 0; retry < 200; retry += 1) {
         acknowledgement = await browser.host.submitSource({
-          sourceId: "console-source",
+          sourceId: "live-control-source",
           generation: 1n,
           startFrame: BigInt(block * 128),
           sampleRateHz: 48_000,
@@ -1074,7 +1074,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
       quantumFrames: 128,
       sourceRingFrames: OBSERVATION_FRAMES,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
     }),
     createContext: () => {
@@ -1164,12 +1164,12 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
 
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const planes = observationPlanes(block);
-      const headlessSource = headless.submitSource({ sourceId: "console-source", generation: 1n,
+      const headlessSource = headless.submitSource({ sourceId: "live-control-source", generation: 1n,
         startFrame: BigInt(block * 128), planes,
         endOfRegion: block === OBSERVATION_FRAMES / 128 - 1 });
       if (!headlessSource.ok) throw new Error("headless live EQ source refused");
       const acknowledgement = await browser.host.submitSource({
-        sourceId: "console-source",
+        sourceId: "live-control-source",
         generation: 1n,
         startFrame: BigInt(block * 128),
         sampleRateHz: 48_000,
@@ -1344,7 +1344,7 @@ async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<ty
       quantumFrames: 128,
       sourceRingFrames: OBSERVATION_FRAMES,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
     }),
     createContext: () => {
@@ -1393,7 +1393,7 @@ async function runResidentObservationQualification(): Promise<Record<string, unk
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const planes = observationPlanes(block);
       const acknowledgement = await browser.host.submitSource({
-        sourceId: "console-source",
+        sourceId: "live-control-source",
         generation: 1n,
         startFrame: BigInt(block * 128),
         sampleRateHz: 48_000,
@@ -1516,7 +1516,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       quantumFrames: 128,
       sourceRingFrames: OBSERVATION_FRAMES,
       backend: "simd128" as const,
-      sources: [{ id: "console-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
     }),
     createContext: () => {
@@ -1546,7 +1546,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
     for (let block = 0; block < OBSERVATION_FRAMES / 128; block += 1) {
       const planes = observationPlanes(block);
       const acknowledgement = await browser.host.submitSource({
-        sourceId: "console-source",
+        sourceId: "live-control-source",
         generation: 1n,
         startFrame: BigInt(block * 128),
         sampleRateHz: 48_000,

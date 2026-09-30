@@ -2472,8 +2472,8 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       true,
       "qualification boot contract: typed unsupported catch did not receive its typed refusal",
     );
-    await expectStop("runConsoleQualification", () => hooks.runConsoleQualification(
-      forwardingCreateHost("runConsoleQualification"), documentBytes,
+    await expectStop("runLiveControlQualification", () => hooks.runLiveControlQualification(
+      forwardingCreateHost("runLiveControlQualification"), documentBytes,
     ));
     await expectStop("runObservationRun", () => hooks.runObservationRun(
       forwardingCreateHost("runObservationRun"), documentBytes, true,
@@ -2485,7 +2485,7 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
     assert.deepEqual(
       observed.map(({ label }) => label),
       [
-        "renderCorpusSegment", "typedUnsupportedAttestation", "runConsoleQualification",
+        "renderCorpusSegment", "typedUnsupportedAttestation", "runLiveControlQualification",
         "runObservationRun", "runStallQualification",
       ],
       "qualification boot contract: caller witness set changed",
@@ -2500,7 +2500,8 @@ async function testQualificationBoot({ registered, makeFake, setNextFake, setPro
       && options.options.liveControlObservationTaps === 0n
       && options.options.liveControlMasterTrackPlusOne === 0n),
     "qualification boot contract: plain option variant changed");
-    const liveControlOptions = observed.find(({ label }) => label === "runConsoleQualification").options.options;
+    const liveControlOptions = observed
+      .find(({ label }) => label === "runLiveControlQualification").options.options;
     assert.equal(liveControlOptions.liveControlCommandQueueRecords, 64n);
     assert.equal(liveControlOptions.liveControlMeterBlocks, 2n);
     assert.equal(liveControlOptions.liveControlObservationTaps, 0n);

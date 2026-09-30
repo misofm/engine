@@ -31,7 +31,7 @@
 | `parameter_metadata -- --check` (#137 D4) | hand-edit one `liveUpdatable` in the shipped document | byte equality against a freshly generated document fails |
 | `tools/parameter-metadata/tests/round_trip.rs` (#137 E7) | delete the `effect_index >= rack_effects[rack]` leg in `CommandRecord::into_matrix` | an out-of-range effect index is refused as `UNSUPPORTED_KIND`, so the test stops distinguishing "resolved" from "did not resolve" and its negative case fails |
 | `qualification/run.mjs --self-test-mutations` control-path gates (#137 E8) | `exactRetargetedOutput = false`, `masterPeak = 0`, or `commandAdmitted = 0` | `<browser>: control-path` fails on the applied change, on the meter frame, and on the admission |
-| `qualification/run.mjs --self-test-mutations` stall console load (#137 E6) | `stall.consoleMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
+| `qualification/run.mjs --self-test-mutations` `stall-live-controls-load` (#137 E6) | `stall.liveControlMeterFrames = 0` | `<browser>: main-thread-stall` fails because the stall no longer carried a live command and meter load |
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 
@@ -238,14 +238,14 @@ failure was observed, and the mutation was reverted in the same session.
 
 | Target | Mutation | Observed failure |
 |---|---|---|
-| `session-identities.mjs` console row | flip one hex digit of `console-session.json`'s declared `content` | `session-identity: console-session.json: declared source row is not the fed PCM's canonical identity` |
+| `session-identities.mjs` live-control row | flip one hex digit of `live-control-session.json`'s declared `content` | `session-identity: live-control-session.json: declared source row is not the fed PCM's canonical identity` |
 | `session-identities.mjs` stall row | flip one hex digit of `stall-session.json`'s declared `content` | same refusal, naming `stall-session.json` |
 | `session-identities.mjs` observation row | flip one hex digit of `observation-session.json`'s declared `content` | same refusal, naming `observation-session.json` |
-| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `console-session.json` | refused; the check states the derived identity the document must carry |
-| cross-document reuse | declare the stall document's identity on the console document | refused; one digest cannot stand for two different fed regions |
+| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `live-control-session.json` | refused; the check states the derived identity the document must carry |
+| cross-document reuse | declare the stall document's identity on the live-control document | refused; one digest cannot stand for two different fed regions |
 | shape drift | `"frames": "5120"` -> `"5121"` on `stall-session.json` | refused; shape and identity are one pinned row, because the preimage length is `frames * channels * 4` |
 | generator drift | `OBSERVATION_LEVEL` `0.5` -> `0.25` in `qualification.js` | the derived identity moves to `680aca77…` and the unchanged document is refused — a pinned hex string would have stayed green |
-| generator drift | flip the sign of `sourcePlanes`'s right plane | the console identity moves to `7499a91c…` and the unchanged document is refused |
+| generator drift | flip the sign of `sourcePlanes`'s right plane | the live-control identity moves to `7499a91c…` and the unchanged document is refused |
 | stale row beside a truthful one | add a second `"content": "sha256:…"` source row to `stall-session.json` | `expected exactly one source content identity, found 2` |
 | the check's own comparison | the flipped-digit self-proof inside `checkSessionIdentities` | asserts a one-digit-off identity never matches, so the comparison cannot be loosened into a vacuous pass |
 
