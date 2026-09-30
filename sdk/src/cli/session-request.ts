@@ -1,4 +1,5 @@
 import type { EffectId } from "../generated/catalog.ts";
+import { MisoUsageError } from "../core/errors.ts";
 import { effect, session } from "../core/session.ts";
 import type { SessionBuilder } from "../core/session.ts";
 import type {
@@ -50,15 +51,31 @@ function record(value: unknown, path: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** The engine's code for a key its schema does not have, where the request mirrors one of its objects. */
+const UNKNOWN_FIELD = "schema.unknown_field";
+
+/**
+ * Refuse a request key outside `allowed`, and a missing required one.
+ *
+ * `unknownFieldCode` is given where the request object mirrors a session object the engine refuses
+ * an unknown member of (a console slot, a console entry, a track): the refusal then carries the
+ * engine's `schema.unknown_field`, as the builder's does, so `enginectl` and the builder name one
+ * code for one defect.
+ */
 function keys(
   value: Record<string, unknown>,
   allowed: readonly string[],
   required: readonly string[],
   path: string,
+  unknownFieldCode?: typeof UNKNOWN_FIELD,
 ): void {
   const admitted = new Set(allowed);
   for (const key of Object.keys(value)) {
-    if (!admitted.has(key)) fail(`${path}.${key}`, "unknown key");
+    if (admitted.has(key)) continue;
+    if (unknownFieldCode !== undefined) {
+      throw new MisoUsageError(`${path}.${key}: unknown key`, unknownFieldCode);
+    }
+    fail(`${path}.${key}`, "unknown key");
   }
   for (const key of required) {
     if (!Object.hasOwn(value, key)) fail(`${path}.${key}`, "required key is missing");
@@ -216,7 +233,7 @@ const RETIRED_TRACK_KEYS = ["simd1", "dynamic", "simd2"] as const;
 
 function consoleSlotRequest(value: unknown, path: string): ConsoleSlotSpec {
   const raw = record(value, path);
-  keys(raw, ["slot", "effectId", "quality", "linkMode"], ["slot", "effectId"], path);
+  keys(raw, ["slot", "effectId", "quality", "linkMode"], ["slot", "effectId"], path, UNKNOWN_FIELD);
   return {
     slot: string(raw.slot, `${path}.slot`),
     effectId: string(raw.effectId, `${path}.effectId`) as ConsoleSlotSpec["effectId"],
@@ -227,7 +244,7 @@ function consoleSlotRequest(value: unknown, path: string): ConsoleSlotSpec {
 
 function consoleRequest(value: unknown): ConsoleSpec {
   const raw = record(value, "$.console");
-  keys(raw, ["preInsert", "postInsert"], [], "$.console");
+  keys(raw, ["preInsert", "postInsert"], [], "$.console", UNKNOWN_FIELD);
   const section = (name: "preInsert" | "postInsert") => raw[name] === undefined
     ? []
     : array(raw[name], `$.console.${name}`).map((slot, index) =>
@@ -237,7 +254,7 @@ function consoleRequest(value: unknown): ConsoleSpec {
 
 function consoleEntryRequest(value: unknown, path: string): ConsoleEntrySpec {
   const raw = record(value, path);
-  keys(raw, ["slot", "bypass", "parameters", "channel"], ["slot"], path);
+  keys(raw, ["slot", "bypass", "parameters", "channel"], ["slot"], path, UNKNOWN_FIELD);
   // A null-prototype record for the same reason as `effectDecl`'s: `__proto__` is a member name.
   const parameters: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   if (raw.parameters !== undefined) {
@@ -260,15 +277,21 @@ function track(value: unknown, path: string): { id: string; spec: TrackSpec } {
   const raw = record(wrapper.spec, `${path}.spec`);
   for (const retired of RETIRED_TRACK_KEYS) {
     if (Object.hasOwn(raw, retired)) {
-      fail(
-        `${path}.spec.${retired}`,
-        "the per-track simd1, dynamic and simd2 racks are retired; declare session console slots "
-          + "in $.console, each track's knobs for them in spec.console, and per-track effects in "
-          + "spec.inserts",
+      throw new MisoUsageError(
+        `${path}.spec.${retired}: the per-track simd1, dynamic and simd2 racks are retired; declare `
+          + "session console slots in $.console, each track's knobs for them in spec.console, and "
+          + "per-track effects in spec.inserts",
+        UNKNOWN_FIELD,
       );
     }
   }
-  keys(raw, ["source", "builtins", "console", "inserts", "fader", "pan"], ["source"], `${path}.spec`);
+  keys(
+    raw,
+    ["source", "builtins", "console", "inserts", "fader", "pan"],
+    ["source"],
+    `${path}.spec`,
+    UNKNOWN_FIELD,
+  );
 
   let source: TrackSpec["source"];
   if (typeof raw.source === "string") source = raw.source;

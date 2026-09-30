@@ -489,6 +489,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const document = documentBytes(options.document);
+  // The document as booted, kept apart from the one the scratch boot and the host are handed, for
+  // `withSession()` to hold a builder to.
+  const bootedDocument = document.slice();
   const policy = {
     ...options.policy,
     ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
@@ -631,7 +634,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         ))
         : createBrowserLiveControls(host, (edits, managed) =>
           observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-        options.document instanceof SessionBuilder ? options.document : undefined);
+        options.document instanceof SessionBuilder ? options.document : undefined,
+        bootedDocument);
       return semanticLiveControls;
     };
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {

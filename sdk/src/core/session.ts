@@ -162,6 +162,29 @@ const CONSOLE_SLOT_KEYS: ReadonlySet<string> = new Set(["slot", "effectId", "qua
 const CONSOLE_ENTRY_KEYS: ReadonlySet<string> = new Set(["slot", "bypass", "parameters", "channel"]);
 const LINK_MODES: readonly string[] = ["dual_mono", "maximum", "average"];
 
+type LinkMode = NonNullable<EffectOptions["linkMode"]>;
+
+/**
+ * The link modes each native effect supports, wherever it sits (a console slot or an insert).
+ *
+ * This is each engine effect descriptor's `supported_link_modes`. The parameter metadata does not
+ * publish it, so the SDK holds a copy, as it holds `CONSOLE_ELIGIBLE_EFFECTS`, and
+ * `console-evals.mjs` holds the copy to the engine: it boots every catalog effect at every link
+ * mode and requires the engine to accept exactly these and refuse the rest with
+ * `effect.link_mode.unsupported`. Keyed by every catalog effect, so a new one does not typecheck
+ * until it has a row.
+ */
+export const EFFECT_LINK_MODES: Readonly<Record<EffectId, readonly LinkMode[]>> = Object.freeze({
+  "miso.compressor": Object.freeze(["dual_mono", "maximum", "average"] as const),
+  "miso.delay": Object.freeze(["dual_mono"] as const),
+  "miso.gate-expander": Object.freeze(["dual_mono", "maximum", "average"] as const),
+  "miso.multiband-compressor": Object.freeze(["dual_mono", "maximum", "average"] as const),
+  "miso.parametric-eq": Object.freeze(["dual_mono"] as const),
+  "miso.soft-clip": Object.freeze(["dual_mono"] as const),
+  "miso.transient-shaper": Object.freeze(["dual_mono", "maximum", "average"] as const),
+  "miso.true-peak-limiter": Object.freeze(["dual_mono", "maximum"] as const),
+});
+
 /** The engine's diagnostic codes for the refusals the builder makes in front of it. */
 const CODE = Object.freeze({
   unknownField: "schema.unknown_field",
@@ -172,6 +195,9 @@ const CODE = Object.freeze({
   entryOrder: "console.entry_order",
   entryMissing: "console.entry_missing",
   ineligibleEffect: "console.slot.ineligible_effect",
+  wrongType: "schema.wrong_type",
+  qualityUnsupported: "effect.quality.unsupported",
+  linkModeUnsupported: "effect.link_mode.unsupported",
 } as const);
 
 function fail(path: string, message: string, code?: string): never {
@@ -226,9 +252,42 @@ function integer(value: unknown, path: string, minimum: number, maximum: number)
   return value;
 }
 
-function bool(value: unknown, path: string): boolean {
-  if (typeof value !== "boolean") fail(path, "expected a boolean");
+function bool(value: unknown, path: string, code?: string): boolean {
+  if (typeof value !== "boolean") fail(path, "expected a boolean", code);
   return value;
+}
+
+/**
+ * An effect's quality, wherever it sits: the engine's grammar knows `draft`, `normal` and `high`
+ * (anything else is `schema.invalid_enum`), and every launch native descriptor publishes only
+ * `normal` (`effect.quality.unsupported` at prepare-effects).
+ */
+function quality(value: unknown, path: string): "normal" {
+  if (value === undefined || value === "normal") return "normal";
+  if (value === "draft" || value === "high") {
+    fail(path, "launch native descriptors publish only the 'normal' quality row", CODE.qualityUnsupported);
+  }
+  fail(path, "expected draft, normal or high, and launch effects publish only 'normal'", CODE.invalidEnum);
+}
+
+/**
+ * An effect's link mode, wherever it sits: one of the three tokens (`schema.invalid_enum`), and
+ * one the effect supports (`EFFECT_LINK_MODES`; `effect.link_mode.unsupported` at prepare-effects).
+ */
+function linkMode(effectId: EffectId, value: unknown, path: string): LinkMode {
+  const mode = value ?? "dual_mono";
+  if (typeof mode !== "string" || !LINK_MODES.includes(mode)) {
+    fail(path, "expected dual_mono, maximum or average", CODE.invalidEnum);
+  }
+  const supported = EFFECT_LINK_MODES[effectId];
+  if (!supported.includes(mode as LinkMode)) {
+    fail(
+      path,
+      `${effectId} supports only the link modes ${nameList(supported)}, not '${mode}'`,
+      CODE.linkModeUnsupported,
+    );
+  }
+  return mode as LinkMode;
 }
 
 /**
@@ -452,14 +511,9 @@ export function effect<E extends EffectId>(
   const descriptor = effectDescriptor(effectId, "effect().effectId");
   const path = `effect("${effectId}")`;
   if (options.slotId !== undefined) stableId(options.slotId, `${path}.slotId`);
-  if (options.bypass !== undefined) bool(options.bypass, `${path}.bypass`);
-  if (options.quality !== undefined && options.quality !== "normal") {
-    fail(`${path}.quality`, "launch native descriptors publish only the 'normal' quality row");
-  }
-  const linkMode = options.linkMode ?? "dual_mono";
-  if (!LINK_MODES.includes(linkMode)) {
-    fail(`${path}.linkMode`, "expected dual_mono, maximum or average", CODE.invalidEnum);
-  }
+  if (options.bypass !== undefined) bool(options.bypass, `${path}.bypass`, CODE.wrongType);
+  quality(options.quality, `${path}.quality`);
+  const mode = linkMode(effectId, options.linkMode, `${path}.linkMode`);
   const channel = options.channel ?? "both";
   if (!["left", "right", "both"].includes(channel)) {
     fail(`${path}.channel`, "expected left, right or both");
@@ -486,7 +540,7 @@ export function effect<E extends EffectId>(
     options: {
       bypass: options.bypass ?? false,
       quality: "normal" as const,
-      linkMode,
+      linkMode: mode,
       channel,
       ...(options.sidechain === undefined ? {} : { sidechain: options.sidechain }),
     },
@@ -1083,19 +1137,14 @@ function consoleSlot(
       CODE.ineligibleEffect,
     );
   }
-  if (raw.quality !== undefined && raw.quality !== "normal") {
-    fail(`${path}.quality`, "launch native descriptors publish only the 'normal' quality row");
-  }
-  const linkMode = raw.linkMode ?? "dual_mono";
-  if (!LINK_MODES.includes(linkMode)) {
-    fail(`${path}.linkMode`, "expected dual_mono, maximum or average", CODE.invalidEnum);
-  }
+  quality(raw.quality, `${path}.quality`);
+  const mode = linkMode(effectId as ConsoleEffectId, raw.linkMode, `${path}.linkMode`);
   return freeze({
     slot,
     section,
     effectId: effectId as ConsoleEffectId,
     quality: "normal" as const,
-    linkMode,
+    linkMode: mode,
   });
 }
 
@@ -1146,7 +1195,7 @@ function normalizeConsoleEntries(
         CODE.entryOrder,
       );
     }
-    const bypass = entry.bypass === undefined ? false : bool(entry.bypass, `${where}.bypass`);
+    const bypass = entry.bypass === undefined ? false : bool(entry.bypass, `${where}.bypass`, CODE.wrongType);
     const channel = entry.channel ?? "both";
     if (!["left", "right", "both"].includes(channel)) {
       fail(`${where}.channel`, "expected left, right or both", CODE.invalidEnum);
@@ -1247,7 +1296,7 @@ function resolveAutomationTarget(
     const slot = slots.find((candidate) => candidate.slot === slotId);
     const entry = (track.spec.console ?? []).find((candidate) => candidate.slot === slotId);
     if (slot === undefined || entry === undefined) {
-      fail(`${path}.slotId`, `'${slotId}' is not a console slot of this session`);
+      fail(`${path}.slotId`, `'${slotId}' is not a console slot of this session`, CODE.missingEntity);
     }
     effectId = slot.effectId;
     declaredValue = (entry.parameters as Readonly<Record<string, unknown>> | undefined)
@@ -1257,7 +1306,7 @@ function resolveAutomationTarget(
     const declared = track.spec.inserts ?? [];
     const decl = declared.find((candidate, position) => insertId(candidate, position) === slotId);
     if (decl === undefined) {
-      fail(`${path}.slotId`, `'${slotId}' is not one of ${track.id}'s inserts`);
+      fail(`${path}.slotId`, `'${slotId}' is not one of ${track.id}'s inserts`, CODE.missingEntity);
     }
     effectId = decl.effectId;
     declaredValue = decl.parameters[target.parameter as keyof typeof decl.parameters];
@@ -1274,6 +1323,7 @@ function resolveAutomationTarget(
     fail(
       `${path}.parameter`,
       `${row.name} is not declared on '${slotId}' for channel '${target.channel}'`,
+      CODE.missingEntity,
     );
   }
   return { parameterId: row.id, unit: row.unitName, effectId: slotId, row };

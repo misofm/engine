@@ -81,10 +81,12 @@ export function vocalMix() {
 ```
 
 The builder refuses what the engine refuses -- a missing, repeated or misordered console entry, an
-unknown slot, an ineligible effect, a sidechain or bypass on a slot -- and `MisoUsageError`'s
-`diagnosticCode` is the engine's own code for it (`console.entry_order`,
-`console.slot.ineligible_effect`, ...). The seven track taps are `input`, `post_input`,
-`insert_send`, `insert_return`, `pre_fader`, `post_fader` and `post_pan`.
+unknown slot, an ineligible effect, a sidechain or bypass on a slot, a link mode the effect does
+not support (`EFFECT_LINK_MODES`: the EQ, soft-clip and delay are `dual_mono` only, and the limiter
+has no `average`) -- and `MisoUsageError`'s `diagnosticCode` is the engine's own code for it
+(`console.entry_order`, `console.slot.ineligible_effect`, `effect.link_mode.unsupported`, ...).
+The seven track taps are `input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`,
+`post_fader` and `post_pan`.
 
 ## Render offline
 
@@ -208,7 +210,18 @@ effectId)` one of the track's inserts; `effect("console" | "inserts", index, eff
 live address directly (a console slot's index in `preInsert`-then-`postInsert` order). IDs resolve
 against the session the engine booted when it was booted from a `session(...)` builder; for a
 document booted from text, call `controls.withSession(builder)` first, because the SDK never parses
-a document.
+a document. `withSession()` holds the builder to the booted document byte for byte: its `toJson()`
+must be exactly the booted text, so any other session (a reordered console, a renamed slot, another
+insert chain) throws a `MisoUsageError` rather than resolve IDs to addresses that name other
+instances. Boot the builder's `toJson()`, or the engine's canonical text of it.
+
+A live `bypass(true)` or `bypass(false)` is a latency-preserving shunt, and it can lift a bypass the
+session authored, except on the delay and the multiband compressor (`PREPARED_BYPASS_EFFECTS`):
+they keep a session bypass as a prepared one, and the engine acknowledges a live un-bypass of either
+and renders nothing different. So when the SDK has the session, `bypass(false)` on a
+session-bypassed delay or multiband throws a `MisoUsageError` before anything is sent; author it
+unbypassed and reload the session to hear it. Addressed by index with no session, the SDK cannot
+know, and that lift is acknowledged and changes nothing. Setting a bypass on either works.
 
 One `submit()` is one atomic admission: all edits are accepted or none are. A successful report's
 `appliedAtSample` is the absolute engine sample at which the edits take effect, at the start of

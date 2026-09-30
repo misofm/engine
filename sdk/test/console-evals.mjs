@@ -12,6 +12,11 @@
  *    engine-written console fixtures byte for byte.
  * 4. Live controls address a console slot by its slot ID and an insert by its ID or index, and a
  *    live bypass on each lands on exactly the instance the same bypass authored in the session does.
+ *    They resolve IDs only against the session the engine booted (`withSession()` holds a builder
+ *    to the booted bytes), and they refuse a live lift the engine would acknowledge and ignore (a
+ *    session-bypassed delay or multiband keeps its prepared bypass).
+ * 5. The SDK's copies of two engine tables the metadata does not publish -- each effect's link
+ *    modes, and the effects that keep a prepared bypass -- are the engine's, effect by effect.
  *
  * Each test names the red mutation that turns it red.
  */
@@ -27,7 +32,8 @@ import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
-import { CONSOLE_ELIGIBLE_EFFECTS, effect, session } from "../src/core/session.ts";
+import { EngineLiveControls, PREPARED_BYPASS_EFFECTS } from "../src/core/live-controls.ts";
+import { CONSOLE_ELIGIBLE_EFFECTS, EFFECT_LINK_MODES, effect, session } from "../src/core/session.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes, ramp } from "./support.mjs";
 
@@ -101,6 +107,23 @@ async function engineCode(model) {
   const outcome = await validate(JSON.stringify(model, null, 1), { asset });
   assert.equal(outcome.ok, false, "the engine must refuse the hand-written defect");
   return outcome.diagnostics[0]?.code;
+}
+
+/** A hand-written insert record, as the engine's schema spells it, with `fields` overriding. */
+function nativeInsert(effectId, fields = {}) {
+  return {
+    id: "x", identity: { kind: "native", effect_id: effectId }, quality: "normal", bypass: false,
+    link_mode: "dual_mono", params: [], sidechain: { kind: "none" }, ...fields,
+  };
+}
+
+/** The valid strip with its automation retargeted: `target` overrides the ride on the console EQ. */
+function ride(target) {
+  return stripBase().track("t", { source: "stem", console: stripEntries() }).automation({
+    id: "ride",
+    target: { trackId: "t", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both", ...target },
+    segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue: 0, endValue: 0 }],
+  });
 }
 
 function builderCode(build) {
@@ -260,6 +283,71 @@ describe("issue #1097 -- every builder refusal is the engine's, with the engine'
       edit: (model) => { model.routes[0].source.tap = "post_matrix"; },
     },
     {
+      name: "a slot quality no launch effect publishes",
+      code: "effect.quality.unsupported",
+      build: () => stripBase({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq", quality: "draft" }] }),
+      edit: (model) => { model.console.pre_insert[0].quality = "draft"; },
+    },
+    {
+      name: "a slot quality outside the grammar",
+      code: "schema.invalid_enum",
+      build: () => stripBase({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq", quality: "ultra" }] }),
+      edit: (model) => { model.console.pre_insert[0].quality = "ultra"; },
+    },
+    {
+      name: "an insert quality no launch effect publishes",
+      code: "effect.quality.unsupported",
+      build: () => effect("miso.delay", {}, { quality: "high" }),
+      edit: (model) => { model.tracks[0].inserts.effects = [nativeInsert("miso.delay", { quality: "high" })]; },
+    },
+    {
+      name: "a link mode the effect does not support, on a slot (the EQ, maximum)",
+      code: "effect.link_mode.unsupported",
+      build: () => stripBase({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq", linkMode: "maximum" }] }),
+      edit: (model) => { model.console.pre_insert[0].link_mode = "maximum"; },
+    },
+    {
+      name: "a link mode the effect does not support, on an insert (the limiter, average)",
+      code: "effect.link_mode.unsupported",
+      build: () => effect("miso.true-peak-limiter", {}, { linkMode: "average" }),
+      edit: (model) => {
+        model.tracks[0].inserts.effects = [nativeInsert("miso.true-peak-limiter", { link_mode: "average" })];
+      },
+    },
+    {
+      name: "a console entry bypass that is not a boolean",
+      code: "schema.wrong_type",
+      build: () => stripBase().track("t", {
+        source: "stem",
+        console: [{ slot: "eq", bypass: 1 }, { slot: "comp" }, { slot: "limiter" }],
+      }),
+      edit: (model) => { model.tracks[0].console[0].bypass = 1; },
+    },
+    {
+      name: "an insert bypass that is not a boolean",
+      code: "schema.wrong_type",
+      build: () => effect("miso.delay", {}, { bypass: "yes" }),
+      edit: (model) => { model.tracks[0].inserts.effects = [nativeInsert("miso.delay", { bypass: "yes" })]; },
+    },
+    {
+      name: "a console automation target naming no slot",
+      code: "reference.missing_entity",
+      build: () => ride({ rack: "console", slotId: "ghost", parameter: "band-1-gain" }),
+      edit: (model) => { model.automation[0].target.effect_id = "ghost"; },
+    },
+    {
+      name: "an insert automation target naming no insert",
+      code: "reference.missing_entity",
+      build: () => ride({ rack: "inserts", slotId: "ghost", parameter: "band-1-gain" }),
+      edit: (model) => { model.automation[0].target.rack = "inserts"; model.automation[0].target.effect_id = "ghost"; },
+    },
+    {
+      name: "an automation target on a parameter its instance does not declare",
+      code: "reference.missing_entity",
+      build: () => ride({ rack: "console", slotId: "eq", parameter: "band-1-frequency" }),
+      edit: (model) => { model.automation[0].target.parameter_id = 3; },
+    },
+    {
       name: "a retired automation rack",
       code: "schema.invalid_enum",
       build: () => stripBase().track("t", { source: "stem", console: stripEntries() }).automation({
@@ -334,6 +422,47 @@ describe("issue #1097 -- the SDK's eligibility list is the engine's", () => {
       const outcome = await validate(JSON.stringify(model), { asset });
       assert.equal(outcome.ok, eligible, `${id}: ${JSON.stringify(outcome.diagnostics)}`);
       if (!eligible) assert.equal(outcome.diagnostics[0]?.code, "console.slot.ineligible_effect", id);
+    }
+  });
+});
+
+describe("issue #1097 -- the SDK's link-mode table is the engine's", () => {
+  test("every catalog effect takes exactly the link modes the engine admits, as an insert and as a slot", async () => {
+    // The metadata does not publish `supported_link_modes`, so the SDK holds EFFECT_LINK_MODES;
+    // this is what keeps it the engine's (#1097 verdict L1). Red mutation: admit `maximum` for the
+    // EQ, or drop `maximum` from the limiter -> the builder and the engine disagree on that cell.
+    assert.deepEqual(Object.keys(EFFECT_LINK_MODES).sort(), CATALOG.effects.map((row) => row.id).sort());
+    for (const { id } of CATALOG.effects) {
+      for (const mode of ["dual_mono", "maximum", "average"]) {
+        const supported = EFFECT_LINK_MODES[id].includes(mode);
+        const where = `${id} at ${mode}`;
+        const asInsert = () => effect(id, {}, { linkMode: mode });
+        if (supported) assert.doesNotThrow(asInsert, where);
+        else assert.equal(builderCode(asInsert), "effect.link_mode.unsupported", where);
+
+        const insertModel = strippedModel();
+        insertModel.tracks[0].inserts.effects = [nativeInsert(id, { link_mode: mode })];
+        const inserted = await validate(JSON.stringify(insertModel), { asset });
+        assert.equal(inserted.ok, supported, `${where} as an insert: ${JSON.stringify(inserted.diagnostics)}`);
+        if (!supported) assert.equal(inserted.diagnostics[0]?.code, "effect.link_mode.unsupported", where);
+
+        if (!CONSOLE_ELIGIBLE_EFFECTS.includes(id)) continue;
+        const asSlot = () => session({ id: "link", sampleRateHz: 48_000 })
+          .console({ preInsert: [{ slot: "x", effectId: id, linkMode: mode }] });
+        if (supported) assert.doesNotThrow(asSlot, where);
+        else assert.equal(builderCode(asSlot), "effect.link_mode.unsupported", where);
+
+        const slotModel = strippedModel();
+        slotModel.console.pre_insert = [{
+          slot: "x", identity: { kind: "native", effect_id: id }, quality: "normal", link_mode: mode,
+        }];
+        slotModel.console.post_insert = [];
+        slotModel.tracks[0].console = [{ slot: "x", bypass: false, params: [] }];
+        slotModel.automation = [];
+        const slotted = await validate(JSON.stringify(slotModel), { asset });
+        assert.equal(slotted.ok, supported, `${where} as a slot: ${JSON.stringify(slotted.diagnostics)}`);
+        if (!supported) assert.equal(slotted.diagnostics[0]?.code, "effect.link_mode.unsupported", where);
+      }
     }
   });
 });
@@ -598,35 +727,46 @@ async function renderBlocks(document, edit, blocks = 6) {
 
 /**
  * Two tracks, each with a `pre_insert` EQ, an insert EQ and a `post_insert` EQ, all audibly
- * different, so a bypass on any one instance of track `b` is heard and told apart.
+ * different, so a bypass on any one instance of track `b` is heard and told apart. The two tracks'
+ * insert chains differ in order, so an insert ID resolved against the wrong track's chain lands on
+ * another index.
+ *
+ * `variant` makes a session that is *not* this one, for `withSession()` to refuse: its console
+ * reordered, a slot renamed, or track `b`'s insert chain changed.
  */
-function addressedStrip(bypassed = undefined) {
+function addressedStrip(bypassed = undefined, variant = undefined) {
   const eq = (gain, frequency) => ({ "band-1-enabled": true, "band-1-gain": gain, "band-1-frequency": frequency });
+  const preEq = variant === "renamed slot" ? "pre-eq-2" : "pre-eq";
+  const preInsert = [
+    { slot: preEq, effectId: "miso.parametric-eq" },
+    { slot: "pre-comp", effectId: "miso.compressor" },
+  ];
+  if (variant === "reordered console") preInsert.reverse();
   let built = session({ id: "console.live", sampleRateHz: 48_000, revision: 1 })
     .source("sa", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
     .source("sb", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
-    .console({
-      preInsert: [
-        { slot: "pre-eq", effectId: "miso.parametric-eq" },
-        { slot: "pre-comp", effectId: "miso.compressor" },
-      ],
-      postInsert: [{ slot: "post-eq", effectId: "miso.parametric-eq" }],
-    })
+    .console({ preInsert, postInsert: [{ slot: "post-eq", effectId: "miso.parametric-eq" }] })
     .output("out");
   for (const id of ["a", "b"]) {
     const off = (name) => id === "b" && bypassed === name;
+    const entries = {
+      [preEq]: { slot: preEq, bypass: off("pre-eq"), parameters: eq(9, 400) },
+      "pre-comp": { slot: "pre-comp", bypass: off("pre-comp"), parameters: { threshold: -30, ratio: 4 } },
+    };
+    const inserts = [
+      effect("miso.parametric-eq", eq(6, 1_200), { slotId: "ins-eq", bypass: off("ins-eq") }),
+      effect("miso.delay", { "delay time": 3 }, { slotId: "echo" }),
+    ];
+    // Track `a` runs its chain the other way round, so `ins-eq` is insert 1 on `a` and 0 on `b`.
+    if (id === "a" || (id === "b" && variant === "another insert chain")) inserts.reverse();
     built = built
       .track(id, {
         source: `s${id}`,
         console: [
-          { slot: "pre-eq", bypass: off("pre-eq"), parameters: eq(9, 400) },
-          { slot: "pre-comp", bypass: off("pre-comp"), parameters: { threshold: -30, ratio: 4 } },
+          ...preInsert.map((slot) => entries[slot.slot]),
           { slot: "post-eq", bypass: off("post-eq"), parameters: eq(-9, 3_000) },
         ],
-        inserts: [
-          effect("miso.parametric-eq", eq(6, 1_200), { slotId: "ins-eq", bypass: off("ins-eq") }),
-          effect("miso.delay", { "delay time": 3 }, { slotId: "echo" }),
-        ],
+        inserts,
       })
       .route({
         id: `${id}-out`,
@@ -636,6 +776,10 @@ function addressedStrip(bypassed = undefined) {
   }
   return built;
 }
+
+/** The refusal `withSession()` makes for a session that did not write the booted document. */
+const NOT_BOOTED = (error) => error instanceof MisoUsageError
+  && /not the document this engine booted/.test(error.message);
 
 describe("issue #1097 -- live controls address console slots by slot ID and inserts by ID or index", () => {
   test("stable IDs resolve to S1c's live addresses and rack codes", async () => {
@@ -656,6 +800,12 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
       assert.deepEqual(address(track.effect("inserts", 0, "miso.parametric-eq").bypass(true)), [1, 1, 0]);
       assert.equal(RACK.console, 3);
       assert.equal(RACK.inserts, 1);
+      // Each track's inserts resolve against its own chain (#1097 verdict L3). Red mutation:
+      // resolve insert() against the first track's chain -> `b`'s `ins-eq` is written at index 1.
+      const a = engine.liveControls().edit.track("a");
+      assert.deepEqual(address(a.insert("ins-eq", "miso.parametric-eq").bypass(true)), [0, RACK.inserts, 1]);
+      assert.deepEqual(address(a.insert("echo", "miso.delay").bypass(true)), [0, RACK.inserts, 0]);
+      assert.throws(() => a.insert(0, "miso.parametric-eq"), /insert 'echo' is miso\.delay, not miso\.parametric-eq/);
 
       assert.throws(() => track.console("ghost", "miso.parametric-eq"), /no console slot 'ghost'; its slots are pre-eq, pre-comp, post-eq/);
       assert.throws(() => track.console("pre-eq", "miso.compressor"), /'pre-eq' is miso\.parametric-eq, not miso\.compressor/);
@@ -680,13 +830,70 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
       assert.throws(() => controls.edit.track("b").insert("ins-eq", "miso.parametric-eq"), /withSession/);
       const edit = controls.withSession(builder).edit.track("b").console("post-eq", "miso.parametric-eq").bypass(true);
       assert.deepEqual([edit.rack, edit.effectIndex], [RACK.console, 2]);
+      // A different builder object that writes the same document is the same session.
+      const again = controls.withSession(addressedStrip()).edit.track("b").insert("ins-eq", "miso.parametric-eq");
+      assert.deepEqual([again.bypass(true).rack, again.bypass(true).effectIndex], [RACK.inserts, 0]);
       const other = session({ id: "other", sampleRateHz: 48_000 })
         .source("s", { channels: 1, bitDepth: 16, frames: 480, content: CONTENT })
         .track("z", { source: "s" });
-      assert.throws(() => controls.withSession(other), /the engine compiled a, b/);
+      assert.throws(() => controls.withSession(other), NOT_BOOTED);
     } finally {
       engine.dispose();
     }
+  });
+
+  test("withSession() refuses any session but the one the engine booted, before an edit is built", async () => {
+    // #1097 verdict M1. Each variant keeps the booted tracks, so a track-set check passes all
+    // three, and each would resolve an ID to an address that names another instance: with the
+    // console reordered, `pre-comp` resolves to slot 0 (the EQ); with the slot renamed, nothing
+    // resolves `pre-eq`; with `b`'s chain reversed, `ins-eq` resolves to insert 1 (the delay).
+    // Red mutation: drop assertBootedSession from withSession() -> every variant is accepted.
+    const engine = await createOfflineEngine(addressedStrip().toJson(), { asset, liveControls: { commandQueueRecords: 8 } });
+    try {
+      const controls = engine.liveControls();
+      for (const variant of ["reordered console", "renamed slot", "another insert chain"]) {
+        const builder = addressedStrip(undefined, variant);
+        assert.notEqual(builder.toJson(), addressedStrip().toJson(), `${variant} is another session`);
+        assert.throws(() => controls.withSession(builder), NOT_BOOTED, variant);
+      }
+      // The booted text is held byte for byte, so the same session booted from non-canonical text
+      // cannot be matched without a parser, and is refused rather than trusted.
+      const spaced = await createOfflineEngine(`${addressedStrip().toJson().trimEnd()} \n`, {
+        asset, liveControls: { commandQueueRecords: 8 },
+      });
+      try {
+        assert.throws(() => spaced.liveControls().withSession(addressedStrip()), NOT_BOOTED);
+      } finally {
+        spaced.dispose();
+      }
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("loadSession() moves the document withSession() holds a builder to", async () => {
+    // Red mutation: keep the first boot's bytes across loadSession() -> the new session's builder
+    // is refused and the replaced one is accepted.
+    const engine = await createOfflineEngine(addressedStrip(), { asset, liveControls: { commandQueueRecords: 8 } });
+    try {
+      const next = addressedStrip(undefined, "another insert chain");
+      engine.loadSession(next.toJson(), { liveControls: { commandQueueRecords: 8 } });
+      const controls = engine.liveControls();
+      assert.throws(() => controls.withSession(addressedStrip()), NOT_BOOTED);
+      const edit = controls.withSession(next).edit.track("b").insert("ins-eq", "miso.parametric-eq").bypass(true);
+      assert.deepEqual([edit.rack, edit.effectIndex], [RACK.inserts, 1]);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("withSession() on live controls built without the booted document refuses rather than trusts", () => {
+    // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
+    const controls = new EngineLiveControls(
+      { tracks: ["a", "b"], sources: [], metersAttached: false },
+      () => assert.fail("nothing is submitted"),
+    );
+    assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);
   });
 
   test("a live bypass on a console slot or an insert renders the session bypass of exactly that instance", async () => {
@@ -710,5 +917,119 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
       renders.set(name, JSON.stringify(live));
     }
     assert.equal(new Set(renders.values()).size, 4, "each address reaches a different instance");
+  });
+});
+
+/** Parameters that make each catalog effect audible on `feed()`'s noise, so bypass is heard. */
+const AUDIBLE = Object.freeze({
+  "miso.compressor": { threshold: -40, ratio: 8 },
+  "miso.delay": { "delay time": 2, mix: 0.5 },
+  "miso.gate-expander": { threshold: -3, ratio: 20, hold: 0, hysteresis: 0, release: 5 },
+  "miso.multiband-compressor": { low_threshold: -40, low_ratio: 8, high_threshold: -40, high_ratio: 8 },
+  "miso.parametric-eq": { "band-1-enabled": true, "band-1-gain": 9, "band-1-frequency": 1_000 },
+  "miso.soft-clip": { drive: 24 },
+  "miso.transient-shaper": { "attack amount": 1, "sustain amount": -1 },
+  "miso.true-peak-limiter": { ceiling: -12 },
+});
+
+/** One track whose one insert, `fx`, is `effectId`, audible, with its session bypass `bypassed`. */
+function oneInsert(effectId, bypassed) {
+  return session({ id: "console.prepared-bypass", sampleRateHz: 48_000, revision: 1 })
+    .source("s", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+    .track("t", { source: "s", inserts: [effect(effectId, AUDIBLE[effectId], { slotId: "fx", bypass: bypassed })] })
+    .output("out")
+    .route({
+      id: "main",
+      source: { kind: "track", trackId: "t", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+}
+
+/** The refusal `bypass(false)` makes for a session-bypassed effect that keeps its prepared bypass. */
+const KEEPS_PREPARED_BYPASS = (error) => error instanceof MisoUsageError
+  && /keeps its prepared bypass/.test(error.message);
+
+describe("issue #1097 -- a live lift the engine would acknowledge and ignore is refused before it is sent", () => {
+  test("a session-bypassed delay or multiband refuses bypass(false), by ID, by index and through withSession()", async () => {
+    // #1097 verdict M2: the engine admits the lift, acks `ok`, and renders nothing different, so an
+    // ack would precede a no-op. Red mutation: drop the prepared-bypass refusal in
+    // EffectEdits.bypass() -> every `throws` below goes red.
+    const built = session({ id: "console.lift", sampleRateHz: 48_000, revision: 1 })
+      .source("s", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+      .track("t", {
+        source: "s",
+        inserts: [
+          effect("miso.delay", {}, { slotId: "echo", bypass: true }),
+          effect("miso.multiband-compressor", {}, { slotId: "mb", bypass: true }),
+          effect("miso.parametric-eq", {}, { slotId: "ins-eq", bypass: true }),
+          effect("miso.delay", {}, { slotId: "echo-live" }),
+        ],
+      })
+      .output("out")
+      .route({
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    for (const [how, boot, bind] of [
+      ["booted from the builder", built, (controls) => controls],
+      ["booted from text, then withSession()", built.toJson(), (controls) => controls.withSession(built)],
+    ]) {
+      const engine = await createOfflineEngine(boot, { asset, liveControls: { commandQueueRecords: 8 } });
+      try {
+        const track = bind(engine.liveControls()).edit.track("t");
+        assert.throws(() => track.insert("echo", "miso.delay").bypass(false), KEEPS_PREPARED_BYPASS, how);
+        assert.throws(() => track.insert("mb", "miso.multiband-compressor").bypass(false), KEEPS_PREPARED_BYPASS, how);
+        assert.throws(() => track.insert(0, "miso.delay").bypass(false), KEEPS_PREPARED_BYPASS, how);
+        assert.throws(() => track.effect("inserts", 1, "miso.multiband-compressor").bypass(false), KEEPS_PREPARED_BYPASS, how);
+        // The instance at the address governs, not the effect the caller claims for it.
+        assert.throws(() => track.effect("inserts", 0, "miso.parametric-eq").bypass(false), KEEPS_PREPARED_BYPASS, how);
+        // Setting a bypass, lifting one on any other effect, and lifting a delay the session did not
+        // bypass all still go through.
+        assert.equal(track.insert("echo", "miso.delay").bypass(true).kind, "effectBypass", how);
+        assert.equal(track.insert("ins-eq", "miso.parametric-eq").bypass(false).kind, "effectBypass", how);
+        assert.equal(track.insert("echo-live", "miso.delay").bypass(false).kind, "effectBypass", how);
+      } finally {
+        engine.dispose();
+      }
+    }
+  });
+
+  test("every catalog effect's live lift does what the SDK's PREPARED_BYPASS_EFFECTS says the engine does", async () => {
+    // The metadata does not publish which effects keep a prepared bypass, so the SDK holds a copy;
+    // this holds it to the engine. For each effect, authored bypassed: the engine's own answer to a
+    // raw lift (a text boot, addressed by index, so the SDK cannot refuse it) must leave the
+    // bypassed render exactly on the listed effects, and on every other effect the SDK must send
+    // the lift and it must render the authored-unbypassed session bit for bit.
+    // Red mutation: drop the multiband from PREPARED_BYPASS_EFFECTS, or add the soft-clip -> the
+    // SDK's answer and the engine's disagree on that effect.
+    assert.deepEqual(Object.keys(AUDIBLE).sort(), CATALOG.effects.map((row) => row.id).sort());
+    for (const { id } of CATALOG.effects) {
+      const keeps = PREPARED_BYPASS_EFFECTS.includes(id);
+      const bypassed = await renderBlocks(oneInsert(id, true));
+      const enabled = await renderBlocks(oneInsert(id, false));
+      assert.notDeepEqual(bypassed, enabled, `${id}: the fixture must hear the bypass`);
+      const raw = await renderBlocks(
+        oneInsert(id, true).toJson(),
+        (controls) => controls.edit.track("t").effect("inserts", 0, id).bypass(false),
+      );
+      assert.deepEqual(raw, keeps ? bypassed : enabled, `${id}: the engine's live lift`);
+
+      const engine = await createOfflineEngine(oneInsert(id, true), { asset, liveControls: { commandQueueRecords: 8 } });
+      try {
+        const lift = () => engine.liveControls().edit.track("t").insert("fx", id).bypass(false);
+        if (keeps) assert.throws(lift, KEEPS_PREPARED_BYPASS, id);
+        else assert.doesNotThrow(lift, id);
+      } finally {
+        engine.dispose();
+      }
+      if (!keeps) {
+        const lifted = await renderBlocks(
+          oneInsert(id, true),
+          (controls) => controls.edit.track("t").insert("fx", id).bypass(false),
+        );
+        assert.deepEqual(lifted, enabled, `${id}: the SDK's live lift`);
+      }
+    }
   });
 });

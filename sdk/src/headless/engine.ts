@@ -115,6 +115,8 @@ export class OfflineEngine {
   readonly #boundary: WasmBoundary;
   readonly #asset: MisoEngineAsset;
   #session: SessionBuilder | undefined;
+  /** The document the engine booted, as staged: what `withSession()` holds a builder to. */
+  #booted: Uint8Array | undefined;
   readonly #observationLimits: ObservationSubscriptionLimits | undefined;
   #observationSubscriptions: ObservationSubscriptionOwner | undefined;
   readonly #responseLimits: TrackResponseSubscriptionLimits | undefined;
@@ -124,6 +126,7 @@ export class OfflineEngine {
     asset: MisoEngineAsset,
     boundary: WasmBoundary,
     session: SessionBuilder | undefined,
+    booted: Uint8Array,
     observationLimits: ObservationSubscriptionLimits | undefined,
     responseLimits: TrackResponseSubscriptionLimits | undefined,
     spectrumLimits: SpectrumSubscriptionLimits | undefined,
@@ -131,6 +134,7 @@ export class OfflineEngine {
     this.#asset = asset;
     this.#boundary = boundary;
     this.#session = session;
+    this.#booted = booted;
     this.#observationLimits = observationLimits;
     this.#responseLimits = responseLimits;
     this.#spectrumLimits = spectrumLimits;
@@ -161,10 +165,13 @@ export class OfflineEngine {
         ...(spectrumCollection === undefined ? {} : { spectrumCollection }),
       };
     const asset = suppliedAsset ?? await defaultBundledAsset();
+    const bytes = documentBytes(document);
     return new OfflineEngine(
       asset,
-      await WasmBoundary.boot(asset, documentBytes(document), bootOptions),
+      await WasmBoundary.boot(asset, bytes, bootOptions),
       builtSession(document),
+      // A copy: a caller's Uint8Array is staged as is, and may change after the boot.
+      bytes.slice(),
       observationSubscriptionLimits,
       responseSubscriptionLimits,
       spectrumSubscriptionLimits,
@@ -258,7 +265,8 @@ export class OfflineEngine {
     return new EngineLiveControls(this.sessionMap(), (edits) =>
       this.submitCommands(encodeLaneEdits(edits), edits.length),
       (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
-      this.#session);
+      this.#session,
+      this.#booted);
   }
 
   nextAbsoluteSample(): bigint {
@@ -325,8 +333,11 @@ export class OfflineEngine {
     this.#observationSubscriptions?.invalidate();
     // Cleared first, so a refused reboot cannot leave IDs resolving against the replaced session.
     this.#session = undefined;
-    this.#boundary.reboot(documentBytes(document), options);
+    this.#booted = undefined;
+    const bytes = documentBytes(document);
+    this.#boundary.reboot(bytes, options);
     this.#session = builtSession(document);
+    this.#booted = bytes.slice();
   }
 
   dispose(): void {

@@ -77,9 +77,19 @@ async function buildSdkBundle(sdkRoot) {
   const sourceRoot = path.resolve(HERE, "../../../sdk/src");
   const distribution = path.join(sdkRoot, "dist");
   const useDistribution = await readdir(distribution).then((entries) => entries.includes("core"), () => false);
-  if (!useDistribution && sdkRoot !== path.dirname(sourceRoot)) {
+  const repositorySdk = sdkRoot === path.dirname(sourceRoot);
+  if (!useDistribution && !repositorySdk) {
     throw new Error("selected SDK package has no built distribution");
   }
+  // Say which SDK this run qualifies (#1097 verdict L5). A leftover `sdk/dist` -- from
+  // `sdk-package.sh check`, say -- silently switches the repository's own SDK from CI's source
+  // bundle to whatever that build left behind, so the evidence must name the bundle it used.
+  process.stdout.write(!useDistribution
+    ? `sdk bundle: the source at ${sourceRoot} (CI's mode)\n`
+    : repositorySdk
+      ? `sdk bundle: the built distribution at ${distribution}, not CI's source bundle; delete it `
+        + "to qualify the source as CI does\n"
+      : `sdk bundle: the selected package's built distribution at ${distribution}\n`);
   const shippedSdk = {
     name: "shipped-sdk",
     setup(builder) {

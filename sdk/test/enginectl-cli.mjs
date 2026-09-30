@@ -411,6 +411,35 @@ process.stdout.write = function () {
     );
   });
 
+  test("the request's own key refusals on the console and a track carry the engine's code", async () => {
+    // #1097 verdict L2. enginectl reads a request before the builder does, so its own key check is
+    // the first refusal for a console sidechain or an effect field on an entry, and it must name
+    // the code the builder and the engine name for the same defect. Red mutation: drop the code
+    // from the request's key check -> these refusals carry no diagnostics.
+    const sidechain = { source: { kind: "track", trackId: "bass", tap: "post_fader" }, portId: "sidechain-in" };
+    const cases = [
+      ["a console slot sidechain", (body) => { body.console.preInsert[0].sidechain = sidechain; }],
+      ...["effectId", "quality", "linkMode", "sidechain", "id", "identity", "params"].map((field) => [
+        `${field} on a console entry`,
+        (body) => { body.tracks[1].spec.console[0][field] = "x"; },
+      ]),
+      ["an unknown console key", (body) => { body.console.sidechain = []; }],
+      ["a retired per-track rack", (body) => { body.tracks[1].spec.dynamic = []; }],
+      ["an unknown track key", (body) => { body.tracks[1].spec.effects = []; }],
+    ];
+    for (const [name, edit] of cases) {
+      const body = request();
+      edit(body);
+      const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
+      failure(result, 3, "request.shape");
+      assert.deepEqual(
+        JSON.parse(result.stderr.toString("utf8")).diagnostics?.map((row) => row.code),
+        ["schema.unknown_field"],
+        name,
+      );
+    }
+  });
+
   test("a missing packaged Wasm asset is internal, not a session refusal", async () => {
     const wasm = resolve(dirname(executable), "assets", "miso-engine-v1-audio-worklet.simd128.wasm");
     const unavailable = `${wasm}.unavailable`;

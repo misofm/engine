@@ -101,11 +101,13 @@ for (const track of tracks) {
 | `SessionModel` (no `console`); track model `simd1`/`dynamic`/`simd2` | `SessionModel.console` (`pre_insert`, `post_insert`); track model `console` and `inserts` |
 | `SendTap`: `input`, `post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, `post_matrix` | `input`, `post_input`, `insert_send`, `insert_return`, `pre_fader`, `post_fader`, `post_pan` (codes 1-7 unchanged) |
 | `AutomationTarget { rack: "simd1", slotId }` | `{ rack: "console", slotId: <slot> }` or `{ rack: "inserts", slotId: <insert id> }` |
-| `MisoUsageError` (message only) | `MisoUsageError.diagnosticCode`: the engine's code when the builder refuses what the engine would (`console.entry_missing`, `console.entry_order`, `id.duplicate`, `reference.missing_entity`, `schema.unknown_field`, `schema.invalid_enum`, `id.invalid`, `console.slot.ineligible_effect`) |
+| `MisoUsageError` (message only) | `MisoUsageError.diagnosticCode`: the engine's code when the builder refuses what the engine would (`console.entry_missing`, `console.entry_order`, `id.duplicate`, `reference.missing_entity`, `schema.unknown_field`, `schema.invalid_enum`, `schema.wrong_type`, `id.invalid`, `console.slot.ineligible_effect`, `effect.quality.unsupported`, `effect.link_mode.unsupported`) |
 | `LiveControlRack` = `"simd1" \| "dynamic" \| "simd2"` | `"console" \| "inserts"` |
 | `TrackEdits.effect("simd1" \| "dynamic" \| "simd2", index, effectId)` | `TrackEdits.effect("console" \| "inserts", index, effectId)`: a console slot by its index in `pre_insert`-then-`post_insert` order, an insert by its chain index |
 | (none) | `TrackEdits.console(slot, effectId)` (by slot ID) and `TrackEdits.insert(idOrIndex, effectId)` |
-| (none) | `EngineLiveControls.withSession(builder)`; the constructor's optional fourth argument and `LiveControlEdits`' optional second argument take the session. IDs resolve automatically when the engine booted from a `session(...)` builder (`createOfflineEngine(builder)`, `createEngine({ document: builder })`); for document text, call `withSession(builder)` |
+| (none) | `EngineLiveControls.withSession(builder)`; the constructor's optional fourth argument and `LiveControlEdits`' optional second argument take the session, and the constructor's optional fifth argument (`createBrowserLiveControls`' fourth) the booted document. IDs resolve automatically when the engine booted from a `session(...)` builder (`createOfflineEngine(builder)`, `createEngine({ document: builder })`); for document text, call `withSession(builder)`. `withSession()` requires the builder's `toJson()` to equal the booted document byte for byte, and throws a `MisoUsageError` for any other session (a reordered console, a renamed slot, another insert chain) or when the live controls were constructed without the booted document |
+| (none) | `EffectEdits.bypass(false)` throws a `MisoUsageError` ("keeps its prepared bypass") for a session-bypassed delay or multiband whenever the SDK has the session; `PREPARED_BYPASS_EFFECTS` lists the two. The `EffectEdits` constructor's optional fifth argument (`AuthoredInstance`) carries what the session authored |
+| (none) | `EFFECT_LINK_MODES`: the link modes each effect supports. The builder refuses any other on a slot or an insert with `effect.link_mode.unsupported`: the EQ, soft-clip and delay are `dual_mono` only, and the limiter has no `average` |
 | `LaneEdit.rack` `0` simd1, `1` dynamic, `2` simd2 | `1` inserts, `3` console, `255` not applicable |
 | `ObservationRack` = `"simd1" \| "dynamic" \| "simd2"` | `"console" \| "inserts"` (selections, bindings and read results) |
 | `TrackResponseMember.rack` `"input" \| "simd1" \| "dynamic" \| "simd2"`, `rackValue` 0-3 | `"input" \| "console" \| "inserts"`, `rackValue` `0` input, `4` console, `2` inserts |
@@ -117,8 +119,22 @@ for (const track of tracks) {
 
 For code that addresses the worklet host's records by number: the app's `ENGINE_DYNAMIC_RACK`
 (`key-map.ts`) is compared with observation bindings in `observations.ts` and `intent.ts` and
-written into `EngineTrackEffect.rack` in `session-document.ts`. The layout JSON's `racks` and
-`liveResponseRacks` tables are the machine-readable source (S1c).
+written into `EngineTrackEffect.rack` in `session-document.ts`. At app `0757a84` two more places
+carry the old numbering:
+
+- `src/lib/mixer/engine/index.ts` compares effects and targets with `ENGINE_DYNAMIC_RACK` five
+  times (`:311`, `:867`, `:876`, `:985`, `:1062`). For the EQ -> compressor pair each becomes the
+  console code `3`.
+- `authoritative-session.ts`'s `projectedEffects` (`:1120-1124`) walks a hard-coded
+  `simd1 0 / dynamic 1 / simd2 2` table over `track[name].effects`. It becomes two walks: the
+  session's console slots (`console.pre_insert` then `console.post_insert`) at code `3`, whose
+  effect ID is the slot's `identity.effect_id` and whose index is the slot's position in that
+  order, and the track's `inserts.effects` at code `1`, indexed by chain position. Its
+  `${track.id}/${name}/${effectIndex}` address keys move with it.
+
+The layout JSON's `racks` and `liveResponseRacks` tables are the machine-readable source (S1c).
+The host-web qualification fixture `console-session.json` is now `live-control-session.json`; the
+app does not reference it.
 
 | Record | Old | New |
 |---|---|---|
@@ -130,4 +146,6 @@ written into `EngineTrackEffect.rack` in `session-document.ts`. The layout JSON'
 Live bypass: an EQ, compressor, gate, soft-clip, transient shaper or limiter bypass is a per-lane
 shunt, so a live toggle is exact and keeps the track in its bank. A session-bypassed delay or
 multiband keeps its prepared bypass: a live un-bypass of either is admitted and changes nothing
-(S1c).
+(S1c). Through the SDK, with the session known, that lift throws a `MisoUsageError` before it is
+sent; a raw record, or an SDK edit addressed by index with no session, is still acknowledged and
+changes nothing.

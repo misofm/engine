@@ -76,7 +76,9 @@ Closed tokens:
 - render mode: `single_thread` (the only token; anything else is `schema.invalid_enum`)
 - sample format: `f32_planar`
 - quality: `draft`, `normal`, `high` (launch native effects publish only `normal`)
-- link mode: `dual_mono`, `maximum`, `average`
+- link mode: `dual_mono`, `maximum`, `average`; each effect supports a subset, on a slot or an
+  insert alike: the EQ, soft-clip and delay take only `dual_mono`, the limiter has no `average`,
+  and any other pairing is `effect.link_mode.unsupported` at prepare-effects
 - identity kind: `native`, `cid`
 - channel: `left`, `right`, `both`
 - unit: `db`, `hz`, `milliseconds`, `samples`, `linear`, `ratio`
@@ -129,8 +131,10 @@ round-trips, and renders nothing.
 
 The TypeScript builder (`sdk/src/core/session.ts`, `session().console({ preInsert, postInsert })`
 then `.track(id, { source, console: [...entries], inserts: [...] })`) and
-`enginectl session build` write the canonical bytes and refuse every defect above, before boot,
-with the same code. Their document still goes through the validator below.
+`enginectl session build` write the canonical bytes and refuse, before boot and with the same
+code, every defect above that they can express. They cannot express a `cid` slot, because a slot
+names a native effect ID, so `console.slot_not_native` comes only from the engine. Their document
+still goes through the validator below.
 
 ## Validate and canonicalize
 

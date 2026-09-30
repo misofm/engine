@@ -35,12 +35,14 @@ function browserCommand(edit: LaneEdit): MisoCommand {
  * Bind the shared semantic live controls to the shipped MessagePort host.
  *
  * `session`, the builder the host's document came from, lets console slots and inserts be addressed
- * by their stable IDs.
+ * by their stable IDs. `booted`, the document the host booted, is what `withSession()` holds a
+ * later builder to; without it, `withSession()` refuses.
  */
 export async function createBrowserLiveControls(
   host: MisoAudioWorkletHost,
   beforeSubmit?: LiveControlBeforeSubmit,
   session?: SessionLike,
+  booted?: Uint8Array,
 ): Promise<EngineLiveControls> {
   const remoteMap = await host.sessionMap();
   const map: SessionMap = Object.freeze({
@@ -60,5 +62,5 @@ export async function createBrowserLiveControls(
       admitted: ack.admitted,
       appliedAtSample: ack.appliedAtSample,
     });
-  }, beforeSubmit, session);
+  }, beforeSubmit, session, booted);
 }
