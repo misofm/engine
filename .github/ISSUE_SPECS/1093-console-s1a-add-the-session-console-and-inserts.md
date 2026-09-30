@@ -152,7 +152,8 @@ the new shape.
   `compressor-dynamic-bank-observation`, `compressor-dynamic-observation`,
   `console-sixty-four-track{,-intended,-mono}`, `observation-frame-shape`,
   `parametric-eq-bank-console` and `parametric-eq-nine-track`;
-- `hosts/host-web/qualification/{console,observation,stall}-session.json`;
+- `hosts/host-web/qualification/{live-control,observation,stall}-session.json` (the first was
+  `console-session.json` until S1r's post-verdict fix, `a068202f`);
 - `hosts/host-web/tests/browser-v1/{command-session,observation-session,session}.json`;
 - `crates/graph-compiler/tests/data/reduced-nobus-from-970-verify.json`;
 - `docs/session-v1.schema.json`;
@@ -624,3 +625,146 @@ Everything below was re-derived independently on x86-64-v3, not read from the ev
      acceptable because batch mode opens no per-slice PR, the script sits outside
      `check-script-reachability.py`'s `scripts/` scope, and the B0 rebase and #1097 need it.
    - `docs/IMPLEMENTATION_PLAN.md:31` still spells the old chain.
+
+## Rebase evidence (C3)
+
+Terra, on `codex/1093-session-console-inserts`, with `git merge` only (no history rewritten):
+
+- `616427aa` merges `codex/1095-rename-live-controls` at `bca6d777` (C1, C2 and S1r) into the
+  verdict head `c5699847`;
+- `b8e28e2b` ports B0, P1 and P1b to the console shape;
+- `3741d34f` closes the cheap lows;
+- `0ad4da3b` merges S1r's post-verdict fixes (`a068202f`, `96bd1648`), with no conflict.
+
+The class-A base is `398e8988` (`main` after C2). Every gate below ran on `0ad4da3b`, x86-64-v3.
+
+### Conflicts and resolutions
+
+- `effect-compiler/src/prepare.rs`: S1a's `CONSOLE_ELIGIBLE_EFFECTS` sat beside P1's
+  `NEVER_BANKED_EFFECTS` and P1b's `PREPARED_BYPASS_EFFECTS` and `lowers_session_bypass`. Kept
+  both.
+- `effect-compiler/tests/native_session.rs`: S1a's eligibility test and P1's two bypass tests
+  were appended at the same place. Kept all three, and ported P1's `bypassed_console()`: the EQ
+  and limiter bypass through track 0's console entries, and the delay and multiband are inserts.
+- `graph-compiler/src/lib.rs` (test imports): S1r's `attach_effect_live_controls` with S1a's
+  `prepare_native_session_effects_with_console_eligibility`.
+
+S1a's own lines named no renamed live-console identifier except that import. The `with_console`
+test helpers build session consoles, so they keep their name. After the merge, the build failed
+only in `console-workload` and in three tests, which are ported below. The S1r fix merge carries
+S1a's migration into the renamed `live-control-session.json` and `observation-session.json`, and
+all three qualification sessions validate through stage 5.
+
+### Ports
+
+- **B0's app-shape row.** The rule's one moving case.
+  - `console-sixty-four-track-app.json` was migrated by the committed script: `dynamic` is
+    appended to the empty `pre_insert`, giving `[eq, comp]`, an empty `post_insert`, and 21
+    tracks with both entries bypassed.
+  - `derive-app-console-fixture.py` now derives from the migrated intended fixture. It clears
+    `post_insert` and each limiter entry, and bypasses both entries on 2-mod-3 tracks.
+    `check-console-fixtures.sh` regenerates the fixture byte for byte.
+  - The witness block, the V8 harness's document block and `console-workload` were ported:
+    `strip_layout` `pre_insert:eq+compressor`; `BypassCensus` counts console entries and inserts,
+    and a new case covers a bypassed insert; the app and census tests; `SendTap::PostPan`.
+  - `bench` now states the console layout, and the validators still accept S0's
+    `inserts:eq+compressor`.
+  - `check-console-benchmark-fixture.sh` needed no change: S1a had already ported it, and B0 did
+    not touch it.
+- **P1 and P1b tests.**
+  - `bypass_cohorts` and `bypass_resources`: a strip slot's bypass is its console entry. The
+    `-0.0` case reorders `pre_insert` to comp -> eq. The multiband, which is not
+    console-eligible, is each track's insert.
+  - `symmetry_witness::edited_apart`: a console slot cannot be split per track, so every EQ is an
+    insert, and the bypassed tracks open their chain with a compressor. The split has to be at
+    slot 0: an EQ appended after the first slot shared the cohort and banked. Dropping
+    `.and(live.control.symmetry())` still turns the test red.
+- **Other C1/C2/S1r files.** A search for retired rack keys, taps and rack tokens finds nothing
+  else to port.
+  - P2a-P2e's tests read the migrated fixtures through the model and pass unchanged.
+  - The old spellings left belong to S1c/S1d: the host-web qualification harness and SDK entry,
+    the SDK and its tests, the `.d.ts` tap prose, and `APP-LIVE-CONTROLS.md`'s rack tokens.
+  - Internal names also stay: graph stage text, `MeterTap::PostMatrix` and the records'
+    `meter_tap: "post_matrix"`, and test names.
+
+### Lows
+
+- **L2 closed.** `prepare_native_session_effects_with_console_eligibility` is
+  `#[cfg(any(test, feature = "test-support"))]` plus `#[doc(hidden)]`, over a private preparation
+  that the public entry also uses. `graph-compiler` (dev) and `tools/audit` enable
+  `effect-compiler/test-support`; CI's test-debug-a already did. `effect-compiler`,
+  `graph-compiler`, `host-core` and `capi` check without it.
+- **L3 closed.** Validation now builds the declared slots once and checks missing entries against
+  the entries it saw. One track with 6,000 slots validates in 2.86 s, against 2.90 s for 6,000
+  inserts (debug `session_validator`, all stages).
+- **L4 left.** An affine parse-transient bound changes `host-web`'s boot-admission arithmetic and
+  `check-web-boot-budget.mjs`'s re-measurement. That is not a cheap edit, and it needs its own
+  issue.
+- **L5 closed.** Every #966 mutation row was re-run on the console tree. M1 is now red on 8 of 9
+  (the probe: 42 lines over 25 seeds). M2 2/9, M3 3/9, M7 2/9, M8 1/9, M9 2/9 and M10 3/9.
+  M970 is red on the probe (6 lines, 5 seeds) and on 7 of 9 `collapse_arming` tests. P3-M45 was
+  re-run against `track.inserts`; the test's name is now `..._and_console_tokens`.
+- **Info closed.** `IMPLEMENTATION_PLAN.md` spells the console chain. The other info items stay
+  with #1094 and #1096.
+
+### Class A across the merge
+
+Base `398e8988` (a `git archive`) against head `0ad4da3b`: the 22 console-workload digests
+(`gain_pan_profile digests`, 64 blocks) are identical, with no document re-pinned. That includes
+`sixty_four_track_app_shape`, `c740fa2dd904`, whose fixture moved from `dynamic` to `pre_insert`.
+
+- `bench console --preflight` prints identical output: 7 arms, and the same collapse counters and
+  pushes.
+- The V8 preflight gives identical arm digests (7) and document digests: console
+  `d913ad961d2d`, app `3dd8b2fff4b9`. `controls.json` differs only in the app's `strip_layout`.
+- The app row's compiled plan carries 64 `Simd1:eq` and 64 `Simd1:comp` entries, 21 of each
+  bypassed on exactly the 2-mod-3 tracks. They bind as 16 full banks of 8, and no Dynamic effect
+  is left. The census is `index_mod_3_is_2`, 21 tracks.
+- S0's rows still build and run:
+  - the digests test renders all 22 session rows;
+  - the `bench` tests run the five strip rows, the meters row, the mixing row, the metered row
+    and the driver-fed row;
+  - the console preflight still requires 60 records.
+
+### Gates on `0ad4da3b`
+
+The CI jobs were mirrored step by step: fmt, clippy, doc, the lint job's 28 policy and probe steps,
+the docs gates, the gate self-tests, test-debug-a, test-debug-b, test-release, audit-native (all 20
+steps), wasm-guests, cross-target, release-shape, the artifact job and the artifact gates.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check`, clippy `-D warnings`, `cargo doc -D warnings` | pass |
+| test-debug-a / test-debug-b | 1,124 / 834 passed, 0 failed |
+| test-release (lane, math, wasm-gates) and the loom leg | 109 passed |
+| audit-native: release `audit`, `bench`, `console-workload` tests | 114 passed |
+| audit-native: every audit, including the builtins fixture corpus and the standing console fixtures against the release validator | pass |
+| wasm `simd128` probes; `check-protocol-wasm-parity.sh` | pass |
+| `scripts/run-wasm-gates.sh` (full: native, wasm and V8 spill) | pass |
+| `check-cross-targets.sh` (AArch64 iOS and Android) | pass |
+| release shape; `--release --workspace` check with `panic=unwind` | pass |
+| Artifact job; `check-web-audioworklet.sh`; `check-browser-expected-resources.py`; scalar-oracle-absent; `test-web-audioworklet.sh`; V8 spill | pass |
+| `test-console-benchmark.sh`, `check-console-fixtures.sh`, `check-console-benchmark-fixture.sh` | pass |
+| `test-ci-path-routing.py` | pass |
+| Gate 6: `preflight-console-benchmark.sh --step s1a-c3-scratch-preflight` | pass, 0 workload launches |
+| Gate 6: V8 `prepare` then `preflight` in an empty scratch directory | pass |
+| SDK: `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh` | pass |
+| SDK: `check-sdk-headless.sh` and `sdk-package.sh check` | fail, S1d's (see below) |
+
+`test-bench-policy.sh` failed once and passed on a clean rerun. Its `sort_fault` shim keeps its
+counter in `${TMPDIR:-/tmp}` but deletes `/tmp/...`, so with `TMPDIR` set, a second run inherits
+the counters of the first. This is a harness defect that CI's unset `TMPDIR` never meets. It was
+not fixed here.
+
+The SDK failures are the knowingly out-of-step suites (the spec's Dependencies): the SDK writes
+`simd1`/`dynamic`/`simd2` and the old taps.
+
+- `check-sdk-headless.sh` fails 86 of 284 tests. Every refusal shown is
+  `schema.missing_field $.console` or `schema.unknown_field $.tracks[i].simd1` and similar.
+- `sdk-package.sh check` fails 4 of 11 `enginectl` tests, each on the same diagnostics.
+- These are S1d's (#1097), and batch C3 is not pushed until S1d passes them.
+- The AArch64 legs themselves need arm64 hardware; only their cross-compile checks ran.
+
+**Artifact.** The shipped module is `14c34b5c1f327abe2c31f52c5c848fe559bd53425aa2eaedf935c2369f1f490a`,
+3,283,936 bytes. The artifact job and the V8 prepare built the same bytes. It is not the release
+pin: the module moves with every Rust change, and the batch boundary re-pins it.
