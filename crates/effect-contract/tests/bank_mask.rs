@@ -3,9 +3,10 @@
 //! A bank request carries one request per lane and one active-mask entry per lane, and binds
 //! `members <= lanes` tracks, `members` being the mask's active count. `validate_shape` is the
 //! contract-violation half of `bind_homogeneous_bank` (issue #95): it must accept every non-empty
-//! mask of the right length, so that a planner can bind a padded group, and refuse the two masks
-//! no correct planner produces -- one naming no member and one of the wrong length -- each with
-//! its own typed code, so a factory can never index a lane the mask does not have.
+//! members-first mask of the right length, so that a planner can bind a padded group, and refuse
+//! the three masks no correct planner produces -- one naming no member, one of the wrong length and
+//! one with an active lane after a padded one -- each with its own typed code, so a factory can
+//! never index a lane the mask does not have or meet a layout the graph cannot gather.
 //!
 //! Every mask is enumerated at both bank widths, so the oracle is the definition itself (a
 //! population count) rather than a sample of it.
@@ -45,15 +46,17 @@ fn code(request: PrepareEffectBankRequest<'_>) -> Option<&'static str> {
     request.validate_shape().err().map(|error| error.code)
 }
 
-/// Every non-empty mask of the right length is well formed, whatever its active count, and its
-/// active count and padding are what the mask says.
+/// A non-empty mask of the right length is well formed exactly when its members come first, whatever
+/// its active count; every other one is `effect.bank.mask_not_prefix`. A well-formed mask's active
+/// count and padding are what the mask says.
 ///
-/// Red if `validate_shape` refuses a partial mask (the planner could never bind a padded group,
-/// which is P2a's whole point), accepts a mask by some other rule than "at least one member"
-/// (for example only prefix masks, or only full ones), or if `active_lanes`/`is_padded` count
-/// anything but the mask's `true` entries -- the guard every unpadded factory declines on.
+/// Red if `validate_shape` refuses a partial prefix mask (the planner could never bind a padded
+/// group, which is P2a's whole point), accepts a mask with an active lane after a padded one (the
+/// graph's gather and scatter admit only members first, and an opted-in factory relies on it; P2a
+/// verdict, L3), accepts only full masks, or if `active_lanes`/`is_padded` count anything but the
+/// mask's `true` entries -- the guard every unpadded factory declines on.
 #[test]
-fn every_nonempty_mask_of_the_width_is_well_formed() {
+fn a_mask_is_well_formed_exactly_when_its_members_come_first() {
     for (backend, width) in WIDTHS {
         let lanes = width.lanes() as usize;
         let requests = vec![member(); lanes];
@@ -67,6 +70,14 @@ fn every_nonempty_mask_of_the_width_is_well_formed() {
                 active_mask: &mask,
             };
             let members = bits.count_ones() as usize;
+            if bits != (1 << members) - 1 {
+                assert_eq!(
+                    code(request),
+                    Some("effect.bank.mask_not_prefix"),
+                    "{width:?} mask {bits:#b} has an active lane after a padded one"
+                );
+                continue;
+            }
             assert_eq!(
                 code(request),
                 None,
