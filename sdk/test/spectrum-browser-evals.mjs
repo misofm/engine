@@ -399,7 +399,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
   try {
     const resident = await engine.subscribeObservations({
-      selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
       windowBlocks: 1,
     });
     const failed = await engine.subscribeSpectrum(request);

@@ -310,7 +310,8 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
     const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
     const kind = ABI_LAYOUT.constants.wireCommandKinds.find((row) => row.name === "effectParam");
     view.setUint8(at("kind"), kind.value);
-    view.setUint8(at("rack"), 0); // simd1
+    // The EQ is console slot 0, and `console` is the record's rack `3` (S1c).
+    view.setUint8(at("rack"), ABI_LAYOUT.constants.racks.find((row) => row.name === "console").value);
     view.setUint8(at("channel"), 2); // both
     view.setUint32(at("trackIndex"), 0, true);
     view.setUint32(at("effectIndex"), 0, true);
@@ -328,7 +329,7 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
     assert.equal(ack.value, "-6.3");
 
     const eq = (gain) => ({
-      simd1: [effectEntry("eq", "miso.parametric-eq", [
+      preInsert: [effectEntry("eq", "miso.parametric-eq", [
         { id: 1, unit: "linear", value: 1.0 },
         { id: 2, unit: "linear", value: 2.0 },
         { id: 3, unit: "hz", value: 1000.0 },

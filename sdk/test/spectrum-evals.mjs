@@ -35,9 +35,9 @@ function spectrumDocument() {
   return sessionDocument({
     frames: 4_800,
     effects: {
-      simd1: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
-      dynamic: [],
-      simd2: [],
+      preInsert: [effectEntry("eq", "miso.parametric-eq", eqParameters())],
+      inserts: [],
+      postInsert: [],
     },
   });
 }
@@ -198,8 +198,8 @@ test("candidate Wasm spectrum query captures all graph targets through explicit 
 }, async () => {
   const asset = await candidateAsset();
   const queries = [
-    queryFor({ kind: "trackPostInputBuiltins", trackId: "t" }),
-    queryFor({ kind: "trackPostMatrix", trackId: "t" }),
+    queryFor({ kind: "trackPostInput", trackId: "t" }),
+    queryFor({ kind: "trackPostPan", trackId: "t" }),
     queryFor({ kind: "output", outputId: "out" }),
   ];
   const results = [];
@@ -263,7 +263,7 @@ test("candidate Wasm spectrum arm, cancel, and dispose preserve lifecycle refusa
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
   const asset = await candidateAsset();
-  const query = queryFor({ kind: "trackPostMatrix", trackId: "t" });
+  const query = queryFor({ kind: "trackPostPan", trackId: "t" });
   const engine = await makeEngine(asset, query);
   assert.equal(engine.armSpectrum().ok, true);
   const cancelled = engine.cancelSpectrum();
@@ -282,7 +282,7 @@ test("candidate Wasm spectrum honors a selected channel and explicit capture lim
   skip: !process.env.MISO_ENGINE_SDK_ARTIFACTS_HEX,
 }, async () => {
   const asset = await candidateAsset();
-  const query = queryFor({ kind: "trackPostMatrix", trackId: "t" }, "left");
+  const query = queryFor({ kind: "trackPostPan", trackId: "t" }, "left");
   const engine = await makeEngine(asset, query);
   try {
     assert.equal(engine.armSpectrum().ok, true);
@@ -567,11 +567,11 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
     const readReleases = [];
     const notifications = [];
     const observationSelection = {
-      trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
+      trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: CHANNELS,
     };
     const observationMap = {
       bindings: [{
-        trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+        trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
         nativeEffectId: "miso.compressor", tapIds: [1],
       }],
     };
@@ -718,7 +718,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
 });
 
 test("managed spectrum collection updates target and smoothing atomically", async () => {
-  const firstQuery = queryFor({ kind: "trackPostMatrix", trackId: "t" });
+  const firstQuery = queryFor({ kind: "trackPostPan", trackId: "t" });
   const secondQuery = queryFor({ kind: "output", outputId: "out" });
   const collection = {
     entries: [
@@ -1398,7 +1398,7 @@ test("managed spectrum admission refuses before start and preserves a working st
   );
   assert.deepEqual(refused.counts(), { starts: 0, stops: 0, reads: 0 });
 
-  const malformed = makeOwner(undefined, metadata({ kind: "trackPostMatrix", trackId: "other" }));
+  const malformed = makeOwner(undefined, metadata({ kind: "trackPostPan", trackId: "other" }));
   await assert.rejects(
     malformed.owner.subscribeSpectrum({ ...prepared, cadenceMs: 1 }),
     /target differs|not prepared/,

@@ -5,6 +5,7 @@ import { MisoEngineError, MisoUsageError, resultName } from "../core/errors.ts";
 import { constantValue } from "../core/abi.ts";
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { SourceSpec } from "../core/types.ts";
+import { SessionBuilder } from "../core/session.ts";
 import {
   assertQuantumMatch,
   assertWebDeliverableSources,
@@ -273,8 +274,8 @@ function spectrumTargetId(target: SpectrumQuery["target"]): string {
   }
   let id: unknown;
   switch (target.kind) {
-    case "trackPostInputBuiltins":
-    case "trackPostMatrix":
+    case "trackPostInput":
+    case "trackPostPan":
       id = target.trackId;
       break;
     case "output":
@@ -295,10 +296,10 @@ function sameSpectrumTarget(left: SpectrumQuery["target"], right: SpectrumQuery[
   }
   const leftKind = left.kind;
   const rightKind = right.kind;
-  if (leftKind !== "trackPostInputBuiltins" && leftKind !== "trackPostMatrix" && leftKind !== "output") {
+  if (leftKind !== "trackPostInput" && leftKind !== "trackPostPan" && leftKind !== "output") {
     throw new MisoUsageError("target.kind must name a supported spectrum boundary");
   }
-  if (rightKind !== "trackPostInputBuiltins" && rightKind !== "trackPostMatrix" && rightKind !== "output") {
+  if (rightKind !== "trackPostInput" && rightKind !== "trackPostPan" && rightKind !== "output") {
     throw new MisoUsageError("target.kind must name a supported spectrum boundary");
   }
   if (leftKind !== rightKind) return false;
@@ -313,7 +314,7 @@ function spectrumChannelMask(channels: SpectrumQuery["channels"]): number {
 }
 
 function spectrumHostSelection(query: SpectrumQuery): {
-  readonly target: "trackPostInputBuiltins" | "trackPostMatrix" | "output";
+  readonly target: "trackPostInput" | "trackPostPan" | "output";
   readonly targetId: string;
   readonly channels: "left" | "right" | "both";
 } {
@@ -488,6 +489,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     throw new MisoUsageError("spectrum and spectrumCollection are mutually exclusive");
   }
   const document = documentBytes(options.document);
+  // The document as booted, kept apart from the one the scratch boot and the host are handed, for
+  // `withSession()` to hold a builder to.
+  const bootedDocument = document.slice();
   const policy = {
     ...options.policy,
     ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
@@ -629,7 +633,9 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           "this engine booted with no live controls attached; set policy.liveControls.commandQueueRecords",
         ))
         : createBrowserLiveControls(host, (edits, managed) =>
-          observationSubscriptions?.beforeLiveControlSubmit(edits, managed));
+          observationSubscriptions?.beforeLiveControlSubmit(edits, managed),
+        options.document instanceof SessionBuilder ? options.document : undefined,
+        bootedDocument);
       return semanticLiveControls;
     };
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {

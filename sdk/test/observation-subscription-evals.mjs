@@ -21,7 +21,7 @@ function observationDocument() {
   assert.ok(compressor && gate);
   return sessionDocument({
     effects: {
-      dynamic: [
+      inserts: [
         effectEntry("comp", compressor.id, compressor.parameters.map((row) => ({
           id: row.id, unit: row.unitName, value: row.default, channel: "both",
         }))),
@@ -34,7 +34,7 @@ function observationDocument() {
 }
 
 function selection(effectSlotId, channels = "both") {
-  return { trackId: "t", rack: "dynamic", effectSlotId, tapId: 1, channels };
+  return { trackId: "t", rack: "inserts", effectSlotId, tapId: 1, channels };
 }
 
 function feed(engine, block) {
@@ -67,7 +67,7 @@ function injectedOwner() {
   let submitCount = 0;
   const map = {
     bindings: [{
-      trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+      trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
@@ -147,7 +147,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
       assert.deepEqual(first.readLatest().map((row) => row.status), ["pending", "pending"]);
       const liveControls = engine.liveControls();
       await assert.rejects(
-        () => liveControls.submit(liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        () => liveControls.submit(liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", false, 2)),
         /conflict/,
       );
@@ -233,7 +233,7 @@ describe("issue 783 -- managed resident observation subscriptions", () => {
 
     const mutationHarness = injectedOwner();
     mutationHarness.map.bindings.push({
-      trackId: "t", rack: "dynamic", effectSlotId: "gate", effectIndex: 1,
+      trackId: "t", rack: "inserts", effectSlotId: "gate", effectIndex: 1,
       nativeEffectId: "miso.compressor", tapIds: [1],
     });
     const managed = (await mutationHarness.owner.subscribe({

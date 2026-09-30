@@ -1,9 +1,15 @@
+import { ABI_LAYOUT } from "../generated/abi.ts";
 import { CATALOG } from "../generated/catalog.ts";
 import type { EffectDescriptor } from "../generated/catalog.ts";
 import { MisoEngineError, MisoUsageError } from "./errors.ts";
 
-/** The three prepared effect racks, in signal order. */
-export type ObservationRack = "simd1" | "dynamic" | "simd2";
+/**
+ * Where an observed effect lives: a session console slot or one of the track's inserts.
+ *
+ * A binding's `effectIndex` is the live address within it -- the slot's index in the session's slot
+ * order, or the insert's index in the track's chain -- exactly as a live-control edit addresses it.
+ */
+export type ObservationRack = "console" | "inserts";
 
 /** The independent lanes a caller wants copied from one resident observation. */
 export type ObservationChannels = "left" | "right" | "both";
@@ -95,13 +101,22 @@ export interface RawObservationBinding {
   readonly tapIds: readonly number[];
 }
 
+function rackValue(name: ObservationRack): number {
+  const row = ABI_LAYOUT.constants.racks.find((candidate) => candidate.name === name);
+  if (row === undefined) throw new Error(`the generated ABI layout has no rack ${name}`);
+  return row.value;
+}
+
+/**
+ * The observation rack codes, from the generated layout's `racks` table: `1` inserts and
+ * `3` console (S1c). The retired `0` and `2` decode to nothing.
+ */
 const RACK_VALUES: Readonly<Record<ObservationRack, number>> = Object.freeze({
-  simd1: 0,
-  dynamic: 1,
-  simd2: 2,
+  console: rackValue("console"),
+  inserts: rackValue("inserts"),
 });
 
-const RACK_NAMES: readonly ObservationRack[] = ["simd1", "dynamic", "simd2"];
+const RACK_NAMES: readonly ObservationRack[] = ["console", "inserts"];
 const CHANNEL_VALUES: Readonly<Record<ObservationChannels, number>> = Object.freeze({
   left: 1,
   right: 2,
@@ -121,7 +136,7 @@ export function observationChannelsValue(channels: ObservationChannels): number 
 }
 
 function rackName(value: number): ObservationRack {
-  const name = RACK_NAMES[value];
+  const name = RACK_NAMES.find((candidate) => RACK_VALUES[candidate] === value);
   if (name === undefined) throw new Error(`unknown observation rack ${value}`);
   return name;
 }
@@ -185,7 +200,8 @@ export function enrichObservationMap(
     if (!Number.isSafeInteger(binding.trackIndex) || binding.trackIndex < 0
         || binding.trackIndex >= tracks.length || typeof tracks[binding.trackIndex] !== "string"
         || !Number.isSafeInteger(binding.effectIndex) || binding.effectIndex < 0
-        || !RACK_NAMES[binding.rack] || typeof binding.effectSlotId !== "string"
+        || !RACK_NAMES.some((name) => RACK_VALUES[name] === binding.rack)
+        || typeof binding.effectSlotId !== "string"
         || binding.effectSlotId.length === 0 || typeof binding.nativeEffectId !== "string"
         || binding.nativeEffectId.length === 0 || !Array.isArray(binding.tapIds)
         || binding.tapIds.length === 0 || binding.tapIds.some((tapId) => !Number.isSafeInteger(tapId)

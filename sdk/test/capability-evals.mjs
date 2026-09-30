@@ -38,7 +38,7 @@ function compressorDocument() {
   assert.ok(compressor);
   return sessionDocument({
     effects: {
-      simd1: [effectEntry(
+      preInsert: [effectEntry(
         "compressor",
         compressor.id,
         compressor.parameters.map((row) => ({
@@ -119,7 +119,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       writer.stage({
         kind: "observeSubscribe",
         trackIndex: 0,
-        rack: 0,
+        rack: 3, // console slot 0
         channel: 255,
         effectIndex: 0,
         parameterId: 1,

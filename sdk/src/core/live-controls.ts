@@ -9,9 +9,19 @@ import type {
 } from "../generated/catalog.ts";
 import type { CommandReport, SessionMap } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
+import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
+import type { SessionLike, SessionModel } from "./session.ts";
 import type { LaneEdit } from "./writer.ts";
 
-export type LiveControlRack = "simd1" | "dynamic" | "simd2";
+/**
+ * Where a live effect edit lands (owner decision 12, S1c's live address).
+ *
+ * A `console` address is a session console slot by its index in the session's slot order --
+ * `pre_insert`, then `post_insert` -- which is also its index in every track's `console` array. An
+ * `inserts` address is the track's insert by its index in chain order. `TrackEdits.console()` and
+ * `TrackEdits.insert()` resolve stable IDs to those indices; `TrackEdits.effect()` takes the index.
+ */
+export type LiveControlRack = "console" | "inserts";
 export type LiveControlChannel = "left" | "right" | "both";
 
 export interface SmoothingOptions {
@@ -111,9 +121,142 @@ export type LiveControlBeforeSubmit = (
   managed?: boolean,
 ) => void | Promise<void>;
 
-const RACKS = Object.freeze({ simd1: 0, dynamic: 1, simd2: 2 } as const);
+function rackCode(name: string): number {
+  const row = ABI_LAYOUT.constants.racks.find((candidate) => candidate.name === name);
+  if (row === undefined) throw new MisoUsageError(`the generated ABI layout has no rack ${name}`);
+  return row.value;
+}
+
+/**
+ * The command record's rack byte, from the generated layout's `racks` table (S1c): `1` inserts,
+ * `3` console and `255` not applicable. The retired `0` and `2` are never written.
+ */
+const RACKS: Readonly<Record<LiveControlRack, number>> = Object.freeze({
+  console: rackCode("console"),
+  inserts: rackCode("inserts"),
+});
 const CHANNELS = Object.freeze({ left: 0, right: 1, both: 2 } as const);
-const NONE = 255;
+const NONE = rackCode("notApplicable");
+
+/**
+ * The native effects whose session bypass stays a prepared bypass (S1c; issues #1087, #1100).
+ *
+ * Every other launch effect lowers a session bypass to a per-lane shunt, so a live bypass edit
+ * both sets and lifts it. These two do not: the delay never banks (the engine's
+ * `effect_compiler::NEVER_BANKED_EFFECTS`), and the multiband keeps its prepared bypass so a
+ * bypassed lane cannot silence its bank-mates (`PREPARED_BYPASS_EFFECTS`). A live un-bypass of a
+ * session-bypassed instance of either is admitted by the engine and changes nothing, so
+ * `EffectEdits.bypass(false)` refuses it whenever the SDK knows the instance's authored bypass.
+ *
+ * The metadata does not publish the list, so the SDK holds a copy, and `console-evals.mjs` holds
+ * the copy to the engine: it lifts a session bypass live on every catalog effect and requires the
+ * render to stay bypassed on exactly these.
+ */
+export const PREPARED_BYPASS_EFFECTS: readonly EffectId[] = Object.freeze([
+  "miso.delay",
+  "miso.multiband-compressor",
+]);
+
+/** One addressable effect instance, as the session the SDK built declares it. */
+interface LayoutRow {
+  readonly id: string;
+  readonly effectId: string;
+}
+
+/** One track's instance of a console slot or an insert, with the bypass its session authored. */
+interface InstanceRow extends LayoutRow {
+  readonly bypass: boolean;
+}
+
+/**
+ * The part of a built session live controls need to resolve stable IDs to live addresses.
+ *
+ * The SDK never parses a document (ruling 5438024085), so this comes only from a session the SDK
+ * built: the console slots in slot order, and each track's console entries (in the same order)
+ * and inserts (in chain order), each with its authored bypass.
+ */
+interface LiveControlLayout {
+  readonly console: readonly LayoutRow[];
+  readonly tracks: ReadonlyMap<string, {
+    readonly console: readonly InstanceRow[];
+    readonly inserts: readonly InstanceRow[];
+  }>;
+}
+
+function modelOf(session: SessionLike): SessionModel {
+  const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };
+  if (candidate !== null && typeof candidate === "object" && typeof candidate.toJSON === "function") {
+    return (candidate.toJSON as () => SessionModel)();
+  }
+  if (candidate === null || typeof candidate !== "object" || candidate.schema_version !== 1) {
+    throw new MisoUsageError("live controls resolve IDs against a session built by the SDK");
+  }
+  return session as SessionModel;
+}
+
+function layoutRow(record: unknown, idKey: "slot" | "id"): LayoutRow {
+  const row = record as Readonly<Record<string, unknown>>;
+  const identity = row.identity as Readonly<Record<string, unknown>> | undefined;
+  return Object.freeze({ id: String(row[idKey]), effectId: String(identity?.effect_id ?? "") });
+}
+
+function layoutOf(session: SessionLike, tracks: readonly string[]): LiveControlLayout {
+  const model = modelOf(session);
+  const consoleRecord = model.console as Readonly<Record<string, readonly unknown[]>>;
+  const slots = [...(consoleRecord.pre_insert ?? []), ...(consoleRecord.post_insert ?? [])]
+    .map((slot) => layoutRow(slot, "slot"));
+  const instances = new Map<string, {
+    readonly console: readonly InstanceRow[];
+    readonly inserts: readonly InstanceRow[];
+  }>();
+  for (const track of model.tracks) {
+    const entries = (track.console as readonly Readonly<Record<string, unknown>>[] | undefined) ?? [];
+    const effects = (track.inserts as Readonly<Record<string, readonly unknown[]>>).effects ?? [];
+    instances.set(String(track.id), Object.freeze({
+      // Entries follow slot order, so entry `i` is slot `i`'s instance on this track.
+      console: Object.freeze(slots.map((slot, index) =>
+        Object.freeze({ ...slot, bypass: entries[index]?.bypass === true }))),
+      inserts: Object.freeze(effects.map((effect) => Object.freeze({
+        ...layoutRow(effect, "id"),
+        bypass: (effect as Readonly<Record<string, unknown>>).bypass === true,
+      }))),
+    }));
+  }
+  const declared = [...instances.keys()].sort();
+  const compiled = [...tracks].sort();
+  if (declared.length !== compiled.length || declared.some((id, index) => id !== compiled[index])) {
+    throw new MisoUsageError(
+      `the session declares tracks ${declared.join(", ")}, but the engine compiled ${compiled.join(", ")}; `
+        + "live controls resolve IDs only against the session the engine booted",
+    );
+  }
+  return Object.freeze({ console: Object.freeze(slots), tracks: instances });
+}
+
+/**
+ * Hold `session` to the document the engine booted, byte for byte (#1097 verdict M1).
+ *
+ * The SDK never parses a document, so the only identity it can check without a parser is the
+ * canonical text: the builder's `toJson()` is the engine's canonical writer's output for the same
+ * session, byte for byte, so the builder that wrote the booted document reproduces it exactly, and
+ * any other builder -- a reordered console, a renamed slot, a different insert chain on any track,
+ * or any other difference -- does not. A track-set check alone would let a live bypass resolve
+ * against a reordered console and land on another slot, acknowledged `ok`.
+ */
+function assertBootedSession(session: SessionLike, booted: Uint8Array): void {
+  const written = new TextEncoder().encode(writeCanonicalSessionDocument(modelOf(session)));
+  const length = Math.min(written.length, booted.length);
+  let offset = 0;
+  while (offset < length && written[offset] === booted[offset]) offset += 1;
+  if (offset === length && written.length === booted.length) return;
+  throw new MisoUsageError(
+    `withSession(): the session's canonical document is not the document this engine booted `
+      + `(they first differ at byte ${offset}); live controls resolve console slot and insert IDs `
+      + "only against the session the engine booted, so pass the builder whose toJson() is that "
+      + "document (the SDK never parses a document, so a booted text that is not canonical cannot "
+      + "be matched: boot the builder's toJson() or the engine's canonical text)",
+  );
+}
 
 function u32(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
@@ -245,12 +388,20 @@ function trackEdit(
   });
 }
 
-/** A semantic edit builder bound to the engine's canonical session map. */
+/**
+ * A semantic edit builder bound to the engine's canonical session map.
+ *
+ * Given the session the SDK built for this engine, it also resolves console slot IDs and insert
+ * IDs to live addresses (`TrackEdits.console()`, `TrackEdits.insert()`). Without one, effects are
+ * addressed by index through `TrackEdits.effect()`.
+ */
 export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
+  readonly #layout: LiveControlLayout | undefined;
 
-  constructor(map: SessionMap) {
+  constructor(map: SessionMap, session?: SessionLike) {
     this.#tracks = new Map(map.tracks.map((id, index) => [id, index] as const));
+    this.#layout = session === undefined ? undefined : layoutOf(session, map.tracks);
   }
 
   track(trackId: string): TrackEdits {
@@ -260,16 +411,24 @@ export class LiveControlEdits {
         `the compiled session has no track '${trackId}'; expected one of ${[...this.#tracks.keys()].join(", ")}`,
       );
     }
-    return new TrackEdits(index);
+    return new TrackEdits(index, trackId, this.#layout);
   }
 }
+
+const NO_LAYOUT = "this engine was not booted from a session the SDK built, so there is nothing to "
+  + "resolve IDs against (the SDK never parses a document); call liveControls().withSession(session) "
+  + "with the builder, or address the effect by index with effect()";
 
 /** Every strip-level live edit. Methods build data and never mutate the engine. */
 export class TrackEdits {
   readonly #trackIndex: number;
+  readonly #trackId: string | undefined;
+  readonly #layout: LiveControlLayout | undefined;
 
-  constructor(trackIndex: number) {
+  constructor(trackIndex: number, trackId?: string, layout?: LiveControlLayout) {
     this.#trackIndex = trackIndex;
+    this.#trackId = trackId;
+    this.#layout = layout;
   }
 
   pan(left: number, right: number, options: SmoothingOptions = {}): LaneEdit {
@@ -365,18 +524,108 @@ export class TrackEdits {
     });
   }
 
+  /**
+   * Address an effect by its live address: a console slot by its index in the session's slot order
+   * (`pre_insert`, then `post_insert`), or an insert by its index in the track's chain.
+   */
   effect<E extends EffectId>(
     rack: LiveControlRack,
     effectIndex: number,
     effectId: E,
   ): EffectEdits<E> {
+    if (rack !== "console" && rack !== "inserts") {
+      throw new MisoUsageError(
+        `rack must be console or inserts, not '${String(rack)}' (simd1, dynamic and simd2 are retired)`,
+      );
+    }
+    const index = u32(effectIndex, "effectIndex");
+    // With a layout, the instance at this address is known, whatever `effectId` claims, so its
+    // authored bypass is carried to `bypass()`.
+    const instance = this.#layout?.tracks.get(this.#trackId ?? "")?.[rack][index];
     return new EffectEdits(
       this.#trackIndex,
       RACKS[rack],
-      u32(effectIndex, "effectIndex"),
+      index,
       effectId,
+      instance === undefined ? undefined : authoredInstance(rack, instance, this.#trackId ?? ""),
     );
   }
+
+  /**
+   * Address a session console slot by its stable slot ID.
+   *
+   * The ID resolves to the slot's index in the session's slot order, which is the live address; the
+   * section is not part of it. `effectId` must be the slot's own effect, and it types the edits.
+   */
+  console<E extends EffectId>(slot: string, effectId: E): EffectEdits<E> {
+    if (this.#layout === undefined) throw new MisoUsageError(`console('${slot}'): ${NO_LAYOUT}`);
+    const index = this.#layout.console.findIndex((row) => row.id === slot);
+    const declared = this.#layout.console[index];
+    if (declared === undefined) {
+      throw new MisoUsageError(
+        `the session has no console slot '${slot}'; its slots are `
+          + `${this.#layout.console.map((candidate) => candidate.id).join(", ") || "none"}`,
+      );
+    }
+    return this.#resolved("console", index, declared, effectId);
+  }
+
+  /** Address one of this track's inserts by its stable ID or its index in chain order. */
+  insert<E extends EffectId>(insert: string | number, effectId: E): EffectEdits<E> {
+    if (typeof insert === "number") {
+      const row = this.#layout?.tracks.get(this.#trackId ?? "")?.inserts[insert];
+      if (this.#layout !== undefined && row === undefined) {
+        throw new MisoUsageError(`track '${this.#trackId}' has no insert at index ${insert}`);
+      }
+      return row === undefined
+        ? this.effect("inserts", insert, effectId)
+        : this.#resolved("inserts", insert, row, effectId);
+    }
+    if (this.#layout === undefined) throw new MisoUsageError(`insert('${insert}'): ${NO_LAYOUT}`);
+    const rows = this.#layout.tracks.get(this.#trackId ?? "")?.inserts ?? [];
+    const index = rows.findIndex((row) => row.id === insert);
+    const row = rows[index];
+    if (row === undefined) {
+      throw new MisoUsageError(
+        `track '${this.#trackId}' has no insert '${insert}'; its inserts are `
+          + `${rows.map((candidate) => candidate.id).join(", ") || "none"}`,
+      );
+    }
+    return this.#resolved("inserts", index, row, effectId);
+  }
+
+  #resolved<E extends EffectId>(
+    rack: LiveControlRack,
+    index: number,
+    row: LayoutRow,
+    effectId: E,
+  ): EffectEdits<E> {
+    if (row.effectId !== effectId) {
+      throw new MisoUsageError(
+        `${rack === "console" ? "console slot" : "insert"} '${row.id}' is ${row.effectId}, not ${String(effectId)}`,
+      );
+    }
+    return this.effect(rack, index, effectId);
+  }
+}
+
+/**
+ * What the session authored for the instance a live edit addresses, when the SDK knows it: the
+ * instance's real effect (whatever the caller's `effectId` claims), its session bypass, and a name
+ * for messages.
+ */
+export interface AuthoredInstance {
+  readonly effectId: string;
+  readonly bypass: boolean;
+  readonly label: string;
+}
+
+function authoredInstance(rack: LiveControlRack, row: InstanceRow, trackId: string): AuthoredInstance {
+  return Object.freeze({
+    effectId: row.effectId,
+    bypass: row.bypass,
+    label: `${rack === "console" ? "console slot" : "insert"} '${row.id}' on track '${trackId}'`,
+  });
 }
 
 /** Catalog-derived edits for one effect instance. */
@@ -385,12 +634,19 @@ export class EffectEdits<E extends EffectId> {
   readonly #rack: number;
   readonly #effectIndex: number;
   readonly #effectId: E;
+  readonly #authored: AuthoredInstance | undefined;
 
-  constructor(trackIndex: number, rack: number, effectIndex: number, effectId: E) {
+  /**
+   * `authored` is the addressed instance as the booted session declares it, when the SDK has that
+   * session; `TrackEdits` supplies it. Without it, `bypass(false)` cannot know the instance keeps a
+   * prepared bypass.
+   */
+  constructor(trackIndex: number, rack: number, effectIndex: number, effectId: E, authored?: AuthoredInstance) {
     this.#trackIndex = trackIndex;
     this.#rack = rack;
     this.#effectIndex = effectIndex;
     this.#effectId = effectId;
+    this.#authored = authored;
   }
 
   parameter<N extends LiveEffectParameterName<E>>(
@@ -456,7 +712,28 @@ export class EffectEdits<E extends EffectId> {
     });
   }
 
+  /**
+   * Set or lift this instance's bypass, live, through the latency-preserving shunt.
+   *
+   * It can lift a bypass the session authored too, except on the effects in
+   * `PREPARED_BYPASS_EFFECTS` -- the delay and the multiband compressor -- which keep a
+   * session bypass as a prepared one: the engine admits a live un-bypass of either and renders
+   * nothing different. So when the SDK knows the addressed instance (the engine booted from a
+   * builder, or `withSession()` supplied it), `bypass(false)` on a session-bypassed delay or
+   * multiband throws a `MisoUsageError` before anything is sent, rather than let an `ok`
+   * acknowledgement stand for a no-op. Author the instance unbypassed and reload the session to
+   * hear it. Addressed by index with no session, the SDK cannot know, and the lift is sent.
+   */
   bypass(enabled: boolean): LaneEdit {
+    const authored = this.#authored;
+    if (!enabled && authored !== undefined && authored.bypass
+      && PREPARED_BYPASS_EFFECTS.includes(authored.effectId as EffectId)) {
+      throw new MisoUsageError(
+        `${authored.label} is a ${authored.effectId} the session bypassed, and it keeps its prepared `
+          + "bypass: the engine would acknowledge a live un-bypass and render nothing different. "
+          + "Author it with bypass false and reload the session to hear it",
+      );
+    }
     return trackEdit("effectBypass", this.#trackIndex, {
       rack: this.#rack,
       effectIndex: this.#effectIndex,
@@ -482,13 +759,49 @@ export class EffectEdits<E extends EffectId> {
 /** One transaction-oriented set of live controls over either SDK transport. */
 export class EngineLiveControls {
   readonly edit: LiveControlEdits;
+  readonly #map: SessionMap;
   readonly #submit: LiveControlSubmit;
   readonly #beforeSubmit: LiveControlBeforeSubmit | undefined;
+  readonly #booted: Uint8Array | undefined;
 
-  constructor(map: SessionMap, submit: LiveControlSubmit, beforeSubmit?: LiveControlBeforeSubmit) {
-    this.edit = new LiveControlEdits(map);
+  /**
+   * `session` is the session the SDK built for this engine, when there is one; it is what lets
+   * `edit.track(id).console(slot, ...)` and `.insert(id, ...)` resolve stable IDs. `booted` is the
+   * document the engine booted, exactly as it was staged; both SDK engines supply it, and
+   * `withSession()` holds its session to it.
+   */
+  constructor(
+    map: SessionMap,
+    submit: LiveControlSubmit,
+    beforeSubmit?: LiveControlBeforeSubmit,
+    session?: SessionLike,
+    booted?: Uint8Array,
+  ) {
+    this.edit = new LiveControlEdits(map, session);
+    this.#map = map;
     this.#submit = submit;
     this.#beforeSubmit = beforeSubmit;
+    this.#booted = booted;
+  }
+
+  /**
+   * The same live controls, resolving console slot and insert IDs against `session`.
+   *
+   * For an engine booted from document text: the SDK never parses a document, so the caller hands
+   * over the builder that wrote it, and that builder must have written exactly the booted document:
+   * its canonical `toJson()` must equal the booted bytes. Any other session -- its console
+   * reordered, a slot renamed, a track's inserts changed -- is refused with a `MisoUsageError`,
+   * before any edit is built, because its IDs would resolve to addresses that name other instances.
+   */
+  withSession(session: SessionLike): EngineLiveControls {
+    if (this.#booted === undefined) {
+      throw new MisoUsageError(
+        "withSession() holds the session to the document the engine booted, and these live "
+          + "controls were constructed without it; pass the session to the constructor instead",
+      );
+    }
+    assertBootedSession(session, this.#booted);
+    return new EngineLiveControls(this.#map, this.#submit, this.#beforeSubmit, session, this.#booted);
   }
 
   async submit(...edits: readonly LaneEdit[]): Promise<CommandReport> {

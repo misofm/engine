@@ -114,7 +114,8 @@ function responseCapture(sectionCount = 6) {
   setU32(ownerLayout, owner, "nativeIdBytes", 1);
   setU32(ownerLayout, owner, "stableIdOffset", strings + 2);
   setU32(ownerLayout, owner, "stableIdBytes", 1);
-  setU32(ownerLayout, owner, "rack", 1);
+  // `4` is the owner record's console code (S1c); `1` and `3` are retired.
+  setU32(ownerLayout, owner, "rack", 4);
   setU32(ownerLayout, owner, "slot", 2);
   setU32(ownerLayout, owner, "kind", 1);
   setU32(ownerLayout, owner, "availability", 1);
@@ -181,6 +182,23 @@ test("live response parsers accept six sections and reject seven or truncated re
   for (const malformed of [seven, truncated]) {
     assert.throws(() => parseTrackResponseState(malformed), MisoEngineError);
     assert.throws(() => module.querySnapshotIfChanged(query, malformed, state), MisoEngineError);
+  }
+  // Decision 12 retired the owner record's `1` and `3` (simd1, simd2): never reinterpreted, and a
+  // code nobody allocated is refused the same way. Red mutation: decode the owner rack through the
+  // retired positional table -> `1` and `3` parse as racks and this goes red.
+  for (const code of [0, 2, 4]) {
+    const recoded = valid.slice();
+    new DataView(recoded.buffer).setUint32(resultLayout.bytes + fieldOffset(ownerLayout, "rack"), code, true);
+    assert.doesNotThrow(() => module.querySnapshotIfChanged(query, recoded, parseTrackResponseState(recoded)));
+  }
+  for (const retired of [1, 3, 5, 255]) {
+    const recoded = valid.slice();
+    new DataView(recoded.buffer).setUint32(resultLayout.bytes + fieldOffset(ownerLayout, "rack"), retired, true);
+    assert.throws(
+      () => module.querySnapshotIfChanged(query, recoded, parseTrackResponseState(recoded)),
+      /unknown live response rack/,
+      `owner rack ${retired} must be refused`,
+    );
   }
   module.close();
 });
@@ -310,9 +328,9 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
   const asset = await MisoEngineAsset.load(await moduleBytes());
   const engine = await createOfflineEngine(sessionDocument({
     effects: {
-      simd1: [effectEntry("eq", "miso.parametric-eq", params)],
-      dynamic: [effectEntry("comp", "miso.compressor")],
-      simd2: [],
+      preInsert: [effectEntry("eq", "miso.parametric-eq", params)],
+      inserts: [effectEntry("comp", "miso.compressor")],
+      postInsert: [],
     },
   }), { asset, liveControls: { commandQueueRecords: 64 } });
   const request = {
@@ -332,9 +350,13 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
     assert.equal(first.rightDb.length, 16);
     assert.deepEqual(first.members.map((member) => [member.rack, member.stableId, member.available]), [
       ["input", "input-filters", true],
-      ["simd1", "eq", true],
-      ["dynamic", "comp", false],
+      ["console", "eq", true],
+      ["inserts", "comp", false],
     ]);
+    // The owner record's codes (S1c): `0` input filters, `4` console, `2` inserts. Red mutation:
+    // decode through the retired positional table (`input`, `simd1`, `dynamic`, `simd2`) -> the
+    // console code `4` has no row and the query throws; the rack names above go red first.
+    assert.deepEqual(first.members.map((member) => member.rackValue), [0, 4, 2]);
     assert.deepEqual(first.members[1].enabledLeft, [true, false, false, false, false, false]);
     assert.equal(first.members[2].excludedReason, "linearResponseUnavailable");
     const firstFrequencies = first.frequenciesHz.slice();
@@ -342,7 +364,7 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
 
     const liveControls = engine.liveControls();
     await liveControls.submit(
-      liveControls.edit.track("t").effect("simd1", 0, "miso.parametric-eq").parameter("band-1-gain", -3),
+      liveControls.edit.track("t").effect("console", 0, "miso.parametric-eq").parameter("band-1-gain", -3),
     );
     const beforeDrain = engine.queryTrackResponse(request);
     assert.equal(beforeDrain.capturedSample, 0n);

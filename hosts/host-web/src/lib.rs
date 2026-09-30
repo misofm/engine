@@ -5904,9 +5904,9 @@ fn compile_ready(
         let count = |effects: usize| -> Result<u32, Vec<u8>> {
             u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
         };
-        // The lowered racks (decision 12): every track carries every `pre_insert` and
-        // `post_insert` slot, so those counts are the session's; rack bytes `0`/`1`/`2` keep
-        // addressing them until #1096 (S1c) gives the browser record its console byte.
+        // The lowered racks (decision 12), in chain order: every track carries every
+        // `pre_insert` and `post_insert` slot, so those counts are the session's. A live address
+        // (rack byte `3` console or `1` inserts, #1096) reaches them through `dense_effect_slot`.
         rack_effects.push([
             count(model.console.pre_insert.len())?,
             count(track.inserts.effects.len())?,

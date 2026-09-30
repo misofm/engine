@@ -305,11 +305,11 @@ test("browser live controls retain the managed observation conflict hook", async
   });
   try {
     const managed = await engine.subscribeObservations({
-      selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+      selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
       windowBlocks: 1,
     });
     const liveControls = await engine.liveControls();
-    const manual = liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
+    const manual = liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
       .observe("Gain Reduction", false, 1);
     await assert.rejects(liveControls.submit(manual), /conflict/);
     assert.equal(commands.length, 1, "the manual conflicting edit is stopped by the existing hook");

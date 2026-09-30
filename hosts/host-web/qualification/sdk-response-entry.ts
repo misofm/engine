@@ -4,7 +4,7 @@ import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
 import { CATALOG } from "../../../sdk/src/generated/catalog.ts";
-import { effect } from "../../../sdk/src/core/session.ts";
+import { effect, session } from "../../../sdk/src/core/session.ts";
 import type { ObservationReadResult } from "../../../sdk/src/core/observation.ts";
 import type { TrackResponseResult } from "../../../sdk/src/core/live-response.ts";
 import { createResponsePreview } from "../../../sdk/src/browser/response.ts";
@@ -23,12 +23,12 @@ const PEAK_EQ_GAIN_DB = 6;
 
 const SPECTRUM_QUERIES = [
   {
-    target: { kind: "trackPostInputBuiltins" as const, trackId: "track" },
+    target: { kind: "trackPostInput" as const, trackId: "track" },
     channels: "both" as const,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
   },
   {
-    target: { kind: "trackPostMatrix" as const, trackId: "track" },
+    target: { kind: "trackPostPan" as const, trackId: "track" },
     channels: "both" as const,
     spectrumLimits: { maximumCaptureBytes: ABI_LAYOUT.constants.spectrumCaptureBytes },
   },
@@ -41,11 +41,11 @@ const SPECTRUM_QUERIES = [
 
 const SPECTRUM_COLLECTION_ENTRIES = [
   {
-    target: { kind: "trackPostMatrix" as const, trackId: "track-a" },
+    target: { kind: "trackPostPan" as const, trackId: "track-a" },
     channels: "both" as const,
   },
   {
-    target: { kind: "trackPostMatrix" as const, trackId: "track-b" },
+    target: { kind: "trackPostPan" as const, trackId: "track-b" },
     channels: "left" as const,
   },
 ];
@@ -56,7 +56,7 @@ const SPECTRUM_COLLECTION = {
 };
 
 function observationSelection(effectSlotId: string, channels: "left" | "right" | "both" = "both") {
-  return { trackId: "track", rack: "dynamic" as const, effectSlotId, tapId: 1, channels };
+  return { trackId: "track", rack: "inserts" as const, effectSlotId, tapId: 1, channels };
 }
 
 function observationPlanes(block: number): Float32Array[] {
@@ -129,8 +129,8 @@ function observationDocumentWithGate(raw: string): Uint8Array {
     })),
     sidechain: { kind: "none" },
   };
-  track.dynamic.effects = [
-    ...track.dynamic.effects.filter((entry: { id?: string }) => entry.id !== "gate"),
+  track.inserts.effects = [
+    ...track.inserts.effects.filter((entry: { id?: string }) => entry.id !== "gate"),
     gateEntry,
   ];
   return new TextEncoder().encode(JSON.stringify(document));
@@ -285,8 +285,10 @@ function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array
       lane.trim_db = 0;
       lane.polarity_invert = false;
     }
-    const eq = track.simd1?.effects?.find((entry: { identity?: { effect_id?: string } }) =>
+    // The first console slot is the EQ; its knobs are this track's entry for that slot.
+    const slot = document.console?.pre_insert?.find((entry: { identity?: { effect_id?: string } }) =>
       entry.identity?.effect_id === "miso.parametric-eq");
+    const eq = track.console?.find((entry: { slot?: string }) => entry.slot === slot?.slot);
     const definition = CATALOG.effects.find((candidate) => candidate.id === "miso.parametric-eq");
     if (eq === undefined || definition === undefined) throw new Error("spectrum peak EQ fixture is unavailable");
     const names = new Map([
@@ -303,8 +305,11 @@ function spectrumDocument(raw: string, frames: number, peak = false): Uint8Array
         unit: parameter.unitName,
         value: names.get(parameter.name) ?? parameter.default,
       }));
-    track.dynamic.effects = [];
-    track.simd2.effects = [];
+    // Only that EQ stays: no inserts, and no post_insert slot (nor its entry).
+    track.inserts.effects = [];
+    document.console.pre_insert = [slot];
+    document.console.post_insert = [];
+    track.console = [eq];
   }
   return new TextEncoder().encode(JSON.stringify(document));
 }
@@ -1142,7 +1147,9 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const liveControls = await browser.liveControls();
     const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
     const edits = (owner: EngineLiveControls) => {
-      const eq = owner.edit.track("track").effect("simd1", 0, "miso.parametric-eq");
+      // The raw document gives no builder to resolve `eq-simd1` against, so its live address:
+      // console slot 0.
+      const eq = owner.edit.track("track").effect("console", 0, "miso.parametric-eq");
       return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
         eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
         eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
@@ -1666,6 +1673,173 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   }
 }
 
+const LIVE_BYPASS_FRAMES = 1_024;
+
+/** Deterministic broadband PCM, so each EQ band below is audible in the output. */
+function liveBypassPlanes(block: number): Float32Array[] {
+  return [0, 1].map((channel) => {
+    let state = (0x9e37_79b9 ^ (block * 1_024 + channel * 16 + 7)) >>> 0;
+    return Float32Array.from({ length: 128 }, () => {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+      return ((state / 0x1_0000_0000) * 2 - 1) * 0.25;
+    });
+  });
+}
+
+/**
+ * The console-strip bypass fixture (#1097 gate 4), built with the SDK so live controls resolve IDs:
+ * a `pre_insert` EQ, a `post_insert` EQ and an insert EQ, each tuned to a different band.
+ */
+function liveBypassSession(bypassed?: "desk-hi" | "ins-mid") {
+  const band = (gain: number, frequency: number) => ({
+    "band-1-enabled": true, "band-1-gain": gain, "band-1-frequency": frequency,
+  });
+  return session({ id: "qualification.live-bypass", sampleRateHz: 48_000, revision: 1 })
+    .source("live-control-source", {
+      channels: 2, bitDepth: 24, frames: LIVE_BYPASS_FRAMES, content: `blake3:${"0".repeat(64)}`,
+    })
+    .console({
+      preInsert: [{ slot: "desk-lo", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "desk-hi", effectId: "miso.parametric-eq" }],
+    })
+    .track("track", {
+      source: "live-control-source",
+      console: [
+        { slot: "desk-lo", parameters: band(9, 200) },
+        { slot: "desk-hi", bypass: bypassed === "desk-hi", parameters: band(-12, 6_000) },
+      ],
+      inserts: [effect("miso.parametric-eq", band(12, 1_500), { slotId: "ins-mid", bypass: bypassed === "ins-mid" })],
+    })
+    .output("main-out")
+    .route({
+      id: "main",
+      source: { kind: "track", trackId: "track", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main-out" },
+    });
+}
+
+async function sha256Hex(planes: readonly Float32Array[]): Promise<string> {
+  const bytes = new Uint8Array(planes.reduce((total, plane) => total + plane.byteLength, 0));
+  let at = 0;
+  for (const plane of planes) {
+    bytes.set(new Uint8Array(plane.buffer, plane.byteOffset, plane.byteLength), at);
+    at += plane.byteLength;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Render the fixture once in an OfflineAudioContext, after an optional live bypass edit.
+ *
+ * The engine boots from the builder itself, so `console("desk-hi")` and `insert("ins-mid")`
+ * resolve through the SDK, and the edit is admitted before the first quantum: its render must be
+ * the render of the same bypass authored in the document.
+ */
+async function renderLiveBypass(
+  bypassed: "desk-hi" | "ins-mid" | undefined,
+  live?: { readonly target: "desk-hi" | "ins-mid"; readonly bypass: boolean },
+): Promise<{ digest: string; energy: number; address?: readonly number[]; appliedAtSample?: string }> {
+  const browser = await createEngine({
+    document: liveBypassSession(bypassed),
+    policy: { sourceRingFrames: LIVE_BYPASS_FRAMES, liveControls: { commandQueueRecords: 16 } },
+    scratchBoot: async () => ({
+      sampleRateHz: 48_000,
+      quantumFrames: 128,
+      sourceRingFrames: LIVE_BYPASS_FRAMES,
+      backend: "simd128" as const,
+      sources: [{ id: "live-control-source", channels: 2, frames: BigInt(LIVE_BYPASS_FRAMES) }],
+      tracks: ["track"],
+    }),
+    createContext: () => {
+      const context = new OfflineAudioContext(2, LIVE_BYPASS_FRAMES, 48_000);
+      Object.defineProperty(context, "close", { value: async () => {} });
+      return context;
+    },
+    createHost: (request) => createDefaultHost({
+      ...request,
+      hostModuleUrl: "/artifacts/miso-engine-v1-audio-worklet-host.js",
+    }),
+    simd128ModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
+    responseWorkerModuleUrl: "/sdk/response-worker.js",
+  });
+  browser.host.node.connect(browser.context.destination);
+  try {
+    let address: readonly number[] | undefined;
+    let appliedAtSample: string | undefined;
+    if (live !== undefined) {
+      const controls = await browser.liveControls();
+      const track = controls.edit.track("track");
+      const edit = live.target === "desk-hi"
+        ? track.console("desk-hi", "miso.parametric-eq").bypass(live.bypass)
+        : track.insert("ins-mid", "miso.parametric-eq").bypass(live.bypass);
+      const report = await controls.submit(edit);
+      if (!report.ok || report.admitted !== 1) {
+        throw new Error(`live bypass ${live.target} was refused: ${report.reasonName}`);
+      }
+      address = [edit.rack, edit.effectIndex];
+      appliedAtSample = report.appliedAtSample.toString();
+    }
+    for (let block = 0; block < LIVE_BYPASS_FRAMES / 128; block += 1) {
+      const acknowledgement = await browser.host.submitSource({
+        sourceId: "live-control-source",
+        generation: 1n,
+        startFrame: BigInt(block * 128),
+        sampleRateHz: 48_000,
+        planes: liveBypassPlanes(block),
+        frames: 128,
+        endOfRegion: block === LIVE_BYPASS_FRAMES / 128 - 1,
+      });
+      if (acknowledgement.result !== 0) throw new Error("live bypass source submission refused");
+    }
+    const rendered = await (browser.context as OfflineAudioContext).startRendering();
+    const planes = [rendered.getChannelData(0), rendered.getChannelData(1)];
+    const energy = planes.reduce((total, plane) =>
+      total + plane.reduce((sum, value) => sum + value * value, 0), 0);
+    return {
+      digest: await sha256Hex(planes),
+      energy,
+      ...(address === undefined ? {} : { address }),
+      ...(appliedAtSample === undefined ? {} : { appliedAtSample }),
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+/**
+ * #1097 gate 4: a live bypass toggle on a console slot and on an insert, through the SDK.
+ *
+ * Each direction is checked: bypassing an enabled instance renders the document that authors it
+ * bypassed, and lifting an authored bypass renders the document with none. The console slot is the
+ * `post_insert` one, so its live address (console slot 1) crosses the section split.
+ */
+async function runSdkLiveBypassQualification(): Promise<Record<string, unknown>> {
+  const base = await renderLiveBypass(undefined);
+  const consoleOff = await renderLiveBypass("desk-hi");
+  const insertOff = await renderLiveBypass("ins-mid");
+  const consoleOffLive = await renderLiveBypass(undefined, { target: "desk-hi", bypass: true });
+  const insertOffLive = await renderLiveBypass(undefined, { target: "ins-mid", bypass: true });
+  const consoleOnLive = await renderLiveBypass("desk-hi", { target: "desk-hi", bypass: false });
+  const insertOnLive = await renderLiveBypass("ins-mid", { target: "ins-mid", bypass: false });
+  return {
+    base: base.digest,
+    consoleOff: consoleOff.digest,
+    insertOff: insertOff.digest,
+    consoleOffLive: consoleOffLive.digest,
+    insertOffLive: insertOffLive.digest,
+    consoleOnLive: consoleOnLive.digest,
+    insertOnLive: insertOnLive.digest,
+    consoleAddress: consoleOffLive.address,
+    insertAddress: insertOffLive.address,
+    liftAddresses: [consoleOnLive.address, insertOnLive.address],
+    appliedAtSamples: [consoleOffLive, insertOffLive, consoleOnLive, insertOnLive]
+      .map((render) => render.appliedAtSample),
+    baseEnergy: base.energy,
+  };
+}
+
 export async function runSdkResponseQualification(): Promise<Record<string, unknown>> {
   const bytes = new Uint8Array(await (await fetch("/artifacts/miso-engine-v1-audio-worklet.simd128.wasm")).arrayBuffer());
   const asset = await MisoEngineAsset.load(bytes);
@@ -1725,6 +1899,7 @@ export async function runSdkResponseQualification(): Promise<Record<string, unkn
       ownedAfterSecondQuery: eqLeft.every((value, index) => value === eq.totalLeftDb?.[index]),
       observations: await runSdkObservationQualification(),
       spectrum: await runSdkSpectrumQualification(),
+      liveBypass: await runSdkLiveBypassQualification(),
     };
   } finally {
     await preview.close();

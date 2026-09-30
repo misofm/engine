@@ -32,6 +32,8 @@ const MUTATIONS = [
   "sdk-response", "sdk-observation", "sdk-spectrum", "sdk-spectrum-hop-missing",
   "sdk-spectrum-hop-wrong", "sdk-spectrum-recovery-loss",
   "sdk-spectrum-recovery-unavailable", "sdk-spectrum-recovery-identity",
+  // Issue #1097 gate 4: a live bypass that reached no instance, or the wrong one.
+  "sdk-live-bypass-console", "sdk-live-bypass-insert", "sdk-live-bypass-address",
 ];
 
 function option(name) {
@@ -75,9 +77,19 @@ async function buildSdkBundle(sdkRoot) {
   const sourceRoot = path.resolve(HERE, "../../../sdk/src");
   const distribution = path.join(sdkRoot, "dist");
   const useDistribution = await readdir(distribution).then((entries) => entries.includes("core"), () => false);
-  if (!useDistribution && sdkRoot !== path.dirname(sourceRoot)) {
+  const repositorySdk = sdkRoot === path.dirname(sourceRoot);
+  if (!useDistribution && !repositorySdk) {
     throw new Error("selected SDK package has no built distribution");
   }
+  // Say which SDK this run qualifies (#1097 verdict L5). A leftover `sdk/dist` -- from
+  // `sdk-package.sh check`, say -- silently switches the repository's own SDK from CI's source
+  // bundle to whatever that build left behind, so the evidence must name the bundle it used.
+  process.stdout.write(!useDistribution
+    ? `sdk bundle: the source at ${sourceRoot} (CI's mode)\n`
+    : repositorySdk
+      ? `sdk bundle: the built distribution at ${distribution}, not CI's source bundle; delete it `
+        + "to qualify the source as CI does\n"
+      : `sdk bundle: the selected package's built distribution at ${distribution}\n`);
   const shippedSdk = {
     name: "shipped-sdk",
     setup(builder) {
@@ -208,7 +220,36 @@ function validate(browserName, result) {
   return "simd128 supported";
 }
 
+/**
+ * Issue #1097 gate 4: a live bypass toggle on a console slot and on an insert, through the SDK.
+ *
+ * Bypassing lands on exactly the instance the same bypass authored in the document does, lifting
+ * an authored bypass renders the document with none, all four edits apply at the first quantum,
+ * and the console slot is addressed by S1c's code `3` at its index in slot order (`post_insert`
+ * slot `desk-hi` is slot 1), the insert by `1` at its index.
+ */
+function validateSdkLiveBypass(browserName, live) {
+  const digest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+  gate(browserName, "sdk-live-bypass", ["base", "consoleOff", "insertOff", "consoleOffLive",
+    "insertOffLive", "consoleOnLive", "insertOnLive"].every((key) => digest(live?.[key]))
+    && live.baseEnergy > 0
+    && new Set([live.base, live.consoleOff, live.insertOff]).size === 3,
+  "the console and insert bypasses were not both audible and distinct renders");
+  gate(browserName, "sdk-live-bypass", live.consoleOffLive === live.consoleOff
+    && live.consoleOnLive === live.base,
+  "a live bypass toggle on the post_insert console slot did not render its authored bypass state");
+  gate(browserName, "sdk-live-bypass", live.insertOffLive === live.insertOff
+    && live.insertOnLive === live.base,
+  "a live bypass toggle on the insert did not render its authored bypass state");
+  gate(browserName, "sdk-live-bypass", JSON.stringify(live.consoleAddress) === "[3,1]"
+    && JSON.stringify(live.insertAddress) === "[1,0]"
+    && JSON.stringify(live.liftAddresses) === "[[3,1],[1,0]]"
+    && JSON.stringify(live.appliedAtSamples) === JSON.stringify(["0", "0", "0", "0"]),
+  "the live bypass edits did not carry the console/insert addresses or apply at the first quantum");
+}
+
 function validateSdkResponse(browserName, response) {
+  validateSdkLiveBypass(browserName, response?.liveBypass);
   gate(browserName, "sdk-response", response?.capabilities?.some(
     (row) => row.owner === "effect" && row.target === "miso.parametric-eq",
   ) === true, "SDK did not expose the generated EQ capability");
@@ -255,9 +296,9 @@ function validateSdkResponse(browserName, response) {
   ]);
   const expectedLiveMemberOrder = [
     ["miso.builtin.input-filters", "input-filters", "input", "inputFilters", true, false],
-    ["miso.parametric-eq", "eq-simd1", "simd1", "parametricEq", true, false],
-    ["miso.compressor", "comp", "dynamic", "unavailable", false, false],
-    ["miso.parametric-eq", "eq-simd2", "simd2", "parametricEq", true, true],
+    ["miso.parametric-eq", "eq-simd1", "console", "parametricEq", true, false],
+    ["miso.compressor", "comp", "inserts", "unavailable", false, false],
+    ["miso.parametric-eq", "eq-simd2", "console", "parametricEq", true, true],
   ];
   gate(browserName, "sdk-live-response", live?.trackId === "track"
     && live.mode === "target" && live.meaning === "eqFilterSubtotal"
@@ -282,9 +323,9 @@ function validateSdkResponse(browserName, response) {
   ]);
   const expectedManagedMemberOrder = [
     ["miso.builtin.input-filters", "input-filters", "input", "inputFilters", true, false],
-    ["miso.parametric-eq", "eq-simd1", "simd1", "parametricEq", true, false],
-    ["miso.compressor", "comp", "dynamic", "unavailable", false, false],
-    ["miso.parametric-eq", "eq-simd2", "simd2", "parametricEq", true, true],
+    ["miso.parametric-eq", "eq-simd1", "console", "parametricEq", true, false],
+    ["miso.compressor", "comp", "inserts", "unavailable", false, false],
+    ["miso.parametric-eq", "eq-simd2", "console", "parametricEq", true, true],
   ];
   const finiteArray = (values) => Array.isArray(values) && values.length > 0
     && values.every(Number.isFinite);
@@ -408,8 +449,8 @@ function validateSdkResponse(browserName, response) {
   const spectrum = response?.spectrum;
   const spectrumRows = Array.isArray(spectrum?.targets) ? spectrum.targets : [];
   const expectedSpectrumTargets = [
-    "trackPostInputBuiltins:track",
-    "trackPostMatrix:track",
+    "trackPostInput:track",
+    "trackPostPan:track",
     "output:main-out",
   ];
   const spectrumU64 = (value) => typeof value === "string"
@@ -502,27 +543,27 @@ function validateSdkResponse(browserName, response) {
   const collectionCaptured = canonicalU64(collection?.capturedSample);
   const collectionEnd = canonicalU64(collection?.endSample);
   gate(browserName, "sdk-spectrum-collection", JSON.stringify(collection?.selections) === JSON.stringify([
-      "trackPostMatrix:track-a", "trackPostMatrix:track-b", "trackPostMatrix:track-a",
+      "trackPostPan:track-a", "trackPostPan:track-b", "trackPostPan:track-a",
     ])
     && JSON.stringify(collection?.masks) === JSON.stringify(["both", "left"])
     && collection?.toBOk === true && collection?.toAOks === true
-    && collection?.toBTarget === "trackPostMatrix:track-b"
+    && collection?.toBTarget === "trackPostPan:track-b"
     && collection?.toBChannels === "left"
     && collection?.bCleared === true && collection?.aCleared === true
     && collection?.switchedWithoutRestart === true,
   "spectrum collection did not atomically switch the existing owner A-to-B-to-A with fresh results");
-  gate(browserName, "sdk-spectrum-collection", collection?.firstTarget === "trackPostMatrix:track-a"
+  gate(browserName, "sdk-spectrum-collection", collection?.firstTarget === "trackPostPan:track-a"
     && collection?.firstChannels === "both"
     && collectionFirstCaptured === 0n
     && collectionFirstEnd === 2_048n
-    && collection?.secondTarget === "trackPostMatrix:track-b"
+    && collection?.secondTarget === "trackPostPan:track-b"
     && collection?.secondChannels === "left"
     && collectionSecondCaptured !== undefined && collectionSecondEnd !== undefined
     && collectionSecondEnd > collectionSecondCaptured
     && Math.abs(collection?.firstPeakHz - 750) < 0.01
     && Math.abs(collection?.secondPeakHz - 750) < 0.01
     && collection?.distinctSelectedSignal === true
-    && collection?.resultTarget === "trackPostMatrix:track-a"
+    && collection?.resultTarget === "trackPostPan:track-a"
     && collection?.resultChannels === "both"
     && collectionCaptured !== undefined && collectionEnd !== undefined
     && collectionSecondEnd !== undefined && collectionCaptured > collectionSecondEnd
@@ -615,6 +656,15 @@ function mutate(result, mutation) {
     const recovery = copy.sdkResponse.spectrum.continuous.recoveryDelivery;
     recovery.resultCapturedSample = (BigInt(recovery.notificationCapturedSample) + 1n).toString();
   }
+  // A live console bypass that did nothing, an insert bypass that landed on another instance, and
+  // a post_insert slot addressed by its index within its own section.
+  if (mutation === "sdk-live-bypass-console") {
+    copy.sdkResponse.liveBypass.consoleOffLive = copy.sdkResponse.liveBypass.base;
+  }
+  if (mutation === "sdk-live-bypass-insert") {
+    copy.sdkResponse.liveBypass.insertOffLive = copy.sdkResponse.liveBypass.consoleOff;
+  }
+  if (mutation === "sdk-live-bypass-address") copy.sdkResponse.liveBypass.consoleAddress = [3, 0];
   return copy;
 }
 

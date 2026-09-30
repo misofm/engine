@@ -22,7 +22,7 @@ function observationDocument() {
   assert.ok(compressor && gate);
   return sessionDocument({
     effects: {
-      dynamic: [
+      inserts: [
         effectEntry("comp", compressor.id, compressor.parameters.map((row) => ({
           id: row.id, unit: row.unitName, value: row.default, channel: "both",
         }))),
@@ -41,7 +41,7 @@ function largeObservationDocument() {
   const tracks = Array.from({ length: 257 }, (_unused, index) => {
     const track = structuredClone(trackTemplate);
     track.id = `t${index}`;
-    track.dynamic.effects = [structuredClone(trackTemplate.dynamic.effects[0])];
+    track.inserts.effects = [structuredClone(trackTemplate.inserts.effects[0])];
     return track;
   });
   document.tracks = tracks;
@@ -55,7 +55,7 @@ function largeObservationDocument() {
 }
 
 function selection(effectSlotId, channels = "both") {
-  return { trackId: "t", rack: "dynamic", effectSlotId, tapId: 1, channels };
+  return { trackId: "t", rack: "inserts", effectSlotId, tapId: 1, channels };
 }
 
 function feed(engine, block) {
@@ -143,9 +143,9 @@ describe("issue 777 -- selected resident observations", () => {
 
       const liveControls = engine.liveControls();
       const armed = await liveControls.submit(
-        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
-        liveControls.edit.track("t").effect("dynamic", 1, "miso.gate-expander")
+        liveControls.edit.track("t").effect("inserts", 1, "miso.gate-expander")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(armed.ok, true);
@@ -170,9 +170,9 @@ describe("issue 777 -- selected resident observations", () => {
 
       // The prior resident cell survives a re-arm, but is historical for that new arm.
       await liveControls.submit(
-        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", false, 2),
-        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        liveControls.edit.track("t").effect("inserts", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(engine.readObservations([comp])[0].status, "pending");
