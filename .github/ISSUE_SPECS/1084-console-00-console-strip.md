@@ -581,3 +581,78 @@ documents with a uniform, non-empty `dynamic` rack are the two named witnesses. 
 4. **Typo.** The P2b-P2e dependency lines read "(P2a), #1088)".
 5. **Optional.** S1r's gates pass on the old schema, so it could close C2 instead and shorten C3's
    unpushed window.
+
+## C2 boundary evidence
+
+**PASS, nothing fixed.** Terra checked the merged batch once, as `qualification.yml` would. The
+batch is `codex/batch-console-2` at `51a1514a` on `origin/main` `223330bc`: P1 #1087, P1b #1100,
+P2a #1088, P2b #1089, P2c #1090, P2d #1091 and P2e #1092, plus root's doc, test and ratchet
+commits.
+- The router gives `route=full`, `math_closure=true`, `release_inputs=true` and `self_tests=[]`
+  (`ci-path-router.py --flags`, base `223330bc`).
+- 95 steps ran on an x86-64-v3 host (AMD EPYC 7313P) with rustc 1.97.1, `CARGO_INCREMENTAL=0` and
+  the worktree's `target/`. Every step exited 0.
+- No merge-interaction defect was found and no commit was needed beyond this record.
+
+| Job | Gate (command) | Result |
+|---|---|---|
+| route | `check-ci-path-routing.py`, `test-ci-path-routing.py` | ok |
+| docs-gates | `check-dsp-research.sh`, `check-builtins-listening.sh` | ok |
+| lint | `cargo fmt --all -- --check` | ok |
+| lint | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| lint | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | ok |
+| lint | every `check-*`/`test-*` step of the job: workspace, session, env-vocabulary, bench policy + `test-bench-policy.sh`, test-support CI, scalar-oracle self-test, script reachability, console-benchmark fixture, builtins-fixture mutations, bench preconditions, host-core, protocol-control, realtime + audit-leak + artifact-evidence-leak, trace validator, lane, unfused seal, rack/builtins/graph, effect-runtime policy + fixtures, conformance boundaries, EQ render contract, release-shape self-test, npm publish modes, stem store, stem-identity corpus | all ok |
+| lint | the three sub-v3 probes (scalar and AVX2-without-FMA refused with "requires x86-64-v3"; AVX2+FMA compiles) | ok |
+| test-debug-a | `cargo test --locked --workspace --all-targets --exclude …` with the job's features | 93 binaries, 1109 passed, 0 failed |
+| test-debug-b | `cargo test --locked --all-targets -p lane … -p conformance` with the job's features; `conformance_fixtures -- --check` | 151 binaries, 834 passed, 0 failed; fixtures ok |
+| test-release | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | 109 passed, `g5_native_digests_match_pins` ok |
+| test-release | M3 FMA cfg; loom `spsc_loom`; M1 `m1_exhaustive` and F1 `f1_fast_db_bounds` `--ignored` (math closure) | ok |
+| audit-native | release build; `cargo test --release -p audit -p bench -p console-workload` | 114 passed, 0 failed |
+| audit-native | `audit capi` and its record validator; `audit delay`, `compressor` and `parametric-eq` at 100,000 blocks; `audit gate-expander` (bank width 8, `bank_available`) | every counter 0, `total_violations` 0 |
+| audit-native | builtins, builtins-graph, graph, realtime and effect-contract traces at 1,000,000 blocks; protocol allocation audit; realtime, builtins and builtins-graph probe mutations | PASS |
+| audit-native | `check-capi-abi.sh` and `--self-test`; scalar oracle absent from `libcapi.so`; graph determinism 100/100; builtins fixtures (50 files); console fixtures; `check-effect-contract.sh` (8 factories, 0 failed gates) | ok |
+| release tests, affected crates | `cargo test --locked --release` over compressor, gate-expander, transient-shaper, soft-clip, true-peak-limiter, parametric-eq, multiband-compressor, effect-runtime, effect-contract, delay, graph-compiler, graph, rack, effect-compiler, host-core, conformance and bench-support, with the test-support features | 172 binaries, 1166 passed, 0 failed |
+| console digests | `cargo test --release -p console-workload --test gain_pan_profile digests -- --ignored` at the head and at `223330bc` (a `git archive` in scratch, with its own target directory) | **22 of 22 rows identical** |
+| console benchmark | `scripts/test-console-benchmark.sh` | PASS |
+| wasm-guests | runner build; simd128 probe; evidence crates; `check-protocol-wasm-parity.sh`; `run-wasm-gates.sh --without-v8-spill --without-native` | ok |
+| cross-target | `scripts/check-cross-targets.sh` | PASS; the iOS `memset_pattern16` counts equal every ceiling (parametric-eq 146) |
+| release-shape | `check-release-shape.py`; `CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets` | ok |
+| artifact | `build-web-audioworklet.sh` | module `f767076a…09e8`, closure `2e10e721…4edf` |
+| artifact-identity | a twin `--module-only` build from another path and `CARGO_HOME`; `web-audioworklet-identity.py --self-test` and `report --event push --before 223330bc` | reproducible; **ARTIFACT CHANGED** |
+| artifact-gates | `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, scalar oracle absent from the module, `test-web-audioworklet.sh`, V8 spill self-test and gate (Node 22.23.2) | ok |
+| sdk | `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh` (284 passed), `sdk-package.sh check` | ok |
+| browser | `npm run qualify -- … --check-matrix --self-test-mutations` for Chromium 151, Firefox 153 and WebKit 26.5 | all qualification gates passed |
+| aarch64-debug/-release | see below | resolved; not run (no arm64 host) |
+
+**Artifact.** ARTIFACT CHANGED:
+
+| | main `223330bc` | batch `51a1514a` |
+|---|---|---|
+| Module digest | `885aa117ed0133f325a08992e0df0265e2984b1b63a163b8a8708722322c6545` | `f767076a03548350a35dc6d758716c328f108de59a40cb31442ace59435a09e8` |
+| Size | 3,254,230 B | 3,270,838 B |
+
+- The batch module is 16,608 B (0.51 %) larger. P1 and P2 change the effect kernels, so a change is
+  expected.
+- The main digest is the `audioworklet-sha256` status that main's own run recorded. A local
+  `--module-only` build of `223330bc` reproduces it byte for byte.
+- The committed pin (`6c952a2c…`) was not touched. Under #1061 it is checked only at release.
+
+**AArch64 legs.** They cannot run on this host. Resolved:
+- **Debug leg.** The 25 product crates (`capi`'s closure, from `scripts/lib/product-crates.sh`)
+  plus `dsp-reference`, `conformance` and `target-smoke`. It has no expected-failure rows.
+- **Release leg.** `lane` and `math` with `math/lane`, then `console-workload`, then the capi,
+  delay, compressor, parametric-eq and gate-expander audits. It has two #1019 rows:
+  `m2_exp2_lane_identity` and `m2_log2_lane_identity`, both in `math`'s `m2_lane_identity`.
+- **Checks run here.**
+  - The no-silent-skip scan (rg exit 1, no match).
+  - The known-defect self-test.
+  - `judge-skips` over each leg's `--list`: debug 1783 tests, release 114 tests. The listings come
+    from x86 builds of the same packages and features. Every row names exactly one test.
+
+**Local deviations, none a gate change.**
+- The artifact directory is in scratch rather than `target/ci/qualification-artifacts`.
+- The twin build's second checkout is a `git archive` of `HEAD`.
+- The identity report ran as the main push will: `--event push --before 223330bc`.
+- The browser legs' pulse socket and Chromium's `TMPDIR` needed short `/tmp` paths. The scratchpad
+  path is longer than the 108-byte Unix-socket limit. The first Chromium attempt aborted on that
+  ("Socket path too long") before any gate ran.
