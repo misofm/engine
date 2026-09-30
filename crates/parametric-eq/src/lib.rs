@@ -1786,6 +1786,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// `+0.0`, and `flush` leaves both integrators `+0.0`. An elided or dry section passes the
     /// `+0.0` through. So a padded lane never fails the bound and is never recovered; were it
     /// recovered, it would be left at `+0.0` at rest, and no other lane would see it.
+    ///
+    /// `#[inline(never)]`: this is the fault path, which a correct session never takes, and it
+    /// sits in the one `process_bank` body whose stationary loops the shipped module's V8 spill
+    /// gate holds (`check-web-audioworklet-v8-spill.py`). Inlined, its lane-mask build and
+    /// block-wide select changed TurboFan's allocation of the dual depth-one tail, which then
+    /// carried two values through stack slots (the #977 mechanism). Outlined, it is one call on a
+    /// branch the loops never reach, and it carries no `f32x4` arithmetic for the kernel roster.
+    #[inline(never)]
     fn recover_failed_lanes(&mut self, io: &mut [f32]) -> u32 {
         let failed = nonfinite_lane_mask::<L>(io);
         debug_assert_ne!(failed, 0, "a rejected block names the lanes that failed it");
