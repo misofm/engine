@@ -880,9 +880,14 @@ pub struct GraphEffectObservationBinding {
 }
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
+    /// The member on each active lane, in lane order: lanes `0..members.len()`.
     pub members: Box<[EffectNodeId]>,
-    /// `true` for every lane that carries a member. #96 binds only full groups, so this is all
-    /// `true` today; the field exists so a padded group can be bound without a second bank shape.
+    /// One entry per lane: `true` exactly on lanes `0..members.len()`, which carry a member, and
+    /// `false` on every padded lane after them (issue #1088). It is the mask the effect's factory
+    /// was bound with (`effect_contract::PrepareEffectBankRequest::active_mask`) and the mask the
+    /// rack chain gathers and scatters by, so a padded lane is never read from or written to a
+    /// track. A full bank is all `true`, and every shipped plan binds only full banks until a group
+    /// asks for padding (`graph_compiler`'s padding policy).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
     /// Factory-declared response capability shared by this homogeneous bank.

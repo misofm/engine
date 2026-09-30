@@ -180,7 +180,8 @@ pub struct GraphRackBoundSlot {
     pub group: usize,
     /// Index into that group's leader program.
     pub slot: usize,
-    /// One node per lane, in lane order.
+    /// One node per member, in lane order. A padded bank (issue #1088) has fewer members than
+    /// lanes: its members are lanes `0..members.len()`, and the rest are padding.
     pub members: Vec<EffectNodeId>,
 }
 
@@ -246,6 +247,9 @@ mod schedule;
 mod tests {
     use super::*;
     use crate::banks::bind_rack_banks_indexed;
+
+    /// Issue #1088's padded-bank gate, beside the harness it reuses.
+    mod bank_padding;
     use crate::canonical::{
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,

@@ -263,6 +263,19 @@ impl BankWidth {
             (Self::Four, Some(Self::Four)) | (Self::Eight, Some(Self::Eight))
         )
     }
+
+    /// The active mask of a full bank of this width: one `true` per lane.
+    ///
+    /// What [`PrepareEffectBankRequest::active_mask`] is for every bank that has a member on every
+    /// lane, which is every bank a shipped planner binds until a group asks for padding (issue
+    /// #1088).
+    #[must_use]
+    pub const fn full_mask(self) -> &'static [bool] {
+        match self {
+            Self::Four => &[true; 4],
+            Self::Eight => &[true; 8],
+        }
+    }
 }
 
 /// Transpose one four-by-four tile of 32-bit words: `out[k][lane] == rows[lane][k]`.
@@ -886,12 +899,56 @@ pub struct PrepareEffectRequest<'a> {
     pub initial_values: &'a [InitialParameterValue],
     pub limits: PrepareEffectLimits,
 }
+/// One homogeneous bank's preparation: a request per lane, and which lanes carry a member.
+///
+/// # Padding: a bank of fewer members than lanes (issue #1088; decision 12, amendment 6)
+///
+/// A bank binds `members <= lanes` tracks, where `members` is the number of `true` entries of
+/// [`active_mask`](Self::active_mask). A lane whose entry is `false` is a **padded** lane: it carries
+/// no track, and it exists so that a partial group can still be one bank of the build's width. The
+/// contract has four clauses. The caller (the planner and the rack) owes the clone and a `+0.0`
+/// feed into the first slot of a chain; a factory that accepts padding owes the rest:
+///
+/// * **A padded lane carries a clone of an active member's prepared request, never zeros.** There is
+///   still one request per lane, so `requests.len() == lanes` holds for every bank. The clone shares
+///   the member's program key, parameter domains and window shape, so a padded lane is a lane the
+///   effect already knows how to run, and a whole-bank decision (the true-peak limiter's
+///   uniform-body gate, for one) sees the lanes a full bank of the same members would. A lane of
+///   zeros or of descriptor defaults is not a clone: it can lie outside a parameter's domain, or
+///   drag a whole-bank fast path onto its slow body.
+/// * **A padded lane is fed `+0.0` and its output is discarded.** The caller never gathers into a
+///   padded lane and never scatters out of it: `rack::BankChain` zero-fills its resident block at
+///   bind, so the first slot of a chain sees `+0.0` there, and a later slot and the next block see
+///   what the slots before them left in it. A factory that accepts padding therefore keeps a padded
+///   lane at `+0.0` out, with its state finite and at rest, whenever it is fed `+0.0` in; that is
+///   what makes the premise hold down a chain and across blocks.
+/// * **D7 recovery and D7 reports attribute active lanes only.** A padded lane never triggers a
+///   recovery on an active lane, its entry in [`BankProcessReport::reports`] stays empty, and
+///   nothing is ever charged to it.
+/// * **Coupling rule.** Banking may couple lanes' cost, never their bits: an active lane's output
+///   and state do not depend on the padded lanes, nor on which active member they clone.
+///
+/// **Padding is opt-in per effect.** A factory that has not implemented the clauses above declines
+/// a request with any padded lane with `Ok(None)`, after it has validated every member, and never
+/// binds one: a factory that ignored the mask would bind clone lanes as real ones. Every shipped
+/// factory declines until its own slice opts it in (P2b-P2e, #1089-#1092).
+///
+/// **Members come first.** The mask is `true` on lanes `0..members` and `false` after them, which is
+/// the only layout the graph planner emits and the only one its gather and scatter admit.
+/// [`validate_shape`](Self::validate_shape) refuses any other mask, so a factory that opts in may
+/// rely on a padded lane never preceding an active one (P2a verdict, L3).
 #[derive(Clone, Copy, Debug)]
 pub struct PrepareEffectBankRequest<'a> {
     /// Backend this build executes on. Factories validate it against `width`.
     pub backend: Backend,
     pub width: BankWidth,
+    /// Exactly one request per lane, active or padded. A padded lane's request is a clone of an
+    /// active member's (see the type's documentation).
     pub requests: &'a [PrepareEffectRequest<'a>],
+    /// Exactly one entry per lane: `true` for a lane that carries a member, `false` for a padded
+    /// lane. At least one lane is active, and every active lane precedes every padded one.
+    /// [`BankWidth::full_mask`] is the mask of a full bank.
+    pub active_mask: &'a [bool],
 }
 
 impl PrepareEffectBankRequest<'_> {
@@ -901,25 +958,76 @@ impl PrepareEffectBankRequest<'_> {
         self.width.matches_backend(self.backend)
     }
 
+    /// The number of lanes that carry a member: `members` in `members <= lanes`.
+    #[must_use]
+    pub const fn active_lanes(self) -> usize {
+        let mut active = 0;
+        let mut lane = 0;
+        while lane < self.active_mask.len() {
+            if self.active_mask[lane] {
+                active += 1;
+            }
+            lane += 1;
+        }
+        active
+    }
+
+    /// Whether this request pads a lane: some entry of its [`active_mask`](Self::active_mask) is
+    /// `false`.
+    ///
+    /// The guard every factory that has not opted into padding answers with `Ok(None)` (issue
+    /// #1088). Asked after [`validate_shape`](Self::validate_shape), so the mask has one entry per
+    /// lane and "not padded" means a full bank.
+    #[must_use]
+    pub const fn is_padded(self) -> bool {
+        self.active_lanes() != self.active_mask.len()
+    }
+
     /// The **contract-violation** half of the `bind_homogeneous_bank` rule (issue #95).
     ///
     /// A bank request is malformed — and therefore a typed `Err`, not a fallback — when its
-    /// declared backend and width disagree about the lane count, or when it does not carry
-    /// exactly one member request per lane. Neither can arise from a correct planner, so a caller
-    /// that sees `effect.bank.requests` has a bug to fix, not a slower path to take.
+    /// declared backend and width disagree about the lane count, when it does not carry exactly one
+    /// member request per lane, or when its active mask is not one entry per lane naming at least
+    /// one member, members first (issue #1088). None of them can arise from a correct planner, so a caller that
+    /// sees one of these codes has a bug to fix, not a slower path to take. A mask with padded
+    /// lanes is well formed; whether this artifact can bank it is the factory's `Ok(None)` to give.
     ///
     /// Every `bind_homogeneous_bank` implementation calls this **before** it inspects a member,
     /// so that a malformed request can never be hidden behind an absent capability.
     ///
     /// # Errors
     ///
-    /// `effect.bank.requests` if the request's shape is not the one its own fields declare.
+    /// * `effect.bank.requests` if the backend and width disagree, or there is not one request per
+    ///   lane;
+    /// * `effect.bank.mask_length` if the active mask does not have one entry per lane;
+    /// * `effect.bank.mask_empty` if the active mask names no member;
+    /// * `effect.bank.mask_not_prefix` if an active lane follows a padded one.
     pub const fn validate_shape(self) -> Result<(), EffectPrepareError> {
-        if !self.has_matching_backend_width() || self.requests.len() != self.width.lanes() as usize
-        {
+        let lanes = self.width.lanes() as usize;
+        if !self.has_matching_backend_width() || self.requests.len() != lanes {
             return Err(EffectPrepareError {
                 code: "effect.bank.requests",
             });
+        }
+        if self.active_mask.len() != lanes {
+            return Err(EffectPrepareError {
+                code: "effect.bank.mask_length",
+            });
+        }
+        let members = self.active_lanes();
+        if members == 0 {
+            return Err(EffectPrepareError {
+                code: "effect.bank.mask_empty",
+            });
+        }
+        let mut lane = members;
+        while lane < lanes {
+            if self.active_mask[lane] {
+                return Err(EffectPrepareError {
+                    code: "effect.bank.mask_not_prefix",
+                });
+            }
+            lane += 1;
         }
         Ok(())
     }
@@ -1569,7 +1677,9 @@ pub trait NativeEffectFactory: Send + Sync {
     /// * a width this build does not execute (decision D4 makes that a compile-time constant, so
     ///   it is a property of the artifact and not of the request);
     /// * a **heterogeneous cohort** — members that do not all share one `EffectProgramKey`;
-    /// * a port or link configuration this effect has no bank kernel for.
+    /// * a port or link configuration this effect has no bank kernel for;
+    /// * a **padded** request (issue #1088), from a factory that has not opted into the padding
+    ///   contract on [`PrepareEffectBankRequest`].
     ///
     /// The heterogeneous case is the one that moved. `graph-compiler` groups candidates by
     /// `metadata.program_key()` before it ever calls this method, so a mixed cohort is

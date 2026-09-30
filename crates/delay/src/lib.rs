@@ -594,18 +594,14 @@ impl NativeEffectFactory for DelayFactory {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn effect_contract::PreparedNativeEffectBank>>, EffectPrepareError>
     {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         for member in request.requests.iter().copied() {
             let _ = validate_inputs(member)?;
         }
         // A variable gathered two-second ring has no accepted W4/W8 core kernel. Every validated
-        // request therefore remains a legal, ordered scalar member.
+        // request therefore remains a legal, ordered scalar member. That decline is also this
+        // effect's padding guard (issue #1088): the delay never banks, so a padded request is
+        // declined like every other one, and never padded (decision 12, "Eligibility").
         Ok(None)
     }
 }
@@ -2554,6 +2550,7 @@ mod tests {
                     backend: Backend::Simd4,
                     width: BankWidth::Four,
                     requests: &requests,
+                    active_mask: BankWidth::Four.full_mask(),
                 })
                 .expect("legal scalar fallback")
                 .is_none()
@@ -2567,6 +2564,7 @@ mod tests {
             backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &malformed_requests,
+            active_mask: BankWidth::Four.full_mask(),
         }) {
             Err(error) => error,
             Ok(_) => panic!("malformed member must precede fallback"),
@@ -2578,11 +2576,64 @@ mod tests {
             backend: Backend::Simd4,
             width: BankWidth::Four,
             requests: &below_cap,
+            active_mask: BankWidth::Four.full_mask(),
         }) {
             Err(error) => error,
             Ok(_) => panic!("under-cap member must precede fallback"),
         };
         assert_eq!(under_cap.code, "effect.resource.limit");
+    }
+
+    /// Issue #1088 (console strip P2a), gate 3: the delay never banks, so it declines a padded
+    /// bank request like every other one -- and, like every other one, only after the request's
+    /// shape, active mask included, and every member have been validated.
+    ///
+    /// The delay's decline is unconditional, so it has no separate padding guard to remove. What
+    /// turns this red is a delay that stops validating before it declines: the hand-written shape
+    /// check it carried before #1088 never read the mask, so a mask of the wrong length or with no
+    /// member would be declined instead of refused, as would a padded request with a malformed
+    /// member.
+    #[test]
+    fn a_padded_request_is_declined_and_still_validated() {
+        let factory = DelayFactory;
+        let bank_values = [initial_values(); 4];
+        let requests: [PrepareEffectRequest<'_>; 4] =
+            core::array::from_fn(|index| request(&bank_values[index], 48_000));
+        let bind = |requests: &[PrepareEffectRequest<'_>], mask: &[bool]| {
+            factory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: Backend::Simd4,
+                width: BankWidth::Four,
+                requests,
+                active_mask: mask,
+            })
+        };
+        for members in 1..4 {
+            let mask: Vec<bool> = (0..4).map(|lane| lane < members).collect();
+            assert!(
+                bind(&requests, &mask)
+                    .expect("a padded request is well formed")
+                    .is_none(),
+                "{members} of 4 lanes active"
+            );
+        }
+        for (mask, code) in [
+            (&[true; 3][..], "effect.bank.mask_length"),
+            (&[false; 4][..], "effect.bank.mask_empty"),
+        ] {
+            assert_eq!(
+                bind(&requests, mask).err().map(|error| error.code),
+                Some(code)
+            );
+        }
+        let mut malformed = requests;
+        malformed[0].limits.maximum_total_state_bytes -= 1;
+        assert_eq!(
+            bind(&malformed, &[true, false, false, false])
+                .err()
+                .map(|error| error.code),
+            Some("effect.resource.limit"),
+            "a padded request still validates its members"
+        );
     }
 
     /// Automation that is out of shape is counted, never applied, and never panics.

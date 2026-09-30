@@ -122,6 +122,7 @@ pub fn prepare_bank(
             backend: backend(width),
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bind")
 }

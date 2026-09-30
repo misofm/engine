@@ -3224,6 +3224,12 @@ impl NativeEffectFactory for ParametricEqFactory {
                 return Ok(None);
             }
         }
+        // Issue #1088: this effect has not opted into padding (its P2 slice, #1089), so a request
+        // with a padded lane is declined after every member is validated, never bound: binding it
+        // would run the clone lanes as real tracks.
+        if request.is_padded() {
+            return Ok(None);
+        }
         Ok(Some(match request.width {
             BankWidth::Four => Box::new(prepare_width::<Simd4, 4>(
                 metadata,

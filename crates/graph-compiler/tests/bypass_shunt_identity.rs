@@ -413,6 +413,7 @@ fn a_shunt_bypassed_bank_lane_is_bit_identical_to_prepared_bypass() {
                         backend: Backend::current(),
                         width,
                         requests: &requests,
+                        active_mask: width.full_mask(),
                     })
                     .expect("a well-formed bank request")
                 else {
@@ -629,6 +630,7 @@ fn a_live_toggle_on_a_session_bypassed_bank_lane_matches_the_per_node_live_path(
                 backend: Backend::current(),
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("a well-formed bank request")
             .expect("a bankable effect binds at the host width");
@@ -773,6 +775,7 @@ fn the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank() {
                 backend: Backend::current(),
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("a well-formed bank request");
         if bank.is_none() {

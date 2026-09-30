@@ -221,6 +221,7 @@ fn the_render_path_allocates_nothing() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank binding")
         .expect("bank available");
@@ -278,6 +279,7 @@ fn the_render_path_allocates_nothing() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("mono bank binding")
         .expect("mono bank available");
