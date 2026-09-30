@@ -311,7 +311,7 @@ test("preparation compiles once, disposes scratch, and yields fresh stateful liv
     return effectEntry(`fx${index}`, id, row.parameters.map(parameter => ({ id: parameter.id, unit: parameter.unitName, value: values[parameter.id] ?? parameter.default })));
   });
   const bytes = await moduleBytes();
-  const document = new TextEncoder().encode(sessionDocument({ effects: { simd1: effects }, frames: 16384 }));
+  const document = new TextEncoder().encode(sessionDocument({ effects: { preInsert: effects.slice(0, 2), inserts: effects.slice(2) }, frames: 16384 }));
   const options = { liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 } };
   let compiles = 0, disposals = 0; const compile = WebAssembly.compile; const dispose = WasmBoundary.prototype.dispose;
   WebAssembly.compile = async (...args) => { compiles++; return compile(...args); };

@@ -43,10 +43,14 @@ export interface LaneEdit {
   /** A `wireCommandKinds` name, e.g. `effectParam`, `faderDb`, `mute`. */
   readonly kind: CommandKindName;
   readonly trackIndex: number;
-  /** `0` simd1, `1` dynamic, `2` simd2, `255` not applicable. */
+  /**
+   * The record's rack byte: `1` inserts, `3` console, `255` not applicable (S1c). The retired `0`
+   * and `2` are refused by the engine with `unknownRack`.
+   */
   readonly rack: number;
   /** `0` left, `1` right, `2` both, `255` not applicable. */
   readonly channel: number;
+  /** A console slot's index in the session's slot order, or an insert's index on its track. */
   readonly effectIndex?: number;
   readonly parameterId?: number;
   readonly smoothingSamples?: number;

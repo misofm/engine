@@ -1205,9 +1205,13 @@ export class WasmBoundary {
     let reason = commandReasonValue("none");
     if (result === constantValue("resultCodes", "invalidArgument")) {
       const trackCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle));
+      // An effect lives in an insert (`1`) or a console slot (`3`); anything else, the retired
+      // `0` and `2` included, is an unknown rack, as the worklet classifies it (#1096).
+      const effectRack = address.rack === constantValue("racks", "inserts")
+        || address.rack === constantValue("racks", "console");
       reason = address.trackIndex >= trackCount
         ? commandReasonValue("unknownTrack")
-        : address.rack > 2
+        : !effectRack
           ? commandReasonValue("unknownRack")
           : commandReasonValue("unknownEffect");
     }

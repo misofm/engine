@@ -26,9 +26,15 @@ export interface TrackResponseMember {
   readonly trackId: string;
   readonly nativeId: string;
   readonly stableId: string;
-  /** `input`, `simd1`, `dynamic`, or `simd2`. */
-  readonly rack: "input" | "simd1" | "dynamic" | "simd2";
-  /** Numeric native rack word, retained for callers that persist wire metadata. */
+  /**
+   * `input` for the input section's filters, `console` for a session console slot in either
+   * section, or `inserts` for one of the track's inserts.
+   */
+  readonly rack: "input" | "console" | "inserts";
+  /**
+   * The owner record's rack code, retained for callers that persist wire metadata: `0` input
+   * filters, `2` inserts, `4` console (S1c; `1` and `3` are retired).
+   */
   readonly rackValue: number;
   /** Position in the actual declared response-owner order. */
   readonly slot: number;
@@ -522,6 +528,17 @@ function parseObservedSections(
   return Object.freeze(sections);
 }
 
+/**
+ * The live-response owner record's rack codes, from the generated layout's `liveResponseRacks`
+ * table: `0` input filters, `2` inserts and `4` console. The retired `1` and `3` decode to nothing.
+ */
+const LIVE_RESPONSE_RACKS: ReadonlyMap<number, TrackResponseMember["rack"]> = new Map(
+  ABI_LAYOUT.constants.liveResponseRacks.map((row) => [
+    row.value,
+    row.name === "inputFilters" ? "input" : row.name,
+  ] as const),
+);
+
 function freezeMember(raw: {
   readonly trackId: string;
   readonly nativeId: string;
@@ -534,7 +551,7 @@ function freezeMember(raw: {
   readonly enabledLeft: readonly boolean[];
   readonly enabledRight: readonly boolean[];
 }): TrackResponseMember {
-  const rack = ["input", "simd1", "dynamic", "simd2"][raw.rack];
+  const rack = LIVE_RESPONSE_RACKS.get(raw.rack);
   if (rack === undefined) throw invalidPayload("the engine returned an unknown live response rack");
   const kind = raw.available
     ? raw.kind === 1 ? "parametricEq" : raw.kind === 2 ? "inputFilters" : undefined

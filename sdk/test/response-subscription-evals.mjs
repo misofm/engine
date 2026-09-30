@@ -63,7 +63,7 @@ function parserCapture() {
   setU32(ownerLayout, owner, "trackIdOffset", strings); setU32(ownerLayout, owner, "trackIdBytes", 1);
   setU32(ownerLayout, owner, "nativeIdOffset", strings + 1); setU32(ownerLayout, owner, "nativeIdBytes", 1);
   setU32(ownerLayout, owner, "stableIdOffset", strings + 2); setU32(ownerLayout, owner, "stableIdBytes", 1);
-  setU32(ownerLayout, owner, "rack", 1); setU32(ownerLayout, owner, "slot", 2); setU32(ownerLayout, owner, "kind", 1);
+  setU32(ownerLayout, owner, "rack", 4); setU32(ownerLayout, owner, "slot", 2); setU32(ownerLayout, owner, "kind", 1);
   setU32(ownerLayout, owner, "bypassed", 0); setU32(ownerLayout, owner, "availability", 1);
   setU32(ownerLayout, owner, "leftOffset", section); setU32(ownerLayout, owner, "leftCount", 1);
   setU32(ownerLayout, owner, "rightOffset", section); setU32(ownerLayout, owner, "rightCount", 1);
@@ -97,7 +97,7 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
       };
     });
   const engine = await createOfflineEngine(sessionDocument({
-    effects: { simd1: [effectEntry("eq", "miso.parametric-eq", params)] },
+    effects: { preInsert: [effectEntry("eq", "miso.parametric-eq", params)] },
   }), { asset, liveControls: { commandQueueRecords: 64 } });
   const request = {
     trackId: "t",
@@ -120,7 +120,7 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
 
     const semanticLiveControls = engine.liveControls();
     await semanticLiveControls.submit(
-      semanticLiveControls.edit.track("t").effect("simd1", 0, "miso.parametric-eq")
+      semanticLiveControls.edit.track("t").effect("console", 0, "miso.parametric-eq")
         .parameter("band-1-gain", -3),
     );
     assert.equal(await first.pump(), undefined);
@@ -156,7 +156,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
   let responseWords = [1];
   const observationMap = {
     bindings: [{
-      trackId: "t", rack: "dynamic", effectSlotId: "comp", effectIndex: 0,
+      trackId: "t", rack: "inserts", effectSlotId: "comp", effectIndex: 0,
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
@@ -212,7 +212,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
     maximumCaptureAttempts: 2,
   });
   const resident = await owner.subscribe({
-    selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
+    selections: [{ trackId: "t", rack: "inserts", effectSlotId: "comp", tapId: 1, channels: "both" }],
     windowBlocks: 1,
     cadenceMs: 10,
   });

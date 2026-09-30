@@ -20,6 +20,10 @@ function request(overrides = {}) {
       { id: "stem", spec: { channels: 2, bitDepth: "32f", frames: 48_000, content: CONTENT } },
       { id: "di", spec: { channels: 1, bitDepth: 24, frames: 48_000, content: CONTENT } },
     ],
+    console: {
+      preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "clip", effectId: "miso.soft-clip", linkMode: "dual_mono" }],
+    },
     tracks: [
       {
         id: "vocal",
@@ -28,8 +32,11 @@ function request(overrides = {}) {
           builtins: { left: { trimDb: -1, hpfHz: 80 }, right: { trimDb: -1, hpfHz: 80 } },
           fader: { leftDb: -3, rightDb: -3 },
           pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: 1 }, smoothingSamples: 8 },
-          simd1: [{ effectId: "miso.parametric-eq", parameters: { "band-1-enabled": true, "band-1-gain": -2 }, options: { slotId: "eq" } }],
-          dynamic: [{
+          console: [
+            { slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": -2 } },
+            { slot: "clip", parameters: { drive: 3 } },
+          ],
+          inserts: [{
             effectId: "miso.compressor",
             parameters: { threshold: -18, ratio: 4 },
             options: {
@@ -40,21 +47,27 @@ function request(overrides = {}) {
               },
             },
           }],
-          simd2: [{ effectId: "miso.soft-clip", parameters: { drive: 3 } }],
         },
       },
-      { id: "bass", spec: { source: { id: "di", left: 0, right: 0 }, pan: { left: -1, right: 1 } } },
+      {
+        id: "bass",
+        spec: {
+          source: { id: "di", left: 0, right: 0 },
+          pan: { left: -1, right: 1 },
+          console: [{ slot: "eq", bypass: true }, { slot: "clip" }],
+        },
+      },
     ],
     submixes: ["bus"],
     outputs: ["main"],
     routes: [
-      { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_matrix" }, destination: { kind: "submix_input", submixId: "bus" } },
-      { id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_matrix" }, destination: { kind: "submix_input", submixId: "bus" } },
+      { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
+      { id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
       { id: "to-main", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "output_input", outputId: "main" } },
     ],
     automation: [{
       id: "eq-ride",
-      target: { trackId: "vocal", rack: "simd1", slotId: "eq", parameter: "band-1-gain", channel: "both" },
+      target: { trackId: "vocal", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
       segments: [{ shape: "linear", startSample: "0", endSample: "480", startValue: -2, endValue: 0 }],
     }],
     ...overrides,
@@ -200,28 +213,38 @@ describe("enginectl session build", () => {
       .source("di", { channels: 1, bitDepth: 24, frames: 48_000, content: CONTENT })
       .submix("bus")
       .output("main")
+      .console({
+        preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+        postInsert: [{ slot: "clip", effectId: "miso.soft-clip" }],
+      })
       .track("vocal", {
         source: "stem",
         builtins: { left: { trimDb: -1, hpfHz: 80 }, right: { trimDb: -1, hpfHz: 80 } },
         fader: { leftDb: -3, rightDb: -3 },
         pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: 1 }, smoothingSamples: 8 },
-        simd1: [effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" })],
-        dynamic: [effect("miso.compressor", { threshold: -18, ratio: 4 }, {
+        console: [
+          { slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": -2 } },
+          { slot: "clip", parameters: { drive: 3 } },
+        ],
+        inserts: [effect("miso.compressor", { threshold: -18, ratio: 4 }, {
           slotId: "comp",
           sidechain: {
             source: { kind: "track", trackId: "bass", tap: "post_fader" },
             portId: "sidechain-in",
           },
         })],
-        simd2: [effect("miso.soft-clip", { drive: 3 })],
       })
-      .track("bass", { source: { id: "di", left: 0, right: 0 }, pan: { left: -1, right: 1 } })
-      .route({ id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_matrix" }, destination: { kind: "submix_input", submixId: "bus" } })
-      .route({ id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_matrix" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .track("bass", {
+        source: { id: "di", left: 0, right: 0 },
+        pan: { left: -1, right: 1 },
+        console: [{ slot: "eq", bypass: true }, { slot: "clip" }],
+      })
+      .route({ id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .route({ id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } })
       .route({ id: "to-main", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "output_input", outputId: "main" } })
       .automation({
         id: "eq-ride",
-        target: { trackId: "vocal", rack: "simd1", slotId: "eq", parameter: "band-1-gain", channel: "both" },
+        target: { trackId: "vocal", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
         segments: [{ shape: "linear", startSample: 0n, endSample: 480n, startValue: -2, endValue: 0 }],
       });
     const original = request();
@@ -337,7 +360,7 @@ process.stdout.write = function () {
       failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(malformed)), 3, "request.shape");
     }
     const badEffect = request();
-    badEffect.tracks[0].spec.dynamic[0].effectId = "miso.nope";
+    badEffect.tracks[0].spec.inserts[0].effectId = "miso.nope";
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(badEffect)), 3, "request.shape");
     const magicParameter = JSON.stringify(request()).replace(
       '"parameters":{"threshold":-18',
@@ -347,6 +370,45 @@ process.stdout.write = function () {
     failure(magicResult, 3, "request.shape");
     assert.match(JSON.parse(magicResult.stderr.toString("utf8")).error.message, /has no parameter '__proto__'/);
     failure(await run(["session", "build", "--request", "-", "--output", "-"], Buffer.alloc(4 * 1024 * 1024 + 1, 0x20)), 3, "request.too_large");
+  });
+
+  test("the retired per-track racks are refused by name, and console and inserts replace them", async () => {
+    // Decision 12 retired `simd1`, `dynamic` and `simd2`. A request still spelling them must be
+    // refused, never silently dropped: an ignored key would build a session with no effects.
+    // Red mutation: delete the RETIRED_TRACK_KEYS loop -> the generic unknown-key refusal still
+    // fires, but its message no longer names what replaced the rack, and this test goes red.
+    for (const retired of ["simd1", "dynamic", "simd2"]) {
+      const old = request();
+      old.tracks[1].spec[retired] = [{ effectId: "miso.parametric-eq" }];
+      const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(old));
+      failure(result, 3, "request.shape");
+      const message = JSON.parse(result.stderr.toString("utf8")).error.message;
+      assert.match(message, new RegExp(`\\$\\.tracks\\[1\\]\\.spec\\.${retired}`));
+      assert.match(message, /retired/);
+      assert.match(message, /spec\.console/);
+      assert.match(message, /spec\.inserts/);
+    }
+  });
+
+  test("a builder refusal carries the engine's diagnostic code", async () => {
+    // One vocabulary: a console entry out of slot order is `console.entry_order` whether the
+    // builder or the engine refused it. Red mutation: drop the `diagnostics` extra in enginectl's
+    // request.shape mapping -> the code is gone from the stderr document.
+    const misordered = request();
+    misordered.tracks[1].spec.console.reverse();
+    const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(misordered));
+    failure(result, 3, "request.shape");
+    const document = JSON.parse(result.stderr.toString("utf8"));
+    assert.deepEqual(document.diagnostics.map((row) => row.code), ["console.entry_order"]);
+
+    const ineligible = request();
+    ineligible.console.postInsert[0].effectId = "miso.delay";
+    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(ineligible));
+    failure(refused, 3, "request.shape");
+    assert.deepEqual(
+      JSON.parse(refused.stderr.toString("utf8")).diagnostics.map((row) => row.code),
+      ["console.slot.ineligible_effect"],
+    );
   });
 
   test("a missing packaged Wasm asset is internal, not a session refusal", async () => {
@@ -371,7 +433,7 @@ process.stdout.write = function () {
     const cyclic = request({
       submixes: ["bus", "loop"],
       routes: [
-        { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_matrix" }, destination: { kind: "submix_input", submixId: "bus" } },
+        { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
         { id: "bus-loop", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "submix_input", submixId: "loop" } },
         { id: "loop-bus", source: { kind: "submix_output", submixId: "loop" }, destination: { kind: "submix_input", submixId: "bus" } },
         { id: "loop-main", source: { kind: "submix_output", submixId: "loop" }, destination: { kind: "output_input", outputId: "main" } },

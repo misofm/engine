@@ -272,7 +272,7 @@ const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();
@@ -326,7 +326,7 @@ const cliRequest = JSON.stringify({
   outputs: ["main"],
   routes: [{
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   }],
 });
@@ -361,7 +361,7 @@ const expectedCliDocument = imported["."].session({ id: "tarball.cli", sampleRat
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();
@@ -412,16 +412,17 @@ const causalDocument = (withBypassedCompressor) => imported["."].session({
   .source("stem", {
     channels: 2, bitDepth: "32f", frames: 128, content: `blake3:${"0".repeat(64)}`,
   })
+  .console({
+    preInsert: withBypassedCompressor ? [{ slot: "comp", effectId: "miso.compressor" }] : [],
+  })
   .track("track", {
     source: "stem",
-    ...(withBypassedCompressor
-      ? { simd1: [imported["."].effect("miso.compressor", {}, { bypass: true })] }
-      : {}),
+    ...(withBypassedCompressor ? { console: [{ slot: "comp", bypass: true }] } : {}),
   })
   .output("main")
   .route({
     id: "main",
-    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    source: { kind: "track", trackId: "track", tap: "post_pan" },
     destination: { kind: "output_input", outputId: "main" },
   })
   .toJson();

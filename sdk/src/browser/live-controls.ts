@@ -4,6 +4,7 @@ import type { CommandReport, SessionMap } from "../core/boundary.ts";
 import { EngineLiveControls } from "../core/live-controls.ts";
 import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
+import type { SessionLike } from "../core/session.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
   MisoAudioWorkletHost,
@@ -30,10 +31,16 @@ function browserCommand(edit: LaneEdit): MisoCommand {
   };
 }
 
-/** Bind the shared semantic live controls to the shipped MessagePort host. */
+/**
+ * Bind the shared semantic live controls to the shipped MessagePort host.
+ *
+ * `session`, the builder the host's document came from, lets console slots and inserts be addressed
+ * by their stable IDs.
+ */
 export async function createBrowserLiveControls(
   host: MisoAudioWorkletHost,
   beforeSubmit?: LiveControlBeforeSubmit,
+  session?: SessionLike,
 ): Promise<EngineLiveControls> {
   const remoteMap = await host.sessionMap();
   const map: SessionMap = Object.freeze({
@@ -53,5 +60,5 @@ export async function createBrowserLiveControls(
       admitted: ack.admitted,
       appliedAtSample: ack.appliedAtSample,
     });
-  }, beforeSubmit);
+  }, beforeSubmit, session);
 }

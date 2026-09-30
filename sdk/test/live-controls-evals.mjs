@@ -22,7 +22,7 @@ function compressorDocument() {
   const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
   return sessionDocument({
     effects: {
-      simd1: [effectEntry(
+      preInsert: [effectEntry(
         "compressor",
         compressor.id,
         compressor.parameters.map((row) => ({
@@ -79,7 +79,7 @@ describe("issue 322 -- shared semantic live controls", () => {
     try {
       const liveControls = engine.liveControls();
       const track = liveControls.edit.track("t");
-      const compressor = track.effect("simd1", 0, "miso.compressor");
+      const compressor = track.effect("console", 0, "miso.compressor");
       const first = await liveControls.submit(
         track.pan(-0.5, 0.5, { smoothingSamples: 16 }),
         track.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
@@ -120,7 +120,7 @@ describe("issue 322 -- shared semantic live controls", () => {
       feed(engine, 1);
       engine.render();
       const refused = await liveControls.submit(
-        liveControls.edit.track("t").effect("simd1", 99, "miso.compressor").bypass(true),
+        liveControls.edit.track("t").effect("console", 99, "miso.compressor").bypass(true),
       );
       assert.equal(refused.ok, false);
       assert.equal(refused.admitted, 0);
@@ -153,11 +153,11 @@ describe("issue 322 -- shared semantic live controls", () => {
     assert.equal(calls, 0, "authoring a filter edit does not submit it");
     assert.throws(() => liveControls.edit.track("t").pan(-2, 0), /at least -1/);
     assert.throws(
-      () => liveControls.edit.track("t").effect("simd1", 0, "miso.compressor")
+      () => liveControls.edit.track("t").effect("console", 0, "miso.compressor")
         .parameter("threshold", 100),
       /at most/,
     );
-    const compressor = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
+    const compressor = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
     assert.throws(
       () => compressor.parameter({ key: "threshold", value: -18, unit: "db" }),
       /unknown field 'unit'/,
@@ -186,7 +186,7 @@ describe("issue 322 -- shared semantic live controls", () => {
       () => compressor.parameter({ key: "threshold", value: -18, smoothingSamples: 1.5 }),
       /smoothingSamples must be a u32/,
     );
-    const delay = liveControls.edit.track("t").effect("dynamic", 0, "miso.delay");
+    const delay = liveControls.edit.track("t").effect("inserts", 0, "miso.delay");
     assert.throws(
       () => delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" }),
       /shared and must address both lanes/,
@@ -205,7 +205,7 @@ describe("issue 322 -- shared semantic live controls", () => {
         feed(engine, 0);
         engine.render();
         const liveControls = engine.liveControls();
-        const parameter = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
+        const parameter = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
         const report = edit === undefined ? undefined : await liveControls.submit(edit(parameter));
         const output = [];
         for (let block = 1; block < 4; block += 1) {
@@ -328,7 +328,7 @@ describe("issue 322 -- shared semantic live controls", () => {
     };
     try {
       const liveControls = await createBrowserLiveControls(host);
-      const parameter = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
+      const parameter = liveControls.edit.track("t").effect("console", 0, "miso.compressor");
       const objectEdit = parameter.parameter({
         key: "threshold",
         value: -18,
@@ -347,7 +347,7 @@ describe("issue 322 -- shared semantic live controls", () => {
       assert.deepEqual(request, {
         commands: [{
           kind: 5,
-          rack: 0,
+          rack: 3, // console slot 0, the record's appended console code (S1c)
           channel: 2,
           trackIndex: 0,
           effectIndex: 0,

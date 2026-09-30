@@ -72,11 +72,11 @@ track.faderDb(-6, { channel: "left", smoothingSamples: 32 });
 // @ts-expect-error no untyped option bag is accepted
 track.faderDb(-6, { lane: "left" });
 
-const gate = track.effect("simd1", 0, "miso.gate-expander");
+const gate = track.effect("console", 0, "miso.gate-expander");
 // @ts-expect-error lookahead is absent from the causal launch gate
 gate.parameter("lookahead", 1);
 
-const compressor = track.effect("simd1", 0, "miso.compressor");
+const compressor = track.effect("console", 0, "miso.compressor");
 compressor.parameter("threshold", -18, { channel: "both" });
 compressor.parameter({ key: "threshold", value: -18, channel: "both", smoothingSamples: 64 });
 compressor.observe("Gain Reduction", true, 4);
@@ -95,12 +95,12 @@ compressor.parameter({ key: "threshold", value: -18, unit: "db" });
 // @ts-expect-error unknown parameter keys are not accepted
 compressor.parameter({ key: "missing", value: 0 });
 
-const multiband = track.effect("dynamic", 0, "miso.multiband-compressor");
+const multiband = track.effect("inserts", 0, "miso.multiband-compressor");
 multiband.parameter("low_threshold", -18, { channel: "both" });
 // @ts-expect-error lookahead is absent from the causal launch multiband compressor
 multiband.parameter("lookahead", 1);
 
-const delay = track.effect("dynamic", 0, "miso.delay");
+const delay = track.effect("inserts", 0, "miso.delay");
 delay.parameter("cross feedback", 0.5, { channel: "both" });
 // @ts-expect-error cross feedback is shared and cannot address one lane
 delay.parameter("cross feedback", 0.5, { channel: "left" });
@@ -109,7 +109,17 @@ delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" });
 // @ts-expect-error delay declares no observation tap
 delay.observe("Gain Reduction", true);
 
-const eq = track.effect("simd2", 0, "miso.parametric-eq");
+const eq = track.effect("console", 1, "miso.parametric-eq");
+// @ts-expect-error the retired rack tokens are not live-control racks
+track.effect("simd1", 0, "miso.parametric-eq");
+// @ts-expect-error the retired rack tokens are not live-control racks
+track.effect("dynamic", 0, "miso.parametric-eq");
+// Stable IDs: a console slot by its slot ID, an insert by its ID or index.
+track.console("eq", "miso.parametric-eq").bypass(true);
+track.insert("delay", "miso.delay").bypass(true);
+track.insert(0, "miso.delay").parameter("cross feedback", 0.5);
+// @ts-expect-error a console slot is addressed by its stable ID, not an index
+track.console(0, "miso.parametric-eq");
 // @ts-expect-error the enumeration is prepared-only, not a live-control parameter
 eq.parameter("band-1-kind", "bell");
 eq.parameter("hpf-enabled", true);

@@ -46,6 +46,11 @@ const ZERO_CONTENT = `blake3:${"0".repeat(64)}`;
  *
  * JSON keys are always quoted. The helper intentionally emits noncanonical-but-valid whitespace
  * so boot tests continue proving that acceptance belongs to the engine rather than the builder.
+ *
+ * `effects` places `effectEntry()` records: `preInsert` and `postInsert` become session console
+ * slots (identity, quality and link mode on the slot, bypass and params on the track's entry), and
+ * `inserts` stays the track's full effect declarations. The retired `simd1`, `dynamic` and
+ * `simd2` keys throw, so an unmigrated eval cannot silently lose its effects.
  */
 export function sessionDocument(options = {}) {
   const {
@@ -59,9 +64,18 @@ export function sessionDocument(options = {}) {
     sourceExtra = "",
     renderMode = "single_thread",
     trackId = "t",
-    effects = { simd1: [], dynamic: [], simd2: [] },
+    effects = {},
     padding = 0,
   } = options;
+  for (const retired of ["simd1", "dynamic", "simd2"]) {
+    if (retired in effects) throw new Error(`sessionDocument: '${retired}' is retired; use preInsert, inserts or postInsert`);
+  }
+  const slot = (entry) => ({
+    slot: entry.id, identity: entry.identity, quality: entry.quality, link_mode: entry.link_mode,
+  });
+  const consoleEntry = (entry) => ({ slot: entry.id, bypass: entry.bypass, params: entry.params });
+  const preInsert = effects.preInsert ?? [];
+  const postInsert = effects.postInsert ?? [];
   const lane = { polarity_invert: false, trim_db: 0.0, hpf_hz: 0.0, lpf_hz: 0.0, delay_samples: 0 };
   const document = {
     schema_version: 1, session_id: sessionId, revision: "1", sample_rate_hz: sampleRateHz,
@@ -69,17 +83,18 @@ export function sessionDocument(options = {}) {
     render_profile: { id: "native", mode: renderMode },
     output_profile: { id: "main", channels: 2, sample_format: "f32_planar" },
     sources: [{ id: "s", content, channels, bit_depth: bitDepth, frames: String(frames) }],
+    console: { pre_insert: preInsert.map(slot), post_insert: postInsert.map(slot) },
     tracks: [{
       id: trackId, source_id: "s", left_source_channel: 0,
       right_source_channel: channels === 1 ? 0 : 1,
       builtins: { left: { ...lane }, right: { ...lane } },
-      simd1: { effects: effects.simd1 ?? [] }, dynamic: { effects: effects.dynamic ?? [] },
-      simd2: { effects: effects.simd2 ?? [] },
+      console: [...preInsert, ...postInsert].map(consoleEntry),
+      inserts: { effects: effects.inserts ?? [] },
       fader: { left_db: 0.0, right_db: 0.0, left_mute: false, right_mute: false },
       pan: { left: -1.0, right: 1.0, smoothing_samples: 0 },
     }],
     submixes: [], outputs: [{ id: "out" }],
-    routes: [{ id: "main", source: { kind: "track", track_id: trackId, tap: "post_matrix" },
+    routes: [{ id: "main", source: { kind: "track", track_id: trackId, tap: "post_pan" },
       destination: { kind: "output_input", output_id: "out" },
       channel_matrix: { ll: 1.0, lr: 0.0, rl: 0.0, rr: 1.0 }, gain_db: 0.0 }],
     automation: [],
@@ -89,7 +104,7 @@ export function sessionDocument(options = {}) {
   return `${text}${" ".repeat(padding)}\n`;
 }
 
-/** One effect entry for a rack, with explicit parameter rows. */
+/** One effect record, with explicit parameter rows: an insert, or a console slot via `effects`. */
 export function effectEntry(id, effectId, params = []) {
   return {
     id, identity: { kind: "native", effect_id: effectId }, quality: "normal", bypass: false,

@@ -3,10 +3,16 @@ import { MisoEngineError, MisoUsageError, resultName } from "./errors.ts";
 
 import type { Channel } from "./types.ts";
 
-/** One of the three graph boundaries supported by the one-shot spectrum capture. */
+/**
+ * One of the three graph boundaries supported by the one-shot spectrum capture.
+ *
+ * `trackPostInput` is a track at its `post_input` tap (after the input section) and
+ * `trackPostPan` at its `post_pan` tap (after pan or matrix); decision 12 renamed both in place,
+ * with codes 1 and 2 unchanged. `output` is a session output.
+ */
 export type SpectrumTarget =
-  | Readonly<{ readonly kind: "trackPostInputBuiltins"; readonly trackId: string }>
-  | Readonly<{ readonly kind: "trackPostMatrix"; readonly trackId: string }>
+  | Readonly<{ readonly kind: "trackPostInput"; readonly trackId: string }>
+  | Readonly<{ readonly kind: "trackPostPan"; readonly trackId: string }>
   | Readonly<{ readonly kind: "output"; readonly outputId: string }>;
 
 /** Bounds for one spectrum capture/query. */
@@ -187,8 +193,8 @@ function streamStatusName(raw: number): SpectrumStreamStatus {
 
 function targetValue(target: SpectrumTarget): number {
   switch (target.kind) {
-    case "trackPostInputBuiltins": return value(TARGETS, "trackPostInputBuiltins");
-    case "trackPostMatrix": return value(TARGETS, "trackPostMatrix");
+    case "trackPostInput": return value(TARGETS, "trackPostInput");
+    case "trackPostPan": return value(TARGETS, "trackPostPan");
     case "output": return value(TARGETS, "output");
     default: throw new MisoUsageError("target.kind must name a supported spectrum boundary");
   }
@@ -205,8 +211,8 @@ function targetId(target: SpectrumTarget): string {
   }
   let id: unknown;
   switch (target.kind) {
-    case "trackPostInputBuiltins":
-    case "trackPostMatrix":
+    case "trackPostInput":
+    case "trackPostPan":
       id = target.trackId;
       break;
     case "output":

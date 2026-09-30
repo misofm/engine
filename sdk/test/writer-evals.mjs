@@ -43,7 +43,7 @@ const EQ_PARAMS = [
 function liveControlDocument(instances = 1) {
   return sessionDocument({
     effects: {
-      simd1: Array.from({ length: instances }, (_unused, index) =>
+      preInsert: Array.from({ length: instances }, (_unused, index) =>
         effectEntry(`eq${index}`, "miso.parametric-eq", EQ_PARAMS)),
     },
   });
@@ -54,7 +54,7 @@ function compressorDocument() {
   const compressor = CATALOG.effects.find((effect) => effect.id === "miso.compressor");
   return sessionDocument({
     effects: {
-      dynamic: [effectEntry(
+      inserts: [effectEntry(
         "compressor",
         compressor.id,
         compressor.parameters.map((row) => ({
@@ -92,7 +92,7 @@ function gainEdit(parameterId, channel, value) {
   return {
     kind: "effectParam",
     trackIndex: 0,
-    rack: 0,
+    rack: 3, // console: the EQs are console slots
     channel,
     effectIndex: 0,
     parameterId,
@@ -147,7 +147,7 @@ function bothLaneAddresses(instances) {
       edits.push({
         kind: "effectParam",
         trackIndex: 0,
-        rack: 0,
+        rack: 3, // console
         channel: 2,
         effectIndex,
         parameterId: row.id,

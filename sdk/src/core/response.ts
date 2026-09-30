@@ -25,7 +25,7 @@ export interface ResponsePreviewGrid {
 /** Caller metadata echoed as correlation; it is never treated as an active plan binding. */
 export interface ResponseTargetCorrelation {
   readonly trackId?: string;
-  readonly rack?: "simd1" | "dynamic" | "simd2";
+  readonly rack?: "console" | "inserts";
   readonly slotId?: string;
 }
 
