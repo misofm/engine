@@ -183,26 +183,41 @@ for (const control of table.controls) {
 }
 
 // The two console-strip documents (#1085), as the native rows state them. Each fixture is checked
-// against the table's facts from its own JSON: every track's effects, section by section in the
-// console vocabulary of `console_workload::Workload::strip_layout` (`simd1` reads `pre_insert`,
-// `dynamic` `inserts`, `simd2` `post_insert`), and which tracks bypass them.
+// against the table's facts from its own JSON: every track's effects, section by section in strip
+// order, in the console vocabulary of `console_workload::Workload::strip_layout` (decision 12,
+// #1093: the session's `pre_insert` slots, the track's `inserts`, then the `post_insert` slots),
+// and which tracks bypass them.
 const DOCUMENT_KINDS = ["sixty_four_track_console", "sixty_four_track_app_shape"];
-const SECTIONS = [["simd1", "pre_insert"], ["dynamic", "inserts"], ["simd2", "post_insert"]];
 const SHORT_NAMES = {
   "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
 };
-const effectNames = (effects) => effects.map((effect) => SHORT_NAMES[effect.identity.effect_id] ?? "other");
-function trackLayout(track) {
-  const sections = SECTIONS.filter(([rack]) => track[rack].effects.length > 0)
-    .map(([rack, name]) => `${name}:${effectNames(track[rack].effects).join("+")}`);
+const shortName = (effect) => SHORT_NAMES[effect.effect_id] ?? "other";
+// A track's strip as `[section, effects]` in strip order, each effect `{ effect_id, bypass }`. A
+// console slot's effect is declared once on the session; its bypass is the track's entry.
+function trackSections(document, track) {
+  const { pre_insert: pre, post_insert: post } = document.console;
+  const declared = new Map([...pre, ...post].map((slot) => [slot.slot, slot.identity.effect_id]));
+  const entries = (slots) => {
+    const names = new Set(slots.map((slot) => slot.slot));
+    return track.console.filter((entry) => names.has(entry.slot))
+      .map((entry) => ({ effect_id: declared.get(entry.slot), bypass: entry.bypass }));
+  };
+  const inserts = track.inserts.effects
+    .map((effect) => ({ effect_id: effect.identity.effect_id, bypass: effect.bypass }));
+  return [["pre_insert", entries(pre)], ["inserts", inserts], ["post_insert", entries(post)]];
+}
+const trackEffects = (document, track) => trackSections(document, track).flatMap(([, effects]) => effects);
+function trackLayout(document, track) {
+  const sections = trackSections(document, track).filter(([, effects]) => effects.length > 0)
+    .map(([name, effects]) => `${name}:${effects.map(shortName).join("+")}`);
   return sections.length === 0 ? "builtins" : sections.join(",");
 }
-function bypassCensus(tracks) {
+function bypassCensus(document) {
   let any = false;
   let exact = true;
   let bypassed = 0;
-  tracks.forEach((track, index) => {
-    const effects = SECTIONS.flatMap(([rack]) => track[rack].effects);
+  document.tracks.forEach((track, index) => {
+    const effects = trackEffects(document, track);
     const some = effects.some((effect) => effect.bypass);
     const every = effects.length > 0 && effects.every((effect) => effect.bypass);
     any ||= some;
@@ -215,14 +230,14 @@ assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), DOCUME
   "the table lists the two console-strip documents");
 const DOCUMENTS = table.documents.map((doc) => {
   const loaded = loadDocument(doc.fixture_id);
-  const { tracks } = loaded.fixture;
-  assert.equal(tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
-  for (const track of tracks) {
-    assert.equal(trackLayout(track), doc.strip_layout, `${doc.workload_kind} ${track.id}: layout`);
-    const content = effectNames(SECTIONS.flatMap(([rack]) => track[rack].effects)).join("+");
+  const document = loaded.fixture;
+  assert.equal(document.tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
+  for (const track of document.tracks) {
+    assert.equal(trackLayout(document, track), doc.strip_layout, `${doc.workload_kind} ${track.id}: layout`);
+    const content = trackEffects(document, track).map(shortName).join("+");
     assert.equal(content, doc.strip_content, `${doc.workload_kind} ${track.id}: content`);
   }
-  const census = bypassCensus(tracks);
+  const census = bypassCensus(document);
   assert.equal(census.pattern, doc.bypass_pattern, `${doc.workload_kind}: bypass pattern`);
   assert.equal(census.bypassed, doc.bypassed_tracks, `${doc.workload_kind}: bypassed tracks`);
   return { doc, loaded };

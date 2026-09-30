@@ -128,10 +128,13 @@ const SIXTY_FOUR_TRACK_MONO: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
 /// The app-shape fixture (issue #1085): what `misofm/app` compiles, on the standing console.
 ///
-/// Generated from the standing fixture by `scripts/derive-app-console-fixture.py`, which moves
-/// every track's exact EQ and compressor objects, in order, from `simd1` to `dynamic`, drops the
-/// limiter, and bypasses both effects on every track whose index is 2 mod 3. A committed document
-/// rather than a strip edit, because the browser arm boots the same bytes the native row renders.
+/// Generated from the standing fixture by `scripts/derive-app-console-fixture.py`, which keeps the
+/// standing EQ and compressor as the session's two `pre_insert` slots and each track's entries for
+/// them (decision 12's console shape, #1093), drops the limiter's `post_insert` slot and entries,
+/// and bypasses both entries on every track whose index is 2 mod 3. B0 wrote the same effects
+/// into every track's `dynamic` rack; the console migration moved them to `pre_insert` with their
+/// bits unchanged. A committed document rather than a strip edit, because the browser arm boots
+/// the same bytes the native row renders.
 const SIXTY_FOUR_TRACK_APP: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json");
 
@@ -809,8 +812,9 @@ impl Workload {
     /// states the same placement it always did. What it buys is that the same spelling describes
     /// the row on today's per-track racks and on the console model, so a row measured before and
     /// after the console strip lands is pinned by one validator rule. The one row whose layout the
-    /// console migration moves is the app shape, whose EQ and compressor go from `inserts` to
-    /// `pre_insert`; the validator accepts both spellings for that row alone.
+    /// console migration moved (#1093) is the app shape, whose EQ and compressor went from
+    /// `inserts` to `pre_insert`; the validator accepts both spellings for that row alone, so S0's
+    /// baseline records and a rerun on the console model are held to the same rule.
     pub const fn strip_layout(self) -> &'static str {
         match self {
             Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "pre_insert:eq",
@@ -823,8 +827,9 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy => "pre_insert:eq,inserts:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
             Self::SixtyFourTrackEqCompSimd1 => "pre_insert:eq+compressor",
-            // The app shape: EQ -> compressor on every track's `dynamic` rack, no limiter.
-            Self::SixtyFourTrackAppShape => "inserts:eq+compressor",
+            // The app shape: EQ -> compressor as the session's two `pre_insert` slots (#1093), no
+            // limiter. Before the console migration it was `inserts:eq+compressor`.
+            Self::SixtyFourTrackAppShape => "pre_insert:eq+compressor",
             // The intended production layout.
             _ => "pre_insert:eq+compressor,post_insert:limiter",
         }
@@ -1158,13 +1163,16 @@ impl BypassCensus {
         let mut exact = true;
         let mut bypassed_tracks = 0;
         for (index, track) in model.tracks.iter().enumerate() {
-            let effects = || {
-                [&track.simd1, &track.dynamic, &track.simd2]
-                    .into_iter()
-                    .flat_map(|rack| rack.effects.iter())
+            // A track's effects are its console entries and its inserts (decision 12).
+            let bypasses = || {
+                track
+                    .console
+                    .iter()
+                    .map(|entry| entry.bypass)
+                    .chain(track.inserts.effects.iter().map(|effect| effect.bypass))
             };
-            let some = effects().any(|effect| effect.bypass);
-            let every = effects().next().is_some() && effects().all(|effect| effect.bypass);
+            let some = bypasses().any(|bypass| bypass);
+            let every = bypasses().next().is_some() && bypasses().all(|bypass| bypass);
             any |= some;
             bypassed_tracks += u64::from(every);
             exact &= every == (index % 3 == 2) && some == every;
@@ -3132,7 +3140,7 @@ mod tests {
                 "fixtures/session/v1/console-sixty-four-track-app.json",
                 false,
                 "eq+compressor",
-                "inserts:eq+compressor"
+                "pre_insert:eq+compressor"
             )
         );
         let sparse = Workload::SixtyFourTrackConsoleSparse;
@@ -3190,7 +3198,7 @@ mod tests {
     }
 
     /// Issue #1085: a strip-at-N row is the standing fixture's first N tracks, each carried over
-    /// whole under a new id, with one post-matrix route per track to the fixture's output.
+    /// whole under a new id, with one `post_pan` route per track to the fixture's output.
     ///
     /// Red mutation: clone `template[template.len() - 1 - index]` in `synthesise_tracks`, or apply
     /// a strip edit to the rows -- the per-track equality fails.
@@ -3220,7 +3228,7 @@ mod tests {
                     route.source
                         == session::RouteSource::Track {
                             track_id: track.id.clone(),
-                            tap: session::SendTap::PostMatrix,
+                            tap: session::SendTap::PostPan,
                         },
                     "{}: route {index}",
                     row.kind()
@@ -3239,44 +3247,51 @@ mod tests {
         }
     }
 
-    /// Issue #1085: the app shape is the standing strip's own EQ and compressor on every track's
-    /// `dynamic` rack, with no limiter, and both effects bypassed on exactly the tracks whose index
-    /// is 2 mod 3. Everything else about each track is the standing fixture's.
+    /// Issue #1085: the app shape is the standing strip's own EQ and compressor on every track,
+    /// with no limiter, and both effects bypassed on exactly the tracks whose index is 2 mod 3.
+    /// Everything else about each track is the standing fixture's.
+    ///
+    /// In decision 12's console shape since #1093: the EQ and compressor are the session's two
+    /// `pre_insert` slots, declared exactly as the standing fixture declares them, the limiter's
+    /// `post_insert` slot is gone, and each track's two entries are its standing entries with the
+    /// bypass the pattern gives; no track carries an insert.
     ///
     /// Read from the committed fixture through the same parse the row renders, against the
     /// standing model, so the fixture and its generator are held to the row's claim here as well
     /// as by `scripts/check-console-fixtures.sh`.
     #[test]
-    fn the_app_shape_moves_the_standing_eq_and_compressor_into_dynamic_and_bypasses_every_third_track()
-     {
+    fn the_app_shape_keeps_the_standing_eq_and_compressor_slots_and_bypasses_every_third_track() {
         let standing = standing_model();
         let app = console_model(Workload::SixtyFourTrackAppShape);
+        assert_eq!(app.console.pre_insert, standing.console.pre_insert);
+        assert!(app.console.post_insert.is_empty(), "no limiter slot");
         assert_eq!(app.tracks.len(), standing.tracks.len());
         let mut bypassed = 0;
         for (index, (track, reference)) in app.tracks.iter().zip(&standing.tracks).enumerate() {
-            assert!(track.simd1.effects.is_empty() && track.simd2.effects.is_empty());
+            assert!(
+                track.inserts.effects.is_empty(),
+                "track {index}: no inserts"
+            );
             let want_bypass = index % 3 == 2;
-            let moved: Vec<session::Effect> = track
-                .dynamic
-                .effects
+            let entries: Vec<session::ConsoleEntry> = track
+                .console
                 .iter()
-                .map(|effect| {
-                    assert_eq!(effect.bypass, want_bypass, "track {index}");
-                    session::Effect {
+                .map(|entry| {
+                    assert_eq!(entry.bypass, want_bypass, "track {index}");
+                    session::ConsoleEntry {
                         bypass: false,
-                        ..effect.clone()
+                        ..entry.clone()
                     }
                 })
                 .collect();
             assert_eq!(
-                moved, reference.simd1.effects,
-                "track {index}: the standing EQ and compressor"
+                entries,
+                reference.console[..2],
+                "track {index}: the standing EQ and compressor entries"
             );
             bypassed += u64::from(want_bypass);
             let mut body = track.clone();
-            body.dynamic = reference.dynamic.clone();
-            body.simd1 = reference.simd1.clone();
-            body.simd2 = reference.simd2.clone();
+            body.console.clone_from(&reference.console);
             assert_eq!(&body, reference, "track {index}: nothing else moved");
         }
         assert_eq!(bypassed, 21);
@@ -3295,13 +3310,14 @@ mod tests {
     /// Issue #1085: the bypass census names the app pattern only for the app pattern.
     ///
     /// Red mutation: drop the `some == every` term -- a track bypassing its EQ alone reads as the
-    /// app pattern; drop `effects().next().is_some()` -- an empty track counts as bypassed.
+    /// app pattern; drop `bypasses().next().is_some()` -- an empty track counts as bypassed; read
+    /// the console entries alone -- a bypassed insert goes uncounted.
     #[test]
     fn the_bypass_census_names_the_app_pattern_and_nothing_else() {
         let app = console_model(Workload::SixtyFourTrackAppShape);
         assert_eq!(BypassCensus::of(&app).pattern, BypassPattern::IndexMod3Is2);
         let mut partial = app.clone();
-        partial.tracks[2].dynamic.effects[1].bypass = false;
+        partial.tracks[2].console[1].bypass = false;
         assert_eq!(
             BypassCensus::of(&partial),
             BypassCensus {
@@ -3311,19 +3327,35 @@ mod tests {
             "a track bypassing its EQ alone"
         );
         let mut extra = app.clone();
-        for effect in &mut extra.tracks[0].dynamic.effects {
-            effect.bypass = true;
+        for entry in &mut extra.tracks[0].console {
+            entry.bypass = true;
         }
         assert_eq!(BypassCensus::of(&extra).pattern, BypassPattern::Other);
         let mut shifted = app.clone();
         for (index, track) in shifted.tracks.iter_mut().enumerate() {
-            for effect in &mut track.dynamic.effects {
-                effect.bypass = index % 3 == 1;
+            for entry in &mut track.console {
+                entry.bypass = index % 3 == 1;
             }
         }
         assert_eq!(BypassCensus::of(&shifted).pattern, BypassPattern::Other);
+        let mut inserted = app.clone();
+        let slot = inserted.console.pre_insert[0].clone();
+        inserted.tracks[0].inserts.effects.push(session::Effect {
+            id: StableId::parse("extra").expect("stable id"),
+            identity: slot.identity,
+            quality: slot.quality,
+            bypass: true,
+            link_mode: slot.link_mode,
+            params: Vec::new(),
+            sidechain: session::SidechainDeclaration::None,
+        });
+        assert_eq!(
+            BypassCensus::of(&inserted).pattern,
+            BypassPattern::Other,
+            "a bypassed insert on a track that bypasses nothing else"
+        );
         let mut emptied = app;
-        emptied.tracks[1].dynamic.effects.clear();
+        emptied.tracks[1].console.clear();
         assert_eq!(
             BypassCensus::of(&emptied).bypassed_tracks,
             21,

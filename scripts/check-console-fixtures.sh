@@ -76,19 +76,20 @@ for track in mono["tracks"]:
                 assert values[(parameter_id, "right", unit)] == value
 assert sum(t["fader"]["left_db"] != t["fader"]["right_db"] for t in mono["tracks"]) == 49
 assert sum(t["pan"]["left"] != t["pan"]["right"] for t in mono["tracks"]) == 50
-# #1085: the app shape. The standing strip's own EQ and compressor on `dynamic`, no limiter, and
-# both effects bypassed on exactly the tracks whose index is 2 mod 3.
+# #1085: the app shape, in decision 12's console shape since #1093. The standing EQ and compressor
+# slots are the session's `pre_insert`, with no `post_insert` limiter; each track's two entries are
+# its standing entries, both bypassed on exactly the tracks whose index is 2 mod 3; no inserts.
 assert app["session_id"] == "console-sixty-four-track-app"
-outer = lambda d: {k: v for k, v in d.items() if k not in ("session_id", "tracks")}
+outer = lambda d: {k: v for k, v in d.items() if k not in ("session_id", "console", "tracks")}
 assert outer(app) == outer(intended) and len(app["tracks"]) == 64
+assert app["console"] == {"pre_insert": intended["console"]["pre_insert"], "post_insert": []}
 for index, (track, standing) in enumerate(zip(app["tracks"], intended["tracks"])):
-    assert track["simd1"]["effects"] == [] and track["simd2"]["effects"] == []
-    moved = [dict(e, bypass=False) for e in track["dynamic"]["effects"]]
-    assert moved == standing["simd1"]["effects"]
-    assert all(e["bypass"] == (index % 3 == 2) for e in track["dynamic"]["effects"])
-    rest = lambda t: {k: v for k, v in t.items() if k not in ("simd1", "dynamic", "simd2")}
+    assert track["inserts"]["effects"] == []
+    assert [dict(e, bypass=False) for e in track["console"]] == standing["console"][:2]
+    assert all(e["bypass"] == (index % 3 == 2) for e in track["console"])
+    rest = lambda t: {k: v for k, v in t.items() if k != "console"}
     assert rest(track) == rest(standing)
-assert sum(e["bypass"] for t in app["tracks"] for e in t["dynamic"]["effects"]) == 2 * 21
+assert sum(e["bypass"] for t in app["tracks"] for e in t["console"]) == 2 * 21
 PY
 
 printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono/app witnesses)\n'
