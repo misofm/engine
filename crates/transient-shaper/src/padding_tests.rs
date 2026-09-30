@@ -21,7 +21,9 @@
 //! NaNs fold to one word before any comparison (decision 10).
 
 use super::*;
+use effect_contract::BankWidth;
 use effect_contract::{PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
+use lane::{Simd4, Simd8};
 
 const QUANTUM: u32 = 128;
 const WIDTHS: [BankWidth; 2] = [BankWidth::Four, BankWidth::Eight];

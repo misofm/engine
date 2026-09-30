@@ -41,7 +41,9 @@ pub use symmetry::{
 
 use core::{fmt, hash::Hash};
 use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz, is_launch_sample_rate};
-use lane::{Backend, Simd4, Simd8};
+#[cfg(not(target_arch = "wasm32"))]
+use lane::Simd8;
+use lane::{Backend, Simd4};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -227,15 +229,27 @@ pub fn parameter_automation_smoothing_valid(
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
 scalar_enum!(PortLayout {DualMonoPlanar=1});
+/// The lane count of a homogeneous bank.
+///
+/// # `Eight` is absent on wasm32 (issue #1110)
+///
+/// The browser runs four lanes only, so on `wasm32` this enum has one variant, as `lane` has no
+/// `Simd8` and no `Backend::Simd8` there. The predicate, `#[cfg(not(target_arch = "wasm32"))]`, is
+/// written on the variant, on this type's own arms, and on the eight-lane arm of
+/// [`match_bank_width!`], the one dispatch through which every other crate turns a width into a
+/// lane type. Nothing else changes by target: the variant set is the only difference, and every
+/// kernel is one generic body.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BankWidth {
     Four,
+    #[cfg(not(target_arch = "wasm32"))]
     Eight,
 }
 impl BankWidth {
     pub const fn lanes(self) -> u32 {
         match self {
             Self::Four => 4,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Eight => 8,
         }
     }
@@ -248,8 +262,18 @@ impl BankWidth {
         // Asked of the width, not of the variants: `Backend::Scalar`, the test-only whole-plan
         // oracle, exists only where `lane/test-support` is enabled (issue #1059), and Cargo
         // unifies that feature across a build, so no match on the variants compiles in both.
-        match backend.width() {
+        Self::for_lanes(backend.width())
+    }
+
+    /// The bank width of `lanes` lanes, or `None` for a lane count no bank has on this target:
+    /// the one-lane scalar path, and eight lanes on `wasm32` (issue #1110).
+    ///
+    /// What turns a lane type's `WIDTH` into a width [`match_bank_width!`] can dispatch on.
+    #[must_use]
+    pub const fn for_lanes(lanes: usize) -> Option<Self> {
+        match lanes {
             4 => Some(Self::Four),
+            #[cfg(not(target_arch = "wasm32"))]
             8 => Some(Self::Eight),
             _ => None,
         }
@@ -258,10 +282,10 @@ impl BankWidth {
     /// Whether this non-scalar bank width is legal for a selected backend.
     #[must_use]
     pub const fn matches_backend(self, backend: Backend) -> bool {
-        matches!(
-            (self, Self::for_backend(backend)),
-            (Self::Four, Some(Self::Four)) | (Self::Eight, Some(Self::Eight))
-        )
+        match Self::for_backend(backend) {
+            Some(width) => width.lanes() == self.lanes(),
+            None => false,
+        }
     }
 
     /// The active mask of a full bank of this width: one `true` per lane.
@@ -273,9 +297,66 @@ impl BankWidth {
     pub const fn full_mask(self) -> &'static [bool] {
         match self {
             Self::Four => &[true; 4],
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Eight => &[true; 8],
         }
     }
+}
+
+/// Evaluates `$body` at one bank width's lane vocabulary: the workspace's one dispatch from a
+/// [`BankWidth`] to a lane type (issue #1110).
+///
+/// `match_bank_width!(width, |L| body)` expands to a `match` on `width` with one arm per
+/// [`BankWidth`] this target has. In each arm `L` is a local alias of that width's lane type
+/// (`lane::Simd4` or `lane::Simd8`), so `body` is written once and instantiated per width.
+/// Two optional binders follow: `|L, N| body` also binds `N`, the lane count as a `usize`
+/// constant, for a const-generic width parameter, and `|L, N, tile| body` also binds `tile`, the
+/// width's AoSoA tile transpose ([`transpose_tile_4`] or `transpose_tile_8`). The lane type may be
+/// `_` when the body does not use it. Each arm is a block in the caller's function, so `?` and
+/// `return` in `body` act on the caller.
+///
+/// # Why a macro
+///
+/// `BankWidth::Eight` and `lane::Simd8` do not exist on `wasm32` (see [`BankWidth`]). A `match`
+/// written out at each site would need `#[cfg]` on its eight-lane arm, and a `use` of `Simd8`
+/// beside it, at every site; this macro is the one place outside `lane` and this type where the
+/// eight-lane arm is written. Its `cfg` is on the target architecture, which is the same for every
+/// crate in a build, so it means the same thing wherever the macro expands.
+#[macro_export]
+macro_rules! match_bank_width {
+    ($width:expr, |$lane:tt $(, $lanes:ident $(, $tile:ident)?)?| $body:expr) => {
+        match $width {
+            $crate::BankWidth::Four => {
+                $crate::match_bank_width!(@lane $lane = $crate::__private::Simd4);
+                $(
+                    const $lanes: usize = 4;
+                    $(let $tile = $crate::transpose_tile_4;)?
+                )?
+                $body
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            $crate::BankWidth::Eight => {
+                $crate::match_bank_width!(@lane $lane = $crate::__private::Simd8);
+                $(
+                    const $lanes: usize = 8;
+                    $(let $tile = $crate::transpose_tile_8;)?
+                )?
+                $body
+            }
+        }
+    };
+    (@lane _ = $type:ty) => {};
+    (@lane $lane:ident = $type:ty) => {
+        type $lane = $type;
+    };
+}
+
+/// Not public API: the lane types [`match_bank_width!`] names, so that its callers need not.
+#[doc(hidden)]
+pub mod __private {
+    pub use lane::Simd4;
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use lane::Simd8;
 }
 
 /// Transpose one four-by-four tile of 32-bit words: `out[k][lane] == rows[lane][k]`.
@@ -303,6 +384,7 @@ pub fn transpose_tile_4(rows: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// [`Simd8`]'s `transpose` is the 24-shuffle AVX pattern (eight `unpack`, eight `shuffle`, eight
 /// `permute2f128`); on a target where `wide` lowers `f32x8` to two 128-bit halves it is the scalar
 /// element permutation, which is equally bit-exact and equally correct.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 #[must_use]
 pub fn transpose_tile_8(rows: [[f32; 8]; 8]) -> [[f32; 8]; 8] {

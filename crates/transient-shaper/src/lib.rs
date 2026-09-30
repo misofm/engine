@@ -34,7 +34,7 @@
 //! is what keeps the layout a contract fixture.
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
@@ -52,7 +52,7 @@ use effect_runtime::params::{
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use lane::kernels::gain_mix_step;
-use lane::{Backend, Lane, Simd4, Simd8};
+use lane::{Backend, Lane};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
@@ -868,14 +868,9 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     request: PrepareEffectBankRequest<'_>,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
-    Ok(match request.width {
-        BankWidth::Four => {
-            boxed::<Simd4, 4, NATIVE_ONLY>(bind::<_, 4, NATIVE_ONLY>(factory, request)?)
-        }
-        BankWidth::Eight => {
-            boxed::<Simd8, 8, NATIVE_ONLY>(bind::<_, 8, NATIVE_ONLY>(factory, request)?)
-        }
-    })
+    Ok(effect_contract::match_bank_width!(request.width, |L, W| {
+        boxed::<L, W, NATIVE_ONLY>(bind::<_, W, NATIVE_ONLY>(factory, request)?)
+    }))
 }
 
 /// Boxes a bank bound at `W` lanes.

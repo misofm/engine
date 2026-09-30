@@ -21,6 +21,7 @@ use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, LinkMode, PrepareEffectLimits,
     PreparedPorts, PreparedSidechainPort,
 };
+use lane::{Simd4, Simd8};
 
 const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];

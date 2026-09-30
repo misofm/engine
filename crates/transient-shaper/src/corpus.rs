@@ -28,11 +28,11 @@
 //! The determinism claim excludes NaN payloads (wasm canonicalises them). Every input here is
 //! finite and every output is checked for finiteness by the gate.
 
-use lane::{Lane, Simd4, Simd8};
+use lane::Lane;
 
 use crate::{PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR, coefficient_row};
 use effect_contract::{
-    EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
+    BankWidth, EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
     PreparedSidechainPort, StatePayloadSizes, TailSamples,
 };
 
@@ -62,7 +62,12 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 ];
 
 /// The widths every case is digested at.
+#[cfg(not(target_arch = "wasm32"))]
 pub const WIDTHS: [usize; 3] = [1, 4, 8];
+/// The widths every case is digested at: no eight on `wasm32`, which has no eight-lane type
+/// (issue #1110, `effect_contract::BankWidth`).
+#[cfg(target_arch = "wasm32")]
+pub const WIDTHS: [usize; 2] = [1, 4];
 
 /// SHA-256 of each case's word stream, pinned from the scalar `Lane` instantiation.
 ///
@@ -167,11 +172,10 @@ fn signal(track: usize, channel: usize) -> Vec<f32> {
 pub fn run_case(case: usize, width: usize, out: &mut [u32]) {
     assert!(case < CASE_COUNT, "corpus case out of range");
     assert_eq!(out.len(), WORDS, "corpus output must be WORDS long");
-    match width {
-        1 => run::<f32, 1>(case, out),
-        4 => run::<Simd4, 4>(case, out),
-        8 => run::<Simd8, 8>(case, out),
-        _ => panic!("corpus width must be 1, 4 or 8"),
+    match BankWidth::for_lanes(width) {
+        Some(bank) => effect_contract::match_bank_width!(bank, |L, W| run::<L, W>(case, out)),
+        None if width == 1 => run::<f32, 1>(case, out),
+        None => panic!("corpus width must be one of WIDTHS"),
     }
 }
 

@@ -23,6 +23,7 @@
 use super::*;
 use effect_contract::{LinkMode, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
 use lane::Backend;
+use lane::{Simd4, Simd8};
 
 const QUANTUM: u32 = 128;
 const WIDTHS: [BankWidth; 2] = [BankWidth::Four, BankWidth::Eight];

@@ -44,7 +44,7 @@ use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
 use lane::kernels::halfband::{HALFBAND63_LIVE_ROWS as LIVE_ROWS, HALFBAND63_POS_MASK as POS_MASK};
-use lane::{Lane, Simd4, Simd8};
+use lane::{Backend, Lane};
 use math::db_to_gain_f32;
 
 pub mod corpus;
@@ -944,23 +944,9 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     request: PrepareEffectBankRequest<'_>,
 ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
     request.validate_shape()?;
-    Ok(match request.width {
-        BankWidth::Four => {
-            boxed::<Simd4, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
-        }
-        BankWidth::Eight => {
-            boxed::<Simd8, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
-        }
-    })
-}
-
-/// The width a bank of `L` runs at: a compile-time constant for each `L`.
-const fn lane_width<L: Lane>() -> BankWidth {
-    if L::WIDTH == 4 {
-        BankWidth::Four
-    } else {
-        BankWidth::Eight
-    }
+    Ok(effect_contract::match_bank_width!(request.width, |L| {
+        boxed::<L, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
+    }))
 }
 
 /// Boxes a bank bound at `L::WIDTH` lanes.
@@ -975,26 +961,20 @@ fn boxed<L: Lane, const NATIVE_ONLY: bool>(
 where
     PreparedSoftClipBank<L>: PreparedNativeEffectBank,
 {
-    if NATIVE_ONLY && !width_is_native(lane_width::<L>()) {
+    if NATIVE_ONLY && !executes(L::WIDTH) {
         return None;
     }
     bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
 }
 
-/// `true` if this artifact executes `width` lanes natively.
+/// `true` if this artifact executes banks of `lanes` lanes natively.
 ///
 /// D4 replaced runtime SIMD dispatch with a compile-time ISA pin plus a boot attestation, so this
-/// is a `cfg` question and not a CPUID one. A width the artifact was not built for is declined
-/// with `Ok(None)`, exactly as the deleted `PreparedSoftClipBankKernel::try_new` declined an
-/// unavailable backend, and the caller falls back to scalar instances.
-const fn width_is_native(width: BankWidth) -> bool {
-    match width {
-        BankWidth::Four => cfg!(any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )),
-        BankWidth::Eight => cfg!(target_arch = "x86_64"),
-    }
+/// is a compile-time constant and not a CPUID question. A width the artifact was not built for is
+/// declined with `Ok(None)`, exactly as the deleted `PreparedSoftClipBankKernel::try_new` declined
+/// an unavailable backend, and the caller falls back to scalar instances.
+const fn executes(lanes: usize) -> bool {
+    lanes == Backend::current().width()
 }
 
 /// Binds one bank of `L::WIDTH` lanes.
@@ -1035,7 +1015,7 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
         right_defaults[track] = right;
     }
     // `L::WIDTH` is a compile-time constant here, so the D4 check folds (see [`boxed`]).
-    if !same_program || (NATIVE_ONLY && !width_is_native(lane_width::<L>())) {
+    if !same_program || (NATIVE_ONLY && !executes(L::WIDTH)) {
         return Ok(None);
     }
     let mut inner = SoftClip::new(
