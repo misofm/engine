@@ -1,5 +1,5 @@
 import { WasmBoundary } from "../../../sdk/src/core/boundary.ts";
-import { EngineConsole } from "../../../sdk/src/core/console.ts";
+import { EngineLiveControls } from "../../../sdk/src/core/live-controls.ts";
 import { encodeLaneEdits } from "../../../sdk/src/core/writer.ts";
 import { MisoEngineAsset } from "../../../sdk/src/core/asset.ts";
 import { ABI_LAYOUT } from "../../../sdk/src/generated/abi.ts";
@@ -354,7 +354,7 @@ async function createContinuousSpectrumBrowser(
     spectrum: query,
     policy: {
       sourceRingFrames: frames,
-      console: { commandQueueRecords: 64, meterBlocks: 16 },
+      liveControls: { commandQueueRecords: 64, meterBlocks: 16 },
       ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
     },
     scratchBoot: async () => ({
@@ -1066,7 +1066,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
   );
   const browser = await createEngine({
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
     } },
     scratchBoot: async () => ({
@@ -1104,9 +1104,9 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
   )).arrayBuffer());
   const headless = await WasmBoundary.boot(asset, document, {
     sourceRingFrames: OBSERVATION_FRAMES,
-    console: { commandQueueRecords: 64, observationTaps: 4 },
+    liveControls: { commandQueueRecords: 64, observationTaps: 4 },
   });
-  const headlessConsole = new EngineConsole(headless.sessionMap(), (edits) =>
+  const headlessLiveControls = new EngineLiveControls(headless.sessionMap(), (edits) =>
     headless.submitCommands(encodeLaneEdits(edits), edits.length));
   const request = {
     trackId: "track",
@@ -1139,17 +1139,17 @@ async function runTrackResponseSubscriptionQualification(reference: TrackRespons
     const initial = subscription.readLatest();
     if (initial === undefined) throw new Error("track response subscription returned no initial result");
     const initialQueries = stats.queries;
-    const console = await browser.console();
+    const liveControls = await browser.liveControls();
     const builtinPair = { hpfHz: 80, lpfHz: 12_000 } as const;
-    const edits = (owner: EngineConsole) => {
+    const edits = (owner: EngineLiveControls) => {
       const eq = owner.edit.track("track").effect("simd1", 0, "miso.parametric-eq");
       return [eq.parameter("band-1-gain", -3), eq.parameter("hpf-frequency", 400),
         eq.parameter("hpf-q", 0.8), eq.parameter("hpf-enabled", true),
         eq.parameter("lpf-frequency", 6_000), eq.parameter("lpf-q", 0.9),
         eq.parameter("lpf-enabled", true), owner.edit.track("track").inputFilters(builtinPair, { channel: "left" })];
     };
-    const command = await console.submit(...edits(console));
-    const headlessCommand = await headlessConsole.submit(...edits(headlessConsole));
+    const command = await liveControls.submit(...edits(liveControls));
+    const headlessCommand = await headlessLiveControls.submit(...edits(headlessLiveControls));
     if (!headlessCommand.ok || command.appliedAtSample !== headlessCommand.appliedAtSample) {
       throw new Error("browser/headless live EQ and builtin-filter acknowledgements disagree");
     }
@@ -1336,7 +1336,7 @@ async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<ty
   );
   const browser = await createEngine({
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
     } },
     scratchBoot: async () => ({
@@ -1508,7 +1508,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
   );
   const browser = await createEngine({
     document,
-    policy: { sourceRingFrames: OBSERVATION_FRAMES, console: {
+    policy: { sourceRingFrames: OBSERVATION_FRAMES, liveControls: {
       commandQueueRecords: 64, observationTaps: 4,
     } },
     scratchBoot: async () => ({

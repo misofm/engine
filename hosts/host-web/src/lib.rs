@@ -562,7 +562,7 @@ pub const COMMAND_RECORD_BYTES: u32 = 48;
 pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
 /// Per-track control-queue depth used when the configuration asks for the default.
 pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
-/// Largest `console_observation_taps` the browser configuration accepts.
+/// Largest `live_control_observation_taps` the browser configuration accepts.
 ///
 /// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
 /// taps per effect than a consumer can read; the cap keeps a mistyped configuration from asking
@@ -884,7 +884,7 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 ///
 /// The honest form of "you asked for a subscription this preparation cannot deliver": the effect
 /// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
-/// none. A caller fixes it by preparing with `console_observation_taps` set, not by retrying.
+/// none. A caller fixes it by preparing with `live_control_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
@@ -1023,25 +1023,25 @@ pub struct WebBootOptions {
     pub maximum_memory_bytes: u64,
     /// Per-track live-control queue depth in records, or `0` to attach no control channel
     /// and no command staging at all (issue #137 D1).
-    pub console_command_queue_records: u64,
+    pub live_control_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
     /// Zero is the honest form of "metering off costs nothing": no observer is bound, so the
     /// render path does not fold a single sample. A nonzero value binds one post-matrix meter per
     /// track with a `blocks * quantum_frames` window; the port lease then gates whether a finished
     /// window is posted. `12` is ~31 frames per second at 48 kHz with a 128-frame quantum.
-    pub console_meter_blocks: u64,
+    pub live_control_meter_blocks: u64,
     /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
     /// at all (issue #143 D3, level 1).
     ///
-    /// Requires `console_command_queue_records != 0`: a subscription rides the effect's own
+    /// Requires `live_control_command_queue_records != 0`: a subscription rides the effect's own
     /// command queue, so observation without live controls has no delivery path.
-    pub console_observation_taps: u64,
+    pub live_control_observation_taps: u64,
     /// The designated master track, **plus one**, or `0` for none (issue #143 D6).
     ///
     /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
-    pub console_master_track_plus_one: u64,
+    pub live_control_master_track_plus_one: u64,
 }
 
 impl WebBootOptions {
@@ -1056,19 +1056,19 @@ impl WebBootOptions {
             source_ring_frames: 0,
             reserved0: 0,
             maximum_memory_bytes: 0,
-            console_command_queue_records: 0,
-            console_meter_blocks: 0,
-            console_observation_taps: 0,
-            console_master_track_plus_one: 0,
+            live_control_command_queue_records: 0,
+            live_control_meter_blocks: 0,
+            live_control_observation_taps: 0,
+            live_control_master_track_plus_one: 0,
         }
     }
 
     /// Explicit defaults with the live web controls attached.
     #[must_use]
-    pub const fn console_defaults() -> Self {
+    pub const fn live_control_defaults() -> Self {
         Self {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
             ..Self::explicit_defaults()
         }
     }
@@ -1161,8 +1161,8 @@ pub struct WebResourceReport {
     /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue #143).
     ///
     /// Carved out of the report's first reserved word. Exactly zero for a session prepared with
-    /// `console_observation_taps == 0`, and that zero is *walked* over the built runtime rather
-    /// than computed from the configuration. The 224-byte layout is unchanged.
+    /// `live_control_observation_taps == 0`, and that zero is *walked* over the built runtime
+    /// rather than computed from the configuration. The 224-byte layout is unchanged.
     pub observation_retained_bytes: u64,
     /// Required-zero expansion words.
     pub reserved: [u64; 3],
@@ -1354,7 +1354,7 @@ struct ReadyOwnership {
     spectrum_capture: Option<PreparedSpectrumCapture>,
     host: PreparedHost,
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
-    /// when `console_meter_blocks` was zero, in which case no observer exists at all.
+    /// when `live_control_meter_blocks` was zero, in which case no observer exists at all.
     meters: Vec<MeterConsumer>,
     /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
     /// order the command producers use, so an addressed subscription reaches its lane with one
@@ -2530,7 +2530,7 @@ impl AudioWorkletEngineHost {
     fn next_meter_boundary(&self, sample: u64) -> u64 {
         let Some(period) = self
             .options
-            .console_meter_blocks
+            .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames))
             .filter(|period| *period != 0)
         else {
@@ -2864,7 +2864,7 @@ impl AudioWorkletEngineHost {
         let quantum = self.status.quantum_frames as usize;
         let meter_period = self
             .options
-            .console_meter_blocks
+            .live_control_meter_blocks
             .checked_mul(u64::from(self.status.quantum_frames));
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
@@ -3069,7 +3069,7 @@ impl AudioWorkletEngineHost {
     /// Drain every finished meter window into the frame buffer (issue #137 D2).
     ///
     /// Returns the number of complete windows folded by this call. Zero work happens without the
-    /// lease, and a host prepared with `console_meter_blocks == 0` has no observer to drain.
+    /// lease, and a host prepared with `live_control_meter_blocks == 0` has no observer to drain.
     ///
     /// Allocation-free by construction: it moves `Copy` snapshots out of bounded queues into a
     /// buffer allocated at compilation.
@@ -5350,7 +5350,7 @@ fn project_buffers(
     let output_pcm_bytes = u64::from(quantum_frames)
         .checked_mul(8)
         .ok_or_else(arithmetic)?;
-    let command_records = if options.console_command_queue_records == 0 {
+    let command_records = if options.live_control_command_queue_records == 0 {
         0
     } else {
         MAXIMUM_COMMAND_RECORDS
@@ -5490,12 +5490,14 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
             "web.options.reserved0",
         ));
     }
-    if options.console_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || (options.console_observation_taps != 0 && options.console_command_queue_records == 0)
-        || options.console_master_track_plus_one > u64::from(u32::MAX)
-        || (options.console_master_track_plus_one != 0 && options.console_observation_taps == 0)
-        || options.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
-        || options.console_meter_blocks > u64::from(u32::MAX)
+    if options.live_control_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
+        || (options.live_control_observation_taps != 0
+            && options.live_control_command_queue_records == 0)
+        || options.live_control_master_track_plus_one > u64::from(u32::MAX)
+        || (options.live_control_master_track_plus_one != 0
+            && options.live_control_observation_taps == 0)
+        || options.live_control_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
+        || options.live_control_meter_blocks > u64::from(u32::MAX)
     {
         return Err(BootFailure::fixed(
             RESULT_REFUSED_OPTIONS,
@@ -5599,7 +5601,7 @@ fn prepare_caps(
             total.checked_add(u32::try_from(lane.segments.len()).ok()?)
         })
         .unwrap_or(u32::MAX)
-        .max(u32::try_from(options.console_command_queue_records).unwrap_or(u32::MAX))
+        .max(u32::try_from(options.live_control_command_queue_records).unwrap_or(u32::MAX))
         .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
@@ -5796,7 +5798,7 @@ fn compile_ready(
     report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
     // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
-    // prepared with `console_observation_taps == 0`.
+    // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
     let track_count = handles.tracks.len();
     let mut rack_effects = Vec::new();
@@ -6103,20 +6105,20 @@ fn compile_ready(
 /// Translate the browser configuration's two live-control words into the facade's live-control
 /// request.
 ///
-/// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
-/// render path folds nothing at all. The port lease is a second, finer switch over posting.
+/// `live_control_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so
+/// the render path folds nothing at all. The port lease is a second, finer switch over posting.
 fn live_control_request(
     options: WebBootOptions,
     quantum_frames: u32,
 ) -> Option<HostLiveControlRequest> {
-    let control_queue_depth = match options.console_command_queue_records {
+    let control_queue_depth = match options.live_control_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
     };
-    let meter_period_frames = if options.console_meter_blocks == 0 {
+    let meter_period_frames = if options.live_control_meter_blocks == 0 {
         None
     } else {
-        let blocks = u32::try_from(options.console_meter_blocks).ok()?;
+        let blocks = u32::try_from(options.live_control_meter_blocks).ok()?;
         Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
     };
     Some(HostLiveControlRequest {
@@ -6126,8 +6128,8 @@ fn live_control_request(
         meter_queue_depth: NonZeroUsize::new(8)?,
         meter_tap: MeterTap::PostMatrix,
         // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
-        observation_taps: u32::try_from(options.console_observation_taps).ok()?,
-        master_track: match options.console_master_track_plus_one {
+        observation_taps: u32::try_from(options.live_control_observation_taps).ok()?,
+        master_track: match options.live_control_master_track_plus_one {
             0 => None,
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },

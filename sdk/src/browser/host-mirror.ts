@@ -11,10 +11,10 @@ import { validateBrowserSpectrumHopFrames } from "./policy.ts";
  * # Why there are two shapes at all
  *
  * The shipped `.d.ts` predates this SDK and is the app's direct interface to the worklet host: it
- * is flat, every field is required, and the two console-adjacent words are `bigint` because that is
- * what the wire takes. `BootOptions` is the SDK's: every field optional, absent meaning zero
- * meaning *the engine's* default, and the four console words grouped, because a caller who wants
- * no console should be able to say nothing rather than write four zeroes.
+ * is flat, every field is required, and the two live-control-adjacent words are `bigint` because
+ * that is what the wire takes. `BootOptions` is the SDK's: every field optional, absent meaning
+ * zero meaning *the engine's* default, and the four live-control words grouped, because a caller
+ * who wants no live controls should be able to say nothing rather than write four zeroes.
  *
  * Both are right for their callers, and neither should be bent to match the other. What must not
  * happen is a third, hand-written copy of the mapping between them appearing in an app -- which is
@@ -40,35 +40,41 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   const word = (name: string, value: number | undefined): bigint =>
     BigInt(nonNegative(name, value ?? 0));
 
-  const console = options.console;
-  const observationTaps = word("console.observationTaps", console?.observationTaps);
-  const commandQueueRecords = word("console.commandQueueRecords", console?.commandQueueRecords);
-  const masterTrackPlusOne = word("console.masterTrackPlusOne", console?.masterTrackPlusOne);
+  const liveControls = options.liveControls;
+  const observationTaps = word("liveControls.observationTaps", liveControls?.observationTaps);
+  const commandQueueRecords = word(
+    "liveControls.commandQueueRecords",
+    liveControls?.commandQueueRecords,
+  );
+  const masterTrackPlusOne = word(
+    "liveControls.masterTrackPlusOne",
+    liveControls?.masterTrackPlusOne,
+  );
   const spectrumHopFrames = validateBrowserSpectrumHopFrames(options.spectrumHopFrames) ?? 0;
 
-  // The engine refuses these combinations at boot with `web.options.console`. Catching them here
-  // turns a boot-time refusal into a caller-time message that says which pair is inconsistent,
+  // The engine refuses these combinations at boot with `web.options.live_controls`. Catching them
+  // here turns a boot-time refusal into a caller-time message that says which pair is inconsistent,
   // without duplicating the engine's authority: the engine still refuses if this check is wrong.
   if (observationTaps !== 0n && commandQueueRecords === 0n) {
     throw new MisoUsageError(
-      "observation taps ride the effect's own command queue, so consoleObservationTaps requires "
-      + "consoleCommandQueueRecords",
+      "observation taps ride the effect's own command queue, so liveControlObservationTaps requires "
+      + "liveControlCommandQueueRecords",
     );
   }
   if (masterTrackPlusOne !== 0n && observationTaps === 0n) {
     throw new MisoUsageError(
       "a designated master track is a designation over observed effects, so "
-      + "consoleMasterTrackPlusOne requires consoleObservationTaps",
+      + "liveControlMasterTrackPlusOne requires liveControlObservationTaps",
     );
   }
   if (observationTaps > BigInt(ABI_LAYOUT.constants.maximumObservationTaps)) {
     throw new MisoUsageError(
-      `consoleObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
+      `liveControlObservationTaps is capped at ${ABI_LAYOUT.constants.maximumObservationTaps}`,
     );
   }
   if (commandQueueRecords > BigInt(ABI_LAYOUT.constants.maximumCommandRecords)) {
     throw new MisoUsageError(
-      `consoleCommandQueueRecords is capped at ${ABI_LAYOUT.constants.maximumCommandRecords}`,
+      `liveControlCommandQueueRecords is capped at ${ABI_LAYOUT.constants.maximumCommandRecords}`,
     );
   }
 
@@ -84,10 +90,10 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   return {
     sourceRingFrames: nonNegative("sourceRingFrames", options.sourceRingFrames ?? 0),
     maximumMemoryBytes: options.maximumMemoryBytes ?? 0n,
-    consoleCommandQueueRecords: commandQueueRecords,
-    consoleMeterBlocks: word("console.meterBlocks", console?.meterBlocks),
-    consoleObservationTaps: observationTaps,
-    consoleMasterTrackPlusOne: masterTrackPlusOne,
+    liveControlCommandQueueRecords: commandQueueRecords,
+    liveControlMeterBlocks: word("liveControls.meterBlocks", liveControls?.meterBlocks),
+    liveControlObservationTaps: observationTaps,
+    liveControlMasterTrackPlusOne: masterTrackPlusOne,
     spectrumHopFrames,
     spectrum,
     spectrumCollection,

@@ -1,6 +1,6 @@
 // Browser AudioWorklet host, ABI version 1.
 //
-// # The live console (issue 137)
+// # The live controls (issue 137)
 //
 // V1 as issue 024 froze it was a deterministic *renderer*: create, stream, render, dispose. Issue
 // 137 adds the three things a live mixing console needs on top, additively -- no existing message,
@@ -39,10 +39,10 @@
 //
 // `MisoCommandReason.UnsupportedKind` (`result: 7`) has **not** gone away, and it still means
 // exactly what it said: the target is real and the value is legal, and *this session* has no write
-// path for it. A host compiled with `consoleCommandQueueRecords === 0n` is that session -- there
-// is no control channel and no staging buffer -- and so is a future effect parameter that declares
-// `AutomationRate::None`. It stays distinguishable from `Malformed` and from the `Unknown*`
-// reasons for that reason.
+// path for it. A host compiled with `liveControlCommandQueueRecords === 0n` is that session --
+// there is no control channel and no staging buffer -- and so is a future effect parameter that
+// declares `AutomationRate::None`. It stays distinguishable from `Malformed` and from the
+// `Unknown*` reasons for that reason.
 //
 // ## Addressing is session-stable and string-free
 //
@@ -61,7 +61,7 @@
 //
 // ## Application timing is exact
 //
-// Every console stage -- matrix/pan, fader/mute, and each driven effect -- drains its control
+// Every live-control stage -- matrix/pan, fader/mute, and each driven effect -- drains its control
 // queue at the top of the block, before it touches a sample. `appliedAtSample` on the
 // acknowledgement is the first sample of the next rendered block, when the target is applied.
 // Smoothing follows each descriptor's law. EQ uses the current words at sample A and the exact
@@ -73,9 +73,9 @@
 //
 // ## What metering costs
 //
-// `consoleMeterBlocks === 0n` binds no meter observer at all: the render path folds nothing, and
-// `meters({ enabled: true })` is refused with `RESULT_UNSUPPORTED` rather than reporting zeros. A
-// nonzero value binds one post-matrix meter per track with a `blocks * quantumFrames` window and
+// `liveControlMeterBlocks === 0n` binds no meter observer at all: the render path folds nothing,
+// and `meters({ enabled: true })` is refused with `RESULT_UNSUPPORTED` rather than reporting zeros.
+// A nonzero value binds one post-matrix meter per track with a `blocks * quantumFrames` window and
 // makes the port lease a second, finer switch over the master fold and every drain and post. The
 // honest summary: *not attaching* meters costs nothing at all; attaching them and releasing the
 // lease costs one branch per block plus the per-track observation fold, which runs whenever the
@@ -92,8 +92,9 @@
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
 // `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused with
 // `MisoCommandReason.UnsupportedKind`. A session that never asks for observation
-// (`consoleObservationTaps === 0n`) allocates none of it and renders byte-identical audio; inside a
-// session that does, an unarmed tap costs one predicted branch per driven effect per block.
+// (`liveControlObservationTaps === 0n`) allocates none of it and renders byte-identical audio;
+// inside a session that does, an unarmed tap costs one predicted branch per driven effect per
+// block.
 //
 // ## What a frame costs the render callback
 //
@@ -175,7 +176,7 @@ export interface MisoUnsupportedBrowser {
   readonly capability: "simd128";
 }
 
-/// Frozen live-console command kinds (issue 137 D1).
+/// Frozen live-control command kinds (issue 137 D1).
 ///
 /// All twelve are one vocabulary, proved across every file that spells it -- this enum, the Rust
 /// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
@@ -214,7 +215,7 @@ export const enum MisoCommandKind {
   ObserveUnsubscribe = 8,
   /// Engage or clear one track's solo-in-place bit. Applied (issue 210 phase 1).
   ///
-  /// Console state, not a strip DSP parameter -- which is why solo has no row in the metadata
+  /// Live-control state, not a strip DSP parameter -- which is why solo has no row in the metadata
   /// JSON's `builtins` table while it does have a `commandKinds` row. `rack` and `channel` are
   /// both `255`: solo addresses a strip, not a lane. `values[0]` is exactly `0` or `1`, and
   /// `smoothingSamples` is the engage/disengage fade -- the same declick window `Mute` takes, and
@@ -272,7 +273,7 @@ export const enum MisoCommandKind {
   InputFilters = 12,
 }
 
-/// Frozen typed reasons a live-console submission was refused (issue 137 D1).
+/// Frozen typed reasons a live-control submission was refused (issue 137 D1).
 export const enum MisoCommandReason {
   /// The submission was admitted whole.
   None = 0,
@@ -301,12 +302,12 @@ export const enum MisoCommandReason {
   UnknownTap = 10,
   /// The tap exists and the address is right; this session bound no observation capacity.
   ///
-  /// Prepare with `consoleObservationTaps` set. Retrying will not help, which is why this is its
-  /// own reason and not `Backpressure`.
+  /// Prepare with `liveControlObservationTaps` set. Retrying will not help, which is why this is
+  /// its own reason and not `Backpressure`.
   ObservationUnbound = 11,
 }
 
-/// One live-console command. `255` means "not applicable to this kind".
+/// One live-control command. `255` means "not applicable to this kind".
 export interface MisoCommand {
   kind: MisoCommandKind;
   /// `0` simd1, `1` dynamic, `2` simd2, `255` for a builtin-addressed kind.
@@ -330,7 +331,7 @@ export interface MisoCommandRequest {
   commands: MisoCommand[];
 }
 
-/// One live-console acknowledgement. `result` is `0` only when the whole batch was admitted.
+/// One live-control acknowledgement. `result` is `0` only when the whole batch was admitted.
 export interface MisoCommandAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
@@ -605,7 +606,7 @@ export interface MisoObservationSubscription {
   /// parameter id sent here comes back as `MisoCommandReason.UnknownTap`, never
   /// `UnknownParameter`.
   tapId: number;
-  /// Render blocks per published window, or `0` for the plan's default (`consoleMeterBlocks`).
+  /// Render blocks per published window, or `0` for the plan's default (`liveControlMeterBlocks`).
   ///
   /// The returned binding reports the window that is actually in force, so a caller that sends `0`
   /// reads the resolved number back rather than having to know the default.
@@ -693,22 +694,22 @@ export interface MisoWebBootOptions {
   /// Prepared continuous-spectrum hop in frames, or `0` for the engine-derived default.
   spectrumHopFrames: number;
   /// Per-track control-queue depth in records, or `0n` to attach no control channel (issue 137).
-  consoleCommandQueueRecords: bigint;
+  liveControlCommandQueueRecords: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
-  consoleMeterBlocks: bigint;
+  liveControlMeterBlocks: bigint;
   /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReason.ObservationUnbound`. Requires `consoleCommandQueueRecords !== 0n`,
+  /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`,
   /// because a subscription rides the effect's own command queue.
-  consoleObservationTaps: bigint;
+  liveControlObservationTaps: bigint;
   /// The designated master track **plus one**, or `0n` for none (issue 143).
   ///
   /// V1 has no structural master bus -- submixes and outputs carry no effect racks -- so
   /// `masterGrDb` is a designation rather than a discovery. Plus one because zero has to keep
-  /// meaning "unset". Requires `consoleObservationTaps !== 0n`.
-  consoleMasterTrackPlusOne: bigint;
+  /// meaning "unset". Requires `liveControlObservationTaps !== 0n`.
+  liveControlMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;
   spectrumCollection?: MisoSpectrumCollectionBootOptions | null;
@@ -740,7 +741,7 @@ export interface MisoWebResourceReport {
   readonly largestNamedAllocationBytes: bigint;
   /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue 143).
   ///
-  /// Exactly `0n` for a session prepared with `consoleObservationTaps === 0n`, and that zero is
+  /// Exactly `0n` for a session prepared with `liveControlObservationTaps === 0n`, and that zero is
   /// walked over the built runtime rather than computed from the configuration.
   readonly observationRetainedBytes: bigint;
 }
@@ -799,7 +800,7 @@ export interface MisoAudioWorkletHost {
   /// straddle this content discontinuity; the seek does not advance the meter generation.
   seekSource(request: MisoSeekRequest): Promise<MisoAck>;
   status(): Promise<MisoStatus>;
-  /// Submit one live-console batch as a single transaction (issue 137 D1).
+  /// Submit one live-control batch as a single transaction (issue 137 D1).
   command(request: MisoCommandRequest): Promise<MisoCommandAck>;
   /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).
   ///

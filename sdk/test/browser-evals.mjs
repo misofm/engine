@@ -32,7 +32,7 @@ import { moduleBytes, sessionDocument } from "./support.mjs";
 const POLICY = Object.freeze({
   sourceRingFrames: 512,
   maximumMemoryBytes: 64n << 20n,
-  console: Object.freeze({
+  liveControls: Object.freeze({
     commandQueueRecords: 48,
     meterBlocks: 6,
     observationTaps: 2,
@@ -120,7 +120,7 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
   test("the two option blocks are byte-equal with the two require_* words masked", () => {
     // "Identical options struct" was literally impossible: the scratch boot writes `require_* = 0`
     // while the worklet writes the physical rate and quantum, and two structs differing in two
-    // words are not identical. The divergence A-1 actually named was the CONSOLE words, so the
+    // words are not identical. The divergence A-1 actually named was the LIVE-CONTROL words, so the
     // rule is stated over the words it is about -- and asserted over BYTES, because bytes are what
     // the engine reads.
     const agreement = bootOptionsAgree(POLICY, PHYSICAL);
@@ -137,10 +137,10 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
     const expected = {
       sourceRingFrames: 512,
       maximumMemoryBytes: 64n << 20n,
-      consoleCommandQueueRecords: 48n,
-      consoleMeterBlocks: 6n,
-      consoleObservationTaps: 2n,
-      consoleMasterTrackPlusOne: 1n,
+      liveControlCommandQueueRecords: 48n,
+      liveControlMeterBlocks: 6n,
+      liveControlObservationTaps: 2n,
+      liveControlMasterTrackPlusOne: 1n,
     };
     assert.deepEqual(
       [...POLICY_WORDS].sort(),
@@ -161,17 +161,17 @@ describe("finding 3 -- the scratch and worklet boots agree on every policy word"
     assert.equal(wordAt(worklet, "requireSampleRateHz"), PHYSICAL.sampleRateHz);
     assert.equal(wordAt(worklet, "requireQuantumFrames"), PHYSICAL.quantumFrames);
 
-    // RED MUTATION: let the worklet's policy diverge on one console word -- say a scratch boot
-    // that budgets no console while the worklet budgets one. The masked comparison goes red, which
-    // is A-1's actual hazard: the scratch instance would size a different plan and answer a
-    // question about a session nobody is going to run.
+    // RED MUTATION: let the worklet's policy diverge on one live-control word -- say a scratch
+    // boot that budgets no live controls while the worklet budgets them. The masked comparison goes
+    // red, which is A-1's actual hazard: the scratch instance would size a different plan and
+    // answer a question about a session nobody is going to run.
     const divergent = bootOptionsAgree(
-      { ...POLICY, console: { ...POLICY.console, commandQueueRecords: 0 } },
+      { ...POLICY, liveControls: { ...POLICY.liveControls, commandQueueRecords: 0 } },
       PHYSICAL,
     );
     assert.notEqual(
-      wordAt(divergent.scratch, "consoleCommandQueueRecords"),
-      wordAt(scratch, "consoleCommandQueueRecords"),
+      wordAt(divergent.scratch, "liveControlCommandQueueRecords"),
+      wordAt(scratch, "liveControlCommandQueueRecords"),
       "the mutation must actually change a shared word",
     );
   });
@@ -367,11 +367,11 @@ describe("the browser open sequence", () => {
   });
 
   test("the worklet boot carries the physical shape as its backstop", async () => {
-    // The console words of POLICY, but no ring override: the engine requires an explicit ring to
-    // be a whole number of quanta, and 512 is not a multiple of 127. Leaving it absent selects the
-    // engine's own derivation, which is what a caller with no reason to override should do -- and
-    // it keeps this test about the shape words rather than about ring arithmetic.
-    const policy = { maximumMemoryBytes: POLICY.maximumMemoryBytes, console: POLICY.console };
+    // The live-control words of POLICY, but no ring override: the engine requires an explicit ring
+    // to be a whole number of quanta, and 512 is not a multiple of 127. Leaving it absent selects
+    // the engine's own derivation, which is what a caller with no reason to override should do --
+    // and it keeps this test about the shape words rather than about ring arithmetic.
+    const policy = { maximumMemoryBytes: POLICY.maximumMemoryBytes, liveControls: POLICY.liveControls };
     let seen;
     await createEngine({
       document: sessionDocument({ sampleRateHz: 96_000, quantumFrames: 127, frames: 9_600 }),

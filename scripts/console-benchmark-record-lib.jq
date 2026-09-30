@@ -582,7 +582,7 @@ def meters_record_valid:
 
 # The observation arm (#163 item 0d), which is the issue #143 two-level zero measured rather than
 # argued: `absent` has no lane at all, `unarmed` has a lane with nothing armed, `armed` has every
-# declared tap armed. All three carry the live-console control channel, so the deltas are the
+# declared tap armed. All three carry the live-control channel, so the deltas are the
 # observation lane and the arming, never the control queue.
 def observation_record_valid:
   (keys | sort) == observation_keys and

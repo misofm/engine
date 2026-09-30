@@ -103,7 +103,7 @@ function queuedManagedSpectrumOwner(query, queued) {
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => query,
     spectrumStart: async () => ({
       ok: true,
@@ -628,7 +628,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
           window: { firstSample: 0n, endSample: 128n, sequence: 1n, blocks: 1 },
         } : {}),
       })),
-      console: () => ({
+      liveControls: () => ({
         edit: {
           track: () => ({
             effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
@@ -772,7 +772,7 @@ test("managed spectrum collection updates target and smoothing atomically", asyn
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPreparedCollection: () => collection,
     spectrumSelect: async () => ({ ok: true, result: 0, code: "ok" }),
     spectrumStreamSelect: async (query, smoothingMs) => {
@@ -907,7 +907,7 @@ test("managed spectrum loss baselines stay monotonic within an epoch and reset o
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => reads.shift() ?? { metadata: metadata("pending", 1, 0n), result: undefined },
@@ -961,7 +961,7 @@ test("automatic spectrum drains once after a gap and preserves coalesced losses"
   let stopped = false;
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }), readObservations: () => [],
-    console: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
+    liveControls: () => { throw new Error("unused"); }, spectrumPrepared: () => prepared,
     spectrumStart: async () => ({ ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n) }),
     spectrumRead: async () => { calls++; return await queued.shift(); },
     spectrumStop: async () => { stopped = true; return { ok: true, result: 0, code: "ok" }; },
@@ -1248,7 +1248,7 @@ test("managed spectrum publication metadata survives pending and lifecycle reads
   const owner = new ObservationSubscriptionOwner({
     observationMap: () => ({ bindings: [] }),
     readObservations: () => [],
-    console: () => { throw new Error("unused"); },
+    liveControls: () => { throw new Error("unused"); },
     spectrumPrepared: () => prepared,
     spectrumStart: async () => ({
       ok: true, result: 0, code: "ok", metadata: metadata("warming", 0, 0n),
@@ -1373,7 +1373,7 @@ test("managed spectrum admission refuses before start and preserves a working st
     const owner = new ObservationSubscriptionOwner({
       observationMap: () => ({ bindings: [] }),
       readObservations: () => [],
-      console: () => { throw new Error("unused"); },
+      liveControls: () => { throw new Error("unused"); },
       spectrumPrepared: () => prepared,
       spectrumStart: async () => {
         starts += 1;

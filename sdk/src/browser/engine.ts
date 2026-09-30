@@ -23,11 +23,11 @@ import type {
   MeterListener,
   TelemetryListener,
 } from "./measurement.ts";
-import type { EngineConsole } from "../core/console.ts";
+import type { EngineLiveControls } from "../core/live-controls.ts";
 import { scratchBootWithWorker } from "./scratch.ts";
 import type { ScratchWorkerFactory } from "./scratch.ts";
 import { createDefaultHost, BrowserBootError } from "./default-host.ts";
-import { createBrowserConsole } from "./console.ts";
+import { createBrowserLiveControls } from "./live-controls.ts";
 import { createTrackResponse } from "./response.ts";
 import type { BrowserTrackResponse } from "./response.ts";
 import { createSpectrum } from "./response.ts";
@@ -107,9 +107,9 @@ import type {
  * # The two boots agree, and where they do not they agree about that too
  *
  * Both boots read the same policy object, so the policy words -- ring, memory budget, and all four
- * console words -- are identical by construction. The two `require_*` words are role-defined: zero
- * in the scratch boot, physical in the worklet boot. See `./policy.ts` for why "identical options
- * struct" had to be restated that way, and for the executable form of the rule.
+ * live-control words -- are identical by construction. The two `require_*` words are role-defined:
+ * zero in the scratch boot, physical in the worklet boot. See `./policy.ts` for why "identical
+ * options struct" had to be restated that way, and for the executable form of the rule.
  *
  * # This file is deliberately thin
  *
@@ -210,8 +210,8 @@ export interface BrowserEngine<Context extends AudioContextLike = DefaultAudioCo
   subscribeSpectrum(request: SpectrumSubscriptionRequest): Promise<SpectrumSubscription>;
   /** Arm, capture and analyze one complete 2048-frame spectrum window. */
   querySpectrum(request: SpectrumQuery): Promise<SpectrumResult>;
-  /** Bind the semantic console once; rejects with MisoUsageError when no console was attached. */
-  console(): Promise<EngineConsole>;
+  /** Bind the semantic live controls once; rejects with MisoUsageError when none were attached. */
+  liveControls(): Promise<EngineLiveControls>;
   /** Dispose the worklet host, then close its context. Safe to call more than once. */
   close(): Promise<void>;
 }
@@ -491,7 +491,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
   const policy = {
     ...options.policy,
     ...(spectrumHopFrames === undefined ? {} : { spectrumHopFrames }),
-    ...(typeof options.policy?.console === "object" ? { console: { ...options.policy.console } } : {}),
+    ...(typeof options.policy?.liveControls === "object" ? { liveControls: { ...options.policy.liveControls } } : {}),
   };
   const preparedModule = options.preparedModule;
   const simd128ModuleUrl = options.simd128ModuleUrl ?? BUNDLED_ENGINE_ASSETS.wasm.href;
@@ -569,7 +569,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       workletModuleUrl,
       ...(preparedModule === undefined ? {} : { preparedModule }),
     });
-    let semanticConsole: Promise<EngineConsole> | undefined;
+    let semanticLiveControls: Promise<EngineLiveControls> | undefined;
     let closePromise: Promise<void> | undefined;
     let trackResponse: BrowserTrackResponse | undefined;
     let trackResponsePromise: Promise<BrowserTrackResponse> | undefined;
@@ -586,7 +586,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const measurementFeeds = createMeasurementFeeds(
       host,
       shape.tracks,
-      policy.console !== undefined,
+      policy.liveControls !== undefined,
     );
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
@@ -623,14 +623,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         shape.sampleRateHz,
       );
     };
-    const getConsole = (): Promise<EngineConsole> => {
-      semanticConsole ??= (policy.console?.commandQueueRecords ?? 0) === 0
+    const getLiveControls = (): Promise<EngineLiveControls> => {
+      semanticLiveControls ??= (policy.liveControls?.commandQueueRecords ?? 0) === 0
         ? Promise.reject(new MisoUsageError(
-          "this engine booted with no console attached; set policy.console.commandQueueRecords",
+          "this engine booted with no live controls attached; set policy.liveControls.commandQueueRecords",
         ))
-        : createBrowserConsole(host, (edits, managed) =>
-          observationSubscriptions?.beforeConsoleSubmit(edits, managed));
-      return semanticConsole;
+        : createBrowserLiveControls(host, (edits, managed) =>
+          observationSubscriptions?.beforeLiveControlSubmit(edits, managed));
+      return semanticLiveControls;
     };
     const ensureSpectrumWorker = (query: SpectrumQuery): Promise<BrowserSpectrum> => {
       if (spectrum !== undefined) return Promise.resolve(spectrum);
@@ -983,7 +983,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       new ObservationSubscriptionOwner({
         observationMap,
         readObservations,
-        console: getConsole,
+        liveControls: getLiveControls,
         responseRead: readTrackResponse,
         ...(preparedSpectrum === undefined ? {} : {
           spectrumPrepared: () => preparedSpectrum,
@@ -1256,7 +1256,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         .then((receipt) => receipt.handle),
       queryTrackResponse,
       querySpectrum,
-      console: getConsole,
+      liveControls: getLiveControls,
       close: () => {
         closed = true;
         measurementFeeds.close();
@@ -1297,7 +1297,7 @@ export async function scratchBootInWorker(request: {
   readonly expectedSha256?: string;
 }): Promise<SessionShape> {
   const document = new Uint8Array(request.document);
-  const options = { ...request.options, ...(typeof request.options.console === "object" ? { console: { ...request.options.console } } : {}) };
+  const options = { ...request.options, ...(typeof request.options.liveControls === "object" ? { liveControls: { ...request.options.liveControls } } : {}) };
   const asset = await MisoEngineAsset.load(request.moduleBytes, request.expectedSha256);
   const boundary = await WasmBoundary.boot(asset, document, options);
   try {
@@ -1312,7 +1312,7 @@ export async function scratchBootInWorker(request: {
 /** Compile and rehearse only disposable DSP state; retain the compiled code for live boot. */
 export async function prepareBrowserSessionInWorker(request: Parameters<typeof scratchBootInWorker>[0]): Promise<import("./scratch.ts").PreparedBrowserSession> {
   const document = new Uint8Array(request.document);
-  const options = { ...request.options, ...(typeof request.options.console === "object" ? { console: { ...request.options.console } } : {}) };
+  const options = { ...request.options, ...(typeof request.options.liveControls === "object" ? { liveControls: { ...request.options.liveControls } } : {}) };
   const asset = await MisoEngineAsset.load(request.moduleBytes, request.expectedSha256);
   const boundary = await WasmBoundary.boot(asset, document, options);
   try {

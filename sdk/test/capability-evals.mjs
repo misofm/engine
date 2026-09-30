@@ -5,7 +5,7 @@ import { before, describe, test } from "node:test";
 
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
-import { ConsoleWriter } from "../src/core/writer.ts";
+import { LiveControlWriter } from "../src/core/writer.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
@@ -102,7 +102,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     const meterBlocks = 2;
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
-      console: {
+      liveControls: {
         commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
         meterBlocks,
         observationTaps: 1,
@@ -113,7 +113,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.equal(engine.sessionMap().metersAttached, true);
       assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
 
-      const writer = new ConsoleWriter({
+      const writer = new LiveControlWriter({
         submit: (records, count) => engine.submitCommands(records, count),
       });
       writer.stage({

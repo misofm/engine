@@ -32,7 +32,7 @@ import type {
   SpectrumSubscriptionLimits,
   SpectrumSubscriptionRequest,
 } from "../core/observation-subscriptions.ts";
-import { EngineConsole } from "../core/console.ts";
+import { EngineLiveControls } from "../core/live-controls.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
@@ -235,11 +235,11 @@ export class OfflineEngine {
     return this.#boundary.cancelSpectrum();
   }
 
-  /** A semantic console bound to the currently loaded session. */
-  console(): EngineConsole {
-    return new EngineConsole(this.sessionMap(), (edits) =>
+  /** Semantic live controls bound to the currently loaded session. */
+  liveControls(): EngineLiveControls {
+    return new EngineLiveControls(this.sessionMap(), (edits) =>
       this.submitCommands(encodeLaneEdits(edits), edits.length),
-      (edits, managed) => this.#observationSubscriptions?.beforeConsoleSubmit(edits, managed));
+      (edits, managed) => this.#observationSubscriptions?.beforeLiveControlSubmit(edits, managed));
   }
 
   nextAbsoluteSample(): bigint {
@@ -316,7 +316,7 @@ export class OfflineEngine {
     return this.#observationSubscriptions ??= new ObservationSubscriptionOwner({
       observationMap: () => this.observationMap(),
       readObservations: (selections) => this.readObservations(selections),
-      console: () => this.console(),
+      liveControls: () => this.liveControls(),
       spectrumPrepared: () => this.#boundary.preparedSpectrumQuery(),
       spectrumPreparedCollection: () => this.#boundary.preparedSpectrumCollection(),
       spectrumSelect: (query) => this.#boundary.selectSpectrum(query),

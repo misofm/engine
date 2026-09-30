@@ -1,8 +1,8 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import { commandReasonName } from "../core/boundary.ts";
 import type { CommandReport, SessionMap } from "../core/boundary.ts";
-import { EngineConsole } from "../core/console.ts";
-import type { ConsoleBeforeSubmit } from "../core/console.ts";
+import { EngineLiveControls } from "../core/live-controls.ts";
+import type { LiveControlBeforeSubmit } from "../core/live-controls.ts";
 import { resultName } from "../core/errors.ts";
 import type { LaneEdit } from "../core/writer.ts";
 import type {
@@ -30,18 +30,18 @@ function browserCommand(edit: LaneEdit): MisoCommand {
   };
 }
 
-/** Bind the shared semantic console to the shipped MessagePort host. */
-export async function createBrowserConsole(
+/** Bind the shared semantic live controls to the shipped MessagePort host. */
+export async function createBrowserLiveControls(
   host: MisoAudioWorkletHost,
-  beforeSubmit?: ConsoleBeforeSubmit,
-): Promise<EngineConsole> {
+  beforeSubmit?: LiveControlBeforeSubmit,
+): Promise<EngineLiveControls> {
   const remoteMap = await host.sessionMap();
   const map: SessionMap = Object.freeze({
     tracks: Object.freeze([...remoteMap.tracks]),
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
   });
-  return new EngineConsole(map, async (edits): Promise<CommandReport> => {
+  return new EngineLiveControls(map, async (edits): Promise<CommandReport> => {
     const ack = await host.command({ commands: edits.map(browserCommand) });
     return Object.freeze({
       ok: ack.result === 0,

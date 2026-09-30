@@ -189,7 +189,7 @@ done
 # A clock read anywhere outside `renderClock()` fails the pinned-site rule even when it is not in
 # the render-callback body.
 mutated="$mutation_dir/worklet-clock.js"
-sed 's/^  bindConsole(init) {/  bindConsole(init) {\n    this.boot = Date.now();/' "$worklet" >"$mutated"
+sed 's/^  bindLiveControls(init) {/  bindLiveControls(init) {\n    this.boot = Date.now();/' "$worklet" >"$mutated"
 if diff -q "$worklet" "$mutated" >/dev/null; then
   echo "clock-site mutation matched nothing" >&2
   exit 1

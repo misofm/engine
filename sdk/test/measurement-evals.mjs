@@ -73,7 +73,7 @@ function browserContext(onClose = () => {}) {
   };
 }
 
-function openBrowser(host, policy = { console: { commandQueueRecords: 8, meterBlocks: 1 } }) {
+function openBrowser(host, policy = { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } }) {
   return createEngine({
     document: "opaque",
     policy,
@@ -218,7 +218,7 @@ test("a rejected numeric lease result is typed and recoverable", async () => {
   feeds.close();
 });
 
-test("measurement admission without a console is a typed SDK refusal", async () => {
+test("measurement admission without live controls is a typed SDK refusal", async () => {
   const feeds = createMeasurementFeeds(fakeHost(), ["track"], false);
   await assert.rejects(feeds.meters(() => undefined), (error) => error instanceof MisoUsageError);
   await assert.rejects(feeds.telemetry(() => undefined), (error) => error instanceof MisoUsageError);
@@ -268,7 +268,7 @@ test("engine close clears measurement callbacks and releases a late successful a
   await engine.close();
 });
 
-test("browser console retains the managed observation conflict hook", async () => {
+test("browser live controls retain the managed observation conflict hook", async () => {
   const host = fakeHost();
   const commands = [];
   Object.assign(host, {
@@ -301,17 +301,17 @@ test("browser console retains the managed observation conflict hook", async () =
     },
   });
   const engine = await openBrowser(host, {
-    console: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
+    liveControls: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
   });
   try {
     const managed = await engine.subscribeObservations({
       selections: [{ trackId: "t", rack: "dynamic", effectSlotId: "comp", tapId: 1, channels: "both" }],
       windowBlocks: 1,
     });
-    const console = await engine.console();
-    const manual = console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+    const liveControls = await engine.liveControls();
+    const manual = liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
       .observe("Gain Reduction", false, 1);
-    await assert.rejects(console.submit(manual), /conflict/);
+    await assert.rejects(liveControls.submit(manual), /conflict/);
     assert.equal(commands.length, 1, "the manual conflicting edit is stopped by the existing hook");
     await managed.close();
     assert.equal(commands.length, 2, "managed close still uses the owner bypass");

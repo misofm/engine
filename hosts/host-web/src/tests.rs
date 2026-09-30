@@ -97,7 +97,7 @@ fn compressor_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: 4,
+            live_control_command_queue_records: 4,
             ..boot_options(quantum)
         },
     )
@@ -115,7 +115,7 @@ fn multiband_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: 4,
+            live_control_command_queue_records: 4,
             ..boot_options(quantum)
         },
     )
@@ -373,16 +373,19 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, source_ring_frames), 16);
     assert_eq!(offset_of!(WebBootOptions, maximum_memory_bytes), 24);
     assert_eq!(
-        offset_of!(WebBootOptions, console_command_queue_records),
+        offset_of!(WebBootOptions, live_control_command_queue_records),
         32
     );
-    assert_eq!(offset_of!(WebBootOptions, console_meter_blocks), 40);
+    assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
     // carved the first two. The structure is still 192 bytes and every existing offset is where it
     // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
-    assert_eq!(offset_of!(WebBootOptions, console_observation_taps), 48);
     assert_eq!(
-        offset_of!(WebBootOptions, console_master_track_plus_one),
+        offset_of!(WebBootOptions, live_control_observation_taps),
+        48
+    );
+    assert_eq!(
+        offset_of!(WebBootOptions, live_control_master_track_plus_one),
         56
     );
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
@@ -905,9 +908,9 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
         (
             "on",
             WebBootOptions {
-                console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-                console_meter_blocks: 0,
-                console_observation_taps: 0,
+                live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+                live_control_meter_blocks: 0,
+                live_control_observation_taps: 0,
                 ..boot_options(128)
             },
             (MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) as u64,
@@ -984,7 +987,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
         assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
         assert_eq!(host.resources().observation_retained_bytes, 0);
 
-        let input_shadow_bytes = if options.console_command_queue_records == 0 {
+        let input_shadow_bytes = if options.live_control_command_queue_records == 0 {
             0
         } else {
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
@@ -1047,9 +1050,9 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         },
         WebBootOptions {
             source_ring_frames,
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_meter_blocks: 0,
-            console_observation_taps: 0,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_meter_blocks: 0,
+            live_control_observation_taps: 0,
             ..boot_options(128)
         },
     ] {
@@ -1163,8 +1166,8 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
-                console_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
-                console_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
+                live_control_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
+                live_control_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
                 ..boot_options(128)
             },
         ),
@@ -1751,7 +1754,7 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
-        console_command_queue_records: u64::from(DEPTH),
+        live_control_command_queue_records: u64::from(DEPTH),
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
@@ -2431,7 +2434,7 @@ fn input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkle
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: queue_depth,
+            live_control_command_queue_records: queue_depth,
             ..boot_options(quantum)
         },
     )
@@ -2459,7 +2462,7 @@ fn effect_input_filter_live_control_host(quantum: u32, queue_depth: u64) -> Audi
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: queue_depth,
+            live_control_command_queue_records: queue_depth,
             ..boot_options(quantum)
         },
     )
@@ -2595,8 +2598,8 @@ fn live_control_host_at_rate(
         require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("live-control boot")
@@ -2624,7 +2627,7 @@ fn paired_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired live-control boot")
@@ -2661,8 +2664,8 @@ fn meter_tail_host_for_blocks(
         require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("meter-tail boot")
@@ -3324,7 +3327,7 @@ fn effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost 
     let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: quantum,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect live-control boot")
@@ -3335,7 +3338,7 @@ fn bank_effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngine
     let document = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
     let options = WebBootOptions {
         source_ring_frames: quantum * 2,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ live-control boot")
@@ -3370,12 +3373,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
     let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
     const SOURCE_RING_FRAMES: u32 = 1 << 20;
 
-    for (name, console_command_queue_records) in
+    for (name, live_control_command_queue_records) in
         [("off", 0_u64), ("on", DEFAULT_COMMAND_QUEUE_RECORDS as u64)]
     {
         let options = WebBootOptions {
             source_ring_frames: SOURCE_RING_FRAMES,
-            console_command_queue_records,
+            live_control_command_queue_records,
             ..boot_options(128)
         };
         let projection = project_buffers(
@@ -3453,7 +3456,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let decoded_count =
             command_staging_count(shape.track_count as usize).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
-        let input_shadow_bytes = if console_command_queue_records == 0 {
+        let input_shadow_bytes = if live_control_command_queue_records == 0 {
             0
         } else {
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
@@ -4957,9 +4960,9 @@ fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
 /// host's own output plane, so for this identity fixture both must equal the maximum magnitude of
 /// the submitted block -- exactly, not within a tolerance.
 ///
-/// Red mutation: change `console_meter_blocks` handling so the period is `blocks` frames instead
-/// of `blocks * quantum_frames` -> a window closes mid-block, `poll_meters` reports more windows
-/// than blocks rendered, and the cadence assertion fails.
+/// Red mutation: change `live_control_meter_blocks` handling so the period is `blocks` frames
+/// instead of `blocks * quantum_frames` -> a window closes mid-block, `poll_meters` reports more
+/// windows than blocks rendered, and the cadence assertion fails.
 #[test]
 fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     const QUANTUM: u32 = 128;
@@ -5618,10 +5621,10 @@ fn observation_host(
     let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
-        console_observation_taps: 4,
-        console_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
+        live_control_observation_taps: 4,
+        live_control_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
@@ -5648,8 +5651,8 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     let document = canonical_session_json(&model).expect("canonical two-effect session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_observation_taps: 4,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
@@ -6185,7 +6188,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     // the frame is untouched.
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
     let before = host.meter_frame().to_vec();
-    let depth = host.options().console_command_queue_records as usize;
+    let depth = host.options().live_control_command_queue_records as usize;
     let flood = (depth + 2).min(MAXIMUM_COMMAND_RECORDS as usize);
     for index in 0..flood {
         stage_command(
@@ -6230,8 +6233,8 @@ fn a_subscription_without_capacity_is_observation_unbound() {
     let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
@@ -6258,17 +6261,17 @@ fn observation_configuration_words_are_validated() {
     let document = one_track_session(128);
     for options in [
         WebBootOptions {
-            console_observation_taps: 4,
+            live_control_observation_taps: 4,
             ..boot_options(128)
         },
         WebBootOptions {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
             ..boot_options(128)
         },
         WebBootOptions {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_master_track_plus_one: 1,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_master_track_plus_one: 1,
             ..boot_options(128)
         },
     ] {
@@ -6277,7 +6280,7 @@ fn observation_configuration_words_are_validated() {
             .expect("invalid live-control options");
         assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
     }
-    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::console_defaults())
+    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::live_control_defaults())
         .expect("zero observation words remain valid");
 }
 
@@ -6288,7 +6291,7 @@ fn observation_configuration_words_are_validated() {
 /// pin -- so a change to the audio makes them move together, which is the point.
 ///
 /// Two runs, one timeline: with observation capacity and every declared tap armed, and with
-/// `console_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
+/// `live_control_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
 /// against leg (d) on the browser ABI, and it is checked here rather than asserted about.
 ///
 /// Red mutation: fold the observation read into the compressor's inner loop -> the two digests
@@ -6307,10 +6310,10 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM,
-            console_command_queue_records: u64::from(DEPTH),
-            console_meter_blocks: u64::from(WINDOW_BLOCKS),
-            console_observation_taps: taps,
-            console_master_track_plus_one: if taps == 0 { 0 } else { 1 },
+            live_control_command_queue_records: u64::from(DEPTH),
+            live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
+            live_control_observation_taps: taps,
+            live_control_master_track_plus_one: if taps == 0 { 0 } else { 1 },
             ..boot_options(QUANTUM)
         };
         let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
@@ -6613,8 +6616,8 @@ fn three_source_session(quantum: u32) -> String {
 /// projection must cover both ID families rather than assuming source IDs are always longest.
 ///
 /// Red mutation: project only `longest_source_id_bytes` again -> boot still publishes a handle,
-/// but `miso_engine_web_v1_console_track_id` silently returns zero for this valid track and the
-/// browser's live-control bind turns that document-dependent condition into `RESULT_INTERNAL`.
+/// but `miso_engine_web_v1_live_control_track_id` silently returns zero for this valid track and
+/// the browser's live-control bind turns that document-dependent condition into `RESULT_INTERNAL`.
 #[test]
 fn live_control_track_id_longer_than_every_source_id_boots_and_round_trips() {
     const QUANTUM: u32 = 128;
@@ -6642,13 +6645,13 @@ fn live_control_track_id_longer_than_every_source_id_boots_and_round_trips() {
     assert_eq!(resources.id_staging_bytes, TRACK_ID.len() as u64);
     assert!(resources.id_staging_bytes > SOURCE_ID.len() as u64);
 
-    let length = miso_engine_web_v1_console_track_id(handle, 0);
+    let length = miso_engine_web_v1_live_control_track_id(handle, 0);
     assert_eq!(length, TRACK_ID.len() as u32);
     assert_eq!(
         crate::ffi::test_read_source_id(handle, length).expect("staged track ID"),
         TRACK_ID.as_bytes()
     );
-    assert_eq!(miso_engine_web_v1_console_track_id(handle, 1), 0);
+    assert_eq!(miso_engine_web_v1_live_control_track_id(handle, 1), 0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -6781,7 +6784,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     );
     assert_eq!(miso_engine_web_v1_source_count(handle), 3);
     assert_eq!(miso_engine_web_v1_source_channels(handle, 1), 2);
-    assert_eq!(miso_engine_web_v1_console_track_count(handle), 1);
+    assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 1);
 
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);
@@ -6844,7 +6847,7 @@ fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEn
     let document = solo_session(quantum, tracks, mutes);
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot")
@@ -7547,7 +7550,7 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
     let document = canonical_session_json(&model).expect("canonical effect solo session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect solo boot")

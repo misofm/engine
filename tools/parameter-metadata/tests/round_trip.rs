@@ -406,7 +406,7 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
@@ -561,9 +561,9 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
-        console_meter_blocks: 4,
-        console_observation_taps: 4,
+        live_control_command_queue_records: 64,
+        live_control_meter_blocks: 4,
+        live_control_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
@@ -699,7 +699,7 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(json.as_bytes(), options).is_ok()

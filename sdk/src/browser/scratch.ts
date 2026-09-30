@@ -56,7 +56,7 @@ export async function prepareBrowserSessionWithWorker(options: ScratchBootWorker
 
 async function runScratchWorker(options: ScratchBootWorkerOptions, mode: "scratch" | "prepare"): Promise<{ shape: SessionShape; module?: WebAssembly.Module }> {
   const document = new Uint8Array(options.document);
-  const bootOptions = { ...options.options, ...(typeof options.options.console === "object" ? { console: { ...options.options.console } } : {}) };
+  const bootOptions = { ...options.options, ...(typeof options.options.liveControls === "object" ? { liveControls: { ...options.options.liveControls } } : {}) };
   const moduleUrl = String(options.moduleUrl);
   options.signal?.throwIfAborted();
   const deadline = options.requestDeadlineMs ?? 5_000;

@@ -3939,7 +3939,7 @@ pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
 
 /// Return the number of tracks the live controls address, or zero before compilation.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
+pub extern "C" fn miso_engine_web_v1_live_control_track_count(handle: u32) -> u32 {
     with_host(handle, 0, |host| {
         u32::try_from(host.live_control_tracks().len()).unwrap_or(0)
     })
@@ -3950,7 +3950,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
 /// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
 /// preparation already sized for the longest source or track ID in the session.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -> u32 {
+pub extern "C" fn miso_engine_web_v1_live_control_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
 }
 

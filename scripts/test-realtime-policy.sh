@@ -146,10 +146,10 @@ create_fixture() {
         'fn effect_bank_process() {}' \
         '// REALTIME_POLICY_END' \
         '// REALTIME_POLICY_BEGIN' \
-        'fn console_process_mono() {}' \
+        'fn live_control_process_mono() {}' \
         '// REALTIME_POLICY_END' \
         '// REALTIME_POLICY_BEGIN' \
-        'fn console_process() {}' \
+        'fn live_control_process() {}' \
         '// REALTIME_POLICY_END' \
         '// REALTIME_POLICY_BEGIN' \
         'fn process_inner() {}' \

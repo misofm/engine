@@ -7,7 +7,7 @@ Owner ruling (2026-09-28, `docs/rulings/engine-footprint-2026-09-28.md`): ramp l
 1. **Schema.** An optional session-level object, for example `"controlSmoothing": { "muteMs": …, "faderMs": …, "panMs": … }`, in the canonical JSON session (`crates/session`, `docs/SESSION_SCHEMA_V1.md`), with strict validation (finite, non-negative, an upper bound), canonical serialization and snapshot round-trip. If omitted, **one documented default table** in the session schema applies; the values in that table are set by the research issue filed alongside this one (placeholders until then, recorded as such).
 2. **Conversion.** Milliseconds convert to samples at the session's sample rate with one fixed, documented rounding rule, so every host computes the same sample count.
 3. **Engine.** A live fader, mute/solo or pan change that does not carry its own smoothing uses the session's value (or the default). A change that carries an explicit smoothing value keeps it (per-change override). This is core behaviour in the portable crates, used identically by the browser adapter and the C ABI adapter.
-4. **Browser SDK.** `sdk/src/core/console.ts` stops defaulting `smoothingSamples` to 0: when the app passes nothing, the engine's session value applies.
+4. **Browser SDK.** `sdk/src/core/live-controls.ts` stops defaulting `smoothingSamples` to 0: when the app passes nothing, the engine's session value applies.
 5. **Editing.** Changing `controlSmoothing` in a session is an ordinary session transaction.
 
 ## Objective gates

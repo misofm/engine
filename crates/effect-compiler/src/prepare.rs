@@ -1444,8 +1444,9 @@ pub struct EffectObservationHandle {
 /// nothing to observe, so it carries nothing.
 ///
 /// `window_blocks` is the plan's default window length in render blocks. It is the *meter* window,
-/// derived by the host from the same `console_meter_blocks` the peak meters use, so a gain-reduction
-/// value and the peak beside it in one `miso.meter.v1` frame describe the same span of samples.
+/// derived by the host from the same `live_control_meter_blocks` the peak meters use, so a
+/// gain-reduction value and the peak beside it in one `miso.meter.v1` frame describe the same span
+/// of samples.
 ///
 /// # Errors
 ///

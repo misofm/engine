@@ -7,17 +7,18 @@ function bootOptions() {
   return {
     sourceRingFrames: QUANTUM,
     maximumMemoryBytes: 0n,
-    // Issue #137: zero in both console words is the frozen pre-console shape -- no control
-    // channel, no meter observers -- which is what this fixture's digest was pinned against.
-    consoleCommandQueueRecords: 0n,
-    consoleMeterBlocks: 0n,
+    // Issue #137: zero in both live-control words is the frozen pre-live-control shape -- no
+    // control channel, no meter observers -- which is what this fixture's digest was pinned
+    // against.
+    liveControlCommandQueueRecords: 0n,
+    liveControlMeterBlocks: 0n,
     // Issue #143 D3/D6: the remaining two policy words. The worklet's exact-field guard means
     // these are not optional -- an `options` object missing them is refused with
     // `RESULT_INVALID_ARGUMENT` before the module is instantiated. Zero in both is the same
     // "no observation capacity, no master designation" every pre-#143 writer already meant, and
     // is what this fixture's digests were pinned against.
-    consoleObservationTaps: 0n,
-    consoleMasterTrackPlusOne: 0n,
+    liveControlObservationTaps: 0n,
+    liveControlMasterTrackPlusOne: 0n,
     // Zero selects the rate/quantum-derived spectrum hop default.
     spectrumHopFrames: 0,
     spectrum: undefined,

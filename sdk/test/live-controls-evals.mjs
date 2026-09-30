@@ -1,10 +1,10 @@
-/** Issue #322: one semantic console and one whole-batch contract over both transports. */
+/** Issue #322: shared semantic live controls and one whole-batch contract over both transports. */
 
 import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
-import { createBrowserConsole } from "../src/browser/console.ts";
-import { EngineConsole } from "../src/core/console.ts";
+import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
+import { EngineLiveControls } from "../src/core/live-controls.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
@@ -70,17 +70,17 @@ function encodeBrowserCommands(commands) {
   return records;
 }
 
-describe("issue 322 -- shared semantic console", () => {
+describe("issue 322 -- shared semantic live controls", () => {
   test("all twelve command kinds are built by name and admitted by live Wasm", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
-      console: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 },
+      liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 },
     });
     try {
-      const console = engine.console();
-      const track = console.edit.track("t");
+      const liveControls = engine.liveControls();
+      const track = liveControls.edit.track("t");
       const compressor = track.effect("simd1", 0, "miso.compressor");
-      const first = await console.submit(
+      const first = await liveControls.submit(
         track.pan(-0.5, 0.5, { smoothingSamples: 16 }),
         track.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
         track.faderDb(-3, { channel: "both" }),
@@ -100,7 +100,7 @@ describe("issue 322 -- shared semantic console", () => {
 
       feed(engine, 0);
       engine.render();
-      const unsubscribe = await console.submit(
+      const unsubscribe = await liveControls.submit(
         compressor.observe("Gain Reduction", false, 2),
       );
       assert.equal(unsubscribe.ok, true);
@@ -119,14 +119,14 @@ describe("issue 322 -- shared semantic console", () => {
 
       feed(engine, 1);
       engine.render();
-      const refused = await console.submit(
-        console.edit.track("t").effect("simd1", 99, "miso.compressor").bypass(true),
+      const refused = await liveControls.submit(
+        liveControls.edit.track("t").effect("simd1", 99, "miso.compressor").bypass(true),
       );
       assert.equal(refused.ok, false);
       assert.equal(refused.admitted, 0);
       assert.equal(refused.reasonName, "unknownEffect");
 
-      const recovery = await console.submit(track.faderDb(-6));
+      const recovery = await liveControls.submit(track.faderDb(-6));
       assert.equal(recovery.ok, true, "a typed refusal is per request, not terminal");
     } finally {
       engine.dispose();
@@ -135,29 +135,29 @@ describe("issue 322 -- shared semantic console", () => {
 
   test("unknown tracks and numeric domains refuse before transport", async () => {
     let calls = 0;
-    const console = new EngineConsole(
+    const liveControls = new EngineLiveControls(
       { tracks: ["t"], sources: [], metersAttached: false },
       () => {
         calls += 1;
         throw new Error("must not be called");
       },
     );
-    assert.throws(() => console.edit.track("missing"), MisoUsageError);
-    assert.throws(() => console.edit.track("t").faderDb(Number.NaN), /finite/);
-    const hpf = console.edit.track("t").hpfHz(80, { channel: "left" });
-    const pair = console.edit.track("t").inputFilters({ hpfHz: 80, lpfHz: 12_000 });
+    assert.throws(() => liveControls.edit.track("missing"), MisoUsageError);
+    assert.throws(() => liveControls.edit.track("t").faderDb(Number.NaN), /finite/);
+    const hpf = liveControls.edit.track("t").hpfHz(80, { channel: "left" });
+    const pair = liveControls.edit.track("t").inputFilters({ hpfHz: 80, lpfHz: 12_000 });
     assert.equal(hpf.kind, "inputFilters");
     assert.equal(hpf.parameterId, 3);
     assert.equal(pair.kind, "inputFilters");
     assert.deepEqual(pair.values, [80, 12_000, 0, 0]);
     assert.equal(calls, 0, "authoring a filter edit does not submit it");
-    assert.throws(() => console.edit.track("t").pan(-2, 0), /at least -1/);
+    assert.throws(() => liveControls.edit.track("t").pan(-2, 0), /at least -1/);
     assert.throws(
-      () => console.edit.track("t").effect("simd1", 0, "miso.compressor")
+      () => liveControls.edit.track("t").effect("simd1", 0, "miso.compressor")
         .parameter("threshold", 100),
       /at most/,
     );
-    const compressor = console.edit.track("t").effect("simd1", 0, "miso.compressor");
+    const compressor = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
     assert.throws(
       () => compressor.parameter({ key: "threshold", value: -18, unit: "db" }),
       /unknown field 'unit'/,
@@ -186,7 +186,7 @@ describe("issue 322 -- shared semantic console", () => {
       () => compressor.parameter({ key: "threshold", value: -18, smoothingSamples: 1.5 }),
       /smoothingSamples must be a u32/,
     );
-    const delay = console.edit.track("t").effect("dynamic", 0, "miso.delay");
+    const delay = liveControls.edit.track("t").effect("dynamic", 0, "miso.delay");
     assert.throws(
       () => delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" }),
       /shared and must address both lanes/,
@@ -198,15 +198,15 @@ describe("issue 322 -- shared semantic console", () => {
     async function renderAfter(edit) {
       const engine = await createOfflineEngine(compressorDocument(), {
         asset,
-        console: { commandQueueRecords: 64 },
+        liveControls: { commandQueueRecords: 64 },
       });
       try {
         const shape = engine.shape();
         feed(engine, 0);
         engine.render();
-        const console = engine.console();
-        const parameter = console.edit.track("t").effect("simd1", 0, "miso.compressor");
-        const report = edit === undefined ? undefined : await console.submit(edit(parameter));
+        const liveControls = engine.liveControls();
+        const parameter = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
+        const report = edit === undefined ? undefined : await liveControls.submit(edit(parameter));
         const output = [];
         for (let block = 1; block < 4; block += 1) {
           feed(engine, block);
@@ -274,9 +274,9 @@ describe("issue 322 -- shared semantic console", () => {
         };
       },
     };
-    const console = await createBrowserConsole(host);
-    const report = await console.submit(
-      console.edit.track("t").faderDb(-6, { channel: "left", smoothingSamples: 32 }),
+    const liveControls = await createBrowserLiveControls(host);
+    const report = await liveControls.submit(
+      liveControls.edit.track("t").faderDb(-6, { channel: "left", smoothingSamples: 32 }),
     );
     assert.equal(report.ok, true);
     assert.equal(report.reasonName, "none");
@@ -298,7 +298,7 @@ describe("issue 322 -- shared semantic console", () => {
   test("browser transport carries the object edit record and actual report", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
-      console: { commandQueueRecords: 64 },
+      liveControls: { commandQueueRecords: 64 },
     });
     let request;
     const host = {
@@ -327,8 +327,8 @@ describe("issue 322 -- shared semantic console", () => {
       },
     };
     try {
-      const console = await createBrowserConsole(host);
-      const parameter = console.edit.track("t").effect("simd1", 0, "miso.compressor");
+      const liveControls = await createBrowserLiveControls(host);
+      const parameter = liveControls.edit.track("t").effect("simd1", 0, "miso.compressor");
       const objectEdit = parameter.parameter({
         key: "threshold",
         value: -18,
@@ -340,7 +340,7 @@ describe("issue 322 -- shared semantic console", () => {
         smoothingSamples: 64,
       });
       assert.deepEqual(objectEdit, positionalEdit, "the overloads normalize to one LaneEdit");
-      const report = await console.submit(objectEdit);
+      const report = await liveControls.submit(objectEdit);
       assert.equal(report.ok, true);
       assert.equal(report.reasonName, "none");
       assert.equal(report.appliedAtSample, 0n);
@@ -363,7 +363,7 @@ describe("issue 322 -- shared semantic console", () => {
 
   test("a torn acknowledgement is rejected after, never before, transport answers", async () => {
     let answered = false;
-    const console = new EngineConsole(
+    const liveControls = new EngineLiveControls(
       { tracks: ["t"], sources: [], metersAttached: false },
       async () => {
         answered = true;
@@ -380,7 +380,7 @@ describe("issue 322 -- shared semantic console", () => {
       },
     );
     await assert.rejects(
-      () => console.submit(console.edit.track("t").faderDb(-6)),
+      () => liveControls.submit(liveControls.edit.track("t").faderDb(-6)),
       /violated whole-batch admission/,
     );
     assert.equal(answered, true, "the SDK inspected an acknowledgement only after transport settled");

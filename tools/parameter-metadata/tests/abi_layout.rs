@@ -204,7 +204,7 @@ fn the_emitted_command_record_offsets_are_the_engine_s_own_decode_rule() {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
         source_ring_frames: 128,
-        console_command_queue_records: 64,
+        live_control_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
     let mut host = AudioWorkletEngineHost::boot(one_effect_session(first).as_bytes(), options)
@@ -376,11 +376,11 @@ fn the_document_carries_its_whole_schema_and_the_engine_s_offsets() {
         24
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleCommandQueueRecords"),
+        field_offset(&document, "bootOptions", "liveControlCommandQueueRecords"),
         32
     );
     assert_eq!(
-        field_offset(&document, "bootOptions", "consoleMasterTrackPlusOne"),
+        field_offset(&document, "bootOptions", "liveControlMasterTrackPlusOne"),
         56
     );
     assert_eq!(field_offset(&document, "status", "sampleRateHz"), 20);

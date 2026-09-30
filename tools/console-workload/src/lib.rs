@@ -89,7 +89,7 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 pub const METER_QUEUE_DEPTH: usize = 8;
 /// Blocks per meter window on the metered console row (issue #881): the default web boot's.
 ///
-/// `WebBootOptions::console_defaults` sets `console_meter_blocks` to the web host's
+/// `WebBootOptions::live_control_defaults` sets `live_control_meter_blocks` to the web host's
 /// `DEFAULT_METER_BLOCKS`, twelve, and its `live_control_request` turns that into a period of
 /// `12 * quantum_frames`. Mirrored here rather than imported: the browser host is not a
 /// dependency of this subject, and this crate names the number it renders with.
@@ -1008,7 +1008,7 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 
 /// The meter set the default web boot binds, one per track (issue #881).
 ///
-/// The request `host_core` builds when a browser boots with its console defaults: one
+/// The request `host_core` builds when a browser boots with its live-control defaults: one
 /// [`MeterMetricSet::SAMPLE_PEAK`] meter at [`MeterTap::PostMatrix`] per track of the compiled
 /// session's normalized model, handles `index + 1` in that order, a window of
 /// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep

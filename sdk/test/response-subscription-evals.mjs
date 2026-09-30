@@ -98,7 +98,7 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     });
   const engine = await createOfflineEngine(sessionDocument({
     effects: { simd1: [effectEntry("eq", "miso.parametric-eq", params)] },
-  }), { asset, console: { commandQueueRecords: 64 } });
+  }), { asset, liveControls: { commandQueueRecords: 64 } });
   const request = {
     trackId: "t",
     grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },
@@ -118,9 +118,9 @@ test("managed live responses share jobs, suppress unchanged captures, and own la
     assert.equal(secondResult.leftDb[0], secondValue);
     assert.equal(await first.pump(), undefined);
 
-    const semanticConsole = engine.console();
-    await semanticConsole.submit(
-      semanticConsole.edit.track("t").effect("simd1", 0, "miso.parametric-eq")
+    const semanticLiveControls = engine.liveControls();
+    await semanticLiveControls.submit(
+      semanticLiveControls.edit.track("t").effect("simd1", 0, "miso.parametric-eq")
         .parameter("band-1-gain", -3),
     );
     assert.equal(await first.pump(), undefined);
@@ -160,7 +160,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
       nativeEffectId: "miso.compressor", tapIds: [1],
     }],
   };
-  const observationConsole = {
+  const observationLiveControls = {
     edit: {
       track: () => ({
         effect: () => ({ observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }) }),
@@ -182,7 +182,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
       sampleRateHz: 48_000,
       status: "unarmed",
     })),
-    console: () => observationConsole,
+    liveControls: () => observationLiveControls,
     responseRead: async (_request, previousState) => {
       responseReads += 1;
       if (previousState !== undefined) {

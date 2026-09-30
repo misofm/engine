@@ -12,7 +12,7 @@ Deliver value-only fader, mute and pan transactions to the running C ABI plan th
   Today it always replaces the plan, which resets source rings and restarts all DSP state
   (`capi/src/runtime/control.rs:46-53`, `:711`).
 - The engine already has live lanes for exactly these values, used by the browser
-  (`HostConsoleRequest::control_queue_depth`, `TrackControlProducer`).
+  (`HostLiveControlRequest::control_queue_depth`, `TrackControlProducer`).
 - capi does not request them (`compile.rs:410`).
 - Findings: `docs/handoffs/live-control-2026-09-28/FINDINGS.md`.
 
@@ -20,15 +20,15 @@ Deliver value-only fader, mute and pan transactions to the running C ABI plan th
 
 1. **Bound the drains.** Bound the four fader and matrix drains by `available_at_entry()`
    (`builtins-compiler/src/lib.rs:958`, `:994`, `:4257`, `:4320`). This is its own commit.
-2. **Attach the console in capi.** Prepare with `Concurrent` delivery and keep `track_controls` in
-   `ProviderEpoch`. Effect producers stay idle in this slice.
+2. **Attach the live controls in capi.** Prepare with `Concurrent` delivery and keep
+   `track_controls` in `ProviderEpoch`. Effect producers stay idle in this slice.
 3. **Add the live delta.** Add `live_builtin_delta` behind host-core's `control-provider` feature,
    so the browser build does not compile it.
 4. **Commit live deltas without a new plan.** In `command()`'s `Structural` arm: when the delta is
    `Some`, run `compiled_model_admission`, check room, push to the newest epoch, then commit the
    prepared token. Otherwise run the existing path unchanged.
-5. **Charge the resources.** Charge the console producer table and queue rows in capi's resource
-   report, and update the `resource_lifecycle` oracles.
+5. **Charge the resources.** Charge the live-control producer table and queue rows in capi's
+   resource report, and update the `resource_lifecycle` oracles.
 6. **Document the behaviour.** Update the C header comment, `docs/C_ABI_V1_QUALIFICATION.md` and
    `docs/CONTROL_PROTOCOL_SEMANTICS.md`. Value-only transactions apply at each stage's next block
    and are never lost. Structural transactions replace the plan.
@@ -51,7 +51,7 @@ Deliver value-only fader, mute and pan transactions to the running C ABI plan th
 1. **PCM through the C ABI.** Through the exported entry points, a `SetTrackFader` or
    `SetTrackMatrixOrPan` transaction changes the next block of the *same* plan: no pending
    provider, and no re-seek or resubmission. A mute-and-unmute round trip is bit-identical to a
-   console-free reference plan fed from the same ring. Check at 1 and 10 tracks and at the four
+   live-control-free reference plan fed from the same ring. Check at 1 and 10 tracks and at the four
    launch rates.
 2. **Persistence.** The snapshot and the revision carry the value, and `SESSION_COMMITTED` is
    emitted. A later structural replacement starts at the committed value, checked against a control
@@ -66,7 +66,8 @@ Deliver value-only fader, mute and pan transactions to the running C ABI plan th
    and a final state equal to the last committed model.
 5. **Unchanged behaviour.**
    - Every existing structural capi test passes unchanged.
-   - Console digests are byte-identical: `gain_pan_profile digests` and the host-web console tests.
+   - Console digests are byte-identical: `gain_pan_profile digests` and the host-web live-control
+     tests.
    - The shipped artifact's hash moves only because of the bounded drains; record the move.
 6. **Builds.**
    - Native `--all-targets --all-features`, `clippy -D warnings`, and the wasm `simd128` check pass.
@@ -118,9 +119,9 @@ See `VERIFY.md` in this folder. These amendments supersede the text above where 
      mutation in `test-realtime-policy.sh`;
    - record the artifact move (`476e58ad…` → `57dc99ab…`, +267 bytes on this base) and repin
      `hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`.
-2. **Attach the console.** Keep the track producers for the newest epoch. The same
+2. **Attach the live controls.** Keep the track producers for the newest epoch. The same
    `control_queue_depth` also attaches every effect lane (15,361 bytes on the fixture). Either keep
-   those producers for L2 and charge them, or add a builtins-only console request to host-core.
+   those producers for L2 and charge them, or add a builtins-only live-control request to host-core.
    Rule on which.
 3. **The live delta.**
    - Address tracks by id, never by index.
@@ -186,7 +187,7 @@ See `VERIFY.md` in this folder. These amendments supersede the text above where 
      scan, or justify a new exemption.
 5. **Gate 5.** The `gain_pan_profile` digests show that static rendering did not move. They are not
    evidence for the drains, because `console-workload` pushes no fader or matrix records. The drain
-   evidence is the `builtins-compiler` and `host-web` console tests plus the A1.1 policy rule.
+   evidence is the `builtins-compiler` and `host-web` live-control tests plus the A1.1 policy rule.
 6. **Gate 7 (new).** A domain-boundary test (-144, 24, ±0, NaN, ±1 matrix coefficients) through
    both the lowering and the render-side setter.
 
