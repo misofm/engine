@@ -112,3 +112,83 @@ nothing, or a generator that mutes everything.
 
 Not run: nightly's `--workspace` release build, which takes 21 minutes. The probe does not depend on
 workspace feature unification.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, 2026-09-30, on `f00d1aa4` (test `83194805`). One scratch `target/`, `CARGO_INCREMENTAL=0`,
+on a host shared with another agent's benchmark (load 3 to 14), so wall times are indicative.
+
+### Cause, confirmed independently
+
+A temporary probe, since reverted, read each plan's `output_latency` at all three widths and found
+the first nonzero output sample in a 48-block scalar render.
+
+| Seed | Latency, scalar = simd4 = simd8 | First audible sample |
+|---|---|---|
+| 1192 | 2,461 | 2,361 |
+| 1554 | 2,430 | 2,372 |
+| 2045 | 2,430 | 2,372 |
+| 2609 | 2,430 | 2,346 |
+| 2804 | 2,461 | 2,377 |
+| 5338 | 2,430 | 2,328 |
+
+All six are `Free`, with four or five limiters on a track. The old window ends at 2,048. Across all
+6,400 seeds:
+
+- 138 plans exceed 12 blocks, and 9 exceed 2,048 samples. Exactly these six start after 2,048.
+- Latency never differs by width.
+- Onset precedes the reported latency by 29 to 102 samples. This is the limiter's pre-ringing, so
+  the three 2,068-sample seeds (235, 3882, 4340) reached the old window with 9 audible samples.
+
+### Could the fix hide a defect? No.
+
+- **Superset.** The window only grows, and it always starts at sample 0. Every sample the old
+  window compared is still compared.
+- **Latency source.** Latency is read from the compiled artifact
+  (`artifact.report().output_latency`), not recomputed. Each render uses its own plan's report. If
+  two widths reported different latencies, their PCM lengths would differ and the seed would land
+  in `moved`: red, not masked.
+- **Tallies.** Identical to the base at both 6,400 and 64 seeds, so the `collapsed > 0` reach gate
+  gained nothing from longer renders.
+- **Margin.** `+4` guarantees at least 512 samples past the latency. That is what the fixed window
+  already gives a plan at 12 blocks. The alternative, a full 16 blocks, cost 10 s per PR.
+- **Budget.** The six seeds added no measurable time.
+
+| 6,400 seeds, release, nightly env | Base `aa1338d3` | Fix |
+|---|---|---|
+| Default | 45.1 s, red `[1554]` | 42.4 s (44.1 s on another run), green |
+| `RENDER_ALL=1` | 73.1 s, red on all six | 58.3 s, green, all 6,400 audible |
+
+The nightly job's timeout is 45 minutes.
+
+### Gates
+
+| Gate | Result |
+|---|---|
+| 1. 6,400 seeds, nightly env | Green. Misaligned `[0, 2698, 1906]`, rendered 2,708, collapse 318, longest latency 2,461. By-shape counts equal the base. |
+| 2. 64 seeds | Green in release (0.89 s) and debug with `graph/test-support` (23.0 s). All 9 tests pass. Tallies `[0, 34, 22]`, rendered 34, collapse 5, by shape all equal the base. |
+| 3. Planted: source gain times 0, 64 seeds | Red, all 34 rendered seeds listed |
+| 3. Fix reverted (the base) | Red, `[1554]`, and all six under render-all |
+| 3. Sol's mutation: window = `ceil(latency / 128) - 1` blocks | Red at 6,400 via `[1554]` only. Under render-all: `[1554, 2045, 2609, 5338]`. 1192 and 2804 escape because their onset precedes the latency. Green at 64 seeds. |
+| 4. `cargo fmt --all --check`, and clippy `--all-targets --all-features -D warnings` | Green |
+
+### Test value
+
+The nightly probe now goes red on a banking or armed-collapse defect that moves bits only in a
+deep-PDC plan: output after the 16th block, or past a plan's first few output samples. Before the
+fix, such a plan compared zeros (seed 1554) or 9 pre-ringing samples (seed 235). In nightly's
+default mode, 39 rendered seeds now get a longer window.
+
+### Findings
+
+- **H:** none.
+- **M:** none.
+- **L1. The `+4` margin is chosen, not tested.** Setting `AUDIBLE_BLOCKS = 0` stays green at 6,400
+  seeds with render-all. The vacuity gate needs only one nonzero sample, so the margin could erode
+  unnoticed. It is justified above; a follow-up could assert a minimum count of audible samples.
+- **L2. One doc comment is inexact.** `AUDIBLE_BLOCKS`'s comment says the plan "renders silence"
+  before `output_latency`. Measured onset is 29 to 102 samples earlier, because of pre-ringing.
+- **L3. Two prose claims are inexact; neither is material.**
+  - The evidence says "as few as 104 audible samples." Seed 235, which nightly renders, had 9.
+  - The evidence says per-PR renders are unchanged. At 64 seeds, seed 50 (latency 1,582) now
+    renders 17 blocks. The cost is unmeasurable.
