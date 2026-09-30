@@ -238,3 +238,213 @@ and `5d755046...` at this branch. `graph`'s runtime, `graph-compiler`'s estimate
   host, `capi` and browser budget test above still passes. A host that sets the automation
   capacity near `u32::MAX` with a console attached is now refused at compile by its caps, where
   before it aborted at bind.
+
+## Sol verdict, attempt 1
+
+Sol, 2026-09-30. Verified `3bdba498`..`e3589bec` on `b0f37aa7` against this body, P1's verdict
+(M1, M2, L2, L3), decision 12 and `baa03f09`.
+
+**PASS.** Every objective gate holds on independent evidence. Twelve mutations of Sol's own go red,
+including the two the brief named. There is no high or medium finding. The low findings are
+documentation and records that root can take at merge.
+
+### Evidence
+
+**Class A: a differential render at three commits.** Sol wrote a scratch probe (not committed) and
+compiled it unchanged at `6fdf5db2`, at `b0f37aa7` and at the branch. Each commit had its own fresh
+release target directory. (A shared directory silently linked the branch's `graph` into the base
+builds, because cargo keys path crates by relative path.) The probe ran 612 renders per commit at
+Simd8, Simd4 and Scalar. It digested every word at `PostInputBuiltins`, `PostSimd1`, `PostDynamic`
+and `PostSimd2PreFader` on every track, plus the output, with NaN folded. The renders covered:
+- the multiband alone in SIMD rack 1, the dynamic rack and SIMD rack 2, on 8 tracks, with masks
+  `00`, `ff`, `69`, `01`, `fe`, `aa`, `80`, `0f` and `3c`, fed music and random input;
+- the multiband alone on 16, 5 and 4 tracks;
+- each of the other seven launch effects alone, on 3, 8 and 13 tracks with mixed masks, fed music,
+  runs of `-2^-149` (8,442 `-0.0` words reach the taps) and random input;
+- the strip on 8, 13 and 16 tracks, with and without a mixed-bypass multiband in the dynamic rack,
+  both console-free and with a live console attached;
+- 63 pairs in which the first bypassed multiband lane is fed a `+-6e29` square wave and the other
+  tracks' words are compared with a quiet render.
+
+| Comparison | Bits | Bank shape |
+|---|---|---|
+| Branch vs `6fdf5db2`, all 612 renders | 0 differ | multiband 300/300 equal; the other effects differ exactly where #1087 intends |
+| Branch vs `b0f37aa7`, the 288 renders without a multiband | 0 differ | 0 differ |
+| Branch vs `b0f37aa7`, multiband | only the 39 hot renders in which P1 moved a neighbour | 161 differ: P1 banks the mixed masks |
+| Hot neighbours moved | branch 0/63, `6fdf5db2` 0/63, `b0f37aa7` 39/63 (Simd8 and Simd4) | |
+
+The shipped-plan digest gates are all green, and none is re-pinned:
+- `console-workload` in release, including `the_console_strip_rows_render_their_pinned_bits`;
+- `check-console-fixtures.sh`;
+- `check-graph-determinism.sh` (100/100);
+- `run-wasm-gates.sh`: native, wasm `simd128` G5 and the V8 spill gate;
+- `check-browser-expected-resources.py --artifacts`, which checks digests and exact rows.
+
+**Gate 1, the window bound.**
+- `ConsoleEffect::new` now sizes the per-node window only for a live channel, the per-node twin of
+  `baa03f09` (`crates/graph/src/runtime.rs:893-920`).
+- A channel's consumer is private to `EffectControlLane` and is set only at construction.
+  `attach_effect_console` replaces a lane before the graph compiles (`host-core/src/prepare.rs:844`),
+  and bind moves each lane into its owner. No path attaches a channel to a bound owner, so no live
+  lane can arrive and find no window.
+- A live lane still gets its window. Sol's mutation 12 below empties it, and the graph's live
+  tests go red, including `live_bypass_is_latency_preserving_and_reversible`.
+
+**Gate 2, the estimate is an upper bound.** Sol's scratch sweep reuses the committed test's
+method: the estimate delta against the audited allocator's retained delta, from prepare to bind,
+with the producers dropped. It covers:
+- all 8 launch effects;
+- per node (Scalar, 1 and 3 tracks), W = 8 (8 and 13 tracks) and W = 4 (4 and 6 tracks);
+- SIMD rack 1 and the dynamic rack;
+- 1, 128 and 1,000 spans;
+- one, all or alternate lanes bypassed; a live console on none, one or all but one bypassed lane;
+- an `eq -> limiter -> comp` chain, with and without a console.
+
+Results:
+- 1,736 rows. 1,640 are exact (charged = retained), including every row without a multiband. None
+  is overcharged.
+- 96 multiband rows fall short. Each one is a mask that changes the plan's shape: the mixed cohort
+  declines its bank, so effect-processor state moves outside `incremental_plan_bytes` (L3).
+- With the shape held fixed (the same mask, console off against console on), 75 multiband rows are
+  exact.
+- Nothing double-charges. Stage growth, windows and the shunt are charged once per bank slot, and
+  the per-node owner only for an entry that is not a bank member.
+
+**Gate 3, the multiband.**
+- `PREPARED_BYPASS_EFFECTS` is separate from `NEVER_BANKED_EFFECTS`.
+- `lowers_session_bypass` is the one predicate the lowering reads.
+- A live console seeds the multiband's lane from the session bypass, which equals the prepared
+  bypass, exactly as `6fdf5db2` did.
+- The class-A table above is the render evidence.
+
+**Gate 4.** Render is allocation-free, and `-0.0` survives the bypass shunt. The committed tests
+pass in dev and release, and both named `fma(0, wet, dry)` restores turn the `-0.0` case red
+(mutations 9 and 10).
+
+**Sol's mutations**, each reverted and each red:
+
+| # | Mutation | Red in |
+|---|---|---|
+| 1 | Window bound reverted (`live = true`) | gate 1 aborts with `memory allocation of 171798691800 bytes failed` under a 32 GB address-space cap; gate 2 also red |
+| 2 | Multiband dropped from `PREPARED_BYPASS_EFFECTS` | both new `bypass_cohorts` multiband tests (`metadata.bypass` false; 14 neighbour taps moved) and `native_session` |
+| 3 | Every shunt charge removed | gate 2 (1,400 retained vs 376 charged) and the #964 unit test |
+| 4 | Per-node shunt charge only | gate 2 (1,400 vs 376) |
+| 5 | Banked shunt charge only | gate 2 (40,048 vs 752) |
+| 6 | Banked shunt charged only for live lanes | gate 2 (40,048 vs 752) |
+| 7 | `ConsoleEffect` box not charged | gate 2 (1,400 vs 1,096) |
+| 8 | Per-node window not charged | gate 2, live console (26,176 vs 10,816) |
+| 9 | `fma(0, wet, dry)` in `BypassShunt::apply` | `-0.0 scalar`: word 160 `0x00000000`, expected `0x80000000` |
+| 10 | `fma(0, wet, dry)` in the rack's restore loop | `-0.0 lowered`: the same word |
+| 11 | An allocation in the rack's banked restore | gate 4, Simd8: (768, 768) allocations and frees |
+| 12 | A live lane's window emptied (`live = false`) | 3 `graph` console tests, 1 `graph-compiler` test, and `host-core` aborts |
+
+**Gate 5 and the other gates.** All exit 0 unless stated.
+- Format and lint:
+  - `cargo fmt --check`;
+  - clippy `--workspace --all-targets --all-features -D warnings`;
+  - rustdoc `-D warnings`. Its only error is B0's `console-workload/src/lib.rs:374`. With
+    `--exclude console-workload` it passes.
+- Tests:
+  - Debug, CI's debug-a set: 1,103 passed, 10 ignored.
+  - Debug, the debug-b DSP set: 790 passed, 28 ignored.
+  - Release, `graph`, `graph-compiler`, `effect-compiler`, `effect-contract` and `rack`: 389
+    passed, 2 ignored.
+  - Release, `audit`, `bench` and `console-workload`: 114 passed, 2 ignored.
+  - `bench-support`'s `current_thread_counts_every_allocator_operation` fails in release only.
+    It fails the same way at `b0f37aa7`, so it is pre-existing. Debug passes.
+- Policies, and their mutation suites where CI runs them:
+  - realtime (54 regions) and realtime-audit-leak;
+  - effect-contract, rack, bench and graph;
+  - workspace, host-core, conformance, lane, effect-runtime, artifact-evidence-leak, env
+    vocabulary, builtins and session.
+- The audit-native job, step for step:
+  - `audit capi`, 100,000 calls: 0 allocations, frees, locks, syscalls and violations;
+  - `audit delay`, `compressor` and `parametric-eq` at 100,000 blocks each, and `gate-expander`;
+  - the builtins, builtins-graph and graph traces;
+  - the protocol allocation audit;
+  - the realtime probes and the 1,000,000-block trace;
+  - the effect-contract trace at 1,000,000;
+  - the builtins probe mutation tests;
+  - `check-capi-abi.sh` and its self-test;
+  - `check-scalar-oracle-absent.py`, `--native` and `--wasm`;
+  - the builtins fixtures, `check-effect-contract.sh target/release/bench` and
+    `test-console-benchmark.sh`.
+- `check-cross-targets.sh`:
+  - x86-64-v3;
+  - `aarch64-apple-ios` and `aarch64-linux-android`, checked and linted, with only #1018's
+    expected failures;
+  - wasm `simd128`;
+  - the armv7 and scalar-wasm refusals.
+- The AudioWorklet gates on a delivery build: `check-web-audioworklet.sh`, whose callgraph gate
+  finds the render closure allocation-free; `check-browser-expected-resources.py --artifacts`;
+  and `test-web-audioworklet.sh`.
+
+**The AudioWorklet artifact.**
+- Sol reproduced both module hashes: `0f5c0ee7...` at `b0f37aa7` and `5d755046...` here. The
+  module grows by 3,848 B (3,254,573 to 3,258,421), all of it control plane, per `twiggy diff`:
+  - `effect_control_resource`: +858 B;
+  - its `BTreeSet` to `BTreeMap` swap: +104 B of sort monomorphs and +632 B of drop glue;
+  - the name section: +2,138 B;
+  - `prepare_native_session_effects`: +106 B;
+  - `graph::runtime::build_sequential`, bind-time: +10 B.
+- No render function changed. The release pin is untouched, and Sol did not re-pin anything.
+
+**Merge with P2a** (`codex/1088-partial-bank-mask`, `2320454c`).
+- It merges with no textual conflicts.
+- On the merged tree, `graph`, `graph-compiler`, `effect-compiler`, `effect-contract` and `rack`
+  pass in debug: 395 passed, 0 failed.
+
+**AArch64 was not run.** There is no toolchain or qemu here. The factories' width gates say the
+Simd8 leg binds nothing on a 4-lane host:
+- the EQ and the compressor bind only at the host's width;
+- the limiter binds only up to it.
+
+At Simd4, all three strip slots bank, which is what the new tests assume. `aarch64-debug` runs them
+when C2 is pushed.
+
+### Findings, ranked
+
+**L1. The list of stale sentences is incomplete.** Each sentence below says that every session
+bypass, or every bankable effect's, is lowered or prepared enabled. That is false for the multiband
+since this slice.
+- Outside this slice's paths; root fixes these at merge:
+  - `docs/EFFECT_CONTRACT_V1.md:46-51` (listed);
+  - `crates/effect-contract/src/lib.rs:959-961` (not listed) and `:974-977` (listed);
+  - `crates/effect-contract/src/live.rs:116-118`, the `EffectControlLane` heading "A lane without a
+    channel" (not listed);
+  - `crates/effect-contract/src/live.rs:845-848` and `:859-861`, "When a shunt exists" (listed,
+    without lines);
+  - `crates/graph-compiler/src/banks.rs:64-66` and `:135-136` (not listed);
+  - `crates/rack/src/lib.rs:897-898` (not listed);
+  - test docs: `crates/graph-compiler/src/lib.rs:4169-4171` and
+    `crates/graph-compiler/tests/bypass_shunt_identity.rs:522-523` (not listed).
+- Inside this slice's own paths, which the slice should have fixed:
+  - `crates/effect-compiler/src/prepare.rs:131-132`;
+  - `crates/effect-compiler/src/prepare.rs:1394-1396`, which says "an effect that can bank is
+    prepared enabled ... this channel replaces the channel-less lane";
+  - the module doc of `crates/graph-compiler/tests/bypass_cohorts.rs:3-6`.
+
+**L2. The deviations are accepted.** Each one is the minimum needed.
+- `tools/bench-support/src/alloc.rs` adds `released_bytes`:
+  - The change is additive. No existing field, and no gate or tool that reads one, changes
+    meaning, and nothing serializes `Counters`.
+  - The allocator is test- and tool-only; the bench policy and its mutation suite pass.
+  - Render never frees, so the extra relaxed add in `dealloc` and `realloc` never runs in an armed
+    window.
+- The `graph-compiler` dev-dependency on `bench-support` is allowed for `crates/` by the bench
+  policy.
+- The #964 unit test pins exact totals, so it had to change. Mutation 3 turns it red.
+- The owner-box (304 B) and stage-growth (176 B) charges go beyond the non-goal's "windows and
+  shunts". Gate 2 needs them: mutation 7 shows the per-node case short by exactly the box.
+
+**L3. The estimate and shape-changing multiband masks.** Declining a mixed multiband bank moves
+effect state that the graph estimate does not describe: up to about 28 KB, and even a negative
+estimate delta. Per-node processor state is charged at effect preparation (`EffectCompileCaps`),
+the same as at `6fdf5db2`. It is neither a window nor a shunt, so it is outside this slice. Record
+only.
+
+**L4. The multiband joins the delay.** A live console cannot lift a session bypass on either of
+them, because the prepared bypass stays in force. That matches `6fdf5db2`. Carry it into S1c
+together with P1's L4. The slice that lifts the multiband exclusion ends it.
+
+**L5.** The new tests' AArch64 legs are unverified here (see above).
