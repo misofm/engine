@@ -37,7 +37,10 @@ three separate mechanisms, each where its hazard is:
 * **Divergence** — output finiteness is checked **once per block per bank** with one vector
   compare, `x == x` and `|x| < 1e30` (`effect_runtime::bank::check_block`). A failing
   block zeroes its output, resets that effect's state to prepared defaults, and increments a
-  **block** counter. The contract's report counts blocks, never samples.
+  **block** counter. The contract's report counts blocks, never samples. In a bank, every launch
+  effect recovers only the failing lane and reports it alone (#1089-#1092), so a lane's fault never
+  moves a bank-mate's bits. The one exception is the multiband, whose bank still zeroes and resets
+  every lane; it therefore keeps a prepared session bypass (#1100).
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
   effect.
 

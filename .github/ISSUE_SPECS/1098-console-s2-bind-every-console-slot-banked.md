@@ -78,7 +78,9 @@ This is batch C4, after batch C2 (P1, P2a-P2e) and batch C3 (S1r, S1a-S1d) have 
 2. **Class A.** A committed randomized differential renders these sessions banked, on a
    production backend, and per node, through the test-only `Scalar` oracle. Every track is
    bit-identical in both, with NaNs folded (decision 10). A planted
-   whole-bank decision that is not bit-neutral per lane turns it red.
+   whole-bank decision that is not bit-neutral per lane turns it red. It names the true-peak
+   limiter explicitly as a padded `post_insert` slot, with mixed bypass, at Simd8 and Simd4, fed
+   hot enough that the gain path runs (#1091 verdict L3).
 3. **Diagnostic.** A planted factory decline on a console group, on a production backend, fails
    the compile with the typed diagnostic and never yields a per-node plan. The `Scalar` oracle's
    exemption does not reach a production backend: a test compiles the same session on Simd8 with the

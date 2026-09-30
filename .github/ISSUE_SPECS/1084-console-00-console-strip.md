@@ -304,6 +304,12 @@ both.
 - Performance issues that matter more under this design: #887 (tiled partial gather and scatter,
   amended) and #892 (the dry line feed when nothing is bypassed).
 - Identity-slot insert cohorts: #888 and #889, amended to that half.
+- #1102: put a limiter bank back on its uniform body after a partial recovery (#1091 verdict L1).
+- One shared per-lane D7 recovery: #1089-#1092 each recover per lane in their own crate (for
+  example `compressor::finish_lanes`). The frame-zeroing half may belong beside
+  `effect_runtime::bank::nonfinite_lane_mask`, in the spirit of #95's ratchet (#1089 verdict L4).
+  File it when a fifth copy would otherwise appear.
+- Multiband per-lane D7, which lifts its prepared session bypass (#1100) once #1069 closes.
 
 ## App (misofm/app; out of this repo's scope)
 
