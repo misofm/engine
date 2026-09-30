@@ -296,9 +296,12 @@ fn render_blocks(plan: &mut PreparedRenderPlan, pcm: &mut [f32], first: u64, blo
 /// `memory allocation of 171798691800 bytes failed` (`u32::MAX` spans of 40 bytes). Its estimate
 /// charges no window either, so it stays far below the 172 GB the window would have cost.
 ///
-/// Red mutations, each of which aborts this test: size `ConsoleEffect::new`'s window by the
-/// automation capacity whatever the lane (the per-node leg); size
-/// `ConsoleEffectBankStage::new`'s windows likewise (the banked leg, `baa03f09`'s twin).
+/// A host with that much memory does not abort, so the test also asserts, from the audited
+/// allocator, that the bound plan retains less than 1 GiB.
+///
+/// Red mutations: size `ConsoleEffect::new`'s window by the automation capacity whatever the lane
+/// (the per-node leg); size `ConsoleEffectBankStage::new`'s windows likewise (the banked leg,
+/// `baa03f09`'s twin). Each aborts bind or retains 172 GB.
 #[test]
 fn a_console_free_bypass_binds_at_any_automation_capacity() {
     let lanes = host_lanes();
@@ -321,6 +324,11 @@ fn a_console_free_bypass_binds_at_any_automation_capacity() {
                 "{label}: the bypassed lane stays in its bank"
             );
         }
+        assert!(
+            bound.live < 1 << 30,
+            "{label}: the plan retains {} bytes, so a channel-less lane holds a window",
+            bound.live
+        );
         assert!(
             bound.estimate < 1 << 30,
             "{label}: the estimate charges no window for a channel-less lane ({} bytes)",
