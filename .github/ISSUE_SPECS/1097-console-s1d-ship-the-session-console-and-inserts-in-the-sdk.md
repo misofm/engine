@@ -58,7 +58,9 @@ S1d closes batch C3 (S1r, S1a, S1b, S1c, S1d). The batch is pushed once, after S
 ## Objective gates
 
 1. `bash scripts/check-sdk-generated.sh`, `bash scripts/check-sdk-types.sh`,
-   `bash scripts/check-sdk-headless.sh` and the SDK test suites pass.
+   `bash scripts/check-sdk-headless.sh`, `bash scripts/sdk-package.sh check` and the SDK test
+   suites pass. At S1a's C3 rebase, 86 headless and 4 package tests failed, all because the SDK
+   still sends the old schema (#1093 C3 rebase verdict, low 3); every one must pass.
 2. Documents from the SDK builder parse under S1a's grammar and round-trip byte for byte through
    the engine's canonical writer. This holds for an empty console, both sections, empty inserts and
    the app shape.

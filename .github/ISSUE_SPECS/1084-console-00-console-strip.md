@@ -310,6 +310,7 @@ both.
   `effect_runtime::bank::nonfinite_lane_mask`, in the spirit of #95's ratchet (#1089 verdict L4).
   File it when a fifth copy would otherwise appear.
 - Multiband per-lane D7, which lifts its prepared session bypass (#1100) once #1069 closes.
+- #1104: make the session parse-transient bound affine (#1093 verdict, low 4).
 
 ## App (misofm/app; out of this repo's scope)
 
