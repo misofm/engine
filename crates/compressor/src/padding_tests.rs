@@ -111,7 +111,8 @@ fn bind<L: Lane>(
     parts.bank::<L>()
 }
 
-/// Lane `l` of a mask is active.
+/// The mask of `members` members: lanes `0..members` active, the rest padded (the only layout
+/// `validate_shape` admits).
 fn members_first(members: usize, lanes: usize) -> Vec<bool> {
     (0..lanes).map(|lane| lane < members).collect()
 }
@@ -210,20 +211,8 @@ fn draw_case(seed: u64, width: usize) -> Case {
     let link = LINKS[(seed as usize / (width - 1)) % LINKS.len()];
     let mono = draw.chance(1, 3);
     let rate = draw.pick(&RATES);
-    let mask = if draw.chance(1, 2) {
-        members_first(members, width)
-    } else {
-        // Any non-empty mask is legal, not only the planner's members-first layout.
-        let mut lanes: Vec<usize> = (0..width).collect();
-        for index in (1..width).rev() {
-            lanes.swap(index, draw.below(index + 1));
-        }
-        let mut mask = vec![false; width];
-        for lane in &lanes[..members] {
-            mask[*lane] = true;
-        }
-        mask
-    };
+    // Members first: the only layout the planner emits and `validate_shape` admits (P2a, L3).
+    let mask = members_first(members, width);
     let values = (0..members).map(|_| draw_values(&mut draw, mono)).collect();
     let blocks = (0..24)
         .map(|_| {
@@ -342,11 +331,45 @@ fn per_node(case: &Case) -> Rendered {
     rendered
 }
 
+/// One lane's whole channel state as bits: its envelope word, every coefficient word, and every
+/// field of every parameter and coefficient ramp.
+fn lane_state<L: Lane>(channel: &Channel<L>, lane: usize) -> Vec<u32> {
+    let mut envelope = [0_u32; MAX_WIDTH];
+    channel.gain_reduction_db.store_bits(&mut envelope);
+    let mut state = vec![envelope[lane]];
+    state.extend((0..COEF_COUNT).map(|coefficient| channel.words[coefficient][lane].to_bits()));
+    for ramp in channel.ramps.iter().chain(channel.rate_ramps.iter()) {
+        let ramp = ramp[lane];
+        state.extend([
+            ramp.current.to_bits(),
+            ramp.target.to_bits(),
+            ramp.step.to_bits(),
+            ramp.remaining,
+        ]);
+    }
+    state
+}
+
+/// Whether a padded lane's state, as [`lane_state`] lists it, is at rest: a `+0.0` envelope, no
+/// ramp in flight and every word finite.
+fn at_rest(state: &[u32]) -> bool {
+    let finite = |bits: u32| f32::from_bits(bits).is_finite();
+    let ramps = &state[1 + COEF_COUNT..];
+    state[0] == 0
+        && state[1..1 + COEF_COUNT].iter().all(|word| finite(*word))
+        && ramps
+            .chunks_exact(4)
+            .all(|ramp| finite(ramp[0]) && ramp[0] == ramp[1] && ramp[3] == 0)
+}
+
 /// The members rendered as one padded bank at `L`, padded lanes cloning member `clone_of`.
 ///
-/// Also asserts the contract's two obligations on the padded lanes themselves, every block: fed
-/// `+0.0`, a padded lane writes `+0.0` (so the next slot of a chain and the next block are fed
-/// `+0.0` too), and its report stays empty. And a padded lane is not a track for a payload.
+/// Also asserts the contract's obligations on the padded lanes themselves, every block (P2a
+/// verdict, L4): fed `+0.0`, a padded lane writes exactly `+0.0` (never `-0.0`, never a subnormal),
+/// so the next slot of a chain and the next block are fed `+0.0` too; its state is finite and at
+/// rest after binding and stays bit for bit where binding left it, block after block, spans
+/// addressed to it included; and its report stays empty. And a padded lane is not a track for a
+/// payload.
 fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
     let lanes = L::WIDTH;
     let (_, width) = width_of::<L>();
@@ -354,6 +377,20 @@ fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
     let mut bank = bind::<L>(&requests, &case.mask);
     let active = member_lanes(&case.mask);
     let members = active.len();
+    let rest: Vec<(usize, Vec<u32>, Vec<u32>)> = (members..lanes)
+        .map(|lane| {
+            let state = (
+                lane,
+                lane_state(&bank.instance.left, lane),
+                lane_state(&bank.instance.right, lane),
+            );
+            assert!(
+                at_rest(&state.1) && at_rest(&state.2),
+                "W{lanes}: padded lane {lane} binds off rest"
+            );
+            state
+        })
+        .collect();
     let mut rendered = Rendered {
         outputs: vec![Vec::new(); members],
         reports: vec![Vec::new(); members],
@@ -416,6 +453,16 @@ fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
                 report.reports[lane],
                 ProcessReport::default(),
                 "W{lanes} block {index}: padded lane {lane} was reported"
+            );
+        }
+        for (lane, left, right) in &rest {
+            assert_eq!(
+                (
+                    &lane_state(&bank.instance.left, *lane),
+                    &lane_state(&bank.instance.right, *lane)
+                ),
+                (left, right),
+                "W{lanes} block {index}: padded lane {lane} left rest"
             );
         }
         for (member, lane) in active.iter().enumerate() {
@@ -551,8 +598,8 @@ fn padded_differential<L: Lane>(seed: u64, reach: &mut Reach) {
 
 /// Gates 1 and 2: a padded bank's members render their per-node bits, at `Simd4` and `Simd8`.
 ///
-/// Seeds reach every active count `1..W` under every link mode at both widths, members-first and
-/// scattered masks, every launch rate, dual and collapsed. Inputs mix every `Profile` (hostile
+/// Seeds reach every active count `1..W` under every link mode at both widths, every launch rate,
+/// dual and collapsed. Inputs mix every `Profile` (hostile
 /// NaNs, infinities and words past `1e30` among them) with whole-bank silence; members are
 /// automated with points that often land inside the previous point's 64-sample ramp, because
 /// blocks are as short as one frame (the #1069 shape); and every member serves in turn as the

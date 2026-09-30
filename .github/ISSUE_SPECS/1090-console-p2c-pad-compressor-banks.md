@@ -61,7 +61,9 @@ any order, one merge each.
 2. Coupling rule: active lanes' bits do not depend on the clone source, and every link mode
    combines L and R of one lane only.
 3. A bank whose active lanes are all silent still takes silent admission. A padded lane that
-   defeated it would turn this test red.
+   defeated it would turn this test red. A padded lane fed `+0.0` produces exactly `+0.0` out (not
+   `-0.0`, not a denormal) and keeps its state finite and at rest, block after block (P2a verdict,
+   L4).
 4. D7: a planted non-finite state in one active lane recovers and reports that lane alone.
    A bypassed lane counts as active: a bypassed lane fed a tripping value (for example `1e30`
    behind enough legal gain) leaves every enabled bank-mate's bits unchanged (P1 verdict, M2).
