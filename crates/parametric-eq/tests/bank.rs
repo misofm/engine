@@ -508,14 +508,23 @@ fn bank_binding_declines_a_heterogeneous_cohort() {
     );
 }
 
-/// Issue #1088 (console strip P2a), gate 3: the EQ has not opted into padding (P2b, #1089), so
-/// it declines a padded bank request, and only after it has validated every member.
+/// Issue #1089 (console strip P2b): the EQ binds a padded request -- fewer members than lanes, the
+/// rest clones of a member -- at every member count, and validates every lane before it decides.
 ///
-/// Red if the guard in `bind_homogeneous_bank` is removed -- a padded request binds, and the bank
-/// runs its clone lanes as real tracks -- or if it moves above member validation, where a padded
-/// request with a malformed member is declined instead of refused.
+/// * Every mask `0..members` for `members` in `1..=W` binds, with the full mask as the control.
+/// * A malformed member is refused with the code `prepare` gives it, at every member count from
+///   two. The malformed member is the last one, never lane 0 (P2a verdict, L1): the metadata is
+///   taken from lane 0, so a decision taken before the member loop would still refuse a malformed
+///   lane 0, and only a later member shows the order (#1070's).
+/// * A padded lane whose request is not a clone -- another program key -- declines the bank.
+/// * A mask whose members are not on lanes `0..members` is refused
+///   (`effect.bank.mask_not_prefix`, P2a verdict L3).
+///
+/// Red if the #1088 guard comes back (a padded request declines), if a decline is taken before the
+/// member loop (the malformed member declines instead of refusing), or if the bind stops calling
+/// `validate_shape` (the scattered mask binds).
 #[test]
-fn a_padded_request_is_declined_until_the_eq_opts_in() {
+fn a_padded_request_binds_after_every_lane_is_validated() {
     let Some((width, backend)) = native_bank() else {
         return;
     };
@@ -530,33 +539,48 @@ fn a_padded_request_is_declined_until_the_eq_opts_in() {
             active_mask: mask,
         })
     };
-    assert!(
-        bind(&requests, width.full_mask())
-            .expect("a full bank")
-            .is_some(),
-        "the control: the same members bind as a full bank"
-    );
-    for members in 1..lanes {
+    let mut illegal = values.clone();
+    set_initial(&mut illegal, 2, ParameterChannel::Right, f32::NAN);
+    for members in 1..=lanes {
         let mask: Vec<bool> = (0..lanes).map(|lane| lane < members).collect();
-        assert!(
-            bind(&requests, &mask)
-                .expect("a padded request is well formed")
-                .is_none(),
-            "{members} of {lanes} lanes active"
-        );
+        let bank = bind(&requests, &mask)
+            .expect("a padded request is well formed")
+            .unwrap_or_else(|| panic!("{members} of {lanes} lanes active: the EQ must bind"));
+        assert_eq!(bank.metadata().width, width);
+        if members >= 2 {
+            let last = members - 1;
+            let mut limits = requests.clone();
+            limits[last].limits.maximum_total_state_bytes = 0;
+            let mut initial = requests.clone();
+            initial[last].initial_values = &illegal;
+            for (what, malformed) in [("limits", limits), ("initial value", initial)] {
+                let refusal = ParametricEqFactory
+                    .prepare(malformed[last])
+                    .err()
+                    .expect("a malformed member")
+                    .code;
+                assert_eq!(
+                    bind(&malformed, &mask).err().map(|error| error.code),
+                    Some(refusal),
+                    "{members} members: a malformed {what} on lane {last} is refused"
+                );
+            }
+        }
+        if members < lanes {
+            let mut foreign = requests.clone();
+            foreign[lanes - 1].bypass = true;
+            assert!(
+                bind(&foreign, &mask)
+                    .expect("a heterogeneous request is well formed")
+                    .is_none(),
+                "{members} members: a padded lane that is not a clone declines"
+            );
+        }
     }
-    let mut malformed = requests.clone();
-    malformed[0].limits.maximum_total_state_bytes = 0;
-    let refusal = ParametricEqFactory
-        .prepare(malformed[0])
-        .err()
-        .expect("a malformed member")
-        .code;
-    let mask: Vec<bool> = (0..lanes).map(|lane| lane == 0).collect();
+    let scattered: Vec<bool> = (0..lanes).map(|lane| lane == 1).collect();
     assert_eq!(
-        bind(&malformed, &mask).err().map(|error| error.code),
-        Some(refusal),
-        "a padded request still validates its members"
+        bind(&requests, &scattered).err().map(|error| error.code),
+        Some("effect.bank.mask_not_prefix")
     );
 }
 
@@ -915,6 +939,155 @@ fn fold_payload(hasher: &mut Sha256, payload: &Payload) {
     }
 }
 
+/// How a scenario's tracks sit in banks (issue #1089, console strip P2b).
+///
+/// Each bank carries `members` consecutive tracks on its first lanes, in track order, and pads its
+/// other lanes with clones of its first member's request: the graph planner's layout of a padded
+/// group. A count that does not divide the tracks leaves the last bank with the remainder.
+/// `members == lanes` is a full bank, the layout every pin below was recorded on, and it binds and
+/// folds exactly as the scenarios did before padding existed.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    width: BankWidth,
+    backend: Backend,
+    lanes: usize,
+    members: usize,
+    tracks: usize,
+}
+
+impl Layout {
+    fn new(width: BankWidth, backend: Backend, members: usize, tracks: usize) -> Self {
+        let lanes = width.lanes() as usize;
+        assert!(
+            (1..=lanes).contains(&members),
+            "{members} members of {lanes} lanes"
+        );
+        Self {
+            width,
+            backend,
+            lanes,
+            members,
+            tracks,
+        }
+    }
+
+    fn banks(self) -> usize {
+        self.tracks.div_ceil(self.members)
+    }
+
+    /// The track on lane `lane` of bank `bank`, or `None` on a padded lane.
+    fn track(self, bank: usize, lane: usize) -> Option<usize> {
+        let first = bank * self.members;
+        (lane < self.members && first + lane < self.tracks).then_some(first + lane)
+    }
+
+    /// `(lane, track)` for every member of bank `bank`.
+    fn members_of(self, bank: usize) -> impl Iterator<Item = (usize, usize)> {
+        (0..self.lanes).filter_map(move |lane| self.track(bank, lane).map(|track| (lane, track)))
+    }
+
+    /// Binds every bank through the public factory, `request(track)` per member and a clone of
+    /// the bank's first member on every padded lane.
+    fn bind<'a>(
+        self,
+        request: impl Fn(usize) -> effect_contract::PrepareEffectRequest<'a>,
+    ) -> Vec<Box<dyn PreparedNativeEffectBank>> {
+        (0..self.banks())
+            .map(|bank| {
+                let requests: Vec<_> = (0..self.lanes)
+                    .map(|lane| request(self.track(bank, lane).unwrap_or(bank * self.members)))
+                    .collect();
+                let mask: Vec<bool> = (0..self.lanes)
+                    .map(|lane| self.track(bank, lane).is_some())
+                    .collect();
+                ParametricEqFactory
+                    .bind_homogeneous_bank(PrepareEffectBankRequest {
+                        backend: self.backend,
+                        width: self.width,
+                        requests: &requests,
+                        active_mask: &mask,
+                    })
+                    .expect("valid bank request")
+                    .expect("the native width must bind")
+            })
+            .collect()
+    }
+
+    /// Every lane's state payload, bank by bank: what a padded lane must still hold later.
+    fn at_bind(self, banks: &[Box<dyn PreparedNativeEffectBank>]) -> Vec<Vec<Payload>> {
+        banks
+            .iter()
+            .map(|bank| {
+                (0..self.lanes)
+                    .map(|lane| snapshot_bank(bank.as_ref(), lane as u32))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// One plane of bank `bank`: `word(frame, track)` on a member's lane and `+0.0` on a padded
+    /// lane, which the caller never writes.
+    fn plane(self, bank: usize, frames: usize, word: impl Fn(usize, usize) -> f32) -> Vec<f32> {
+        (0..frames * self.lanes)
+            .map(|cell| {
+                self.track(bank, cell % self.lanes)
+                    .map_or(0.0, |track| word(cell / self.lanes, track))
+            })
+            .collect()
+    }
+
+    /// Folds bank `bank`'s members in track order -- each member's words (the left plane, then
+    /// the right one unless `right` is `None`), its report and its state payload, exactly as the
+    /// pinned legs always folded a lane -- and checks every padded lane: it wrote exactly `+0.0`,
+    /// its report is empty, and its state is still the one it was bound with (gate 3).
+    #[allow(clippy::too_many_arguments)]
+    fn fold(
+        self,
+        hasher: &mut Sha256,
+        bank: usize,
+        processor: &dyn PreparedNativeEffectBank,
+        at_bind: &[Payload],
+        frames: usize,
+        left: &[f32],
+        right: Option<&[f32]>,
+        report: &effect_contract::BankProcessReport,
+    ) {
+        for lane in 0..self.lanes {
+            let column = |plane: &[f32]| -> Vec<f32> {
+                (0..frames)
+                    .map(|frame| plane[frame * self.lanes + lane])
+                    .collect()
+            };
+            if self.track(bank, lane).is_some() {
+                match right {
+                    None => fold_words(hasher, column(left).into_iter()),
+                    Some(right) => {
+                        fold_words(hasher, column(left).into_iter().chain(column(right)))
+                    }
+                }
+                fold_report(hasher, &report.reports[lane]);
+                fold_payload(hasher, &snapshot_bank(processor, lane as u32));
+                continue;
+            }
+            for plane in core::iter::once(left).chain(right) {
+                assert!(
+                    column(plane).iter().all(|word| word.to_bits() == 0),
+                    "#1089: padded lane {lane} of bank {bank} ({self:?}) wrote a word other than +0.0"
+                );
+            }
+            assert_eq!(
+                report.reports[lane],
+                effect_contract::ProcessReport::default(),
+                "#1089: padded lane {lane} of bank {bank} ({self:?}) was reported"
+            );
+            assert!(
+                snapshot_bank(processor, lane as u32) == at_bind[lane],
+                "#1089: padded lane {lane} of bank {bank} ({self:?}) moved its state"
+            );
+        }
+    }
+}
+
 /// Resets this thread's count of select-free depth-one tail passes (issue #976 M3); a no-op
 /// without `test-support`, where the counter does not exist.
 fn reset_select_free_tails() {
@@ -983,13 +1156,13 @@ fn odd_scalar_digest() -> OddLeg {
     (hex(&hasher.finalize()), tails)
 }
 
-/// The bank legs: `ODD_TRACKS / lanes` native banks, folded per track in track order so the
-/// digest does not depend on the bank width. `mono` renders the collapsed body instead of the dual
-/// one, over the left plane alone.
-fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
-    let lanes = width.lanes() as usize;
-    assert_eq!(ODD_TRACKS % lanes, 0, "the scenario fills whole banks");
-    let factory = ParametricEqFactory;
+/// The bank legs: [`ODD_TRACKS`] tracks in native banks of `members` members each (fewer than the
+/// width pads every bank, issue #1089), folded per track in track order so the digest depends
+/// neither on the bank width nor on the member count. `mono` renders the collapsed body instead of
+/// the dual one, over the left plane alone.
+fn odd_bank_digest(width: BankWidth, backend: Backend, members: usize, mono: bool) -> OddLeg {
+    let layout = Layout::new(width, backend, members, ODD_TRACKS);
+    let lanes = layout.lanes;
     let mut hasher = Sha256::new();
     let mut tails = Vec::new();
     for shape in ODD_SHAPES {
@@ -997,32 +1170,16 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
         let configurations: Vec<_> = (0..ODD_TRACKS)
             .map(|track| odd_configuration(shape, track))
             .collect();
-        let mut banks: Vec<_> = configurations
-            .chunks(lanes)
-            .map(|group| {
-                let requests: Vec<_> = group
-                    .iter()
-                    .map(|(initial, _)| request(initial, false))
-                    .collect();
-                factory
-                    .bind_homogeneous_bank(PrepareEffectBankRequest {
-                        backend,
-                        width,
-                        requests: &requests,
-                        active_mask: width.full_mask(),
-                    })
-                    .expect("valid bank request")
-                    .expect("the native width must bind")
-            })
-            .collect();
+        let mut banks = layout.bind(|track| request(&configurations[track].0, false));
+        let at_bind = layout.at_bind(&banks);
         let offsets = vec![0_u32; lanes + 1];
         let mut position = 0_u64;
         for block in 0..ODD_BLOCKS {
             let frames = odd_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
                 assert!(!mono || bank.supports_mono_collapse());
-                for lane in 0..lanes {
-                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                for (lane, track) in layout.members_of(group) {
+                    for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
                                 bank.as_mut(),
@@ -1035,11 +1192,9 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
                     }
                 }
                 let plane = |channel: usize| -> Vec<f32> {
-                    (0..frames * lanes)
-                        .map(|cell| {
-                            odd_word(block, cell / lanes, group * lanes + cell % lanes, channel)
-                        })
-                        .collect()
+                    layout.plane(group, frames, |frame, track| {
+                        odd_word(block, frame, track, channel)
+                    })
                 };
                 let mut left = plane(0);
                 let mut right = if mono {
@@ -1064,20 +1219,16 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
                 } else {
                     bank.process_bank(process)
                 };
-                for lane in 0..lanes {
-                    let column = |plane: &[f32]| -> Vec<f32> {
-                        (0..frames)
-                            .map(|frame| plane[frame * lanes + lane])
-                            .collect()
-                    };
-                    if mono {
-                        fold_words(&mut hasher, column(&left).into_iter());
-                    } else {
-                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
-                    }
-                    fold_report(&mut hasher, &report.reports[lane]);
-                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
-                }
+                layout.fold(
+                    &mut hasher,
+                    group,
+                    bank.as_ref(),
+                    &at_bind[group],
+                    frames,
+                    &left,
+                    (!mono).then_some(&right[..]),
+                    &report,
+                );
             }
             position += frames as u64;
         }
@@ -1086,12 +1237,57 @@ fn odd_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> OddLeg {
     (hex(&hasher.finalize()), tails)
 }
 
+/// Issue #1089 gate 1 on a scenario fixture: the same tracks in banks of every member count
+/// `1..W`, each bank padded with clones of its first member, render the full layout's digests,
+/// dual and collapsed. `full` is `[dual, mono]`.
+///
+/// Every padded leg folds the same words in the same track order as the full leg, so an equal
+/// digest is every member's words, reports and states over every block. [`Layout::fold`] also
+/// checks each padded lane on every block (gate 3). Red if a padded bank renders any member
+/// differently from the full bank (a padded lane leaks, or a recovery reaches past the lane that
+/// failed), or if the EQ declines a padded request.
+fn assert_padded_legs(
+    scenario: &str,
+    full: [&str; 2],
+    digest: impl Fn(BankWidth, Backend, usize, bool) -> String,
+) {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    for members in 1..width.lanes() as usize {
+        for (mono, full) in [(false, full[0]), (true, full[1])] {
+            assert_eq!(
+                digest(width, backend, members, mono),
+                full,
+                "#1089 gate 1: the {scenario} scenario in banks of {members} members (mono \
+                 {mono}) is not the full bank's render"
+            );
+        }
+    }
+}
+
+/// The digest of leg `name`.
+fn leg<'a, T>(legs: &'a [(&str, T)], name: &str) -> &'a T {
+    &legs
+        .iter()
+        .find(|(leg, _)| *leg == name)
+        .unwrap_or_else(|| panic!("the {name} leg ran"))
+        .1
+}
+
 fn hex(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The digests [`odd_live_counts_render_the_base_bits`] pins, recorded on the unmodified base of
 /// issue #976 (before the stationary cascade stopped padding odd live-section counts).
+///
+/// The two bank rows were re-recorded by #1089, which made a D7 recovery per lane: a fault used
+/// to zero and reset its whole bank plane, and now zeroes and resets only the lanes that failed,
+/// as each track's per-node instance does. The dual row is
+/// therefore the scalar row, which the test also asserts.
+/// The collapsed row moved for the same reason. Nothing else moved: this test with the
+/// whole-plane recovery restored still renders the old rows (`247bc0b6…`, `e9041804…`).
 const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -1099,11 +1295,11 @@ const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "247bc0b6fd53e45fe85f15dd481dc65eb6110bc3ca8cd6a056e40a6d9c131d7c",
+        "81015a5c841e7fb53b6d7f4968c1706b46902db7055cdc687fa2d7c5366cb852",
     ),
     (
         "bank-mono",
-        "e904180499a49c1a203eef5da5f6a257b7e9a74c34a1e1ba22fdb7ebcb1e108a",
+        "e6467c9f475bfce7d86624f3df160c720c15e77f67470e937f2a5c73d2d6ac89",
     ),
 ];
 
@@ -1127,8 +1323,9 @@ const ODD_LIVE_DIGESTS: [(&str, &str); 3] = [
 fn odd_live_counts_render_the_base_bits() {
     let mut legs = vec![("scalar", odd_scalar_digest())];
     if let Some((width, backend)) = native_bank() {
-        legs.push(("bank", odd_bank_digest(width, backend, false)));
-        legs.push(("bank-mono", odd_bank_digest(width, backend, true)));
+        let lanes = width.lanes() as usize;
+        legs.push(("bank", odd_bank_digest(width, backend, lanes, false)));
+        legs.push(("bank-mono", odd_bank_digest(width, backend, lanes, true)));
     }
     for (leg, (digest, tails)) in &legs {
         println!("odd-live digest {leg} {digest}");
@@ -1155,6 +1352,18 @@ fn odd_live_counts_render_the_base_bits() {
         assert_eq!(
             digest, pinned,
             "#976 gate 1: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+    if native_bank().is_some() {
+        assert_eq!(
+            leg(&legs, "bank").0,
+            leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances"
+        );
+        assert_padded_legs(
+            "odd-live",
+            [&leg(&legs, "bank").0, &leg(&legs, "bank-mono").0],
+            |width, backend, members, mono| odd_bank_digest(width, backend, members, mono).0,
         );
     }
 }
@@ -1473,12 +1682,12 @@ fn select_scalar_digest() -> SelectLeg {
     (hex(&hasher.finalize()), counts, poisoned)
 }
 
-/// The bank legs of the admitted-select scenario, folded per track in track order so the digest
-/// does not depend on the bank width. `mono` renders the collapsed body over the left plane.
-fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectLeg {
-    let lanes = width.lanes() as usize;
-    assert_eq!(SELECT_TRACKS % lanes, 0, "the scenario fills whole banks");
-    let factory = ParametricEqFactory;
+/// The bank legs of the admitted-select scenario, in banks of `members` members (issue #1089),
+/// folded per track in track order so the digest depends neither on the bank width nor on the
+/// member count. `mono` renders the collapsed body over the left plane.
+fn select_bank_digest(width: BankWidth, backend: Backend, members: usize, mono: bool) -> SelectLeg {
+    let layout = Layout::new(width, backend, members, SELECT_TRACKS);
+    let lanes = layout.lanes;
     let mut hasher = Sha256::new();
     let mut counts = Vec::new();
     let mut poisoned = true;
@@ -1488,31 +1697,15 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
         let configurations: Vec<_> = (0..SELECT_TRACKS)
             .map(|track| select_configuration(shape, track))
             .collect();
-        let mut banks: Vec<_> = configurations
-            .chunks(lanes)
-            .map(|group| {
-                let requests: Vec<_> = group
-                    .iter()
-                    .map(|(initial, _)| request(initial, false))
-                    .collect();
-                factory
-                    .bind_homogeneous_bank(PrepareEffectBankRequest {
-                        backend,
-                        width,
-                        requests: &requests,
-                        active_mask: width.full_mask(),
-                    })
-                    .expect("valid bank request")
-                    .expect("the native width must bind")
-            })
-            .collect();
+        let mut banks = layout.bind(|track| request(&configurations[track].0, false));
+        let at_bind = layout.at_bind(&banks);
         let offsets = vec![0_u32; lanes + 1];
         let mut position = 0_u64;
         for block in 0..SELECT_BLOCKS {
             let frames = select_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
-                for lane in 0..lanes {
-                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                for (lane, track) in layout.members_of(group) {
+                    for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
                                 bank.as_mut(),
@@ -1524,6 +1717,7 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
                         }
                     }
                 }
+                // Track 0 is lane 0 of bank 0 in every layout.
                 if shape == SelectShape::PoisonedDryHpf && group == 0 && block % 16 == 0 {
                     let mut payload = snapshot_bank(bank.as_ref(), 0);
                     plant_left_ic2(&mut payload, 0, -f32::MAX);
@@ -1537,17 +1731,9 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
                     .expect("a finite integrator restores");
                 }
                 let plane = |channel: usize| -> Vec<f32> {
-                    (0..frames * lanes)
-                        .map(|cell| {
-                            select_word(
-                                shape,
-                                block,
-                                cell / lanes,
-                                group * lanes + cell % lanes,
-                                channel,
-                            )
-                        })
-                        .collect()
+                    layout.plane(group, frames, |frame, track| {
+                        select_word(shape, block, frame, track, channel)
+                    })
                 };
                 let mut left = plane(0);
                 let mut right = if mono {
@@ -1592,20 +1778,16 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
                         &report.reports[0],
                     );
                 }
-                for lane in 0..lanes {
-                    let column = |plane: &[f32]| -> Vec<f32> {
-                        (0..frames)
-                            .map(|frame| plane[frame * lanes + lane])
-                            .collect()
-                    };
-                    if mono {
-                        fold_words(&mut hasher, column(&left).into_iter());
-                    } else {
-                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
-                    }
-                    fold_report(&mut hasher, &report.reports[lane]);
-                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
-                }
+                layout.fold(
+                    &mut hasher,
+                    group,
+                    bank.as_ref(),
+                    &at_bind[group],
+                    frames,
+                    &left,
+                    (!mono).then_some(&right[..]),
+                    &report,
+                );
             }
             position += frames as u64;
         }
@@ -1622,6 +1804,13 @@ fn select_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> SelectL
 /// its 48 NaN words (the poisoned dry lane's `NaN` integrators, 16 per leg, all `0xFFC0_0000` on
 /// x86) are the only words the fold changes. The folded scalar digest is the raw digest the
 /// AArch64 leg printed for #1017, whose arithmetic NaN is already `0x7FC0_0000`.
+///
+/// The two bank rows were re-recorded by #1089, which made a D7 recovery per lane: a fault used
+/// to zero and reset its whole bank plane, and now zeroes and resets only the lanes that failed,
+/// as each track's per-node instance does. The dual row is
+/// therefore the scalar row, which the test also asserts.
+/// The collapsed row moved for the same reason. Nothing else moved: this test with the
+/// whole-plane recovery restored still renders the old rows (`d68a2494…`, `e5db81b9…`).
 const SELECT_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -1629,11 +1818,11 @@ const SELECT_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "d68a2494011d118d10eb295683957bd55c09092259d9161ae0bd0a0cfc6ac5b7",
+        "3719d502178e4c1e65fd01d18b9664d4a50259a1fc61d733cd229cd1e7e9f6e3",
     ),
     (
         "bank-mono",
-        "e5db81b9acb69a451505fbd48add97d960c928f934b9fc20c6fd136a88b725a6",
+        "d7a3f759adf337f4aaa4753bcf4095594497be7a7f249de5671f76f6ece19f2a",
     ),
 ];
 
@@ -1657,8 +1846,9 @@ const SELECT_DIGESTS: [(&str, &str); 3] = [
 fn admitted_blocks_render_the_base_bits_without_selects() {
     let mut legs = vec![("scalar", select_scalar_digest())];
     if let Some((width, backend)) = native_bank() {
-        legs.push(("bank", select_bank_digest(width, backend, false)));
-        legs.push(("bank-mono", select_bank_digest(width, backend, true)));
+        let lanes = width.lanes() as usize;
+        legs.push(("bank", select_bank_digest(width, backend, lanes, false)));
+        legs.push(("bank-mono", select_bank_digest(width, backend, lanes, true)));
     }
     for (leg, (digest, counts, _)) in &legs {
         println!("admitted-select digest {leg} {digest}");
@@ -1696,6 +1886,25 @@ fn admitted_blocks_render_the_base_bits_without_selects() {
                 );
             }
         }
+    }
+    if native_bank().is_some() {
+        assert_eq!(
+            leg(&legs, "bank").0,
+            leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances"
+        );
+        assert_padded_legs(
+            "admitted-select",
+            [&leg(&legs, "bank").0, &leg(&legs, "bank-mono").0],
+            |width, backend, members, mono| {
+                let (digest, _, poisoned) = select_bank_digest(width, backend, members, mono);
+                assert!(
+                    poisoned,
+                    "{members} members: the dry lane must still poison"
+                );
+                digest
+            },
+        );
     }
 }
 
@@ -1863,46 +2072,28 @@ fn skew_scalar_digest() -> String {
     hex(&hasher.finalize())
 }
 
-/// The bank legs of the skewed-pass scenario, folded per track in track order so the digest does
-/// not depend on the bank width. `mono` renders the collapsed body over the left plane.
-fn skew_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
-    let lanes = width.lanes() as usize;
-    assert_eq!(SKEW_TRACKS % lanes, 0, "the scenario fills whole banks");
-    let factory = ParametricEqFactory;
+/// The bank legs of the skewed-pass scenario, in banks of `members` members (issue #1089),
+/// folded per track in track order so the digest depends neither on the bank width nor on the
+/// member count. `mono` renders the collapsed body over the left plane.
+fn skew_bank_digest(width: BankWidth, backend: Backend, members: usize, mono: bool) -> String {
+    let layout = Layout::new(width, backend, members, SKEW_TRACKS);
+    let lanes = layout.lanes;
     let mut hasher = Sha256::new();
     for shape in SKEW_SHAPES {
         let configurations: Vec<_> = (0..SKEW_TRACKS)
             .map(|track| skew_configuration(shape, track))
             .collect();
-        let mut banks: Vec<_> = configurations
-            .chunks(lanes)
-            .map(|group| {
-                let requests: Vec<_> = group
-                    .iter()
-                    .map(|initial| request(initial, false))
-                    .collect();
-                factory
-                    .bind_homogeneous_bank(PrepareEffectBankRequest {
-                        backend,
-                        width,
-                        requests: &requests,
-                        active_mask: width.full_mask(),
-                    })
-                    .expect("valid bank request")
-                    .expect("the native width must bind")
-            })
-            .collect();
+        let mut banks = layout.bind(|track| request(&configurations[track], false));
+        let at_bind = layout.at_bind(&banks);
         let offsets = vec![0_u32; lanes + 1];
         let mut position = 0_u64;
         for block in 0..SKEW_BLOCKS {
             let frames = skew_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
                 let plane = |channel: usize| -> Vec<f32> {
-                    (0..frames * lanes)
-                        .map(|cell| {
-                            skew_word(block, cell / lanes, group * lanes + cell % lanes, channel)
-                        })
-                        .collect()
+                    layout.plane(group, frames, |frame, track| {
+                        skew_word(block, frame, track, channel)
+                    })
                 };
                 let mut left = plane(0);
                 let mut right = if mono {
@@ -1927,20 +2118,16 @@ fn skew_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
                 } else {
                     bank.process_bank(process)
                 };
-                for lane in 0..lanes {
-                    let column = |plane: &[f32]| -> Vec<f32> {
-                        (0..frames)
-                            .map(|frame| plane[frame * lanes + lane])
-                            .collect()
-                    };
-                    if mono {
-                        fold_words(&mut hasher, column(&left).into_iter());
-                    } else {
-                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
-                    }
-                    fold_report(&mut hasher, &report.reports[lane]);
-                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
-                }
+                layout.fold(
+                    &mut hasher,
+                    group,
+                    bank.as_ref(),
+                    &at_bind[group],
+                    frames,
+                    &left,
+                    (!mono).then_some(&right[..]),
+                    &report,
+                );
             }
             position += frames as u64;
         }
@@ -1950,6 +2137,13 @@ fn skew_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> String {
 
 /// The digests [`two_and_four_live_sections_render_the_base_bits`] pins, recorded on the
 /// unmodified base of issue #978 (every depth-two pass in the interleaved schedule).
+///
+/// The two bank rows were re-recorded by #1089, which made a D7 recovery per lane: a fault used
+/// to zero and reset its whole bank plane, and now zeroes and resets only the lanes that failed,
+/// as each track's per-node instance does. The dual row is
+/// therefore the scalar row, which the test also asserts.
+/// The collapsed row moved for the same reason. Nothing else moved: this test with the
+/// whole-plane recovery restored still renders the old rows (`aad039b4…`, `602d2f39…`).
 const SKEW_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -1957,11 +2151,11 @@ const SKEW_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "aad039b4e61453d750e40869a0c8b7aa59df2a6299eecfc6430faab0beebcc6a",
+        "9fdeb65d468cd6c5b5aed91c853d0dcb3fb4781dc723ecba223cf67926214dda",
     ),
     (
         "bank-mono",
-        "602d2f39e13d8431c2db10bb94caebeeb3f64d767261ec6c773c648079106ea4",
+        "b82939dae909cc075fc82b18107a0bf69c8795cb1ac71c1b8141696c5eb6862d",
     ),
 ];
 
@@ -1978,8 +2172,9 @@ const SKEW_DIGESTS: [(&str, &str); 3] = [
 fn two_and_four_live_sections_render_the_base_bits() {
     let mut legs = vec![("scalar", skew_scalar_digest())];
     if let Some((width, backend)) = native_bank() {
-        legs.push(("bank", skew_bank_digest(width, backend, false)));
-        legs.push(("bank-mono", skew_bank_digest(width, backend, true)));
+        let lanes = width.lanes() as usize;
+        legs.push(("bank", skew_bank_digest(width, backend, lanes, false)));
+        legs.push(("bank-mono", skew_bank_digest(width, backend, lanes, true)));
     }
     for (leg, digest) in &legs {
         println!("skewed-pass digest {leg} {digest}");
@@ -1993,6 +2188,18 @@ fn two_and_four_live_sections_render_the_base_bits() {
         assert_eq!(
             digest, pinned,
             "#978 gate 2: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+    if native_bank().is_some() {
+        assert_eq!(
+            leg(&legs, "bank"),
+            leg(&legs, "scalar"),
+            "#1089: the dual bank leg must render its per-node instances"
+        );
+        assert_padded_legs(
+            "skewed-pass",
+            [leg(&legs, "bank"), leg(&legs, "bank-mono")],
+            skew_bank_digest,
         );
     }
 }
@@ -2101,9 +2308,13 @@ fn overflow_word(frame: usize) -> f32 {
     }
 }
 
-/// The scalar leg of the switched-off-cut scenario, then of the restored-overflow scenario; and how
-/// many left-plane faults the overflow scenario reported.
-fn cliff_scalar_digest() -> (String, u64) {
+/// The scalar leg of the switched-off-cut scenario, then of the restored-overflow scenario over
+/// `overflow_tracks` tracks, every fourth one (from track 0) planted; and how many left-plane faults
+/// the overflow scenario reported.
+///
+/// One overflow track is the pinned scalar leg. [`CLIFF_TRACKS`] of them are the bank legs' tracks,
+/// the per-node render each bank leg must reproduce (issue #1089).
+fn cliff_scalar_digest(overflow_tracks: usize) -> (String, u64) {
     let factory = ParametricEqFactory;
     let mut hasher = Sha256::new();
     for shape in CLIFF_SHAPES {
@@ -2149,77 +2360,78 @@ fn cliff_scalar_digest() -> (String, u64) {
         }
     }
     let values = overflow_configuration();
-    let mut effect = factory
-        .prepare(request(&values, false))
-        .expect("scalar prepare");
-    let mut payload = snapshot(effect.as_ref());
-    plant_left_ic2(&mut payload, 2, -f32::MAX);
-    effect
-        .restore_state_payload(
-            PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
-            StatePayloadInput::new(
-                &payload.0,
-                &payload.1,
-                &payload.2,
-                effect.metadata().state_sizes,
-            )
-            .expect("state input"),
-        )
-        .expect("a finite integrator restores");
+    let mut effects: Vec<_> = (0..overflow_tracks)
+        .map(|track| {
+            let mut effect = factory
+                .prepare(request(&values, false))
+                .expect("scalar prepare");
+            if track.is_multiple_of(4) {
+                let mut payload = snapshot(effect.as_ref());
+                plant_left_ic2(&mut payload, 2, -f32::MAX);
+                effect
+                    .restore_state_payload(
+                        PARAMETRIC_EQ_DESCRIPTOR.state_layout_version,
+                        StatePayloadInput::new(
+                            &payload.0,
+                            &payload.1,
+                            &payload.2,
+                            effect.metadata().state_sizes,
+                        )
+                        .expect("state input"),
+                    )
+                    .expect("a finite integrator restores");
+            }
+            effect
+        })
+        .collect();
     let mut faults = 0;
     for block in 0..8 {
-        let mut left: Vec<f32> = (0..128).map(overflow_word).collect();
-        let mut right = left.clone();
-        let report = effect.process(
-            EffectProcessBlock::new(&mut left, &mut right, None, (block * 128) as u64, &[], 128)
+        for effect in &mut effects {
+            let mut left: Vec<f32> = (0..128).map(overflow_word).collect();
+            let mut right = left.clone();
+            let report = effect.process(
+                EffectProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    (block * 128) as u64,
+                    &[],
+                    128,
+                )
                 .expect("scalar block"),
-        );
-        faults += report.nonfinite_left_blocks;
-        fold_words(&mut hasher, left.into_iter().chain(right));
-        fold_report(&mut hasher, &report);
-        fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+            );
+            faults += report.nonfinite_left_blocks;
+            fold_words(&mut hasher, left.into_iter().chain(right));
+            fold_report(&mut hasher, &report);
+            fold_payload(&mut hasher, &snapshot(effect.as_ref()));
+        }
     }
     (hex(&hasher.finalize()), faults)
 }
 
-/// The bank legs of both scenarios, folded per track in track order so the digest does not depend
-/// on the bank width, and the left-plane faults the overflow scenario reported on lane 0. `mono`
-/// renders the collapsed body over the left plane.
-fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String, u64) {
-    let lanes = width.lanes() as usize;
-    assert_eq!(CLIFF_TRACKS % lanes, 0, "the scenario fills whole banks");
-    let factory = ParametricEqFactory;
+/// The bank legs of both scenarios, in banks of `members` members (issue #1089), folded per track
+/// in track order so the digest depends neither on the bank width nor on the member count; and the
+/// left-plane faults the overflow scenario reported on lane 0 of each bank. `mono` renders the
+/// collapsed body over the left plane.
+fn cliff_bank_digest(
+    width: BankWidth,
+    backend: Backend,
+    members: usize,
+    mono: bool,
+) -> (String, u64) {
+    let layout = Layout::new(width, backend, members, CLIFF_TRACKS);
+    let lanes = layout.lanes;
     let mut hasher = Sha256::new();
-    let bind = |configurations: &[Vec<effect_contract::InitialParameterValue>]| {
-        configurations
-            .chunks(lanes)
-            .map(|group| {
-                let requests: Vec<_> = group
-                    .iter()
-                    .map(|initial| request(initial, false))
-                    .collect();
-                factory
-                    .bind_homogeneous_bank(PrepareEffectBankRequest {
-                        backend,
-                        width,
-                        requests: &requests,
-                        active_mask: width.full_mask(),
-                    })
-                    .expect("valid bank request")
-                    .expect("the native width must bind")
-            })
-            .collect::<Vec<_>>()
-    };
     let offsets = vec![0_u32; lanes + 1];
     let render = |bank: &mut Box<dyn PreparedNativeEffectBank>,
+                  at_bind: &[Payload],
                   hasher: &mut Sha256,
+                  group: usize,
                   block: usize,
                   word: &dyn Fn(usize, usize, usize) -> f32|
      -> u64 {
         let plane = |channel: usize| -> Vec<f32> {
-            (0..128 * lanes)
-                .map(|cell| word(cell / lanes, cell % lanes, channel))
-                .collect()
+            layout.plane(group, 128, |frame, track| word(frame, track, channel))
         };
         let mut left = plane(0);
         let mut right = if mono {
@@ -2244,33 +2456,28 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
         } else {
             bank.process_bank(process)
         };
-        for lane in 0..lanes {
-            let column = |plane: &[f32]| -> Vec<f32> {
-                (0..128).map(|frame| plane[frame * lanes + lane]).collect()
-            };
-            if mono {
-                fold_words(hasher, column(&left).into_iter());
-            } else {
-                fold_words(hasher, column(&left).into_iter().chain(column(&right)));
-            }
-            fold_report(hasher, &report.reports[lane]);
-            fold_payload(hasher, &snapshot_bank(bank.as_ref(), lane as u32));
-        }
+        layout.fold(
+            hasher,
+            group,
+            bank.as_ref(),
+            at_bind,
+            128,
+            &left,
+            (!mono).then_some(&right[..]),
+            &report,
+        );
         report.reports[0].nonfinite_left_blocks
     };
     for shape in CLIFF_SHAPES {
         let configurations: Vec<_> = (0..CLIFF_TRACKS)
             .map(|track| cliff_configuration(shape, track))
             .collect();
-        let initials: Vec<_> = configurations
-            .iter()
-            .map(|(initial, _)| initial.clone())
-            .collect();
-        let mut banks = bind(&initials);
+        let mut banks = layout.bind(|track| request(&configurations[track].0, false));
+        let at_bind = layout.at_bind(&banks);
         for block in 0..CLIFF_ON_BLOCKS + CLIFF_OFF_BLOCKS {
             for (group, bank) in banks.iter_mut().enumerate() {
-                for lane in 0..lanes {
-                    for (at, target, changed) in &configurations[group * lanes + lane].1 {
+                for (lane, track) in layout.members_of(group) {
+                    for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
                                 bank.as_mut(),
@@ -2282,23 +2489,22 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
                         }
                     }
                 }
-                let word = |frame: usize, lane: usize, channel: usize| {
-                    cliff_word(block, frame, group * lanes + lane, channel)
+                let word = |frame: usize, track: usize, channel: usize| {
+                    cliff_word(block, frame, track, channel)
                 };
-                render(bank, &mut hasher, block, &word);
+                render(bank, &at_bind[group], &mut hasher, group, block, &word);
             }
         }
     }
     let mut faults = 0;
     let values = overflow_configuration();
-    let mut banks = bind(&vec![values; CLIFF_TRACKS]);
-    // Tracks 0 and 4 carry the planted integrator: one of them lands in every four-lane bank, and
-    // a fault zeroes and resets a whole bank plane, so a four-lane (AArch64 NEON) plan faults and
-    // resets exactly the tracks the one eight-lane bank does and the digest does not depend on the
-    // bank width (#1017).
+    let mut banks = layout.bind(|_| request(&values, false));
+    // Tracks 0 and 4 carry the planted integrator (#1017), so every layout plants the same tracks.
+    // A fault recovers its own lane alone (#1089), so the digest is the per-node render of those
+    // tracks and of the six that play on beside them, `cliff_scalar_digest(CLIFF_TRACKS)`.
     for (group, bank) in banks.iter_mut().enumerate() {
-        for lane in 0..lanes {
-            if !(group * lanes + lane).is_multiple_of(4) {
+        for (lane, track) in layout.members_of(group) {
+            if !track.is_multiple_of(4) {
                 continue;
             }
             let mut payload = snapshot_bank(bank.as_ref(), lane as u32);
@@ -2313,10 +2519,11 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
             .expect("a finite integrator restores");
         }
     }
+    let at_bind = layout.at_bind(&banks);
     for block in 0..8 {
-        for bank in &mut banks {
+        for (group, bank) in banks.iter_mut().enumerate() {
             let word = |frame: usize, _: usize, _: usize| overflow_word(frame);
-            faults += render(bank, &mut hasher, block, &word);
+            faults += render(bank, &at_bind[group], &mut hasher, group, block, &word);
         }
     }
     (hex(&hasher.finalize()), faults)
@@ -2331,6 +2538,14 @@ fn cliff_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> (String,
 /// digest depended on the width; with tracks 0 and 4 planted the x86-64-v3 and AArch64 legs pin the
 /// same digest. No render changed: the eight-lane leg with the old planting still renders the old
 /// rows (`2e0845c6…`, `26a755c1…`), and the scalar row is untouched.
+///
+/// The two bank rows were re-recorded by #1089, which made a D7 recovery per lane: a fault used
+/// to zero and reset its whole bank plane, and now zeroes and resets only the lanes that failed,
+/// as each track's per-node instance does. The dual row is
+/// therefore the per-node render of the eight overflow tracks, `cliff_scalar_digest(CLIFF_TRACKS)`,
+/// which the test also asserts (the scalar row renders one).
+/// The collapsed row moved for the same reason. Nothing else moved: this test with the
+/// whole-plane recovery restored still renders the old rows (`9e6886cf…`, `171406a7…`).
 const CLIFF_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -2338,11 +2553,11 @@ const CLIFF_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "9e6886cfbab5d3a7a95fa50323ec074c060560d6f44ba2134a88ebf9ce7f63cd",
+        "9cc6791804f0b1de429df3ed8acf356dd5d2b979a93d1dab12a6730f2beb8649",
     ),
     (
         "bank-mono",
-        "171406a7198ccc9dc1d1288a9c2eb5519fc3d8d336907b982ab035169d1bdde6",
+        "70307424de9d724dd96979fff16b761d766802b028e1702055c94903038073e0",
     ),
 ];
 
@@ -2359,10 +2574,11 @@ const CLIFF_DIGESTS: [(&str, &str); 3] = [
 /// output word, every report and every lane's state payload after every block, one SHA-256 per leg.
 #[test]
 fn a_cut_switched_off_keeps_the_bank_eliding() {
-    let mut legs = vec![("scalar", cliff_scalar_digest())];
+    let mut legs = vec![("scalar", cliff_scalar_digest(1))];
     if let Some((width, backend)) = native_bank() {
-        legs.push(("bank", cliff_bank_digest(width, backend, false)));
-        legs.push(("bank-mono", cliff_bank_digest(width, backend, true)));
+        let lanes = width.lanes() as usize;
+        legs.push(("bank", cliff_bank_digest(width, backend, lanes, false)));
+        legs.push(("bank-mono", cliff_bank_digest(width, backend, lanes, true)));
     }
     for (leg, (digest, faults)) in &legs {
         println!("switched-off-cut digest {leg} {digest} (overflow faults {faults})");
@@ -2382,6 +2598,18 @@ fn a_cut_switched_off_keeps_the_bank_eliding() {
         assert!(
             *faults > 0,
             "non-vacuity: the {leg} leg's executed band must overflow and fault its first block"
+        );
+    }
+    if native_bank().is_some() {
+        assert_eq!(
+            leg(&legs, "bank").0,
+            cliff_scalar_digest(CLIFF_TRACKS).0,
+            "#1089: the dual bank leg must render its per-node instances"
+        );
+        assert_padded_legs(
+            "switched-off-cut",
+            [&leg(&legs, "bank").0, &leg(&legs, "bank-mono").0],
+            |width, backend, members, mono| cliff_bank_digest(width, backend, members, mono).0,
         );
     }
 }
@@ -2693,12 +2921,11 @@ fn limit_scalar_digest() -> LimitLeg {
     (hex(&hasher.finalize()), tallies)
 }
 
-/// The bank legs of the block-limit scenario, folded per track in track order. `mono` renders the
-/// collapsed body over the left plane.
-fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg {
-    let lanes = width.lanes() as usize;
-    assert_eq!(LIMIT_TRACKS % lanes, 0, "the scenario fills whole banks");
-    let factory = ParametricEqFactory;
+/// The bank legs of the block-limit scenario, in banks of `members` members (issue #1089), folded
+/// per track in track order. `mono` renders the collapsed body over the left plane.
+fn limit_bank_digest(width: BankWidth, backend: Backend, members: usize, mono: bool) -> LimitLeg {
+    let layout = Layout::new(width, backend, members, LIMIT_TRACKS);
+    let lanes = layout.lanes;
     let mut hasher = Sha256::new();
     let mut tallies = Vec::new();
     for shape in LIMIT_SHAPES {
@@ -2706,32 +2933,15 @@ fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg
         let configurations: Vec<_> = (0..LIMIT_TRACKS)
             .map(|track| limit_configuration(shape, track % LIMIT_VOICES))
             .collect();
-        let mut banks: Vec<_> = configurations
-            .chunks(lanes)
-            .map(|group| {
-                let requests: Vec<_> = group
-                    .iter()
-                    .map(|(initial, _)| request(initial, false))
-                    .collect();
-                factory
-                    .bind_homogeneous_bank(PrepareEffectBankRequest {
-                        backend,
-                        width,
-                        requests: &requests,
-                        active_mask: width.full_mask(),
-                    })
-                    .expect("valid bank request")
-                    .expect("the native width must bind")
-            })
-            .collect();
+        let mut banks = layout.bind(|track| request(&configurations[track].0, false));
+        let at_bind = layout.at_bind(&banks);
         let offsets = vec![0_u32; lanes + 1];
         let mut position = 0_u64;
         for block in 0..LIMIT_BLOCKS {
             let frames = limit_frames(block);
             for (group, bank) in banks.iter_mut().enumerate() {
                 assert!(!mono || bank.supports_mono_collapse());
-                for lane in 0..lanes {
-                    let track = group * lanes + lane;
+                for (lane, track) in layout.members_of(group) {
                     for (at, target, changed) in &configurations[track].1 {
                         if *at == block {
                             apply_prepared_targets_lane(
@@ -2759,12 +2969,9 @@ fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg
                     }
                 }
                 let plane = |channel: usize| -> Vec<f32> {
-                    (0..frames * lanes)
-                        .map(|cell| {
-                            let track = group * lanes + cell % lanes;
-                            limit_word(block, cell / lanes, track % LIMIT_VOICES, channel)
-                        })
-                        .collect()
+                    layout.plane(group, frames, |frame, track| {
+                        limit_word(block, frame, track % LIMIT_VOICES, channel)
+                    })
                 };
                 let mut left = plane(0);
                 let mut right = if mono {
@@ -2789,27 +2996,25 @@ fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg
                 } else {
                     bank.process_bank(process)
                 };
-                for lane in 0..lanes {
-                    let column = |plane: &[f32]| -> Vec<f32> {
-                        (0..frames)
-                            .map(|frame| plane[frame * lanes + lane])
-                            .collect()
-                    };
+                for (lane, _) in layout.members_of(group) {
                     let entry = &report.reports[lane];
-                    if mono {
-                        limit_tally(&mut faults, entry.nonfinite_left_blocks, 0);
-                        fold_words(&mut hasher, column(&left).into_iter());
+                    let right = if mono {
+                        0
                     } else {
-                        limit_tally(
-                            &mut faults,
-                            entry.nonfinite_left_blocks,
-                            entry.nonfinite_right_blocks,
-                        );
-                        fold_words(&mut hasher, column(&left).into_iter().chain(column(&right)));
-                    }
-                    fold_report(&mut hasher, entry);
-                    fold_payload(&mut hasher, &snapshot_bank(bank.as_ref(), lane as u32));
+                        entry.nonfinite_right_blocks
+                    };
+                    limit_tally(&mut faults, entry.nonfinite_left_blocks, right);
                 }
+                layout.fold(
+                    &mut hasher,
+                    group,
+                    bank.as_ref(),
+                    &at_bind[group],
+                    frames,
+                    &left,
+                    (!mono).then_some(&right[..]),
+                    &report,
+                );
             }
             position += frames as u64;
         }
@@ -2820,6 +3025,13 @@ fn limit_bank_digest(width: BankWidth, backend: Backend, mono: bool) -> LimitLeg
 
 /// The digests [`admitted_blocks_over_the_block_limit_render_the_base_bits`] pins, recorded on the
 /// unmodified base of issue #999 (every block's §4.4 verdict still a separate scan of the planes).
+///
+/// The two bank rows were re-recorded by #1089, which made a D7 recovery per lane: a fault used
+/// to zero and reset its whole bank plane, and now zeroes and resets only the lanes that failed,
+/// as each track's per-node instance does. The dual row is
+/// therefore the scalar row, which the test also asserts.
+/// The collapsed row moved for the same reason. Nothing else moved: this test with the
+/// whole-plane recovery restored still renders the old rows (`033bb41c…`, `0da773b7…`).
 const LIMIT_DIGESTS: [(&str, &str); 3] = [
     (
         "scalar",
@@ -2827,11 +3039,11 @@ const LIMIT_DIGESTS: [(&str, &str); 3] = [
     ),
     (
         "bank",
-        "033bb41c2daae4fcc72b4cc61e62ce74e298cbb0234479be41fbf4f40518ff0c",
+        "69929ee05f9192faebe174ef7a6d48a5de4abd584e18e1a4834ec0913b4a7c95",
     ),
     (
         "bank-mono",
-        "0da773b7d5ee458d4175f31b1523a035673dc39c6dc8c16eb5f425335864e289",
+        "03c418fc010c98421132b34a2ba86914466e8f75c1b786eef8b4b6d06898c56b",
     ),
 ];
 
@@ -2854,8 +3066,9 @@ const LIMIT_DIGESTS: [(&str, &str); 3] = [
 fn admitted_blocks_over_the_block_limit_render_the_base_bits() {
     let mut legs = vec![("scalar", limit_scalar_digest())];
     if let Some((width, backend)) = native_bank() {
-        legs.push(("bank", limit_bank_digest(width, backend, false)));
-        legs.push(("bank-mono", limit_bank_digest(width, backend, true)));
+        let lanes = width.lanes() as usize;
+        legs.push(("bank", limit_bank_digest(width, backend, lanes, false)));
+        legs.push(("bank-mono", limit_bank_digest(width, backend, lanes, true)));
     }
     for (leg, (digest, faults)) in &legs {
         println!("block-limit digest {leg} {digest}");
@@ -2888,6 +3101,18 @@ fn admitted_blocks_over_the_block_limit_render_the_base_bits() {
         assert_eq!(
             digest, pinned,
             "#999 gate 2: the {leg} leg moved a bit, a report or a state word"
+        );
+    }
+    if native_bank().is_some() {
+        assert_eq!(
+            leg(&legs, "bank").0,
+            leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances"
+        );
+        assert_padded_legs(
+            "block-limit",
+            [&leg(&legs, "bank").0, &leg(&legs, "bank-mono").0],
+            |width, backend, members, mono| limit_bank_digest(width, backend, members, mono).0,
         );
     }
 }
