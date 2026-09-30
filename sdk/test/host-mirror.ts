@@ -38,7 +38,7 @@ const _adapted: MisoWebBootOptions = toWebBootOptions({
   sourceRingFrames: 0,
   maximumMemoryBytes: 0n,
   spectrumHopFrames: 256,
-  console: { commandQueueRecords: 64, meterBlocks: 12, observationTaps: 0, masterTrackPlusOne: 0 },
+  liveControls: { commandQueueRecords: 64, meterBlocks: 12, observationTaps: 0, masterTrackPlusOne: 0 },
 } satisfies BootOptions);
 
 // 2. The SDK's `createHost` seam is satisfiable by the shipped factory's signature.

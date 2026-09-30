@@ -548,8 +548,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     },
     // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
     // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltins`,
-    // bound by `ConsoleFaderProcessor` for a track a live console drives. This row states the
-    // parameter's *capability*, exactly as `matrix_ll..rr` do: a session with no console has
+    // bound by `LiveControlFaderProcessor` for a track live controls drive. This row states the
+    // parameter's *capability*, exactly as `matrix_ll..rr` do: a session with no live controls has
     // nothing that writes either surface, and the prepared `FaderMuteBuiltins` it binds instead
     // is unchanged. `mute` is smoothed for the same reason it is a block target: a mute is a
     // retarget of the same gain to zero, over the same ramp window, not a discontinuity.
@@ -1944,7 +1944,7 @@ impl<L: Lane> InputStage<L> {
     ///    this.
     ///
     /// A copy at step 3 clones the *post-drain* left record onto the right channel, so a retarget
-    /// the console addressed to one lane ramps both -- and, because `LIVE` is a latch, the chain
+    /// live controls addressed to one lane ramps both -- and, because `LIVE` is a latch, the chain
     /// never collapses again and the right channel never recovers. The integrators have no such
     /// window: nothing in the drain writes them.
     ///
@@ -2149,7 +2149,7 @@ impl<L: Lane> InputStage<L> {
         // `FaderRampStage::reset` and `MatrixStage::reset` do: a reset is a state reset, and a
         // half-finished ramp is state. The *target* is kept, because `trim_db` and
         // `polarity_invert` declare `BuiltinParameterReset::RestorePreparedValue` for the
-        // **prepared** value and the live target is what the console last asked for -- the same
+        // **prepared** value and the live target is what live controls last asked for -- the same
         // reading `fader_db` has had since #140 B.
         self.ramp.current = self.ramp.target;
         self.ramp.step = [L::zero(); 2];
@@ -2521,7 +2521,7 @@ impl<L: Lane> FaderStage<L> {
 ///
 /// # One body, so lane identity is a property of the code
 ///
-/// This is the *only* ramped-fader implementation in the workspace. A live-console track is this
+/// This is the *only* ramped-fader implementation in the workspace. A live-control track is this
 /// type at `L = f32` over planar slices ([`FaderMuteRampBuiltins`]); a banked strip slot is the
 /// same type at `Simd4` or `Simd8` over an AoSoA block ([`BuiltinFaderBank`]). The banked form is
 /// therefore op-order-identical to the per-track form by construction rather than by two
@@ -2910,7 +2910,7 @@ impl<L: Lane> MatrixStage<L> {
 
     /// Retargets one lane over an explicit ramp window, and adopts that window as the lane's own.
     ///
-    /// Issue #137 D1: a live console changes the pan window with the pan, so the retarget and the
+    /// Issue #137 D1: live controls change the pan window with the pan, so the retarget and the
     /// window are one event. `set_target` is exactly this call with the prepared window, so the
     /// two cannot drift.
     fn set_target_over(
@@ -3241,11 +3241,11 @@ impl InputBuiltins {
     ///   sealed fixture-ABI accounting (the builtin-compiler mutation-matrix transcript), and a phase that changes no
     ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
     /// * The two live terms stay set because this object has no queue: a per-node scalar input
-    ///   section is reached by the console through `ConsoleInputProcessor`, which owns the
+    ///   section is reached by live controls through `LiveControlInputProcessor`, which owns the
     ///   consumer, folds `ChannelSymmetryWitness::admit` per record and conjoins the result with
     ///   this value -- exactly as `BuiltinBankProcessor` does for the banked form. The seam the
     ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecord`
-    ///   implements `LiveConsoleRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
+    ///   implements `LiveControlRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
     ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
     ///   dispatch reads the witness. Filter targets use the same upstream queue and clear the
     ///   witness according to their addressed lanes.
@@ -3288,7 +3288,7 @@ impl InputBuiltins {
     /// Retargets this track's `trim_db` on the addressed channels, over an explicit window.
     ///
     /// The scalar sibling of [`BuiltinInputBank::set_trim_db`]: one body, one width, so a
-    /// per-node console track and a bank lane cannot drift.
+    /// per-node live-control track and a bank lane cannot drift.
     ///
     /// # Errors
     ///
@@ -4030,7 +4030,7 @@ impl BuiltinLaneSelector {
     }
 }
 
-/// The live-console fader and mute section of one track (issue #140 B).
+/// The live-control fader and mute section of one track (issue #140 B).
 ///
 /// # The ramped-fader decision, and why it is a separate type
 ///
@@ -4040,11 +4040,11 @@ impl BuiltinLaneSelector {
 /// since #140 B flipped them, and the ABI table is the authority. What the sentence was about is
 /// the *type*, and that is unchanged.) Making that type ramp would change the fixed
 /// input/fader/matrix section layout, the builtin resource report, and the frozen
-/// builtins-compiler transcript for **every** session, console or not.
+/// builtins-compiler transcript for **every** session, with live controls or without.
 ///
-/// This type is the ramped fader instead. It exists only for a track a live console drives, it is
-/// bound only by `ConsoleFaderProcessor`, and [`FaderMuteBuiltins`] is byte-for-byte the type it
-/// always was. No builtins fixture digest, no frozen transcript and no corpus digest moves,
+/// This type is the ramped fader instead. It exists only for a track live controls drive, it is
+/// bound only by `LiveControlFaderProcessor`, and [`FaderMuteBuiltins`] is byte-for-byte the type
+/// it always was. No builtins fixture digest, no frozen transcript and no corpus digest moves,
 /// because for a command-free session none of this code is reachable.
 ///
 /// # Mute is a fader endpoint, not a discontinuity

@@ -7,8 +7,8 @@
 //! parameters drawn from every launch effect's descriptor (symmetric or channel-asymmetric),
 //! bypassed effects, input delays, trims and cuts, compressor and gate sidechains from earlier
 //! tracks, and sends from every tap into submixes. Each console is prepared through host-core's
-//! own entry points with a live console attached, fed one deterministic source, and rendered with
-//! random live-console records at random blocks: input trim and polarity, fader and mute, matrix,
+//! own entry points with live controls attached, fed one deterministic source, and rendered with
+//! random live-control records at random blocks: input trim and polarity, fader and mute, matrix,
 //! effect parameter points (bit-equal `Left`/`Right` twins, or one channel) and live bypass.
 //!
 //! The oracles, every one by bits:
@@ -38,12 +38,12 @@ use effect_contract::{
 };
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     ResponseParameterOverride, ResponsePreviewError, ResponsePreviewGrid, ResponsePreviewLimits,
     ResponsePreviewOutput, ResponsePreviewRequest, ResponsePreviewTarget,
     ResponseSnapshotCollector, ResponseSnapshotOutput, ResponseSnapshotQueryError,
     SourceSubmission, compile_host_session, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_console, query_response_snapshot_into,
+    prepare_host_runtime_with_live_controls, query_response_snapshot_into,
 };
 use session::{
     ChannelMatrix, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam, LinkMode,
@@ -109,8 +109,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console(tap: MeterTap) -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls(tap: MeterTap) -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -512,10 +512,10 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
 struct Arm {
     label: &'static str,
     host: PreparedHost,
-    handles: HostConsoleHandles,
+    handles: HostLiveControlHandles,
 }
 
-/// One block's live-console records, applied to every arm.
+/// One block's live-control records, applied to every arm.
 #[derive(Clone, Copy, Debug)]
 enum Live {
     Input(usize, TrackInputRecord),
@@ -537,8 +537,8 @@ fn smoothing(draw: &mut Draw) -> u32 {
     draw.pick(&[0_u32, 1, 17, 64, 480])
 }
 
-/// Up to three live-console records for this block.
-fn live_records(draw: &mut Draw, handles: &HostConsoleHandles) -> Vec<Live> {
+/// Up to three live-control records for this block.
+fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> {
     let mut records = Vec::new();
     let tracks = handles.track_controls.len();
     for _ in 0..draw.below(4) {
@@ -648,7 +648,7 @@ fn live_records(draw: &mut Draw, handles: &HostConsoleHandles) -> Vec<Live> {
 
 /// Pushes one record and says whether the queue took it; a full queue answers the same on every
 /// arm, because every arm has seen the same records.
-fn push(handles: &mut HostConsoleHandles, record: Live) -> bool {
+fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
     match record {
         Live::Input(track, record) => handles.track_controls[track].input.try_push(record).is_ok(),
         Live::Fader(track, record) => handles.track_controls[track].fader.try_push(record).is_ok(),
@@ -687,7 +687,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
             MeterTap::PostInputBuiltins,
         ])
     };
-    let request = console(tap);
+    let request = live_controls(tap);
     let compiled = match compile_host_session(&document, &caps) {
         Ok(compiled) => compiled,
         Err(failure) => {
@@ -705,7 +705,7 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
         let result = if serialized {
             prepare_host_runtime_between_render_calls(&compiled, &caps, &request)
         } else {
-            prepare_host_runtime_with_console(&compiled, &caps, &request)
+            prepare_host_runtime_with_live_controls(&compiled, &caps, &request)
         };
         result.unwrap_or_else(|failure| {
             panic!(

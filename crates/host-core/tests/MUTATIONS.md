@@ -213,15 +213,15 @@ Ten mutations, each proven to fail `scripts/check-host-core-policy.sh`: capi cal
 including that the one pending-conversion host (`hosts/host-web`, issue #106) is
 exempt.
 
-## Issue #140 A — the banked-effect console seam
+## Issue #140 A — the banked-effect live-control seam
 
 Applied to the working tree, the named test run, the failure observed, the mutation reverted, in
 the same session. Host: `x86_64` (Simd8 bank width), debug profile.
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| 140-14 | `ConsoleEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset | `rack/src/lib.rs` | `effect_console::*` | RED (`two_lanes_of_one_bank_take_two_different_commands`: each lane carries exactly the command addressed to it) |
-| 140-15 | the bank builder never takes a member's control channel (`.filter(\|_\| false)` after `effect_controls.remove`), so a banked lane silently keeps the console-free stage | `graph/src/runtime.rs` | `effect_console::a_banked_effect_applies_each_lanes_own_command_and_no_others` | RED (`the commanded lane moved`) |
+| 140-14 | `LiveControlEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset | `rack/src/lib.rs` | `effect_live_controls::*` | RED (`two_lanes_of_one_bank_take_two_different_commands`: each lane carries exactly the command addressed to it) |
+| 140-15 | the bank builder never takes a member's control channel (`.filter(\|_\| false)` after `effect_controls.remove`), so a banked lane silently keeps the live-control-free stage | `graph/src/runtime.rs` | `effect_live_controls::a_banked_effect_applies_each_lanes_own_command_and_no_others` | RED (`the commanded lane moved`) |
 
 
 ---
@@ -320,7 +320,7 @@ that the digest comparison discriminates.
 
 ## Issue #210 phase 3 — the live input trim and polarity, end to end
 
-Driver: `cargo test -p host-core --test input_liveness_console`, one mutation at a
+Driver: `cargo test -p host-core --test input_liveness_live_controls`, one mutation at a
 time, tree restored between rows. The mutated code lives in `builtins-compiler` and
 `graph`; the rows are logged there as P3-M21 through P3-M26. What this file records is
 why the *end-to-end* form is the one that catches them.
@@ -344,7 +344,7 @@ a per-lane record drained on the block a collapsed chain disengages. `BankChain:
 slot's `begin_block` before it reads the collapse witness and runs `disengage_collapse` after, so
 the boundary is reached with the two channels' trim-ramp records legitimately apart — and a stage
 that copies the whole per-channel state there clones the just-drained record onto the channel the
-console did not address.
+live controls did not address.
 
 It is unreachable from every other test in these suites, because they all push their commands
 before block 0 and the chain has therefore never collapsed when the record arrives. The gate is

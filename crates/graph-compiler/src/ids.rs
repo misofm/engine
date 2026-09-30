@@ -286,8 +286,8 @@ pub(crate) fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<Ro
         rr: matrix.rr,
     })
 }
-/// Lower the prepared entries into the plan's effects, and -- separately -- the live-console
-/// control channels of whichever of them a console drives (issue #140 A).
+/// Lower the prepared entries into the plan's effects, and -- separately -- the live-control
+/// channels of whichever of them live controls drive (issue #140 A).
 ///
 /// The two vectors are returned side by side rather than as one because
 /// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see

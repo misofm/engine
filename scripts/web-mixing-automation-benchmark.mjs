@@ -25,14 +25,25 @@
 // native tone's, from the same table. Both feeds are stated in the record, because how a limiter
 // engages depends on them.
 //
+// Two documents ride along (#1085): the standing sixty-four-track console and the app shape, the
+// native rows `sixty_four_track_console` and `sixty_four_track_app_shape`, listed with their facts
+// in the same table. Each is booted from its checked-in fixture as written (its one source
+// stretched), checked to carry the layout and the bypass the table states, fed the same streamed
+// tone, and rendered with no control traffic. After the three arms are timed, the two documents
+// are timed alternated per observation, `miso_engine_web_v1_render` alone inside the clock, and
+// the record states each one's percentiles and digest under `documents`. They are the console
+// strip's browser baseline; no per-N browser rows exist, because that would be a second framework.
+//
 // usage: node --no-liftoff web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json
 //        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json ROUND
 //
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
-// premises asserted on their digests. `run` asserts the same premises first, then times the three
-// arms alternated per observation and prints one JSON record for ROUND (`warmup`, `1` or `2`; the
-// runner launches one process per round, as the console runner does). Every assertion throws, so
-// a broken premise exits non-zero before any number is printed.
+// premises asserted on their digests; then the two documents over the same blocks, each rendering
+// audible bits of its own. `run` asserts the same premises first, then times the three arms
+// alternated per observation, then the two documents alternated per observation, and prints one
+// JSON record for ROUND (`warmup`, `1` or `2`; the runner launches one process per round, as the
+// console runner does). Every assertion throws, so a broken premise exits non-zero before any
+// number is printed.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -121,16 +132,24 @@ const INPUT_FEED = {
   continuous_across_blocks: true,
 };
 
-const fixtureText = readFileSync(new URL(FIXTURE_ID, ROOT), "utf8");
-const fixture = JSON.parse(fixtureText);
-assert.equal(fixture.sources.length, 1, "the mono fixture carries one source");
-assert.deepEqual(fixture.automation, [], "the mono fixture declares no automation");
-const framesText = `"frames": "${fixture.sources[0].frames}"`;
-assert.equal(fixtureText.split(framesText).length, 2, "exactly one source length to stretch");
-const documentBytes = new TextEncoder().encode(
-  fixtureText.replace(framesText, `"frames": "${SOURCE_FRAMES}"`),
-);
-const sourceId = new TextEncoder().encode(fixture.sources[0].id);
+// A checked-in fixture as the browser boots it: its one source stretched so the tone never ends,
+// and nothing else changed.
+function loadDocument(fixtureId) {
+  const text = readFileSync(new URL(fixtureId, ROOT), "utf8");
+  const parsed = JSON.parse(text);
+  assert.equal(parsed.sources.length, 1, `${fixtureId}: one source`);
+  assert.deepEqual(parsed.automation, [], `${fixtureId}: no automation`);
+  const frames = `"frames": "${parsed.sources[0].frames}"`;
+  assert.equal(text.split(frames).length, 2, `${fixtureId}: exactly one source length to stretch`);
+  return {
+    fixture: parsed,
+    bytes: new TextEncoder().encode(text.replace(frames, `"frames": "${SOURCE_FRAMES}"`)),
+    sourceId: new TextEncoder().encode(parsed.sources[0].id),
+  };
+}
+
+const mixingDocument = loadDocument(FIXTURE_ID);
+const fixture = mixingDocument.fixture;
 
 // Each base is the value the booted document holds, as the native row reads it from the model.
 // Decision 12: the control table addresses the lowered racks -- `0` the console's `pre_insert`
@@ -162,6 +181,52 @@ for (const control of table.controls) {
     assert.equal(Math.fround(param.value), Math.fround(control.base), `${control.track_id}: held base`);
   }
 }
+
+// The two console-strip documents (#1085), as the native rows state them. Each fixture is checked
+// against the table's facts from its own JSON: every track's effects, section by section in the
+// console vocabulary of `console_workload::Workload::strip_layout` (`simd1` reads `pre_insert`,
+// `dynamic` `inserts`, `simd2` `post_insert`), and which tracks bypass them.
+const DOCUMENT_KINDS = ["sixty_four_track_console", "sixty_four_track_app_shape"];
+const SECTIONS = [["simd1", "pre_insert"], ["dynamic", "inserts"], ["simd2", "post_insert"]];
+const SHORT_NAMES = {
+  "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
+};
+const effectNames = (effects) => effects.map((effect) => SHORT_NAMES[effect.identity.effect_id] ?? "other");
+function trackLayout(track) {
+  const sections = SECTIONS.filter(([rack]) => track[rack].effects.length > 0)
+    .map(([rack, name]) => `${name}:${effectNames(track[rack].effects).join("+")}`);
+  return sections.length === 0 ? "builtins" : sections.join(",");
+}
+function bypassCensus(tracks) {
+  let any = false;
+  let exact = true;
+  let bypassed = 0;
+  tracks.forEach((track, index) => {
+    const effects = SECTIONS.flatMap(([rack]) => track[rack].effects);
+    const some = effects.some((effect) => effect.bypass);
+    const every = effects.length > 0 && effects.every((effect) => effect.bypass);
+    any ||= some;
+    bypassed += every ? 1 : 0;
+    exact &&= every === (index % 3 === 2) && some === every;
+  });
+  return { pattern: !any ? "none" : exact ? "index_mod_3_is_2" : "other", bypassed };
+}
+assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), DOCUMENT_KINDS,
+  "the table lists the two console-strip documents");
+const DOCUMENTS = table.documents.map((doc) => {
+  const loaded = loadDocument(doc.fixture_id);
+  const { tracks } = loaded.fixture;
+  assert.equal(tracks.length, doc.tracks, `${doc.workload_kind}: track count`);
+  for (const track of tracks) {
+    assert.equal(trackLayout(track), doc.strip_layout, `${doc.workload_kind} ${track.id}: layout`);
+    const content = effectNames(SECTIONS.flatMap(([rack]) => track[rack].effects)).join("+");
+    assert.equal(content, doc.strip_content, `${doc.workload_kind} ${track.id}: content`);
+  }
+  const census = bypassCensus(tracks);
+  assert.equal(census.pattern, doc.bypass_pattern, `${doc.workload_kind}: bypass pattern`);
+  assert.equal(census.bypassed, doc.bypassed_tracks, `${doc.workload_kind}: bypassed tracks`);
+  return { doc, loaded };
+});
 
 // ---------------------------------------------------------------------------------------------
 // One booted engine, and the SDK's prepared-control owner on it.
@@ -222,7 +287,8 @@ function preparedControl(e, handle) {
 
 const wasmModule = new WebAssembly.Module(moduleBytes);
 
-function boot() {
+function boot(document = mixingDocument) {
+  const documentBytes = document.bytes;
   const e = new WebAssembly.Instance(wasmModule, {}).exports;
   assert.equal(e.miso_engine_web_v1_abi_version(), ABI_LAYOUT.abiVersion);
   const optionsPointer = e.miso_engine_web_v1_boot_options_ptr();
@@ -236,12 +302,12 @@ function boot() {
   u32("sourceRingFrames", SOURCE_RING_FRAMES);
   u32("reserved0", 0);
   u64("maximumMemoryBytes", 0n);
-  // The live console with the default command queue, and no meters, observation or master, as
+  // The live controls with the default command queue, and no meters, observation or master, as
   // the native row prepares its plan (`control: true`, nothing else).
-  u64("consoleCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
-  u64("consoleMeterBlocks", 0n);
-  u64("consoleObservationTaps", 0n);
-  u64("consoleMasterTrackPlusOne", 0n);
+  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  u64("liveControlMeterBlocks", 0n);
+  u64("liveControlObservationTaps", 0n);
+  u64("liveControlMasterTrackPlusOne", 0n);
   const pointer = e.miso_engine_web_v1_document_ptr(documentBytes.byteLength);
   new Uint8Array(e.memory.buffer, pointer, documentBytes.byteLength).set(documentBytes);
   const handle = e.miso_engine_web_v1_boot(documentBytes.byteLength);
@@ -250,23 +316,26 @@ function boot() {
     throw new Error(`boot ${e.miso_engine_web_v1_boot_result()}: ${new TextDecoder().decode(
       new Uint8Array(e.memory.buffer, pointer, bytes))}`);
   }
-  // The wire's track index is the booted console's track order; check the table addresses it.
-  for (const control of table.controls) {
-    const length = e.miso_engine_web_v1_console_track_id(handle, control.track_index);
+  // The wire's track index is the booted live controls' track order; check the table addresses it.
+  // The console-strip documents carry no control traffic, so only the mixing document is checked.
+  for (const control of document === mixingDocument ? table.controls : []) {
+    const length = e.miso_engine_web_v1_live_control_track_id(handle, control.track_index);
     const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
     const id = new TextDecoder().decode(new Uint8Array(e.memory.buffer, idPointer, length));
-    assert.equal(id, control.track_id, `${control.track_id}: console track index`);
+    assert.equal(id, control.track_id, `${control.track_id}: live-control track index`);
   }
   return {
-    e, handle, control: preparedControl(e, handle), frame: 0n, block: 0,
+    e, handle, control: preparedControl(e, handle), frame: 0n, block: 0, sourceId: document.sourceId,
     outputPointer: e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT),
     left: new Float32Array(Q), right: new Float32Array(Q),
   };
 }
 
 // The tone: one continuous sine on the fixture's one source. The mono fixture maps source channel
-// 0 onto both channels of every track, so the right plane is carried and never read.
+// 0 onto both channels of every track, so the right plane is carried and never read; the stereo
+// documents read it, and it is the native tone's right channel, the left scaled by -0.75.
 function feed(engine) {
+  const { sourceId } = engine;
   const block = Number(engine.frame / BigInt(Q));
   for (let i = 0; i < Q; i++) {
     const t = (block * Q + i) * TONE_RADIANS_PER_FRAME;
@@ -360,6 +429,47 @@ function armName(arm, effect) {
   return effect === null ? arm : `${arm}_${EFFECT_NAMES[effect]}_only`;
 }
 
+// One console-strip document (#1085): booted as written, the tone fed, the pre-roll rendered, and
+// no control traffic, ever.
+function makeDocument({ doc, loaded }) {
+  const engine = boot(loaded);
+  const state = { doc, engine, audible: false };
+  for (let i = 0; i < LEAD_BLOCKS; i++) feed(engine);
+  for (let i = 0; i < PREROLL; i++) {
+    feed(engine);
+    render(state);
+  }
+  return state;
+}
+
+// Folds a document's block into its digest and notes whether it was audible. Outside the clock.
+function absorbDocument(state, hash) {
+  absorb(state, hash);
+  const output = new Float32Array(state.engine.e.memory.buffer, state.engine.outputPointer, 2 * Q);
+  state.audible ||= output.some((word) => word !== 0);
+}
+
+// The documents' premises, over the preflight blocks: each renders audible bits, and the two
+// render different ones, or one session was booted twice.
+function documentPreflight() {
+  const states = DOCUMENTS.map(makeDocument);
+  const hashes = states.map(() => createHash("sha256"));
+  for (let block = 0; block < PREFLIGHT_BLOCKS; block++) {
+    states.forEach((state, index) => {
+      feed(state.engine);
+      render(state);
+      absorbDocument(state, hashes[index]);
+    });
+  }
+  const digests = Object.fromEntries(states.map((state, index) => [
+    state.doc.workload_kind, hashes[index].digest("hex"),
+  ]));
+  for (const state of states) assert.ok(state.audible, `preflight ${state.doc.workload_kind}: silent`);
+  assert.notEqual(digests[DOCUMENT_KINDS[0]], digests[DOCUMENT_KINDS[1]],
+    "preflight: the two documents rendered the same bits");
+  return digests;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The premises, asserted before any number is taken.
 // ---------------------------------------------------------------------------------------------
@@ -411,8 +521,11 @@ function pairedMedian(left, right) {
 
 const loadStart = readFileSync("/proc/loadavg", "utf8").trim();
 const preflightDigests = preflight();
+const documentPreflightDigests = documentPreflight();
 if (mode === "preflight") {
-  process.stdout.write(`${JSON.stringify({ mode, module_sha256: moduleSha256, digests: preflightDigests })}\n`);
+  process.stdout.write(`${JSON.stringify({
+    mode, module_sha256: moduleSha256, digests: preflightDigests, documents: documentPreflightDigests,
+  })}\n`);
   process.exit(0);
 }
 
@@ -432,7 +545,27 @@ for (let observation = 0; observation < OBSERVATIONS; observation++) {
   });
   arms.forEach((state, index) => absorb(state, hashes[index]));
 }
+// The console-strip documents (#1085), booted once the arms are timed and timed the same way,
+// alternated per observation, with the render call alone inside the clock.
+const documents = DOCUMENTS.map(makeDocument);
+const documentSamples = documents.map(() => new Array(OBSERVATIONS));
+const documentHashes = documents.map(() => createHash("sha256"));
+for (let observation = 0; observation < OBSERVATIONS; observation++) {
+  documents.forEach((state, index) => {
+    feed(state.engine);
+    const start = process.hrtime.bigint();
+    const result = state.engine.e.miso_engine_web_v1_render(state.engine.handle, Q);
+    const elapsed = process.hrtime.bigint() - start;
+    assert.equal(result, RESULT_OK, "render");
+    state.engine.block += 1;
+    documentSamples[index][observation] = Number(elapsed);
+  });
+  documents.forEach((state, index) => absorbDocument(state, documentHashes[index]));
+}
 const loadEnd = readFileSync("/proc/loadavg", "utf8").trim();
+const documentDigests = documentHashes.map((hash) => hash.digest("hex"));
+for (const state of documents) assert.ok(state.audible, `run ${state.doc.workload_kind}: silent`);
+assert.notEqual(documentDigests[0], documentDigests[1], "run: the two documents rendered the same bits");
 const digests = hashes.map((hash) => hash.digest("hex"));
 assert.equal(digests[0], digests[1], "run: restating the held values moved a rendered bit");
 assert.notEqual(digests[1], digests[2], "run: the automated arm rendered the restated arm's bits");
@@ -486,12 +619,24 @@ const record = {
   restated_output_sha256: digests[1],
   automated_output_sha256: digests[2],
   preflight_output_sha256: preflightDigests,
+  documents: documents.map((state, index) => ({
+    workload_kind: state.doc.workload_kind,
+    fixture_id: state.doc.fixture_id,
+    tracks: state.doc.tracks,
+    strip_content: state.doc.strip_content,
+    strip_layout: state.doc.strip_layout,
+    input_signal: state.doc.input_signal,
+    bypass_pattern: state.doc.bypass_pattern,
+    bypassed_tracks: state.doc.bypassed_tracks,
+    ...Object.fromEntries([50, 95, 99].map((p) => [`p${p}_ns`, nearestRank(documentSamples[index], p)])),
+    output_sha256: documentDigests[index],
+  })),
   bit_identity: "quiet == restated, asserted in-run",
   // host_web.wasm exports no collapse counter; the native row states them.
   bank_collapse_counters_exported: false,
   loadavg_start: loadStart,
   loadavg_end: loadEnd,
   descriptive_only: true,
-  statistical_method: "three arms alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
+  statistical_method: "three arms alternated per observation, then the two documents alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
 };
 process.stdout.write(`${JSON.stringify(record)}\n`);

@@ -39,9 +39,9 @@
 //!
 //! # The hook rule is structural, not a list of kinds
 //!
-//! The rule is *"every record admitted onto a live-console queue declares what it does to an
-//! upstream per-lane word"*, and it is carried by [`LiveConsoleRecord`] rather than by an
-//! `if` over today's record kinds. A new live-console record type -- an automation span, anything
+//! The rule is *"every record admitted onto a live-control queue declares what it does to an
+//! upstream per-lane word"*, and it is carried by [`LiveControlRecord`] rather than by an
+//! `if` over today's record kinds. A new live-control record type -- an automation span, anything
 //! a later issue adds -- cannot be drained into a witness-carrying stage without implementing that
 //! trait, and the trait's two obligations are exactly the two facts the witness needs: which side
 //! of the seam the record's stage sits on, and what the record does to the two channels.
@@ -81,7 +81,7 @@
 //!
 //! 1. **Builtins liveness -- CLOSED by #210 phase 3.** `trim_db` and `polarity_invert` are live:
 //!    the input-builtins stage has a queue, and `builtins_compiler::TrackInputRecord`
-//!    implements [`LiveConsoleRecord`] with `SEAM = UpstreamOfSeam` and is folded through
+//!    implements [`LiveControlRecord`] with `SEAM = UpstreamOfSeam` and is folded through
 //!    [`ChannelSymmetryWitness::admit`] by its drain, exactly as `EffectControlLane::stage` folds
 //!    an effect record. The trait bound is what made that an obligation rather than a reminder,
 //!    and it is what a *third* builtin record type would meet next. `hpf_hz` and `lpf_hz` are
@@ -91,7 +91,7 @@
 //!    [`ParameterChannel`](crate::ParameterChannel) exactly as a live record does, so the rule is
 //!    already written: [`ParameterChannel::writes_one_channel`]. What does not exist yet is the
 //!    admission point -- a compiled session's spans are not drained through any queue -- so when
-//!    one appears, the span source becomes a [`LiveConsoleRecord`] implementor and nothing else
+//!    one appears, the span source becomes a [`LiveControlRecord`] implementor and nothing else
 //!    changes.
 //!
 //! # The static-bypass convention, and its asymmetry
@@ -99,13 +99,13 @@
 //! `UNBYPASSED` is seeded from the **prepared** bypass ([`EffectControlLane::new`]) and then
 //! maintained by the drain, so a session that declares an effect bypassed declines that lane from
 //! the moment the plan exists rather than only after a `Bypass(true)` record arrives -- but only
-//! where a live-console channel exists to hold the term, because a console-free plan builds no
+//! where a live-control channel exists to hold the term, because a live-control-free plan builds no
 //! [`EffectControlLane`] at all and its witness is the designed-word comparison alone
 //! (`rack::EffectBankStage::lane_symmetry`, `runtime::NodeKind::Effect`). The
 //! asymmetry is deliberate and safe in this phase (nothing reads the witness to decide anything
 //! rendered) and it is a **seam the collapse must close**: a statically bypassed stage is a dry
 //! shunt that copies both planes, so a phase that collapses on this witness has to decide the term
-//! for console-free plans too rather than inherit an unconditional `true`.
+//! for live-control-free plans too rather than inherit an unconditional `true`.
 //!
 //! # Why the seam side is a `const` on the record type
 //!
@@ -116,7 +116,7 @@
 
 use crate::{EffectControlRecord, ParameterChannel};
 
-/// Which side of the fader/matrix seam a live-console record's stage sits on.
+/// Which side of the fader/matrix seam a live-control record's stage sits on.
 ///
 /// The seam is the earliest genuinely cross-channel operation in the strip -- the 2x2 matrix --
 /// and the fader immediately before it. Everything before that pair is per-channel arithmetic
@@ -130,7 +130,7 @@ pub enum SeamSide {
     SeamSide,
 }
 
-/// What one admitted live-console record does to the two channels' agreement.
+/// What one admitted live-control record does to the two channels' agreement.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SymmetryEvent {
     /// The record leaves the channels doing identical work.
@@ -199,7 +199,7 @@ impl ChannelSymmetryWitness {
     /// afterwards -- so both channels advance through the same kernel on the same samples and come
     /// out holding the same state. What the term gates is the *collapse*, not the agreement: a
     /// collapsed block's shunt would feed the latency line a plane nobody gathered
-    /// (`rack::ConsoleEffectBankStage::process_inner`), which is why a bypassed lane
+    /// (`rack::LiveControlEffectBankStage::process_inner`), which is why a bypassed lane
     /// must render dual. Folding that into the agreement invariant would retire a chain for the
     /// duration of a bypass it renders correctly on both channels throughout.
     pub const AGREEING: u8 = Self::ALL & !Self::UNBYPASSED;
@@ -288,7 +288,7 @@ impl ChannelSymmetryWitness {
     ///
     /// Seam-side records are a compile-time no-op: the collapse duplicates the plane *into* the
     /// fader and the matrix, so their per-channel words never gate it.
-    pub fn admit<R: LiveConsoleRecord>(&mut self, record: &R) {
+    pub fn admit<R: LiveControlRecord>(&mut self, record: &R) {
         if R::SEAM == SeamSide::SeamSide {
             return;
         }
@@ -307,18 +307,18 @@ impl Default for ChannelSymmetryWitness {
     }
 }
 
-/// Every record type that may be admitted onto a live-console queue declares its effect on the
+/// Every record type that may be admitted onto a live-control queue declares its effect on the
 /// channel-symmetry witness.
 ///
 /// # The obligation, and why it is a trait
 ///
 /// The de-symmetrising surface is not "the kinds someone remembered": it is *every admission that
 /// writes an upstream per-lane word*. A drain that folds records into a witness takes
-/// `R: LiveConsoleRecord`, so a record type that has not answered the two questions cannot be
+/// `R: LiveControlRecord`, so a record type that has not answered the two questions cannot be
 /// drained there at all. That is the whole mechanism -- the future kinds this has to cover
 /// (builtins trim/polarity liveness, automation spans) are covered because the compiler will not
 /// let them past, not because a list was kept up to date.
-pub trait LiveConsoleRecord: Copy {
+pub trait LiveControlRecord: Copy {
     /// Which side of the fader/matrix seam the stage this record addresses sits on.
     const SEAM: SeamSide;
 
@@ -340,7 +340,7 @@ impl ParameterChannel {
     }
 }
 
-impl LiveConsoleRecord for EffectControlRecord {
+impl LiveControlRecord for EffectControlRecord {
     /// Every prepared effect instance sits in `simd1`, `dynamic` or `simd2` -- all three racks are
     /// upstream of the fader (`TrackStage` order), so every record on this queue is upstream.
     const SEAM: SeamSide = SeamSide::UpstreamOfSeam;
@@ -495,7 +495,7 @@ mod tests {
     fn a_seam_side_record_never_moves_the_witness() {
         #[derive(Clone, Copy)]
         struct SeamRecord;
-        impl LiveConsoleRecord for SeamRecord {
+        impl LiveControlRecord for SeamRecord {
             const SEAM: SeamSide = SeamSide::SeamSide;
             fn symmetry_event(&self) -> SymmetryEvent {
                 // Deliberately the worst answer: the seam-side const must win regardless.

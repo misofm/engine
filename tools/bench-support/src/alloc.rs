@@ -36,6 +36,7 @@ static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static DEALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
+static RELEASED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static CURRENT_THREAD: Cell<Counters> = const {
@@ -44,6 +45,7 @@ thread_local! {
             deallocations: 0,
             reallocations: 0,
             requested_bytes: 0,
+            released_bytes: 0,
         })
     };
 }
@@ -73,6 +75,12 @@ pub struct Counters {
     pub reallocations: u64,
     /// Bytes requested by `alloc`, `alloc_zeroed` and `realloc`.
     pub requested_bytes: u64,
+    /// Bytes handed back by `dealloc`, and the old block's bytes of every `realloc`.
+    ///
+    /// Over a window that frees nothing it did not allocate, `requested_bytes - released_bytes`
+    /// is exactly the bytes that window left live (issue #1100): what a prepared plan retains,
+    /// with every transient its preparation freed already subtracted.
+    pub released_bytes: u64,
 }
 
 /// Read the process-wide totals.
@@ -83,6 +91,7 @@ pub fn counters() -> Counters {
         deallocations: DEALLOCATIONS.load(Ordering::Relaxed),
         reallocations: REALLOCATIONS.load(Ordering::Relaxed),
         requested_bytes: REQUESTED_BYTES.load(Ordering::Relaxed),
+        released_bytes: RELEASED_BYTES.load(Ordering::Relaxed),
     }
 }
 
@@ -95,6 +104,7 @@ pub fn delta_since(mark: Counters) -> Counters {
         deallocations: now.deallocations.saturating_sub(mark.deallocations),
         reallocations: now.reallocations.saturating_sub(mark.reallocations),
         requested_bytes: now.requested_bytes.saturating_sub(mark.requested_bytes),
+        released_bytes: now.released_bytes.saturating_sub(mark.released_bytes),
     }
 }
 
@@ -117,6 +127,7 @@ pub fn current_thread_delta_since(mark: Counters) -> Counters {
         deallocations: now.deallocations.saturating_sub(mark.deallocations),
         reallocations: now.reallocations.saturating_sub(mark.reallocations),
         requested_bytes: now.requested_bytes.saturating_sub(mark.requested_bytes),
+        released_bytes: now.released_bytes.saturating_sub(mark.released_bytes),
     }
 }
 
@@ -131,21 +142,23 @@ fn record_current_thread_allocation(bytes: usize) {
 }
 
 #[inline]
-fn record_current_thread_reallocation(bytes: usize) {
+fn record_current_thread_reallocation(bytes: usize, released: usize) {
     CURRENT_THREAD.with(|counters| {
         let mut current = counters.get();
         current.allocations = current.allocations.wrapping_add(1);
         current.reallocations = current.reallocations.wrapping_add(1);
         current.requested_bytes = current.requested_bytes.wrapping_add(bytes as u64);
+        current.released_bytes = current.released_bytes.wrapping_add(released as u64);
         counters.set(current);
     });
 }
 
 #[inline]
-fn record_current_thread_deallocation() {
+fn record_current_thread_deallocation(released: usize) {
     CURRENT_THREAD.with(|counters| {
         let mut current = counters.get();
         current.deallocations = current.deallocations.wrapping_add(1);
+        current.released_bytes = current.released_bytes.wrapping_add(released as u64);
         counters.set(current);
     });
 }
@@ -186,7 +199,8 @@ unsafe impl GlobalAlloc for AuditedAllocator {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         DEALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        record_current_thread_deallocation();
+        RELEASED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        record_current_thread_deallocation(layout.size());
         violated(ForbiddenOperation::Deallocation);
         // SAFETY: the pointer/layout pair came from this allocator and is forwarded unchanged.
         unsafe { System.dealloc(pointer, layout) }
@@ -196,7 +210,8 @@ unsafe impl GlobalAlloc for AuditedAllocator {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         REQUESTED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-        record_current_thread_reallocation(new_size);
+        RELEASED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        record_current_thread_reallocation(new_size, layout.size());
         violated(ForbiddenOperation::Allocation);
         // SAFETY: the allocation came from this allocator; the original layout and the requested
         // new size are forwarded unchanged.
@@ -259,6 +274,7 @@ mod tests {
             deallocations: u64::MAX,
             reallocations: u64::MAX,
             requested_bytes: u64::MAX,
+            released_bytes: u64::MAX,
         };
         assert_eq!(delta_since(future), Counters::default());
     }
@@ -269,15 +285,17 @@ mod tests {
 
         let mark = current_thread_counters();
         let layout = Layout::from_size_align(16, 8).unwrap();
+        // Each pointer passes through `black_box`: an allocation nothing reads is one LLVM may
+        // elide in release, together with its `dealloc`, and the counts would then fall short.
         // SAFETY: `layout` was constructed by `Layout::from_size_align`, so it is valid.
-        let first = unsafe { alloc(layout) };
+        let first = std::hint::black_box(unsafe { alloc(layout) });
         assert!(!first.is_null(), "test allocation failed");
         // SAFETY: `layout` was constructed by `Layout::from_size_align`, so it is valid.
-        let zeroed = unsafe { alloc_zeroed(layout) };
+        let zeroed = std::hint::black_box(unsafe { alloc_zeroed(layout) });
         assert!(!zeroed.is_null(), "test zeroed allocation failed");
         // SAFETY: `first` is the non-null allocation returned by `alloc` with `layout`, and the
         // requested replacement size is valid.
-        let grown = unsafe { realloc(first, layout, 32) };
+        let grown = std::hint::black_box(unsafe { realloc(first, layout, 32) });
         assert!(!grown.is_null(), "test reallocation failed");
         // SAFETY: `zeroed` and `grown` are non-null allocations returned by the matching
         // allocation operations and each is deallocated exactly once with its matching layout.
@@ -296,6 +314,8 @@ mod tests {
                 deallocations: 2,
                 reallocations: 1,
                 requested_bytes: 64,
+                // The realloc's old 16-byte block, then the zeroed 16 and the grown 32.
+                released_bytes: 64,
             }
         );
     }

@@ -394,7 +394,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   const engine = await browserEngine(
     host,
     () => new SpectrumWorker({ failStream: workerCount++ === 0 }),
-    { policy: { console: { commandQueueRecords: 16, observationTaps: 1 } } },
+    { policy: { liveControls: { commandQueueRecords: 16, observationTaps: 1 } } },
   );
   const request = { target: { kind: "output", outputId: "out" }, channels: "both", cadenceMs: 1 };
   try {

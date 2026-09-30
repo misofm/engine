@@ -274,6 +274,7 @@ fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativ
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bank binding must not fail")
 }

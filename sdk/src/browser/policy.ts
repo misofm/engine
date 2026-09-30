@@ -26,8 +26,9 @@ import type { SpectrumCollection, SpectrumQuery } from "../core/spectrum.ts";
  * #240 S5 sealed "identical options struct for scratch and worklet boots", and adopted ruling
  * 5462139867 finding 3 corrected it: literally identical is impossible, because the scratch boot
  * writes `require_* = 0` while the worklet writes the physical rate and quantum. The divergence
- * class A-1 actually named was the CONSOLE words -- a scratch instance that budgeted a console
- * differently from the worklet would size its plan differently and answer the wrong question.
+ * class A-1 actually named was the LIVE-CONTROL words -- a scratch instance that budgeted live
+ * controls differently from the worklet would size its plan differently and answer the wrong
+ * question.
  *
  * So the rule is stated over the words it is about: the policy words are shared by construction,
  * because a caller supplies them once and both boots read the same object; the two `require_*`
@@ -38,7 +39,7 @@ export interface BrowserBootPolicy {
   readonly maximumMemoryBytes?: bigint;
   /** Optional native continuous-spectrum hop selected during browser preparation. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
-  readonly console?: BootOptions["console"];
+  readonly liveControls?: BootOptions["liveControls"];
 }
 
 export type BrowserSpectrumHopFrames = NonNullable<BrowserBootPolicy["spectrumHopFrames"]>;
@@ -88,7 +89,7 @@ function withRequiredShape(
   }
   const spectrumHopFrames = validateBrowserSpectrumHopFrames(policy.spectrumHopFrames);
   if (spectrumHopFrames !== undefined) options.spectrumHopFrames = spectrumHopFrames;
-  if (policy.console !== undefined) options.console = policy.console;
+  if (policy.liveControls !== undefined) options.liveControls = policy.liveControls;
   if (spectrum !== undefined) options.spectrum = spectrum;
   if (spectrumCollection !== undefined) options.spectrumCollection = spectrumCollection;
   return options;

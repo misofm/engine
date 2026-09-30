@@ -46,7 +46,7 @@ use bench_support::digest::Sha256Sink;
 use builtins::{MeterConfig, MeterHandle, MeterMetricSet, MeterSnapshot, MeterTap};
 use builtins_compiler::{MeterConsumer, MeterRequest, SelectedMeterRequest};
 use effect_compiler::{
-    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_live_controls,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::{
@@ -81,7 +81,7 @@ pub const PLAN_ID: u64 = 149;
 /// frame have to describe the same span of samples, which is the rule
 /// `attach_effect_observation` states and the rule a host follows.
 pub const WINDOW_BLOCKS: u32 = 4;
-/// Bounded depth of each effect's live-console control channel in the observation arms.
+/// Bounded depth of each effect's live-control channel in the observation arms.
 pub const CONTROL_QUEUE_DEPTH: usize = 8;
 /// Cap on declared observation taps per effect, passed to the observation attach.
 pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
@@ -89,13 +89,13 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 pub const METER_QUEUE_DEPTH: usize = 8;
 /// Blocks per meter window on the metered console row (issue #881): the default web boot's.
 ///
-/// `WebBootOptions::console_defaults` sets `console_meter_blocks` to the web host's
-/// `DEFAULT_METER_BLOCKS`, twelve, and its `console_request` turns that into a period of
+/// `WebBootOptions::live_control_defaults` sets `live_control_meter_blocks` to the web host's
+/// `DEFAULT_METER_BLOCKS`, twelve, and its `live_control_request` turns that into a period of
 /// `12 * quantum_frames`. Mirrored here rather than imported: the browser host is not a
 /// dependency of this subject, and this crate names the number it renders with.
 pub const WEB_METER_BLOCKS: u32 = 12;
 /// Bounded depth of each meter stream on the metered console row: the depth the web host's
-/// `console_request` asks for (one window per post, plus headroom for a stalled control side).
+/// `live_control_request` asks for (one window per post, plus headroom for a stalled control side).
 pub const WEB_METER_QUEUE_DEPTH: usize = 8;
 
 const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -126,6 +126,14 @@ const SIXTY_FOUR_TRACK: &str =
 /// generator's header says why, and so does the fixture's own.
 const SIXTY_FOUR_TRACK_MONO: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
+/// The app-shape fixture (issue #1085): what `misofm/app` compiles, on the standing console.
+///
+/// Generated from the standing fixture by `scripts/derive-app-console-fixture.py`, which moves
+/// every track's exact EQ and compressor objects, in order, from `simd1` to `dynamic`, drops the
+/// limiter, and bypasses both effects on every track whose index is 2 mod 3. A committed document
+/// rather than a strip edit, because the browser arm boots the same bytes the native row renders.
+const SIXTY_FOUR_TRACK_APP: &str =
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json");
 
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -333,7 +341,7 @@ pub enum Workload {
     /// are bound as **permanent** observers through
     /// `builtins_compiler::prepare_selected_session_builtins_between_render_calls`, which is the
     /// entry `host_core::prepare_host_runtime_with_selected_meters_between_render_calls` calls for
-    /// that boot. No live-console control channel is attached.
+    /// that boot. No live-control channel is attached.
     ///
     /// **The meters are not the only difference from the standing row.** That entry also selects
     /// `BuiltinControlDelivery::BetweenRenderCalls`, as the default web boot does, and under that
@@ -359,6 +367,55 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
     SixtyFourTrackConsoleMetered,
+    /// The standing strip at ten tracks (issue #1085): one full eight-lane bank and a remainder of
+    /// two.
+    ///
+    /// The first ten tracks of the standing fixture, renamed and routed as the ragged nine-track
+    /// row's are (`synthesise_tracks`). With [`Self::NineTrackRaggedStrip`] (remainder one),
+    /// [`Self::ThirteenTrackRaggedStrip`] (remainder five), [`Self::SixteenTrackStrip`] (two full
+    /// banks) and [`Self::SixtyFourTrackConsole`] (eight), it is the strip-at-N row set the console
+    /// strip's padding changes: today a remainder runs each effect one lane at a time, and after
+    /// the padding slices it runs as a padded bank. The rows state no floor for that reason.
+    ///
+    /// Not in [`WORKLOADS`]: see [`CONSOLE_STRIP_WORKLOADS`].
+    TenTrackRaggedStrip,
+    /// The standing strip at thirteen tracks: one full eight-lane bank and a remainder of five.
+    ///
+    /// See [`Self::TenTrackRaggedStrip`].
+    ThirteenTrackRaggedStrip,
+    /// The standing strip at sixteen tracks: two full eight-lane banks and no remainder.
+    ///
+    /// See [`Self::TenTrackRaggedStrip`].
+    SixteenTrackStrip,
+    /// The app shape (issue #1085): what `misofm/app` compiles, on the standing console.
+    ///
+    /// Every track carries EQ -> compressor in its `dynamic` rack, with no limiter, and both
+    /// effects are bypassed on every track whose index is 2 mod 3 (21 of 64). Today a bypassed
+    /// effect is part of its bank key, so the bypassed tracks bank apart from the rest and skip the
+    /// wet path; once a bypassed lane stays in its bank (decision 12, "Bypass") it runs the wet
+    /// path in a shared bank. This row is that shape, measured before and after.
+    ///
+    /// The committed app fixture as written (`scripts/derive-app-console-fixture.py`), so the
+    /// browser arm boots the same document. Its record states the bypass pattern it observed in
+    /// the compiled session ([`SessionRuntime::bypass_census`]).
+    ///
+    /// Not in [`WORKLOADS`]: see [`CONSOLE_STRIP_WORKLOADS`].
+    SixtyFourTrackAppShape,
+    /// Sparse activity (issue #1085): the standing console with every odd track fed silence.
+    ///
+    /// The plan is the unmodified sixty-four-track console, as on the idle row; only the input
+    /// differs. Even tracks read the tone and odd tracks exact zeros, so every bank holds both,
+    /// and no bank is wholly silent. That is the case the silent fast path cannot serve: it is
+    /// decided per bank (`block_is_positive_zero` over every lane), so one active track keeps its
+    /// bank-mates processing. The row is read against [`Self::SixtyFourTrackConsole`] (every track
+    /// active) and [`Self::SixtyFourTrackIdle`] (every track silent).
+    ///
+    /// No settling is needed, unlike the idle row's: a silent lane starts at zero state and its
+    /// input is exact zeros, so it never leaves zero, and its active bank-mates are the console
+    /// row's own.
+    ///
+    /// Not in [`WORKLOADS`]: see [`CONSOLE_STRIP_WORKLOADS`].
+    SixtyFourTrackConsoleSparse,
 }
 
 impl Workload {
@@ -396,6 +453,40 @@ impl Workload {
         match self {
             Self::SixtyFourTrackGainPanRing => SourceFeed::PlayedPlanes,
             _ => SourceFeed::Bound,
+        }
+    }
+}
+
+/// What a row's track inputs carry: the tone, exact zeros, or one per track (issue #1085).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputSignal {
+    /// Every track reads the tone ([`source_block`]).
+    Tone,
+    /// Every track reads exact zeros.
+    Silence,
+    /// Even-indexed tracks read the tone and odd-indexed tracks exact zeros, so every bank of the
+    /// standing console holds both at either lane width.
+    OddTracksSilent,
+}
+
+impl InputSignal {
+    /// The record-side name of this input.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tone => "tone",
+            Self::Silence => "silence",
+            Self::OddTracksSilent => "odd_tracks_silent",
+        }
+    }
+
+    /// Whether the track at `track` (its index in the model's track order) reads exact zeros.
+    #[must_use]
+    pub const fn silent(self, track: usize) -> bool {
+        match self {
+            Self::Tone => false,
+            Self::Silence => true,
+            Self::OddTracksSilent => track % 2 == 1,
         }
     }
 }
@@ -478,13 +569,28 @@ pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPan
 /// pair.
 pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
 
+/// The console-strip rows the native bench emits after [`METERED_WORKLOADS`] (issue #1085).
+///
+/// The shapes the console strip moves, frozen before any console slice lands so the same rows can
+/// be measured before and after: the strip at ten, thirteen and sixteen tracks (with the existing
+/// nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}), the app shape, and
+/// sparse activity. Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is.
+pub const CONSOLE_STRIP_WORKLOADS: [Workload; 5] = [
+    Workload::TenTrackRaggedStrip,
+    Workload::ThirteenTrackRaggedStrip,
+    Workload::SixteenTrackStrip,
+    Workload::SixtyFourTrackAppShape,
+    Workload::SixtyFourTrackConsoleSparse,
+];
+
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
-/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`].
+/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
         .chain(DRIVER_FED_WORKLOADS)
         .chain(METERED_WORKLOADS)
+        .chain(CONSOLE_STRIP_WORKLOADS)
 }
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -587,12 +693,20 @@ impl Workload {
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
             Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
+            Self::TenTrackRaggedStrip => "ten_track_ragged_strip",
+            Self::ThirteenTrackRaggedStrip => "thirteen_track_ragged_strip",
+            Self::SixteenTrackStrip => "sixteen_track_strip",
+            Self::SixtyFourTrackAppShape => "sixty_four_track_app_shape",
+            Self::SixtyFourTrackConsoleSparse => "sixty_four_track_console_sparse",
         }
     }
     /// How many console tracks this workload renders.
     pub const fn tracks(self) -> u32 {
         match self {
             Self::NineTrackBaseline | Self::NineTrackRaggedStrip => 9,
+            Self::TenTrackRaggedStrip => 10,
+            Self::ThirteenTrackRaggedStrip => 13,
+            Self::SixteenTrackStrip => 16,
             Self::OneTwentyEightTrackStretch => 128,
             _ => 64,
         }
@@ -609,6 +723,7 @@ impl Workload {
             | Self::SixtyFourTrackConsoleHalfMono => {
                 "fixtures/session/v1/console-sixty-four-track-mono.json"
             }
+            Self::SixtyFourTrackAppShape => "fixtures/session/v1/console-sixty-four-track-app.json",
             _ => "fixtures/session/v1/console-sixty-four-track-intended.json",
         }
     }
@@ -632,6 +747,10 @@ impl Workload {
                 // The metered row renders the standing fixture as written. Its meters are a
                 // preparation facility, not an edit to the session.
                 | Self::SixtyFourTrackConsoleMetered
+                // The app shape is a committed fixture, rendered as written. The sparse row, like
+                // the idle row, is reported as derived: its session is the standing one, but what
+                // it renders is fed in code.
+                | Self::SixtyFourTrackAppShape
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -659,7 +778,9 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => "compressor",
             Self::SixtyFourTrackBuiltinsOnly => "builtins",
             Self::SixtyFourTrackDispatchOnly => "identity",
-            Self::SixtyFourTrackConsoleLegacy | Self::SixtyFourTrackEqCompSimd1 => "eq+compressor",
+            Self::SixtyFourTrackConsoleLegacy
+            | Self::SixtyFourTrackEqCompSimd1
+            | Self::SixtyFourTrackAppShape => "eq+compressor",
             // The feed is not strip content; the record names it separately, as `source_feed`.
             Self::SixtyFourTrackGainPanOnly | Self::SixtyFourTrackGainPanRing => "gain+pan",
             _ => "eq+compressor+limiter",
@@ -676,29 +797,48 @@ impl Workload {
     /// two rows are indistinguishable in a record, and the number that separates them -- one
     /// AoSoA round-trip per bank per block -- would be attributed to nothing.
     ///
-    /// The vocabulary is `rack:slot[+slot]`, racks in strip order, joined by `,`. `builtins` is
-    /// the row that carries no rack effect at all.
+    /// The vocabulary is `section:slot[+slot]`, sections in strip order, joined by `,`.
+    /// `builtins` is the row that carries no rack effect at all.
+    ///
+    /// # Layout-neutral since issue #1085
+    ///
+    /// The sections are named in the console vocabulary of decision 12
+    /// (`docs/rulings/engine-footprint-2026-09-29.md`), through its lowering: `pre_insert` is what
+    /// runs where `simd1` runs today, `inserts` where `dynamic` runs, and `post_insert` where
+    /// `simd2` runs. Each row's layout was rewritten by that mapping and nothing else, so a row
+    /// states the same placement it always did. What it buys is that the same spelling describes
+    /// the row on today's per-track racks and on the console model, so a row measured before and
+    /// after the console strip lands is pinned by one validator rule. The one row whose layout the
+    /// console migration moves is the app shape, whose EQ and compressor go from `inserts` to
+    /// `pre_insert`; the validator accepts both spellings for that row alone.
     pub const fn strip_layout(self) -> &'static str {
         match self {
-            Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "simd1:eq",
-            Self::SixtyFourTrackCompressorOnly => "simd1:compressor",
+            Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "pre_insert:eq",
+            Self::SixtyFourTrackCompressorOnly => "pre_insert:compressor",
             Self::SixtyFourTrackBuiltinsOnly
             | Self::SixtyFourTrackDispatchOnly
             | Self::SixtyFourTrackGainPanOnly
             | Self::SixtyFourTrackGainPanRing => "builtins",
             // The retired layout: two one-slot chains, one per rack.
-            Self::SixtyFourTrackConsoleLegacy => "simd1:eq,dynamic:compressor",
+            Self::SixtyFourTrackConsoleLegacy => "pre_insert:eq,inserts:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
-            Self::SixtyFourTrackEqCompSimd1 => "simd1:eq+compressor",
+            Self::SixtyFourTrackEqCompSimd1 => "pre_insert:eq+compressor",
+            // The app shape: EQ -> compressor on every track's `dynamic` rack, no limiter.
+            Self::SixtyFourTrackAppShape => "inserts:eq+compressor",
             // The intended production layout.
-            _ => "simd1:eq+compressor,simd2:limiter",
+            _ => "pre_insert:eq+compressor,post_insert:limiter",
         }
     }
-    /// What every track's source binding writes into the graph.
+    /// What every track's source binding writes into the graph, named in the record.
     pub const fn input_signal(self) -> &'static str {
+        self.input().name()
+    }
+    /// Which tracks this row feeds the tone and which exact zeros.
+    pub const fn input(self) -> InputSignal {
         match self {
-            Self::SixtyFourTrackIdle => "silence",
-            _ => "tone",
+            Self::SixtyFourTrackIdle => InputSignal::Silence,
+            Self::SixtyFourTrackConsoleSparse => InputSignal::OddTracksSilent,
+            _ => InputSignal::Tone,
         }
     }
     /// Untimed blocks rendered before the clock starts.
@@ -784,14 +924,14 @@ fn apply_strip(model: &mut SessionModel, strip: Strip) {
 /// Which console-side facilities a prepared arm carries.
 ///
 /// The session rows all use [`PlanConfig::BASELINE`], which is what the console benchmark has
-/// always measured: no meter streams, no live-console control channel, no observation capacity.
+/// always measured: no meter streams, no live-control channel, no observation capacity.
 /// The #163 item 0d arms differ from it in exactly one field each, so the paired delta between two
 /// arms is the cost of that one facility.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PlanConfig {
     /// One meter stream per track at the post-matrix tap, as a production console prepares.
     pub meters: bool,
-    /// One bounded live-console control channel per prepared effect.
+    /// One bounded live-control channel per prepared effect.
     pub control: bool,
     /// Effect observation capacity, and whether its taps are armed.
     pub observation: ObservationArm,
@@ -840,6 +980,7 @@ fn console_model(workload: Workload) -> SessionModel {
         Workload::SixtyFourTrackConsoleMono
         | Workload::SixtyFourTrackConsoleMonoDual
         | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
+        Workload::SixtyFourTrackAppShape => SIXTY_FOUR_TRACK_APP,
         _ => SIXTY_FOUR_TRACK,
     };
     let mut model = parse_session_json(text).expect("frozen console session fixture");
@@ -886,13 +1027,13 @@ fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
 
 /// The meter set the default web boot binds, one per track (issue #881).
 ///
-/// The request `host_core` builds when a browser boots with its console defaults: one
+/// The request `host_core` builds when a browser boots with its live-control defaults: one
 /// [`MeterMetricSet::SAMPLE_PEAK`] meter at [`MeterTap::PostMatrix`] per track of the compiled
 /// session's normalized model, handles `index + 1` in that order, a window of
 /// [`WEB_METER_BLOCKS`] blocks, no peak hold, peak decay off, a [`WEB_METER_QUEUE_DEPTH`]-deep
 /// queue and reset generation zero. Transcribed field for field from
-/// `prepare_host_runtime_with_console_policy_and_spectrum` and the web host's
-/// `console_request`, because this subject does not link either host.
+/// `prepare_host_runtime_with_live_controls_policy_and_spectrum` and the web host's
+/// `live_control_request`, because this subject does not link either host.
 fn web_meter_requests(session: &session::CompiledSession) -> Vec<SelectedMeterRequest> {
     let config = MeterConfig {
         period_frames: NonZeroU32::new(WEB_METER_BLOCKS * QUANTUM as u32).expect("nonzero period"),
@@ -969,6 +1110,75 @@ pub struct SessionRuntime {
     /// lanes, and a collapse decision is their conjunction. `PlanUnitEligibility::lane_tracks`
     /// is the relation between the two keys.
     structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitness)>,
+    /// Which tracks the compiled session bypasses, taken at compile time (issue #1085).
+    bypass: BypassCensus,
+}
+
+/// Which tracks of a compiled session bypass their rack effects, and the pattern they form
+/// (issue #1085).
+///
+/// Read from the compiled session's normalized model, so a record states the bypass the plan was
+/// built from rather than the one its workload was meant to carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BypassCensus {
+    /// Tracks that carry at least one rack effect and bypass every one of them.
+    pub bypassed_tracks: u64,
+    /// The pattern the bypassed tracks form.
+    pub pattern: BypassPattern,
+}
+
+/// The shape of a session's bypass, as a record names it (issue #1085).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BypassPattern {
+    /// No rack effect of any track is bypassed.
+    None,
+    /// Every rack effect of every track whose index is 2 mod 3 is bypassed, and no other effect
+    /// is: the app shape's pattern.
+    IndexMod3Is2,
+    /// Any other bypass: a partly bypassed track, or another set of bypassed tracks.
+    Other,
+}
+
+impl BypassPattern {
+    /// The record-side name of this pattern.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::IndexMod3Is2 => "index_mod_3_is_2",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl BypassCensus {
+    /// Takes the census of `model`'s tracks, in their order.
+    fn of(model: &SessionModel) -> Self {
+        let mut any = false;
+        let mut exact = true;
+        let mut bypassed_tracks = 0;
+        for (index, track) in model.tracks.iter().enumerate() {
+            let effects = || {
+                [&track.simd1, &track.dynamic, &track.simd2]
+                    .into_iter()
+                    .flat_map(|rack| rack.effects.iter())
+            };
+            let some = effects().any(|effect| effect.bypass);
+            let every = effects().next().is_some() && effects().all(|effect| effect.bypass);
+            any |= some;
+            bypassed_tracks += u64::from(every);
+            exact &= every == (index % 3 == 2) && some == every;
+        }
+        let pattern = match (any, exact) {
+            (false, _) => BypassPattern::None,
+            (true, true) => BypassPattern::IndexMod3Is2,
+            (true, false) => BypassPattern::Other,
+        };
+        Self {
+            bypassed_tracks,
+            pattern,
+        }
+    }
 }
 
 impl SessionRuntime {
@@ -1056,11 +1266,11 @@ impl SessionRuntime {
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the control queue drain.
         let controls = if config.control {
-            attach_effect_console(
+            attach_effect_live_controls(
                 &mut effects,
                 NonZeroUsize::new(CONTROL_QUEUE_DEPTH).expect("nonzero depth"),
             )
-            .expect("live-console control channels")
+            .expect("live-control channels")
         } else {
             Vec::new()
         };
@@ -1070,7 +1280,7 @@ impl SessionRuntime {
             attach_effect_observation(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
                 .expect("effect observation capacity")
         };
-        let silent = workload.input_signal() == "silence";
+        let input = workload.input();
         let mappings = channel_mappings(&model);
         // Issue #881: the metered row is prepared through the builtins entry the default web boot's
         // host preparation reaches, which binds its selected meters as permanent observers. It
@@ -1109,7 +1319,7 @@ impl SessionRuntime {
             SourceFeed::Bound => {
                 let nodes = artifact
                     .external_binding_nodes()
-                    .map(|node| source_binding(node, silent, &source, &mappings))
+                    .map(|node| source_binding(node, input, &source, &mappings))
                     .collect();
                 artifact
                     .into_bound(GraphRuntimeBindings {
@@ -1133,14 +1343,14 @@ impl SessionRuntime {
                 // The set requires its claims strictly ascending, and the driver serves claim `i`
                 // as the `i`-th of them.
                 claims.sort_unstable();
-                let driver = FrozenSourceDriver::new(&claims, silent, &source, &mappings);
+                let driver = FrozenSourceDriver::new(&claims, input, &source, &mappings);
                 let resources = driver.resource_report();
                 let source_set =
                     GraphPreparedSourceSet::new(envelope, claims, resources, Box::new(driver));
                 let nodes = artifact
                     .external_binding_nodes()
                     .filter(|node| !is_track_input(node))
-                    .map(|node| source_binding(node, silent, &source, &mappings))
+                    .map(|node| source_binding(node, input, &source, &mappings))
                     .collect();
                 artifact
                     .into_bound_with_source_set(
@@ -1191,6 +1401,7 @@ impl SessionRuntime {
             controls,
             observations,
             structural_symmetry: builtins_compiler::session_structural_symmetry(&session),
+            bypass: BypassCensus::of(session.normalized_model()),
         };
         if config.observation == ObservationArm::Armed {
             runtime.arm_observation();
@@ -1217,10 +1428,10 @@ impl SessionRuntime {
         }
     }
 
-    /// The live-console control channel of the alphabetically first track carrying `effect_id`.
+    /// The live-control channel of the alphabetically first track carrying `effect_id`.
     ///
     /// "One track" has to be chosen by a stable key rather than by taking the first matching
-    /// channel: [`attach_effect_console`] returns channels in prepared-entry order, which is
+    /// channel: [`attach_effect_live_controls`] returns channels in prepared-entry order, which is
     /// sorted by effect id and not by track, so a positional choice would silently address a
     /// different track when the entry set changes. The track id is the session-stable identity, so
     /// picking its minimum is deterministic across every build of every fixture.
@@ -1237,10 +1448,10 @@ impl SessionRuntime {
             .map(|(index, _)| index)
     }
 
-    /// The live-console control channel of `track_id`'s `effect_id` (a contract id), by stable
+    /// The live-control channel of `track_id`'s `effect_id` (a contract id), by stable
     /// identity rather than by position (issue #1003).
     ///
-    /// `attach_effect_console` returns channels in prepared-entry order, which moves when the
+    /// `attach_effect_live_controls` returns channels in prepared-entry order, which moves when the
     /// entry set does, so a row that automates named tracks resolves each one by its session id.
     /// Returns `None` for a `control: false` plan or when the track carries no such effect.
     #[must_use]
@@ -1259,7 +1470,7 @@ impl SessionRuntime {
         (&producer.track_id, &producer.effect_id)
     }
 
-    /// Pushes one live-console bypass record into one prepared effect's bounded queue.
+    /// Pushes one live-control bypass record into one prepared effect's bounded queue.
     ///
     /// The production control path, like [`SessionRuntime::push_parameter`]: the record is drained
     /// by the render thread at the top of the next block, and it moves the channel-symmetry
@@ -1279,7 +1490,7 @@ impl SessionRuntime {
             .is_ok()
     }
 
-    /// Pushes one live-console parameter retarget into one prepared effect's bounded queue.
+    /// Pushes one live-control parameter retarget into one prepared effect's bounded queue.
     ///
     /// This is the production control path and nothing else: the record is drained by the render
     /// thread at the top of the next block and staged as a single
@@ -1423,6 +1634,14 @@ impl SessionRuntime {
     #[must_use]
     pub fn bank_shape(&self) -> [u64; 2] {
         self.plan.bank_shape()
+    }
+
+    /// Which tracks the compiled session bypasses, and the pattern they form (issue #1085).
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bypass_census(&self) -> BypassCensus {
+        self.bypass
     }
 
     /// Tracks whose structural channel-symmetry witness holds: the `SOURCE` term, per track.
@@ -1887,7 +2106,7 @@ fn channel_mappings(model: &SessionModel) -> Vec<(usize, usize)> {
 /// mapping, a track reads.
 fn frozen_track_source(
     track_id: &str,
-    silent: bool,
+    input: InputSignal,
     source: &SourceSignal,
     mappings: &[(usize, usize)],
 ) -> FrozenGraphSource {
@@ -1896,7 +2115,7 @@ fn frozen_track_source(
         .parse()
         .unwrap_or(0);
     let block = source
-        .block(track, silent)
+        .block(track, input.silent(track))
         .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
     let mapping = mappings
         .get(track)
@@ -1920,16 +2139,16 @@ fn is_track_input(node: &GraphNodeId) -> bool {
 /// alignment [`FrozenGraphSource`] carries.
 fn bound_track_source(
     track_id: &str,
-    silent: bool,
+    input: InputSignal,
     source: &SourceSignal,
     mappings: &[(usize, usize)],
 ) -> Box<FrozenGraphSource> {
-    Box::new(frozen_track_source(track_id, silent, source, mappings))
+    Box::new(frozen_track_source(track_id, input, source, mappings))
 }
 
 fn source_binding(
     node: &GraphNodeId,
-    silent: bool,
+    input: InputSignal,
     source: &SourceSignal,
     mappings: &[(usize, usize)],
 ) -> GraphNodeBinding {
@@ -1940,7 +2159,7 @@ fn source_binding(
     {
         GraphNodeBinding::new(
             node.clone(),
-            bound_track_source(track_id.as_str(), silent, source, mappings),
+            bound_track_source(track_id.as_str(), input, source, mappings),
         )
     } else {
         GraphNodeBinding::identity(node.clone())
@@ -1974,7 +2193,7 @@ impl FrozenSourceDriver {
     /// and the graph would refuse the set at bind anyway.
     fn new(
         claims: &[GraphSourceInputClaim],
-        silent: bool,
+        input: InputSignal,
         source: &SourceSignal,
         mappings: &[(usize, usize)],
     ) -> Self {
@@ -1984,7 +2203,7 @@ impl FrozenSourceDriver {
                 GraphNodeId::TrackStage {
                     track_id,
                     stage: TrackStage::Input,
-                } => frozen_track_source(track_id.as_str(), silent, source, mappings),
+                } => frozen_track_source(track_id.as_str(), input, source, mappings),
                 node => panic!("a source claim must name a track input, not {node:?}"),
             })
             .collect();
@@ -2399,7 +2618,8 @@ mod tests {
             })
             .collect();
         claims.sort_unstable();
-        let mut driver = FrozenSourceDriver::new(&claims, false, &SourceSignal::Local, &mappings);
+        let mut driver =
+            FrozenSourceDriver::new(&claims, InputSignal::Tone, &SourceSignal::Local, &mappings);
         let count = claims.len();
         let report = driver.resource_report();
         assert_eq!(
@@ -2551,7 +2771,8 @@ mod tests {
             })
             .collect();
         claims.sort_unstable();
-        let driver = FrozenSourceDriver::new(&claims, false, &SourceSignal::Local, &mappings);
+        let driver =
+            FrozenSourceDriver::new(&claims, InputSignal::Tone, &SourceSignal::Local, &mappings);
         assert_eq!(driver.claim_count(), ring.tracks() as usize);
         for claim in 0..driver.claim_count() {
             let (left, right) = driver.played_planes(claim).expect("every claim lends");
@@ -2570,7 +2791,12 @@ mod tests {
             .tracks
             .iter()
             .map(|track| {
-                bound_track_source(track.id.as_str(), false, &SourceSignal::Local, &mappings)
+                bound_track_source(
+                    track.id.as_str(),
+                    InputSignal::Tone,
+                    &SourceSignal::Local,
+                    &mappings,
+                )
             })
             .collect();
         assert_eq!(blocks.len(), bound.tracks() as usize);
@@ -2615,17 +2841,24 @@ mod tests {
             METERED_WORKLOADS == [metered],
             "the metered row is the only one"
         );
-        for workload in WORKLOADS.into_iter().chain(DRIVER_FED_WORKLOADS) {
+        for workload in WORKLOADS
+            .into_iter()
+            .chain(DRIVER_FED_WORKLOADS)
+            .chain(CONSOLE_STRIP_WORKLOADS)
+        {
             assert!(!workload.web_meters(), "{}", workload.kind());
         }
         let rows: Vec<Workload> = native_session_rows().collect();
         assert_eq!(
             rows.len(),
-            WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + METERED_WORKLOADS.len()
+            WORKLOADS.len()
+                + DRIVER_FED_WORKLOADS.len()
+                + METERED_WORKLOADS.len()
+                + CONSOLE_STRIP_WORKLOADS.len()
         );
         assert!(
-            rows.last() == Some(&metered),
-            "the metered row is emitted last, after the driver-fed row"
+            rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len()) == Some(&metered),
+            "the metered row is emitted after the driver-fed row, before the console-strip rows"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
         kinds.sort_unstable();
@@ -2821,5 +3054,418 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #1085: the console-strip rows.
+    // -----------------------------------------------------------------------------------------
+
+    /// The five console-strip rows, in emission order.
+    const STRIP_ROWS: [Workload; 5] = CONSOLE_STRIP_WORKLOADS;
+
+    /// The standing console's model: the fixture every strip-at-N row and the sparse row is cut
+    /// from, and the app shape is derived from.
+    fn standing_model() -> SessionModel {
+        console_model(Workload::SixtyFourTrackConsole)
+    }
+
+    /// A track's facts less its identity: what a truncation must carry over unchanged.
+    fn track_body(track: &session::Track) -> session::Track {
+        let mut body = track.clone();
+        body.id = StableId::parse("body").expect("stable id");
+        body
+    }
+
+    /// Issue #1085: each console-strip row states the facts it is pinned on, the rows are emitted
+    /// last, and only the app shape carries a bypass.
+    ///
+    /// Red mutations: give `SixteenTrackStrip` 64 tracks, report the app shape as synthetic, or
+    /// give the sparse row the `Tone` input -- the stated-facts table fails; append a row to
+    /// `WORKLOADS` instead -- the emission-order assertion fails.
+    #[test]
+    fn the_console_strip_rows_state_their_facts_and_are_emitted_last() {
+        let standing = Workload::SixtyFourTrackConsole;
+        let intended = "pre_insert:eq+compressor,post_insert:limiter";
+        assert_eq!(standing.strip_layout(), intended);
+        for (row, kind, tracks) in [
+            (Workload::TenTrackRaggedStrip, "ten_track_ragged_strip", 10),
+            (
+                Workload::ThirteenTrackRaggedStrip,
+                "thirteen_track_ragged_strip",
+                13,
+            ),
+            (Workload::SixteenTrackStrip, "sixteen_track_strip", 16),
+        ] {
+            assert_eq!(row.kind(), kind);
+            assert_eq!(
+                stated_facts(row),
+                (
+                    tracks,
+                    standing.fixture_id(),
+                    true,
+                    standing.strip_content(),
+                    intended
+                ),
+                "{kind}"
+            );
+            assert_eq!(row.input(), InputSignal::Tone, "{kind}");
+        }
+        // With the two standing rows, the strip at N in {9, 10, 13, 16, 64}.
+        let strip_counts: Vec<u32> = [Workload::NineTrackRaggedStrip, standing]
+            .into_iter()
+            .chain(STRIP_ROWS)
+            .filter(|row| {
+                row.strip_layout() == intended
+                    && row.fixture_id() == standing.fixture_id()
+                    && row.input() == InputSignal::Tone
+            })
+            .map(Workload::tracks)
+            .collect();
+        assert_eq!(strip_counts, [9, 64, 10, 13, 16]);
+
+        let app = Workload::SixtyFourTrackAppShape;
+        assert_eq!(app.kind(), "sixty_four_track_app_shape");
+        assert_eq!(
+            stated_facts(app),
+            (
+                64,
+                "fixtures/session/v1/console-sixty-four-track-app.json",
+                false,
+                "eq+compressor",
+                "inserts:eq+compressor"
+            )
+        );
+        let sparse = Workload::SixtyFourTrackConsoleSparse;
+        assert_eq!(sparse.kind(), "sixty_four_track_console_sparse");
+        assert_eq!(
+            stated_facts(sparse),
+            (
+                64,
+                standing.fixture_id(),
+                true,
+                standing.strip_content(),
+                intended
+            )
+        );
+        assert_eq!(sparse.input_signal(), "odd_tracks_silent");
+        assert_eq!(sparse.warmup_blocks(), standing.warmup_blocks());
+        for row in STRIP_ROWS {
+            assert!(row.strip() == Strip::AsWritten, "{}", row.kind());
+            assert_eq!(row.source_feed(), SourceFeed::Bound, "{}", row.kind());
+            assert!(
+                !row.web_meters() && !row.collapse_forced_off(),
+                "{}",
+                row.kind()
+            );
+            assert!(
+                !WORKLOADS.contains(&row),
+                "{}: not a wasm-arm row",
+                row.kind()
+            );
+        }
+        let rows: Vec<Workload> = native_session_rows().collect();
+        assert!(
+            rows[rows.len() - STRIP_ROWS.len()..] == STRIP_ROWS,
+            "the console-strip rows are emitted last"
+        );
+        let mut kinds: Vec<&str> = rows.iter().map(|row| row.kind()).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), rows.len(), "every emitted kind is distinct");
+        for row in rows {
+            let census = BypassCensus::of(&console_model(row));
+            let expected = if row == app {
+                BypassCensus {
+                    bypassed_tracks: 21,
+                    pattern: BypassPattern::IndexMod3Is2,
+                }
+            } else {
+                BypassCensus {
+                    bypassed_tracks: 0,
+                    pattern: BypassPattern::None,
+                }
+            };
+            assert_eq!(census, expected, "{}", row.kind());
+        }
+    }
+
+    /// Issue #1085: a strip-at-N row is the standing fixture's first N tracks, each carried over
+    /// whole under a new id, with one post-matrix route per track to the fixture's output.
+    ///
+    /// Red mutation: clone `template[template.len() - 1 - index]` in `synthesise_tracks`, or apply
+    /// a strip edit to the rows -- the per-track equality fails.
+    #[test]
+    fn the_strip_at_n_rows_are_the_standing_fixtures_first_n_tracks() {
+        let standing = standing_model();
+        for row in [
+            Workload::NineTrackRaggedStrip,
+            Workload::TenTrackRaggedStrip,
+            Workload::ThirteenTrackRaggedStrip,
+            Workload::SixteenTrackStrip,
+        ] {
+            let model = console_model(row);
+            let tracks = row.tracks() as usize;
+            assert_eq!(model.tracks.len(), tracks, "{}", row.kind());
+            assert_eq!(model.routes.len(), tracks, "{}", row.kind());
+            for (index, track) in model.tracks.iter().enumerate() {
+                assert_eq!(track.id.as_str(), format!("ch{index:03}"), "{}", row.kind());
+                assert_eq!(
+                    track_body(track),
+                    track_body(&standing.tracks[index]),
+                    "{}: track {index} is the standing fixture's track {index}",
+                    row.kind()
+                );
+                let route = &model.routes[index];
+                assert!(
+                    route.source
+                        == session::RouteSource::Track {
+                            track_id: track.id.clone(),
+                            tap: session::SendTap::PostMatrix,
+                        },
+                    "{}: route {index}",
+                    row.kind()
+                );
+                assert!(
+                    route.destination == standing.routes[0].destination,
+                    "{}: route {index} reaches the fixture's output",
+                    row.kind()
+                );
+            }
+            assert!(
+                model.outputs == standing.outputs && model.sources == standing.sources,
+                "{}: the outputs and sources are the fixture's",
+                row.kind()
+            );
+        }
+    }
+
+    /// Issue #1085: the app shape is the standing strip's own EQ and compressor on every track's
+    /// `dynamic` rack, with no limiter, and both effects bypassed on exactly the tracks whose index
+    /// is 2 mod 3. Everything else about each track is the standing fixture's.
+    ///
+    /// Read from the committed fixture through the same parse the row renders, against the
+    /// standing model, so the fixture and its generator are held to the row's claim here as well
+    /// as by `scripts/check-console-fixtures.sh`.
+    #[test]
+    fn the_app_shape_moves_the_standing_eq_and_compressor_into_dynamic_and_bypasses_every_third_track()
+     {
+        let standing = standing_model();
+        let app = console_model(Workload::SixtyFourTrackAppShape);
+        assert_eq!(app.tracks.len(), standing.tracks.len());
+        let mut bypassed = 0;
+        for (index, (track, reference)) in app.tracks.iter().zip(&standing.tracks).enumerate() {
+            assert!(track.simd1.effects.is_empty() && track.simd2.effects.is_empty());
+            let want_bypass = index % 3 == 2;
+            let moved: Vec<session::Effect> = track
+                .dynamic
+                .effects
+                .iter()
+                .map(|effect| {
+                    assert_eq!(effect.bypass, want_bypass, "track {index}");
+                    session::Effect {
+                        bypass: false,
+                        ..effect.clone()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                moved, reference.simd1.effects,
+                "track {index}: the standing EQ and compressor"
+            );
+            bypassed += u64::from(want_bypass);
+            let mut body = track.clone();
+            body.dynamic = reference.dynamic.clone();
+            body.simd1 = reference.simd1.clone();
+            body.simd2 = reference.simd2.clone();
+            assert_eq!(&body, reference, "track {index}: nothing else moved");
+        }
+        assert_eq!(bypassed, 21);
+        assert!(app.routes == standing.routes && app.outputs == standing.outputs);
+        let runtime = SessionRuntime::new(Workload::SixtyFourTrackAppShape);
+        assert_eq!(
+            runtime.bypass_census(),
+            BypassCensus {
+                bypassed_tracks: 21,
+                pattern: BypassPattern::IndexMod3Is2,
+            },
+            "the compiled session carries the app's bypass"
+        );
+    }
+
+    /// Issue #1085: the bypass census names the app pattern only for the app pattern.
+    ///
+    /// Red mutation: drop the `some == every` term -- a track bypassing its EQ alone reads as the
+    /// app pattern; drop `effects().next().is_some()` -- an empty track counts as bypassed.
+    #[test]
+    fn the_bypass_census_names_the_app_pattern_and_nothing_else() {
+        let app = console_model(Workload::SixtyFourTrackAppShape);
+        assert_eq!(BypassCensus::of(&app).pattern, BypassPattern::IndexMod3Is2);
+        let mut partial = app.clone();
+        partial.tracks[2].dynamic.effects[1].bypass = false;
+        assert_eq!(
+            BypassCensus::of(&partial),
+            BypassCensus {
+                bypassed_tracks: 20,
+                pattern: BypassPattern::Other,
+            },
+            "a track bypassing its EQ alone"
+        );
+        let mut extra = app.clone();
+        for effect in &mut extra.tracks[0].dynamic.effects {
+            effect.bypass = true;
+        }
+        assert_eq!(BypassCensus::of(&extra).pattern, BypassPattern::Other);
+        let mut shifted = app.clone();
+        for (index, track) in shifted.tracks.iter_mut().enumerate() {
+            for effect in &mut track.dynamic.effects {
+                effect.bypass = index % 3 == 1;
+            }
+        }
+        assert_eq!(BypassCensus::of(&shifted).pattern, BypassPattern::Other);
+        let mut emptied = app;
+        emptied.tracks[1].dynamic.effects.clear();
+        assert_eq!(
+            BypassCensus::of(&emptied).bypassed_tracks,
+            21,
+            "a track with no effect is not a bypassed track"
+        );
+    }
+
+    /// Issue #1085: the sparse row feeds the tone to every even track and exact zeros to every odd
+    /// one, and every bank of its plan holds both, so no bank is wholly silent.
+    ///
+    /// The second half is the row's premise: the silent fast path is decided per bank, so a row
+    /// whose silent tracks filled whole banks would measure the skip rather than the case it
+    /// cannot serve. Read off the plan's own lane table, so it holds at whatever lane width the
+    /// cohort planner banks at.
+    ///
+    /// Red mutation: make `OddTracksSilent` silence `track >= 32` -- half the banks are wholly
+    /// silent and the per-bank assertion fails; ignore the input in `frozen_track_source` -- the
+    /// per-track block assertion fails.
+    #[test]
+    fn the_sparse_row_silences_every_odd_track_and_leaves_no_bank_wholly_silent() {
+        let row = Workload::SixtyFourTrackConsoleSparse;
+        let model = console_model(row);
+        let mappings = channel_mappings(&model);
+        for (index, track) in model.tracks.iter().enumerate() {
+            let block = frozen_track_source(
+                track.id.as_str(),
+                row.input(),
+                &SourceSignal::Local,
+                &mappings,
+            );
+            let silent = block
+                .left
+                .iter()
+                .chain(&block.right)
+                .all(|word| word.to_bits() == 0);
+            let audible = block.left.iter().any(|word| *word != 0.0);
+            assert_eq!(silent, index % 2 == 1, "track {index}: exact zeros");
+            assert_eq!(audible, index % 2 == 0, "track {index}: the tone");
+        }
+        let runtime = SessionRuntime::new(row);
+        let banks: Vec<PlanUnitEligibility> = runtime
+            .unit_eligibility()
+            .into_iter()
+            .filter(|unit| unit.banked && !unit.lane_tracks.is_empty())
+            .collect();
+        assert!(!banks.is_empty(), "the sparse row banks its strip");
+        let mut lanes = 0;
+        for bank in &banks {
+            let parity: Vec<usize> = bank
+                .lane_tracks
+                .iter()
+                .map(|track| {
+                    track
+                        .trim_start_matches(|c: char| !c.is_ascii_digit())
+                        .parse::<usize>()
+                        .expect("a track lane names a numbered track")
+                        % 2
+                })
+                .collect();
+            lanes += parity.len();
+            assert!(
+                parity.contains(&0) && parity.contains(&1),
+                "unit {}: a bank of the sparse row holds an active and a silent track, {:?}",
+                bank.unit,
+                bank.lane_tracks
+            );
+        }
+        assert!(lanes >= model.tracks.len(), "every track renders in a bank");
+    }
+
+    /// Issue #1085: the console-strip rows render their pinned 64-block bits with no forbidden
+    /// operation, and the rows the others are read against render theirs.
+    ///
+    /// The pins are this commit's, taken before any console slice lands. Every slice of the
+    /// console strip is class A per lane (decision 12), so these digests are the bits S4's rows
+    /// must render again: padding, per-lane bypass and the schema's lowering may move cost, never
+    /// a bit. The standing console row's pin is `tests/chain_shape.rs`'s, restated so the sparse
+    /// row can be held apart from it, and the idle row is rendered for the same reason.
+    ///
+    /// Red mutations: silence the even tracks rather than the odd -- the sparse pin moves;
+    /// bypass the tracks at index 1 mod 3 in the app fixture -- the app pin moves; take the last N
+    /// tracks rather than the first -- the strip-at-N pins move.
+    #[test]
+    fn the_console_strip_rows_render_their_pinned_bits() {
+        const BLOCKS: u64 = 64;
+        const PINS: [(Workload, &str); 5] = [
+            (
+                Workload::TenTrackRaggedStrip,
+                "1eed6377a0b5c773fb35d979f76600d4ad2403796a4fdbc1ce481e11742a4fe3",
+            ),
+            (
+                Workload::ThirteenTrackRaggedStrip,
+                "17b2451b59f71b6504cb905cafb11742edcecd5be10dd1f86759541bb201bb12",
+            ),
+            (
+                Workload::SixteenTrackStrip,
+                "5e1b97df9b46df231895344b4da03c02a8ff9e6cead10f356b001b9c2144c293",
+            ),
+            (
+                Workload::SixtyFourTrackAppShape,
+                "c740fa2dd904d26dfc104ff4b202b81454757b8428c54e83092d93fe441bd4c3",
+            ),
+            (
+                Workload::SixtyFourTrackConsoleSparse,
+                "1f18f156705313c098e2e8310a848f63eeb23085c971239991dffd2b4a8de334",
+            ),
+        ];
+        const CONSOLE_DIGEST: &str =
+            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de";
+        let run = |workload: Workload| {
+            let mut runtime = SessionRuntime::new(workload);
+            let mut digest = Sha256Sink::new();
+            let mut audible = false;
+            audit::warm_up();
+            audit::reset();
+            for block in 0..BLOCKS {
+                runtime.render(block).expect("console render");
+                runtime.hash_output(&mut digest);
+                audible |= runtime.output.0.iter().any(|word| *word != 0.0);
+            }
+            (digest.finish_hex(), audible, audit::snapshot().total())
+        };
+        let (console, _, _) = run(Workload::SixtyFourTrackConsole);
+        assert_eq!(console, CONSOLE_DIGEST, "the standing console row moved");
+        let (idle, idle_audible, _) = run(Workload::SixtyFourTrackIdle);
+        assert!(!idle_audible, "the idle row renders silence");
+        let mut digests = Vec::new();
+        for (workload, pin) in PINS {
+            let (digest, audible, forbidden) = run(workload);
+            assert!(audible, "{}: the row renders the tone", workload.kind());
+            assert_eq!(forbidden, 0, "{}: a forbidden operation", workload.kind());
+            assert_eq!(digest, pin, "{}: the row's bits moved", workload.kind());
+            digests.push(digest);
+        }
+        let sparse = &digests[4];
+        assert!(
+            *sparse != console && *sparse != idle,
+            "the sparse row renders bits of its own"
+        );
+        let mut distinct = digests.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), digests.len(), "five rows, five renders");
     }
 }

@@ -180,7 +180,8 @@ pub struct GraphRackBoundSlot {
     pub group: usize,
     /// Index into that group's leader program.
     pub slot: usize,
-    /// One node per lane, in lane order.
+    /// One node per member, in lane order. A padded bank (issue #1088) has fewer members than
+    /// lanes: its members are lanes `0..members.len()`, and the rest are padding.
     pub members: Vec<EffectNodeId>,
 }
 
@@ -246,6 +247,9 @@ mod schedule;
 mod tests {
     use super::*;
     use crate::banks::bind_rack_banks_indexed;
+
+    /// Issue #1088's padded-bank gate, beside the harness it reuses.
+    mod bank_padding;
     use crate::canonical::{
         canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
         write_canonical,
@@ -316,14 +320,14 @@ mod tests {
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, SelectedMeterRequest, TrackControlRequest,
         TrackFaderRecord, prepare_selected_session_builtins_between_render_calls,
-        prepare_selected_session_builtins_with_console, prepare_session_builtins,
-        prepare_session_builtins_between_render_calls, prepare_session_builtins_with_console,
+        prepare_selected_session_builtins_with_live_controls, prepare_session_builtins,
+        prepare_session_builtins_between_render_calls, prepare_session_builtins_with_live_controls,
         test_only_fader_matrix_witness, test_only_reset_fader_matrix_witness,
     };
     use conformance::DualAccumulatorDelayFactory;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_console,
+        EffectCompileCaps, EffectPreparedSession, EffectRack, attach_effect_live_controls,
         launch_native_effect_registry, prepare_native_session_effects_with_console_eligibility,
     };
     use effect_contract::{
@@ -3071,8 +3075,8 @@ mod tests {
                 .expect("prepared EQ effects");
             assert_eq!(effects.entries.len(), 8);
             let requested_depth = NonZeroUsize::new(4_103).expect("fixture queue depth");
-            let producers = attach_effect_console(&mut effects, requested_depth)
-                .expect("checked effect-console attachment");
+            let producers = attach_effect_live_controls(&mut effects, requested_depth)
+                .expect("checked effect live-control attachment");
             assert_eq!(producers.len(), effects.entries.len());
             let mut expected_total = 0_u64;
             let mut expected_largest = 0_u64;
@@ -3139,13 +3143,38 @@ mod tests {
                 .map(|width| width.lanes() as usize)
                 .unwrap_or(0);
             let banked = bank_width != 0;
+            // Issue #1100: every controlled instance also gets a live-control owner around its
+            // effect. Each lane here has a live channel, so each owner holds a staging window of
+            // the effect's automation capacity, and a shunt of two dry blocks and two latency
+            // lines.
+            let metadata = &effects.entries[0].metadata;
+            let span = size_of::<effect_contract::PreparedAutomationSpan>();
+            let capacity = metadata.automation_capacity as usize;
+            let quantum = metadata.quantum as usize;
+            let latency = usize::try_from(metadata.latency.0).expect("EQ latency");
             if banked && controlled != 0 {
                 assert_eq!(8 % bank_width, 0, "EQ fixture fills complete banks");
+                let banks = controlled.div_ceil(bank_width) as u64;
                 let bank_bytes = (bank_width * size_of::<Option<EffectControlLane>>()) as u64;
                 expected_total = expected_total
-                    .checked_add(bank_bytes * controlled.div_ceil(bank_width) as u64)
+                    .checked_add(bank_bytes * banks)
                     .expect("bank owner arithmetic");
                 expected_largest = expected_largest.max(bank_bytes);
+                // `LiveControlEffectBankStage` in place of `EffectBankStage`: its growth, one
+                // lane's staging window, the packed window of every lane, and the AoSoA shunt.
+                let stage = size_of::<rack::LiveControlEffectBankStage>();
+                let growth = stage - size_of::<rack::EffectBankStage>();
+                let staging = capacity * span;
+                let packed = capacity * bank_width * span;
+                let shunt = 2 * (quantum + latency) * bank_width * size_of::<f32>();
+                expected_total = expected_total
+                    .checked_add((growth + staging + packed + shunt) as u64 * banks)
+                    .expect("bank live-control owner arithmetic");
+                expected_largest = expected_largest
+                    .max(stage as u64)
+                    .max(staging as u64)
+                    .max(packed as u64)
+                    .max((quantum.max(latency) * bank_width * size_of::<f32>()) as u64);
             } else if !banked && controlled != 0 {
                 let lane_bytes = size_of::<EffectControlLane>() as u64;
                 let scalar_bytes = (controlled as u64)
@@ -3155,6 +3184,23 @@ mod tests {
                     .checked_add(scalar_bytes)
                     .expect("scalar owner arithmetic");
                 expected_largest = expected_largest.max(lane_bytes);
+                // `graph`'s boxed `LiveControlEffect`, field by field (its own
+                // `observation_size_accounting` test pins the identity), its staging window and
+                // its shunt.
+                let owner = size_of::<GraphPreparedEffect>()
+                    + size_of::<Box<EffectControlLane>>()
+                    + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
+                    + size_of::<effect_contract::BypassShunt>()
+                    + size_of::<Option<Box<effect_contract::ObservationLane>>>();
+                let window = capacity * span;
+                let shunt = 2 * (quantum + latency) * size_of::<f32>();
+                expected_total = expected_total
+                    .checked_add((owner + window + shunt) as u64 * controlled as u64)
+                    .expect("scalar live-control owner arithmetic");
+                expected_largest = expected_largest
+                    .max(owner as u64)
+                    .max(window as u64)
+                    .max((quantum.max(latency) * size_of::<f32>()) as u64);
             }
             (
                 effects,
@@ -3353,8 +3399,9 @@ mod tests {
             prepare_native_session_effects(&compressor_session, &compressor_registry, effect_caps)
                 .expect("prepared compressor effects");
         let compressor_depth = NonZeroUsize::new(4_103).expect("compressor queue depth");
-        let compressor_producers = attach_effect_console(&mut compressor_effects, compressor_depth)
-            .expect("checked compressor attachment");
+        let compressor_producers =
+            attach_effect_live_controls(&mut compressor_effects, compressor_depth)
+                .expect("checked compressor attachment");
         assert_eq!(compressor_producers.len(), compressor_effects.entries.len());
         for (entry, producer) in compressor_effects.entries.iter().zip(&compressor_producers) {
             assert_eq!(entry.effect_id, "compressor");
@@ -4369,27 +4416,27 @@ mod tests {
         assert!(report.scalar_in(RackLocation::Simd1).is_empty());
     }
 
-    /// A slot bypassed at preparation takes its chain out of the cohort, exactly as a slot of a
-    /// different effect would: `bypass` is part of the `EffectProgramKey`, so a bypassed and an
-    /// active instance of one effect never share a bank. And one slot id used in two racks of one
-    /// track prepares as two entries, whose program keys differ when only one is bypassed.
+    /// A session-bypassed slot keeps its chain in the cohort (issue #1087).
     ///
-    /// Two groups' worth of two-slot chains, with the last track's slot 1 bypassed: the first group
-    /// fills and binds both its slots, and the second, one track short of full once the bypassed
-    /// chain leaves it, falls back per node, the bypassed track's two nodes with it. Track 0 also
-    /// carries a bypassed dynamic copy of its SIMD-1 slot 1, under the same id.
+    /// A session's `bypass` on an effect that lowers it (not the delay or the multiband) becomes a
+    /// prepared `bypass = false` plus a bypassed channel-less lane, so a bypassed and an active instance of one effect share one `EffectProgramKey`, and
+    /// a bypassed track no longer leaves its bank. One slot id used in two racks of one track still
+    /// prepares as two entries, each with its own lane.
     ///
-    /// Ported by #1027 from the #650 allocation-record audit subject
-    /// (`tools/audit/src/prepared_effect_allocations.rs`:
-    /// `banks64_proves_current_backend_cohort_and_heterogeneous_fallback` and
-    /// `crossed_small_proves_reversed_distinct_prepared_programs`), retired with its record
-    /// validator. Every surviving heterogeneity test varies the effect id, never only the bypass.
+    /// Two groups' worth of two-slot chains, with the last track's slot 1 bypassed: both groups
+    /// fill and bind both their slots, the bypassed track's lane with them. Track 0 also carries a
+    /// bypassed dynamic copy of its SIMD-1 slot 1, under the same id, which is a one-track chain
+    /// and renders per node.
     ///
-    /// Red mutation: `PreparedEffectMetadata::program_key` copies `bypass: false` rather than
-    /// `self.bypass` -> red at the program-key assertions; with those removed, the cohort half is
-    /// red on its own: the bypassed chain rejoins its group, both groups fill, and four slots bind.
+    /// Before #1087 this fixture (ported by #1027 from the #650 allocation-record audit subject)
+    /// pinned the opposite: the bypassed chain left its group, the second group fell one short of
+    /// full, and only two slots bound.
+    ///
+    /// Red mutation: `prepare_native_session_effects` prepares `bypass: effect.bypass` again ->
+    /// red at the program-key assertions; with those removed, the cohort half is red on its own:
+    /// the bypassed chain leaves its group again and only two slots bind.
     #[test]
-    fn a_prepare_time_bypassed_slot_takes_its_chain_out_of_the_cohort() {
+    fn a_prepare_time_bypassed_slot_keeps_its_chain_in_the_cohort() {
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width; evidence is vacuous otherwise");
         };
@@ -4412,7 +4459,7 @@ mod tests {
             },
         );
 
-        let key = |track: &str, rack: EffectRack| {
+        let entry = |track: &str, rack: EffectRack| {
             let matching: Vec<_> = effects
                 .entries
                 .iter()
@@ -4423,26 +4470,29 @@ mod tests {
                 })
                 .collect();
             assert_eq!(matching.len(), 1, "{track} {rack:?} prepares chain0 once");
-            matching[0].metadata.program_key()
+            matching[0]
         };
-        let active = key("bank01", EffectRack::Simd1);
-        let bypassed = key(&last, EffectRack::Simd1);
-        assert!(bypassed.bypass && !active.bypass);
-        assert_ne!(bypassed, active, "bypass alone separates the two programs");
+        let active = entry("bank01", EffectRack::Simd1);
+        let bypassed = entry(&last, EffectRack::Simd1);
+        assert!(bypassed.initial_bypass && !active.initial_bypass);
         assert_eq!(
-            effect_contract::EffectProgramKey {
-                bypass: false,
-                ..bypassed
-            },
-            active,
-            "and nothing else does"
+            bypassed.metadata.program_key(),
+            active.metadata.program_key(),
+            "bypass no longer separates the two programs"
         );
-        let shadow = key("bank00", EffectRack::Dynamic);
-        let original = key("bank00", EffectRack::Simd1);
-        assert!(shadow.bypass && !original.bypass);
-        assert_ne!(
-            shadow, original,
-            "one slot id in two racks: two distinct programs"
+        assert!(!bypassed.metadata.program_key().bypass);
+        let lane = bypassed
+            .control
+            .as_deref()
+            .expect("the bypass rides a lane");
+        assert!(!lane.has_channel() && lane.bypassed());
+        assert!(active.control.is_none());
+        let shadow = entry("bank00", EffectRack::Dynamic);
+        let original = entry("bank00", EffectRack::Simd1);
+        assert!(shadow.initial_bypass && !original.initial_bypass);
+        assert!(
+            shadow.control.is_some() && original.control.is_none(),
+            "one slot id in two racks: two entries, and only the bypassed one holds a lane"
         );
 
         let artifact = compile_chain_fixture(effects);
@@ -4450,32 +4500,31 @@ mod tests {
         let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
         assert_eq!(
             bound.len(),
-            2,
-            "only the first group fills, and it binds both slots"
+            4,
+            "both groups fill, and each binds both slots"
         );
-        let second_group = format!("bank{lanes:02}");
         assert!(
-            bound.iter().all(|slot| slot.members.len() == lanes
-                && slot
+            bound.iter().all(|slot| slot.members.len() == lanes),
+            "every bound bank is full"
+        );
+        assert_eq!(
+            bound
+                .iter()
+                .filter(|slot| slot
                     .members
                     .iter()
-                    .all(|member| member.track_id.as_str() < second_group.as_str())),
-            "the bound banks hold the first group's tracks"
-        );
-        let scalar = report.scalar_in(RackLocation::Simd1);
-        assert_eq!(
-            scalar.len(),
-            2 * lanes,
-            "the second group's chains fall back per node"
-        );
-        assert_eq!(
-            scalar
-                .iter()
-                .filter(|node| node.track_id.as_str() == last)
+                    .any(|member| member.track_id.as_str() == last))
                 .count(),
             2,
-            "both of the bypassed track's nodes render per node"
+            "the bypassed track's chain binds with its group"
         );
+        assert!(report.scalar_in(RackLocation::Simd1).is_empty());
+        assert_eq!(
+            report.scalar_in(RackLocation::Dynamic).len(),
+            1,
+            "the one-track dynamic shadow renders per node"
+        );
+        assert_eq!(artifact.graph().prepared_bank_count(), 4);
     }
 
     /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
@@ -4493,9 +4542,11 @@ mod tests {
         let baseline = compile_chain_fixture(effects);
 
         let (_r2, mut shuffled) = rack_chain_fixture(lanes, 2, |_| 2);
-        let _producers =
-            attach_effect_console(&mut shuffled, NonZeroUsize::new(4).expect("control queue"))
-                .expect("controls attach to every prepared effect");
+        let _producers = attach_effect_live_controls(
+            &mut shuffled,
+            NonZeroUsize::new(4).expect("control queue"),
+        )
+        .expect("controls attach to every prepared effect");
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         for index in (1..shuffled.entries.len()).rev() {
             state ^= state << 13;
@@ -4542,12 +4593,16 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let baseline_producers =
-            attach_effect_console(&mut baseline, NonZeroUsize::new(8).expect("control queue"))
-                .expect("baseline controls attach");
-        let candidate_producers =
-            attach_effect_console(&mut candidate, NonZeroUsize::new(8).expect("control queue"))
-                .expect("candidate controls attach");
+        let baseline_producers = attach_effect_live_controls(
+            &mut baseline,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("baseline controls attach");
+        let candidate_producers = attach_effect_live_controls(
+            &mut candidate,
+            NonZeroUsize::new(8).expect("control queue"),
+        )
+        .expect("candidate controls attach");
         candidate.entries.reverse();
         let baseline = compile_with_session_builtins(SessionBuiltinsCompile {
             plan_id: 6_330,
@@ -4626,7 +4681,7 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let crossed_processor_producers = attach_effect_console(
+        let crossed_processor_producers = attach_effect_live_controls(
             &mut crossed_processor,
             NonZeroUsize::new(8).expect("control queue"),
         )
@@ -4684,7 +4739,7 @@ mod tests {
             ));
             entry.metadata.tail = TailSamples::Finite(entry.metadata.latency.0 + 1);
         }
-        let crossed_control_producers = attach_effect_console(
+        let crossed_control_producers = attach_effect_live_controls(
             &mut crossed_control,
             NonZeroUsize::new(8).expect("control queue"),
         )
@@ -10678,7 +10733,7 @@ mod tests {
     /// cohort run one lane pass per block, every meter merges its lane's block peak instead of
     /// reading its samples, and nothing observable moves.
     ///
-    /// Both deliveries a host prepares selected meters with -- the concurrent console and
+    /// Both deliveries a host prepares selected meters with -- the concurrent live-control path and
     /// `between_render_calls`, the browser's -- at a period the 128-frame block divides (512, so
     /// every block merges) and one it does not (300, so a block that crosses a window takes the
     /// sample loop). Each runs twice: with the pass, and with the pass declined, which is the scalar
@@ -11655,9 +11710,9 @@ mod tests {
     /// still render plausible audio.
     ///
     /// So the oracle is the node form of the same session -- `Backend::Scalar` binds no bank at
-    /// all, so every track keeps its `ConsoleFaderProcessor` -- driven by the *same* commands at
-    /// the *same* blocks, and the two must agree word for word. Lane identity (#83 D4/D5) is what
-    /// makes the scalar arm a legitimate oracle for the vector one.
+    /// all, so every track keeps its `LiveControlFaderProcessor` -- driven by the *same* commands
+    /// at the *same* blocks, and the two must agree word for word. Lane identity (#83 D4/D5) is
+    /// what makes the scalar arm a legitimate oracle for the vector one.
     ///
     /// # Two ways this test was vacuous before it was a gate, both recorded on purpose
     ///
@@ -11784,7 +11839,7 @@ mod tests {
                     if matches!(track_id.as_str(), "ch00" | "ch01")
             )
         });
-        let artifact = compile_scalar_live_console_model(&model, 2_140);
+        let artifact = compile_scalar_live_control_model(&model, 2_140);
         assert_eq!(
             artifact.prepared_builtin_bank_count(),
             0,
@@ -11888,7 +11943,7 @@ mod tests {
                     absolute_sample: block * frames as u64,
                 },
             )
-            .expect("scalar live console render");
+            .expect("scalar live-control render");
             rendered_nonzero |= pcm.iter().any(|sample| *sample != 0.0);
         }
         assert!(rendered_nonzero, "rendered audio must be nonzero");
@@ -12019,7 +12074,7 @@ mod tests {
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
             })
             .collect();
-        let builtins = prepare_session_builtins_with_console(
+        let builtins = prepare_session_builtins_with_live_controls(
             &session,
             &[],
             &controls,
@@ -12187,7 +12242,7 @@ mod tests {
     }
 
     /// [`compile_console_model_with_builtins`] for metric-selected meters (issue #943), through the
-    /// two selected entry points a host prepares them with: the concurrent console, or
+    /// two selected entry points a host prepares them with: the concurrent live-control path, or
     /// `between_render_calls`, which is what host-core calls for the browser. `dispatch` is the
     /// bank backend, so a test can bind the browser's four-lane banks on an eight-lane host.
     fn compile_console_model_with_selected_meters(
@@ -12234,7 +12289,7 @@ mod tests {
                 &session, meters, &controls, caps,
             )
         } else {
-            prepare_selected_session_builtins_with_console(&session, meters, &controls, caps)
+            prepare_selected_session_builtins_with_live_controls(&session, meters, &controls, caps)
         }
         .expect("prepared selected console builtins");
         GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
@@ -12351,7 +12406,7 @@ mod tests {
     /// intentionally separate from the broad host-dispatch helper above: the split-pair seam is
     /// eligible only for between-render-call controls, and scalar dispatch must disable every
     /// builtin bank before the graph is bound.
-    fn compile_scalar_live_console_model(
+    fn compile_scalar_live_control_model(
         model: &session::SessionModel,
         plan_id: u64,
     ) -> PreparedGraphBuiltinsArtifact {
@@ -12366,7 +12421,7 @@ mod tests {
                 max_source_ring_bytes: u64::MAX,
             },
         )
-        .expect("compiled live console model");
+        .expect("compiled live-control model");
         let controls: Vec<TrackControlRequest> = model
             .tracks
             .iter()
@@ -12409,7 +12464,7 @@ mod tests {
             builtins,
             caps: integration_caps(),
         })
-        .unwrap_or_else(|_| panic!("production scalar live console graph"))
+        .unwrap_or_else(|_| panic!("production scalar live-control graph"))
     }
 
     /// The registry that forces every console effect onto the per-node scalar path.

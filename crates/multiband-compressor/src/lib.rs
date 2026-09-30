@@ -1551,6 +1551,12 @@ fn prepare_bank<L: Lane, const W: usize>(
         left[track] = track_left;
         right[track] = track_right;
     }
+    // Issue #1088: the multiband is not padded until #1069 closes (decision 12, "Eligibility"), so a
+    // request with a padded lane is declined after every member is validated, never bound: binding
+    // it would run the clone lanes as real tracks.
+    if request.is_padded() {
+        return Ok(None);
+    }
     if !same_program {
         return Ok(None);
     }
@@ -1584,13 +1590,7 @@ impl NativeEffectFactory for MultibandCompressorFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
+        request.validate_shape()?;
         match request.width {
             BankWidth::Four => prepare_bank::<Simd4, 4>(self, request),
             BankWidth::Eight => prepare_bank::<Simd8, 8>(self, request),

@@ -41,8 +41,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
-    "miso_engine_web_v1_console_track_count",
-    "miso_engine_web_v1_console_track_id",
+    "miso_engine_web_v1_live_control_track_count",
+    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -188,22 +188,22 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "consoleCommandQueueRecords",
+          "name": "liveControlCommandQueueRecords",
           "offset": 32,
           "type": "u64"
         },
         {
-          "name": "consoleMeterBlocks",
+          "name": "liveControlMeterBlocks",
           "offset": 40,
           "type": "u64"
         },
         {
-          "name": "consoleObservationTaps",
+          "name": "liveControlObservationTaps",
           "offset": 48,
           "type": "u64"
         },
         {
-          "name": "consoleMasterTrackPlusOne",
+          "name": "liveControlMasterTrackPlusOne",
           "offset": 56,
           "type": "u64"
         }

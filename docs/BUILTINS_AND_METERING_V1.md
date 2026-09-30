@@ -94,14 +94,14 @@ those explicitly out-of-scope claims.
 
 Meters observe *boundaries*; observation taps observe *effects*. A track's peak is a fold over
 samples the meter can see; a compressor's gain reduction is state only the compressor holds, and it
-reaches a console through a separate mechanism with its own declared menu, cost classes and
+reaches the live controls through a separate mechanism with its own declared menu, cost classes and
 conflating transport. `docs/EFFECT_OBSERVATION_V1.md` is that mechanism in full.
 
 What belongs here is where the two meet: **one frame, one timeline**. Gain reduction rides the
 existing `miso.meter.v1` post rather than a second message, so the pinned-occurrence rule for the
 render callback is unchanged, and the window a gain-reduction value describes is the *same* meter
 window the peak beside it describes — the observation window length is derived from
-`console_meter_blocks`, not configured separately.
+`live_control_meter_blocks`, not configured separately.
 
 The frame is `3 * trackCount + 3` `f32` words: the frozen `2T + 2` peak section exactly where it
 was, then one **non-negative decibel magnitude** per track and the designated master's. The sample
@@ -114,10 +114,10 @@ request.
 
 ## Solo in place (issue #210 phase 1)
 
-Solo is **console state, composed at command admission, with no render-plane code at all**. The
+Solo is **live-control state, composed at command admission, with no render-plane code at all**. The
 strip already carries a per-lane declicked gate whose target is `0.0` or the lane's fader gain, fed
 by a bounded per-track queue of mute records. Solo-in-place adds a state machine above that queue —
-`ConsoleSoloState` in `host-core` — which composes
+`LiveControlSoloState` in `host-core` — which composes
 
 ```
 effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)
@@ -159,7 +159,7 @@ silence stems that the session, read as a document, says are audible.
 
 This does not violate the standing "protocol mutations update the typed session model and must be
 snapshot-able" law, because solo deliberately does not mutate the session model — exactly as live
-fader, pan, mute and effect-parameter moves already do not. Live console state is rebuilt from the
+fader, pan, mute and effect-parameter moves already do not. Live-control state is rebuilt from the
 session on reload and is never written back.
 
 Persisted solo-safe or monitor-scene semantics, if the product ever wants them, are a future session

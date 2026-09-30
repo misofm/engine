@@ -829,8 +829,8 @@ pub struct PreparedGraphPlan {
     /// session that declared no delay.
     track_delays: Vec<PreparedTrackDelay>,
     effects: Vec<GraphPreparedEffect>,
-    /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
-    /// asked for no console, which is what keeps the runtime on its byte-identical path.
+    /// Issue #140 A: one entry per effect live controls drive. Empty for every session that
+    /// asked for no live controls, which is what keeps the runtime on its byte-identical path.
     effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: one entry per effect that has observation taps. Empty for every session
     /// that named no observation capacity, which is what keeps the runtime unobserved *and*
@@ -852,7 +852,7 @@ pub struct GraphPreparedEffect {
     pub native_id: &'static str,
 }
 
-/// One prepared effect's live-console control channel, carried **beside** the prepared effects
+/// One prepared effect's live-control channel, carried **beside** the prepared effects
 /// rather than inside them (issue #140 A).
 ///
 /// # Why beside, and not a field of [`GraphPreparedEffect`]
@@ -860,7 +860,7 @@ pub struct GraphPreparedEffect {
 /// `GraphPreparedEffect` is the payload of `runtime::NodeKind::Effect`. Runtime op/unit layout
 /// changes are admitted separately by the derived runtime metadata reservation, while this
 /// channel remains in its own vector so `NodeKind`'s largest variant stays unchanged. A
-/// console-free plan therefore retains no control-channel payload.
+/// live-control-free plan therefore retains no control-channel payload.
 pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
@@ -880,9 +880,14 @@ pub struct GraphEffectObservationBinding {
 }
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
+    /// The member on each active lane, in lane order: lanes `0..members.len()`.
     pub members: Box<[EffectNodeId]>,
-    /// `true` for every lane that carries a member. #96 binds only full groups, so this is all
-    /// `true` today; the field exists so a padded group can be bound without a second bank shape.
+    /// One entry per lane: `true` exactly on lanes `0..members.len()`, which carry a member, and
+    /// `false` on every padded lane after them (issue #1088). It is the mask the effect's factory
+    /// was bound with (`effect_contract::PrepareEffectBankRequest::active_mask`) and the mask the
+    /// rack chain gathers and scatters by, so a padded lane is never read from or written to a
+    /// track. A full bank is all `true`, and every shipped plan binds only full banks until a group
+    /// asks for padding (`graph_compiler`'s padding policy).
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn effect_contract::PreparedNativeEffectBank>,
     /// Factory-declared response capability shared by this homogeneous bank.
@@ -1061,7 +1066,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
         [0, 0]
     }
 
-    /// Drain this bank's live-console queues, before any lane of the block is dispatched.
+    /// Drain this bank's live-control queues, before any lane of the block is dispatched.
     ///
     /// Forwarded from `rack::BankStage::begin_block`, and it carries that method's
     /// whole contract: an admitted record takes effect on the first sample of the block that
@@ -1070,7 +1075,7 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// upstream of the fader/matrix seam that drained inside `process` instead would publish a
     /// one-channel retarget onto both channels of the block that admitted it.
     ///
-    /// The default is a no-op, which is what a console-free plan pays.
+    /// The default is a no-op, which is what a live-control-free plan pays.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
         let _ = first_sample;
         Ok(())
@@ -1713,7 +1718,7 @@ pub struct PreparedGraphPlanParts {
     /// Issue #210 phase 2: input-side track alignment, one entry per delayed track.
     pub track_delays: Vec<PreparedTrackDelay>,
     pub effects: Vec<GraphPreparedEffect>,
-    /// Issue #140 A: live-console control channels, one per driven effect node.
+    /// Issue #140 A: live-control channels, one per driven effect node.
     pub effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: observation taps, one entry per observed effect node.
     pub effect_observations: Vec<GraphEffectObservationBinding>,
@@ -2729,46 +2734,49 @@ mod observation_size_accounting {
     //! answers the narrower observation question with numbers: "what exactly grew, and by how
     //! much".
     //!
-    //! The answer is: `ConsoleEffect` grew by exactly one nullable pointer, and nothing else grew
-    //! at all, because `ConsoleEffect` is behind a `Box` inside `NodeKind`. Both halves are stated
-    //! as identities over `size_of`, so a future field that changes either one fails here instead
-    //! of silently moving a reported byte.
+    //! The answer is: `LiveControlEffect` grew by exactly one nullable pointer, and nothing else
+    //! grew at all, because `LiveControlEffect` is behind a `Box` inside `NodeKind`. Both halves
+    //! are stated as identities over `size_of`, so a future field that changes either one fails
+    //! here instead of silently moving a reported byte.
 
     use super::*;
     use core::mem::size_of;
 
     #[test]
-    fn the_observation_lane_costs_one_nullable_pointer_in_the_console_effect() {
+    fn the_observation_lane_costs_one_nullable_pointer_in_the_live_control_effect() {
         assert_eq!(
             size_of::<Option<Box<effect_contract::ObservationLane>>>(),
             size_of::<usize>(),
             "an absent lane is a null pointer, not a discriminant plus a pointer"
         );
         assert_eq!(
-            size_of::<runtime::ConsoleEffect>(),
+            size_of::<runtime::LiveControlEffect>(),
             size_of::<GraphPreparedEffect>()
                 + size_of::<Box<effect_contract::EffectControlLane>>()
                 + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
                 + size_of::<effect_contract::BypassShunt>()
                 + size_of::<Option<Box<effect_contract::ObservationLane>>>(),
-            "the console effect is exactly its five fields, and #143 added the fifth"
+            "the live-control effect is exactly its five fields, and #143 added the fifth"
         );
     }
 
     #[test]
     fn no_reported_runtime_byte_moved() {
-        // `NodeKind::ConsoleEffect` carries a `Box`, so the variant is one pointer and the enum's
-        // size is still decided by `NodeKind::Effect(GraphPreparedEffect)` -- the same variant that
-        // decided it before #140 and before #143.
-        assert_eq!(size_of::<Box<runtime::ConsoleEffect>>(), size_of::<usize>());
+        // `NodeKind::LiveControlEffect` carries a `Box`, so the variant is one pointer and the
+        // enum's size is still decided by `NodeKind::Effect(GraphPreparedEffect)` -- the same
+        // variant that decided it before #140 and before #143.
+        assert_eq!(
+            size_of::<Box<runtime::LiveControlEffect>>(),
+            size_of::<usize>()
+        );
         assert!(
             size_of::<runtime::NodeKind>() >= size_of::<GraphPreparedEffect>(),
             "the largest variant is still the unobserved prepared effect"
         );
         assert!(
             size_of::<runtime::NodeKind>()
-                < size_of::<GraphPreparedEffect>() + size_of::<runtime::ConsoleEffect>(),
-            "the console effect is boxed, so it cannot be the enum's size"
+                < size_of::<GraphPreparedEffect>() + size_of::<runtime::LiveControlEffect>(),
+            "the live-control effect is boxed, so it cannot be the enum's size"
         );
     }
 }
@@ -5805,9 +5813,9 @@ mod tests {
 
     /// One track: source input -> one dynamic-rack effect -> output, at a four-frame quantum.
     ///
-    /// `control` is the consumer half of the effect's live-console channel, or `None` for the
-    /// console-free plan the workspace has always bound.
-    fn console_effect_plan(
+    /// `control` is the consumer half of the effect's live-control channel, or `None` for the
+    /// live-control-free plan the workspace has always bound.
+    fn live_control_effect_plan(
         latency: u64,
         control: Option<Box<EffectControlLane>>,
         source: Box<dyn GraphRuntimeProcessor>,
@@ -5864,7 +5872,7 @@ mod tests {
                 kind: GraphPortKind::MainInput,
                 effect_port: None,
             },
-            path: "$.console.main".to_owned(),
+            path: "$.live_controls.main".to_owned(),
         };
         let output_edge = GraphEdge {
             id: GraphEdgeId::TrackMain {
@@ -5880,7 +5888,7 @@ mod tests {
                 kind: GraphPortKind::MainInput,
                 effect_port: None,
             },
-            path: "$.console.output".to_owned(),
+            path: "$.live_controls.output".to_owned(),
         };
         let schedule = vec![input.clone(), effect_node.clone(), output_node.clone()];
         let graph = PreparedGraphPlan::new(PreparedGraphPlanParts {
@@ -5974,7 +5982,7 @@ mod tests {
         }
     }
 
-    fn render_console_blocks(
+    fn render_live_control_blocks(
         plan: &mut PreparedRenderPlan,
         start_block: usize,
         blocks: usize,
@@ -6013,14 +6021,14 @@ mod tests {
     /// #140 A / E1 for the dynamic rack: an admitted parameter command takes effect on the first
     /// sample of the next rendered block, and not one sample before.
     ///
-    /// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect`
+    /// Red mutation: move the `live.control.stage(..)` drain in `execute_op`'s `LiveControlEffect`
     /// arm to *after* `effect.processor.process(block)` -> the command lands one block late and
     /// the `block 1` assertion below fails on its first sample.
     #[test]
-    fn a_console_parameter_command_applies_at_the_next_block_boundary() {
+    fn a_live_control_parameter_command_applies_at_the_next_block_boundary() {
         let (mut producer, control) = control_pair(4);
-        let mut plan = console_effect_plan(0, Some(control), Box::new(SampleIndexSource));
-        let block0 = render_console_blocks(&mut plan, 0, 1);
+        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let block0 = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(
             &block0[..4],
             &[0.0, 1.0, 2.0, 3.0],
@@ -6034,7 +6042,7 @@ mod tests {
                 value: 0.5,
             })
             .expect("room");
-        let block1 = render_console_blocks(&mut plan, 1, 1);
+        let block1 = render_live_control_blocks(&mut plan, 1, 1);
         assert_eq!(
             &block1[..4],
             &[2.0, 2.5, 3.0, 3.5],
@@ -6050,13 +6058,14 @@ mod tests {
     /// Live bypass returns the dry signal delayed by exactly the effect's declared latency, so
     /// every PDC route timing the compiler derived from that latency stays correct.
     ///
-    /// Red mutation: delete the `console.shunt.capture(..)` call -> the dry buffer keeps its
+    /// Red mutation: delete the `live.shunt.capture(..)` call -> the dry buffer keeps its
     /// initial zeros and a bypassed block renders silence instead of the delayed input.
     #[test]
     fn live_bypass_is_latency_preserving_and_reversible() {
         const LATENCY: u64 = 2;
         let (mut producer, control) = control_pair(4);
-        let mut plan = console_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
+        let mut plan =
+            live_control_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
         producer
             .try_push(effect_contract::EffectControlRecord::Parameter {
                 parameter_index: 0,
@@ -6064,7 +6073,7 @@ mod tests {
                 value: 0.0,
             })
             .expect("room");
-        let wet = render_console_blocks(&mut plan, 0, 2);
+        let wet = render_live_control_blocks(&mut plan, 0, 2);
         // Latency 2 with a zero gain: the first two samples are the line's zeros, then zeros.
         assert!(
             wet[..4].iter().all(|value| *value == 0.0),
@@ -6074,7 +6083,7 @@ mod tests {
         producer
             .try_push(effect_contract::EffectControlRecord::Bypass(true))
             .expect("room");
-        let bypassed = render_console_blocks(&mut plan, 2, 1);
+        let bypassed = render_live_control_blocks(&mut plan, 2, 1);
         assert_eq!(
             &bypassed[..4],
             &[6.0, 7.0, 8.0, 9.0],
@@ -6085,7 +6094,7 @@ mod tests {
         producer
             .try_push(effect_contract::EffectControlRecord::Bypass(false))
             .expect("room");
-        let restored = render_console_blocks(&mut plan, 3, 1);
+        let restored = render_live_control_blocks(&mut plan, 3, 1);
         assert!(
             restored[..4].iter().all(|value| *value == 0.0),
             "releasing bypass returns the *current* wet signal, not a stale one: {:?}",
@@ -6098,23 +6107,24 @@ mod tests {
         );
     }
 
-    /// A console-free plan renders exactly the bits a console-attached plan renders when no
-    /// command is ever sent: the feed is inert until something is admitted.
+    /// A live-control-free plan renders exactly the bits a live-control-attached plan renders when
+    /// no command is ever sent: the feed is inert until something is admitted.
     ///
     /// This is the class-A identity claim in its smallest form -- the same claim the corpus
     /// digests and the three wasm-gate legs make for whole sessions.
     #[test]
-    fn an_idle_console_changes_no_rendered_bit() {
+    fn idle_live_controls_change_no_rendered_bit() {
         for latency in [0_u64, 3] {
-            let mut without = console_effect_plan(latency, None, Box::new(SampleIndexSource));
+            let mut without = live_control_effect_plan(latency, None, Box::new(SampleIndexSource));
             let (_producer, control) = control_pair(4);
-            let mut with = console_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
-            let plain = render_console_blocks(&mut without, 0, 4);
-            let console = render_console_blocks(&mut with, 0, 4);
+            let mut with =
+                live_control_effect_plan(latency, Some(control), Box::new(SampleIndexSource));
+            let plain = render_live_control_blocks(&mut without, 0, 4);
+            let live = render_live_control_blocks(&mut with, 0, 4);
             assert_eq!(
                 plain.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                console.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                "latency={latency}: an idle console is bit-inert",
+                live.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "latency={latency}: idle live controls are bit-inert",
             );
         }
     }
@@ -6122,9 +6132,9 @@ mod tests {
     /// The staging window cannot overflow, because preparation caps the queue at the effect's
     /// automation capacity; a violated cap would be counted here rather than written past the end.
     #[test]
-    fn the_console_effect_drops_nothing_within_its_prepared_capacity() {
+    fn the_live_control_effect_drops_nothing_within_its_prepared_capacity() {
         let (mut producer, control) = control_pair(2);
-        let mut plan = console_effect_plan(0, Some(control), Box::new(SampleIndexSource));
+        let mut plan = live_control_effect_plan(0, Some(control), Box::new(SampleIndexSource));
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             producer
                 .try_push(effect_contract::EffectControlRecord::Parameter {
@@ -6134,7 +6144,7 @@ mod tests {
                 })
                 .expect("room");
         }
-        let block = render_console_blocks(&mut plan, 0, 1);
+        let block = render_live_control_blocks(&mut plan, 0, 1);
         assert_eq!(&block[..4], &[0.0, 2.0, 4.0, 6.0]);
         assert_eq!(&block[4..], &[0.0, -2.0, -4.0, -6.0]);
     }

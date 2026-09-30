@@ -27,8 +27,8 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use builtins::MeterTap;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
-    prepare_host_session_with_console, session_structural_symmetry,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
+    prepare_host_session_with_live_controls, session_structural_symmetry,
 };
 use session::{canonical_session_json, parse_session_json};
 
@@ -60,8 +60,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -119,9 +119,10 @@ fn signal(index: usize) -> f32 {
 /// "the same source, already late".
 fn render(document: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec<f32>; 2] {
     let (_, mut prepared, mut handles) =
-        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_live_controls(document, &caps(), &live_controls())
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     if let Some(forced_off) = collapse {
         prepared.plan.force_mono_collapse_off(forced_off);
     }

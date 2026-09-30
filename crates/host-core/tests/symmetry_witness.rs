@@ -46,9 +46,9 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use builtins::MeterTap;
 use effect_contract::{EffectControlRecord, ParameterChannel};
 use host_core::{
-    ChannelSymmetryWitness, EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps,
-    HostShapePolicy, PreparedHost, SourceSubmission, prepare_host_session_with_console,
-    session_structural_symmetry,
+    ChannelSymmetryWitness, EffectRack, HostLiveControlHandles, HostLiveControlRequest,
+    HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
+    prepare_host_session_with_live_controls, session_structural_symmetry,
 };
 use session::{CompiledSession, canonical_session_json, parse_session_json};
 
@@ -90,8 +90,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -103,7 +103,7 @@ fn console() -> HostConsoleRequest {
 
 struct Console {
     prepared: PreparedHost,
-    handles: HostConsoleHandles,
+    handles: HostLiveControlHandles,
     block: usize,
 }
 
@@ -126,9 +126,10 @@ fn prepare(document: &str) -> (CompiledSession, Console) {
 /// rather than on the census, so the precondition is not one it owes.
 fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
     let (session, prepared, handles) =
-        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_live_controls(document, &caps(), &live_controls())
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     assert_eq!(handles.tracks.len(), TRACKS);
     (
         session,
@@ -193,8 +194,10 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
         .effect_controls
         .iter_mut()
         .find(|producer| {
+            // Every track carries one EQ, in SIMD rack 1 or, under `edited_apart`, the dynamic
+            // rack.
             producer.track_id.as_ref() == track_id
-                && producer.rack == EffectRack::Simd1
+                && matches!(producer.rack, EffectRack::Simd1 | EffectRack::Dynamic)
                 && producer.effect_index == 0
         })
         .expect("a control channel for the addressed effect");
@@ -392,11 +395,11 @@ fn declining_tracks(console: &Console) -> std::collections::BTreeSet<String> {
 /// The mono fixture with per-track edits, addressed by track index.
 ///
 /// The two levers are the two the tests below need, and they are levers on *different* things.
-/// `bypass` sets a track's EQ to prepare-time bypass, which changes its `EffectProgramKey` and so
-/// its cohort; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and
-/// so its **pool class** (mono-collapse M1). Two independent two-valued splits give four cohorts
-/// over eight tracks, which is how [`the_scalar_console_effect_arm_maintains_its_own_live_terms`]
-/// reaches a plan with no effect bank at the eight-lane launch width.
+/// `bypass` sets a track's EQ to prepare-time bypass, which seeds its lane's `UNBYPASSED` term
+/// false; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and so
+/// its **pool class** (mono-collapse M1). Since #1087 a session bypass no longer changes the
+/// `EffectProgramKey` (it is per-lane shunt state), so it no longer splits a cohort:
+/// [`edited_apart`] is the fixture that still needs the split.
 fn edited(bypass: &[usize], invert: &[usize]) -> String {
     let mut model = parse_session_json(&mono_session()).expect("mono fixture parses");
     for (index, track) in model.tracks.iter_mut().enumerate() {
@@ -405,6 +408,26 @@ fn edited(bypass: &[usize], invert: &[usize]) -> String {
         }
         if invert.contains(&index) {
             track.builtins.right.polarity_invert = true;
+        }
+    }
+    canonical_session_json(&model).expect("edited fixture canonicalizes")
+}
+
+/// [`edited`], with every bypassed track's EQ moved from SIMD rack 1 into the dynamic rack.
+///
+/// Two independent two-valued splits over eight tracks: the rack (a bypassed track's EQ is a
+/// different rack chain, so it never shares a bank with an unbypassed one) crossed with the pool
+/// class. Four cohorts of two do not fill an eight-lane bank, which is how
+/// [`the_scalar_live_control_effect_arm_maintains_its_own_live_terms`] reaches a plan with no
+/// effect bank at the eight-lane launch width. Before #1087 the bypass itself was the first split,
+/// because it changed the EQ's `EffectProgramKey`; now bypassed and unbypassed EQs share a key
+/// and would bank together.
+fn edited_apart(bypass: &[usize], invert: &[usize]) -> String {
+    let mut model = parse_session_json(&edited(bypass, invert)).expect("edited fixture parses");
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if bypass.contains(&index) {
+            let eq = track.simd1.effects.remove(0);
+            track.dynamic.effects.insert(0, eq);
         }
     }
     canonical_session_json(&model).expect("edited fixture canonicalizes")
@@ -439,41 +462,43 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
     );
 }
 
-/// The **scalar** console-effect arm maintains its own live terms.
+/// The **scalar** live-control effect arm maintains its own live terms.
 ///
 /// # The debt this pays
 ///
-/// Two objects drain a live-console queue into a witness: `ConsoleEffectBankStage`, one lane of a
-/// bank at a time, and `runtime::NodeKind::ConsoleEffect`, one per-node instance at a time. Every
-/// other test in this file runs on the checked-in fixture, which banks all eight of its tracks
-/// into one cohort -- so only the first arm was ever executed, and the census would not have
-/// noticed if `NodeKind::ConsoleEffect`'s `.and(console.control.symmetry())` had been dropped
+/// Two objects drain a live-control queue into a witness: `LiveControlEffectBankStage`, one lane of
+/// a bank at a time, and `runtime::NodeKind::LiveControlEffect`, one per-node instance at a time.
+/// Every other test in this file runs on the checked-in fixture, which banks all eight of its
+/// tracks into one cohort -- so only the first arm was ever executed, and the census would not have
+/// noticed if `NodeKind::LiveControlEffect`'s `.and(live.control.symmetry())` had been dropped
 /// outright.
 ///
 /// # How the arm is made bank-free at the eight-lane launch width
 ///
-/// Two independent splits over the eight tracks: a prepare-time bypass (which changes the
-/// `EffectProgramKey`, so bypassed and unbypassed tracks can never share a bank) crossed with a
-/// polarity inversion (which clears `DESIGNED`, so mono-collapse M1's pool class separates them).
-/// Four cohorts of two do not fill an eight-lane bank, so **no** effect bank binds and every EQ is
-/// a per-node `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a
-/// fact rather than an intention.
+/// Two independent splits over the eight tracks: a prepare-time bypass on an EQ moved into the
+/// dynamic rack (so bypassed and unbypassed EQs sit in different rack chains and can never share a
+/// bank; since #1087 the bypass alone would not split them) crossed with a polarity inversion
+/// (which clears `DESIGNED`, so mono-collapse M1's pool class separates them). Four cohorts of two
+/// do not fill an eight-lane bank, so **no** effect bank binds and every EQ is a per-node
+/// `LiveControlEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a fact
+/// rather than an intention.
 ///
 /// A four-lane build (AArch64 NEON, #1017) does bank a cohort of two, so there this fixture never
 /// reaches the per-node arm and the test is ignored, by name and with its reason, rather than run
 /// against banked EQs it does not describe. The arm itself is width-independent scalar code, and
 /// the x86-64-v3 legs run it.
 ///
-/// Red mutation: drop `.and(console.control.symmetry())` from `NodeKind::channel_symmetry`'s
-/// `ConsoleEffect` arm -> the parameter half of this test fails and every banked test stays green.
+/// Red mutation: drop `.and(live.control.symmetry())` from `NodeKind::channel_symmetry`'s
+/// `LiveControlEffect` arm -> the parameter half of this test fails and every banked test stays
+/// green.
 #[test]
 #[cfg_attr(
     not(target_arch = "x86_64"),
     ignore = "a four-lane bank takes a cohort of two, so this fixture reaches the per-node arm only \
               at the eight-lane launch width (#1017)"
 )]
-fn the_scalar_console_effect_arm_maintains_its_own_live_terms() {
-    let document = edited(&[4, 5, 6, 7], &[2, 3, 6, 7]);
+fn the_scalar_live_control_effect_arm_maintains_its_own_live_terms() {
+    let document = edited_apart(&[4, 5, 6, 7], &[2, 3, 6, 7]);
     let (_session, mut console) = prepare_unbanked(&document);
     assert_eq!(
         console.prepared.report.effect_bank_scratch_bytes, 0,
@@ -830,7 +855,7 @@ fn an_observe_record_never_moves_the_witness() {
 /// Red mutation: change `SEAM_SIDE_WITNESS` to `DECLINED`, or make
 /// `ChannelSymmetryWitness::admit` ignore `R::SEAM` -> this fails.
 #[test]
-fn seam_side_console_traffic_leaves_every_lane_eligible() {
+fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
     use builtins::BuiltinLaneSelector;
     use builtins::Matrix2x2;
     use builtins_compiler::{TrackControlRecord, TrackFaderRecord};

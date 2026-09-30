@@ -263,7 +263,7 @@ describe("eval 4 -- losslessness by physics, on the wasm engine", () => {
   async function renderBlocks(document, commands, blocks = 8) {
     const engine = await createOfflineEngine(document, {
       asset,
-      console: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
+      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
     });
     try {
       if (commands) {

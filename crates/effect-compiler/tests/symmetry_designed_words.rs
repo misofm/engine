@@ -279,6 +279,7 @@ fn a_bank_declines_exactly_the_asymmetric_lane() {
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("bind")
         .expect("the EQ carries a homogeneous bank kernel");

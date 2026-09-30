@@ -229,6 +229,7 @@ the slice that changes the behaviour.
 | B0 | `1085-console-b0-add-the-console-strip-benchmark-rows.md` | Strip at N in {9, 10, 13, 16, 64}, app shape, sparse activity; layout-neutral `strip_layout`; two V8 documents | R0 |
 | S0 | `1086-console-s0-record-the-console-strip-baseline.md` | One native and one V8 run on B0's commit | B0 |
 | P1 | `1087-console-p1-keep-a-bypassed-lane-in-its-effect-bank.md` | Session bypass -> shunt state; mixed-bypass cohorts bind one bank | R0 |
+| P1b | `1100-console-p1b-bound-and-charge-the-bypass-shunts.md` | P1's verdict conditions: bound and charge the staging windows and shunts; the multiband keeps its prepared bypass; allocation and `-0.0` witnesses | P1 |
 | P2a | `1088-console-p2a-let-an-effect-bank-bind-a-partial-group.md` | Active mask, padding contract, planner support; every factory still declines | P1 (merge order: shared files) |
 | P2b | `1089-console-p2b-pad-parametric-eq-banks.md` | EQ opts in (supersedes #888's absent-member half) | P2a |
 | P2c | `1090-console-p2c-pad-compressor-banks.md` | Compressor opts in (supersedes #889's absent-member half) | P2a |
@@ -254,7 +255,7 @@ after the push.
 | Batch | Slices, in merge order | Why this boundary |
 |---|---|---|
 | C1 | R0, B0, then S0's records | The baseline must be recorded on the unchanged engine, so C1 is pushed before any engine slice lands |
-| C2 | P1, P2a, then P2b-P2e | S2's banking prerequisites, with no schema change. Every shipped plan is unchanged except mixed-bypass cohorts (P1) |
+| C2 | P1, P1b, P2a, then P2b-P2e | S2's banking prerequisites, with no schema change. Every shipped plan is unchanged except mixed-bypass cohorts (P1) |
 | C3 | S1r, S1a, S1b, S1c, S1d | The schema change, pushed once. From S1a until S1d the SDK is out of step, so nothing is pushed in between |
 | C4 | S2, then S4 | The guarantee, then the after-measurement |
 
@@ -262,6 +263,9 @@ Sequencing inside each batch follows shared files, not only functional dependenc
 - P1 and P2a both edit `effect-contract/src/lib.rs` and `graph-compiler/src/banks.rs`, so P1
   merges first.
 - P2b-P2e edit disjoint effect crates and may land in any order after P2a.
+- C2 is not pushed until P1b, P2b, P2c and P2e have closed (P1 verdict, conditions 1-4). If one of
+  P2b, P2c or P2e cannot close, P1's lowering is withheld for that slice's effects before the
+  push, so no pushed build couples a bypassed lane's D7 to its bank-mates.
 - S1r, S1a and S1c all edit `effect-compiler/src/prepare.rs`, and S1r and P1 both edit
   `rack/src/lib.rs`. C2 lands before C3, and inside C3 the order is S1r, S1a, S1b, S1c, S1d, one at
   a time.
@@ -300,6 +304,12 @@ both.
 - Performance issues that matter more under this design: #887 (tiled partial gather and scatter,
   amended) and #892 (the dry line feed when nothing is bypassed).
 - Identity-slot insert cohorts: #888 and #889, amended to that half.
+- #1102: put a limiter bank back on its uniform body after a partial recovery (#1091 verdict L1).
+- One shared per-lane D7 recovery: #1089-#1092 each recover per lane in their own crate (for
+  example `compressor::finish_lanes`). The frame-zeroing half may belong beside
+  `effect_runtime::bank::nonfinite_lane_mask`, in the spirit of #95's ratchet (#1089 verdict L4).
+  File it when a fifth copy would otherwise appear.
+- Multiband per-lane D7, which lifts its prepared session bypass (#1100) once #1069 closes.
 
 ## App (misofm/app; out of this repo's scope)
 
@@ -334,6 +344,7 @@ S1d's handoff notes carry the name maps.
 | B0 | #1085 |
 | S0 | #1086 |
 | P1 | #1087 |
+| P1b | #1100 |
 | P2a | #1088 |
 | P2b | #1089 |
 | P2c | #1090 |
@@ -512,3 +523,61 @@ Terra, 2026-09-29, a spec-only revision answering Sol's R0 verdict above.
   - The design verification moved to `docs/handoffs/console-strip-2026-09-29/VERIFY.md`.
   - The GitHub bodies (#1084-#1099, and the #887-#889 amendments) are root's to sync after the C1
     push.
+
+## Sol verdict, R0 attempt 2
+
+**PASS.** Sol checked `11ea359b` against the attempt-1 verdict, the owner's decisions and the code
+at that commit.
+
+**Attempt-1 findings, each closed.**
+- **High (S4 had no owner).**
+  - S1a's `dynamic` clause moves B0's app-shape row, native and V8, into `console.pre_insert`.
+    Bypass is not part of the "uniform" test, so the row qualifies, and the 2-mod-3 pattern
+    survives.
+  - Chain order is preserved in every case of the append, prepend and stay rule.
+  - S1a owns the V8 fixture lookup and the builders. S1c owns the rack codes. Both gate on the
+    native console preflight and on the V8 harness's `prepare` and `preflight` steps.
+  - S4 maps every row to the slice that owns it.
+- **Medium, merge order.** S1r now merges before S1a.
+- **Medium, authorization.** S1a is authorized for, and gated on, `check-console-benchmark-fixture.sh`,
+  `check-console-fixtures.sh` and `test-console-benchmark.sh`.
+- **Medium, attribution.** The owner's decision and root's application are now separated, and
+  `_v1` stays. Sol cannot see the owner's question text in the repo, so this is accepted as root
+  attests it.
+- **Medium, batch plan.** C1-C4 works under CI-conscious delivery:
+  - each batch is pushed once and its issues close after the push;
+  - C1 is pushed before any engine slice lands;
+  - C3's single push is forced by the SDK lockstep;
+  - the file-based sequencing inside each batch is correct.
+- **Low.** Every low finding is closed.
+
+**The deviation is sound.** Sol reclassified all 18 documents with a script. The only multi-track
+documents with a uniform, non-empty `dynamic` rack are the two named witnesses. Neither blocks S4:
+- `console-sixty-four-track.json` feeds only `sixty_four_track_console_legacy` and its twin,
+  `sixty_four_track_eq_comp_simd1`.
+- The headline `sixty_four_track_console` row and B0's strip and sparse-activity rows use the
+  `-intended` fixture (`tools/console-workload/src/lib.rs:582-593`). That fixture becomes fully
+  console, so S4 measures the console model at N = 64.
+- Keeping the witnesses preserves the console-against-insert pairs that AGENTS.md's placement rule
+  needs.
+
+**Gates.** All exited 0 at `11ea359b`, on the `full` route:
+- `check-workspace-policy.sh` and `check-session-policy.sh`;
+- `check-script-reachability.py`;
+- `check-ci-path-routing.py` and `test-ci-path-routing.py`;
+- `check-env-vocabulary.sh`;
+- `check-dsp-research.sh` and `check-builtins-listening.sh`.
+
+**Low findings.** None blocks R0; fix them in passing.
+1. **S1c's harness authorization is too narrow.** It says "the rack byte only" (`:279`), but after
+   S1c's codes change, the lookup at `:136-140` also keys on `control.rack`. Authorize S1c for the
+   harness's rack-code handling, or have S1a key the lookup on `slot_id`.
+2. **S4's gate 5 names the wrong V8 fields.** The V8 records carry `quiet_output_sha256`,
+   `restated_output_sha256`, `automated_output_sha256` and `preflight_output_sha256`, not
+   `output_sha256`. Name them.
+3. **S4's gate 5 has no allowance for intervening bit changes.** Allow a difference that is
+   attributed to a named non-console commit that declared a bit change between C1 and C4.
+   Otherwise an unrelated class-B fix makes the gate unpassable.
+4. **Typo.** The P2b-P2e dependency lines read "(P2a), #1088)".
+5. **Optional.** S1r's gates pass on the old schema, so it could close C2 instead and shorten C3's
+   unpushed window.

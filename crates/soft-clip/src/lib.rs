@@ -39,7 +39,7 @@ use effect_contract::{
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::{NonFiniteReport, finish_block};
+use effect_runtime::bank::{NonFiniteReport, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{ParameterSpec, is_negative_zero, normalize_zero};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload as payload;
@@ -385,6 +385,30 @@ impl<L: Lane> Channel<L> {
                 ramp.snap();
                 set_lane(self.state.field_mut(parameter), lane, ramp.current);
             }
+        }
+    }
+
+    /// [`reset_discontinuity`](Self::reset_discontinuity) for one lane: its rows of every history
+    /// are zeroed and its ramps snapped, and every other lane is left bit-unchanged (issue #1092).
+    ///
+    /// The shared cursor is not moved. It need not be: every row of the lane is zero, so the ring
+    /// reads the same at any rotation, which is the property a lane restore already relies on
+    /// ([`apply_lane_words`]). So this is bit-for-bit what a scalar instance's whole reset does to
+    /// its one lane.
+    fn reset_lane_discontinuity(&mut self, lane: usize) {
+        let width = L::WIDTH;
+        for history in [
+            &mut self.history.x,
+            &mut self.history.e,
+            &mut self.history.dry,
+        ] {
+            for word in history.iter_mut().skip(lane).step_by(width) {
+                *word = 0.0;
+            }
+        }
+        for (parameter, ramp) in self.ramps[lane].iter_mut().enumerate() {
+            ramp.snap();
+            set_lane(self.state.field_mut(parameter), lane, ramp.current);
         }
     }
 
@@ -785,6 +809,10 @@ struct SoftClip<L: Lane> {
     left: Channel<L>,
     right: Channel<L>,
     nonfinite: NonFiniteReport,
+    /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
+    /// it takes no automation, and D7 recovers it without charging it (the padding contract on
+    /// `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank is active.
+    active: u32,
 }
 
 impl<L: Lane> SoftClip<L> {
@@ -802,6 +830,7 @@ impl<L: Lane> SoftClip<L> {
             left,
             right,
             nonfinite: NonFiniteReport::new(),
+            active: (1 << L::WIDTH) - 1,
         }
     }
 
@@ -820,28 +849,51 @@ impl<L: Lane> SoftClip<L> {
 
     /// Renders one block of both channels and applies the master plan §4.4 boundary check.
     ///
-    /// Returns `true` if the block was accepted. On rejection both channels are zeroed, every
-    /// lane's histories are cleared and its ramps snapped, and the bank's `nonfinite_blocks`
-    /// counter advances by one — a *block*, never a sample.
-    fn process(
-        &mut self,
-        left: &mut [f32],
-        right: &mut [f32],
-        frames: usize,
-        bypass: bool,
-    ) -> bool {
+    /// Returns the bitmask of the active lanes charged with a D7 recovery, `0` when the block was
+    /// accepted. See [`recover_lanes`](Self::recover_lanes).
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize, bypass: bool) -> u32 {
         self.left.process(left, frames, bypass);
         self.right.process(right, frames, bypass);
-        let Self {
-            left: left_channel,
-            right: right_channel,
-            nonfinite,
-            ..
-        } = self;
-        finish_block::<L>(left, right, nonfinite, || {
-            left_channel.reset_discontinuity();
-            right_channel.reset_discontinuity();
-        })
+        if check_block::<L>(left) && check_block::<L>(right) {
+            return 0;
+        }
+        let failed = nonfinite_lane_mask::<L>(left) | nonfinite_lane_mask::<L>(right);
+        self.recover_lanes(left, right, failed)
+    }
+
+    /// The D7 recovery, one lane at a time (issue #1092; decision 12's coupling rule).
+    ///
+    /// A lane that failed the boundary check on either channel has both of its channels zeroed,
+    /// its rows of every history cleared and its ramps snapped, which is exactly what the scalar
+    /// instance does to its one lane; every other lane is left bit-unchanged. The shared
+    /// `effect_runtime::bank::finish_block` zeroed and reset the whole bank and this crate charged
+    /// every lane, so one hot track -- a bypassed one whose wet path still runs (#1087) -- silenced
+    /// and charged its bank-mates.
+    ///
+    /// A padded lane is recovered like any other, so it stays at rest, but it is never charged.
+    /// Returns the charged lanes; when there are any, the bank's `nonfinite_blocks` advances by one
+    /// -- a *block*, never a sample -- and `nonfinite_lanes` records them.
+    fn recover_lanes(&mut self, left: &mut [f32], right: &mut [f32], failed: u32) -> u32 {
+        let width = L::WIDTH;
+        for lane in 0..width {
+            if failed & (1 << lane) == 0 {
+                continue;
+            }
+            for word in left.iter_mut().skip(lane).step_by(width) {
+                *word = 0.0;
+            }
+            for word in right.iter_mut().skip(lane).step_by(width) {
+                *word = 0.0;
+            }
+            self.left.reset_lane_discontinuity(lane);
+            self.right.reset_lane_discontinuity(lane);
+        }
+        let charged = failed & self.active;
+        if charged != 0 {
+            self.nonfinite.nonfinite_lanes = charged;
+            self.nonfinite.nonfinite_blocks = self.nonfinite.nonfinite_blocks.saturating_add(1);
+        }
+        charged
     }
 }
 
@@ -880,18 +932,53 @@ impl NativeEffectFactory for SoftClipFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
-        match request.width {
-            BankWidth::Four => prepare_bank::<Simd4>(self, request),
-            BankWidth::Eight => prepare_bank::<Simd8>(self, request),
-        }
+        bind_bank::<true>(self, request)
     }
+}
+
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
+fn bind_bank<const NATIVE_ONLY: bool>(
+    factory: &SoftClipFactory,
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    request.validate_shape()?;
+    Ok(match request.width {
+        BankWidth::Four => {
+            boxed::<Simd4, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
+        }
+        BankWidth::Eight => {
+            boxed::<Simd8, NATIVE_ONLY>(prepare_bank::<_, NATIVE_ONLY>(factory, request)?)
+        }
+    })
+}
+
+/// The width a bank of `L` runs at: a compile-time constant for each `L`.
+const fn lane_width<L: Lane>() -> BankWidth {
+    if L::WIDTH == 4 {
+        BankWidth::Four
+    } else {
+        BankWidth::Eight
+    }
+}
+
+/// Boxes a bank bound at `L::WIDTH` lanes.
+///
+/// The D4 check of [`prepare_bank`] is repeated here, where it is a compile-time constant ahead of
+/// the only reference to the bank's vtable, so a production build never links the render code of
+/// a width it does not execute. `prepare_bank` cannot promise that alone: it returns the bank by
+/// value, and the eight-lane soft clip would otherwise stay in the four-lane browser artifact.
+fn boxed<L: Lane, const NATIVE_ONLY: bool>(
+    bank: Option<PreparedSoftClipBank<L>>,
+) -> Option<Box<dyn PreparedNativeEffectBank>>
+where
+    PreparedSoftClipBank<L>: PreparedNativeEffectBank,
+{
+    if NATIVE_ONLY && !width_is_native(lane_width::<L>()) {
+        return None;
+    }
+    bank.map(|bank| Box::new(bank) as Box<dyn PreparedNativeEffectBank>)
 }
 
 /// `true` if this artifact executes `width` lanes natively.
@@ -910,10 +997,22 @@ const fn width_is_native(width: BankWidth) -> bool {
     }
 }
 
-fn prepare_bank<L: Lane>(
+/// Binds one bank of `L::WIDTH` lanes.
+///
+/// # Padding (issue #1092; decision 12)
+///
+/// The soft clip accepts a padded request. Each lane, active or padded, is prepared from its own
+/// request, which for a padded lane is the caller's clone of an active member's, so every lane is
+/// validated. A padded lane takes no automation, and D7 recovers it without charging it
+/// ([`SoftClip::recover_lanes`]). Fed `+0.0` it writes `+0.0`: every history holds zeros, so the
+/// dry word is `+0.0`, and the wet sum is `+0.0` scaled by a positive output gain. The soft clip
+/// never reads across lanes, and its one whole-bank decision, the ramp segmentation, is
+/// partition-invariant (`tests/ramp_law.rs`), so an active lane's bits depend neither on the
+/// padded lanes nor on which member they clone.
+fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
     factory: &SoftClipFactory,
     request: PrepareEffectBankRequest<'_>,
-) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+) -> Result<Option<PreparedSoftClipBank<L>>, EffectPrepareError> {
     let first = request
         .requests
         .first()
@@ -935,20 +1034,28 @@ fn prepare_bank<L: Lane>(
         left_defaults[track] = left;
         right_defaults[track] = right;
     }
-    if !same_program || !width_is_native(request.width) {
+    // `L::WIDTH` is a compile-time constant here, so the D4 check folds (see [`boxed`]).
+    if !same_program || (NATIVE_ONLY && !width_is_native(lane_width::<L>())) {
         return Ok(None);
     }
-    Ok(Some(Box::new(PreparedSoftClipBank::<L> {
+    let mut inner = SoftClip::new(
+        metadata,
+        left_defaults.into_boxed_slice(),
+        right_defaults.into_boxed_slice(),
+    );
+    inner.active = request
+        .active_mask
+        .iter()
+        .enumerate()
+        .filter(|(_, active)| **active)
+        .fold(0, |bits, (lane, _)| bits | (1 << lane));
+    Ok(Some(PreparedSoftClipBank::<L> {
         metadata: PreparedBankMetadata {
             width: request.width,
             program_key: metadata.program_key(),
         },
-        inner: SoftClip::new(
-            metadata,
-            left_defaults.into_boxed_slice(),
-            right_defaults.into_boxed_slice(),
-        ),
-    })))
+        inner,
+    }))
 }
 
 impl PreparedNativeEffect for PreparedSoftClip {
@@ -973,7 +1080,7 @@ impl PreparedNativeEffect for PreparedSoftClip {
             &mut report,
         );
         let bypass = self.inner.metadata.bypass;
-        if !self.inner.process(block.left, block.right, frames, bypass) {
+        if self.inner.process(block.left, block.right, frames, bypass) != 0 {
             let count = frames as u64;
             report.nonfinite_left_blocks = report.nonfinite_left_blocks.saturating_add(count);
             report.nonfinite_right_blocks = report.nonfinite_right_blocks.saturating_add(count);
@@ -1020,6 +1127,10 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             return report;
         }
         for lane in 0..L::WIDTH {
+            // A padded lane carries no track, so no span is its to apply (issue #1092).
+            if self.inner.active & (1 << lane) == 0 {
+                continue;
+            }
             let start = block.automation_offsets[lane] as usize;
             let end = block.automation_offsets[lane + 1] as usize;
             apply_automation(
@@ -1034,16 +1145,20 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         }
         let frames = block.frames as usize;
         let bypass = self.inner.metadata.bypass;
-        if !self.inner.process(block.left, block.right, frames, bypass) {
-            let count = frames as u64;
-            for lane in 0..L::WIDTH {
-                report.reports[lane].nonfinite_left_blocks = report.reports[lane]
-                    .nonfinite_left_blocks
-                    .saturating_add(count);
-                report.reports[lane].nonfinite_right_blocks = report.reports[lane]
-                    .nonfinite_right_blocks
-                    .saturating_add(count);
+        // Only the lanes that failed are charged, never a bank-mate or a padded lane (issue
+        // #1092). Each is charged as its scalar instance charges itself: the block's frames, on
+        // both channels (#1073 owns that unit).
+        let charged = self.inner.process(block.left, block.right, frames, bypass);
+        let count = frames as u64;
+        for lane in 0..L::WIDTH {
+            if charged & (1 << lane) == 0 {
+                continue;
             }
+            let lane_report = &mut report.reports[lane];
+            lane_report.nonfinite_left_blocks =
+                lane_report.nonfinite_left_blocks.saturating_add(count);
+            lane_report.nonfinite_right_blocks =
+                lane_report.nonfinite_right_blocks.saturating_add(count);
         }
         report
     }
@@ -1109,3 +1224,6 @@ fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quan
             .windows(2)
             .any(|pair| pair[0] > pair[1])
 }
+
+#[cfg(test)]
+mod padding_tests;

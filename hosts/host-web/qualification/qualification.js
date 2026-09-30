@@ -36,9 +36,9 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
-// Issue #137 D1/D2: the two console words. Zero in both is the frozen pre-#137 shape -- no control
-// channel, no meter observers -- which is what the corpus and attestation gates keep using so
-// their digests and resource rows are untouched by the console's existence.
+// Issue #137 D1/D2: the two live-control words. Zero in both is the frozen pre-#137 shape -- no
+// control channel, no meter observers -- which is what the corpus and attestation gates keep using
+// so their digests and resource rows are untouched by the live controls' existence.
 //
 // Issue #281: this is the post-#240 atomic-boot shape. `createMisoAudioWorkletHost` takes exactly
 // `{ context, document, options, simd128ModuleUrl, workletModuleUrl }`, and `options` is exactly
@@ -49,22 +49,22 @@ const SIMD128_PROBE = new Uint8Array([
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
 function bootOptions(
   sourceRingFrames,
-  consoleCommandQueueRecords = 0n,
-  consoleMeterBlocks = 0n,
-  consoleObservationTaps = 0n,
-  consoleMasterTrackPlusOne = 0n,
+  liveControlCommandQueueRecords = 0n,
+  liveControlMeterBlocks = 0n,
+  liveControlObservationTaps = 0n,
+  liveControlMasterTrackPlusOne = 0n,
 ) {
   return {
     sourceRingFrames,
     // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
     // same one the direct oracle writes at boot-options offset 24.
     maximumMemoryBytes: 0n,
-    consoleCommandQueueRecords,
-    consoleMeterBlocks,
+    liveControlCommandQueueRecords,
+    liveControlMeterBlocks,
     // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
     // the pre-#143 shape, which is what every row but the observation one keeps using.
-    consoleObservationTaps,
-    consoleMasterTrackPlusOne,
+    liveControlObservationTaps,
+    liveControlMasterTrackPlusOne,
   };
 }
 
@@ -262,14 +262,14 @@ async function diagnoseGlobals() {
   });
 }
 
-/// #137 E8: a live-console row -- one parameter change applied and one meter frame received.
+/// #137 E8: a live-control row -- one parameter change applied and one meter frame received.
 ///
 /// The command is awaited before rendering starts, so its acknowledgement names sample `0` and the
 /// whole rendered block is post-command: the browser leg proves *that* a change reached the DSP
 /// and *what* it did, while the exact-sample transition is proved bit for bit by the native and
 /// raw-Wasm command-timeline oracles. The retarget halves the left matrix coefficient, so the
 /// expected output is the submitted left plane at half gain and the right plane untouched --
-/// computed here, not read back, so a console that quietly did nothing cannot pass.
+/// computed here, not read back, so live controls that quietly did nothing cannot pass.
 async function runConsoleQualification(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, CONSOLE_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -487,7 +487,7 @@ async function runStallQualification(createHost, sessionDocument) {
   const host = await createHost({
     context,
     document: sessionDocument,
-    // #137 E6: the stall runs with a live console attached and its meter lease held, so the
+    // #137 E6: the stall runs with live controls attached and their meter lease held, so the
     // 100 ms fault is survived under exactly the command and metering load a mixing console
     // imposes -- and the frozen exact-output requirement is unchanged.
     options: bootOptions(DEFAULT_RING_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),

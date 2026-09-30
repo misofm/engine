@@ -138,6 +138,7 @@ fn bind(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn PreparedNat
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid bank request")
         .expect("the native width must bind")
@@ -154,6 +155,7 @@ fn bind_lpf(width: BankWidth, backend: Backend, lanes: usize) -> Box<dyn Prepare
             backend,
             width,
             requests: &requests,
+            active_mask: width.full_mask(),
         })
         .expect("valid LPF bank request")
         .expect("the native width must bind")

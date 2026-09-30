@@ -33,7 +33,7 @@ import type { LatticePoint, NearestLatticeValues, StepSizeName } from "./lattice
  *
  * Ranks and canonical decimals are the persisted-edit vocabulary. Applying an edit to a live
  * session is a separate act with a separate carrier, and against the offline wasm engine that
- * carrier is the 48-byte live-console record, whose value words are continuous `f32` by design
+ * carrier is the 48-byte live-control record, whose value words are continuous `f32` by design
  * (#137 D1: there is no string on the hot path). `decimalToFloat32` below is the single site where
  * a canonical decimal becomes such an `f32`, so an audit of that boundary is one grep.
  */
@@ -57,7 +57,7 @@ export interface CatalogParameter {
     readonly precision: number;
     readonly ladder: Readonly<Record<StepSizeName, number>>;
   };
-  /** Whether the live-console command path can move this parameter, or only preparation can. */
+  /** Whether the live-control command path can move this parameter, or only preparation can. */
   readonly liveUpdatable: boolean;
   /** Lane scope: `shared` moves both lanes together, `perLane` addresses one. */
   readonly channelPolicy: string;

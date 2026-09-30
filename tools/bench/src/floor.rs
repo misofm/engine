@@ -142,10 +142,25 @@ impl FloorRow {
 /// costing it at the unmetered strip's floor would publish the meters' cost as a gap in the
 /// strip's. It names no control either: a subtraction against the standing row would be an
 /// isolate of the meters against a floor nobody derived.
+///
+/// The five console-strip rows (issue #1085) are absent too, each for a reason the rulings have not
+/// settled. A remainder's width factor depends on whether it renders per node or as a padded bank,
+/// which is what the console strip changes (the nine-track factor holds for a remainder of one
+/// only, where the two cost the same). The app shape's bypassed lanes and the sparse row's silent
+/// ones are arithmetic no inventory counts. The sixteen-track row could carry the whole strip's
+/// inventory, but it is one of the strip-at-N set and is read with it, on measured cost alone.
+/// H5's figures stay arithmetic until S4 reports, so these rows state no floor and name no
+/// control.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
-        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered => return None,
+        Workload::NineTrackBaseline
+        | Workload::SixtyFourTrackConsoleMetered
+        | Workload::TenTrackRaggedStrip
+        | Workload::ThirteenTrackRaggedStrip
+        | Workload::SixteenTrackStrip
+        | Workload::SixtyFourTrackAppShape
+        | Workload::SixtyFourTrackConsoleSparse => return None,
         Workload::NineTrackRaggedStrip => FloorRow {
             lane_ops: BUILTINS_LANE_OPS + EQ_LANE_OPS + COMPRESSOR_LANE_OPS + LIMITER_LANE_OPS,
             width_factor: RAGGED_NINE_TRACK_WIDTH_FACTOR,
@@ -348,7 +363,16 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
         OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
-    use console_workload::{Workload, native_session_rows};
+    use console_workload::{CONSOLE_STRIP_WORKLOADS, Workload, native_session_rows};
+
+    /// The rows the table states no floor for: the uninventoried nine-track fixture, the metered
+    /// row, and the console-strip rows (issue #1085).
+    fn underived(workload: Workload) -> bool {
+        matches!(
+            workload,
+            Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
+        ) || CONSOLE_STRIP_WORKLOADS.contains(&workload)
+    }
 
     fn rust_floor_table() -> String {
         let mut keys = BTreeSet::new();
@@ -376,10 +400,7 @@ mod tests {
                     table.push('"');
                 }
                 None => {
-                    assert!(matches!(
-                        workload,
-                        Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
-                    ));
+                    assert!(underived(workload), "{}", workload.kind());
                     table.push_str("null,1,\"none\",\"not_derived\"");
                 }
             }
@@ -471,10 +492,7 @@ input as $rust |
     fn every_derived_row_names_its_ruling_and_composes_a_positive_floor() {
         for workload in native_session_rows() {
             let Some(row) = floor_row(workload) else {
-                assert!(matches!(
-                    workload,
-                    Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
-                ));
+                assert!(underived(workload), "{}", workload.kind());
                 continue;
             };
             assert!(

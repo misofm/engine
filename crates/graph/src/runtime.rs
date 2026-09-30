@@ -818,13 +818,13 @@ pub(crate) enum NodeKind {
     Bound(Box<dyn GraphRuntimeProcessor>),
     /// A track-local prepared native effect.
     Effect(GraphPreparedEffect),
-    /// A track-local prepared native effect that a live console drives (issue #140 A).
+    /// A track-local prepared native effect that live controls drive (issue #140 A).
     ///
     /// A separate variant from [`NodeKind::Effect`] on purpose, in the shape #137 D1 fixed for
-    /// `ConsoleMatrixProcessor`: the console-free arm keeps the exact `&[]` call and the exact
-    /// storage it had before this issue, so "a session with no console renders the same bits and
-    /// holds the same bytes" is a property of the code rather than a claim about it.
-    ConsoleEffect(Box<ConsoleEffect>),
+    /// `LiveControlMatrixProcessor`: the live-control-free arm keeps the exact `&[]` call and the
+    /// exact storage it had before this issue, so "a session with no live controls renders the same
+    /// bits and holds the same bytes" is a property of the code rather than a claim about it.
+    LiveControlEffect(Box<LiveControlEffect>),
     /// A route's 2x2 matrix, with the route gain already folded in (D3).
     Route([f32; 4]),
     /// A homogeneous-bank member: the reduction gathers its input, the bank does the work.
@@ -856,15 +856,17 @@ pub(crate) struct SplitPairSlot {
     pub(crate) role: SplitPairRole,
 }
 
-/// One prepared native effect plus everything its live-console channel needs (issue #140 A).
+/// One prepared native effect plus everything its live-control channel needs (issue #140 A).
 ///
 /// Sized once, at bind, from the effect's own prepared metadata: the staging window is exactly
-/// `PreparedEffectMetadata::automation_capacity` spans and the shunt's delay line is exactly
+/// `PreparedEffectMetadata::automation_capacity` spans when the lane has a live channel, and empty
+/// when it does not (issue #1100), and the shunt's delay line is exactly
 /// `PreparedEffectMetadata::latency` samples. Render allocates nothing and frees nothing.
-pub(crate) struct ConsoleEffect {
+pub(crate) struct LiveControlEffect {
     pub(crate) effect: GraphPreparedEffect,
     control: Box<EffectControlLane>,
-    /// `automation_capacity` spans; only `[..staged]` is ever handed to the effect.
+    /// `automation_capacity` spans for a live channel, and none for a channel-less lane; only
+    /// `[..staged]` is ever handed to the effect.
     spans: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry path, so live bypass keeps the effect's declared latency exactly
     /// and therefore leaves every compiled PDC route timing correct.
@@ -875,14 +877,25 @@ pub(crate) struct ConsoleEffect {
     observation: Option<Box<ObservationLane>>,
 }
 
-impl ConsoleEffect {
+impl LiveControlEffect {
     fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
         observation: Option<Box<ObservationLane>>,
         frames: usize,
     ) -> Self {
-        let capacity = effect.metadata.automation_capacity as usize;
+        // Issue #1100, the per-node twin of the rack's #1087 fix: only a live channel ever stages
+        // a span. A channel-less lane -- a session bypass with no live controls attached -- drains
+        // nothing into an empty window, and there is no twin pair for the pairing rule to protect.
+        // The window is the effect's automation capacity, which a caller may set as high as
+        // `u32::MAX` spans, so this is what keeps a live-control-free bypass from costing
+        // live-control staging, or aborting bind.
+        let live = control.has_channel();
+        let capacity = if live {
+            effect.metadata.automation_capacity as usize
+        } else {
+            0
+        };
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         let spans: Box<[PreparedAutomationSpan]> = vec![
             PreparedAutomationSpan {
@@ -900,8 +913,11 @@ impl ConsoleEffect {
         // The live drain's pairing rule needs the window to be exactly the effect's automation
         // capacity (issue #1012). Checked here, at bind, off the render thread; this node builder
         // is infallible, so a violation is a bind-time panic, as `stage_for`'s validated width is.
-        effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
-            .expect("a console effect's staging window is its automation capacity");
+        // A channel-less lane stages nothing.
+        if live {
+            effect_contract::EffectProcessBlock::check_automation_window(&spans, &effect.metadata)
+                .expect("a live-control effect's staging window is its automation capacity");
+        }
         Self {
             observation,
             spans,
@@ -1189,9 +1205,9 @@ fn copy_scalar_response_snapshot(
                 Err(error) => return Err(response_snapshot_error(error)),
             }
         }
-        NodeKind::ConsoleEffect(console) => {
-            let bypassed = console.control.bypassed();
-            match console
+        NodeKind::LiveControlEffect(live) => {
+            let bypassed = live.control.bypassed();
+            match live
                 .effect
                 .processor
                 .copy_response_snapshot(OwnerSnapshotRequest {
@@ -1464,8 +1480,8 @@ impl NodeKind {
     /// A bank member says nothing: its work is the chain's, and the chain's slots carry the
     /// witness for it. An identity, a source input and a route are not upstream-of-seam track
     /// work at all. Everything else answers for itself, and the two effect variants answer with
-    /// the effect's own designed-word comparison -- plus, for a console-driven one, the live terms
-    /// its drain maintains.
+    /// the effect's own designed-word comparison -- plus, for a live-control-driven one, the live
+    /// terms its drain maintains.
     pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         let designed = |symmetric: bool| {
             if symmetric {
@@ -1482,8 +1498,9 @@ impl NodeKind {
             // is the plan's own evidence row agreeing with it.
             Self::TrackDelay { channels_agree, .. } => designed(*channels_agree),
             Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
-            Self::ConsoleEffect(console) => designed(console.effect.processor.channel_symmetry())
-                .and(console.control.symmetry()),
+            Self::LiveControlEffect(live) => {
+                designed(live.effect.processor.channel_symmetry()).and(live.control.symmetry())
+            }
             Self::Bound(processor) => processor.channel_symmetry(),
             // Not a per-track upstream stage: nothing here can make the two channels disagree,
             // and nothing here is collapsed.
@@ -1495,10 +1512,10 @@ impl NodeKind {
 
     /// `[observed stages, declared taps, armed taps]` for one op.
     pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
-        let Self::ConsoleEffect(console) = self else {
+        let Self::LiveControlEffect(live) = self else {
             return [0, 0, 0];
         };
-        let Some(observation) = console.observation.as_deref() else {
+        let Some(observation) = live.observation.as_deref() else {
             return [0, 0, 0];
         };
         let armed = (0..observation.len())
@@ -1510,7 +1527,7 @@ impl NodeKind {
     /// Exact engine-owned observation bytes this op retains. Zero for an unobserved op.
     pub(crate) fn observation_retained_bytes(&self) -> usize {
         match self {
-            Self::ConsoleEffect(console) => console
+            Self::LiveControlEffect(live) => live
                 .observation
                 .as_deref()
                 .map_or(0, ObservationLane::retained_bytes),
@@ -1964,7 +1981,7 @@ fn route_word<L: Lane>([ll, lr, rl, rr]: [L; 4], left: L, right: L) -> (L, L) {
 /// Split from the dynamic half because the two move at different times and for different reasons.
 /// Which track a lane renders, how many stages a unit has and which side of the seam each stage
 /// sits on are decided when the plan is built and cannot change afterwards; how many of the unit's
-/// lanes are *eligible* moves whenever a live-console record is drained. So the identity is
+/// lanes are *eligible* moves whenever a live-control record is drained. So the identity is
 /// computed once, here, from the node ids the lowering already resolved -- and the counters are
 /// pulled from the chain on demand.
 pub(crate) struct UnitIdentity {
@@ -3101,36 +3118,36 @@ fn execute_op(
                 }
             }
         }
-        NodeKind::ConsoleEffect(console) => {
+        NodeKind::LiveControlEffect(live) => {
             // The drain runs before a single sample is touched, so an admitted record takes
             // effect on the first sample of this block -- the exact `applied_at_sample` the
             // control side was acknowledged with (#137 E1's rule, now for effects).
             // Issue #143 D3: the subscription and the parameter commands are drained by this one
             // call, so a batch that changes a threshold and arms its tap lands on one sample
             // timeline by construction rather than by two clocks agreeing.
-            let staged = console.control.stage(
-                &mut console.spans,
+            let staged = live.control.stage(
+                &mut live.spans,
                 first_sample,
-                console.observation.as_deref_mut(),
+                live.observation.as_deref_mut(),
             );
             // Preparation refuses a queue deeper than the effect's automation capacity, so a full
             // drain can never produce more distinct spans than the window holds. This is the
             // invariant, not a runtime policy: in release it costs nothing.
-            debug_assert_eq!(staged.dropped, 0, "console staging window overflowed");
+            debug_assert_eq!(staged.dropped, 0, "live-control staging window overflowed");
             if staged.target_error {
                 return Err(RenderError::InvalidEnvelope);
             }
-            let automation = &console.spans[..staged.staged];
-            let bypassed = console.control.bypassed();
+            let automation = &live.spans[..staged.staged];
+            let bypassed = live.control.bypassed();
             // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and
             // only when this block is bypassed. `bypassed` is already decided here — the control
             // drain that could change it ran above — so the capture is skippable for an
             // un-bypassed block *unless* the shunt carries a latency line, which has to be fed on
             // every block whatever the bypass state. Both readers of `dry_*` are later in this
             // same block, so nothing crosses a block boundary and the skip moves no rendered bit.
-            let capture_dry = bypassed || console.shunt.feeds_line();
-            let effect = &mut console.effect;
-            for target in console.control.prepared_targets() {
+            let capture_dry = bypassed || live.shunt.feeds_line();
+            let effect = &mut live.effect;
+            for target in live.control.prepared_targets() {
                 effect
                     .processor
                     .apply_prepared_target(target)
@@ -3141,7 +3158,7 @@ fn execute_op(
                 None => {
                     let (out_left, out_right) = output_planes(lease, &mut host, output);
                     if capture_dry {
-                        console.shunt.capture(out_left, out_right);
+                        live.shunt.capture(out_left, out_right);
                     }
                     let block = EffectProcessBlock::new(
                         out_left,
@@ -3158,7 +3175,7 @@ fn execute_op(
                     let ((out_left, out_right), (side_left, side_right)) =
                         output_and_sidechain_planes(lease, &mut host, output, sidechain);
                     if capture_dry {
-                        console.shunt.capture(out_left, out_right);
+                        live.shunt.capture(out_left, out_right);
                     }
                     let block = EffectProcessBlock::new(
                         out_left,
@@ -3174,14 +3191,14 @@ fn execute_op(
             }
             if bypassed {
                 let (out_left, out_right) = output_planes(lease, &mut host, output);
-                console.shunt.apply(out_left, out_right);
+                live.shunt.apply(out_left, out_right);
             }
             // Issue #143: after `process`, and after the bypass shunt, so an observed value always
             // describes the block that was actually emitted.
-            if let Some(observation) = console.observation.as_deref_mut() {
+            if let Some(observation) = live.observation.as_deref_mut() {
                 publish_observations(
                     observation,
-                    console.effect.processor.as_ref(),
+                    live.effect.processor.as_ref(),
                     first_sample,
                     lease.frames() as u64,
                 );
@@ -3602,7 +3619,9 @@ pub(crate) fn take_observers(
 // ---------------------------------------------------------------------------------------------
 
 use effect_contract::BankWidth;
-use rack::{AoSoaScratch, BankBlock, BankSlot, BankStage, ConsoleEffectBankStage, EffectBankStage};
+use rack::{
+    AoSoaScratch, BankBlock, BankSlot, BankStage, EffectBankStage, LiveControlEffectBankStage,
+};
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
@@ -3904,8 +3923,8 @@ pub(crate) fn bank_membership(
 pub(crate) struct RuntimeParts {
     pub(crate) routes: BTreeMap<GraphNodeId, RouteTransform>,
     pub(crate) effects: BTreeMap<GraphNodeId, GraphPreparedEffect>,
-    /// Issue #140 A: live-console channels by effect node, taken by whichever owner renders that
-    /// node -- the per-node `ConsoleEffect`, or the bank slot that holds the node's lane.
+    /// Issue #140 A: live-control channels by effect node, taken by whichever owner renders that
+    /// node -- the per-node `LiveControlEffect`, or the bank slot that holds the node's lane.
     effect_controls: BTreeMap<crate::EffectNodeId, Box<EffectControlLane>>,
     /// Issue #143 D3: observation lanes by effect node, taken by whichever owner renders that
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
@@ -3927,7 +3946,7 @@ pub(crate) struct RuntimeParts {
     /// The runtime retains only this compact lowering map; response capture reads the same binding
     /// rows as execution and never asks a DSP stage for identity metadata.
     response_metadata: BTreeMap<GraphNodeId, (bool, &'static str)>,
-    /// Render quantum, so a console-driven effect's staging and shunt are sized once, at bind.
+    /// Render quantum, so a live-control-driven effect's staging and shunt are sized once, at bind.
     frames: usize,
 }
 
@@ -4063,10 +4082,10 @@ impl RuntimeParts {
             let observation = self.effect_observations.remove(&effect.id);
             match self.effect_controls.remove(&effect.id) {
                 // An observation lane is only ever created alongside a control channel -- a
-                // subscription rides that queue -- so this arm is the unobserved, console-free
+                // subscription rides that queue -- so this arm is the unobserved, live-control-free
                 // path it always was, byte for byte.
                 None => NodeKind::Effect(effect),
-                Some(control) => NodeKind::ConsoleEffect(Box::new(ConsoleEffect::new(
+                Some(control) => NodeKind::LiveControlEffect(Box::new(LiveControlEffect::new(
                     effect,
                     control,
                     observation,
@@ -4212,8 +4231,8 @@ impl RuntimeParts {
                 let width = bank.scratch.width();
                 let quantum = bank.scratch.quantum();
                 // Every lane's channel is moved out of its own `GraphPreparedEffect` in lane
-                // order, so the slot has exactly one drainer per lane and a lane the console does
-                // not address stays `None` -- the bank's own `&[]` for that lane's offsets.
+                // order, so the slot has exactly one drainer per lane and a lane the live controls
+                // do not address stays `None` -- the bank's own `&[]` for that lane's offsets.
                 let controls: Vec<Option<EffectControlLane>> = (0..width.lanes() as usize)
                     .map(|lane| {
                         bank.members
@@ -4235,7 +4254,7 @@ impl RuntimeParts {
                 if controls.iter().any(Option::is_some) {
                     let latency = usize::try_from(bank.processor.metadata().program_key.latency.0)
                         .unwrap_or(usize::MAX);
-                    let stage = ConsoleEffectBankStage::new(
+                    let stage = LiveControlEffectBankStage::new(
                         bank.processor,
                         width,
                         quantum,
@@ -6666,7 +6685,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 ///
 /// Effect observation (`ObservationLane`) is *not* such an observer and must not be confused
 /// with one: it reads the effect's own resident state through `observe_resident`, never a planar
-/// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
+/// stage buffer, so an armed live-control lane neither declines the merge nor is disturbed by one.
 ///
 /// `taps` is [`taps_by_op`] of this program, built once by the caller: scanning every tap of the
 /// program for each lane asked made the merge search quadratic in the track count (issue #962).

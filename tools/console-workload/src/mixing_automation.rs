@@ -11,7 +11,7 @@
 //! # The row
 //!
 //! The mono console (`sixty_four_track_console_mono`, the fixture as written) prepared with the
-//! live-console control channel, with eight of its sixty-four tracks each riding one control: one
+//! live-control channel, with eight of its sixty-four tracks each riding one control: one
 //! track per eight-lane bank, and every other four-lane bank.
 //!
 //! * **EQ band-1 gain** on `ch00`, `ch24`, `ch48`, pushed as **one owner edit on `Both`** -- the
@@ -44,7 +44,7 @@ use crate::{ObservationArm, PlanConfig, RenderFailed, SessionRuntime, Workload, 
 /// The session every arm renders: the mono fixture as written.
 pub const WORKLOAD: Workload = Workload::SixtyFourTrackConsoleMono;
 
-/// The live-console control channel and nothing else, on every arm, so the arms differ only in
+/// The live-control channel and nothing else, on every arm, so the arms differ only in
 /// the traffic that rides the channel.
 pub const CONFIG: PlanConfig = PlanConfig {
     meters: false,

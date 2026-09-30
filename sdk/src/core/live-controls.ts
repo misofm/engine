@@ -11,15 +11,15 @@ import type { CommandReport, SessionMap } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 import type { LaneEdit } from "./writer.ts";
 
-export type ConsoleRack = "simd1" | "dynamic" | "simd2";
-export type ConsoleChannel = "left" | "right" | "both";
+export type LiveControlRack = "simd1" | "dynamic" | "simd2";
+export type LiveControlChannel = "left" | "right" | "both";
 
 export interface SmoothingOptions {
   readonly smoothingSamples?: number;
 }
 
 export interface LaneOptions extends SmoothingOptions {
-  readonly channel?: ConsoleChannel;
+  readonly channel?: LiveControlChannel;
 }
 
 /** The two cutoff values carried atomically by one prepared input-filter command. */
@@ -30,7 +30,7 @@ export interface InputFilterValues {
 
 /** Input-filter edits select a lane but use the builtin fixed 64-update policy. */
 export interface InputFilterOptions {
-  readonly channel?: ConsoleChannel;
+  readonly channel?: LiveControlChannel;
 }
 
 type LiveParameter<E extends EffectId> = Extract<
@@ -101,12 +101,12 @@ export interface MatrixValues {
   readonly rr: number;
 }
 
-export type ConsoleSubmit = (
+export type LiveControlSubmit = (
   edits: readonly LaneEdit[],
 ) => CommandReport | Promise<CommandReport>;
 
 /** Optional owner hook used to serialize observation edits with managed subscriptions. */
-export type ConsoleBeforeSubmit = (
+export type LiveControlBeforeSubmit = (
   edits: readonly LaneEdit[],
   managed?: boolean,
 ) => void | Promise<void>;
@@ -139,7 +139,7 @@ function runtimeSmoothing(options: RuntimeParameterOptions): number {
   return u32(sampleCount, "smoothingSamples");
 }
 
-function runtimeChannel(channel: unknown): ConsoleChannel {
+function runtimeChannel(channel: unknown): LiveControlChannel {
   if (channel === undefined || channel === "both") return "both";
   if (channel === "left" || channel === "right") return channel;
   throw new MisoUsageError("channel must be left, right, or both");
@@ -246,7 +246,7 @@ function trackEdit(
 }
 
 /** A semantic edit builder bound to the engine's canonical session map. */
-export class ConsoleEdits {
+export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
 
   constructor(map: SessionMap) {
@@ -366,7 +366,7 @@ export class TrackEdits {
   }
 
   effect<E extends EffectId>(
-    rack: ConsoleRack,
+    rack: LiveControlRack,
     effectIndex: number,
     effectId: E,
   ): EffectEdits<E> {
@@ -479,14 +479,14 @@ export class EffectEdits<E extends EffectId> {
   }
 }
 
-/** One transaction-oriented console over either SDK transport. */
-export class EngineConsole {
-  readonly edit: ConsoleEdits;
-  readonly #submit: ConsoleSubmit;
-  readonly #beforeSubmit: ConsoleBeforeSubmit | undefined;
+/** One transaction-oriented set of live controls over either SDK transport. */
+export class EngineLiveControls {
+  readonly edit: LiveControlEdits;
+  readonly #submit: LiveControlSubmit;
+  readonly #beforeSubmit: LiveControlBeforeSubmit | undefined;
 
-  constructor(map: SessionMap, submit: ConsoleSubmit, beforeSubmit?: ConsoleBeforeSubmit) {
-    this.edit = new ConsoleEdits(map);
+  constructor(map: SessionMap, submit: LiveControlSubmit, beforeSubmit?: LiveControlBeforeSubmit) {
+    this.edit = new LiveControlEdits(map);
     this.#submit = submit;
     this.#beforeSubmit = beforeSubmit;
   }
@@ -503,7 +503,7 @@ export class EngineConsole {
   async #submitChecked(edits: readonly LaneEdit[], managed: boolean): Promise<CommandReport> {
     if (edits.length === 0 || edits.length > ABI_LAYOUT.constants.maximumCommandRecords) {
       throw new MisoUsageError(
-        `a console transaction must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
+        `a live-control transaction must contain 1..${ABI_LAYOUT.constants.maximumCommandRecords} edits`,
       );
     }
     const beforeSubmit = this.#beforeSubmit?.(edits, managed);

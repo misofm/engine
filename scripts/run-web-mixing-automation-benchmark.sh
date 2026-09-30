@@ -6,7 +6,11 @@
 # module built with the delivery recipe, booted and driven under Node's V8 through
 # `prepared-control.js` and `miso_engine_web_v1_command_submit` exactly as the SDK drives it, with
 # `miso_engine_web_v1_render` alone inside the clock (`scripts/web-mixing-automation-benchmark.mjs`
-# says what else it does and why, and how its input differs from the native row's).
+# says what else it does and why, and how its input differs from the native row's). Each round
+# also times two console-strip documents after the arms (#1085): the standing sixty-four-track
+# console and the app shape, the native rows `sixty_four_track_console` and
+# `sixty_four_track_app_shape`, booted from their checked-in fixtures and listed with their facts
+# in the same control table. The record states them under `documents`.
 #
 # Three subcommands, so that nothing is built while anything is timed:
 #
@@ -17,7 +21,8 @@
 #                          mixing_automation_controls`), and records the commit both were built at,
 #                          with their digests, in `provenance.json` (#1011).
 #   preflight WORKDIR      Untimed. The seven-arm premises (restated == quiet, every automated
-#                          effect moves bits) on the prepared module.
+#                          effect moves bits) on the prepared module, and the two documents'
+#                          (each renders audible bits of its own).
 #   run WORKDIR --step N   The one timed invocation. It refuses a module or a control table that
 #                          was not prepared at HEAD, or that changed after `prepare` recorded it.
 #                          Then it launches the harness three times, as the console runner does: one
@@ -76,7 +81,7 @@ case "$command" in
         rmdir -- "$workdir/module"
         cargo run --locked --release --quiet -p console-workload \
             --example mixing_automation_controls >"$workdir/controls.json"
-        jq -e '.controls | length == 8' "$workdir/controls.json" >/dev/null
+        jq -e '(.controls | length == 8) and (.documents | length == 2)' "$workdir/controls.json" >/dev/null
         # Nothing moved under the build: the recorded commit is still the tree that was built.
         require_clean_tree prepare
         [[ "$(git rev-parse --verify HEAD)" == "$commit" ]] ||

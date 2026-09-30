@@ -22,7 +22,7 @@ const PLAYWRIGHT_VERSION = JSON.parse(
 const ENGINES = { chromium, firefox, webkit };
 const MUTATIONS = [
   "attestation", "boot", "native-corpus-digest", "main-thread-stall",
-  // Issue #137 E8/E6: the live-console row and the console load carried across the stall.
+  // Issue #137 E8/E6: the live-control row and the live-control load carried across the stall.
   "control-path-applied", "control-path-meter", "control-path-command", "stall-console-load",
   // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
   // a run whose armed tap published nothing, which is exactly what a browser that lost the
@@ -146,7 +146,7 @@ function validate(browserName, result) {
   gate(browserName, "control-path", live?.commandResult === 0 && live?.commandReason === 0
     && live?.commandAdmitted === 1 && live?.appliedAtSample === "0"
     && Array.isArray(live?.tracks) && live.tracks.length === 1,
-  "the live-console command was not admitted");
+  "the live-control command was not admitted");
   gate(browserName, "control-path", live?.exactRetargetedOutput === true
     && live?.renderedDigest === live?.expectedDigest,
   "the applied parameter change did not produce the exact declared output");

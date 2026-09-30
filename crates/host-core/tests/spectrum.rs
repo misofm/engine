@@ -1,15 +1,15 @@
 //! Native graph-to-window spectrum capture gates for issue #781.
 
 use host_core::{
-    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, SPECTRUM_BIN_COUNT,
     SPECTRUM_WINDOW_FRAMES, SourceSubmission, SpectrumAnalysisError, SpectrumAnalyzer,
     SpectrumCaptureCollectionEntry, SpectrumCaptureCollectionReadError,
     SpectrumCaptureCollectionRequest, SpectrumCaptureCollectionSelectionError,
     SpectrumCaptureReadError, SpectrumCaptureRequest, SpectrumChannels, SpectrumTarget,
-    compile_host_session, prepare_host_runtime, prepare_host_runtime_with_console_and_spectrum,
-    prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    spectrum_capture_collection_resources, spectrum_capture_resources,
-    spectrum_capture_resources_for,
+    compile_host_session, prepare_host_runtime,
+    prepare_host_runtime_with_live_controls_and_spectrum, prepare_host_runtime_with_spectrum,
+    prepare_host_runtime_with_spectrum_collection, spectrum_capture_collection_resources,
+    spectrum_capture_resources, spectrum_capture_resources_for,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -402,30 +402,30 @@ fn preexecutor_render_refusal_invalidates_a_partial_spectrum_window() {
 }
 
 #[test]
-fn console_and_meter_preparation_keeps_spectrum_in_one_transaction() {
+fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
     let compiled = compile_host_session(SESSION, &caps()).expect("compiled fixture");
     let mut limits = caps();
     limits.maximum_meter_streams = 9;
     limits.maximum_meter_items = u64::MAX;
     limits.maximum_meter_bytes = u64::MAX;
-    let console = HostConsoleRequest {
+    let live_controls = HostLiveControlRequest {
         control_queue_depth: core::num::NonZeroUsize::new(1),
         meter_period_frames: core::num::NonZeroU32::new(128),
-        ..HostConsoleRequest::default()
+        ..HostLiveControlRequest::default()
     };
     let target = SpectrumTarget::Output("main-out".into());
     let resources = spectrum_capture_resources_for(&target);
-    let (host, handles, capture) = prepare_host_runtime_with_console_and_spectrum(
+    let (host, handles, capture) = prepare_host_runtime_with_live_controls_and_spectrum(
         &compiled,
         &limits,
-        &console,
+        &live_controls,
         &SpectrumCaptureRequest {
             target,
             channels: SpectrumChannels::Left,
             maximum_capture_bytes: resources.retained_bytes,
         },
     )
-    .expect("console, meters and spectrum prepare together");
+    .expect("live controls, meters and spectrum prepare together");
     assert_eq!(handles.track_controls.len(), 9);
     assert_eq!(handles.meters.len(), 9);
     assert_eq!(

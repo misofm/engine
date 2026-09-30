@@ -1,6 +1,6 @@
 /** Package-owned browser boot, with independent context, scratch and host overrides. */
 export * from "./engine.ts";
-export * from "./console.ts";
+export * from "./live-controls.ts";
 export type {
   MasterMeter,
   MeterListener,

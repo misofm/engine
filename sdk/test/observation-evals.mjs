@@ -111,7 +111,7 @@ describe("issue 777 -- selected resident observations", () => {
     const engine = await createOfflineEngine(largeObservationDocument(), {
       asset,
       maximumMemoryBytes: 64n << 20n,
-      console: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
     });
     try {
       const map = engine.observationMap();
@@ -134,18 +134,18 @@ describe("issue 777 -- selected resident observations", () => {
   test("headless reads two effects, preserves exact windows, and suppresses a re-arm", async () => {
     const engine = await createOfflineEngine(observationDocument(), {
       asset,
-      console: { commandQueueRecords: 64, observationTaps: 4 },
+      liveControls: { commandQueueRecords: 64, observationTaps: 4 },
     });
     try {
       const comp = selection("comp");
       const gate = selection("gate", "left");
       assert.equal(engine.readObservations([comp])[0].status, "unarmed");
 
-      const console = engine.console();
-      const armed = await console.submit(
-        console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+      const liveControls = engine.liveControls();
+      const armed = await liveControls.submit(
+        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
-        console.edit.track("t").effect("dynamic", 1, "miso.gate-expander")
+        liveControls.edit.track("t").effect("dynamic", 1, "miso.gate-expander")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(armed.ok, true);
@@ -169,10 +169,10 @@ describe("issue 777 -- selected resident observations", () => {
       assert.deepEqual(repeated, first);
 
       // The prior resident cell survives a re-arm, but is historical for that new arm.
-      await console.submit(
-        console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+      await liveControls.submit(
+        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
           .observe("Gain Reduction", false, 2),
-        console.edit.track("t").effect("dynamic", 0, "miso.compressor")
+        liveControls.edit.track("t").effect("dynamic", 0, "miso.compressor")
           .observe("Gain Reduction", true, 2),
       );
       assert.equal(engine.readObservations([comp])[0].status, "pending");

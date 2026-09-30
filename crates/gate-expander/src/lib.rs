@@ -339,6 +339,10 @@ struct PreparedGate<L: Lane, const CONNECTED: bool> {
     state: [GateState<L>; 2],
     timing: [[LaneTiming; 2]; MAX_WIDTH],
     ramp_frames_left: u32,
+    /// Bit `l` is set when lane `l` carries a member (issue #1092). A padded lane's bit is clear:
+    /// it takes no automation, and D7 recovers it without reporting it (the padding contract on
+    /// `PrepareEffectBankRequest`). Every lane of a scalar instance and of a full bank is active.
+    active: u32,
 }
 
 /// Reads one lane out of a lane word.
@@ -424,6 +428,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             state: [GateState::default(); 2],
             timing: [[LaneTiming::default(); 2]; MAX_WIDTH],
             ramp_frames_left: 0,
+            active: all_lanes(width),
         };
         for channel in 0..2 {
             for lane in 0..width {
@@ -431,6 +436,17 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             }
         }
         Some(gate)
+    }
+
+    /// Marks the lanes of `active` as the bank's members and every other lane as padded.
+    fn with_active_lanes(mut self, active: u32) -> Self {
+        self.active = active & all_lanes(L::WIDTH);
+        self
+    }
+
+    /// Whether `lane` carries a member rather than padding.
+    const fn is_active(&self, lane: usize) -> bool {
+        self.active & (1 << lane) != 0
     }
 
     /// Derives one lane's timing, coefficients and resting ramps from its prepared defaults.
@@ -640,6 +656,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     /// Recovery is *lane-local and channel-local*, which is where this departs from
     /// `bank::finish_block`: that zeroes both channels and resets the whole bank, and issue #48
     /// froze the gate's recovery as one track's one channel, with the other lanes bit-unchanged.
+    ///
+    /// A padded lane (issue #1092) is recovered like any other, so it stays finite and at rest, but
+    /// it is never reported: its entry in the bank report stays empty.
     fn finish_block(
         &mut self,
         left: &mut [f32],
@@ -664,6 +683,9 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
                     block[frame * width + lane] = 0.0;
                 }
                 self.reset_lane_full(channel, lane);
+                if !self.is_active(lane) {
+                    continue;
+                }
                 let report = &mut reports[lane];
                 let counter = if channel == 0 {
                     &mut report.nonfinite_left_blocks
@@ -878,6 +900,24 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     }
 }
 
+/// Whether this artifact executes banks of `width` lanes: a compile-time constant (D4).
+const fn executes(width: BankWidth) -> bool {
+    width.lanes() as usize == Backend::current().width()
+}
+
+/// The lane bitmask with every lane of a `width`-lane shape set.
+const fn all_lanes(width: usize) -> u32 {
+    (1 << width) - 1
+}
+
+/// The lane bitmask of a validated active mask: bit `l` set where lane `l` carries a member.
+fn active_bits(mask: &[bool]) -> u32 {
+    mask.iter()
+        .enumerate()
+        .filter(|(_, active)| **active)
+        .fold(0, |bits, (lane, _)| bits | (1 << lane))
+}
+
 /// Rejects a track index the bank does not have.
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
@@ -930,6 +970,10 @@ macro_rules! bank_impl {
                 debug_assert!(block.frames <= self.metadata.quantum);
                 let mut reports = [ProcessReport::default(); MAX_WIDTH];
                 for track in 0..<$lane>::WIDTH {
+                    // A padded lane carries no track, so no span is its to apply (issue #1092).
+                    if !self.is_active(track) {
+                        continue;
+                    }
                     let start = block.automation_offsets[track] as usize;
                     let end = block.automation_offsets[track + 1] as usize;
                     self.apply_automation(
@@ -1013,8 +1057,9 @@ impl NativeEffectFactory for GateExpanderFactory {
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
         let metadata = expected_prepared_metadata(self.descriptor(), request)?;
         let values = initial_defaults(request.initial_values)?;
-        let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
-        defaults[0] = values;
+        // Every row of the lane table holds validated values, never zeros: only row 0 is read at
+        // `WIDTH = 1`, and a zero row would lie outside the ratio, attack and release domains.
+        let defaults = [values; MAX_WIDTH];
         let connected = matches!(
             metadata.ports.sidechain,
             PreparedSidechainPort::Connected { .. }
@@ -1037,61 +1082,89 @@ impl NativeEffectFactory for GateExpanderFactory {
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
-        let first = request.requests[0];
-        let metadata = expected_prepared_metadata(self.descriptor(), first)?;
-        let mut defaults = [[[0.0; PARAMETER_COUNT]; 2]; MAX_WIDTH];
-        let mut same_program = true;
-        for (track, item) in request.requests.iter().copied().enumerate() {
-            let candidate = expected_prepared_metadata(self.descriptor(), item)?;
-            if candidate.program_key() != metadata.program_key() {
-                same_program = false;
-            }
-            defaults[track] = initial_defaults(item.initial_values)?;
-        }
-        // Every request is validated before the shape is decided, so a malformed member is an
-        // error and an unbankable-but-valid cohort is a legal `Ok(None)` fallback.
-        if !same_program
-            || !matches!(
-                metadata.ports.sidechain,
-                PreparedSidechainPort::Unconnected {
-                    id,
-                    required: false,
-                } if id == port_id("sidechain-in")
-            )
-        {
-            return Ok(None);
-        }
-        // There is no runtime SIMD dispatch (master plan #83 D4, revision 4): `wide` picks its
-        // instruction set at compile time and the workspace pins `x86-64-v3`, so the available
-        // width is a compile-time constant and an unavailable backend is a scalar fallback.
-        let available = match request.width {
-            BankWidth::Four => Backend::current() == Backend::Simd4,
-            BankWidth::Eight => Backend::current() == Backend::Simd8,
-        };
-        if !available {
-            return Ok(None);
-        }
-        let invalid = EffectPrepareError {
-            code: "effect.parameter.initial",
-        };
-        let width = Some(request.width);
-        Ok(Some(match request.width {
-            BankWidth::Four => Box::new(
-                PreparedGate::<Simd4, false>::new(metadata, width, defaults).ok_or(invalid)?,
-            ) as Box<dyn PreparedNativeEffectBank>,
-            BankWidth::Eight => Box::new(
-                PreparedGate::<Simd8, false>::new(metadata, width, defaults).ok_or(invalid)?,
-            ) as Box<dyn PreparedNativeEffectBank>,
-        }))
+        bind_bank::<true>(request)
     }
 }
+
+/// `bind_homogeneous_bank`, with the D4 width check as a switch: `NATIVE_ONLY` declines a width
+/// this artifact does not execute, which is what production asks for. The unit tests pass `false`
+/// to bind the other width's bank on this host through the same code.
+///
+/// # Padding (issue #1092; decision 12)
+///
+/// The gate accepts a padded request. Each lane, active or padded, is prepared from its own
+/// request, which for a padded lane is the caller's clone of an active member's, so every lane is
+/// validated and inside its declared domains; no lane is ever filled with zeros. The rows of the
+/// lane table past this width start as a clone of the first member's (lane 0's) values for the
+/// same reason.
+/// A padded lane takes no automation and is recovered by D7 without being reported
+/// ([`PreparedGate::with_active_lanes`]). Fed `+0.0` it writes `+0.0` (`dry * gain`, or the dry
+/// word), and the gate never reads across lanes, so an active lane's bits depend neither on the
+/// padded lanes nor on which member they clone.
+fn bind_bank<const NATIVE_ONLY: bool>(
+    request: PrepareEffectBankRequest<'_>,
+) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
+    request.validate_shape()?;
+    // Members come first (`validate_shape`), so lane 0 carries one.
+    let first = request.requests[0];
+    let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, first)?;
+    let mut defaults = [initial_defaults(first.initial_values)?; MAX_WIDTH];
+    let mut same_program = true;
+    for (track, item) in request.requests.iter().copied().enumerate() {
+        let candidate = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, item)?;
+        if candidate.program_key() != metadata.program_key() {
+            same_program = false;
+        }
+        defaults[track] = initial_defaults(item.initial_values)?;
+    }
+    // Every request is validated before the shape is decided, so a malformed member is an
+    // error and an unbankable-but-valid cohort is a legal `Ok(None)` fallback.
+    if !same_program
+        || !matches!(
+            metadata.ports.sidechain,
+            PreparedSidechainPort::Unconnected {
+                id,
+                required: false,
+            } if id == port_id("sidechain-in")
+        )
+    {
+        return Ok(None);
+    }
+    let invalid = EffectPrepareError {
+        code: "effect.parameter.initial",
+    };
+    let width = Some(request.width);
+    let active = active_bits(request.active_mask);
+    // There is no runtime SIMD dispatch (master plan #83 D4, revision 4): `wide` picks its
+    // instruction set at compile time and the workspace pins `x86-64-v3`, so an unavailable width
+    // is a scalar fallback. Each arm's check is a compile-time constant, so a production build
+    // never links the bank of a width it does not execute.
+    Ok(Some(match request.width {
+        BankWidth::Four => {
+            if NATIVE_ONLY && !executes(BankWidth::Four) {
+                return Ok(None);
+            }
+            Box::new(
+                PreparedGate::<Simd4, false>::new(metadata, width, defaults)
+                    .ok_or(invalid)?
+                    .with_active_lanes(active),
+            ) as Box<dyn PreparedNativeEffectBank>
+        }
+        BankWidth::Eight => {
+            if NATIVE_ONLY && !executes(BankWidth::Eight) {
+                return Ok(None);
+            }
+            Box::new(
+                PreparedGate::<Simd8, false>::new(metadata, width, defaults)
+                    .ok_or(invalid)?
+                    .with_active_lanes(active),
+            ) as Box<dyn PreparedNativeEffectBank>
+        }
+    }))
+}
+
+#[cfg(test)]
+mod padding_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1105,7 +1178,7 @@ mod tests {
         /// Issue #48 forbids a public injection API, so this exists only under `cfg(test)` and is
         /// the only way to reach the case where the *state* is non-finite while the output block
         /// is not — which is exactly the case `exp2_lane`'s NaN-swallowing clamp creates.
-        fn inject_nonfinite_gain(&mut self, lane: usize, channel: usize) {
+        pub(crate) fn inject_nonfinite_gain(&mut self, lane: usize, channel: usize) {
             lane_set(&mut self.state[channel].gain_db, lane, f32::NAN);
         }
     }

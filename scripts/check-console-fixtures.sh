@@ -34,6 +34,8 @@ python3 -I -B scripts/derive-intended-console-fixture.py "${validator_args[@]}" 
 cmp "$tmp_dir/intended.json" fixtures/session/v1/console-sixty-four-track-intended.json
 python3 -I -B scripts/derive-mono-console-fixture.py "${validator_args[@]}" >"$tmp_dir/mono.json"
 cmp "$tmp_dir/mono.json" fixtures/session/v1/console-sixty-four-track-mono.json
+python3 -I -B scripts/derive-app-console-fixture.py "${validator_args[@]}" >"$tmp_dir/app.json"
+cmp "$tmp_dir/app.json" fixtures/session/v1/console-sixty-four-track-app.json
 
 python3 -I -B - <<'PY'
 import json
@@ -42,6 +44,7 @@ from pathlib import Path
 root = Path("fixtures/session/v1")
 intended = json.loads((root / "console-sixty-four-track-intended.json").read_text())
 mono = json.loads((root / "console-sixty-four-track-mono.json").read_text())
+app = json.loads((root / "console-sixty-four-track-app.json").read_text())
 assert intended["session_id"] == "console-sixty-four-track-intended"
 assert mono["session_id"] == "console-sixty-four-track-mono"
 assert intended["sample_rate_hz"] == mono["sample_rate_hz"] == 48000
@@ -73,6 +76,19 @@ for track in mono["tracks"]:
                 assert values[(parameter_id, "right", unit)] == value
 assert sum(t["fader"]["left_db"] != t["fader"]["right_db"] for t in mono["tracks"]) == 49
 assert sum(t["pan"]["left"] != t["pan"]["right"] for t in mono["tracks"]) == 50
+# #1085: the app shape. The standing strip's own EQ and compressor on `dynamic`, no limiter, and
+# both effects bypassed on exactly the tracks whose index is 2 mod 3.
+assert app["session_id"] == "console-sixty-four-track-app"
+outer = lambda d: {k: v for k, v in d.items() if k not in ("session_id", "tracks")}
+assert outer(app) == outer(intended) and len(app["tracks"]) == 64
+for index, (track, standing) in enumerate(zip(app["tracks"], intended["tracks"])):
+    assert track["simd1"]["effects"] == [] and track["simd2"]["effects"] == []
+    moved = [dict(e, bypass=False) for e in track["dynamic"]["effects"]]
+    assert moved == standing["simd1"]["effects"]
+    assert all(e["bypass"] == (index % 3 == 2) for e in track["dynamic"]["effects"])
+    rest = lambda t: {k: v for k, v in t.items() if k not in ("simd1", "dynamic", "simd2")}
+    assert rest(track) == rest(standing)
+assert sum(e["bypass"] for t in app["tracks"] for e in t["dynamic"]["effects"]) == 2 * 21
 PY
 
-printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono witnesses)\n'
+printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono/app witnesses)\n'

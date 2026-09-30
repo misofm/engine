@@ -92,13 +92,13 @@ fn boot_options(quantum: u32) -> WebBootOptions {
     }
 }
 
-fn compressor_console_host(quantum: u32) -> AudioWorkletEngineHost {
+fn compressor_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
     let document = one_track_compressor_session(quantum);
     AudioWorkletEngineHost::boot(
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: 4,
+            live_control_command_queue_records: 4,
             ..boot_options(quantum)
         },
     )
@@ -110,13 +110,13 @@ fn compressor_console_host(quantum: u32) -> AudioWorkletEngineHost {
     })
 }
 
-fn multiband_console_host(quantum: u32) -> AudioWorkletEngineHost {
+fn multiband_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
     let document = one_track_multiband_session(quantum);
     AudioWorkletEngineHost::boot(
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: 4,
+            live_control_command_queue_records: 4,
             ..boot_options(quantum)
         },
     )
@@ -147,7 +147,7 @@ fn feed_compressor_block(host: &mut AudioWorkletEngineHost, quantum: u32, block:
 }
 
 /// The actual three-track session fixture with its dynamic-rack causal gate at track `t2`.
-fn gate_console_host(quantum: u32) -> AudioWorkletEngineHost {
+fn gate_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
     observation_host(quantum, 0, None)
 }
 
@@ -329,9 +329,10 @@ fn frozen_layouts_and_values_are_exact() {
         ],
         [2, 3, 4, 5, 6, 7]
     );
-    // Issue #137 D1: the two console words are the first two of the frozen configuration's four
-    // reserved words. Every V1 writer already sets them to zero, which is exactly "default command
-    // queue depth, no meters attached", so the 192-byte layout and every existing caller stand.
+    // Issue #137 D1: the two live-control words are the first two of the frozen configuration's
+    // four reserved words. Every V1 writer already sets them to zero, which is exactly "default
+    // command queue depth, no meters attached", so the 192-byte layout and every existing caller
+    // stand.
     assert_eq!(size_of::<WebCommandReport>(), 48);
     assert_eq!(COMMAND_REPORT_BYTES, 48);
     assert_eq!(COMMAND_RECORD_BYTES, 48);
@@ -373,16 +374,19 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebBootOptions, source_ring_frames), 16);
     assert_eq!(offset_of!(WebBootOptions, maximum_memory_bytes), 24);
     assert_eq!(
-        offset_of!(WebBootOptions, console_command_queue_records),
+        offset_of!(WebBootOptions, live_control_command_queue_records),
         32
     );
-    assert_eq!(offset_of!(WebBootOptions, console_meter_blocks), 40);
+    assert_eq!(offset_of!(WebBootOptions, live_control_meter_blocks), 40);
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
     // carved the first two. The structure is still 192 bytes and every existing offset is where it
     // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
-    assert_eq!(offset_of!(WebBootOptions, console_observation_taps), 48);
     assert_eq!(
-        offset_of!(WebBootOptions, console_master_track_plus_one),
+        offset_of!(WebBootOptions, live_control_observation_taps),
+        48
+    );
+    assert_eq!(
+        offset_of!(WebBootOptions, live_control_master_track_plus_one),
         56
     );
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
@@ -868,7 +872,7 @@ fn extended_rates_refuse_typed_at_browser_boot() {
 }
 
 #[test]
-fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters() {
+fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_meters() {
     let document = one_track_resource_session(128);
     let parsed = parse_host_session(&document).expect("resource session parse");
     let compiled = compile_host_model(
@@ -905,9 +909,9 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
         (
             "on",
             WebBootOptions {
-                console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-                console_meter_blocks: 0,
-                console_observation_taps: 0,
+                live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+                live_control_meter_blocks: 0,
+                live_control_observation_taps: 0,
                 ..boot_options(128)
             },
             (MAXIMUM_COMMAND_RECORDS * COMMAND_RECORD_BYTES) as u64,
@@ -936,11 +940,12 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
             options.source_ring_frames
         };
         let caps = prepare_caps(&compiled, options, source_ring_frames, u64::MAX);
-        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let live_controls =
+            live_control_request(options, shape.quantum_frames).expect("live-control request");
         let (engine, _) = prepare_host_runtime_with_selected_meters_between_render_calls(
             &compiled,
             &caps,
-            &console,
+            &live_controls,
             &[],
         )
         .expect("independent engine preparation");
@@ -969,7 +974,7 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
         assert_eq!(host.command_staging_bytes(), expected_wire_bytes);
         assert!(
             !ready.command_decoded.is_empty(),
-            "decoded backing is retained in console-off mode"
+            "decoded backing is retained in live-control-off mode"
         );
         assert!(
             ready.effect_controls.is_empty(),
@@ -983,7 +988,7 @@ fn decoded_command_resource_is_exact_for_console_modes_without_effects_or_meters
         assert!(ready.rack_effects.iter().all(|counts| *counts == [0, 0, 0]));
         assert_eq!(host.resources().observation_retained_bytes, 0);
 
-        let input_shadow_bytes = if options.console_command_queue_records == 0 {
+        let input_shadow_bytes = if options.live_control_command_queue_records == 0 {
             0
         } else {
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
@@ -1046,9 +1051,9 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         },
         WebBootOptions {
             source_ring_frames,
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_meter_blocks: 0,
-            console_observation_taps: 0,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_meter_blocks: 0,
+            live_control_observation_taps: 0,
             ..boot_options(128)
         },
     ] {
@@ -1060,7 +1065,7 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         assert_eq!(
             size_of_val(ready.effect_controls.as_ref()) as u64,
             dense_effect_table_bytes,
-            "the browser owns the actual dense effect table in both console modes"
+            "the browser owns the actual dense effect table in both live-control modes"
         );
         assert_eq!(
             ready.effect_controls.len(),
@@ -1069,7 +1074,7 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
         );
         assert!(
             baseline.resources().bridge_retained_bytes >= dense_effect_table_bytes,
-            "console-off preparation still charges the dense replacement table"
+            "live-control-off preparation still charges the dense replacement table"
         );
         let exact = exact_retained_report_total(baseline.resources());
         drop(baseline);
@@ -1162,8 +1167,8 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
             include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
-                console_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
-                console_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
+                live_control_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
+                live_control_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
                 ..boot_options(128)
             },
         ),
@@ -1732,7 +1737,7 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
 /// they did. It is over little-endian `f32` words, so it is a bit comparison.
 ///
 /// Red mutation: change the matrix retarget's `applied_at_sample` expectation to `2 * QUANTUM`
-/// -> the assertion fails here, and moving any console stage's drain to after the audio makes
+/// -> the assertion fails here, and moving any live-control stage's drain to after the audio makes
 /// both this digest and the wasm oracle's move together.
 #[test]
 fn native_command_timeline_digest_pins_the_wasm_parity() {
@@ -1750,11 +1755,11 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
-        console_command_queue_records: u64::from(DEPTH),
+        live_control_command_queue_records: u64::from(DEPTH),
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-    assert_eq!(host.console_tracks().len(), 1);
+    assert_eq!(host.live_control_tracks().len(), 1);
 
     let plane = vec![0.25_f32; QUANTUM as usize];
     let mut blocks: Vec<Vec<f32>> = Vec::new();
@@ -1966,8 +1971,8 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
 #[test]
 fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
     const QUANTUM: u32 = 128;
-    let mut baseline = compressor_console_host(QUANTUM);
-    let mut candidate = compressor_console_host(QUANTUM);
+    let mut baseline = compressor_live_control_host(QUANTUM);
+    let mut candidate = compressor_live_control_host(QUANTUM);
 
     feed_compressor_block(&mut baseline, QUANTUM, 0);
     feed_compressor_block(&mut candidate, QUANTUM, 0);
@@ -1979,7 +1984,7 @@ fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
         .canonical_json()
         .to_owned();
     let resources_before = *candidate.resources();
-    let tracks_before = candidate.console_tracks().to_vec();
+    let tracks_before = candidate.live_control_tracks().to_vec();
     let sources_before = candidate.session_source_count();
 
     // The retired compressor address is rejected while a valid makeup-gain update shares the
@@ -2025,7 +2030,7 @@ fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
         session_before
     );
     assert_eq!(*candidate.resources(), resources_before);
-    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.live_control_tracks(), tracks_before.as_slice());
     assert_eq!(candidate.session_source_count(), sources_before);
 
     // A valid same-batch update would change makeup gain. Identical next-block PCM proves that
@@ -2038,8 +2043,8 @@ fn real_compressor_id_eight_rejects_atomically_at_the_web_command_boundary() {
 #[test]
 fn real_multiband_id_two_rejects_without_ack_or_revision_change() {
     const QUANTUM: u32 = 128;
-    let mut baseline = multiband_console_host(QUANTUM);
-    let mut candidate = multiband_console_host(QUANTUM);
+    let mut baseline = multiband_live_control_host(QUANTUM);
+    let mut candidate = multiband_live_control_host(QUANTUM);
 
     feed_compressor_block(&mut baseline, QUANTUM, 0);
     feed_compressor_block(&mut candidate, QUANTUM, 0);
@@ -2051,7 +2056,7 @@ fn real_multiband_id_two_rejects_without_ack_or_revision_change() {
         .canonical_json()
         .to_owned();
     let resources_before = *candidate.resources();
-    let tracks_before = candidate.console_tracks().to_vec();
+    let tracks_before = candidate.live_control_tracks().to_vec();
     let sources_before = candidate.session_source_count();
     let status_before = *candidate.status();
 
@@ -2103,7 +2108,7 @@ fn real_multiband_id_two_rejects_without_ack_or_revision_change() {
         session_before
     );
     assert_eq!(*candidate.resources(), resources_before);
-    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.live_control_tracks(), tracks_before.as_slice());
     assert_eq!(candidate.session_source_count(), sources_before);
     assert_eq!(
         (
@@ -2136,8 +2141,8 @@ fn real_multiband_id_two_rejects_without_ack_or_revision_change() {
 #[test]
 fn real_gate_id_eight_rejects_atomically_at_the_web_command_boundary() {
     const QUANTUM: u32 = 128;
-    let mut baseline = gate_console_host(QUANTUM);
-    let mut candidate = gate_console_host(QUANTUM);
+    let mut baseline = gate_live_control_host(QUANTUM);
+    let mut candidate = gate_live_control_host(QUANTUM);
 
     feed_gate_block(&mut baseline, 0);
     feed_gate_block(&mut candidate, 0);
@@ -2149,7 +2154,7 @@ fn real_gate_id_eight_rejects_atomically_at_the_web_command_boundary() {
         .canonical_json()
         .to_owned();
     let resources_before = *candidate.resources();
-    let tracks_before = candidate.console_tracks().to_vec();
+    let tracks_before = candidate.live_control_tracks().to_vec();
     let sources_before = candidate.session_source_count();
     let status_before = *candidate.status();
 
@@ -2197,7 +2202,7 @@ fn real_gate_id_eight_rejects_atomically_at_the_web_command_boundary() {
         session_before
     );
     assert_eq!(*candidate.resources(), resources_before);
-    assert_eq!(candidate.console_tracks(), tracks_before.as_slice());
+    assert_eq!(candidate.live_control_tracks(), tracks_before.as_slice());
     assert_eq!(candidate.session_source_count(), sources_before);
     let status_after = *candidate.status();
     assert_eq!(
@@ -2417,7 +2422,7 @@ fn submit_prepared_eq_parameter(
     host.submit_prepared_commands(1, 104)
 }
 
-fn input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
+fn input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 4))
         .expect("accepted identity fixture");
     let builtins = &mut model.tracks[0].builtins;
@@ -2430,7 +2435,7 @@ fn input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngi
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: queue_depth,
+            live_control_command_queue_records: queue_depth,
             ..boot_options(quantum)
         },
     )
@@ -2443,7 +2448,7 @@ fn input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngi
 }
 
 #[cfg(feature = "test-support")]
-fn effect_input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
+fn effect_input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
         .expect("accepted command fixture");
     model.quantum_frames = quantum;
@@ -2458,7 +2463,7 @@ fn effect_input_filter_console_host(quantum: u32, queue_depth: u64) -> AudioWork
         document.as_bytes(),
         WebBootOptions {
             source_ring_frames: quantum,
-            console_command_queue_records: queue_depth,
+            live_control_command_queue_records: queue_depth,
             ..boot_options(quantum)
         },
     )
@@ -2574,12 +2579,13 @@ fn stage_mixed_prepared_eq_and_input_filter(host: &mut AudioWorkletEngineHost) -
     total_bytes as u32
 }
 
-/// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
-fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
-    console_host_at_rate(48_000, quantum, meter_blocks)
+/// A live-control host over the browser identity fixture: one track, unity everything, one-quantum
+/// ring.
+fn live_control_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
+    live_control_host_at_rate(48_000, quantum, meter_blocks)
 }
 
-fn console_host_at_rate(
+fn live_control_host_at_rate(
     sample_rate_hz: u32,
     quantum: u32,
     meter_blocks: u64,
@@ -2593,15 +2599,15 @@ fn console_host_at_rate(
         require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("live-control boot")
 }
 
 #[cfg(feature = "test-support")]
-fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
+fn paired_live_control_host(quantum: u32) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
@@ -2622,10 +2628,10 @@ fn paired_console_host(quantum: u32) -> AudioWorkletEngineHost {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         ..WebBootOptions::explicit_defaults()
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("paired live-control boot")
 }
 
 fn meter_tail_host(sample_rate_hz: u32, quantum: u32) -> AudioWorkletEngineHost {
@@ -2659,8 +2665,8 @@ fn meter_tail_host_for_blocks(
         require_sample_rate_hz: sample_rate_hz,
         require_quantum_frames: quantum,
         source_ring_frames: quantum,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("meter-tail boot")
@@ -2694,7 +2700,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     const QUANTUM: u32 = 128;
     const QUEUE_DEPTH: usize = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
 
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     reset_admission_counter_clear();
     for block in 0..3_u64 {
         feed_and_render(&mut host, 1, block, 0.25);
@@ -2910,7 +2916,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(admission_counter_clear_stats(), (0, 0));
 
     // Malformed and backpressured submissions on an idle host cannot create pending ownership.
-    let mut refused = console_host(QUANTUM, 0);
+    let mut refused = live_control_host(QUANTUM, 0);
     stage_command(
         &mut refused,
         0,
@@ -3012,7 +3018,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
     assert_eq!(refused.ready.as_ref().expect("ready").in_flight[0], 1);
 
     // Solo can be a successful zero-emission submission; it must not mark the counters dirty.
-    let mut solo = console_host(QUANTUM, 0);
+    let mut solo = live_control_host(QUANTUM, 0);
     feed_and_render(&mut solo, 1, 0, -0.5);
     stage_mute(&mut solo, 0, 0, true, 0);
     assert_eq!(solo.submit_commands(1), RESULT_OK);
@@ -3027,7 +3033,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
 
     // A render failure is sticky: pending ownership and the untouched clear counters survive the
     // failed block and the subsequent WRONG_STATE re-entry.
-    let mut failed = console_host(QUANTUM, 0);
+    let mut failed = live_control_host(QUANTUM, 0);
     stage_command(
         &mut failed,
         0,
@@ -3089,12 +3095,12 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
 /// top of the block, so the transition is on a block boundary and is exact, not approximate.
 ///
 /// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
-/// `ConsoleMatrixProcessor::process` to *after* `self.matrix.process(block)` -> the reported
+/// `LiveControlMatrixProcessor::process` to *after* `self.matrix.process(block)` -> the reported
 /// sample is one block early and `at_applied` still renders the pre-command value.
 #[test]
 fn command_ack_names_the_exact_application_sample() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     let quantum = QUANTUM as usize;
 
     feed_and_render(&mut host, 1, 0, 0.5);
@@ -3178,7 +3184,7 @@ fn command_ack_names_the_exact_application_sample() {
 #[test]
 fn paired_fader_and_matrix_commands_share_the_acknowledged_application_sample() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     let quantum = QUANTUM as usize;
 
     feed_and_render(&mut host, 1, 0, 0.5);
@@ -3234,7 +3240,7 @@ fn paired_fader_and_matrix_commands_share_the_acknowledged_application_sample() 
 #[test]
 fn acknowledged_pair_render_records_the_same_live_dispatch() {
     const QUANTUM: u32 = 128;
-    let mut host = paired_console_host(QUANTUM);
+    let mut host = paired_live_control_host(QUANTUM);
     feed_and_render(&mut host, 1, 0, 0.5);
     stage_command(
         &mut host,
@@ -3316,27 +3322,27 @@ fn acknowledged_pair_render_records_the_same_live_dispatch() {
     );
 }
 
-/// A console host over the *command* fixture: the identity session plus one dynamic-rack
+/// A live-control host over the *command* fixture: the identity session plus one dynamic-rack
 /// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
-fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+fn effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: quantum,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect live-control boot")
 }
 
 #[cfg(feature = "test-support")]
-fn bank_effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+fn bank_effect_live_control_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     let document = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
     let options = WebBootOptions {
         source_ring_frames: quantum * 2,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("bank EQ live-control boot")
 }
 
 #[test]
@@ -3368,12 +3374,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
     let session_model_bytes = compiled.resource_estimate().compiled_model_bytes;
     const SOURCE_RING_FRAMES: u32 = 1 << 20;
 
-    for (name, console_command_queue_records) in
+    for (name, live_control_command_queue_records) in
         [("off", 0_u64), ("on", DEFAULT_COMMAND_QUEUE_RECORDS as u64)]
     {
         let options = WebBootOptions {
             source_ring_frames: SOURCE_RING_FRAMES,
-            console_command_queue_records,
+            live_control_command_queue_records,
             ..boot_options(128)
         };
         let projection = project_buffers(
@@ -3389,11 +3395,12 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         )
         .expect("bridge projection");
         let caps = prepare_caps(&compiled, options, SOURCE_RING_FRAMES, u64::MAX);
-        let console = console_request(options, shape.quantum_frames).expect("console request");
+        let live_controls =
+            live_control_request(options, shape.quantum_frames).expect("live-control request");
         let (engine, handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
             &compiled,
             &caps,
-            &console,
+            &live_controls,
             &[],
         )
         .expect("independent effect preparation");
@@ -3450,7 +3457,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let decoded_count =
             command_staging_count(shape.track_count as usize).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
-        let input_shadow_bytes = if console_command_queue_records == 0 {
+        let input_shadow_bytes = if live_control_command_queue_records == 0 {
             0
         } else {
             (shape.track_count as usize * size_of::<BuiltinInputShadow>()) as u64
@@ -3558,7 +3565,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
 
 #[test]
 fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_mutation() {
-    let mut host = effect_console_host(128, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
+    let mut host = effect_live_control_host(128, DEFAULT_COMMAND_QUEUE_RECORDS as u64);
     let target = EffectControlRecord::PreparedTarget(PreparedEffectTarget {
         slot: 2,
         channel: ParameterChannel::Left,
@@ -3601,7 +3608,7 @@ fn production_effect_delivery_refuses_prepared_target_without_queue_or_full_muta
 fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation() {
     const QUANTUM: u32 = 128;
 
-    let mut scalar = effect_console_host(QUANTUM, 8);
+    let mut scalar = effect_live_control_host(QUANTUM, 8);
     feed_and_render(&mut scalar, 1, 0, 0.25);
     host_core::test_only_reset_parametric_eq_design_calls();
     stage_prepared_eq_parameter(&mut scalar, 0, 0, 1, 0, 4, -12.0);
@@ -3661,7 +3668,7 @@ fn prepared_eq_owner_transaction_is_design_and_allocation_free_after_preparation
         "two ACKs commit two owner revisions before/at the render boundary"
     );
 
-    let mut bank = bank_effect_console_host(QUANTUM, 8);
+    let mut bank = bank_effect_live_control_host(QUANTUM, 8);
     feed_and_render_tracks(&mut bank, 0, 0.25);
     host_core::test_only_reset_parametric_eq_design_calls();
     stage_prepared_eq_parameter(&mut bank, 0, 0, 0, 0, 4, 12.0);
@@ -3725,7 +3732,7 @@ fn eq_owner_snapshot(host: &mut AudioWorkletEngineHost) -> (Vec<u8>, u64, u64) {
 fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
     const QUANTUM: u32 = 128;
 
-    let mut host = input_filter_console_host(QUANTUM, 8);
+    let mut host = input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_prepared_input_filter(&mut host, 0, 0, 300.0, 2_000.0);
     stage_command(
         &mut host,
@@ -3778,7 +3785,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
 
     // A later invalid original transition rolls back the candidate before either target is
     // published, even though the first command in the batch is valid.
-    let mut late = input_filter_console_host(QUANTUM, 8);
+    let mut late = input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_prepared_input_filter(&mut late, 0, 0, 300.0, 2_000.0);
     stage_command(
         &mut late,
@@ -3807,7 +3814,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
     assert_eq!(late_ready.in_flight[input_slot], 0);
 
     // A stale base revision is rejected by the same companion address path.
-    let mut stale = input_filter_console_host(QUANTUM, 8);
+    let mut stale = input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_prepared_input_filter(&mut stale, 0, 0, 300.0, 2_000.0);
     stale.prepared_companion_mut().unwrap()[40..48].copy_from_slice(&1_u64.to_le_bytes());
     assert_eq!(
@@ -3823,7 +3830,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
 
     // Mutate the existing valid frame, exercising the builtin target coverage/safety checks.
     for mutation in ["missing", "duplicate", "unsafe", "reserved"] {
-        let mut malformed = input_filter_console_host(QUANTUM, 8);
+        let mut malformed = input_filter_live_control_host(QUANTUM, 8);
         let mut frame_bytes = stage_prepared_input_filter(&mut malformed, 0, 0, 300.0, 2_000.0);
         let frame = malformed.prepared_companion_mut().unwrap();
         match mutation {
@@ -3854,7 +3861,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
 
     // A command selector outside the builtin pair vocabulary is malformed wire shape, rather
     // than an unknown effect parameter: the builtin command owns selectors 0, 3 and 4 only.
-    let mut invalid_selector = input_filter_console_host(QUANTUM, 8);
+    let mut invalid_selector = input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_prepared_input_filter(&mut invalid_selector, 0, 0, 300.0, 2_000.0);
     stage_command(
         &mut invalid_selector,
@@ -3883,7 +3890,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
 
     // A full unrelated matrix queue refuses the mixed transaction while leaving the builtin
     // shadow at its committed seed.
-    let mut full = input_filter_console_host(QUANTUM, 2);
+    let mut full = input_filter_live_control_host(QUANTUM, 2);
     for index in 0..2 {
         stage_command(
             &mut full,
@@ -3932,7 +3939,7 @@ fn prepared_builtin_input_filter_owner_is_atomic_across_mixed_batches() {
 fn prepared_mixed_eq_builtin_fader_commits_and_refuses_atomically() {
     const QUANTUM: u32 = 128;
 
-    let mut host = effect_input_filter_console_host(QUANTUM, 8);
+    let mut host = effect_input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_mixed_prepared_eq_and_input_filter(&mut host);
     stage_command(
         &mut host,
@@ -3966,7 +3973,7 @@ fn prepared_mixed_eq_builtin_fader_commits_and_refuses_atomically() {
         "builtin targets drained at render boundary"
     );
 
-    let mut refused = effect_input_filter_console_host(QUANTUM, 8);
+    let mut refused = effect_input_filter_live_control_host(QUANTUM, 8);
     let companion_bytes = stage_mixed_prepared_eq_and_input_filter(&mut refused);
     stage_command(
         &mut refused,
@@ -4019,7 +4026,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
 
     // A valid prepared EQ edit followed by an invalid edit names the original second wire index
     // and leaves the first owner's candidate unpublished.
-    let mut late = effect_console_host(QUANTUM, 8);
+    let mut late = effect_live_control_host(QUANTUM, 8);
     stage_prepared_eq_parameter(&mut late, 0, 0, 1, 0, 4, -12.0);
     stage_command(
         &mut late,
@@ -4057,7 +4064,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
     assert_eq!(recovered_success, 1);
 
     // A missing target record is unsafe even though the semantic edit itself is valid.
-    let mut missing = effect_console_host(QUANTUM, 8);
+    let mut missing = effect_live_control_host(QUANTUM, 8);
     stage_command(
         &mut missing,
         0,
@@ -4094,7 +4101,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
 
     // Unsafe coefficients and invalid original edits cannot be hidden by a valid final target.
     for invalid_edit in [false, true] {
-        let mut host = effect_console_host(QUANTUM, 8);
+        let mut host = effect_live_control_host(QUANTUM, 8);
         let before = eq_owner_snapshot(&mut host);
         stage_prepared_eq_parameter(&mut host, usize::from(invalid_edit), 0, 1, 0, 4, -12.0);
         if invalid_edit {
@@ -4124,7 +4131,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
     }
 
     // A valid target with an unrelated addressed extra record is rejected before publication.
-    let mut extra = effect_console_host(QUANTUM, 8);
+    let mut extra = effect_live_control_host(QUANTUM, 8);
     stage_prepared_eq_parameter(&mut extra, 0, 0, 1, 0, 4, -12.0);
     {
         let companion = extra.prepared_companion_mut().expect("prepared companion");
@@ -4145,7 +4152,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
 
     // Both a stale owner revision and a stale host generation refuse atomically.
     for (label, offset) in [("revision", 40_usize), ("generation", 8_usize)] {
-        let mut stale = effect_console_host(QUANTUM, 8);
+        let mut stale = effect_live_control_host(QUANTUM, 8);
         stage_prepared_eq_parameter(&mut stale, 0, 0, 1, 0, 4, -12.0);
         stale.prepared_companion_mut().expect("prepared companion")[offset..offset + 8]
             .copy_from_slice(&99_u64.to_le_bytes());
@@ -4164,7 +4171,7 @@ fn prepared_eq_owner_refusals_preserve_config_revision_indexes_and_queues() {
 
     // Fill the matrix queue, then submit a valid prepared EQ edit plus a later matrix record.
     // The unrelated full queue refuses the whole batch; after one render, the EQ edit recovers.
-    let mut full = effect_console_host(QUANTUM, 1);
+    let mut full = effect_live_control_host(QUANTUM, 1);
     stage_command(
         &mut full,
         0,
@@ -4247,7 +4254,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
         .in_flight
         .to_vec();
     let before_solo = {
-        let state = host.console_solo().expect("solo state");
+        let state = host.live_control_solo().expect("solo state");
         (
             state.solo_count(),
             (0..state.track_count())
@@ -4313,7 +4320,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
     assert_eq!(ready.observation_arm_samples, before_arm_samples);
 
     let after_solo = {
-        let state = host.console_solo().expect("solo state");
+        let state = host.live_control_solo().expect("solo state");
         (
             state.solo_count(),
             (0..state.track_count())
@@ -4337,12 +4344,12 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
 /// the transition is a block boundary and is exact, not approximate.
 ///
 /// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
-/// `ConsoleFaderProcessor::process` to *after* `self.fader.process(block)` -> the reported sample
-/// is one block early and `at_applied` still renders the pre-command value.
+/// `LiveControlFaderProcessor::process` to *after* `self.fader.process(block)` -> the reported
+/// sample is one block early and `at_applied` still renders the pre-command value.
 #[test]
 fn a_fader_command_names_the_exact_application_sample() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     let quantum = QUANTUM as usize;
 
     feed_and_render(&mut host, 1, 0, 0.5);
@@ -4420,7 +4427,7 @@ fn a_fader_command_names_the_exact_application_sample() {
 #[test]
 fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     let quantum = QUANTUM as usize;
 
     feed_and_render(&mut host, 1, 0, -0.5);
@@ -4489,14 +4496,14 @@ fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
 /// between the two. At `applied_at_sample`, both channels remain bit-identical for sample 0 and
 /// differ at sample 1 as the current-then-advance ramp contract takes effect.
 ///
-/// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm
+/// Red mutation: move the `live.control.stage(..)` drain in `execute_op`'s `LiveControlEffect` arm
 /// below `effect.processor.process(block)` -> the first differing block is one later and the
 /// sample-1 assertions fail.
 #[test]
 fn an_effect_parameter_command_names_the_exact_application_sample() {
     const QUANTUM: u32 = 128;
-    let mut control = effect_console_host(QUANTUM, 8);
-    let mut commanded = effect_console_host(QUANTUM, 8);
+    let mut control = effect_live_control_host(QUANTUM, 8);
+    let mut commanded = effect_live_control_host(QUANTUM, 8);
 
     for block in 0..2_u64 {
         feed_and_render(&mut control, 1, block, 0.25);
@@ -4549,12 +4556,12 @@ fn an_effect_parameter_command_names_the_exact_application_sample() {
 /// #140 A: live effect bypass returns the dry signal at the effect's declared latency, and
 /// releasing it returns the wet signal the effect has been computing all along.
 ///
-/// Red mutation: delete the `console.shunt.capture(..)` call in `execute_op` -> a bypassed block
+/// Red mutation: delete the `live.shunt.capture(..)` call in `execute_op` -> a bypassed block
 /// renders the shunt's initial zeros instead of the input, and the equality below fails.
 #[test]
 fn an_effect_bypass_command_returns_the_dry_signal() {
     const QUANTUM: u32 = 128;
-    let mut host = effect_console_host(QUANTUM, 8);
+    let mut host = effect_live_control_host(QUANTUM, 8);
     // Move the band well off flat first, so "bypassed" and "enabled" are distinguishable.
     assert_eq!(
         submit_prepared_eq_parameter(&mut host, 0, 0, 1, 0, 4, 18.0),
@@ -4628,8 +4635,8 @@ fn an_effect_bypass_command_returns_the_dry_signal() {
 fn a_mixed_batch_is_one_transaction_across_every_queue() {
     const QUANTUM: u32 = 128;
     const DEPTH: u32 = 2;
-    let mut clean = effect_console_host(QUANTUM, u64::from(DEPTH));
-    let mut flooded = effect_console_host(QUANTUM, u64::from(DEPTH));
+    let mut clean = effect_live_control_host(QUANTUM, u64::from(DEPTH));
+    let mut flooded = effect_live_control_host(QUANTUM, u64::from(DEPTH));
     feed_and_render(&mut clean, 1, 0, 0.25);
     feed_and_render(&mut flooded, 1, 0, 0.25);
 
@@ -4712,19 +4719,19 @@ fn a_mixed_batch_is_one_transaction_across_every_queue() {
 }
 
 /// #140 C: `UNSUPPORTED_KIND` still means exactly what it says -- the target is real and the value
-/// is legal, and *this session* has no write path. A host compiled with no console is that
+/// is legal, and *this session* has no write path. A host compiled with no live controls is that
 /// session, and every live kind is refused with it.
 #[test]
-fn a_console_free_host_refuses_every_live_kind_as_unsupported() {
+fn a_live_control_free_host_refuses_every_live_kind_as_unsupported() {
     const QUANTUM: u32 = 128;
-    let mut host = effect_console_host(QUANTUM, 0);
+    let mut host = effect_live_control_host(QUANTUM, 0);
     feed_and_render(&mut host, 1, 0, 0.25);
     let baseline = host.output_pcm().expect("output").to_vec();
-    // A console-free host has no staging buffer at all: the refusal is decided before a record
+    // A live-control-free host has no staging buffer at all: the refusal is decided before a record
     // could even be written, which is the strongest form of "this session cannot apply it".
     assert!(
         host.command_staging_mut().is_none(),
-        "no console means no staging buffer",
+        "no live controls means no staging buffer",
     );
     for records in [1_u32, 8, MAXIMUM_COMMAND_RECORDS] {
         assert_eq!(host.submit_commands(records), RESULT_UNSUPPORTED);
@@ -4738,7 +4745,7 @@ fn a_console_free_host_refuses_every_live_kind_as_unsupported() {
     assert_eq!(
         baseline,
         host.output_pcm().expect("output"),
-        "a console-free host renders the same block it would have without any traffic",
+        "a live-control-free host renders the same block it would have without any traffic",
     );
 }
 
@@ -4753,8 +4760,8 @@ fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
     const QUANTUM: u32 = 128;
     let depth = DEFAULT_COMMAND_QUEUE_RECORDS;
 
-    let mut clean = console_host(QUANTUM, 0);
-    let mut flooded = console_host(QUANTUM, 0);
+    let mut clean = live_control_host(QUANTUM, 0);
+    let mut flooded = live_control_host(QUANTUM, 0);
     for block in 0..4_u64 {
         feed_and_render(&mut clean, 1, block, 0.25);
         feed_and_render(&mut flooded, 1, block, 0.25);
@@ -4797,7 +4804,7 @@ fn command_flood_is_typed_backpressure_and_leaves_the_render_untouched() {
 #[test]
 fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     feed_and_render(&mut host, 1, 0, 0.75);
     let baseline = host.output_pcm().expect("output").to_vec();
     let baseline_status = *host.status();
@@ -4954,15 +4961,15 @@ fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
 /// host's own output plane, so for this identity fixture both must equal the maximum magnitude of
 /// the submitted block -- exactly, not within a tolerance.
 ///
-/// Red mutation: change `console_meter_blocks` handling so the period is `blocks` frames instead
-/// of `blocks * quantum_frames` -> a window closes mid-block, `poll_meters` reports more windows
-/// than blocks rendered, and the cadence assertion fails.
+/// Red mutation: change `live_control_meter_blocks` handling so the period is `blocks` frames
+/// instead of `blocks * quantum_frames` -> a window closes mid-block, `poll_meters` reports more
+/// windows than blocks rendered, and the cadence assertion fails.
 #[test]
 fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     const QUANTUM: u32 = 128;
     const BLOCKS: u64 = 2;
-    let mut off = console_host(QUANTUM, BLOCKS);
-    let mut on = console_host(QUANTUM, BLOCKS);
+    let mut off = live_control_host(QUANTUM, BLOCKS);
+    let mut on = live_control_host(QUANTUM, BLOCKS);
     assert!(on.meters_attached());
     assert_eq!(on.set_meter_lease(true), RESULT_OK);
     assert_eq!(off.set_meter_lease(false), RESULT_OK);
@@ -4999,7 +5006,7 @@ fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     }
 
     // A host with no observers refuses the lease rather than reporting zeros.
-    let mut bare = console_host(QUANTUM, 0);
+    let mut bare = live_control_host(QUANTUM, 0);
     assert!(!bare.meters_attached());
     assert_eq!(bare.set_meter_lease(true), RESULT_UNSUPPORTED);
     assert_eq!(bare.poll_meters(), 0);
@@ -5007,7 +5014,7 @@ fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
 
 #[test]
 fn meter_empty_poll_preserves_early_peak_and_publication_state() {
-    let mut host = console_host(128, 2);
+    let mut host = live_control_host(128, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 1.0);
     assert_eq!(
@@ -5051,8 +5058,8 @@ fn meter_empty_poll_preserves_early_peak_and_publication_state() {
 fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
     const QUANTUM: u32 = 128;
     for blocks in [2_u64, 8, 32] {
-        let mut eager = console_host(QUANTUM, blocks);
-        let mut boundary = console_host(QUANTUM, blocks);
+        let mut eager = live_control_host(QUANTUM, blocks);
+        let mut boundary = live_control_host(QUANTUM, blocks);
         assert_eq!(eager.set_meter_lease(true), RESULT_OK);
         assert_eq!(boundary.set_meter_lease(true), RESULT_OK);
         let initial_frame = eager.meter_frame().to_vec();
@@ -5374,7 +5381,7 @@ const WINDOWS_FOR_TIMING: u64 = 256;
 
 #[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
-    let mut host = console_host(128, 2);
+    let mut host = live_control_host(128, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     for (block, value) in [1.0_f32, 0.2, 0.3, 0.4].into_iter().enumerate() {
         feed_and_render(&mut host, 1, block as u64, value);
@@ -5407,7 +5414,7 @@ fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
 
 #[test]
 fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
-    let mut host = console_host(128, 1);
+    let mut host = live_control_host(128, 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.9);
     assert_eq!(host.poll_meters(), 1);
@@ -5440,7 +5447,7 @@ fn meter_invalid_master_rejects_transactionally_then_recovers_with_loss() {
 
 #[test]
 fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
-    let mut host = console_host(128, 1);
+    let mut host = live_control_host(128, 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.9);
     assert_eq!(host.poll_meters(), 1);
@@ -5469,7 +5476,7 @@ fn meter_producer_reset_starts_a_fresh_delivery_epoch() {
 
 #[test]
 fn meter_queue_saturation_recovers_with_explicit_loss() {
-    let mut host = console_host(128, 1);
+    let mut host = live_control_host(128, 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     for block in 0..12 {
         feed_and_render(&mut host, 1, block, 0.2);
@@ -5525,7 +5532,7 @@ fn meter_spans_cover_all_launch_rates_and_a_nine_track_tail() {
 
 #[test]
 fn source_seek_keeps_the_meter_epoch_and_absolute_peak_clock() {
-    let mut host = console_host(128, 1);
+    let mut host = live_control_host(128, 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.4);
     assert_eq!(host.poll_meters(), 1);
@@ -5548,7 +5555,7 @@ fn source_seek_keeps_the_meter_epoch_and_absolute_peak_clock() {
 
 #[test]
 fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
-    let mut host = console_host(128, 2);
+    let mut host = live_control_host(128, 2);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.9);
     assert_eq!(host.set_meter_lease(false), RESULT_OK);
@@ -5573,7 +5580,7 @@ fn meter_lease_reacquisition_waits_for_a_clean_boundary() {
 
 #[test]
 fn meter_reacquisition_rejects_a_full_stale_queue_then_recovers() {
-    let mut host = console_host(128, 1);
+    let mut host = live_control_host(128, 1);
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
     feed_and_render(&mut host, 1, 0, 0.9);
     assert_eq!(host.poll_meters(), 1);
@@ -5615,10 +5622,10 @@ fn observation_host(
     let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: meter_blocks,
-        console_observation_taps: 4,
-        console_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: meter_blocks,
+        live_control_observation_taps: 4,
+        live_control_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
@@ -5645,8 +5652,8 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     let document = canonical_session_json(&model).expect("canonical two-effect session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_observation_taps: 4,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_observation_taps: 4,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
@@ -5984,7 +5991,7 @@ fn observe(
 
 /// The frame's gain-reduction section: one non-negative magnitude per track, then the master's.
 fn gain_reduction(host: &AudioWorkletEngineHost) -> (Vec<f32>, Option<f32>) {
-    let tracks = host.console_tracks().len();
+    let tracks = host.live_control_tracks().len();
     let frame = host.meter_frame();
     assert_eq!(frame.len(), tracks * 3 + 3, "the frame is 3T + 3 words");
     let base = tracks * 2 + 2;
@@ -6003,7 +6010,7 @@ fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
     const QUANTUM: u32 = 128;
     const BLOCKS: u64 = 2;
     let mut host = observation_host(QUANTUM, BLOCKS, Some(0));
-    assert_eq!(host.console_tracks().len(), 3);
+    assert_eq!(host.live_control_tracks().len(), 3);
     assert!(host.observation_attached());
     assert_eq!(host.set_meter_lease(true), RESULT_OK);
 
@@ -6182,7 +6189,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     // the frame is untouched.
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
     let before = host.meter_frame().to_vec();
-    let depth = host.options().console_command_queue_records as usize;
+    let depth = host.options().live_control_command_queue_records as usize;
     let flood = (depth + 2).min(MAXIMUM_COMMAND_RECORDS as usize);
     for index in 0..flood {
         stage_command(
@@ -6219,7 +6226,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
 }
 
-/// A session with a console but no observation capacity refuses a subscription with its own
+/// A session with live controls but no observation capacity refuses a subscription with its own
 /// reason: the effect exists, the tap is declared, and this preparation bound no lane.
 #[test]
 fn a_subscription_without_capacity_is_observation_unbound() {
@@ -6227,8 +6234,8 @@ fn a_subscription_without_capacity_is_observation_unbound() {
     let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-        console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: DEFAULT_METER_BLOCKS as u64,
         ..boot_options(QUANTUM)
     };
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
@@ -6244,7 +6251,7 @@ fn a_subscription_without_capacity_is_observation_unbound() {
         COMMAND_REASON_OBSERVATION_UNBOUND
     );
     // And the frame is the pre-#143 shape plus the positional gain-reduction section, all zero.
-    let tracks = host.console_tracks().len();
+    let tracks = host.live_control_tracks().len();
     assert_eq!(host.meter_frame().len(), tracks * 3 + 3);
     assert!(host.meter_frame().iter().all(|value| *value == 0.0));
 }
@@ -6255,26 +6262,26 @@ fn observation_configuration_words_are_validated() {
     let document = one_track_session(128);
     for options in [
         WebBootOptions {
-            console_observation_taps: 4,
+            live_control_observation_taps: 4,
             ..boot_options(128)
         },
         WebBootOptions {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
             ..boot_options(128)
         },
         WebBootOptions {
-            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
-            console_master_track_plus_one: 1,
+            live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            live_control_master_track_plus_one: 1,
             ..boot_options(128)
         },
     ] {
         let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
             .err()
-            .expect("invalid console options");
+            .expect("invalid live-control options");
         assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
     }
-    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::console_defaults())
+    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::live_control_defaults())
         .expect("zero observation words remain valid");
 }
 
@@ -6285,7 +6292,7 @@ fn observation_configuration_words_are_validated() {
 /// pin -- so a change to the audio makes them move together, which is the point.
 ///
 /// Two runs, one timeline: with observation capacity and every declared tap armed, and with
-/// `console_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
+/// `live_control_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
 /// against leg (d) on the browser ABI, and it is checked here rather than asserted about.
 ///
 /// Red mutation: fold the observation read into the compressor's inner loop -> the two digests
@@ -6304,14 +6311,14 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM,
-            console_command_queue_records: u64::from(DEPTH),
-            console_meter_blocks: u64::from(WINDOW_BLOCKS),
-            console_observation_taps: taps,
-            console_master_track_plus_one: if taps == 0 { 0 } else { 1 },
+            live_control_command_queue_records: u64::from(DEPTH),
+            live_control_meter_blocks: u64::from(WINDOW_BLOCKS),
+            live_control_observation_taps: taps,
+            live_control_master_track_plus_one: if taps == 0 { 0 } else { 1 },
             ..boot_options(QUANTUM)
         };
         let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
-        assert_eq!(host.console_tracks().len(), 1);
+        assert_eq!(host.live_control_tracks().len(), 1);
         assert_eq!(
             host.resources().observation_retained_bytes == 0,
             taps == 0,
@@ -6350,7 +6357,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
         for block in 0..8 {
             step(&mut host, block);
         }
-        let tracks = host.console_tracks().len();
+        let tracks = host.live_control_tracks().len();
         let base = tracks * 2 + 2;
         let armed = host.meter_frame()[base];
         let master =
@@ -6610,10 +6617,10 @@ fn three_source_session(quantum: u32) -> String {
 /// projection must cover both ID families rather than assuming source IDs are always longest.
 ///
 /// Red mutation: project only `longest_source_id_bytes` again -> boot still publishes a handle,
-/// but `miso_engine_web_v1_console_track_id` silently returns zero for this valid track and the
-/// browser's console bind turns that document-dependent condition into `RESULT_INTERNAL`.
+/// but `miso_engine_web_v1_live_control_track_id` silently returns zero for this valid track and
+/// the browser's live-control bind turns that document-dependent condition into `RESULT_INTERNAL`.
 #[test]
-fn console_track_id_longer_than_every_source_id_boots_and_round_trips() {
+fn live_control_track_id_longer_than_every_source_id_boots_and_round_trips() {
     const QUANTUM: u32 = 128;
     const SOURCE_ID: &str = "s";
     const TRACK_ID: &str = "track-id-is-longer";
@@ -6639,13 +6646,13 @@ fn console_track_id_longer_than_every_source_id_boots_and_round_trips() {
     assert_eq!(resources.id_staging_bytes, TRACK_ID.len() as u64);
     assert!(resources.id_staging_bytes > SOURCE_ID.len() as u64);
 
-    let length = miso_engine_web_v1_console_track_id(handle, 0);
+    let length = miso_engine_web_v1_live_control_track_id(handle, 0);
     assert_eq!(length, TRACK_ID.len() as u32);
     assert_eq!(
         crate::ffi::test_read_source_id(handle, length).expect("staged track ID"),
         TRACK_ID.as_bytes()
     );
-    assert_eq!(miso_engine_web_v1_console_track_id(handle, 1), 0);
+    assert_eq!(miso_engine_web_v1_live_control_track_id(handle, 1), 0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -6700,8 +6707,8 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     // The track order is unchanged by any of this: the two lists are independent, and the source
     // list is not a filter of the referenced sources either -- `alpha` and `zeta` are declared and
     // therefore reported, though no track reads them.
-    assert_eq!(host.console_tracks().len(), 1);
-    assert_eq!(&*host.console_tracks()[0], "track");
+    assert_eq!(host.live_control_tracks().len(), 1);
+    assert_eq!(&*host.live_control_tracks()[0], "track");
 
     // One past the end, and the u32 ceiling.
     assert_eq!(host.session_source_id(3), None);
@@ -6778,7 +6785,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     );
     assert_eq!(miso_engine_web_v1_source_count(handle), 3);
     assert_eq!(miso_engine_web_v1_source_channels(handle, 1), 2);
-    assert_eq!(miso_engine_web_v1_console_track_count(handle), 1);
+    assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 1);
 
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);
@@ -6790,7 +6797,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
 // Solo is 100% control plane. Every eval below therefore drives the *shipped* command path and
 // reads the *rendered* output, because that is the only place a control-plane composition can be
 // wrong in a way anybody hears. The host-side mirror is asserted where the ABI has no other
-// witness for it (`ConsoleSoloState`'s own unit tests carry the algebra).
+// witness for it (`LiveControlSoloState`'s own unit tests carry the algebra).
 // ---------------------------------------------------------------------------------------------
 
 /// A multi-track identity session: `tracks` copies of the browser fixture's identity strip, each
@@ -6835,13 +6842,13 @@ fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
     canonical_session_json(&model).expect("canonical solo session")
 }
 
-/// A console host over [`solo_session`]. No meters and no observation capacity: solo touches
+/// A live-control host over [`solo_session`]. No meters and no observation capacity: solo touches
 /// neither, and a test that bound them would be measuring something else.
 fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEngineHost {
     let document = solo_session(quantum, tracks, mutes);
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot")
@@ -6961,7 +6968,7 @@ fn solo_is_bit_identically_mute_on_the_complement() {
     }
 }
 
-/// P1-2: disengaging solo restores the exact per-lane user-mute set, and the restored console is
+/// P1-2: disengaging solo restores the exact per-lane user-mute set, and the restored host is
 /// bit-identical to one that was never soloed.
 ///
 /// The session bakes an *asymmetric* mute (`left_mute` only) on one track and a full mute on
@@ -7008,7 +7015,7 @@ fn un_solo_restores_the_exact_per_lane_user_mute_set() {
     );
 
     // And the host mirror agrees with the session it was prepared from.
-    let state = soloed.console_solo().expect("solo state");
+    let state = soloed.live_control_solo().expect("solo state");
     assert!(!state.any_solo());
     for (track, expected) in mutes.iter().enumerate() {
         assert_eq!(
@@ -7118,7 +7125,7 @@ fn mute_and_solo_are_separate_states() {
         "a muted soloed track is exact positive zero, not a negative zero",
     );
     {
-        let state = host.console_solo().expect("solo state");
+        let state = host.live_control_solo().expect("solo state");
         assert!(state.solo(0) && !state.solo(1));
         assert_eq!([state.user_mute(0, 0), state.user_mute(0, 1)], [true, true]);
         assert_eq!(
@@ -7139,7 +7146,7 @@ fn mute_and_solo_are_separate_states() {
         "a repeated solo engage un-muted the track it re-engaged",
     );
     {
-        let state = host.console_solo().expect("solo state");
+        let state = host.live_control_solo().expect("solo state");
         assert_eq!(
             [state.user_mute(0, 0), state.user_mute(0, 1)],
             [true, true],
@@ -7176,7 +7183,7 @@ fn mute_and_solo_are_separate_states() {
         "track 1 was muted while soloed away and is still muted now",
     );
     assert_ne!(both.to_bits(), INPUT.to_bits());
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(!state.any_solo());
     assert_eq!(
         [state.user_mute(0, 0), state.user_mute(0, 1)],
@@ -7197,7 +7204,7 @@ fn mute_and_solo_are_separate_states() {
 /// Red mutation: drop the `ready.solo.rollback()` on the refusal path -> the refused engage sticks
 /// in host state, the next admitted mute composes against it, and the comparison diverges.
 #[test]
-fn a_refused_solo_submission_leaves_the_console_untouched() {
+fn a_refused_solo_submission_leaves_the_live_controls_untouched() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 4;
     const DEPTH: u32 = DEFAULT_COMMAND_QUEUE_RECORDS;
@@ -7248,7 +7255,7 @@ fn a_refused_solo_submission_leaves_the_console_untouched() {
     assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);
     assert_eq!(refused.command_report().admitted, 0);
     {
-        let state = refused.console_solo().expect("solo state");
+        let state = refused.live_control_solo().expect("solo state");
         assert!(!state.any_solo(), "a refused engage left a solo bit set");
         assert_eq!(state.solo_count(), 0);
         assert!(!state.transaction_open(), "the transaction was left open");
@@ -7349,7 +7356,7 @@ fn solo_records_are_shape_checked_like_mute_records() {
         );
         assert_eq!(host.submit_commands(1), result, "{values:?}");
         assert_eq!(host.command_report().reason, reason, "{values:?}");
-        let state = host.console_solo().expect("solo state");
+        let state = host.live_control_solo().expect("solo state");
         assert!(
             !state.any_solo(),
             "a refused solo record engaged a bit anyway"
@@ -7375,7 +7382,7 @@ fn solo_records_are_shape_checked_like_mute_records() {
 #[test]
 fn a_solo_that_changes_nothing_emits_nothing() {
     const QUANTUM: u32 = 128;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     feed_and_render(&mut host, 1, 0, -0.5);
     stage_mute(&mut host, 0, 0, true, 0);
     assert_eq!(host.submit_commands(1), RESULT_OK);
@@ -7398,7 +7405,7 @@ fn a_solo_that_changes_nothing_emits_nothing() {
             "block {block}: a solo that changes no effective mute re-entered the ramp path",
         );
     }
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(state.any_solo());
     assert!(state.emitted_mute(0, 0) && state.emitted_mute(0, 1));
 }
@@ -7439,7 +7446,7 @@ fn a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect() {
     stage_solo(&mut net, 1, 5, true, QUANTUM);
     assert_eq!(net.submit_commands(2), RESULT_OK);
 
-    let state = batched.console_solo().expect("solo state");
+    let state = batched.live_control_solo().expect("solo state");
     assert_eq!(state.solo_count(), 2);
     assert!(state.solo(0) && state.solo(5));
     render_pair_and_compare(&mut batched, &mut net, 4, 1, -0.25, "coalesced vs net");
@@ -7465,10 +7472,10 @@ fn a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect() {
 /// delta pass decide) -> the redundant re-mute stages nothing, the plane stays `+0.0`, and this
 /// fails at sample zero.
 #[test]
-fn a_console_that_never_solos_renders_what_it_always_did() {
+fn live_controls_that_never_solo_render_what_they_always_did() {
     const QUANTUM: u32 = 128;
     let quantum = QUANTUM as usize;
-    let mut host = console_host(QUANTUM, 0);
+    let mut host = live_control_host(QUANTUM, 0);
     feed_and_render(&mut host, 1, 0, -0.5);
 
     stage_mute(&mut host, 0, 0, true, 0);
@@ -7500,7 +7507,7 @@ fn a_console_that_never_solos_renders_what_it_always_did() {
         "the ramp assigns its target exactly on the frame it settles on",
     );
 
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(!state.any_solo());
     assert_eq!(state.solo_count(), 0);
     assert!(state.user_mute(0, 0) && state.user_mute(0, 1));
@@ -7544,7 +7551,7 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
     let document = canonical_session_json(&model).expect("canonical effect solo session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
-        console_command_queue_records: depth,
+        live_control_command_queue_records: depth,
         ..boot_options(quantum)
     };
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect solo boot")
@@ -7598,7 +7605,7 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
         host.command_report().reason,
     );
     assert_eq!(host.command_report().admitted, MAXIMUM_COMMAND_RECORDS);
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(state.solo(0));
     for track in 1..TRACKS {
         assert!(
@@ -7695,7 +7702,8 @@ fn trim_and_polarity_are_admitted_on_every_lane_selector() {
 /// The ordering rule is the one every kind follows and the one a new kind is most likely to get
 /// wrong: **track bound first** (`unknownTrack`), **then shape and domain** (`malformed`,
 /// `domain`), **then "this session has no such queue"** (`unsupportedKind`). A record that is both
-/// badly shaped and addressed at a console-less session reports `malformed`, not `unsupported`.
+/// badly shaped and addressed at a session without live controls reports `malformed`, not
+/// `unsupported`.
 #[test]
 fn trim_and_polarity_refuse_on_the_declared_terms() {
     const QUANTUM: u32 = 128;
@@ -7862,8 +7870,9 @@ fn trim_and_polarity_refuse_on_the_declared_terms() {
 /// would retire the track's mono collapse on a command that moves both channels identically -- and
 /// the queue arithmetic is where the control plane shows which one it did.
 ///
-/// The queue depth is the console default; filling it with `depth` both-commands must be admitted,
-/// and one more must be `backpressure`. A two-record lowering would refuse at half that count.
+/// The queue depth is the live-control default; filling it with `depth` both-commands must be
+/// admitted, and one more must be `backpressure`. A two-record lowering would refuse at half that
+/// count.
 ///
 /// Red mutation: lower `channel = 2` to two per-lane records the way `into_effect_records` does ->
 /// the queue fills at half the depth and the `admitted` count below doubles.
@@ -7871,9 +7880,9 @@ fn trim_and_polarity_refuse_on_the_declared_terms() {
 fn a_both_lane_trim_command_is_one_record_and_one_queue_slot() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 2;
-    // The console default queue depth, which is the bound the room pre-check enforces.
+    // The live-control default queue depth, which is the bound the room pre-check enforces.
     let depth = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
-    assert!(depth >= 2, "the console default depth is meaningful");
+    assert!(depth >= 2, "the live-control default depth is meaningful");
 
     // Exactly `depth` both-lane commands fit.
     let mut host = solo_host(QUANTUM, TRACKS, &[]);
@@ -7952,9 +7961,9 @@ fn a_both_lane_trim_command_is_one_record_and_one_queue_slot() {
 ///
 /// **One mutation is deliberately not red here**, and it is worth naming rather than leaving for a
 /// reader to find: making `ReadyOwnership::queue_capacity` return `producer.fader.capacity()` for
-/// an input slot changes nothing observable, because a console leases all three of a track's
+/// an input slot changes nothing observable, because live controls lease all three of a track's
 /// queues at **one** depth -- `TrackControlRequest::queue_capacity` is a single field, and
-/// `prepare_session_builtins_with_console` builds the three rings from it. The wrong queue's
+/// `prepare_session_builtins_with_live_controls` builds the three rings from it. The wrong queue's
 /// capacity is the right number. It becomes observable the day the three depths can differ, and
 /// the line is written per band anyway so that day is a one-line change rather than a bug.
 #[test]
@@ -8139,7 +8148,7 @@ fn trim_and_polarity_leave_the_solo_transaction_closed() {
         "reason {}",
         host.command_report().reason
     );
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(state.solo(2), "the solo bit moved");
     assert!(!state.transaction_open(), "and the transaction closed");
     // `emitted >= user_mute` is the standing invariant: every track the gate silenced was told so,
@@ -8160,7 +8169,7 @@ fn trim_and_polarity_leave_the_solo_transaction_closed() {
     stage_trim(&mut host, 1, 1, 2, 99.0, QUANTUM);
     assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_DOMAIN);
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(
         !state.any_solo(),
         "a batch refused by a trim record left a solo bit engaged"
@@ -8182,7 +8191,7 @@ fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
     let mut host = solo_host(QUANTUM, TRACKS, &[]);
     stage_trim(&mut host, 0, 0, 2, -144.0, 0);
     assert_eq!(host.submit_commands(1), RESULT_OK);
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(
         !state.user_mute(0, 0) && !state.user_mute(0, 1),
         "a trim ride is not a mute: the strip's user-mute state is untouched"
@@ -8193,13 +8202,13 @@ fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
     // record was never a mute record so nothing about it is restored or re-emitted.
     stage_solo(&mut host, 0, 1, true, QUANTUM);
     assert_eq!(host.submit_commands(1), RESULT_OK);
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     assert!(state.emitted_mute(0, 0), "track 0 is outside the solo set");
     assert!(!state.user_mute(0, 0), "and its user mute is still clear");
 
     stage_solo(&mut host, 0, 1, false, QUANTUM);
     assert_eq!(host.submit_commands(1), RESULT_OK);
-    let state = host.console_solo().expect("solo state");
+    let state = host.live_control_solo().expect("solo state");
     for track in 0..TRACKS {
         for lane in 0..2 {
             assert!(
@@ -8212,7 +8221,7 @@ fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
 
 #[test]
 fn prepared_companion_preserves_ordinary_batch_atomicity() {
-    let mut host = console_host(128, 0);
+    let mut host = live_control_host(128, 0);
     let generation = host.host_generation;
     let workspace = host
         .buffers
@@ -8277,10 +8286,10 @@ fn prepared_companion_preserves_ordinary_batch_atomicity() {
         before + 1
     );
 
-    let mut no_console = prepared_host(128);
-    assert!(no_console.prepared_companion_mut().is_none());
-    assert_eq!(no_console.prepared_companion_capacity(), 0);
-    assert!(no_console.eq_target_config().is_none());
+    let mut no_live_controls = prepared_host(128);
+    assert!(no_live_controls.prepared_companion_mut().is_none());
+    assert_eq!(no_live_controls.prepared_companion_capacity(), 0);
+    assert!(no_live_controls.eq_target_config().is_none());
 }
 
 #[test]

@@ -186,7 +186,7 @@ def worklet_called_exports(text: str) -> set[str]:
     The PCM feed path lives in `receiveSource`/`receiveSeek`, not here, so a `source_` name found in
     this body is an introspection query by construction.
     """
-    body = block_after(text, "\n  bindConsole(init) ", "{", "}")
+    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
     called = set(
         re.findall(r"this\.exports\.(miso_engine_web_v1_source_[a-z_]+)\(", body)
     )
@@ -196,7 +196,7 @@ def worklet_called_exports(text: str) -> set[str]:
 
 def worklet_source_reads(text: str) -> dict[str, str]:
     """`field name -> export name`, as the worklet actually wires them together."""
-    body = block_after(text, "\n  bindConsole(init) ", "{", "}")
+    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
     reads = {
         field: export
         for field, export in re.findall(
@@ -219,7 +219,7 @@ def worklet_source_reads(text: str) -> dict[str, str]:
 
 
 def worklet_pushed_fields(text: str) -> list[str]:
-    body = block_after(text, "\n  bindConsole(init) ", "{", "}")
+    body = block_after(text, "\n  bindLiveControls(init) ", "{", "}")
     match = re.search(r"this\.sources\.push\(\{([^}]*)\}\);", body)
     require(match, "the worklet does not push a per-source record with shorthand fields")
     fields = [part.strip() for part in match.group(1).split(",") if part.strip()]

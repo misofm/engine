@@ -43,8 +43,8 @@ const FACTORY_FIELDS = [
   "context", "document", "options", "simd128ModuleUrl", "workletModuleUrl",
 ];
 const BOOT_OPTION_FIELDS = [
-  "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-  "consoleObservationTaps", "consoleMasterTrackPlusOne",
+  "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+  "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ];
 const execFileAsync = promisify(execFile);
 
@@ -424,8 +424,8 @@ async function runSuspendedFixture(urls) {
     "context", "document", "options", "simd128ModuleUrl", "workletModuleUrl",
   ];
   const BOOT_OPTION_FIELDS_IN_ORDER = [
-    "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
-    "consoleObservationTaps", "consoleMasterTrackPlusOne",
+    "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords", "liveControlMeterBlocks",
+    "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
   ];
   const STAGE_TIMEOUT = 15_000;
   const stages = [];
@@ -574,10 +574,10 @@ async function runSuspendedFixture(urls) {
   const bootOptions = () => ({
     sourceRingFrames: 0,
     maximumMemoryBytes: 67_108_864n,
-    consoleCommandQueueRecords: 0n,
-    consoleMeterBlocks: 0n,
-    consoleObservationTaps: 0n,
-    consoleMasterTrackPlusOne: 0n,
+    liveControlCommandQueueRecords: 0n,
+    liveControlMeterBlocks: 0n,
+    liveControlObservationTaps: 0n,
+    liveControlMasterTrackPlusOne: 0n,
   });
   const makeFactoryOptions = () => ({
     context,
@@ -734,10 +734,10 @@ async function runSuspendedFixture(urls) {
     factory: {
       sourceRingFrames: 0,
       maximumMemoryBytes: "67108864",
-      consoleCommandQueueRecords: "0",
-      consoleMeterBlocks: "0",
-      consoleObservationTaps: "0",
-      consoleMasterTrackPlusOne: "0",
+      liveControlCommandQueueRecords: "0",
+      liveControlMeterBlocks: "0",
+      liveControlObservationTaps: "0",
+      liveControlMasterTrackPlusOne: "0",
       preparedModule: false,
       spectrumPreparation: false,
     },

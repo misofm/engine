@@ -1,6 +1,6 @@
-/** Issue #322 compile-time red probes for the catalog-derived live console. */
+/** Issue #322 compile-time red probes for the catalog-derived live controls. */
 
-import { ConsoleEdits } from "../src/core/console.ts";
+import { LiveControlEdits } from "../src/core/live-controls.ts";
 import type {
   MisoCommandAck,
   MisoCommandRequest,
@@ -61,7 +61,7 @@ type _SeekPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["seekSourc
 type _MeterPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["meters"]>[0]>>;
 type _TelemetryPayload = Assert<NoCallerId<Parameters<MisoAudioWorkletHost["telemetry"]>[0]>>;
 
-const edits = new ConsoleEdits({
+const edits = new LiveControlEdits({
   tracks: ["t"],
   sources: [],
   metersAttached: true,
@@ -110,7 +110,7 @@ delay.parameter({ key: "cross feedback", value: 0.5, channel: "left" });
 delay.observe("Gain Reduction", true);
 
 const eq = track.effect("simd2", 0, "miso.parametric-eq");
-// @ts-expect-error the enumeration is prepared-only, not a live console parameter
+// @ts-expect-error the enumeration is prepared-only, not a live-control parameter
 eq.parameter("band-1-kind", "bell");
 eq.parameter("hpf-enabled", true);
 eq.parameter("lpf-enabled", false);

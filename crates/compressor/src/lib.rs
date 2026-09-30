@@ -32,6 +32,8 @@
 
 mod design;
 mod kernel;
+#[cfg(test)]
+mod padding_tests;
 mod state;
 
 pub mod corpus;
@@ -49,12 +51,63 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use effect_runtime::bank::block_is_positive_zero;
+use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use lane::{Backend, Lane, Simd4, Simd8};
 
 use crate::design::{COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT};
 use crate::kernel::{Channel, Detector};
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks the silent fast path skipped (issue #1090 gate 3), counted once per skipped block.
+    static SILENT_ADMISSIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// Counts one silent admission. Test builds only: production has no counter.
+#[cfg(test)]
+fn admitted_silent() {
+    SILENT_ADMISSIONS.with(|blocks| blocks.set(blocks.get() + 1));
+}
+
+/// The D7 boundary check of one channel's block, applied **per lane** (issue #1090).
+///
+/// The clean block, the common case, costs what it always did: one [`check_block`] scan and one
+/// `mask_any`. A rejected block zeroes and resets only the lanes that left the bound, and returns
+/// their bitmask. At `L = f32` the one lane is the whole channel, so a scalar instance keeps the
+/// policy it always had: its channel block is zeroed and its envelope cleared.
+///
+/// # Why per lane
+///
+/// A bank used to zero every lane of the channel and clear every lane's envelope when one lane
+/// failed. That coupled bank-mates' bits (decision 12's coupling rule): one track fed a legal but
+/// tripping value, or a bypassed track whose wet block the rack discards anyway, silenced every
+/// other track of its bank. Per lane, each lane is recovered exactly as the same track rendered
+/// per node is. The check is a per-word predicate, so a lane fails exactly when its own instance's
+/// block would; and a rejection writes only that lane's words and that lane's envelope, which is
+/// everything `Channel::clear_state` resets for it. A padded lane is recovered the same way, which
+/// keeps it at rest; whether a failure is *reported* is the caller's choice.
+///
+/// `andnot` clears a rejected lane's bits outright, so a recovered word is exactly `+0.0`, as the
+/// whole-block `fill(0.0)` wrote, and a kept lane's words are not touched by any arithmetic.
+fn finish_lanes<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
+    if check_block::<L>(io) {
+        return 0;
+    }
+    let failed = nonfinite_lane_mask::<L>(io);
+    let mut flags = [0.0_f32; MAX_WIDTH];
+    for (lane, flag) in flags.iter_mut().enumerate().take(L::WIDTH) {
+        if failed & (1 << lane) != 0 {
+            *flag = 1.0;
+        }
+    }
+    let rejected = L::load(&flags).gt(L::zero());
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        L::load(frame).andnot(rejected).store(frame);
+    }
+    channel.gain_reduction_db = channel.gain_reduction_db.andnot(rejected);
+    failed
+}
 
 /// Fixed scalar words each channel section carries in the current causal payload.
 pub use crate::state::STATE_HEADER_WORDS;
@@ -419,11 +472,14 @@ fn detector_source<'a>(
 }
 
 /// The track index a bank call names, or the track diagnostic.
-fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
+///
+/// A lane past the width and a padded lane (a clear bit of `active`, issue #1090) are both not a
+/// track.
+fn checked_track(track_index: u32, width: usize, active: u32) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| StatePayloadError {
         code: "effect.state.track",
     })?;
-    if track >= width {
+    if track >= width || active & (1 << track) == 0 {
         return Err(StatePayloadError {
             code: "effect.state.track",
         });
@@ -516,6 +572,8 @@ impl<L: Lane> Instance<L> {
             // The recursive words are at their fixed point and the buffers already hold the
             // `+0.0` the current-sample kernel would write, so the whole block is bit-identical
             // to the slow path. There is no history cursor to advance.
+            #[cfg(test)]
+            admitted_silent();
             return;
         }
         let before = quiet.then(|| (self.left.recursive_bits(), self.right.recursive_bits()));
@@ -541,8 +599,8 @@ impl<L: Lane> Instance<L> {
             None => false,
         };
         self.silent_bypass = self.metadata.bypass;
-        let left_mask = kernel::finish_channel::<L>(left, &mut self.left);
-        let right_mask = kernel::finish_channel::<L>(right, &mut self.right);
+        let left_mask = finish_lanes::<L>(left, &mut self.left);
+        let right_mask = finish_lanes::<L>(right, &mut self.right);
         if left_mask | right_mask == 0 {
             return;
         }
@@ -575,6 +633,8 @@ impl<L: Lane> Instance<L> {
             && self.silent_bypass == self.metadata.bypass
             && block_is_positive_zero(&left[..words]);
         if quiet && self.silent_fixed_point {
+            #[cfg(test)]
+            admitted_silent();
             return;
         }
         let before = quiet.then(|| self.left.recursive_bits());
@@ -594,7 +654,7 @@ impl<L: Lane> Instance<L> {
             None => false,
         };
         self.silent_bypass = self.metadata.bypass;
-        let left_mask = kernel::finish_channel::<L>(left, &mut self.left);
+        let left_mask = finish_lanes::<L>(left, &mut self.left);
         if left_mask == 0 {
             return;
         }
@@ -727,10 +787,110 @@ pub struct PreparedCompressor {
     instance: Instance<f32>,
 }
 
-/// A prepared homogeneous bank: `L::WIDTH` tracks as one vector, same kernel body.
+/// A prepared homogeneous bank: `L::WIDTH` lanes as one vector, same kernel body.
+///
+/// # Padded lanes (issue #1090)
+///
+/// A bank may carry fewer members than lanes (the padding contract on
+/// [`PrepareEffectBankRequest`]). A padded lane is prepared from its request, which the caller
+/// cloned from an active member's, and runs the same kernel as every other lane: the compressor
+/// has no whole-bank decision that could move an active lane's bits, so nothing in the kernel
+/// knows which lanes are padded. The bank's own bookkeeping does:
+///
+/// * **D7.** Recovery is per lane ([`finish_lanes`]) for every lane, and only an active lane's
+///   failure is reported. A padded lane is fed `+0.0` and its output is discarded, so its failure
+///   is nobody's; recovering it anyway keeps it at rest.
+/// * **Automation.** A span addressed to a padded lane is neither applied nor counted, so its
+///   ramps stay where preparation put them and its report stays empty.
+/// * **State payloads.** A padded lane is not a track: a snapshot or restore that names one is
+///   `effect.state.track`, as a lane past the width is. A restore could otherwise move it off rest.
+///
+/// On `+0.0` input a padded lane stays at rest and writes `+0.0`, whatever member it cloned: every
+/// legal threshold and knee put the silent detector level, `-160` dB, below the knee, so the curve
+/// target is `+0.0`, the envelope stays `+0.0`, and every output word is `+0.0`: the dry word,
+/// `+0.0 * gain`, or their mix, `mix * (+0.0 - +0.0) + +0.0`. That is the contract's `+0.0`-out
+/// clause, and it is why a padded lane never keeps an otherwise silent bank off the silent fast
+/// path.
+///
+/// # What stays whole-bank, and why no bit moves
+///
+/// Four decisions are still taken once for all lanes. Each couples cost, never bits:
+///
+/// * the **silent fast path** skips a block only when every lane is at its fixed point on `+0.0`
+///   input, where the slow path would write the same `+0.0` and leave the same state;
+/// * the **ramping prefix** is as long as the longest ramp of any lane, and a lane with no ramp in
+///   flight renders the same bits through the ramping body as through the settled one;
+/// * the **all-wet arm** is taken when every lane has `mix == 1`, and differs from the general law
+///   only in a quieted signalling NaN, which fails that lane's own D7 check either way;
+/// * the **link** combines the two channels of one lane, lane-wise, never two lanes.
 struct PreparedCompressorBank<L: Lane> {
     metadata: PreparedBankMetadata,
     instance: Instance<L>,
+    /// Bit `l` is set when lane `l` carries a member; clear for a padded lane. All `L::WIDTH` bits
+    /// are set for a full bank.
+    active: u32,
+}
+
+/// A bank request whose shape and every member request have been validated: what a bank of either
+/// width is built from.
+struct BankParts {
+    width: BankWidth,
+    metadata: PreparedEffectMetadata,
+    left_defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH],
+    right_defaults: [[f32; PARAMETER_COUNT]; MAX_WIDTH],
+    /// Every lane's request, padded ones included, prepares the same program key.
+    same_program: bool,
+    /// [`PreparedCompressorBank::active`].
+    active: u32,
+}
+
+impl BankParts {
+    /// Validates the shape and every lane's request, in lane order, before any fallback is taken:
+    /// an unavailable backend, a connected sidechain or a heterogeneous cohort must never hide a
+    /// malformed request (E13).
+    ///
+    /// A padded lane's request is validated like a member's. It is a clone of one, so it passes
+    /// exactly when that member does; the preparation values it carries are the ones its lane runs.
+    fn validate(request: PrepareEffectBankRequest<'_>) -> Result<Self, EffectPrepareError> {
+        request.validate_shape()?;
+        let first = request.requests[0];
+        let metadata = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, first)?;
+        let (first_left, first_right) = initial_defaults(first.initial_values)?;
+        let mut parts = Self {
+            width: request.width,
+            metadata,
+            left_defaults: [first_left; MAX_WIDTH],
+            right_defaults: [first_right; MAX_WIDTH],
+            same_program: true,
+            active: 0,
+        };
+        for (lane, item) in request.requests.iter().copied().enumerate() {
+            let candidate = expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, item)?;
+            if candidate.program_key() != metadata.program_key() {
+                parts.same_program = false;
+            }
+            let (left, right) = initial_defaults(item.initial_values)?;
+            parts.left_defaults[lane] = left;
+            parts.right_defaults[lane] = right;
+            if request.active_mask[lane] {
+                parts.active |= 1 << lane;
+            }
+        }
+        Ok(parts)
+    }
+
+    /// The bank at `L`, which must be the request's width.
+    fn bank<L: Lane>(&self) -> PreparedCompressorBank<L> {
+        debug_assert_eq!(L::WIDTH, self.width.lanes() as usize);
+        PreparedCompressorBank {
+            metadata: PreparedBankMetadata {
+                width: self.width,
+                program_key: self.metadata.program_key(),
+            },
+            instance: Instance::new(self.metadata, &self.left_defaults, &self.right_defaults),
+            active: self.active,
+        }
+    }
 }
 
 impl NativeEffectFactory for CompressorFactory {
@@ -753,40 +913,20 @@ impl NativeEffectFactory for CompressorFactory {
         }))
     }
 
+    /// Binds a full or a padded bank (issue #1090: the compressor accepts the padding contract on
+    /// [`PrepareEffectBankRequest`]; the private bank type's documentation says how it keeps it).
     fn bind_homogeneous_bank(
         &self,
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-        if !request.has_matching_backend_width()
-            || request.requests.len() != request.width.lanes() as usize
-        {
-            return Err(EffectPrepareError {
-                code: "effect.bank.requests",
-            });
-        }
-        let lanes = request.width.lanes() as usize;
-        let first = request.requests[0];
-        let metadata = expected_prepared_metadata(self.descriptor(), first)?;
-        let (first_left, first_right) = initial_defaults(first.initial_values)?;
-        let mut left_defaults = [first_left; MAX_WIDTH];
-        let mut right_defaults = [first_right; MAX_WIDTH];
-        let mut same_program = true;
-        // Every request is validated before any fallback is taken: an unavailable backend or a
-        // connected sidechain must never hide a malformed request (E13).
-        for (track, item) in request.requests.iter().copied().enumerate() {
-            let candidate = expected_prepared_metadata(self.descriptor(), item)?;
-            if candidate.program_key() != metadata.program_key() {
-                same_program = false;
-            }
-            let (left, right) = initial_defaults(item.initial_values)?;
-            left_defaults[track] = left;
-            right_defaults[track] = right;
-        }
-        if !same_program {
+        let parts = BankParts::validate(request)?;
+        if !parts.same_program {
             return Ok(None);
         }
+        // A console slot never carries a sidechain (decision 12), and a keyed insert has no bank
+        // kernel here.
         if !matches!(
-            metadata.ports.sidechain,
+            parts.metadata.ports.sidechain,
             effect_contract::PreparedSidechainPort::Unconnected {
                 id,
                 required: false,
@@ -797,26 +937,20 @@ impl NativeEffectFactory for CompressorFactory {
         // D4, revision 4: there is no runtime SIMD dispatch. This build has exactly one lane
         // width, decided at compile time and attested at boot, so a bank of any other width is a
         // backend that is not available here — the `Ok(None)` scalar fallback, never an error.
-        if Backend::current().width() != lanes {
+        if Backend::current().width() != request.width.lanes() as usize {
             return Ok(None);
         }
-        let bank_metadata = PreparedBankMetadata {
-            width: request.width,
-            program_key: metadata.program_key(),
-        };
         // The build's own width, as a constant, so only its bank is instantiated: a runtime match on
         // `request.width` would compile the other width's bank into every artifact. By width, not
         // by `Backend` variant, because `Backend::Scalar` is test-only (#1059).
         const NATIVE: Option<BankWidth> = BankWidth::for_backend(Backend::current());
         Ok(Some(match NATIVE {
-            Some(BankWidth::Four) => Box::new(PreparedCompressorBank::<Simd4> {
-                metadata: bank_metadata,
-                instance: Instance::new(metadata, &left_defaults, &right_defaults),
-            }) as Box<dyn PreparedNativeEffectBank>,
-            Some(BankWidth::Eight) => Box::new(PreparedCompressorBank::<Simd8> {
-                metadata: bank_metadata,
-                instance: Instance::new(metadata, &left_defaults, &right_defaults),
-            }) as Box<dyn PreparedNativeEffectBank>,
+            Some(BankWidth::Four) => {
+                Box::new(parts.bank::<Simd4>()) as Box<dyn PreparedNativeEffectBank>
+            }
+            Some(BankWidth::Eight) => {
+                Box::new(parts.bank::<Simd8>()) as Box<dyn PreparedNativeEffectBank>
+            }
             None => return Ok(None),
         }))
     }
@@ -1033,7 +1167,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         track_index: u32,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
+        let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.snapshot(output, track)
     }
 
@@ -1043,7 +1177,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
+        let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
     }
 }
@@ -1105,7 +1239,13 @@ impl<L: Lane> PreparedCompressorBank<L> {
             self.instance.silent_fixed_point = false;
         }
         let metadata = self.instance.metadata;
+        let active = self.active;
         for track in 0..lanes {
+            // A padded lane carries no track, so nothing is automated on it and nothing is
+            // counted against it (issue #1090).
+            if active & (1 << track) == 0 {
+                continue;
+            }
             let start = block.automation_offsets[track] as usize;
             let end = block.automation_offsets[track + 1] as usize;
             apply_automation(
@@ -1121,6 +1261,11 @@ impl<L: Lane> PreparedCompressorBank<L> {
         {
             let report = &mut report;
             let record = move |lane: usize, left_failed: bool, right_failed: bool| {
+                // D7 reports attribute active lanes only: a padded lane's failure, recovered like
+                // any lane's, is charged to nobody (issue #1090).
+                if active & (1 << lane) == 0 {
+                    return;
+                }
                 if left_failed {
                     report.reports[lane].nonfinite_left_blocks =
                         report.reports[lane].nonfinite_left_blocks.saturating_add(1);

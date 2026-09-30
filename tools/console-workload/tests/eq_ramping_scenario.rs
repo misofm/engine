@@ -1,4 +1,4 @@
-//! Issue #1005 gate 3: EQ gain rides through the live-console control path, pinned before the
+//! Issue #1005 gate 3: EQ gain rides through the live-control path, pinned before the
 //! ramping-block elision landed.
 //!
 //! A ramping EQ bank used to run all six sections per channel as single-chain passes; #1005 runs

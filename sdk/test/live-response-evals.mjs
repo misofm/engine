@@ -314,7 +314,7 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
       dynamic: [effectEntry("comp", "miso.compressor")],
       simd2: [],
     },
-  }), { asset, console: { commandQueueRecords: 64 } });
+  }), { asset, liveControls: { commandQueueRecords: 64 } });
   const request = {
     trackId: "t",
     grid: { kind: "logarithmic", points: 16, minimumHz: 20, maximumHz: 20_000 },
@@ -340,9 +340,9 @@ test("candidate Wasm captures the live boundary, actual owners, edit drain, boun
     const firstFrequencies = first.frequenciesHz.slice();
     const firstLeft = first.leftDb.slice();
 
-    const console = engine.console();
-    await console.submit(
-      console.edit.track("t").effect("simd1", 0, "miso.parametric-eq").parameter("band-1-gain", -3),
+    const liveControls = engine.liveControls();
+    await liveControls.submit(
+      liveControls.edit.track("t").effect("simd1", 0, "miso.parametric-eq").parameter("band-1-gain", -3),
     );
     const beforeDrain = engine.queryTrackResponse(request);
     assert.equal(beforeDrain.capturedSample, 0n);

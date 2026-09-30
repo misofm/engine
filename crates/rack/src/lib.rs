@@ -190,7 +190,7 @@ pub enum RackError {
     Overflow,
     Shape,
     WidthMismatch,
-    /// A console slot's live-control staging window is not exactly the bank's
+    /// A live-control slot's staging window is not exactly the bank's
     /// `automation_capacity` spans (`EffectBankProcessBlock::check_automation_window`, issue #1012).
     AutomationWindow,
 }
@@ -632,13 +632,13 @@ pub trait BankStage: Send {
     }
     // REALTIME_POLICY_END
 
-    /// Drain this stage's live-console queues, before any lane of the block is dispatched.
+    /// Drain this stage's live-control queues, before any lane of the block is dispatched.
     ///
     /// # Why the drain is a separate call and not the first paragraph of [`process`](Self::process)
     ///
     /// An admitted record takes effect on the **first sample of the block that drains it** -- that
-    /// is #137 E1's rule and every console gate in the tree rests on it. A record that writes one
-    /// channel's upstream word also clears the channel-symmetry witness' `LIVE` term. Those two
+    /// is #137 E1's rule and every live-control gate in the tree rests on it. A record that writes
+    /// one channel's upstream word also clears the channel-symmetry witness' `LIVE` term. Those two
     /// facts have to be observed in that order: if the collapse dispatch read the witness *before*
     /// the drain, a `ParameterChannel::Left` retarget admitted at block `N` would take effect on
     /// block `N`'s first sample while block `N` still ran collapsed -- and a collapsed block
@@ -647,7 +647,7 @@ pub trait BankStage: Send {
     /// block nobody would think to look at.
     ///
     /// So [`BankChain::run`] drains **every** slot first, then reads the witness, then gathers. The
-    /// default is a no-op, which is what a console-free plan pays.
+    /// default is a no-op, which is what a live-control-free plan pays.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
         let _ = first_sample;
         Ok(())
@@ -691,8 +691,8 @@ pub trait BankStage: Send {
     /// * **Observations.** A resident tap reads bank state, and a collapsed bank's right-channel
     ///   state is frozen at the moment the collapse engaged. The stage substitutes the left
     ///   channel's reading for the right channel's after the bank runs -- see
-    ///   [`ConsoleEffectBankStage::process_mono`] -- because the right channel of a collapsed track
-    ///   *is* its left channel at the tap exactly as at the fader.
+    ///   [`LiveControlEffectBankStage::process_mono`] -- because the right channel of a collapsed
+    ///   track *is* its left channel at the tap exactly as at the fader.
     /// * **Reports and counters.** Per-channel accounting is duplicated from the left, and a total
     ///   that sums both channels is twice the left count. See
     ///   [`PreparedNativeEffectBank::process_bank_mono`], which states the rule for the effects,
@@ -700,7 +700,7 @@ pub trait BankStage: Send {
     /// * **Latency lines.** Anything a stage stages for a *later* block -- a dry shunt's delay line
     ///   is the one in this tree -- must be fed the left plane rather than the ungathered right
     ///   scratch, because the seam is downstream of the line and cannot repair it.
-    ///   `ConsoleEffectBankStage::process_inner` carries that argument in full.
+    ///   `LiveControlEffectBankStage::process_inner` carries that argument in full.
     ///
     /// The common shape of all three is that the collapse is invisible to samples and visible to
     /// state, so a stage whose only mono gate is a digest has not been gated.
@@ -747,12 +747,12 @@ pub struct EffectBankStage {
     /// what the collapse's dispatch needs, would cost more than the collapse saves.
     ///
     /// The cache is sound because the designed words of a **bound** bank cannot move: a
-    /// console-free slot hands the bank an empty automation slice on every block
+    /// live-control-free slot hands the bank an empty automation slice on every block
     /// (`EffectBankStage::process`), and `reset`/`restore_track_state_payload` -- the two calls
     /// that do move them -- are preparation-side and unreachable once a processor has been moved
-    /// into a chain. `ConsoleEffectBankStage` is the slot that *does* drain writes, and it caches
-    /// the same half for the same reason: a one-channel write clears the `LIVE` term, which that
-    /// slot pulls live, and a `Both` write leaves the two channels bit-equal.
+    /// into a chain. `LiveControlEffectBankStage` is the slot that *does* drain writes, and it
+    /// caches the same half for the same reason: a one-channel write clears the `LIVE` term, which
+    /// that slot pulls live, and a `Both` write leaves the two channels bit-equal.
     designed: Box<[bool]>,
 }
 
@@ -805,8 +805,8 @@ impl BankStage for EffectBankStage {
         self.processor.metadata().program_key.bypass
     }
 
-    /// A console-free bank has no live channel at all, so the two live terms cannot be false and
-    /// the whole witness is the effect's own designed-word comparison.
+    /// A live-control-free bank has no live channel at all, so the two live terms cannot be false
+    /// and the whole witness is the effect's own designed-word comparison.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         witness_of_designed(self.designed.get(lane).copied().unwrap_or(false))
     }
@@ -883,13 +883,24 @@ pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
     }
 }
 
-/// The live-console twin of [`EffectBankStage`] (issue #140 A).
+/// The live-control twin of [`EffectBankStage`] (issue #140 A), and the stage of every bank slot
+/// with a lane bypassed at preparation (issue #1087).
 ///
-/// It is a **separate stage type** on purpose, exactly as `ConsoleMatrixProcessor` is a separate
-/// processor from `MatrixProcessor` (#137 D1): a bank prepared without a console keeps
-/// [`EffectBankStage`]'s storage and its `&[]`/zero-offset call, byte for byte, so "control off
-/// costs nothing" stays an identity rather than a claim. Nothing in this type is reachable from a
-/// session that asked for no control channel.
+/// It is a **separate stage type** on purpose, exactly as `LiveControlMatrixProcessor` is a
+/// separate processor from `MatrixProcessor` (#137 D1): a bank prepared without live controls and
+/// without a bypassed lane keeps [`EffectBankStage`]'s storage and its `&[]`/zero-offset call, byte
+/// for byte, so "control off costs nothing" stays an identity rather than a claim. Nothing in this
+/// type is reachable from a session that asked for no control channel and bypasses nothing.
+///
+/// # A session bypass is a lane of this stage (issue #1087)
+///
+/// A session's `bypass`, on every effect but the delay and the multiband (which keep a prepared
+/// bypass, issue #1100), is lowered to a prepared `bypass = false` plus a lane
+/// ([`EffectControlLane::without_channel`] when no live controls are attached) whose bypass is set,
+/// so a bypassed track keeps its bank. Its lane runs the wet path with the others and step 4
+/// restores its latency-matched dry signal: the same words the effect's own prepared bypass emits,
+/// by copies, so `-0.0` survives, and the select is per lane, so banking couples the lanes' cost
+/// and never their bits.
 ///
 /// # What one block does, in order
 ///
@@ -908,15 +919,17 @@ pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
 /// `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
 /// applies a command timeline to lane `l` exactly as the per-node scalar path applies it to the
 /// same effect: same spans, same block, same order.
-pub struct ConsoleEffectBankStage {
+pub struct LiveControlEffectBankStage {
     processor: Box<dyn PreparedNativeEffectBank>,
     width: BankWidth,
     quantum: u32,
     /// `lanes + 1` packed offsets into [`Self::spans`], rewritten every block.
     offsets: Box<[u32]>,
-    /// One control channel per lane; `None` for a lane no console addresses.
+    /// One control lane per bank lane: a live channel, a channel-less lane that carries a
+    /// session bypass (issue #1087), or `None` for a lane neither applies to.
     lanes: Box<[Option<EffectControlLane>]>,
-    /// One lane's staging window: the bank's own `automation_capacity` spans.
+    /// One lane's staging window: the bank's own `automation_capacity` spans, or none when no
+    /// lane has a live channel (issue #1087).
     ///
     /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
     /// the moment it is drained, before the next lane touches the window. The bank never sees this
@@ -926,7 +939,7 @@ pub struct ConsoleEffectBankStage {
     /// `[offsets[l], offsets[l + 1])`, which is the partition the effect contract already defines.
     packed: Box<[PreparedAutomationSpan]>,
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
-    /// slot can be bypassed live.
+    /// slot can be bypassed: no live channel and no lane bypassed at preparation.
     shunt: Option<BypassShunt>,
     /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
     /// plan named no observation capacity. `None` is the byte-identical unobserved path.
@@ -942,7 +955,7 @@ pub struct ConsoleEffectBankStage {
     /// it stale -- a one-channel write clears the `LIVE` term this slot still pulls live.
     designed: Box<[bool]>,
     /// Spans this block's drain packed into [`Self::packed`]. Written by
-    /// [`ConsoleEffectBankStage::drain`], read by the process body that follows it in the same
+    /// [`LiveControlEffectBankStage::drain`], read by the process body that follows it in the same
     /// block.
     staged_spans: usize,
     /// Records dropped because a lane's window was full of distinct targets. Zero by construction.
@@ -951,8 +964,8 @@ pub struct ConsoleEffectBankStage {
     unbound: u64,
 }
 
-impl ConsoleEffectBankStage {
-    /// Builds the console stage for one bound bank slot.
+impl LiveControlEffectBankStage {
+    /// Builds the live-control stage for one bound bank slot.
     ///
     /// `latency` is the slot's declared [`effect_contract::PreparedEffectMetadata::latency`]. Every lane of a bank
     /// shares one [`EffectProgramKey`], so they share one latency and one AoSoA delay line:
@@ -984,7 +997,18 @@ impl ConsoleEffectBankStage {
             return Err(RackError::ZeroQuantum);
         }
         let lane_count = width.lanes() as usize;
-        let capacity = processor.metadata().program_key.automation_capacity as usize;
+        // Issue #1087: only a live channel ever stages a span. A slot whose lanes are all
+        // channel-less -- session bypasses with no live controls attached -- holds no window at
+        // all: its drain stages nothing into an empty one, and there is no twin pair for the
+        // pairing rule to protect. The window is the automation capacity per lane of the bank,
+        // which a caller may set as high as `u32::MAX`, so this is what keeps a live-control-free
+        // bypass from costing live-control staging.
+        let live = lanes.iter().flatten().any(EffectControlLane::has_channel);
+        let capacity = if live {
+            processor.metadata().program_key.automation_capacity as usize
+        } else {
+            0
+        };
         let total = capacity
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
@@ -993,9 +1017,13 @@ impl ConsoleEffectBankStage {
             .checked_mul(lane_count)
             .ok_or(RackError::Overflow)?;
         let line = latency.checked_mul(lane_count).ok_or(RackError::Overflow)?;
+        // Issue #1087: a shunt whenever any lane can be bypassed -- a live channel, which may
+        // bypass at any block, or a lane bypassed at preparation, whether or not live controls
+        // are attached. A channel-less lane that is not bypassed can never become so.
         let shunt = lanes
             .iter()
-            .any(Option::is_some)
+            .flatten()
+            .any(|lane| lane.has_channel() || lane.bypassed())
             .then(|| BypassShunt::new(words, line));
         // Issue #143 level-1 zero: a slot no observation request touched holds neither the lane
         // vector nor the per-lane sample scratch.
@@ -1011,9 +1039,11 @@ impl ConsoleEffectBankStage {
         let staging: Box<[PreparedAutomationSpan]> = vec![IDLE_SPAN; capacity].into_boxed_slice();
         // One window serves every lane, and each lane's staged prefix meets the effect's per-lane
         // `span_index < automation_capacity` cut-off; a window of any other size would let a
-        // staged twin pair straddle it (issue #1012).
-        EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
-            .map_err(|_| RackError::AutomationWindow)?;
+        // staged twin pair straddle it (issue #1012). A slot with no live channel stages nothing.
+        if live {
+            EffectBankProcessBlock::check_automation_window(&staging, &processor.metadata())
+                .map_err(|_| RackError::AutomationWindow)?;
+        }
         Ok(Self {
             processor,
             designed,
@@ -1103,7 +1133,7 @@ const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
     end_value: 0.0,
 };
 
-impl BankStage for ConsoleEffectBankStage {
+impl BankStage for LiveControlEffectBankStage {
     fn copy_response_snapshot_lane(
         &self,
         lane: usize,
@@ -1137,8 +1167,8 @@ impl BankStage for ConsoleEffectBankStage {
     /// The designed-word comparison, conjoined with the lane's own live terms.
     ///
     /// The live half comes from [`EffectControlLane::symmetry`], which the drain in
-    /// [`Self::process`] maintains: a lane with no console channel has no live writes at all and
-    /// contributes only the designed term.
+    /// [`Self::process`] maintains: a lane with no live-control channel has no live writes at all
+    /// and contributes only the designed term.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let designed = witness_of_designed(self.designed.get(lane).copied().unwrap_or(false));
         match self.lanes.get(lane).and_then(Option::as_ref) {
@@ -1168,7 +1198,7 @@ impl BankStage for ConsoleEffectBankStage {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// [`ConsoleEffectBankStage::process`] with the bank call collapsed onto the left plane.
+    /// [`LiveControlEffectBankStage::process`] with the bank call collapsed onto the left plane.
     ///
     /// Every other step is the dual one, in the same order and on the same words: the drain runs
     /// before a sample is touched, the shunt captures and restores both planes, and the taps
@@ -1196,7 +1226,7 @@ impl BankStage for ConsoleEffectBankStage {
     }
 
     fn observation_retained_bytes(&self) -> usize {
-        ConsoleEffectBankStage::observation_retained_bytes(self)
+        LiveControlEffectBankStage::observation_retained_bytes(self)
     }
 
     // REALTIME_POLICY_BEGIN
@@ -1206,7 +1236,7 @@ impl BankStage for ConsoleEffectBankStage {
     // REALTIME_POLICY_END
 }
 
-impl ConsoleEffectBankStage {
+impl LiveControlEffectBankStage {
     /// Step 1 of the block, hoisted out of [`Self::process_inner`] so that it runs before the
     /// chain's collapse dispatch reads the witness. See [`BankStage::begin_block`].
     fn drain(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -1239,7 +1269,7 @@ impl ConsoleEffectBankStage {
     }
 
     // REALTIME_POLICY_BEGIN
-    /// The one console-slot body, dual or collapsed.
+    /// The one live-control slot body, dual or collapsed.
     ///
     /// `MONO` is a const generic rather than an argument so the two monomorphise: the dual
     /// instantiation is the code that shipped before the collapse existed, which is what keeps
@@ -1270,7 +1300,7 @@ impl ConsoleEffectBankStage {
         // read once instead of twice.
         //
         // `shunt.is_some()` means *some lane of this cohort has a control channel*, not that any
-        // lane is bypassed. An eight-lane cohort with one console-driven lane and nothing
+        // lane is bypassed. An eight-lane cohort with one live-control-driven lane and nothing
         // bypassed was paying a `quantum * lanes` two-plane copy every block for a dry block no
         // reader could observe.
         let any_bypassed = self.lanes[..lane_count]
@@ -1821,7 +1851,7 @@ impl<'a> ResidentOutputLane<'a> {
 ///    written a one-plane body, and every slot runs on exactly this chain's lanes.
 /// 2. **Bind time, again.** [`arm_mono_collapse`](BankChain::arm_mono_collapse) records the
 ///    *structural* half of the witness, which a chain cannot see for itself. Unarmed is declining.
-/// 3. **Per block, before a sample moves.** Every slot's live-console queue is drained
+/// 3. **Per block, before a sample moves.** Every slot's live-control queue is drained
 ///    ([`BankStage::begin_block`]) and *then* the witness is read, in that order and for the
 ///    reason `begin_block` documents.
 /// 4. **The seam.** After the prefix, one copy of the resident block's left plane into its right.
@@ -2440,7 +2470,7 @@ impl BankChain {
                 && len <= self.scratch.left.len()
                 && len <= self.scratch.right.len()
         });
-        // Step 0: every slot's live-console queue, drained before anything else. See
+        // Step 0: every slot's live-control queue, drained before anything else. See
         // `BankStage::begin_block` for why this cannot be folded into `process`.
         for slot in &mut self.slots {
             // The same identity-slot guard `process` has always taken. A slot that is an identity

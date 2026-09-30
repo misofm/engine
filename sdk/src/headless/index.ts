@@ -53,7 +53,7 @@ export type {
   SpectrumStreamStart,
   SpectrumStreamStatus,
 } from "../core/spectrum.ts";
-export { EngineConsole } from "../core/console.ts";
+export { EngineLiveControls } from "../core/live-controls.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type {
   CommandReport,

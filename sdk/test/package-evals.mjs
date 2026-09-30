@@ -128,7 +128,7 @@ describe("barrel reachability", () => {
   });
 
   test("core/writer is on the root barrel, by identity", () => {
-    assert.equal(rootBarrel.ConsoleWriter, writer.ConsoleWriter);
+    assert.equal(rootBarrel.LiveControlWriter, writer.LiveControlWriter);
   });
 
   test("core/lattice is on the root barrel, by identity", () => {

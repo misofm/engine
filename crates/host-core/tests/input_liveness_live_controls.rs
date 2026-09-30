@@ -4,10 +4,10 @@
 //! a whole prepared plan can show is the three facts below, and each of them is a property a
 //! crate-local test would have to assume.
 //!
-//! 1. **Class-A OFF, on rendered bits.** A plan that leased a console and sent no trim or polarity
-//!    command renders byte-identically to the same session prepared with **no console at all** --
-//!    which is the plan the engine built before this phase existed. That is the render-identity
-//!    half of the C3 form, in tree, on a real fixture.
+//! 1. **Class-A OFF, on rendered bits.** A plan that leased live controls and sent no trim or
+//!    polarity command renders byte-identically to the same session prepared with **no live
+//!    controls at all** -- which is the plan the engine built before this phase existed. That is
+//!    the render-identity half of the C3 form, in tree, on a real fixture.
 //! 2. **The drain reaches the addressed member and only it.** A command pushed onto track `t`'s
 //!    input queue moves track `t`'s coefficient, at the block that drains it, and moves no other
 //!    track's. On a banked plan the queues are drained by the *bank* over its member lanes, so a
@@ -45,8 +45,8 @@ use builtins::{BuiltinLaneSelector, MeterTap};
 use builtins_compiler::TrackInputRecord;
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SourceSubmission, prepare_host_session, prepare_host_session_with_console,
+    HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    SourceSubmission, prepare_host_session, prepare_host_session_with_live_controls,
 };
 
 /// `[collapsed blocks, dual blocks]` over every bank chain. Read only after render is disarmed.
@@ -89,8 +89,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequest {
-    HostConsoleRequest {
+fn live_controls() -> HostLiveControlRequest {
+    HostLiveControlRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -102,16 +102,17 @@ fn console() -> HostConsoleRequest {
 
 struct Host {
     prepared: PreparedHost,
-    handles: Option<HostConsoleHandles>,
+    handles: Option<HostLiveControlHandles>,
     block: usize,
     peaks: BTreeMap<String, Vec<[u32; 2]>>,
 }
 
-fn prepare_with_console(document: &str) -> Host {
-    let (_, prepared, handles) = prepare_host_session_with_console(document, &caps(), &console())
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+fn prepare_with_live_controls(document: &str) -> Host {
+    let (_, prepared, handles) =
+        prepare_host_session_with_live_controls(document, &caps(), &live_controls())
+            .unwrap_or_else(|failure| {
+                panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+            });
     assert_eq!(handles.tracks.len(), TRACKS);
     assert_eq!(handles.track_controls.len(), TRACKS);
     Host {
@@ -122,7 +123,7 @@ fn prepare_with_console(document: &str) -> Host {
     }
 }
 
-fn prepare_without_console(document: &str) -> Host {
+fn prepare_without_live_controls(document: &str) -> Host {
     let (_, prepared) = prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
@@ -207,7 +208,7 @@ fn peaks(host: &Host) -> &BTreeMap<String, Vec<[u32; 2]>> {
 fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
     host.handles
         .as_mut()
-        .expect("a console")
+        .expect("live controls")
         .track_controls
         .get_mut(track)
         .expect("a control channel for the addressed track")
@@ -224,26 +225,27 @@ fn census(host: &Host) -> [u64; 2] {
 // 1. Class-A OFF, on rendered bits.
 // ---------------------------------------------------------------------------------------------
 
-/// A console-attached plan that sends no input command renders the console-free plan's bytes.
+/// A live-control-attached plan that sends no input command renders the live-control-free plan's
+/// bytes.
 ///
-/// The console-free arm is the plan the engine built before this phase existed: it binds
+/// The live-control-free arm is the plan the engine built before this phase existed: it binds
 /// `InputProcessor` (or a bank with no consumers), it has no ramp in flight, and its input stage
 /// is prepared from the same coefficients. So this is the render-identity half of the class-A OFF
 /// gate, measured rather than argued.
 ///
 /// Red mutation: initialise `InputStage::ramp.current` from anything but `coef.trim` -> every
-/// block of the console arm differs. Red mutation: make `InputStage::process` take the ramping arm
-/// unconditionally -> this stays green (the two arms are bit-identical, which is the point) and
+/// block of the live-control arm differs. Red mutation: make `InputStage::process` take the ramping
+/// arm unconditionally -> this stays green (the two arms are bit-identical, which is the point) and
 /// `builtins`' `the_settled_arm_leaves_the_ramp_words_untouched` is what refuses it.
 #[test]
-fn an_uncommanded_console_renders_the_console_free_bytes() {
+fn uncommanded_live_controls_render_the_live_control_free_bytes() {
     for session in [SESSION.to_owned(), mono_session()] {
-        let mut with_console = prepare_with_console(&session);
-        let mut without = prepare_without_console(&session);
+        let mut with_live_controls = prepare_with_live_controls(&session);
+        let mut without = prepare_without_live_controls(&session);
         assert_eq!(
-            render(&mut with_console, 12),
+            render(&mut with_live_controls, 12),
             render(&mut without, 12),
-            "leasing a console and sending no input command changes no rendered byte"
+            "leasing live controls and sending no input command changes no rendered byte"
         );
     }
 }
@@ -272,7 +274,7 @@ fn an_uncommanded_console_renders_the_console_free_bytes() {
 #[test]
 fn a_command_moves_exactly_the_addressed_track() {
     let session = mono_session();
-    let mut baseline = prepare_with_console(&session);
+    let mut baseline = prepare_with_live_controls(&session);
     let _ = render(&mut baseline, 4);
     let quiet = peaks(&baseline).clone();
     assert_eq!(quiet.len(), TRACKS, "one meter per track");
@@ -284,7 +286,7 @@ fn a_command_moves_exactly_the_addressed_track() {
     );
 
     for (index, addressed) in quiet.keys().cloned().enumerate() {
-        let mut host = prepare_with_console(&session);
+        let mut host = prepare_with_live_controls(&session);
         push(
             &mut host,
             index,
@@ -324,7 +326,7 @@ fn a_command_moves_exactly_the_addressed_track() {
 fn two_commands_are_not_interchangeable() {
     let session = mono_session();
     let build = |first: usize, second: usize| {
-        let mut host = prepare_with_console(&session);
+        let mut host = prepare_with_live_controls(&session);
         push(
             &mut host,
             first,
@@ -372,13 +374,13 @@ fn two_commands_are_not_interchangeable() {
 
 /// A command takes effect on the **first sample of the block that drains it**.
 ///
-/// The drain contract every console gate in the tree rests on. With a zero-length window the whole
-/// block after the push is rendered at the new coefficient, and the block before it at the old
-/// one.
+/// The drain contract every live-control gate in the tree rests on. With a zero-length window the
+/// whole block after the push is rendered at the new coefficient, and the block before it at the
+/// old one.
 #[test]
 fn a_command_takes_effect_on_the_whole_block_that_drains_it() {
     let session = mono_session();
-    let mut host = prepare_with_console(&session);
+    let mut host = prepare_with_live_controls(&session);
     let before = render(&mut host, 1);
     push(
         &mut host,
@@ -396,7 +398,7 @@ fn a_command_takes_effect_on_the_whole_block_that_drains_it() {
     );
 
     // The oracle: a plan whose session declared that trim from the start renders the same block.
-    let mut declared = prepare_with_console(&session);
+    let mut declared = prepare_with_live_controls(&session);
     push(
         &mut declared,
         3,
@@ -440,7 +442,7 @@ fn the_collapse_census_follows_the_commands() {
     // eight-lane fader bank, an eight-lane matrix bank and an EQ cohort, so the total is larger
     // than the track count and the assertions below are on the delta. What matters is that one
     // one-lane command declines exactly one lane.
-    let mut symmetric = prepare_with_console(&session);
+    let mut symmetric = prepare_with_live_controls(&session);
     let before = census(&symmetric);
     assert_eq!(
         before[0], before[1],
@@ -466,7 +468,7 @@ fn the_collapse_census_follows_the_commands() {
     );
 
     // One asymmetric ride declines exactly one lane, on the block that drains it.
-    let mut asymmetric = prepare_with_console(&session);
+    let mut asymmetric = prepare_with_live_controls(&session);
     push(
         &mut asymmetric,
         2,
@@ -502,7 +504,7 @@ fn the_collapse_census_follows_the_commands() {
     );
 
     // A polarity flip is the same class of event.
-    let mut flipped = prepare_with_console(&session);
+    let mut flipped = prepare_with_live_controls(&session);
     push(
         &mut flipped,
         7,
@@ -535,8 +537,8 @@ fn the_collapse_census_follows_the_commands() {
 fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
     let session = mono_session();
 
-    let mut collapsed = prepare_with_console(&session);
-    let mut dual = prepare_with_console(&session);
+    let mut collapsed = prepare_with_live_controls(&session);
+    let mut dual = prepare_with_live_controls(&session);
     for track in 0..TRACKS {
         push(
             &mut collapsed,
@@ -591,8 +593,8 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
 /// Without this every assertion below could be satisfied by two arms that both fail to collapse.
 #[test]
 fn the_stereo_arm_is_a_never_collapsed_oracle() {
-    let mut mono = prepare_with_console(&mono_session());
-    let mut stereo = prepare_with_console(SESSION);
+    let mut mono = prepare_with_live_controls(&mono_session());
+    let mut stereo = prepare_with_live_controls(SESSION);
     let mono_bits = render(&mut mono, 6);
     let stereo_bits = render(&mut stereo, 6);
     assert!(
@@ -673,8 +675,8 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
         ),
     ] {
         for track in [0_usize, 2, 7] {
-            let mut mono = prepare_with_console(&mono_session());
-            let mut stereo = prepare_with_console(SESSION);
+            let mut mono = prepare_with_live_controls(&mono_session());
+            let mut stereo = prepare_with_live_controls(SESSION);
 
             // Engage the collapse for real before the record exists.
             assert_eq!(
@@ -714,13 +716,13 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
 ///
 /// The `LIVE` latch and the disengage window interact here, and the interaction is the one that
 /// makes the fix's narrower restore rule safe: after the disengage the right channel's ramp record
-/// is whatever the console addressed to it, which is *nothing yet*, and the second record is what
+/// is whatever live controls addressed to it, which is *nothing yet*, and the second record is what
 /// puts it where the first put the left one. A copy at the boundary would have made the second
 /// record a no-op and hidden the whole episode.
 #[test]
 fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
-    let mut mono = prepare_with_console(&mono_session());
-    let mut stereo = prepare_with_console(SESSION);
+    let mut mono = prepare_with_live_controls(&mono_session());
+    let mut stereo = prepare_with_live_controls(SESSION);
     let _ = render(&mut mono, 2);
     let _ = render(&mut stereo, 2);
     // One cohort at the eight-lane launch width, two on a four-lane (AArch64 NEON) build (#1017):
@@ -783,8 +785,8 @@ fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
 /// moment any record was drained would pass everything above.
 #[test]
 fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
-    let mut mono = prepare_with_console(&mono_session());
-    let mut stereo = prepare_with_console(SESSION);
+    let mut mono = prepare_with_live_controls(&mono_session());
+    let mut stereo = prepare_with_live_controls(SESSION);
     let _ = render(&mut mono, 2);
     let _ = render(&mut stereo, 2);
     let engaged = collapses(&mono)[0];
@@ -851,8 +853,8 @@ fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
 fn a_drained_trim_ride_ramps_from_the_value_it_reached_on_both_channels() {
     const SMOOTHING: u32 = 256;
     const BLOCKS: usize = 4;
-    let mut ridden = prepare_with_console(SESSION);
-    let mut twin = prepare_with_console(SESSION);
+    let mut ridden = prepare_with_live_controls(SESSION);
+    let mut twin = prepare_with_live_controls(SESSION);
     let mut gain = 1.0_f32;
     let mut discriminated = false;
     // 10^(-6/20) and 10^(-12/20), written out: the two targets as linear gains.

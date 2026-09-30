@@ -452,6 +452,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
                 backend,
                 width,
                 requests: &requests,
+                active_mask: width.full_mask(),
             })
             .expect("legal unavailable fallback")
             .is_none()
@@ -468,6 +469,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
             backend,
             width,
             requests: &malformed_requests,
+            active_mask: width.full_mask(),
         }))
         .code,
         "effect.parameter.initial"
@@ -485,6 +487,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
                 backend,
                 width,
                 requests: &below,
+                active_mask: width.full_mask(),
             }))
             .code,
             "effect.resource.limit"
@@ -499,6 +502,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
                 backend,
                 width,
                 requests: &heterogeneous,
+                active_mask: width.full_mask(),
             })
             .expect("valid heterogeneous fallback")
             .is_none()
@@ -510,6 +514,7 @@ fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
             backend: Backend::Simd8,
             width: BankWidth::Four,
             requests: &requests,
+            active_mask: BankWidth::Four.full_mask(),
         }))
         .code,
         "effect.bank.requests"

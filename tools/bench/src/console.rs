@@ -75,7 +75,7 @@
 //!
 //! # The console-facility arms (issue #163 item 0d)
 //!
-//! Every session row above renders a plan with no meter stream, no live-console control channel
+//! Every session row above renders a plan with no meter stream, no live-control channel
 //! and no observation capacity -- which is not what a running console is. `console_meters` and
 //! `console_observation` measure what those facilities cost, under the same paired-alternation
 //! protocol as the hoist arms, and through the production entry points rather than a hand-built
@@ -127,7 +127,7 @@
 //! ramping path could move a number in it.
 //!
 //! `console_automation` closes that gap with the console's real traffic shape: **one Point span
-//! per block, on one track**, pushed through the same bounded live-console queue a host pushes
+//! per block, on one track**, pushed through the same bounded live-control queue a host pushes
 //! through, into a real prepared plan. Its three arms carry the identical control channel and
 //! differ only in what rides it -- `quiet` pushes nothing, `restated` restates the value in force
 //! (the #144 hoist settles it, so no window opens), `automated` moves it every block. The paired
@@ -144,7 +144,7 @@
 //! retires for the life of the plan, and the fact that tracks spread across banks each take a
 //! bank down.
 //!
-//! This row is the mono fixture as written, with the live-console control channel, riding eight
+//! This row is the mono fixture as written, with the live-control channel, riding eight
 //! controls on eight tracks, one per eight-lane bank (`console_workload::mixing_automation` is the
 //! table). Each control is pushed in the shape a real host pushes it: the EQ as one owner edit on
 //! `Both`, which designs one `Both` target, and the compressor and the limiter as a Left then a
@@ -156,6 +156,23 @@
 //! every cohort collapsed (`bench console --preflight` runs it alone). The row states each arm's
 //! `bank_collapse_counters`, because a collapse renders the bits a dual bank renders and nothing
 //! else can say whether it held.
+//!
+//! # The console-strip rows (issue #1085)
+//!
+//! Five session rows, emitted after the metered row, freeze the shapes the console strip
+//! (decision 12) changes before any of its slices lands, so the same rows can be timed on today's
+//! engine and on the console model: the standing strip at ten, thirteen and sixteen tracks (with
+//! the nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}); the app shape,
+//! whose every track carries EQ -> compressor in `dynamic` with a third of them bypassed; and
+//! sparse activity, the standing console with every odd track fed silence. They are timed exactly
+//! like every other session row. The app shape's record adds the bypass pattern it observed in its
+//! compiled session, and the sparse row's digest is asserted in-run to differ from both the
+//! all-active and the idle row's, because a sparse row that rendered either one's bits would not
+//! have been fed what it claims. None of the five states a floor (see `floor::floor_row`).
+//!
+//! Every session row's `strip_layout` is named in decision 12's console vocabulary since this
+//! issue (`console_workload::Workload::strip_layout`), so the rows are pinned by one validator
+//! rule on both shapes.
 
 use crate::floor::{self, CoreClock};
 use bench_support::alloc as bench_alloc;
@@ -169,8 +186,8 @@ use console_workload::mixing_automation::{
     self, Lowering, MixingArm, Preflight, PushTally, ResolvedControl,
 };
 use console_workload::{
-    ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WINDOW_BLOCKS, Workload,
-    native_session_rows,
+    BypassCensus, ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime,
+    WINDOW_BLOCKS, Workload, native_session_rows,
 };
 use effect_compiler::launch_native_effect_registry;
 use effect_contract::{
@@ -202,6 +219,18 @@ const GAIN_PAN_FEED_PAIR: [Workload; 2] = [
 const METERED_PAIR: [Workload; 2] = [
     Workload::SixtyFourTrackConsole,
     Workload::SixtyFourTrackConsoleMetered,
+];
+
+/// The session rows whose record states the bypass their compiled session carries (issue #1085):
+/// the app shape alone. Every other row's record is unchanged.
+const BYPASS_ROWS: [Workload; 1] = [Workload::SixtyFourTrackAppShape];
+
+/// The sparse-activity row and the two rows it is read against (issue #1085): every track active,
+/// every track silent, every odd track silent. One session, three inputs, so three digests.
+const SPARSE_TRIPLE: [Workload; 3] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackIdle,
+    Workload::SixtyFourTrackConsoleSparse,
 ];
 
 pub(crate) fn main() {
@@ -257,6 +286,14 @@ pub(crate) fn main() {
     assert_eq!(
         metered, unmetered,
         "the metered console row rendered different output: a meter changed the signal"
+    );
+    // And the sparse row's (issue #1085): half its inputs are silent, so it renders neither the
+    // all-active row's bits nor the idle row's. Either equality means the feed never reached the
+    // plan, and the row would publish another row's cost under its name.
+    let [active, idle, sparse] = SPARSE_TRIPLE.map(digest_of);
+    assert!(
+        sparse != active && sparse != idle,
+        "the sparse-activity row rendered the all-active or the idle row's output"
     );
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
@@ -350,6 +387,8 @@ struct SessionMeasurement {
     /// The metered row's meter evidence (issue #881), and `None` on every other row, whose record
     /// is unchanged.
     meters: Option<MeteredEvidence>,
+    /// The app shape's bypass census (issue #1085), read at bind, and `None` on every other row.
+    bypass: Option<BypassCensus>,
 }
 
 /// What the metered console row states beside its timing (issue #881).
@@ -396,6 +435,10 @@ impl SessionMeasurement {
         let mut meters = workload
             .web_meters()
             .then(|| MeteredEvidence::bind(&runtime));
+        // Issue #1085: fixed at compile time, so read once, before the clock starts.
+        let bypass = BYPASS_ROWS
+            .contains(&workload)
+            .then(|| runtime.bypass_census());
         // Untimed settling. Only the idle row asks for any, and it asks for a lot: see
         // `Workload::warmup_blocks`.
         for observation in 0..workload.warmup_blocks() {
@@ -427,6 +470,7 @@ impl SessionMeasurement {
             audit: audit::snapshot(),
             render_errors,
             meters,
+            bypass,
         }
     }
 
@@ -462,7 +506,7 @@ impl SessionMeasurement {
                 "\"p95_ns_per_block\":{p95_ns},\"p99_ns_per_block\":{p99_ns},",
                 "\"max_ns_per_block\":{max_ns},\"output_sha256\":\"{digest}\",",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
-                "{meters}{floor}{metadata}",
+                "{meters}{bypass}{floor}{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"nearest-rank percentiles over per-block nanoseconds; ",
                 "one warmup pass and two measured rounds; descriptive only; no threshold\"}}"
@@ -501,6 +545,15 @@ impl SessionMeasurement {
                 .meters
                 .as_ref()
                 .map_or_else(String::new, MeteredEvidence::record_fields),
+            // Issue #1085: the app shape's bypass, as its compiled session carries it. Empty on
+            // every other row.
+            bypass = self.bypass.map_or_else(String::new, |census| {
+                format!(
+                    "\"bypass_pattern\":\"{}\",\"bypassed_tracks\":{},",
+                    census.pattern.name(),
+                    census.bypassed_tracks
+                )
+            }),
             // Issue #184's floor accounting. The whole group is absent when the runner had no
             // performance counter to measure the pinned core's clock with, which is the shape
             // every sealed record already has and is what makes the columns additive.
@@ -802,6 +855,7 @@ impl HoistArm {
                     backend,
                     width,
                     requests: &eq_requests,
+                    active_mask: width.full_mask(),
                 })
                 .expect("valid eq bank request")
                 .expect("the native width must bind an eq bank")
@@ -1698,7 +1752,7 @@ impl MonoMeasurement {
 /// microsecond of it under two other effects' steady-state cost.
 const AUTOMATION_WORKLOAD: Workload = Workload::SixtyFourTrackCompressorOnly;
 
-/// The plan every automation arm is prepared with: the live-console control channel and nothing
+/// The plan every automation arm is prepared with: the live-control channel and nothing
 /// else.
 ///
 /// All three arms carry the channel, so the deltas between them are the *traffic* and never the
@@ -2779,6 +2833,155 @@ mod tests {
             assert!(
                 !record_validator_accepts(&metered, &format!("{frozen} | {edit}")),
                 "{why}"
+            );
+        }
+    }
+
+    /// Issue #1085: the five console-strip rows, run short through the real subject, render with
+    /// no forbidden operation, print the facts they are pinned on, and the record validator pins
+    /// them: each row's layout in the console vocabulary, the app shape's bypass group (on that row
+    /// alone), and the sparse row's input.
+    ///
+    /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
+    /// thousand (`cargo test -p bench the_console_strip_rows -- --nocapture` prints the records).
+    /// Their timings are not to be read, and their `observations` say they were shortened.
+    ///
+    /// Red mutations: print the app shape's census from a row other than the app shape, or drop
+    /// `BYPASS_ROWS` -- the bypass-group assertions fail; drop `bypass_session_keys` from the
+    /// validator -- the app record is refused; print the rack-token layout -- every record is
+    /// refused.
+    #[test]
+    fn the_console_strip_rows_print_their_facts_and_the_validator_pins_them() {
+        let frozen = ".observations = 1000";
+        let mut records = Vec::new();
+        for workload in console_workload::CONSOLE_STRIP_WORKLOADS {
+            let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
+            assert_eq!(measured.render_errors, 0, "{}", workload.kind());
+            assert_eq!(
+                measured.audit.total(),
+                0,
+                "{}: a forbidden operation on the render path",
+                workload.kind()
+            );
+            assert!(measured.meters.is_none(), "{}", workload.kind());
+            let record = measured.record(
+                workload,
+                1,
+                Backend::current(),
+                Metadata::gather(),
+                None,
+                None,
+            );
+            println!("{record}");
+            assert!(
+                record.contains(&format!("\"workload_kind\":\"{}\",", workload.kind())),
+                "{}: the row names itself",
+                workload.kind()
+            );
+            assert!(
+                record.contains(&format!(
+                    "\"strip_layout\":\"{}\",",
+                    workload.strip_layout()
+                )),
+                "{}: the row states its layout",
+                workload.kind()
+            );
+            assert!(
+                !record_validator_accepts(&record, "."),
+                "{}: a shortened run must not pass for the frozen one",
+                workload.kind()
+            );
+            assert!(
+                record_validator_accepts(&record, frozen),
+                "{}: the record at the frozen count",
+                workload.kind()
+            );
+            let bypass_group = record.contains("\"bypass_pattern\":");
+            assert_eq!(
+                bypass_group,
+                workload == Workload::SixtyFourTrackAppShape,
+                "{}: the bypass group is the app shape's alone",
+                workload.kind()
+            );
+            records.push((workload, record));
+        }
+        let record_of = |kind: Workload| {
+            records
+                .iter()
+                .find(|(workload, _)| *workload == kind)
+                .map(|(_, record)| record.as_str())
+                .expect("every console-strip row was run")
+        };
+
+        let app = record_of(Workload::SixtyFourTrackAppShape);
+        assert!(
+            app.contains("\"bypass_pattern\":\"index_mod_3_is_2\",\"bypassed_tracks\":21,"),
+            "the app shape states the bypass its compiled session carries"
+        );
+        assert!(app.contains("\"strip_layout\":\"inserts:eq+compressor\","));
+        for (edit, why) in [
+            ("del(.bypass_pattern)", "an app record missing its pattern"),
+            ("del(.bypassed_tracks)", "an app record missing its count"),
+            (".bypassed_tracks = 20", "one bypassed track fewer"),
+            (
+                ".bypass_pattern = \"other\"",
+                "a bypass that is not the app's",
+            ),
+            (
+                ".strip_layout = \"dynamic:eq+compressor\"",
+                "the rack-token spelling",
+            ),
+            (
+                ".strip_layout = \"pre_insert:eq+compressor,post_insert:limiter\"",
+                "the standing strip's layout",
+            ),
+        ] {
+            assert!(
+                !record_validator_accepts(app, &format!("{frozen} | {edit}")),
+                "{why}"
+            );
+        }
+        assert!(
+            record_validator_accepts(
+                app,
+                &format!("{frozen} | .strip_layout = \"pre_insert:eq+compressor\"")
+            ),
+            "the app shape after the console migration"
+        );
+        let sparse = record_of(Workload::SixtyFourTrackConsoleSparse);
+        assert!(sparse.contains("\"input_signal\":\"odd_tracks_silent\","));
+        assert!(
+            !record_validator_accepts(sparse, &format!("{frozen} | .input_signal = \"tone\"")),
+            "a sparse row claiming every track active"
+        );
+        assert!(
+            !record_validator_accepts(
+                sparse,
+                &format!(
+                    "{frozen} | . + {{bypass_pattern: \"index_mod_3_is_2\", bypassed_tracks: 21}}"
+                )
+            ),
+            "the bypass group on another row"
+        );
+        for (workload, tracks) in [
+            (Workload::TenTrackRaggedStrip, 10),
+            (Workload::ThirteenTrackRaggedStrip, 13),
+            (Workload::SixteenTrackStrip, 16),
+        ] {
+            let record = record_of(workload);
+            assert!(record.contains(&format!("\"tracks\":{tracks},")));
+            assert!(
+                !record_validator_accepts(record, &format!("{frozen} | .tracks = 64")),
+                "{}: a strip-at-N row claiming the full console",
+                workload.kind()
+            );
+            assert!(
+                !record_validator_accepts(
+                    record,
+                    &format!("{frozen} | .strip_layout = \"simd1:eq+compressor,simd2:limiter\"")
+                ),
+                "{}: the rack-token spelling",
+                workload.kind()
             );
         }
     }

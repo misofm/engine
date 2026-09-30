@@ -20,8 +20,8 @@ they are the rules here:
   structure exactly** -- the sum of the widths equals `bytes`, so a field cannot be added, dropped
   or silently resized without the total moving;
 * the `bootOptions` block is 64 bytes and names exactly the eleven boot words, with the two
-  `require_*` words and the four `console*` words present under those exact spellings, because the
-  SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them;
+  `require_*` words and the four `liveControl*` words present under those exact spellings, because
+  the SDK's scratch/worklet equality rule (adopted ruling finding 3) is written in terms of them;
 * `resultCodes` is the eleven-value frozen ladder with no duplicate value and no duplicate name;
 * `bootResultAliases` is exactly three rows, every one of which **re-uses** a value that
   `resultCodes` already names under a *different* name -- that is what makes it an alias table
@@ -113,8 +113,8 @@ EXPORTS = [
     "miso_engine_web_v1_buffer_ptr",
     "miso_engine_web_v1_command_report_ptr",
     "miso_engine_web_v1_command_submit",
-    "miso_engine_web_v1_console_track_count",
-    "miso_engine_web_v1_console_track_id",
+    "miso_engine_web_v1_live_control_track_count",
+    "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_dispose",
     "miso_engine_web_v1_document_ptr",
     "miso_engine_web_v1_eq_target_close",
@@ -258,15 +258,15 @@ STRUCTURES = {
 }
 BOOT_OPTION_FIELDS = [
     "structSize", "abiVersion", "requireSampleRateHz", "requireQuantumFrames",
-    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "consoleCommandQueueRecords",
-    "consoleMeterBlocks", "consoleObservationTaps", "consoleMasterTrackPlusOne",
+    "sourceRingFrames", "reserved0", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 # The words the scratch and worklet boots must write identically (adopted ruling finding 3), and
 # the two whose values are role-defined. Kept here so the SDK's equality eval has a schema-level
 # statement of which words it masks.
 POLICY_WORDS = [
-    "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords",
-    "consoleMeterBlocks", "consoleObservationTaps", "consoleMasterTrackPlusOne",
+    "sourceRingFrames", "maximumMemoryBytes", "liveControlCommandQueueRecords",
+    "liveControlMeterBlocks", "liveControlObservationTaps", "liveControlMasterTrackPlusOne",
 ]
 ROLE_DEFINED_WORDS = ["requireSampleRateHz", "requireQuantumFrames"]
 

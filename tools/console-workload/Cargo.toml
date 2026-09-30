@@ -33,7 +33,7 @@ session.workspace = true
 [dev-dependencies]
 graph = { workspace = true, features = ["test-support"] }
 # Test-only: `tests/paired_spans.rs` (issue #1004) binds real effect banks behind the production
-# `ConsoleEffectBankStage` in a production `BankChain`, so its differential can read each bank's
+# `LiveControlEffectBankStage` in a production `BankChain`, so its differential can read each bank's
 # state payload between blocks -- the one surface a whole-plan render does not expose.
 rack.workspace = true
 
