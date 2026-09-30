@@ -236,3 +236,187 @@ then `1e1af655` merges S1c's verdict (`6cecc4cc`). Commits `d96cc526` (SDK), `c5
 
 - The AArch64 legs and `check-cross-targets.sh`. S1d changes no Rust outside `host-web`'s test
   module and one comment.
+
+## Sol verdict, attempt 1
+
+**PASS.** Every objective gate holds on `5b59b540`, and every claim tested reproduces. There is no
+high finding. The two mediums are live-control robustness gaps in the SDK's own surface. Neither is
+a gate this brief sets. Fix both before the C3 batch push (attempt 2 or a bounded successor).
+
+### Evidence
+
+All runs used x86-64-v3, `CARGO_INCREMENTAL=0`, one `target/` and a clean `npm ci`.
+
+- **Artifact.** `build-web-audioworklet.sh` gives `e7f2ad31...cdc80be`, 3,283,569 B, closure
+  `19783d70...fa56`. That matches S1c's module and the claimed closure.
+  `git diff 75294894 HEAD -- crates tools scripts fixtures Cargo.toml Cargo.lock` is empty.
+- **SDK gates.** Run from a clean `npm ci`, all pass: `check-sdk-generated.sh ARTIFACTS`,
+  `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh` (**313/313**) and
+  `sdk-package.sh check` (enginectl **13/13**, plus the tarball gate).
+- **Rust gates.**
+  - fmt, clippy `--workspace --all-targets --all-features -D warnings` and
+    `RUSTDOCFLAGS='-D warnings' cargo doc`: pass.
+  - `cargo test --workspace --all-features`: 294 result lines, 2,114 passed, 0 failed, 40 ignored.
+- **Artifact, ABI and wasm gates.** All 14 pass:
+  - `check-web-audioworklet.sh --without-metadata-regeneration`;
+  - expected resources;
+  - scalar-oracle absence;
+  - `test-web-audioworklet.sh`;
+  - the V8 spill gate and its self-test;
+  - `check-abi-layout-v1.py` on the artifact and on `sdk/assets` (the two are byte-identical),
+    and its `--self-test`;
+  - `check-capi-abi.sh` and its `--self-test`;
+  - `run-wasm-gates.sh` (full): "ok (native + wasm simd128 + V8 EQ loops)";
+  - **`check-cross-targets.sh`: PASS**, with only the #1018 expected failures.
+- **Lint and self-test steps.** 58 of 58 pass (`TMPDIR` unset). That covers every lint-job step,
+  including the three sub-v3 probes, plus the path-routing gate and its tests, the docs job, and the
+  five gate-self-test suites.
+- **Browsers, in CI's source mode** (no `sdk/dist`), with `--sdk-root --check-matrix
+  --self-test-mutations` and a private PulseAudio null sink. Chromium 151.0.7922.34, Firefox 153.0
+  and WebKit 26.5 all report "all qualification gates passed", with the 7-file set pinned.
+  - An earlier Firefox failure ("spectrum collection audio resume timed out") was my own harness:
+    its socket path was too long and PulseAudio never started. With a short socket, all three pass.
+- **Class A (PR evidence).**
+  - `gain_pan_profile digests` (release) prints 22 rows. They include `sixty_four_track_app_shape`
+    `c740fa2dd904...` and `sixty_four_track_eq_comp_simd1` `f68febb7...`.
+  - V8 `prepare` + `preflight`, in an empty scratch directory, on module `e7f2ad31...`: all seven
+    arms equal S0's `preflight_output_sha256`. The documents are `d913ad961d2d...` and
+    `3dd8b2fff4b9...`.
+- **Worked session.** `session_validator validate` passes all five stages, and `--canonical`
+  reproduces it byte for byte.
+- **Merge onto `codex/batch-console-3` (`a750981c`).** `git merge-tree --write-tree` is clean
+  (tree `c9700b42`), with no conflicts.
+
+### Completeness against S1c's list
+
+Every file S1c named moved:
+- the spectrum names (`spectrum.ts`, `browser/engine.ts`, `host-mirror.ts`, the evals and the
+  README);
+- the rack codes (`live-controls.ts`, `observation.ts` and `live-response.ts`, whose owner `4` is
+  read from the layout tables);
+- `sdk-response-entry.ts` and `run.mjs` (L4);
+- the old-schema documents.
+
+A grep of `sdk/src`, the README, the codegen, the skill and the qualification entry points finds
+`simd1`/`dynamic`/`simd2`, the old tap names and the old spectrum names only in two kinds of place:
+- retired-token refusals and their messages;
+- the fixture slot IDs `eq-simd1`/`eq-simd2`.
+
+M1 (red under S4, 1 of 15 observation tests), L1 and L3 are fixed.
+
+### Differential probes beyond the 17 twins
+
+I booted each builder document in the wasm engine:
+- The builder and the engine agree on all of these:
+  - an insert ID equal to a slot ID;
+  - a slot ID equal to a track, source or output ID;
+  - 64 `pre_insert` slots;
+  - IDs of 127 and 128 characters;
+  - a console with no tracks;
+  - per-lane entry params;
+  - keyed inserts reading `insert_send`;
+  - `insert_send` and `pre_fader` routes;
+  - an unknown console key.
+- The builder refuses nothing the engine accepts.
+- It admits one class the engine refuses (L1).
+
+### Mutations (each planted once and reverted; the tree is clean)
+
+| Mutation | Result |
+|---|---|
+| Builder: the slot-uniqueness check sees only the slot's own section (`session.ts:652`) | red: "a slot ID repeated across the two sections" only |
+| Builder: skip the repeated-entry check (`session.ts:1138`) | red: "a repeated console entry" (it falls through to `console.entry_order`) |
+| Addressing: swap the `console`/`inserts` rack codes (`live-controls.ts:134-135`) | red: 3 console-evals tests and 3 live-controls evals |
+| Addressing: `post_insert` slots ahead of `pre_insert` in the layout (`live-controls.ts:177`) | red: the chromium `sdk-live-bypass` gate, in source mode |
+| Addressing: resolve `insert()` against the first track's chain (`:500`, `:509`) | **green**: all 35 console-evals and live-controls evals (L3) |
+| Writer: `post_insert` keys `slot, identity, link_mode, quality` (`session-json.ts:76`) | red: the Rust-authority writer corpus, the `--canonical` round trip and the intended-fixture rebuild |
+| host-web: `resolve_observation` counts `pre_insert` only (`lib.rs:5104`) | red: `a_post_insert_observation_is_read_at_its_console_slot_index` only |
+
+### Test value (one line each)
+
+- **Refusal twins:** a builder check that is dropped, reordered or given its own code (proved
+  above).
+- **Eligibility sweep:** the SDK's copy of the eligibility list drifting from the engine's.
+- **Round trip and fixture rebuilds:** writer key-order drift in the root console, a slot or an
+  entry (proved above).
+- **Live addressing:** a wrong rack code, or a `post_insert` slot numbered within its own section.
+  It cannot tell tracks apart (L3).
+- **`withSession`:** a silent empty layout for a document booted from text. It does not cover a
+  console mismatch (M1).
+- **Worked session:** a skill example the engine refuses.
+- **Live-response retired owner codes:** decoding through the old positional table.
+- **`enginectl-cli`:** losing the named retired-key refusal or the code pass-through.
+- **`live-controls-types.ts`:** the retired rack tokens accepted by the type checker.
+- **`sdk-live-bypass`:** a live console or insert bypass that lands on the wrong instance or on none
+  (proved above).
+- **`ffi` M1:** S4 (proved above).
+
+### Findings
+
+- **H:** none.
+- **M1. `withSession()` checks only track IDs, so a live bypass can land on the wrong slot with
+  `ok`.** `layoutOf` (`sdk/src/core/live-controls.ts:174-192`) compares the builder's track set
+  with the engine's and nothing else. `#resolved` checks the effect against the *builder*, not the
+  engine.
+  - **Probe.** Boot `console [eq, comp]` from text, then call `withSession(builder with [comp,
+    eq])`. `console("comp", "miso.compressor").bypass(true)` is written as `[3, 0]` and acked
+    `ok`/`none`, and it bypasses the EQ. Parameter edits were refused only because their kinds
+    happened to differ (`unsupportedKind`).
+  - **Fix.** Hold the builder to the booted session: compare its canonical bytes with the booted
+    document, which both SDK engines have at boot, or at least compare the console slot list and
+    each track's insert chain. Add a test that uses a reordered console.
+- **M2. A live un-bypass of a session-bypassed delay or multiband is acked and changes nothing, and
+  the SDK neither refuses nor documents it.**
+  - **Probe.** Both effects as inserts, session-bypassed. `insert("fx", ...).bypass(false)` returns
+    `ok: true`, `admitted: 1`, and the render equals the bypassed render.
+  - This is S1c's accepted engine behaviour, and S1c's brief says to document it wherever live bypass
+    is documented. The handoff and the shipped `.d.ts` do. The SDK's `EffectEdits.bypass()`
+    (`live-controls.ts:613`) and the README's live-bypass section (`sdk/README.md:185-212`, whose
+    example bypasses a delay insert) do not.
+  - The SDK has the effect and its authored bypass whenever it has a layout. It could refuse the
+    lift with a typed `MisoUsageError`, or at least document it. As things stand, an ack precedes a
+    no-op, which is AGENTS.md's acked-batch question.
+- **L1. The builder admits console link modes the engine refuses.**
+  `consoleSlot` (`sdk/src/core/session.ts:1089-1092`) accepts any of the three link modes. The
+  engine refuses these with `effect.link_mode.unsupported` at prepare-effects:
+  - the EQ with `maximum` or `average`;
+  - soft-clip with `maximum` or `average`;
+  - the limiter with `average`.
+
+  The metadata does not publish link-mode support, and `effect()` has the same gap for inserts.
+  Publish the table, or hold a copy as `CONSOLE_ELIGIBLE_EFFECTS` is held.
+- **L2. Refusals that have an engine counterpart but no code.**
+  - **In the builder:**
+    - slot `quality` (`session.ts:1086`; the engine says `effect.quality.unsupported`);
+    - a non-boolean entry `bypass` (`:1149`; `schema.wrong_type`);
+    - console and insert automation targets naming no instance (`:1250`;
+      `reference.missing_entity`).
+  - **In the CLI:** its own key check refuses a console `sidechain` and effect fields on an entry
+    as "unknown key", with no `schema.unknown_field` (`sdk/src/cli/session-request.ts:219`,
+    `:240`).
+  - **In the skill:** `SKILL.md:131-133` says the builder and `enginectl` refuse every defect in its
+    table "with the same code". That is not true for the CLI key refusals above, nor for the `cid`
+    row (`:125`), which the builder cannot express at all.
+- **L3 (test value). No test tells two tracks' insert chains apart.** `addressedStrip` gives tracks
+  `a` and `b` identical inserts (`sdk/test/console-evals.mjs:616-627`). Resolving `insert()`
+  against another track's chain therefore stays green, and the single-track browser fixture is
+  blind to it too. Give track `b` a different chain.
+- **L4 (handoff).** `APP-CONSOLE-SDK.md:118-121` names the `ENGINE_DYNAMIC_RACK` sites in
+  `observations.ts`, `intent.ts` and `session-document.ts`. It misses two places in the app at
+  `0757a84`:
+  - its five comparisons in `src/lib/mixer/engine/index.ts` (`:311`, `:867`, `:876`, `:985`,
+    `:1062`);
+  - the hard-coded `simd1 0 / dynamic 1 / simd2 2` table in `authoritative-session.ts`'s
+    `projectedEffects` (`:1120-1124`).
+
+  Neither note mentions the renamed qualification fixture (`console-session.json` ->
+  `live-control-session.json`). The app does not reference it, so nothing breaks. Otherwise the note
+  is accurate and sufficient: the shape, the migration of the app's pair, the SDK names, the raw
+  codes and the live-bypass exceptions all check out against the app's current code.
+- **L5 (evidence hygiene).** `run.mjs`'s `buildSdkBundle` (`:77-81`) bundles `sdk/dist` whenever it
+  exists. So a local run made after `sdk-package.sh check` qualifies whatever that build left
+  behind, which may be stale, rather than CI's source bundle: an SDK mutation stayed green in that
+  mode here. Delete `sdk/dist` before a local browser run, and say which mode the evidence used.
+- **Note (S1a, out of scope).** Prepare-stage diagnostics for a console slot point at
+  `$.tracks[id=<track>].effects[id=<slot>]` (`crates/effect-compiler/src/prepare.rs:342`), a path
+  the document does not have, rather than at `$.console.<section>[...]`.
