@@ -1,18 +1,18 @@
 //! Issue #1096 (S1c): a native live control reaches the right lane when it addresses a console slot
 //! by its slot index or an insert by its index.
 //!
-//! The session is the EQ bank console widened to two `pre_insert` slots, one `post_insert` slot and
-//! one insert on each of its eight tracks, every instance a parametric EQ at its own frequency and a
-//! gain that differs by track, so bypassing any one instance on any one track moves the mix in its
-//! own way. Every track carries every slot, so the console slots bank.
+//! The session is the EQ bank console widened to two `pre_insert` slots, one `post_insert` slot
+//! and one insert on each of its eight tracks, every instance a parametric EQ at its own frequency
+//! and a gain that differs by track, so bypassing any one instance on any one track moves the mix
+//! in its own way. Every track carries every slot, so the console slots bank.
 //!
 //! - A live bypass on `(track, address)` renders exactly what the same document renders with that
 //!   instance's session `bypass` set. A session bypass lowers to the same per-lane shunt a live
 //!   bypass engages (issue #1087), and the shunt selects whole blocks, so the two are bit-identical
 //!   when the record is drained before the first block.
-//! - A live parameter change on `(track, address)` renders exactly what the same record renders when
-//!   it is pushed to the channel whose `effect_id` names the intended instance, and differs from the
-//!   base render.
+//! - A live parameter change on `(track, address)` renders exactly what the same record renders
+//!   when it is pushed to the channel whose `effect_id` names the intended instance, and differs
+//!   from the base render.
 //!
 //! Red mutations (each turns `a_live_bypass_reaches_the_addressed_lane` and
 //! `a_live_parameter_reaches_the_addressed_lane` red):

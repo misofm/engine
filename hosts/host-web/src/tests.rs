@@ -8531,10 +8531,10 @@ fn loaded_effect_queues(host: &AudioWorkletEngineHost) -> Vec<(String, String)> 
         .collect()
 }
 
-/// A browser `effectBypass` record at `(rack, effect_index)` reaches the addressed lane: exactly the
-/// addressed instance's queue is loaded, and the render is the session bypass of that instance on
-/// that track, bit for bit. A live bypass drained before the first block and a session bypass are
-/// the same per-lane shunt (issue #1087), and the shunt selects whole blocks.
+/// A browser `effectBypass` record at `(rack, effect_index)` reaches the addressed lane: exactly
+/// the addressed instance's queue is loaded, and the render is the session bypass of that instance
+/// on that track, bit for bit. A live bypass drained before the first block and a session bypass
+/// are the same per-lane shunt (issue #1087), and the shunt selects whole blocks.
 ///
 /// Red mutations: `effect_compiler::declared_live_addresses` giving `post_insert` the base `0`
 /// (the `post_insert` slot addressed as `pre_insert` slot 0: boot refuses the colliding table), or
@@ -8629,9 +8629,9 @@ fn a_browser_parameter_reaches_the_addressed_lane() {
     }
 }
 
-/// Decision 12's wire identity (issue #1096): the retired `simd1` (`0`) and `simd2` (`2`) rack codes
-/// are refused on every effect-addressed record, never reinterpreted, and the refusal leaves the
-/// engine untouched. Each refused record is otherwise the valid twin of one the console admits: at
+/// Decision 12's wire identity (issue #1096): the retired `simd1` (`0`) and `simd2` (`2`) rack
+/// codes are refused on every effect-addressed record, never reinterpreted, and the refusal leaves
+/// the engine untouched. Each refused record is otherwise the valid twin of one the console admits: at
 /// the base, rack `0` effect `0` was this session's `eq`.
 ///
 /// Red mutation: decode `0` as the console or `2` as the inserts, or accept any `rack <= 3` -> a

@@ -524,7 +524,8 @@ def validate(document: object) -> None:
     # Spelled twice on purpose: a retired code must never be reallocated, whatever it is named.
     require(not RETIRED_RACKS & {row["value"] for row in constants["racks"]},
             "constants.racks reallocates a retired simd1/simd2 code")
-    require(not RETIRED_LIVE_RESPONSE_RACKS & {row["value"] for row in constants["liveResponseRacks"]},
+    owner_racks = {row["value"] for row in constants["liveResponseRacks"]}
+    require(not RETIRED_LIVE_RESPONSE_RACKS & owner_racks,
             "constants.liveResponseRacks reallocates a retired simd1/simd2 code")
     check_named(document, "spectrumChannels", SPECTRUM_CHANNELS)
     check_named(document, "spectrumStreamStatuses", SPECTRUM_STREAM_STATUSES)

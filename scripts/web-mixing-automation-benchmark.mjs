@@ -171,7 +171,8 @@ function liveSlot(document, track, rack, index) {
 for (const control of table.controls) {
   const track = fixture.tracks[control.track_index];
   assert.equal(track.id, control.track_id, `${control.track_id}: track index`);
-  assert.ok([RACK_INSERTS, RACK_CONSOLE].includes(control.rack), `${control.track_id}: a live rack`);
+  assert.ok([RACK_INSERTS, RACK_CONSOLE].includes(control.rack),
+    `${control.track_id}: a live rack`);
   const slot = liveSlot(fixture, track, control.rack, control.effect_index);
   assert.equal(slot.id, control.slot_id, `${control.track_id}: slot`);
   assert.equal(slot.effect_id, control.effect, `${control.track_id}: effect`);

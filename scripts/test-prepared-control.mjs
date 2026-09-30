@@ -111,7 +111,10 @@ assert.equal(f.log.copies, 1, "a console slot EQ is a prepared owner");
 for (const retired of [0, 2]) {
   const g = fixture(), retiredOwner = createPreparedControl(g.options);
   let ordinary = 0;
-  g.options.ordinarySubmit = (bytes, count) => { ordinary += 1; return { result: 0, admitted: count, records: bytes }; };
+  g.options.ordinarySubmit = (bytes, count) => {
+    ordinary += 1;
+    return { result: 0, admitted: count, records: bytes };
+  };
   await retiredOwner.submit(records(100, 0, false, retired), 1);
   assert.equal(g.log.copies, 0, `retired rack ${retired} is not a prepared owner`);
   assert.equal(g.log.payloads.length, 0, `retired rack ${retired} carries no companion`);

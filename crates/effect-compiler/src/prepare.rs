@@ -1057,8 +1057,8 @@ mod live_address_tests {
     /// slots, three inserts and one `post_insert` slot.
     ///
     /// Red mutations: lower console slot `k >= pre_insert` into `Simd1` (the `post_insert` slot
-    /// addressed as `pre_insert`), or into `Simd2` at `k` rather than `k - pre_insert`; let an insert
-    /// index reach past the inserts; or accept a console index past the last slot.
+    /// addressed as `pre_insert`), or into `Simd2` at `k` rather than `k - pre_insert`; let an
+    /// insert index reach past the inserts; or accept a console index past the last slot.
     #[test]
     fn a_live_address_lowers_through_the_section_split() {
         let lengths = [2, 3, 1];

@@ -173,7 +173,9 @@ function preparedControl(exports, handle) {
     const reason = result === resultCode("invalidArgument")
       ? address.trackIndex >= exports.miso_engine_web_v1_live_control_track_count(handle)
         ? commandReason("unknownTrack")
-        : !EFFECT_RACKS.has(address.rack) ? commandReason("unknownRack") : commandReason("unknownEffect")
+        : !EFFECT_RACKS.has(address.rack)
+          ? commandReason("unknownRack")
+          : commandReason("unknownEffect")
       : commandReason("none");
     return { result, reason, config: new Uint8Array(0) };
   };

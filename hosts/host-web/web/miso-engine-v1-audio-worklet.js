@@ -1193,7 +1193,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
       const target = message.target === "trackPostInput"
         ? SPECTRUM_TARGET_TRACK_POST_INPUT
-        : message.target === "trackPostPan" ? SPECTRUM_TARGET_TRACK_POST_PAN : SPECTRUM_TARGET_OUTPUT;
+        : message.target === "trackPostPan"
+          ? SPECTRUM_TARGET_TRACK_POST_PAN
+          : SPECTRUM_TARGET_OUTPUT;
       const channels = message.channels === "left"
         ? SPECTRUM_CHANNEL_LEFT
         : message.channels === "right" ? SPECTRUM_CHANNEL_RIGHT : SPECTRUM_CHANNEL_BOTH;

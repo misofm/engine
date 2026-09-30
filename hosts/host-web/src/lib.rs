@@ -1583,7 +1583,7 @@ impl ReadyOwnership {
     /// | `0 .. tracks` | track `t`'s matrix/pan queue |
     /// | `tracks .. 2 * tracks` | track `t`'s fader/mute queue |
     /// | `2 * tracks .. 3 * tracks` | track `t`'s input trim/polarity queue (#210 phase 3) |
-    /// | `3 * tracks ..` | effect instances, in `(track, pre_insert, inserts, post_insert, position)` order |
+    /// | `3 * tracks ..` | effect instances: `(track, pre_insert/inserts/post_insert, position)` |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.

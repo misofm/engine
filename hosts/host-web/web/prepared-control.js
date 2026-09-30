@@ -360,9 +360,8 @@ export function createPreparedControl(options) {
   }
 
   function acceptConfig(address, bytes) {
-    const config = readConfig(
-      bytes, options.sampleRateHz, schema, address.rack === schema.rackNotApplicable ? "builtin" : "eq",
-    );
+    const family = address.rack === schema.rackNotApplicable ? "builtin" : "eq";
+    const config = readConfig(bytes, options.sampleRateHz, schema, family);
     if (generation !== 0n && generation !== config.generation) {
       invalidate();
       throw failure(schema.resultWrongState);
