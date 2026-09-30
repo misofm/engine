@@ -238,3 +238,118 @@ processor, metadata-test comment) and `318df3fc` (line reflow). Every gate below
   raw worklet host.
 - The SDK-driven qualification entry points (`run.mjs`'s `sdk-*` gates and
   `sdk-response-entry.ts`) still expect `trackPostInputBuiltins`/`trackPostMatrix`.
+
+## Sol verdict, attempt 1
+
+**PASS.** Sol, adversarial review of `fa9c53a4`..`e9dc5d87` on base `105064a7`, x86-64-v3,
+`CARGO_INCREMENTAL=0`, one `target/` (the base and the mutation tree built in their own
+subdirectories of it, from detached worktrees of `105064a7` and `e9dc5d87`).
+
+### Evidence
+
+- **Wire identity (decision 12).** At `105064a7` the browser record's rack byte, the observation
+  selection/result/map rack, the companion record's rack and the configuration copy's rack were
+  one encoding: `0` simd1, `1` dynamic, `2` simd2, `255` n/a (`lib.rs:3768`, `ffi.rs:635-658`);
+  `3` was always refused (`rack > 2`). Now `1` is `inserts` (the `dynamic` code, same semantics),
+  `3` is `console` (never allocated before), `0`/`2` decode to nothing everywhere, `255` is
+  unchanged. The live-response owner record carried the engine's native owner rack, `0` input
+  filters or `RackId` `1..3` (`graph/src/runtime.rs:5557-5563`; `4` was never emitted); now `0`
+  and `2` keep their meaning, `1`/`3` are refused and `4` is appended. Spectrum targets keep codes
+  `1`/`2`/`3` under `trackPostInput`/`trackPostPan`/`output`, the `post_input`/`post_pan` taps of
+  the rename. Nothing is renumbered, no retired code is reallocated, `ABI_VERSION` and every
+  record layout are unchanged, and the C ABI carries no browser rack (`check-capi-abi.sh` and its
+  self-test pass). The layout JSON's `racks`/`liveResponseRacks` tables match the Rust constants
+  and `check-abi-layout-v1.py` pins them (asset passes; self-test catches 22).
+- **Addressing.** `declared_live_addresses` numbers `post_insert[j]` as console
+  `pre_insert.len() + j`; `lower` is the only live-to-lowered translation and both the browser's
+  boot placement and its admission go through `dense_effect_slot`, so the dense band is unchanged
+  from the base. Past-the-end addresses are refused, typed: `unknownEffect` on the record,
+  `RESULT_INVALID_ARGUMENT` on the configuration copy and the observation read, `None` natively.
+- **Sol mutations, one at a time in the mutation tree, reverted (`git status` clean after each).**
+  - S1 decode rack `0` as console: `retired_rack_codes_...`, `observation_misuse_...`,
+    `observation_records_...` red.
+  - S2 number `post_insert` after the inserts: native 3/3 and browser 3/3 red.
+  - S3 owner rack `3` (post_insert) reported as inserts: `live_response_owners_...` red.
+  - S5 `lower` accepts one console slot past the end: the `lower` table and
+    `observation_misuse_...` red.
+  - S6 the shipped host accepts rack `2`: `test-web-audioworklet.mjs` red.
+  - S7 `dense_effect_slot` places `post_insert` over the inserts: browser 3/3 red (boot refuses).
+  - S8 multiband dropped from `PREPARED_BYPASS_EFFECTS`: `a_live_bypass_cannot_lift_...` red.
+  - S9 `prepared-control.js` classifies rack `0` as an EQ owner: `test-prepared-control.mjs` red.
+  - S10 the spec's gate-1 plant (`post_insert` base `0`): native 3/3 and browser 3/3 red.
+  - S4 escaped; see M1.
+- **Class A.** `gain_pan_profile digests` (64 blocks, release): **22 of 22** rows identical,
+  base against head. The spec's "21" dropped `sixty_four_track_eq_comp_simd1` (`f68febb7...`, the
+  only row name with a digit), which is unchanged too. V8 `prepare` + `preflight` at both commits:
+  all 7 arm digests and both document digests identical; `controls.json` differs only in the
+  addresses (EQs and compressors `0` -> `3`, limiters `2`/`0` -> `3`/`2`).
+- **Artifact.** `e7f2ad317b37187eaa77c25618003e3521ee4bb68376bef9c4b75ac85cdc80be`, 3,283,569 B,
+  closure `17d297ed...94fbc7`; the V8 `prepare` built the same module.
+- **Browsers, without `--sdk-root`, `--self-test-mutations`, private PulseAudio null sink.**
+  Chromium 151.0.7922.34, Firefox 153.0, WebKit 26.5: all gates pass, the 7-file set is pinned.
+  Chromium with `--check-matrix` fails only at `deployment-matrix`: the checked row carries
+  `sdkResponse: pass`, which only an SDK run adds.
+- **Gates re-run, all pass.** fmt; clippy `--workspace --all-targets --all-features -D warnings`;
+  `RUSTDOCFLAGS='-D warnings' cargo doc`; every lint-job step of `qualification.yml` (31, the
+  sub-v3 probes included); `check-dsp-research.sh`, `check-builtins-listening.sh` and the five
+  gate self-tests (`test-console-benchmark.sh` among them); `check-ci-path-routing.py` and
+  `test-ci-path-routing.py`; `test-debug-a` (1,143 passed) and `test-debug-b`;
+  `cargo test --workspace --all-features` (294 result lines, 2,113 passed, 0 failed, 40 ignored,
+  as claimed); `test-release`,
+  loom, release shape and the unwind check; the release audit job (every audit, trace, capi and
+  fixture step); the wasm `simd128` probes and `check-protocol-wasm-parity.sh`;
+  `check-cross-targets.sh` (only the #1018 expected failures); `run-wasm-gates.sh` (full); the
+  artifact gates (`check-web-audioworklet.sh`, expected resources and its 32-mutation self-test,
+  scalar-oracle absence, `test-web-audioworklet.sh`, the V8 spill gate and self-test);
+  `operator/preflight-console-benchmark.sh --step` (PASS, 0 launches, nothing written);
+  `check-sdk-generated.sh`, `check-sdk-deletions.py`.
+- **SDK (S1d's).** `check-sdk-types.sh` and `sdk-package.sh check` stop at `tsc` on exactly the
+  three errors the spec names (`sdk/src/browser/engine.ts:687`, `:738`,
+  `sdk/src/browser/host-mirror.ts:126`), so the package suite never runs. `check-sdk-headless.sh`
+  gives 86 of 284 failing, and the `not ok` set is identical to the base's (base artifacts rebuilt
+  from `105064a7`). What S1d must change for every SDK gate to pass:
+  - the spectrum names: `sdk/src/core/spectrum.ts:8-9`, `:190-191` (a runtime lookup into the
+    layout, which now throws), `:208-209`; `sdk/src/browser/engine.ts:276-316` and the two `tsc`
+    sites; `host-mirror.ts:126`; `sdk/test/spectrum-evals.mjs:201-202`, `:266`, `:285`, `:721`,
+    `:1401`; `sdk/README.md:203-204`;
+  - the rack codes: `sdk/src/core/live-controls.ts:14`, `:114` (`{simd1: 0, dynamic: 1,
+    simd2: 2}` -> inserts `1`, console `3` plus slot index); `sdk/src/core/observation.ts:6`,
+    `:99-104`; `sdk/src/core/live-response.ts:29-30`, `:537` (owner `4` maps to `undefined` and
+    throws today);
+  - the SDK-driven qualification: `hosts/host-web/qualification/sdk-response-entry.ts:26-48`,
+    `:59` (`rack: "dynamic"`), `:132-133` (`track.dynamic`), and `run.mjs:411-412`, `:505-525`;
+  - S1a's old-schema documents, the rest of the 86 and the package suite's 4.
+
+  S1d's spec covers these through items 3 and 4 and its authorized `sdk/**` plus "the host-web
+  SDK-driven qualification entry points"; see L4.
+- **Out-of-path edits** are minimal and needed: the graph-compiler test module, host-core's
+  re-export, `limiter_linked_session.rs` and three host-core tests only replace the removed
+  `rack`/`effect_index` fields with `address`; the two worklet test scripts follow the changed
+  codes and names and add the retired-code refusals; `round_trip.rs` is a comment.
+- **Merge.** `git merge-tree --write-tree fae18038 e9dc5d87`: clean, no conflicts.
+
+### Findings
+
+- **H:** none.
+- **M1 (test value; non-blocking).** No test reads an observation of a console `post_insert` slot.
+  `resolve_observation` counts a console selection over both sections
+  (`hosts/host-web/src/lib.rs:5104`); S4, which counts `pre_insert` only, passes all 128 host-web
+  tests. The committed observation test (`hosts/host-web/src/ffi.rs:6303`) reads only
+  `pre_insert` slot 0 and insert 0. A Sol probe (the console observation fixture with its slot
+  moved to `post_insert`, a numeric read at rack `3`, index `0`) is green at HEAD and red under S4.
+  The code is correct; add that case (S1d or a follow-up) before the batch push. This is exactly
+  the section-split defect the brief names, on the one path gate 1 does not cover.
+- **L1 (stale comment).** `hosts/host-web/src/lib.rs:5907-5909` still says rack bytes `0`/`1`/`2`
+  address the lowered racks "until #1096 (S1c)".
+- **L2 (evidence).** Gate 6 reports 21 digests (line 217); there are 22 (above). Line 230 calls the
+  86 headless failures "the old-schema documents": the set is unchanged, but three of them
+  (`sdk/test/spectrum-evals.mjs:196`, `:262`, `:281`) now stop first on S1c's rename ("the
+  generated ABI layout has no spectrum value `trackPostInputBuiltins`/`trackPostMatrix`").
+- **L3 (doc).** The shipped `.d.ts` says the retired codes "land" in `UnknownRack`
+  (`miso-engine-v1-audio-worklet-host.d.ts:290-291`). Through the shipped host, `validCommand`
+  (`miso-engine-v1-audio-worklet-host.js:263`) refuses them locally as a `miso.error.v1`
+  invalid argument before the port; only raw-export callers get `unknownRack`. Out-of-set codes
+  were refused this way before, so behaviour is consistent; the comment should say so.
+- **L4 (S1d scope).** S1d's authorization says "the host-web SDK-driven qualification entry
+  points". `run.mjs` is the shared runner, not an SDK entry point, and its `sdk-*` gates spell the
+  old names at `:411-412` and `:505-525`. Name it in S1d's paths.
