@@ -26,7 +26,6 @@ dsp-reference.workspace = true
 # Issue #95 eval E6: the shared effect-contract conformance harness, run against a real effect.
 conformance = { workspace = true, features = ["realtime-audit"] }
 lane.workspace = true
-sha2.workspace = true
 
 [features]
 default = []

@@ -84,11 +84,10 @@ fn render(restate: bool, moved: bool, lanes: usize) -> Vec<u32> {
         .expect("valid bank request")
         .expect("the native width must bind");
 
-    let source: Vec<f32> = (0..FRAMES * lanes)
+    let mut left: Vec<f32> = (0..FRAMES * lanes)
         .map(|index| ((index as f32) * 0.017).sin() * 0.4)
         .collect();
-    let mut left = source.clone();
-    let mut right: Vec<f32> = source.iter().map(|value| -value).collect();
+    let mut right: Vec<f32> = left.iter().map(|value| -value).collect();
     let empty_offsets = vec![0_u32; lanes + 1];
 
     let mut bits = Vec::with_capacity(FRAMES * lanes * 2 * BLOCKS);
@@ -141,11 +140,6 @@ fn a_redundant_automation_point_renders_exactly_the_unautomated_bank() {
     let restated = render(true, false, lanes);
 
     assert_eq!(
-        quiet.len(),
-        restated.len(),
-        "both arms must render the same shape"
-    );
-    assert_eq!(
         quiet, restated,
         "a redundant automation point moved rendered bits"
     );
@@ -164,28 +158,6 @@ fn a_real_automation_point_still_ramps() {
     assert_ne!(
         quiet, nudged,
         "a one-ULP automation point must still be a real retarget"
-    );
-}
-
-/// The re-preparation half: a restated band must not be redesigned, and must still render exactly.
-///
-/// The cached read is only sound because `BandTarget::words` is a pure function of the band and
-/// the sample rate, so the words held in `Section::target` are the words the design would return.
-/// This test states the consequence a caller can observe: restating a band is indistinguishable
-/// from not automating it at all, block after block, for a long enough run that a drifting cache
-/// would show up.
-#[test]
-fn a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks() {
-    let Some((width, _)) = native_bank() else {
-        return;
-    };
-    let lanes = width.lanes() as usize;
-    // Delivered on the first block only (the render helper's contract), but the comparison runs
-    // for BLOCKS blocks so a cached word that had drifted would have time to show.
-    assert_eq!(
-        render(false, false, lanes),
-        render(true, false, lanes),
-        "a restated band diverged from an unautomated one"
     );
 }
 
@@ -233,11 +205,10 @@ fn a_band_restated_mid_flight_still_settles_at_the_designed_words() {
             .expect("valid bank request")
             .expect("the native width must bind");
 
-        let source: Vec<f32> = (0..SHORT_FRAMES * lanes)
+        let mut left: Vec<f32> = (0..SHORT_FRAMES * lanes)
             .map(|index| ((index as f32) * 0.017).sin() * 0.4)
             .collect();
-        let mut left = source.clone();
-        let mut right: Vec<f32> = source.iter().map(|value| -value).collect();
+        let mut right: Vec<f32> = left.iter().map(|value| -value).collect();
         let empty_offsets = vec![0_u32; lanes + 1];
 
         for block in 0..SHORT_BLOCKS {

@@ -8,21 +8,6 @@
 //! never fixed by re-pinning from a vector or wasm run (master plan §8 and the §10 fallback).
 
 use parametric_eq::corpus;
-use sha2::{Digest, Sha256};
-
-fn digest(case: usize) -> [u8; 32] {
-    let mut words = vec![0_u32; corpus::POINTS];
-    corpus::run_case::<f32>(case, &mut words);
-    let mut hasher = Sha256::new();
-    for word in &words {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
-}
-
-fn hex(digest: [u8; 32]) -> String {
-    bench_support::digest::hex(&digest)
-}
 
 /// The corpus is NaN-free, non-trivial and genuinely different per case and per lane.
 ///
@@ -33,41 +18,38 @@ fn hex(digest: [u8; 32]) -> String {
 /// another lane or makes two cases the same computation turns this red.
 #[test]
 fn the_corpus_is_finite_and_discriminating() {
-    let mut digests = Vec::new();
+    let mut cases = Vec::new();
     for case in 0..corpus::CASE_COUNT {
         let mut words = vec![0_u32; corpus::POINTS];
         corpus::run_case::<f32>(case, &mut words);
-        let values: Vec<f32> = words.iter().map(|bits| f32::from_bits(*bits)).collect();
         assert!(
-            values.iter().all(|value| value.is_finite()),
+            words.iter().all(|word| f32::from_bits(*word).is_finite()),
             "{} produced a non-finite sample",
             corpus::CASE_NAMES[case]
         );
         for lane in 0..corpus::LANES {
-            let window = &values[lane * corpus::FRAMES..(lane + 1) * corpus::FRAMES];
+            let window = &words[lane * corpus::FRAMES..(lane + 1) * corpus::FRAMES];
             assert!(
-                window.iter().any(|value| value.abs() > 1.0e-6),
+                window
+                    .iter()
+                    .any(|word| f32::from_bits(*word).abs() > 1.0e-6),
                 "{} lane {lane} is silent",
                 corpus::CASE_NAMES[case]
             );
         }
         for lane in 1..corpus::LANES {
-            let first = &values[..corpus::FRAMES];
-            let other = &values[lane * corpus::FRAMES..(lane + 1) * corpus::FRAMES];
-            assert_ne!(
-                first,
-                other,
+            let first = &words[..corpus::FRAMES];
+            let other = &words[lane * corpus::FRAMES..(lane + 1) * corpus::FRAMES];
+            assert!(
+                first
+                    .iter()
+                    .zip(other)
+                    .any(|(a, b)| f32::from_bits(*a) != f32::from_bits(*b)),
                 "{} lane {lane} duplicates lane 0",
                 corpus::CASE_NAMES[case]
             );
         }
-        digests.push(hex(digest(case)));
+        assert!(!cases.contains(&words), "two cases are the same case");
+        cases.push(words);
     }
-    digests.sort();
-    digests.dedup();
-    assert_eq!(
-        digests.len(),
-        corpus::CASE_COUNT,
-        "two cases are the same case"
-    );
 }
