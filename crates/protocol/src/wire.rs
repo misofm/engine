@@ -339,7 +339,7 @@ pub struct EventHeader {
     pub tlv_count: u32,
 }
 
-/// A typed v1 command header. Payload schemas are added in the next issue-005 tranche.
+/// A typed V1 command header; schema-specific codecs supply its payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandFrame {
     /// Correlates this request and its response.

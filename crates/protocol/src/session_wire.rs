@@ -1811,7 +1811,8 @@ fn utf8(bytes: &[u8]) -> Result<String, DecodeError> {
         .map_err(|_| DecodeError::InvalidUtf8)
 }
 fn stable_id(bytes: &[u8]) -> Result<StableId, DecodeError> {
-    StableId::parse(&utf8(bytes)?).ok_or(DecodeError::InvalidTlv)
+    let value = core::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)?;
+    StableId::parse(value).ok_or(DecodeError::InvalidTlv)
 }
 fn read_f32_exact(bytes: &[u8]) -> Result<f32, DecodeError> {
     let value = read_f32(bytes)?;

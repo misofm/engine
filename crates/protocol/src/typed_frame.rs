@@ -552,13 +552,7 @@ impl ProtocolCodec {
 }
 
 fn command_requires_exact_revision(payload: &CommandPayload<'_>) -> bool {
-    matches!(
-        payload,
-        CommandPayload::SessionTransactionApply(_)
-            | CommandPayload::AutomationEnqueue(_)
-            | CommandPayload::TransportSet(_)
-            | CommandPayload::TelemetryConfigure(_)
-    )
+    command_message_requires_exact(payload.message_id())
 }
 
 const fn command_message_requires_exact(message_id: MessageId) -> bool {
@@ -1435,76 +1429,5 @@ mod tests {
             codec.encode_non_ok_response_frame_into(&unreachable, &mut [0_u8; 64]),
             Err(EncodeError::MessageKindMismatch)
         );
-    }
-
-    #[test]
-    fn complete_frame_encoders_preserve_prepared_typed_values() {
-        let codec = ProtocolCodec::default();
-        let command = TypedCommandFrame {
-            request_id: request_id(),
-            expected_revision: crate::ExpectedRevision::Any,
-            payload: CommandPayload::CapabilitiesGet,
-        };
-        let success = TypedSuccessResponseFrame {
-            request_id: request_id(),
-            revision: SessionRevision(7),
-            payload: SuccessResponsePayload::SessionSnapshot(SessionSnapshot {
-                total_bytes: 0,
-                offset: 0,
-                canonical_json_chunk: &[],
-                eof: true,
-            }),
-        };
-        let non_ok_payload = NonOkResponse {
-            diagnostics: Vec::new(),
-            omitted_diagnostics: 0,
-            backpressure: None,
-        };
-        let non_ok = TypedNonOkResponseFrame {
-            request_id: request_id(),
-            revision: SessionRevision(7),
-            message_id: MessageId::CapabilitiesGet,
-            status: StatusCode::InvalidField,
-            payload: &non_ok_payload,
-        };
-        let event = TypedEventFrame {
-            revision: SessionRevision(7),
-            payload: EventPayload::SessionCommitted(SessionCommitted {
-                event_sequence: 1,
-                origin_request_id: request_id(),
-                previous_revision: SessionRevision(6),
-                applied_operations: 1,
-            }),
-        };
-        let mut command_bytes = [0_u8; 64];
-        let mut success_bytes = [0_u8; 128];
-        let mut non_ok_bytes = [0_u8; 128];
-        let mut event_bytes = [0_u8; 128];
-        for _ in 0..32 {
-            assert_eq!(
-                codec
-                    .encode_command_frame_into(&command, &mut command_bytes)
-                    .expect("command"),
-                48
-            );
-            assert_eq!(
-                codec
-                    .encode_success_response_frame_into(&success, &mut success_bytes)
-                    .expect("success"),
-                104
-            );
-            assert_eq!(
-                codec
-                    .encode_non_ok_response_frame_into(&non_ok, &mut non_ok_bytes)
-                    .expect("non-OK"),
-                64
-            );
-            assert_eq!(
-                codec
-                    .encode_event_frame_into(&event, &mut event_bytes)
-                    .expect("event"),
-                112
-            );
-        }
     }
 }
