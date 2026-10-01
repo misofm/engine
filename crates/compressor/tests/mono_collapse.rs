@@ -1,19 +1,10 @@
 //! The mono-collapse bodies render the dual bodies' left plane, to the bit -- including the link.
 //!
-//! # What this file is for, and why it is not covered by the console gates
-//!
-//! The console's mono row-pair proves the *whole strip* collapses class A on the fixture's content.
-//! That content is a tone: it never carries a subnormal, and the link mode it exercises is
-//! `Maximum`. This file is the kernel-level statement, on the two inputs the whole design turns on:
-//!
-//! * **`LinkMode::Average` on subnormal content.** The collapsed body computes the link on the one
-//!   plane read twice -- `link_frame(detector, slot, p, p, ..)`, which for `Average` is
-//!   `0.5*|p| + 0.5*|p|`. That is *not* `|p|`: for a subnormal `p`, `0.5 * p` loses the low bit and
-//!   the two halves do not sum back (IEEE 754 round-to-nearest: `0.5 * f32::from_bits(3)` is not
-//!   exactly half of it). A "simplification" of the link to `magnitude_left` would pass every
-//!   tone fixture in the tree and fail here.
-//! * **`-0.0`.** Every gain and mix identity in the kernel is a `select` over a mask, and `-0.0`
-//!   is the value that separates "the same number" from "the same bits" at each of them.
+//! These contract tests cover every link mode, settled and ramping bodies, hostile content,
+//! bypass, and state handoff when the channels separate again. Subnormals and signed zeros extend
+//! the tone fixtures' input domain. Subnormal Average-link rounding differences are clamped by
+//! the detector floor before the curve; they do not distinguish an `abs` shortcut in this causal
+//! design (the GREEN mutation is recorded in `MUTATIONS.md`).
 //!
 //! Everything goes through the shipped contract calls: `bind_homogeneous_bank`, `process_bank`,
 //! `process_bank_mono`, `desymmetrize_channels`. No test reaches into the crate.
@@ -169,7 +160,6 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
         (LinkMode::Maximum, true, "per-frame"),
         (LinkMode::Maximum, false, "idle"),
     ] {
-        let _ = body;
         // A threshold and ratio that put the detector on both sides of the knee for this content.
         let values = support::values_with(&[(0, -30.0), (1, 4.0)]);
         let requests: Vec<_> = (0..lanes)
@@ -226,14 +216,7 @@ fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
             }
         }
 
-        // The **state** is the sharper statement, and it is where the subnormal link nuance lands.
-        //
-        // A detector reading below `level_floor` is clamped before the static curve, so a
-        // subnormal exercises operand order without changing the output sample.
-        //
-        // Red mutation: replace the collapsed link with `main_left.abs()` in `frames_loop_mono` or
-        // The idle mono body -- the "the link is a no-op on a mono bank" simplification.
-        // Every sample assertion above stays green and this fails.
+        // Equal PCM must also leave equal state for the following dual-channel block.
         let scalar = support::prepare(request_linked(&values, link_mode));
         collapsed.desymmetrize_channels();
         for track in 0..lanes as u32 {

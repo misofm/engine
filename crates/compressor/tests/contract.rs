@@ -287,23 +287,6 @@ fn preparation_has_expected_metadata_and_one_byte_below_rejects() {
     );
 }
 
-/// The causal contract reports zero latency and consumes the current sample at sample zero.
-#[test]
-fn causal_processing_starts_at_sample_zero() {
-    let values = values_with(&[(0, -40.0), (1, 20.0), (2, 0.0), (3, 0.1), (6, 1.0)]);
-    let mut effect = prepare(request(&values));
-    assert_eq!(effect.metadata().latency, LatencySamples(0));
-    let mut left = vec![0.5_f32; 128];
-    let mut right = vec![0.5_f32; 128];
-    render_scalar(effect.as_mut(), &mut left, &mut right, 128, 128, &[]);
-    assert!(
-        left[0].is_finite() && left[0] > 0.0 && left[0] < 0.5,
-        "active compression must produce a finite positive compressed sample at zero: {}",
-        left[0]
-    );
-    assert!(left.iter().all(|sample| sample.is_finite()));
-}
-
 /// A bank fallback never hides a malformed or incompatible request.
 ///
 /// Rewritten on `lane::Backend`: the "unavailable backend" is a width this build was

@@ -124,13 +124,12 @@ pub(crate) const PARAMETER_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
 /// result is held in `[0, 1]`: a coefficient outside that interval turns the smoother into a
 /// divergent recurrence, and no rounding at the extremes may be able to produce one.
 ///
-/// A non-positive or non-finite time gives `1.0`, the continuous extension as `tau` goes to zero
-/// (an instantaneous smoother). The parameter domains make that unreachable through the contract;
-/// it is the answer for a value that arrived some other way.
+/// A NaN or non-positive time, or a zero sample rate, gives the instantaneous rate `1.0`.
+/// Positive infinite time at a positive rate gives `0.0`, freezing the smoother. The parameter
+/// domains and launch rates exclude these cases through the contract.
 pub(crate) fn rate_coefficient(time_ms: f32, sample_rate: u32) -> f32 {
     let tau_samples = 0.001_f64 * f64::from(time_ms) * f64::from(sample_rate);
-    // A NaN time fails this ordered compare and takes the instantaneous answer, which is why the
-    // test is written as `> 0.0` on the positive side rather than as a negated comparison.
+    // This also handles the NaN product of infinite time and a zero sample rate.
     if tau_samples <= 0.0 || tau_samples.is_nan() {
         return 1.0;
     }

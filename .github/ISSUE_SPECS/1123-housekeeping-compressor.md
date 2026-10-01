@@ -25,6 +25,8 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+Scope amendment 2026-10-01: retire historical pre-change digest gates only with the current retarget/reset/restore/padding and hostile-schedule survivor mapping. A retained current per-frame contract oracle may replace the duplicated historical block splitter, preserving all generators and independent arithmetic/state checks. Keep the single-owned G5 corpus/pins unchanged. If SHA-256 is then unused in this package, remove its `sha2` dev-dependency and only the `compressor` package dependency row in `Cargo.lock`, using package-anchored context; no unrelated lock update is authorized.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
