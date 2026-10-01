@@ -98,27 +98,77 @@ run_guest() {
 # 384-byte copy (measured at #1062, where the retired scalar guest went red on its `f32` one as
 # well, and again on #1110's base). Since #1110 the guest has no `Simd8`, and neither its `f32` nor
 # its `Simd4` `HotChannel::load` is a block move, so no function here needs the exclusion and
-# deleting it turns nothing red: the pin has no live witness on this guest until a history-sized
-# copy appears, and then it fails.
+# deleting it turns nothing red on this guest. The rule's witness is the hermetic self-test below,
+# which holds a history-sized copy red.
 readonly HISTORY_SHIFT_SIZES="44 48 176 192"
+#
+# The pin also has to prove it read something (#1110 verdict L1). It finds the limiter's functions
+# by name, so a guest without its `name` section, or a limiter crate renamed out of the pattern,
+# would scan nothing and pass. It therefore counts the in-scope limiter functions it scanned and
+# fails on zero, and `self_test_detector_residency` holds both reds to synthetic disassembly.
 
-check_detector_residency() {
-    local module="$1" name="$2" found
-    found="$(wasm-objdump -d "$module" | awk -v sizes="$HISTORY_SHIFT_SIZES" '
+# The verdict over one `wasm-objdump -d` disassembly on stdin. Prints the number of in-scope
+# limiter functions scanned on success; fails on a history-sized copy in one of them, or on none.
+detector_residency_verdict() {
+    local name="$1" result scanned found
+    result="$(awk -v sizes="$HISTORY_SHIFT_SIZES" '
         BEGIN { split(sizes, list, " "); for (i in list) forbidden[list[i]] = 1 }
         /^[0-9a-f]+ func\[[0-9]+\] </ {
             subject = /true_peak_limiter/ && !/10HotChannel/ && !/7History/
+            if (subject) scanned++
             fn = $0
             size = ""
         }
         subject && /i32\.const/ { size = $NF }
         subject && /memory\.copy/ && (size in forbidden) { print size, fn }
+        END { print "scanned", scanned + 0 }
     ')"
+    scanned="${result##*scanned }"
+    found="$(sed '$d' <<<"$result")"
+    ((scanned > 0)) || {
+        printf 'wasm gates: the detector-residency pin scanned no limiter function (%s leg): %s\n' \
+            "$name" "a module without names, or a renamed limiter, would pass it unread" >&2
+        return 1
+    }
     [[ -z "$found" ]] || {
         printf 'wasm gates: the detector history is shifted through linear memory (%s leg)\n%s\n' \
             "$name" "$found" >&2
         return 1
     }
+    printf '%s\n' "$scanned"
+}
+
+check_detector_residency() {
+    local module="$1" name="$2"
+    wasm-objdump -d "$module" | detector_residency_verdict "$name"
+}
+
+# The pin's hermetic self-test (#1110 verdict L1): synthetic disassembly, no build. A 192-byte
+# `memory.copy` (a whole `Simd4` history) in a limiter function is red, and so is a disassembly with
+# no limiter function at all; the same limiter function copying a size no history has is green, so
+# each red is the rule firing and not a broken scanner.
+self_test_detector_residency() {
+    local limiter other clean shifted unnamed
+    limiter='000100 func[7] <_RNvMNtCs0_17true_peak_limiter11LimiterCore13process_block>:'
+    other='000100 func[7] <_RNvNtCs0_13parametric_eq4bank12process_bank>:'
+    clean="$limiter"$'\n 000101: 41 c0 00                   | i32.const 64'
+    clean+=$'\n 000104: fc 0a 00 00                | memory.copy 0 0'
+    clean+=$'\n 000108: 0b                         | end'
+    shifted="${clean/i32.const 64/i32.const 192}"
+    unnamed="${clean/"$limiter"/"$other"}"
+    detector_residency_verdict self-test <<<"$clean" >/dev/null || {
+        printf 'wasm gates: residency self-test: a limiter with no history-sized copy failed\n' >&2
+        return 1
+    }
+    if detector_residency_verdict self-test <<<"$shifted" >/dev/null 2>&1; then
+        printf 'wasm gates: residency self-test: a 192-byte copy in a limiter function passed\n' >&2
+        return 1
+    fi
+    if detector_residency_verdict self-test <<<"$unnamed" >/dev/null 2>&1; then
+        printf 'wasm gates: residency self-test: a disassembly with no limiter passed\n' >&2
+        return 1
+    fi
+    printf 'wasm gates: detector-residency self-test passed\n'
 }
 
 # Issue #949 gate 5: the `f64` lane vocabulary must lower to `f64x2` vector opcodes under simd128.
@@ -226,10 +276,12 @@ command -v wasm-objdump >/dev/null 2>&1 || {
     exit 1
 }
 
+self_test_detector_residency
 run_guest simd128 +simd128 simd4
 
-check_detector_residency "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST" simd128
-printf 'wasm gates: detector history resident in locals on the simd128 guest\n'
+scanned="$(check_detector_residency "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST" simd128)"
+printf 'wasm gates: detector history resident in locals on the simd128 guest (%s %s)\n' \
+    "$scanned" "limiter functions scanned"
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
 if ((native)); then
     legs="native + wasm simd128"
