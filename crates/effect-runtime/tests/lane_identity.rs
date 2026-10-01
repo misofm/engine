@@ -14,8 +14,10 @@
 use effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use effect_runtime::corpus::{CASE_NAMES, POINTS, run_case};
 use effect_runtime::ramp::LinearRamp;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::RampSegment;
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 fn lane_words<L: Lane>(value: L) -> Vec<u32> {
     let mut words = vec![0u32; L::WIDTH];
@@ -29,10 +31,12 @@ fn lane_words<L: Lane>(value: L) -> Vec<u32> {
 fn the_corpus_is_width_independent() {
     let mut scalar = vec![0u32; POINTS];
     let mut four = vec![0u32; POINTS];
+    #[cfg(target_feature = "avx2")]
     let mut eight = vec![0u32; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {
         run_case::<f32>(case, &mut scalar);
         run_case::<Simd4>(case, &mut four);
+        #[cfg(target_feature = "avx2")]
         run_case::<Simd8>(case, &mut eight);
         for point in 0..POINTS {
             assert_eq!(
@@ -40,6 +44,7 @@ fn the_corpus_is_width_independent() {
                 "{name} point {point}: W=1 {:#010x} vs W=4 {:#010x}",
                 scalar[point], four[point]
             );
+            #[cfg(target_feature = "avx2")]
             assert_eq!(
                 scalar[point], eight[point],
                 "{name} point {point}: W=1 {:#010x} vs W=8 {:#010x}",
@@ -57,21 +62,28 @@ fn ramp_segments_are_width_independent() {
             let mut base = LinearRamp::fixed(-0.5);
             base.set_target(target, samples);
 
-            let (mut a, mut b, mut c) = (base, base, base);
+            let (mut a, mut b) = (base, base);
+            #[cfg(target_feature = "avx2")]
+            let mut c = base;
             let scalar: RampSegment<f32> = a.advance_block::<f32>(frames);
             let four: RampSegment<Simd4> = b.advance_block::<Simd4>(frames);
+            #[cfg(target_feature = "avx2")]
             let eight: RampSegment<Simd8> = c.advance_block::<Simd8>(frames);
 
             assert_eq!(a, b);
+            #[cfg(target_feature = "avx2")]
             assert_eq!(a, c);
             assert_eq!(scalar.ramp_frames, four.ramp_frames);
+            #[cfg(target_feature = "avx2")]
             assert_eq!(scalar.ramp_frames, eight.ramp_frames);
             for word in lane_words(four.start) {
                 assert_eq!(word, scalar.start.to_bits());
             }
+            #[cfg(target_feature = "avx2")]
             for word in lane_words(eight.step) {
                 assert_eq!(word, scalar.step.to_bits());
             }
+            #[cfg(target_feature = "avx2")]
             for word in lane_words(eight.target) {
                 assert_eq!(word, scalar.target.to_bits());
             }
@@ -90,11 +102,13 @@ fn the_boundary_check_is_width_independent() {
             block[position] = value;
             assert!(!check_block::<f32>(&block), "W=1 at {position}");
             assert!(!check_block::<Simd4>(&block), "W=4 at {position}");
+            #[cfg(target_feature = "avx2")]
             assert!(!check_block::<Simd8>(&block), "W=8 at {position}");
         }
         let clean = vec![0.25f32; 64];
         assert!(check_block::<f32>(&clean));
         assert!(check_block::<Simd4>(&clean));
+        #[cfg(target_feature = "avx2")]
         assert!(check_block::<Simd8>(&clean));
     }
 }
@@ -104,6 +118,7 @@ fn the_boundary_check_is_width_independent() {
 fn the_lane_mask_agrees_across_widths() {
     let mut block = vec![0.0f32; 8 * 8];
     block[8 * 2 + 5] = f32::NAN;
+    #[cfg(target_feature = "avx2")]
     assert_eq!(nonfinite_lane_mask::<Simd8>(&block), 1 << 5);
     // The same buffer read as four-lane frames: index 21 is lane 1 of frame 5.
     assert_eq!(nonfinite_lane_mask::<Simd4>(&block), 1 << 1);

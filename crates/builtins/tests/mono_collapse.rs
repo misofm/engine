@@ -20,8 +20,9 @@ use builtins::*;
 use effect_contract::BankWidth;
 use lane::Backend;
 
-const BANKS: [(Backend, BankWidth); 2] = [
+const BANKS: &[(Backend, BankWidth)] = &[
     (Backend::Simd4, BankWidth::Four),
+    #[cfg(target_feature = "avx2")]
     (Backend::Simd8, BankWidth::Eight),
 ];
 
@@ -100,7 +101,7 @@ fn poisoned_block(frames: usize, lanes: usize) -> Vec<f32> {
 #[test]
 fn the_collapsed_body_publishes_the_dual_bodys_report() {
     const FRAMES: usize = 64;
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let mut collapsed = bank(backend, width);
         let mut dual = bank(backend, width);
@@ -191,7 +192,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 8;
     const SWITCH: usize = 4;
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let mut mixed = bank(backend, width);
         let mut never = bank(backend, width);

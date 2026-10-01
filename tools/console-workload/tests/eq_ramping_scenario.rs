@@ -163,6 +163,7 @@ fn check(workload: Workload, dispatch: Backend, pins: [&str; 3]) {
 }
 
 #[test]
+#[cfg(target_feature = "avx2")]
 fn eq_only_gain_rides_render_the_pinned_bits_at_simd8() {
     check(Workload::SixtyFourTrackEqOnly, Backend::Simd8, EQ_ONLY_PINS);
 }
@@ -173,6 +174,7 @@ fn eq_only_gain_rides_render_the_pinned_bits_at_simd4() {
 }
 
 #[test]
+#[cfg(target_feature = "avx2")]
 fn mono_console_both_rides_render_the_pinned_bits_at_simd8() {
     check(
         Workload::SixtyFourTrackConsoleMono,

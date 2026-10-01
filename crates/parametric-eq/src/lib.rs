@@ -3863,8 +3863,10 @@ mod interleave_identity {
         HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, SampleRateHz, Section, cascade_sections,
         cascade_sections_mono, corpus, process_channels, process_channels_mono,
     };
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
     use lane::kernels::svf_block;
-    use lane::{Lane, Simd4, Simd8};
+    use lane::{Lane, Simd4};
 
     /// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
     ///
@@ -4292,6 +4294,7 @@ mod interleave_identity {
             for seeded in [false, true] {
                 compare::<f32, 1>("Scalar", case, seeded);
                 compare::<Simd4, 4>("Simd4", case, seeded);
+                #[cfg(target_feature = "avx2")]
                 compare::<Simd8, 8>("Simd8", case, seeded);
             }
         }
@@ -4350,6 +4353,7 @@ mod interleave_identity {
 
         run::<f32, 1>();
         run::<Simd4, 4>();
+        #[cfg(target_feature = "avx2")]
         run::<Simd8, 8>();
     }
 
@@ -4501,6 +4505,7 @@ mod interleave_identity {
     #[test]
     fn mixed_dedicated_cut_masks_match_scalar_lanes_bit_for_bit() {
         mixed_cut_scalar_parity::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         mixed_cut_scalar_parity::<Simd8, 8>("Simd8");
     }
 
@@ -4576,18 +4581,16 @@ mod interleave_identity {
     fn disabled_cuts_with_an_original_band_ramp_match_the_four_section_oracle() {
         disabled_cuts_general_ramp_parity::<f32, 1>("Scalar");
         disabled_cuts_general_ramp_parity::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         disabled_cuts_general_ramp_parity::<Simd8, 8>("Simd8");
     }
 
     #[test]
     fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
-        for width in [1_usize, 4, 8] {
-            match width {
-                1 => tiny_disabled_cut_state::<f32, 1>("Scalar"),
-                4 => tiny_disabled_cut_state::<Simd4, 4>("Simd4"),
-                _ => tiny_disabled_cut_state::<Simd8, 8>("Simd8"),
-            }
-        }
+        tiny_disabled_cut_state::<f32, 1>("Scalar");
+        tiny_disabled_cut_state::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
+        tiny_disabled_cut_state::<Simd8, 8>("Simd8");
     }
 
     fn tiny_disabled_cut_state<L: Lane, const W: usize>(width: &str) {
@@ -4632,13 +4635,10 @@ mod interleave_identity {
 
     #[test]
     fn disabled_cuts_match_the_full_six_section_reference() {
-        for width in [1_usize, 4, 8] {
-            match width {
-                1 => compare::<f32, 1>("Scalar-disabled-cuts", 0, false),
-                4 => compare::<Simd4, 4>("Simd4-disabled-cuts", 0, false),
-                _ => compare::<Simd8, 8>("Simd8-disabled-cuts", 0, false),
-            }
-        }
+        compare::<f32, 1>("Scalar-disabled-cuts", 0, false);
+        compare::<Simd4, 4>("Simd4-disabled-cuts", 0, false);
+        #[cfg(target_feature = "avx2")]
+        compare::<Simd8, 8>("Simd8-disabled-cuts", 0, false);
     }
 
     #[test]
@@ -4664,6 +4664,7 @@ mod interleave_identity {
                                 refusal_state,
                                 negative_zero,
                             );
+                            #[cfg(target_feature = "avx2")]
                             compare_disabled_cuts_to_original_four::<Simd8, 8>(
                                 "Simd8",
                                 case,
@@ -4712,6 +4713,7 @@ mod interleave_identity {
                 }
                 compare_signed_zero_refusal::<f32, 1>("Scalar", mono, plane);
                 compare_signed_zero_refusal::<Simd4, 4>("Simd4", mono, plane);
+                #[cfg(target_feature = "avx2")]
                 compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
             }
         }
@@ -4739,13 +4741,16 @@ mod interleave_identity {
 mod elision {
     use super::{
         BandTarget, Channel, ELISION_MAGNITUDE_CEILING, EQ_SECTION_COUNT, EqBandKind, EqSvfWords,
-        HPF_SECTION, INERT_MAGNITUDE_FLOOR, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, STATE_LANE_WORDS,
-        STATE_WORDS_PER_BAND, block_admits_elision, block_admits_elision_oracle, cascade_sections,
-        cascade_sections_mono, corpus, masked_pair_pass_count, process_channels,
-        process_channels_mono, reset_masked_pair_passes, reset_select_free_tail_passes,
-        select_free_tail_pass_count,
+        HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, block_admits_elision,
+        block_admits_elision_oracle, cascade_sections, cascade_sections_mono, corpus,
+        masked_pair_pass_count, process_channels, process_channels_mono, reset_masked_pair_passes,
+        reset_select_free_tail_passes, select_free_tail_pass_count,
     };
-    use lane::{Lane, Simd4, Simd8};
+    #[cfg(target_feature = "avx2")]
+    use super::{INERT_MAGNITUDE_FLOOR, STATE_LANE_WORDS, STATE_WORDS_PER_BAND};
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
+    use lane::{Lane, Simd4};
 
     const FRAMES: usize = corpus::FRAMES;
     /// Every subset of the six cascade positions, as a bitmask of *live* sections.
@@ -4949,19 +4954,23 @@ mod elision {
                     let ran = [
                         compare::<f32, 1>("Scalar", case, live, live, seeded),
                         compare::<Simd4, 4>("Simd4", case, live, live, seeded),
+                        #[cfg(target_feature = "avx2")]
                         compare::<Simd8, 8>("Simd8", case, live, live, seeded),
                     ];
                     assert_eq!(
-                        ran, [count; 3],
+                        ran,
+                        ran.map(|_| count),
                         "the dual cascade keeps exactly the live sections ({live:06b})"
                     );
                     let ran = [
                         compare_mono::<f32, 1>("Scalar", case, live, seeded),
                         compare_mono::<Simd4, 4>("Simd4", case, live, seeded),
+                        #[cfg(target_feature = "avx2")]
                         compare_mono::<Simd8, 8>("Simd8", case, live, seeded),
                     ];
                     assert_eq!(
-                        ran, [count; 3],
+                        ran,
+                        ran.map(|_| count),
                         "the mono cascade keeps exactly the live sections ({live:06b})"
                     );
                 }
@@ -5006,6 +5015,7 @@ mod elision {
         }
         run::<f32, 1>("Scalar");
         run::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         run::<Simd8, 8>("Simd8");
     }
 
@@ -5057,6 +5067,7 @@ mod elision {
     ///
     /// One live band of four is the shipped console fixture's shape (see the intended
     /// sixty-four-track session), and it is the row the standing measurement moves.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn the_shipped_shape_actually_elides() {
         for (live, expected) in [(0b0001_u8, 1_usize), (0b0011, 2), (0b0000, 0)] {
@@ -5088,6 +5099,7 @@ mod elision {
     }
 
     /// A section that is identity on some lanes and live on others is not elidable.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
         let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] =
@@ -5118,6 +5130,7 @@ mod elision {
     ///
     /// This is the leg the proof rests on: an elided identity section would rewrite that `-0.0` to
     /// `+0.0`, which is a moved bit.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_negative_zero_input_refuses_elision() {
         for plane in 0..2 {
@@ -5154,6 +5167,7 @@ mod elision {
     }
 
     /// Non-finite input, and input above the §4.4 magnitude bound, refuse the elision.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_non_finite_or_oversized_input_refuses_elision() {
         for sample in [
@@ -5197,6 +5211,7 @@ mod elision {
     /// magnitudes above the ceiling (the word over it, `f32::MAX`). Admitted: `+-1.0`,
     /// `+-FLUSH_EPS` and `+-1e30`, the two ends of the inert band. Before issue #979 this test was
     /// `a_non_zero_state_in_a_dead_section_refuses_elision` and refused `1.0` too.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_non_inert_state_in_a_dead_section_refuses_elision() {
         let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
@@ -5373,6 +5388,7 @@ mod elision {
         }
         run::<f32, 1>("Scalar");
         run::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         run::<Simd8, 8>("Simd8");
     }
 
@@ -5381,6 +5397,7 @@ mod elision {
     /// Nothing the kernel writes is ever `-0.0` -- `flush` maps every zero to `+0.0` -- but a
     /// restored state payload is admitted on finiteness alone, and a low-pass section carrying
     /// `ic2 = -0.0` is the one shape that can emit `-0.0` into a later elided section.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_negative_zero_state_in_a_live_section_refuses_elision() {
         for word in [0_usize, 1] {
@@ -5677,6 +5694,7 @@ mod elision {
         }
         run::<f32, 1>("Scalar");
         run::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         run::<Simd8, 8>("Simd8");
     }
 
@@ -5686,6 +5704,7 @@ mod elision {
     /// overflow a large restored integrator there to `NaN` behind the dry select. An admitted plan
     /// runs select-free, which would turn that state into output, so leg (c) keeps the bank on the
     /// masked kernel instead.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_non_finite_state_in_a_live_section_refuses_elision() {
         for word in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -f32::NAN] {
@@ -5729,6 +5748,7 @@ mod elision {
     /// section list the gate would have produced had it not refused, and the result is asserted to
     /// **differ** from the full cascade. That difference is exactly the `-0.0` an identity section
     /// rewrites to `+0.0`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn the_negative_zero_refusal_is_load_bearing() {
         let mut moved = 0_usize;
@@ -5780,6 +5800,7 @@ mod elision {
     /// The transition arrives the way automation delivers it -- through `start_ramp`, which ramps
     /// the six words over the smoothing window -- so the sequence covers the non-stationary blocks
     /// during the ramp, the snap that ends it, and the stationary blocks on either side.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_mid_session_enable_or_disable_stays_bit_exact() {
         const BLOCKS: usize = 8;
@@ -5967,6 +5988,7 @@ mod elision {
     fn a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag() {
         reset_mid_ramp_case::<f32, 1>("Scalar");
         reset_mid_ramp_case::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         reset_mid_ramp_case::<Simd8, 8>("Simd8");
     }
 }
@@ -5998,7 +6020,9 @@ mod boundary_fold {
         cascade_sections_mono, check_block, corpus, lane_set, process_channels,
         process_channels_mono,
     };
-    use lane::{Lane, Simd4, Simd8};
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
+    use lane::{Lane, Simd4};
 
     /// `2^104`: times `1e30` it overflows, times `1.0` it does not.
     const HUGE: f32 = f32::from_bits(0x7380_0000);
@@ -6354,6 +6378,7 @@ mod boundary_fold {
     fn the_folded_verdict_is_the_boundary_scan() {
         check::<f32, 1>("Scalar");
         check::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         check::<Simd8, 8>("Simd8");
     }
 }
@@ -6485,7 +6510,9 @@ mod ramping_elision {
     use effect_contract::{
         EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
     };
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const QUANTUM: usize = 128;
@@ -6716,6 +6743,7 @@ mod ramping_elision {
     fn the_unsafe_ramp_rule_keeps_every_dead_section_after_it() {
         unsafe_ramp_rule::<f32, 1>("Scalar");
         unsafe_ramp_rule::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         unsafe_ramp_rule::<Simd8, 8>("Simd8");
     }
 
@@ -6756,6 +6784,7 @@ mod ramping_elision {
     fn a_ramping_identity_section_is_never_dead() {
         ramping_identity_runs::<f32, 1>("Scalar");
         ramping_identity_runs::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         ramping_identity_runs::<Simd8, 8>("Simd8");
     }
 
@@ -6833,6 +6862,7 @@ mod ramping_elision {
     fn a_restored_subnormal_live_state_refuses_the_list() {
         restored_subnormal_live_state::<f32, 1>("Scalar");
         restored_subnormal_live_state::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         restored_subnormal_live_state::<Simd8, 8>("Simd8");
     }
 
@@ -6990,6 +7020,7 @@ mod ramping_elision {
     fn select_lane_writes_match_lane_set_word_for_word() {
         select_writes_match_lane_set::<f32, 1>("Scalar");
         select_writes_match_lane_set::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         select_writes_match_lane_set::<Simd8, 8>("Simd8");
     }
 
@@ -7202,10 +7233,10 @@ mod ramping_elision {
         fn prepare(requests: &[PrepareEffectRequest<'_>], path: Path) -> Self {
             let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0])
                 .expect("metadata");
-            let width = if W == 8 {
-                BankWidth::Eight
-            } else {
-                BankWidth::Four
+            let width = match W {
+                #[cfg(target_feature = "avx2")]
+                8 => BankWidth::Eight,
+                _ => BankWidth::Four,
             };
             Self {
                 eq: on_path(path, || {
@@ -7526,10 +7557,10 @@ mod ramping_elision {
         // A shape whose designs are not all legal (a frequency past the rate's range) is not a
         // scenario; the draw moves on.
         let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]);
-        let width = if W == 8 {
-            BankWidth::Eight
-        } else {
-            BankWidth::Four
+        let width = match W {
+            #[cfg(target_feature = "avx2")]
+            8 => BankWidth::Eight,
+            _ => BankWidth::Four,
         };
         if metadata.is_err()
             || prepare_width::<L, W>(metadata.expect("checked"), width, &requests, &[true; W])
@@ -7882,6 +7913,7 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_seeds());
     }
 
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd8() {
         differential::<Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
@@ -7899,6 +7931,7 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd8() {
         differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
@@ -7915,6 +7948,7 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
         differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
@@ -7926,10 +7960,13 @@ mod ramping_elision {
     #[ignore = "nightly: the full scenario count of the Simd4 and Simd8 differentials (#1049)"]
     fn the_vector_differentials_render_their_bits_at_the_full_scenario_count() {
         differential::<Simd4, 4>("Simd4", "#1005", LIST, all_seeds());
+        #[cfg(target_feature = "avx2")]
         differential::<Simd8, 8>("Simd8", "#1005", LIST, all_seeds());
         differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, all_seeds());
+        #[cfg(target_feature = "avx2")]
         differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, all_seeds());
         differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, all_seeds());
+        #[cfg(target_feature = "avx2")]
         differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, all_seeds());
     }
 }
@@ -7944,7 +7981,9 @@ mod ramping_elision {
 #[cfg(test)]
 mod stationary_subnormal {
     use super::*;
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const FRAMES: usize = 16;
@@ -8066,10 +8105,10 @@ mod stationary_subnormal {
         let requests = vec![request; W];
         let metadata =
             expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request).expect("metadata");
-        let width_tag = if W == 8 {
-            BankWidth::Eight
-        } else {
-            BankWidth::Four
+        let width_tag = match W {
+            #[cfg(target_feature = "avx2")]
+            8 => BankWidth::Eight,
+            _ => BankWidth::Four,
         };
         let prepare =
             || prepare_width::<L, W>(metadata, width_tag, &requests, &[true; W]).expect("prepared");
@@ -8176,6 +8215,7 @@ mod stationary_subnormal {
         let mut mismatches = Vec::new();
         channel_level::<f32, 1>("Scalar", &mut mismatches);
         channel_level::<Simd4, 4>("Simd4", &mut mismatches);
+        #[cfg(target_feature = "avx2")]
         channel_level::<Simd8, 8>("Simd8", &mut mismatches);
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
@@ -8185,6 +8225,7 @@ mod stationary_subnormal {
         let mut mismatches = Vec::new();
         contract_level::<f32, 1>("Scalar", &mut mismatches);
         contract_level::<Simd4, 4>("Simd4", &mut mismatches);
+        #[cfg(target_feature = "avx2")]
         contract_level::<Simd8, 8>("Simd8", &mut mismatches);
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
@@ -8296,6 +8337,7 @@ mod stationary_subnormal {
     fn leg_c_refuses_below_flush_eps_admits_it_and_re_engages() {
         flush_eps_boundary::<f32, 1>("Scalar");
         flush_eps_boundary::<Simd4, 4>("Simd4");
+        #[cfg(target_feature = "avx2")]
         flush_eps_boundary::<Simd8, 8>("Simd8");
     }
 }
@@ -8319,17 +8361,19 @@ mod padded_banks {
         BypassShunt, EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
         PreparedAutomationSpan,
     };
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     const QUANTUM: usize = 128;
     const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
     /// The bank width, and the backend that agrees with it, for `lanes` lanes.
     fn width(lanes: usize) -> (BankWidth, Backend) {
-        if lanes == 8 {
-            (BankWidth::Eight, Backend::Simd8)
-        } else {
-            (BankWidth::Four, Backend::Simd4)
+        match lanes {
+            #[cfg(target_feature = "avx2")]
+            8 => (BankWidth::Eight, Backend::Simd8),
+            _ => (BankWidth::Four, Backend::Simd4),
         }
     }
 
@@ -9050,6 +9094,7 @@ mod padded_banks {
     #[test]
     fn a_planted_non_finite_state_recovers_its_own_lane_alone() {
         planted::<Simd4, 4>();
+        #[cfg(target_feature = "avx2")]
         planted::<Simd8, 8>();
     }
 

@@ -86,7 +86,9 @@ pub(crate) fn link_levels<L: Lane, const MODE: u8>(left: L, right: L) -> (L, L) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     /// The smoother is `target + c * (y - target)`, and the attack coefficient is the one selected
     /// when the target asks for more reduction.
@@ -240,33 +242,43 @@ mod tests {
             target[lane] = 0.6 - lane as f32 * 0.19;
         }
 
-        let (mut scalar, mut four, mut eight) = ([0u32; 8], [0u32; 8], [0u32; 8]);
+        let (mut scalar, mut four) = ([0u32; 8], [0u32; 8]);
+        #[cfg(target_feature = "avx2")]
+        let mut eight = [0u32; 8];
         smoothed::<f32>(&y, &target, &mut scalar);
         smoothed::<Simd4>(&y, &target, &mut four);
+        #[cfg(target_feature = "avx2")]
         smoothed::<Simd8>(&y, &target, &mut eight);
         assert_eq!(scalar, four, "branching_smooth at W=4");
+        #[cfg(target_feature = "avx2")]
         assert_eq!(scalar, eight, "branching_smooth at W=8");
 
         for mode in [LINK_DUAL_MONO, LINK_MAXIMUM, LINK_AVERAGE] {
-            let (mut scalar, mut four, mut eight) = ([0u32; 8], [0u32; 8], [0u32; 8]);
+            let (mut scalar, mut four) = ([0u32; 8], [0u32; 8]);
+            #[cfg(target_feature = "avx2")]
+            let mut eight = [0u32; 8];
             match mode {
                 LINK_MAXIMUM => {
                     linked::<f32, LINK_MAXIMUM>(&y, &target, &mut scalar);
                     linked::<Simd4, LINK_MAXIMUM>(&y, &target, &mut four);
+                    #[cfg(target_feature = "avx2")]
                     linked::<Simd8, LINK_MAXIMUM>(&y, &target, &mut eight);
                 }
                 LINK_AVERAGE => {
                     linked::<f32, LINK_AVERAGE>(&y, &target, &mut scalar);
                     linked::<Simd4, LINK_AVERAGE>(&y, &target, &mut four);
+                    #[cfg(target_feature = "avx2")]
                     linked::<Simd8, LINK_AVERAGE>(&y, &target, &mut eight);
                 }
                 _ => {
                     linked::<f32, LINK_DUAL_MONO>(&y, &target, &mut scalar);
                     linked::<Simd4, LINK_DUAL_MONO>(&y, &target, &mut four);
+                    #[cfg(target_feature = "avx2")]
                     linked::<Simd8, LINK_DUAL_MONO>(&y, &target, &mut eight);
                 }
             }
             assert_eq!(scalar, four, "link mode {mode} at W=4");
+            #[cfg(target_feature = "avx2")]
             assert_eq!(scalar, eight, "link mode {mode} at W=8");
         }
     }

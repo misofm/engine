@@ -23,7 +23,8 @@ pub fn sidechain_port() -> PortId {
 }
 
 /// Prepares an eight-lane bank from eight per-track parameter sets, or `None` when this build has
-/// no eight-lane backend.
+/// no eight-lane backend. Only the 8-lane (AVX2) build has the width to name (#1112).
+#[cfg(target_feature = "avx2")]
 pub fn prepare_bank_w8(
     values: &[Values; 8],
     link_mode: LinkMode,

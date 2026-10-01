@@ -20,7 +20,9 @@
 
 use super::*;
 use dsp_reference::randomized::{Draw, Profile, run_seeds};
-use lane::{Simd4, Simd8};
+use lane::Simd4;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 
 const TEST: &str =
     "randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores";
@@ -493,9 +495,11 @@ fn the_stationary_cascade_renders_the_full_cascade_after_random_restores() {
         for mono in [false, true] {
             scenario::<f32, 1>(seed, mono, &mut reach);
             scenario::<Simd4, 4>(seed, mono, &mut reach);
+            #[cfg(target_feature = "avx2")]
             scenario::<Simd8, 8>(seed, mono, &mut reach);
             tiny_state_cases::<f32, 1>(seed, mono, &mut reach);
             tiny_state_cases::<Simd4, 4>(seed, mono, &mut reach);
+            #[cfg(target_feature = "avx2")]
             tiny_state_cases::<Simd8, 8>(seed, mono, &mut reach);
         }
     });

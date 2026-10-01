@@ -8,12 +8,15 @@
 mod common;
 
 use common::*;
+#[cfg(target_feature = "avx2")]
+use effect_contract::{BankWidth, PrepareEffectBankRequest};
 use effect_contract::{
-    BankWidth, EffectPrepareError, LatencySamples, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedNativeEffect, ResetKind, StatePayloadError,
-    StatePayloadInput, TailSamples, validate_descriptor,
+    EffectPrepareError, LatencySamples, LinkMode, NativeEffectFactory, ParameterChannel,
+    PreparedNativeEffect, ResetKind, StatePayloadError, StatePayloadInput, TailSamples,
+    validate_descriptor,
 };
 use effect_runtime::envelope::retention_coefficient;
+#[cfg(target_feature = "avx2")]
 use lane::Backend;
 use transient_shaper::{
     TRANSIENT_SHAPER_COEFFICIENT_BITS, TRANSIENT_SHAPER_DESCRIPTOR,
@@ -432,10 +435,12 @@ fn state_restore_validates_version_length_envelope_and_parameters() {
 }
 
 /// Resource validation and the program-key check precede the legal "backend unavailable" fallback,
-/// and a width this build does not render is unavailable rather than an error.
+/// and a width this build does not render is unavailable rather than an error. Only the 8-lane
+/// (AVX2) build has a bank width it does not render (#1112).
 ///
 /// Red mutation: return `Err("effect.bank.program")` on a program mismatch (the divergence the 83c
 /// write-up found in `true-peak-limiter`) — the heterogeneous row goes red.
+#[cfg(target_feature = "avx2")]
 #[test]
 fn bank_resources_and_validation_precede_legal_unavailable_fallback() {
     let factory = TransientShaperFactory;

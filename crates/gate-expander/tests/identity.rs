@@ -2,13 +2,16 @@
 
 mod support;
 
-use effect_contract::{BankWidth, EffectBankProcessBlock, LinkMode, PreparedNativeEffectBank};
+#[cfg(target_feature = "avx2")]
+use effect_contract::PreparedNativeEffectBank;
+use effect_contract::{BankWidth, EffectBankProcessBlock, LinkMode};
 use lane::Backend;
 use support::{
-    Values, active_values, assert_bits_eq, initial_values, noise, packed_w8, prepare, prepare_bank,
-    prepare_bank_w8, render_scalar_sidechain, request, request_at, retarget_spans, set_parameter,
-    snapshot, snapshot_bank, track_of,
+    Values, active_values, assert_bits_eq, initial_values, noise, prepare, prepare_bank,
+    render_scalar_sidechain, request, request_at, retarget_spans, set_parameter, snapshot,
 };
+#[cfg(target_feature = "avx2")]
+use support::{packed_w8, prepare_bank_w8, snapshot_bank, track_of};
 
 fn track_values() -> [Values; 8] {
     core::array::from_fn(|track| {
@@ -29,6 +32,7 @@ fn track_values() -> [Values; 8] {
     })
 }
 
+#[cfg(target_feature = "avx2")]
 fn render_bank8(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],
@@ -66,11 +70,8 @@ fn render_bank8(
     }
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
     let values = track_values();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
@@ -223,8 +224,8 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
 
 #[test]
 #[cfg_attr(
-    target_arch = "x86_64",
-    ignore = "a four-lane bank binds only on a four-lane build; the AArch64 legs run it (#1017)"
+    target_feature = "avx2",
+    ignore = "a four-lane bank binds only in a 4-lane (NEON/simd128) build, whose legs run it (#1017)"
 )]
 fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {
     assert_eq!(Backend::current(), Backend::Simd4, "a four-lane build");

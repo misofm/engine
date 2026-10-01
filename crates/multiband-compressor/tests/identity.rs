@@ -14,7 +14,8 @@ use effect_contract::{
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{
-    PARAMETER_COUNT, point, process, request_with, restore, snapshot, snapshot_track, varied_values,
+    BANK_WIDTHS, PARAMETER_COUNT, point, process, request_with, restore, snapshot, snapshot_track,
+    varied_values,
 };
 
 /// Twelve blocks of 128 frames over eight tracks, with a threshold point on track 0 at block 0.
@@ -326,7 +327,7 @@ fn run_scalar(
 fn lane_identity_across_widths() {
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let (scalar_pcm, scalar_state, scalar_reports) = run_scalar(link);
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BANK_WIDTHS {
             let (bank_pcm, bank_state, bank_reports) = run_banks(width, link);
             for channel in 0..TRACKS * 2 {
                 for frame in 0..BLOCKS * FRAMES {
@@ -356,7 +357,7 @@ fn heterogeneous_programs_preserve_public_identity() {
         let (scalar_pcm, scalar_state, scalar_reports) =
             run_scalar_with_sets(link, &sets, &automation);
         assert_populated("scalar programs", &scalar_pcm, &scalar_state);
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BANK_WIDTHS {
             let (bank_pcm, bank_state, bank_reports) =
                 run_banks_with_sets(width, link, &sets, &automation);
             assert_populated("bank programs", &bank_pcm, &bank_state);
@@ -642,7 +643,7 @@ fn restored_programs_continue_across_scalar_and_bank() {
     for (source, destination) in [(0, 1), (1, 0)] {
         for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
             assert_scalar_restore_transition(source, destination, link);
-            for width in [BankWidth::Four, BankWidth::Eight] {
+            for &width in BANK_WIDTHS {
                 assert_bank_restore_transition(source, destination, link, width);
             }
         }
@@ -778,7 +779,7 @@ fn scalar_and_bank_state_interchange_continues() {
 /// A restored different-crossover bank returns to the receiver's prepared defaults on full reset.
 #[test]
 fn bank_full_reset_restores_different_crossover_defaults() {
-    for width in [BankWidth::Four, BankWidth::Eight] {
+    for &width in BANK_WIDTHS {
         let lanes = width.lanes() as usize;
         let mut source_sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
         for (track, values) in source_sets.iter_mut().enumerate() {
@@ -1074,7 +1075,9 @@ fn partition_invariance() {
     }
 }
 
-/// Both resets bring a bank and the scalar product to the same state, from the same history.
+/// Both resets bring a bank and the scalar product to the same state, from the same history. The
+/// bank is the 8-lane (AVX2) width, so only that build runs it.
+#[cfg(target_feature = "avx2")]
 #[test]
 fn resets_agree_across_widths() {
     let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();

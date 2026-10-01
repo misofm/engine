@@ -58,6 +58,7 @@ const NAN_TRACK: usize = 1;
 const NAN_FRAME: usize = 37;
 
 /// SHA-256 of the W8 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
+#[cfg(target_feature = "avx2")]
 const W8_DIGEST: &str = "65609fa00abf6862372589cdaa4fce6b429264e8e1c852ab4b2f17f3869f5f87";
 /// SHA-256 of the W4 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
 const W4_DIGEST: &str = "2cd5cb70f15bdfb2e3fe143dd5bd09891c56b84ff9975e88b55fadc18f13f017";
@@ -469,6 +470,7 @@ fn check(label: &str, digest: String, pin: &str) {
 #[test]
 fn the_seedless_scenario_renders_the_pinned_base_words() {
     let backend = Backend::current();
+    #[cfg(target_feature = "avx2")]
     if backend.width() >= 8 {
         check(
             "W8",

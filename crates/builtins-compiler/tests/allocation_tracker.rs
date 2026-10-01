@@ -12,13 +12,15 @@ use std::alloc::{GlobalAlloc, System};
 use std::sync::Mutex;
 
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
+// Read by the eight-lane input trim drain only (issue #1112).
+#[cfg(target_feature = "avx2")]
+use builtins_compiler::TrackInputRecord;
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
-    TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
-    test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
-    test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
-    test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
-    test_only_prepared_scalar_split_pair_graph,
+    TrackFaderRecord, prepare_session_builtins, test_only_begin_phase_two_allocation_observation,
+    test_only_fader_matrix_witness, test_only_observed_scalar_declined_split_pair_binding,
+    test_only_observed_scalar_pair_binding, test_only_observed_scalar_split_pair_binding,
+    test_only_phase_two_allocation_snapshot, test_only_prepared_scalar_split_pair_graph,
     test_only_prepared_scalar_split_pair_graph_with_observer_error,
     test_only_record_phase_two_allocation, test_only_record_phase_two_deallocation,
     test_only_reset_fader_matrix_witness, test_only_reset_phase_two_allocation_tracker,
@@ -297,6 +299,8 @@ fn audit_runtime_bank_render(
 }
 
 #[test]
+// The nine-track eight-lane graph exists in the 8-lane (AVX2) build only (issue #1112).
+#[cfg(target_feature = "avx2")]
 fn actual_queued_graph_phases_allocate_and_free_nothing() {
     let _session_guard = SESSION
         .lock()
@@ -486,6 +490,8 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
 /// Red mutation: allocate in the banked drain's `TrimDb` arm (`vec![smoothing_samples][0]` for
 /// the window) -> the first ridden block counts nine allocations and nine frees, one per track.
 #[test]
+// The nine-track eight-lane graph exists in the 8-lane (AVX2) build only (issue #1112).
+#[cfg(target_feature = "avx2")]
 fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
     let _session_guard = SESSION
         .lock()
@@ -814,10 +820,13 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             .map_or(0, |layout| layout.allocation_count)
     };
     let mut prepared_unit_layout = None;
-    for width in [
+    // Every bank width this build has: no eight in a 4-lane (NEON/simd128) build (issue #1112).
+    let widths = [
         effect_contract::BankWidth::Four,
+        #[cfg(target_feature = "avx2")]
         effect_contract::BankWidth::Eight,
-    ] {
+    ];
+    for width in widths {
         let lanes = width.lanes() as usize;
         for slot_count in [0_usize, 1, 3, 9] {
             // Stage storage, chain mask and scratch are created before the measured conversion.
@@ -978,51 +987,55 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
 
     // This direct-attachment fixture is separate from compiler admission. It proves the actual
     // runtime R/S bounds for both delivery variants against the same calculated allowance.
-    let mut output = [0.0_f32; 128];
-    graph::test_only_reset_bank_chain_construction_facts();
-    let mut paired = builtins_compiler::test_only_prepared_pair_graph(false);
-    let paired_facts = graph::test_only_bank_chain_construction_facts();
-    let paired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
-        paired_facts.prepared_memberships as u64,
-        Some(effect_contract::BankWidth::Eight),
-    )
-    .expect("paired allowance");
-    assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
-    assert!(paired_facts.runtime_slots <= paired_facts.run_memberships);
-    assert!(paired_facts.run_memberships <= paired_facts.prepared_memberships);
-    assert!(paired_facts.maximum_runtime_slots <= paired_facts.maximum_run_memberships);
-    assert_eq!(
-        paired_allowance.bank_count,
-        paired_facts.prepared_memberships as u64
-    );
-    for sample in [0, 64] {
-        let witness = audit_graph_render(&mut paired, &mut output, sample);
-        assert!(witness.fused_calls > 0, "successful pairing is rendered");
-    }
-    drop(paired);
+    // Its nine-track graphs are eight-lane, so it runs in the 8-lane (AVX2) build only (#1112).
+    #[cfg(target_feature = "avx2")]
+    {
+        let mut output = [0.0_f32; 128];
+        graph::test_only_reset_bank_chain_construction_facts();
+        let mut paired = builtins_compiler::test_only_prepared_pair_graph(false);
+        let paired_facts = graph::test_only_bank_chain_construction_facts();
+        let paired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
+            paired_facts.prepared_memberships as u64,
+            Some(effect_contract::BankWidth::Eight),
+        )
+        .expect("paired allowance");
+        assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
+        assert!(paired_facts.runtime_slots <= paired_facts.run_memberships);
+        assert!(paired_facts.run_memberships <= paired_facts.prepared_memberships);
+        assert!(paired_facts.maximum_runtime_slots <= paired_facts.maximum_run_memberships);
+        assert_eq!(
+            paired_allowance.bank_count,
+            paired_facts.prepared_memberships as u64
+        );
+        for sample in [0, 64] {
+            let witness = audit_graph_render(&mut paired, &mut output, sample);
+            assert!(witness.fused_calls > 0, "successful pairing is rendered");
+        }
+        drop(paired);
 
-    graph::test_only_reset_bank_chain_construction_facts();
-    let mut unpaired = builtins_compiler::test_only_prepared_unpaired_graph();
-    let unpaired_facts = graph::test_only_bank_chain_construction_facts();
-    let unpaired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
-        unpaired_facts.prepared_memberships as u64,
-        Some(effect_contract::BankWidth::Eight),
-    )
-    .expect("unpaired allowance");
-    assert!(
-        unpaired_facts.maximum_runtime_slots > 1,
-        "actual unpaired S > 1"
-    );
-    assert!(unpaired_facts.runtime_slots <= unpaired_facts.run_memberships);
-    assert!(unpaired_facts.run_memberships <= unpaired_facts.prepared_memberships);
-    assert_eq!(
-        unpaired_allowance.bank_count,
-        unpaired_facts.prepared_memberships as u64
-    );
-    for sample in [0, 64] {
-        let _ = audit_graph_render(&mut unpaired, &mut output, sample);
+        graph::test_only_reset_bank_chain_construction_facts();
+        let mut unpaired = builtins_compiler::test_only_prepared_unpaired_graph();
+        let unpaired_facts = graph::test_only_bank_chain_construction_facts();
+        let unpaired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
+            unpaired_facts.prepared_memberships as u64,
+            Some(effect_contract::BankWidth::Eight),
+        )
+        .expect("unpaired allowance");
+        assert!(
+            unpaired_facts.maximum_runtime_slots > 1,
+            "actual unpaired S > 1"
+        );
+        assert!(unpaired_facts.runtime_slots <= unpaired_facts.run_memberships);
+        assert!(unpaired_facts.run_memberships <= unpaired_facts.prepared_memberships);
+        assert_eq!(
+            unpaired_allowance.bank_count,
+            unpaired_facts.prepared_memberships as u64
+        );
+        for sample in [0, 64] {
+            let _ = audit_graph_render(&mut unpaired, &mut output, sample);
+        }
+        drop(unpaired);
     }
-    drop(unpaired);
 }
 
 fn session(track_count: u32) -> session::CompiledSession {

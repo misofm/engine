@@ -8,7 +8,8 @@
 //! Two legs, one corpus:
 //!
 //! * **native** — [`wasm_gate_corpus`] linked as an `rlib` and run in-process at
-//!   every width (`Scalar`, `Simd4` and `Simd8`), compared against the pins.
+//!   every width the build has (`Scalar`, `Simd4`, and `Simd8` where `avx2` is enabled; issue
+//!   #1112), compared against the pins.
 //! * **wasm** — the same crate compiled to `wasm32-unknown-unknown` with `simd128`, the one wasm
 //!   build that ships, and executed under wasmtime, compared against the same pins at the widths
 //!   that build has: `Scalar` and `Simd4`. The browser runs four lanes only, and since #1110 the
@@ -77,8 +78,8 @@ impl ExpectedBackend {
     /// Pinned per index rather than read from the guest, so the leg fails on a guest that stopped
     /// digesting its own width (it reports `[1]`) and on one whose index 1 silently runs `f32`
     /// (it reports `[1, 1]`, digests the scalar oracle twice and would match every pin; issue
-    /// #1110, finding M1). It is not the host's own widths: the host also has `Simd8`, which the
-    /// wasm build does not (issue #1110).
+    /// #1110, finding M1). It is not the host's own widths: an 8-lane (AVX2) host also has
+    /// `Simd8`, which the wasm build does not (issues #1110 and #1112).
     #[must_use]
     pub const fn lane_widths(self) -> &'static [usize] {
         match self {
@@ -456,7 +457,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
 ///
 /// Master plan §8: a pin comes from the oracle, never from copying whatever the production path
 /// currently prints. Only width 0 — the scalar implementation — is read here, and the gate then
-/// requires `Simd4` on every target, and `Simd8` on every native one, to reproduce it.
+/// requires `Simd4` on every target, and `Simd8` on every 8-lane (AVX2) one, to reproduce it.
 #[must_use]
 pub fn print_lane_pins() -> String {
     use fmt::Write as _;

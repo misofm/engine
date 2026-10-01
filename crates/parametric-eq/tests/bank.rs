@@ -32,7 +32,9 @@ fn native_bank() -> Option<(BankWidth, Backend)> {
     BankWidth::for_backend(backend).map(|width| (width, backend))
 }
 
-/// A backend this build cannot execute, for the declining path.
+/// A backend this build cannot execute, for the declining path. Only the 8-lane (AVX2) build has a
+/// second width to decline.
+#[cfg(target_feature = "avx2")]
 fn foreign_bank() -> (BankWidth, Backend) {
     match native_bank() {
         Some((BankWidth::Eight, _)) => (BankWidth::Four, Backend::Simd4),
@@ -438,7 +440,9 @@ fn bank_rendering_is_partition_invariant() {
 /// Before #95 this crate answered `Ok(None)` to all three, which was the half of the wave-2
 /// divergence that hid planner bugs; every other effect answered `effect.bank.requests` to the
 /// first two. Red mutation: replace `request.validate_shape()?` in `bind_homogeneous_bank` with
-/// the old combined `return Ok(None)` and the two `Err` cases below fail.
+/// the old combined `return Ok(None)` and the two `Err` cases below fail. Its shapes name the
+/// 8-lane (AVX2) width, so only that build runs it.
+#[cfg(target_feature = "avx2")]
 #[test]
 fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
     let factory = ParametricEqFactory;

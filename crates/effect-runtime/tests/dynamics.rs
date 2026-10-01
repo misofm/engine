@@ -7,7 +7,9 @@ use effect_runtime::dynamics::{
     GainComputerCoef, MIN_SOFT_KNEE_DB, gain_computer_db, gain_delta_db, gain_from_db,
     knee_coefficients, level_db,
 };
-use lane::{Lane, Simd4, Simd8};
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
+use lane::{Lane, Simd4};
 
 /// Equation 4, transcribed from the paper in `f64`. Independent of the implementation: it is
 /// written in the paper's own variables and branches, with no shared helper.
@@ -463,6 +465,7 @@ fn a_randomized_sweep_never_leaves_the_finite_curve() {
         }
         let scalar = GainComputerCoef::<f32>::new(threshold, ratio, knee);
         let four = GainComputerCoef::<Simd4>::new(threshold, ratio, knee);
+        #[cfg(target_feature = "avx2")]
         let eight = GainComputerCoef::<Simd8>::new(threshold, ratio, knee);
         for level in levels {
             evaluated += 1;
@@ -479,6 +482,7 @@ fn a_randomized_sweep_never_leaves_the_finite_curve() {
                 delta.to_bits(),
                 "Simd4 W {knee:e} T {threshold:e} R {ratio} x {level:e}"
             );
+            #[cfg(target_feature = "avx2")]
             assert_eq!(
                 lane_bits(gain_delta_db::<Simd8>(Simd8::splat(level), &eight)),
                 delta.to_bits(),

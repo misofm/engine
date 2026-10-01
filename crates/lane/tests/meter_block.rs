@@ -21,8 +21,10 @@
 #![allow(missing_docs)]
 
 use core::hint::black_box;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::builtins::{meter_block, meter_sample_peak_block};
-use lane::{Lane, LaneF64, Simd4, Simd8, Widen};
+use lane::{Lane, LaneF64, Simd4, Widen};
 
 /// Xorshift64\*: seeded and portable, so every host sees the same inputs.
 struct Rng(u64);
@@ -280,6 +282,7 @@ fn identity_at<L: Widen>(seed: u64, input: Input) -> usize {
 #[test]
 fn m1_banked_meter_block_is_the_scalar_meters_loop_at_every_width() {
     for input in [Input::Hostile, Input::Tone] {
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             identity_at::<Simd8>(0x0950_9E37_79B9_7F4A, input),
             6 * 64 * 8
@@ -336,6 +339,7 @@ fn boundary_sweep_at<L: Widen>() {
 
 #[test]
 fn m1_count_boundaries_match_the_meters_classification() {
+    #[cfg(target_feature = "avx2")]
     boundary_sweep_at::<Simd8>();
     boundary_sweep_at::<Simd4>();
     boundary_sweep_at::<f32>();
@@ -345,6 +349,7 @@ fn m1_count_boundaries_match_the_meters_classification() {
 /// block's energy added to the carried seed as one zero-seeded partial is not, in general, the
 /// seeded sample-serial sum. If this ever stopped failing somewhere, the carried-seed identity above
 /// would be the weaker for it, so it is asserted to fail at least once.
+#[cfg(target_feature = "avx2")]
 #[test]
 fn m1_a_zero_seeded_partial_plus_the_seed_is_not_the_seeded_sum() {
     let mut rng = Rng(0x0950_0000_0000_0001);

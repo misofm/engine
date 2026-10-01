@@ -19,7 +19,7 @@ use core::cell::Cell;
 use std::alloc::{GlobalAlloc, System};
 
 use effect_contract::{BankWidth, ParameterChannel, ResetKind};
-use support::{bank_available, initial_values, prepare, prepare_bank, process, process_bank};
+use support::{initial_values, prepare, prepare_bank, process, process_bank};
 
 thread_local! {
     /// Whether this thread is inside a measured region. `const`-initialised so that reading it
@@ -141,13 +141,9 @@ fn the_scalar_render_path_never_allocates() {
 
 #[test]
 fn the_bank_render_path_never_allocates() {
-    let width = if bank_available(BankWidth::Eight) {
-        BankWidth::Eight
-    } else if bank_available(BankWidth::Four) {
-        BankWidth::Four
-    } else {
-        return;
-    };
+    // The build's own width: eight in the 8-lane (AVX2) build, four in a 4-lane (NEON/simd128)
+    // build (#1112).
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = initial_values();
     let per_lane: Vec<Vec<_>> = (0..lanes).map(|_| values.to_vec()).collect();

@@ -2,11 +2,12 @@
 //!
 //! These are unit tests rather than integration tests for two reasons:
 //!
-//! * **Both widths on every host.** D4 binds only the build's own width, so an x86 build never
-//!   binds a `Simd4` bank through the factory and an AArch64 or wasm build never binds `Simd8`.
-//!   [`BankParts`] is the factory's own validation and construction, minus exactly that one gate,
-//!   and the bank is driven through the production `PreparedNativeEffectBank` trait bodies. So the
-//!   class-A differential below runs at `Simd4` and `Simd8` wherever `cargo test` runs.
+//! * **Every width the build has.** D4 binds only the build's own width, so the 8-lane (AVX2)
+//!   build never binds a `Simd4` bank through the factory. [`BankParts`] is the factory's own
+//!   validation and construction, minus exactly that one gate, and the bank is driven through the
+//!   production `PreparedNativeEffectBank` trait bodies. So the class-A differential below runs at
+//!   `Simd4` everywhere and at `Simd8` too in the 8-lane build; a 4-lane (NEON/simd128) build has
+//!   no `Simd8` (#1112).
 //! * **Internal witnesses.** Silent admission is invisible in the bits by design, so gate 3 reads
 //!   the test-only [`SILENT_ADMISSIONS`](super::SILENT_ADMISSIONS) counter; and gate 4 plants an
 //!   envelope word no render can reach.
@@ -21,7 +22,9 @@ use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, LinkMode, PrepareEffectLimits,
     PreparedPorts, PreparedSidechainPort,
 };
-use lane::{Simd4, Simd8};
+use lane::Simd4;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 
 const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -89,6 +92,7 @@ fn draw_values(draw: &mut Draw, symmetric: bool) -> Values {
 fn width_of<L: Lane>() -> (Backend, BankWidth) {
     match L::WIDTH {
         4 => (Backend::Simd4, BankWidth::Four),
+        #[cfg(target_feature = "avx2")]
         8 => (Backend::Simd8, BankWidth::Eight),
         width => panic!("no bank of width {width}"),
     }
@@ -623,6 +627,7 @@ fn a_padded_bank_renders_each_member_as_its_own_instance() {
         21,
         |seed| {
             padded_differential::<Simd4>(seed, &mut reach);
+            #[cfg(target_feature = "avx2")]
             padded_differential::<Simd8>(seed, &mut reach);
         },
     );
@@ -735,7 +740,9 @@ fn silent_admission<L: Lane>(mono: bool) {
 fn a_silent_padded_bank_takes_the_silent_fast_path() {
     silent_admission::<Simd4>(false);
     silent_admission::<Simd4>(true);
+    #[cfg(target_feature = "avx2")]
     silent_admission::<Simd8>(false);
+    #[cfg(target_feature = "avx2")]
     silent_admission::<Simd8>(true);
 }
 
@@ -931,5 +938,6 @@ fn planted_state<L: Lane>() {
 #[test]
 fn a_planted_envelope_recovers_its_own_lane_alone() {
     planted_state::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     planted_state::<Simd8>();
 }

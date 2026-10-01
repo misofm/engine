@@ -272,7 +272,13 @@ fn mixed_rack_depths_bank_every_stage_and_leave_subsequences_and_sidechains_scal
     const BANKABLE_STAGES: usize = 3;
     const FULL_CHAIN_TRACKS: usize = 8;
     let session = mixed_twelve_track_session();
-    for dispatch in [Backend::Simd4, Backend::Simd8] {
+    // Every vector width this build has: eight lanes only where `avx2` is enabled (#1112).
+    let dispatches = [
+        Backend::Simd4,
+        #[cfg(target_feature = "avx2")]
+        Backend::Simd8,
+    ];
+    for dispatch in dispatches {
         let lanes = dispatch.width();
         let artifact = compile(&session, &[], dispatch);
 

@@ -44,6 +44,7 @@ const RESET_AT: usize = 80;
 const SCALAR_TRACKS: usize = 8;
 
 /// SHA-256 of the W8 banks' scenario, recorded on the unmodified kernel.
+#[cfg(target_feature = "avx2")]
 const W8_DIGEST: &str = "8b20d428e499689557b2a4f27f7567091dd5c04c055ffde2119f9b22bb299552";
 /// SHA-256 of the W4 banks' scenario, recorded on the unmodified kernel.
 const W4_DIGEST: &str = "f72aa85702645d5286316e0796630cf0d29f38062654f7958beac4abad17a0c8";
@@ -356,6 +357,7 @@ fn check(label: &str, digest: String, pin: &str) {
 #[test]
 fn the_segments_scenario_renders_the_pinned_base_words() {
     let backend = Backend::current();
+    #[cfg(target_feature = "avx2")]
     if backend.width() >= 8 {
         check(
             "W8",

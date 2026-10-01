@@ -39,6 +39,7 @@ const LEFT_RELEASE_AT: usize = 60;
 const RESET_AT: usize = 90;
 
 /// SHA-256 of the W8 bank's scenario, recorded on the unmodified kernel.
+#[cfg(target_feature = "avx2")]
 const W8_DIGEST: &str = "f4892e75a54a09e6ebbc86a84793b8c906d0e5b4aed980da01b9d4e2b3164134";
 /// SHA-256 of the W4 bank's scenario, recorded on the unmodified kernel.
 const W4_DIGEST: &str = "987746c7d9d1e8081a4d0a767b8bf9d255bd22da6df4b7e3ae350b3f3fee59db";
@@ -289,6 +290,7 @@ fn check(label: &str, (digest, deepest): (String, f32), pin: &str) {
 #[test]
 fn the_linked_scenario_renders_the_pinned_base_words() {
     let backend = Backend::current();
+    #[cfg(target_feature = "avx2")]
     if backend.width() >= 8 {
         check(
             "W8",

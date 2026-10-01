@@ -1810,7 +1810,9 @@ mod settled_body_tests {
     use core::cell::Cell;
     use dsp_reference::class_a;
     use effect_contract::LinkMode;
-    use lane::{Lane, Simd4, Simd8};
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
+    use lane::{Lane, Simd4};
     use sha2::{Digest, Sha256};
 
     type Defaults = [[f32; PARAMETER_COUNT]; MAX_WIDTH];
@@ -2863,6 +2865,7 @@ mod settled_body_tests {
     fn grid_all(table: &[[f32; PARAMETER_COUNT]; 8], wet: bool) -> Coverage {
         let mut coverage = grid::<f32>("f32", table, wet);
         coverage.add(&grid::<Simd4>("Simd4", table, wet));
+        #[cfg(target_feature = "avx2")]
         coverage.add(&grid::<Simd8>("Simd8", table, wet));
         println!("grid coverage {coverage:?}");
         assert!(
@@ -3002,6 +3005,7 @@ mod settled_body_tests {
     fn the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet() {
         wet_arm_witness::<f32>();
         wet_arm_witness::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         wet_arm_witness::<Simd8>();
     }
 
@@ -3189,6 +3193,7 @@ mod settled_body_tests {
         randomized_width::<Simd4>();
     }
 
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn randomized_differential_simd8() {
         randomized_width::<Simd8>();
@@ -3439,7 +3444,14 @@ mod settled_body_tests {
     /// folded, and only NaN words moved: the same render hashed the old way still gives
     /// `162979dd…`, and its other 16,280 NaN words (input payloads, quieted signalling NaNs and
     /// x86's `0xFFC0_0000`, none of them `0x7FC0_0000`) are the only words the fold changes.
+    #[cfg(target_feature = "avx2")]
     const SCENARIO_1006: &str = "bd3d711f86bbd00f015a0ead7e04116daabd154b2b8e9d8ef17dc6e616b7382c";
+    /// The same scenario in a 4-lane (NEON/simd128) build, which has no `Simd8` (#1112): the `f32`
+    /// and `Simd4` renders alone, folded in the same order. Taken from the 8-lane (AVX2) build with
+    /// only the `Simd8` stream left out (debug and release agree), so it holds the same renders the
+    /// pin above holds, minus the width this build cannot run.
+    #[cfg(not(target_feature = "avx2"))]
+    const SCENARIO_1006: &str = "5d99e861d79206ba012b7cce5a6dee119a0be9b0d7b2e54622a34f8240b6a1cc";
 
     #[test]
     fn scenario_1006_ramping_prefix_is_pinned() {
@@ -3449,6 +3461,7 @@ mod settled_body_tests {
             for (table, wet) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
                 ride_width::<f32>(&mut hasher, table, wet, link, &mut coverage);
                 ride_width::<Simd4>(&mut hasher, table, wet, link, &mut coverage);
+                #[cfg(target_feature = "avx2")]
                 ride_width::<Simd8>(&mut hasher, table, wet, link, &mut coverage);
             }
         }

@@ -23,12 +23,14 @@
 //! way, so only the counter can see a miscount. The qualification corpus embeds the counters in its
 //! digest (`builtins`), which is the other end of the same rope.
 
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::builtins::{
     InputChainCoef, InputChainPlan, InputChainState, NONFINITE_LIMIT, input_chain_block,
     input_chain_block_elided, input_chain_plan, sanitize_gain_block,
 };
 use lane::kernels::{SvfCoef, svf_step};
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 /// Frames per block.
 const FRAMES: usize = 128;
@@ -301,6 +303,7 @@ fn the_and_form_is_the_select_form_on_every_lane_subset() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 
@@ -464,6 +467,7 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 

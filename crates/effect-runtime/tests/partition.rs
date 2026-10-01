@@ -13,8 +13,10 @@
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, gain_from_db, level_db};
 use effect_runtime::envelope::{peak_follow, retention_coefficient};
 use effect_runtime::ramp::LinearRamp;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::RampSegment;
-use lane::{Lane, Simd4, Simd8, flush};
+use lane::{Lane, Simd4, flush};
 
 /// The block sizes every block API in the workspace is gated on.
 const PARTITIONS: [usize; 5] = [1, 7, 64, 128, 512];
@@ -133,6 +135,7 @@ fn the_composition_is_partition_invariant_at_width_four() {
     assert_partition_invariant::<Simd4>("W=4");
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
 fn the_composition_is_partition_invariant_at_width_eight() {
     assert_partition_invariant::<Simd8>("W=8");
@@ -144,6 +147,7 @@ fn the_composition_is_partition_invariant_at_width_eight() {
 fn the_composition_is_width_independent() {
     let (scalar, _) = render::<f32>(64);
     let (four, _) = render::<Simd4>(64);
+    #[cfg(target_feature = "avx2")]
     let (eight, _) = render::<Simd8>(64);
     for frame in 0..FRAMES {
         assert_eq!(
@@ -151,6 +155,7 @@ fn the_composition_is_width_independent() {
             four[frame * 4].to_bits(),
             "frame {frame}: W=1 vs W=4 lane 0"
         );
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             scalar[frame].to_bits(),
             eight[frame * 8].to_bits(),

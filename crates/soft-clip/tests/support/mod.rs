@@ -95,18 +95,18 @@ pub fn process(
 pub fn backend(width: BankWidth) -> Backend {
     match width {
         BankWidth::Four => Backend::Simd4,
+        #[cfg(target_feature = "avx2")]
         BankWidth::Eight => Backend::Simd8,
     }
 }
 
-/// `true` if this artifact runs banks of `width` lanes natively.
+/// `true` if this artifact runs banks of `width` lanes natively: four in a 4-lane (NEON/simd128)
+/// build, eight in the 8-lane (AVX2) build, the only build that has `Eight` (#1112).
 pub fn bank_available(width: BankWidth) -> bool {
     match width {
-        BankWidth::Four => cfg!(any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )),
-        BankWidth::Eight => cfg!(target_arch = "x86_64"),
+        BankWidth::Four => cfg!(any(target_feature = "neon", target_feature = "simd128")),
+        #[cfg(target_feature = "avx2")]
+        BankWidth::Eight => true,
     }
 }
 

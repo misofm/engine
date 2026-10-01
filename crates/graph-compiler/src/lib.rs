@@ -276,6 +276,14 @@ mod tests {
         Backend::current()
     }
 
+    /// The vector backends this build has: `Simd4`, and `Simd8` where `avx2` is enabled. A 4-lane
+    /// (NEON/simd128) build has no eight-lane width (issue #1112).
+    const VECTOR_BACKENDS: &[Backend] = &[
+        Backend::Simd4,
+        #[cfg(target_feature = "avx2")]
+        Backend::Simd8,
+    ];
+
     fn indexed_effect_ids(
         prepared: &EffectPreparedSession,
     ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
@@ -3441,6 +3449,7 @@ mod tests {
         for (n, width) in [
             (1, effect_contract::BankWidth::Four),
             (3, effect_contract::BankWidth::Four),
+            #[cfg(target_feature = "avx2")]
             (3, effect_contract::BankWidth::Eight),
         ] {
             let (total, largest) = literal(n, width);
@@ -3451,18 +3460,14 @@ mod tests {
                 (total, largest)
             );
         }
+        // The widest bank this build has: eight lanes where `avx2` is enabled, else four (#1112).
+        let widest = effect_contract::BankWidth::for_backend(host_dispatch()).expect("vector host");
         assert_eq!(
-            graph::GraphBankSlotResourceEstimate::checked_for(
-                u64::MAX,
-                Some(effect_contract::BankWidth::Eight)
-            ),
+            graph::GraphBankSlotResourceEstimate::checked_for(u64::MAX, Some(widest)),
             None
         );
-        let resource = graph::GraphBankSlotResourceEstimate::checked_for(
-            3,
-            Some(effect_contract::BankWidth::Eight),
-        )
-        .expect("literal fold resource");
+        let resource = graph::GraphBankSlotResourceEstimate::checked_for(3, Some(widest))
+            .expect("literal fold resource");
         let mut below_largest = compile_fixture(5_110).report().estimate.clone();
         below_largest.graph_metadata_bytes = 11;
         below_largest.incremental_plan_bytes = 22;
@@ -5212,9 +5217,9 @@ mod tests {
         );
 
         // Host dispatch is deliberately detected only while preparing the normal artifact above.
-        // These two direct, off-render binding probes exercise both legal factory widths on every
-        // development host without pretending that a four-lane runtime was executed on x86.
-        for dispatch in [Backend::Simd4, Backend::Simd8] {
+        // These direct, off-render binding probes exercise every legal factory width the build
+        // has (four, and eight where `avx2` is enabled) without executing a runtime at either.
+        for &dispatch in VECTOR_BACKENDS {
             let rebound = prepare_native_session_effects(
                 &session,
                 &registry,
@@ -5265,7 +5270,8 @@ mod tests {
             );
         }
 
-        let eight = Backend::Simd8;
+        // The build's own width: the bind refusals below do not depend on it (#1112).
+        let native = host_dispatch();
         let mut connected_fallback = prepare_native_session_effects(
             &session,
             &registry,
@@ -5289,7 +5295,7 @@ mod tests {
             &connected_index,
             &connected_ids,
             &dependency_levels,
-            eight,
+            native,
             &mut SessionPoolClasses::default(),
         ) else {
             panic!("a sidechained console slot rendered per node");
@@ -5349,7 +5355,7 @@ mod tests {
             &same_wave_index,
             &same_wave_ids,
             &incompatible_levels,
-            eight,
+            native,
             &mut SessionPoolClasses::default(),
         )
         .expect("a level split binds another padded group");
@@ -5413,7 +5419,7 @@ mod tests {
             &rejected_index,
             &rejected_ids,
             &dependency_levels,
-            eight,
+            native,
             &mut SessionPoolClasses::default(),
         ) {
             Ok(_) => panic!("factory failure must reject transactionally"),
@@ -9787,7 +9793,7 @@ mod tests {
         // happens at.
         let mut compiled = Vec::new();
         let mut refused = Vec::new();
-        for dispatch in [Backend::Simd8, Backend::Simd4] {
+        for &dispatch in VECTOR_BACKENDS.iter().rev() {
             let (registry, _, bound) = erroring_compressor_registry(None);
             match try_compile_console_model_at(&session(dispatch), 2_092, &[], dispatch, &registry)
             {

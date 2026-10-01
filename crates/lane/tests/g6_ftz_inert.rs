@@ -18,8 +18,20 @@ mod support;
 
 use std::hint::black_box;
 
-use lane::{Lane, Simd8, flush};
-use support::{Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
+use lane::{Lane, flush};
+use support::{Kernel, Signal, interleave, run_kernel};
+
+/// The lane type the arms run at: the widest this build has, the 8-lane (AVX2) width where `avx2`
+/// is enabled and the 4-lane (NEON/simd128) width elsewhere (#1112). FTZ inertness is a property of
+/// the flush law, so any one vector width carries the claim.
+#[cfg(target_feature = "avx2")]
+type Widest = lane::Simd8;
+/// See the 8-lane definition.
+#[cfg(not(target_feature = "avx2"))]
+type Widest = lane::Simd4;
+
+/// Lanes of [`Widest`].
+const WIDTH: usize = <Widest as Lane>::WIDTH;
 
 /// Frames of the kernel arms.
 const FRAMES: usize = 2_048;
@@ -28,14 +40,14 @@ const FRAMES: usize = 2_048;
 #[inline(never)]
 fn flush_digest() -> Vec<u32> {
     let mut bits = Vec::new();
-    let mut lanes = [0.0f32; MAX_WIDTH];
+    let mut lanes = [0.0f32; WIDTH];
     let mut pattern = 1u32;
     while pattern < 0x0080_0000 {
         for (index, lane) in lanes.iter_mut().enumerate() {
             *lane = f32::from_bits(pattern.wrapping_add(index as u32 * 4_099));
         }
-        let mut out = [0u32; MAX_WIDTH];
-        flush(Simd8::load(black_box(&lanes))).store_bits(&mut out);
+        let mut out = [0u32; WIDTH];
+        flush(Widest::load(black_box(&lanes))).store_bits(&mut out);
         bits.extend_from_slice(&out);
         pattern = pattern.wrapping_add(4_093);
     }
@@ -45,15 +57,15 @@ fn flush_digest() -> Vec<u32> {
 /// Bits of a kernel arm whose recurrences are flushed.
 #[inline(never)]
 fn kernel_digest(kernel: Kernel, signal: Signal) -> Vec<u32> {
-    let lanes: Vec<Vec<f32>> = (0..MAX_WIDTH)
+    let lanes: Vec<Vec<f32>> = (0..WIDTH)
         .map(|lane| {
             let mut samples = vec![0.0f32; FRAMES];
             signal.fill(&mut samples, 0x6F72_0000 + lane as u64);
             samples
         })
         .collect();
-    let mut block = interleave(&lanes, MAX_WIDTH, FRAMES);
-    run_kernel::<Simd8>(kernel, black_box(&mut block), FRAMES, 1.0e-40, FRAMES);
+    let mut block = interleave(&lanes, WIDTH, FRAMES);
+    run_kernel::<Widest>(kernel, black_box(&mut block), FRAMES, 1.0e-40, FRAMES);
     block.iter().map(|value| value.to_bits()).collect()
 }
 

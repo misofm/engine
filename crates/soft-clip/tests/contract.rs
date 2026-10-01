@@ -15,7 +15,9 @@ use effect_contract::{
 };
 use lane::kernels::halfband::{HALFBAND63_CENTER, HALFBAND63_EVEN};
 use soft_clip::{SOFT_CLIP_DESCRIPTOR, SoftClipFactory};
-use support::{PARAMETERS, bank_available, initial_values, prepare, process, request, values_from};
+#[cfg(target_feature = "avx2")]
+use support::bank_available;
+use support::{PARAMETERS, initial_values, prepare, process, request, values_from};
 
 /// E11 — resources, latency, tail and the tap table against the independent `f64` design.
 #[test]
@@ -212,7 +214,8 @@ fn identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit() {
 }
 
 /// Bank binding validates before it declines, and declines rather than failing where the width is
-/// not this artifact's.
+/// not this artifact's. Written at eight lanes, which only the 8-lane (AVX2) build has (#1112).
+#[cfg(target_feature = "avx2")]
 #[test]
 fn bank_binding_validates_before_declining_an_unavailable_width() {
     let values = initial_values();

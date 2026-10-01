@@ -11,7 +11,9 @@ use core::hint::black_box;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use builtins::*;
-use lane::{LaneF64, Simd4, Simd8, Widen};
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
+use lane::{LaneF64, Simd4, Widen};
 
 #[test]
 fn meter_windows_are_exact() {
@@ -614,8 +616,11 @@ fn resident_meter_shape_and_time_errors_precede_mutation_and_empty_input_matches
     assert_snapshot_bits(a.consumer.try_pop().unwrap(), b.consumer.try_pop().unwrap());
 }
 
-// Issue #943, gate G2: the block-peak merge publishes the scalar meter's snapshots.
+// Issue #943, gate G2: the block-peak merge publishes the scalar meter's snapshots. It runs eight
+// meters through the eight-lane kernel, so it and its own helpers exist in the 8-lane (AVX2) build
+// only (issue #1112); gate M2 below takes the merge call at every width this build has.
 
+#[cfg(target_feature = "avx2")]
 /// One event of a G2 stream, applied to every lane's meter in both arms.
 #[derive(Clone, Copy)]
 enum PeakEvent {
@@ -692,6 +697,7 @@ const PEAK_INVALID: [u32; 8] = [
 /// peak is exactly `+0.0`: a kernel that admitted a subnormal or an infinity would publish
 /// something else there, where a lane that also carries normal words would hide it behind a
 /// larger peak.
+#[cfg(target_feature = "avx2")]
 fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, phase: usize) {
     for (index, word) in plane.iter_mut().enumerate() {
         *word = if hostile && matches!(index % 8, 1 | 5) {
@@ -707,6 +713,7 @@ fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, 
     }
 }
 
+#[cfg(target_feature = "avx2")]
 fn peak_meters(metrics: MeterMetricSet, period: u32) -> Vec<PreparedMeter> {
     (0..8_u64)
         .map(|lane| {
@@ -727,6 +734,7 @@ fn peak_meters(metrics: MeterMetricSet, period: u32) -> Vec<PreparedMeter> {
         .collect()
 }
 
+#[cfg(target_feature = "avx2")]
 /// Runs one stream through two arms of eight meters -- arm A through `observe_input`, arm B
 /// through `observe_input_with_block_peak` with the lane kernel's seeded-zero block peaks -- and
 /// asserts every published snapshot is the same on every field. Returns the snapshots compared.
@@ -800,6 +808,7 @@ fn peak_differential(
     compared
 }
 
+#[cfg(target_feature = "avx2")]
 /// The streams G2 runs: 64 plain 128-frame blocks, then the same with a skipped block, a
 /// zero-frame block, and both together.
 fn peak_streams() -> Vec<(&'static str, Vec<PeakEvent>)> {
@@ -821,21 +830,25 @@ fn peak_streams() -> Vec<(&'static str, Vec<PeakEvent>)> {
 }
 
 #[cfg(feature = "test-support")]
+#[cfg(target_feature = "avx2")]
 fn peak_merges() -> Option<u64> {
     Some(builtins::test_only_block_peak_merges())
 }
 
 #[cfg(not(feature = "test-support"))]
+#[cfg(target_feature = "avx2")]
 fn peak_merges() -> Option<u64> {
     None
 }
 
 #[cfg(feature = "test-support")]
+#[cfg(target_feature = "avx2")]
 fn reset_peak_merges() {
     builtins::test_only_reset_block_peak_merges();
 }
 
 #[cfg(not(feature = "test-support"))]
+#[cfg(target_feature = "avx2")]
 fn reset_peak_merges() {}
 
 /// Gate G2. Every snapshot of the merge arm equals the scalar arm's, `sample_peak` by bits, at
@@ -844,6 +857,7 @@ fn reset_peak_merges() {}
 ///
 /// Built with `--features test-support`, it also pins the merge count: every block at period 512,
 /// none at 64 (each 128-frame block crosses a window boundary), some at 300.
+#[cfg(target_feature = "avx2")]
 #[test]
 fn a_block_peak_merge_publishes_the_scalar_meters_snapshots() {
     let peak = MeterMetricSet::SAMPLE_PEAK;
@@ -1270,16 +1284,23 @@ fn banked_sweep(period: u32) -> (usize, u64) {
                     mode: BankedMode::Seeded,
                 };
                 for (fixed_stream, stream) in [(true, &fixed), (false, &random)] {
-                    let eight = banked_differential::<Simd8>(&run, stream, seed);
-                    let four = banked_differential::<Simd4>(&run, stream, seed ^ 0x4);
+                    // Every vector width this build has: no eight in a 4-lane (NEON/simd128) build.
+                    let outcomes = [
+                        #[cfg(target_feature = "avx2")]
+                        banked_differential::<Simd8>(&run, stream, seed),
+                        banked_differential::<Simd4>(&run, stream, seed ^ 0x4),
+                    ];
                     // 48 blocks of 128 frames outlast every period; a random stream's resets and
                     // gaps may leave a long window unfinished.
                     assert!(
-                        !fixed_stream || (eight.compared > 0 && four.compared > 0),
+                        !fixed_stream || outcomes.iter().all(|outcome| outcome.compared > 0),
                         "{run:?}: windows were published"
                     );
-                    total += eight.compared + four.compared;
-                    for outcome in [eight, four] {
+                    total += outcomes
+                        .iter()
+                        .map(|outcome| outcome.compared)
+                        .sum::<usize>();
+                    for outcome in outcomes {
                         let Some(commits) = outcome.commits else {
                             continue;
                         };
@@ -1350,7 +1371,10 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
         hostile: false,
         mode,
     };
+    #[cfg(target_feature = "avx2")]
     let last = |outcome: BankedOutcome| outcome.commits.map(|commits| commits[commits.len() - 1]);
+    // The eight-lane commit-counter rows exist in the 8-lane (AVX2) build only (issue #1112).
+    #[cfg(target_feature = "avx2")]
     for (period, expected) in [(512_u32, Some(8 * 64)), (64, Some(0)), (1536, Some(8 * 64))] {
         let commits = last(banked_differential::<Simd8>(
             &all(period, 0, 0.0, BankedMode::Seeded),
@@ -1361,6 +1385,7 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
             assert_eq!(commits, expected, "ALL at period {period}");
         }
     }
+    #[cfg(target_feature = "avx2")]
     if let Some(commits) = last(banked_differential::<Simd8>(
         &all(300, 0, 0.0, BankedMode::Seeded),
         &plain,
@@ -1371,6 +1396,7 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
             "ALL at period 300: {commits}"
         );
     }
+    #[cfg(target_feature = "avx2")]
     for (hold, decay) in [(7, 0.0), (0, 12.0), (100, 60.0)] {
         if let Some(commits) = last(banked_differential::<Simd8>(
             &all(512, hold, decay, BankedMode::Seeded),
@@ -1388,8 +1414,11 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
         BankedMode::MovedLeftSeed,
         BankedMode::MovedRightSeed,
     ] {
+        #[cfg(target_feature = "avx2")]
         let outcome = banked_differential::<Simd8>(&all(512, 0, 0.0, mode), &plain, 7);
+        #[cfg(target_feature = "avx2")]
         assert_eq!(outcome.compared, 8 * 64 * 128 / 512, "{mode:?}");
+        #[cfg(target_feature = "avx2")]
         if let Some(commits) = outcome.commits {
             assert_eq!(commits[commits.len() - 1], 0, "{mode:?} commits nothing");
         }
@@ -1405,11 +1434,13 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
     }
 
     // A discontinuity: the block after the gap commits too.
+    #[cfg(target_feature = "avx2")]
     let gap = [
         BankedEvent::Block(128),
         BankedEvent::Skip(7),
         BankedEvent::Block(128),
     ];
+    #[cfg(target_feature = "avx2")]
     if let Some(commits) =
         banked_differential::<Simd8>(&all(512, 0, 0.0, BankedMode::Seeded), &gap, 7).commits
     {
@@ -1435,8 +1466,11 @@ fn a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it() {
             hostile,
             mode: BankedMode::Seeded,
         };
+        #[cfg(target_feature = "avx2")]
         let outcome = banked_differential::<Simd8>(&pair, &plain, seed);
+        #[cfg(target_feature = "avx2")]
         assert_eq!(outcome.compared, 2 * 8 * 64 * 128 / 512);
+        #[cfg(target_feature = "avx2")]
         if let Some(commits) = outcome.commits {
             assert_eq!(
                 commits[commits.len() - 1],

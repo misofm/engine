@@ -1,9 +1,12 @@
 use super::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport, BuiltinResetKind,
-    CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP,
     CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
     FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, Simd4, prepare_sections, test_support,
 };
+// Read by the eight-lane post-ramp tests only (issue #1112).
+#[cfg(target_feature = "avx2")]
+use super::{CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP};
+#[cfg(target_feature = "avx2")]
 use lane::Simd8;
 
 fn selected_snapshot(metrics: super::MeterMetricSet) -> super::MeterSnapshot {
@@ -121,6 +124,7 @@ fn post_ramp_symmetry_mask_matches_lane_oracle() {
     let tracks = [track; 8];
     check_post_ramp_mask::<f32>(&tracks[..1]);
     check_post_ramp_mask::<Simd4>(&tracks[..4]);
+    #[cfg(target_feature = "avx2")]
     check_post_ramp_mask::<Simd8>(&tracks[..8]);
 }
 
@@ -240,11 +244,14 @@ fn post_ramp_symmetry_handles_differing_words_countdowns_and_padding() {
     exercise::<f32>(&tracks[..1]);
     exercise::<Simd4>(&tracks[..3]);
     exercise::<Simd4>(&tracks[..4]);
+    #[cfg(target_feature = "avx2")]
     exercise::<Simd8>(&tracks[..5]);
+    #[cfg(target_feature = "avx2")]
     exercise::<Simd8>(&tracks[..8]);
 }
 
 #[test]
+#[cfg(target_feature = "avx2")]
 fn post_ramp_symmetry_extracts_each_word_once() {
     let parameters = BuiltinParameters::default();
     let track = prepare_sections(48_000, parameters)
@@ -285,6 +292,7 @@ fn post_ramp_symmetry_extracts_each_word_once() {
 }
 
 #[test]
+#[cfg(target_feature = "avx2")]
 fn post_ramp_symmetry_helper_is_off_for_settled_blocks() {
     let track = prepare_sections(48_000, BuiltinParameters::default())
         .unwrap()
@@ -342,6 +350,7 @@ fn trim_refresh_preserves_asymmetric_settled_filter_steps() {
     }
     check::<f32>();
     check::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>();
 }
 
@@ -577,7 +586,9 @@ fn lane_symmetry_retarget_updates_only_the_addressed_predicate() {
 
     check_width!(Simd4, 3, 1, 0);
     check_width!(Simd4, 4, 1, 0);
+    #[cfg(target_feature = "avx2")]
     check_width!(Simd8, 5, 1, 0);
+    #[cfg(target_feature = "avx2")]
     check_width!(Simd8, 8, 1, 0);
     check_width!(f32, 1, 0, 0);
 }
@@ -895,10 +906,13 @@ fn settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
         MATRIX_SELECT_FREE_BLOCKS.with(Cell::get)
     }
 
-    for (backend, width) in [
+    // Every bank width this build has: no eight in a 4-lane (NEON/simd128) build.
+    const WIDTHS: &[(Backend, BankWidth)] = &[
+        #[cfg(target_feature = "avx2")]
         (Backend::Simd8, BankWidth::Eight),
         (Backend::Simd4, BankWidth::Four),
-    ] {
+    ];
+    for &(backend, width) in WIDTHS {
         let lanes = width.lanes() as usize;
         let bank = |members: usize, identity_member: Option<usize>| {
             let prepared = (0..members)
@@ -1062,10 +1076,13 @@ fn fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane() 
         FUSED_SELECT_FREE_BLOCKS.with(Cell::get)
     }
 
-    for (backend, width) in [
+    // Every bank width this build has: no eight in a 4-lane (NEON/simd128) build.
+    const WIDTHS: &[(Backend, BankWidth)] = &[
+        #[cfg(target_feature = "avx2")]
         (Backend::Simd8, BankWidth::Eight),
         (Backend::Simd4, BankWidth::Four),
-    ] {
+    ];
+    for &(backend, width) in WIDTHS {
         let lanes = width.lanes() as usize;
         let banks = |members: usize, identity_member: Option<usize>| {
             let matrices = (0..members)

@@ -232,8 +232,17 @@ enum Control {
     Resident,
     Scalar,
     Intervening,
+    /// The second bank at the other width: only an 8-lane (AVX2) build has one (issue #1112).
+    #[cfg(target_feature = "avx2")]
     Incompatible,
 }
+
+/// The bank widths this build has: four, and eight where `avx2` is enabled (issue #1112).
+const BANK_WIDTHS: &[BankWidth] = &[
+    BankWidth::Four,
+    #[cfg(target_feature = "avx2")]
+    BankWidth::Eight,
+];
 
 fn prepared(
     width: BankWidth,
@@ -346,16 +355,16 @@ fn prepared(
         .enumerate()
         .filter(|_| control != Control::Scalar)
         .map(|(id, group)| {
-            let bank_width = if control == Control::Incompatible && id == 1 {
-                BankWidth::Eight
-            } else {
-                width
+            let bank_width = match control {
+                #[cfg(target_feature = "avx2")]
+                Control::Incompatible if id == 1 => BankWidth::Eight,
+                _ => width,
             };
             GraphPreparedBuiltinBank {
-                backend: if bank_width == BankWidth::Four {
-                    Backend::Simd4
-                } else {
-                    Backend::Simd8
+                backend: match bank_width {
+                    BankWidth::Four => Backend::Simd4,
+                    #[cfg(target_feature = "avx2")]
+                    BankWidth::Eight => Backend::Simd8,
                 },
                 members: groups[group].clone().into_boxed_slice(),
                 processor: Box::new(Stage {
@@ -521,7 +530,7 @@ fn render(
 #[test]
 #[cfg(feature = "test-support")]
 fn rt9_resident_observers_extra_reader_failures_and_modes_match_old_acquisition() {
-    for width in [BankWidth::Four, BankWidth::Eight] {
+    for &width in BANK_WIDTHS {
         for population in [width.lanes() as usize - 1, width.lanes() as usize] {
             for frames in [1, width.lanes() - 1, width.lanes(), width.lanes() + 1, 17] {
                 for alias in [false, true] {
@@ -607,6 +616,7 @@ fn rt9_crossfeed_delayed_send_matches_scalar_and_admission_controls() {
     for control in [
         Control::Resident,
         Control::Intervening,
+        #[cfg(target_feature = "avx2")]
         Control::Incompatible,
     ] {
         let (mut scalar, scalar_probe) =
@@ -661,7 +671,7 @@ fn rt9_resident_prepared_plan_render_allocates_and_frees_nothing() {
     });
     let live = realtime::audit::snapshot();
     assert!(live.allocations > 0 && live.deallocations > 0);
-    for width in [BankWidth::Four, BankWidth::Eight] {
+    for &width in BANK_WIDTHS {
         for population in [width.lanes() as usize - 1, width.lanes() as usize] {
             for mono in 0..4 {
                 let (mut plan, probe) =

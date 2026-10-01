@@ -787,7 +787,7 @@ fn a_hot_padded_post_insert_limiter_renders_the_per_node_bits_at_both_widths() {
                 "{n} tracks: ch{index:02}'s limiter works its gain path unless bypassed"
             );
         }
-        for dispatch in [Backend::Simd8, Backend::Simd4] {
+        for &dispatch in VECTOR_BACKENDS.iter().rev() {
             let width = BankWidth::for_backend(dispatch).expect("a vector width");
             let what = format!("{n} tracks at {dispatch:?}");
             let compiled = compile_at(&model, dispatch);
@@ -909,7 +909,13 @@ fn a_console_group_a_factory_declines_fails_the_compile() {
         effect_id: gid("post-limiter"),
     })];
 
-    for dispatch in [host_dispatch(), Backend::Simd8] {
+    // The host's width, and eight lanes where the build has them (issue #1112).
+    let dispatches = [
+        host_dispatch(),
+        #[cfg(target_feature = "avx2")]
+        Backend::Simd8,
+    ];
+    for dispatch in dispatches {
         let Err(diagnostics) =
             try_compile_console_model_at(&model, 1_098, &[], dispatch, &registry)
         else {

@@ -25,12 +25,15 @@
 use core::hint::black_box;
 use std::time::Instant;
 
-use lane::{LaneF64, Simd4, Simd8, Widen};
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
+use lane::{LaneF64, Simd4, Widen};
 
 /// The `f64` companion of `Simd4`, named the way a crate outside `lane` must name it.
 type Simd4F64 = <Simd4 as Widen>::F64;
 
 /// The `f64` companion of `Simd8`.
+#[cfg(target_feature = "avx2")]
 type Simd8F64 = <Simd8 as Widen>::F64;
 
 /// Widest lane count under test.
@@ -218,6 +221,7 @@ fn gate1_widen_is_exact_on_the_directed_pool_and_the_sparse_sweep() {
     for (name, mismatches) in [
         ("f32", widen_list_mismatches::<f32>(&patterns)),
         ("Simd4", widen_list_mismatches::<Simd4>(&patterns)),
+        #[cfg(target_feature = "avx2")]
         ("Simd8", widen_list_mismatches::<Simd8>(&patterns)),
     ] {
         assert_eq!(
@@ -239,6 +243,7 @@ fn gate1_widen_is_exact_on_every_f32_bit_pattern() {
         0,
         "gate 1: widen at Simd4"
     );
+    #[cfg(target_feature = "avx2")]
     assert_eq!(
         widen_exhaustive::<Simd8>("Simd8"),
         0,
@@ -396,6 +401,7 @@ fn gate2_add_and_mul_are_exact_on_every_ordered_pool_pair() {
     for (name, mismatches) in [
         ("f64", pool_pair_mismatches::<f64>(&pool)),
         ("Simd4", pool_pair_mismatches::<Simd4F64>(&pool)),
+        #[cfg(target_feature = "avx2")]
         ("Simd8", pool_pair_mismatches::<Simd8F64>(&pool)),
     ] {
         assert_eq!(mismatches, 0, "gate 2: add/mul at {name} over the pool");
@@ -409,16 +415,18 @@ fn gate2_add_and_mul_are_exact_on_seeded_random_pairs() {
     } else {
         1_000_000
     };
-    for (name, mismatches) in [
+    let widths = [
         (
             "Simd4",
             random_pair_mismatches::<Simd4F64>(0x0949_F64A_DD00_0004, pairs),
         ),
+        #[cfg(target_feature = "avx2")]
         (
             "Simd8",
             random_pair_mismatches::<Simd8F64>(0x0949_F64A_DD00_0008, pairs),
         ),
-    ] {
+    ];
+    for (name, mismatches) in widths {
         assert_eq!(
             mismatches, 0,
             "gate 2: add/mul at {name} over {pairs} random pairs"
@@ -509,6 +517,7 @@ fn gate3_the_square_of_a_widened_f32_is_exact() {
     for (name, mismatches) in [
         ("f32", square_mismatches::<f32>(&inputs)),
         ("Simd4", square_mismatches::<Simd4>(&inputs)),
+        #[cfg(target_feature = "avx2")]
         ("Simd8", square_mismatches::<Simd8>(&inputs)),
     ] {
         assert_eq!(mismatches, 0, "gate 3: square witness at {name}");

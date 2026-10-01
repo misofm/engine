@@ -4,7 +4,9 @@ use effect_runtime::bank::{
     BLOCK_LIMIT, BankKernel, HomogeneousBank, NonFiniteReport, check_block, finish_block,
     finish_channel, nonfinite_lane_mask,
 };
-use lane::{Lane, Simd4, Simd8};
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
+use lane::{Lane, Simd4};
 
 /// A finite block is accepted and left alone.
 #[test]
@@ -12,6 +14,7 @@ fn a_finite_block_is_accepted() {
     let block: Vec<f32> = (0..512).map(|i| (i as f32) * 0.001 - 0.25).collect();
     assert!(check_block::<f32>(&block));
     assert!(check_block::<Simd4>(&block));
+    #[cfg(target_feature = "avx2")]
     assert!(check_block::<Simd8>(&block));
     assert_eq!(nonfinite_lane_mask::<Simd4>(&block), 0);
 }
@@ -54,6 +57,7 @@ fn the_check_rejects_at_the_threshold() {
             value.to_bits()
         );
         assert_eq!(check_block::<Simd4>(&block), accepted, "Simd4: {value}");
+        #[cfg(target_feature = "avx2")]
         assert_eq!(check_block::<Simd8>(&block), accepted, "Simd8: {value}");
     }
 }
@@ -71,9 +75,12 @@ fn the_lane_mask_names_the_failing_lanes() {
         "at W = 1 there is one lane"
     );
 
-    let mut wide = vec![0.0f32; 8 * 8];
-    wide[7] = f32::INFINITY;
-    assert_eq!(nonfinite_lane_mask::<Simd8>(&wide), 0b1000_0000);
+    #[cfg(target_feature = "avx2")]
+    {
+        let mut wide = vec![0.0f32; 8 * 8];
+        wide[7] = f32::INFINITY;
+        assert_eq!(nonfinite_lane_mask::<Simd8>(&wide), 0b1000_0000);
+    }
 }
 
 /// A rejected block is zeroed on both channels, the reset runs, and the counter advances.

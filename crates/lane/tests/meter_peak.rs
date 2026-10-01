@@ -16,8 +16,10 @@
 
 #![allow(missing_docs)]
 
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::builtins::meter_sample_peak_block;
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 /// Xorshift64\*: seeded and portable, so every host sees the same inputs.
 struct Rng(u64);
@@ -164,6 +166,7 @@ fn identity_at<L: Lane>(seed: u64) -> usize {
 
 #[test]
 fn g1_banked_sample_peak_is_the_scalar_meters_peak_at_every_width() {
+    #[cfg(target_feature = "avx2")]
     assert_eq!(identity_at::<Simd8>(0x9E37_79B9_7F4A_7C15), 6 * 64 * 8);
     assert_eq!(identity_at::<Simd4>(0x1234_5678_9ABC_DEF1), 6 * 64 * 4);
     assert_eq!(identity_at::<f32>(0xDEAD_BEEF_CAFE_F00D), 6 * 64);
@@ -215,6 +218,7 @@ fn invalid_lane_at<L: Lane>() {
 
 #[test]
 fn g1_a_lane_fed_only_invalid_values_ends_at_positive_zero() {
+    #[cfg(target_feature = "avx2")]
     invalid_lane_at::<Simd8>();
     invalid_lane_at::<Simd4>();
     invalid_lane_at::<f32>();
@@ -252,6 +256,7 @@ fn boundary_sweep_at<L: Lane>() {
 
 #[test]
 fn g1_sanitization_boundaries_match_normal_or_zero() {
+    #[cfg(target_feature = "avx2")]
     boundary_sweep_at::<Simd8>();
     boundary_sweep_at::<Simd4>();
     boundary_sweep_at::<f32>();

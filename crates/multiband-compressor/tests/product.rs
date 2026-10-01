@@ -13,8 +13,8 @@ use effect_contract::{
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 use support::{
-    backend_for, new_sections, point, process, request, request_with, restore, snapshot, values,
-    varied_values,
+    BANK_WIDTHS, backend_for, new_sections, point, process, request, request_with, restore,
+    snapshot, values, varied_values,
 };
 
 fn rms(values: &[f32]) -> f64 {
@@ -142,7 +142,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         assert_eq!(bypass_left, input_left);
         assert_eq!(bypass_right, input_right);
 
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BANK_WIDTHS {
             let lanes = width.lanes() as usize;
             let bank_values = vec![initial; lanes];
             let mut bank_requests = bank_values
@@ -1005,6 +1005,7 @@ fn dual_mono_bands_compress_each_channel_from_its_own_level() {
 fn bank_requests_are_validated_before_any_fallback() {
     let factory = MultibandCompressorFactory;
     let sets = vec![values(); 4];
+    #[cfg(target_feature = "avx2")]
     let requests = sets.iter().map(|set| request(set)).collect::<Vec<_>>();
     let wrong_count = sets[..3].iter().map(|set| request(set)).collect::<Vec<_>>();
     assert_eq!(
@@ -1020,6 +1021,8 @@ fn bank_requests_are_validated_before_any_fallback() {
             code: "effect.bank.requests"
         })
     );
+    // A backend of another width: only the 8-lane (AVX2) build has a second width.
+    #[cfg(target_feature = "avx2")]
     assert_eq!(
         factory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -1094,7 +1097,7 @@ fn bank_requests_are_validated_before_any_fallback() {
     );
     other[0][0].value = 1_000.0;
 
-    for width in [BankWidth::Four, BankWidth::Eight] {
+    for &width in BANK_WIDTHS {
         let lanes = width.lanes() as usize;
         let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
         let requests = sets.iter().map(|set| request(set)).collect::<Vec<_>>();

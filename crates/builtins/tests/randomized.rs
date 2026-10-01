@@ -46,8 +46,9 @@ const TEST: &str = "the_banks_render_their_scalar_sections_under_random_retarget
 const REPLAY: &str = "cargo test -p builtins --features builtins/test-support --test randomized -- \
                       --exact the_banks_render_their_scalar_sections_under_random_retargets";
 const BLOCKS: usize = 24;
-const WIDTHS: [(Backend, BankWidth); 2] = [
+const WIDTHS: &[(Backend, BankWidth)] = &[
     (Backend::Simd4, BankWidth::Four),
+    #[cfg(target_feature = "avx2")]
     (Backend::Simd8, BankWidth::Eight),
 ];
 
@@ -497,7 +498,7 @@ fn scenario(seed: u64, backend: Backend, width: BankWidth, strict: bool, reach: 
 fn the_banks_render_their_scalar_sections_under_random_retargets() {
     let mut reach = Reach::default();
     let seeds = run_seeds(TEST, REPLAY, 24, |seed| {
-        for (backend, width) in WIDTHS {
+        for &(backend, width) in WIDTHS {
             scenario(seed, backend, width, false, &mut reach);
         }
     });
@@ -526,7 +527,7 @@ fn the_banks_render_their_scalar_sections_including_the_known_defect() {
          --exact the_banks_render_their_scalar_sections_including_the_known_defect",
         24,
         |seed| {
-            for (backend, width) in WIDTHS {
+            for &(backend, width) in WIDTHS {
                 scenario(seed, backend, width, true, &mut reach);
             }
         },

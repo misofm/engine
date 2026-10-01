@@ -38,29 +38,30 @@ mod tests {
         assert_eq!(report.sample_rate.0, 48_000);
         assert_eq!(report.quantum_frames.0, 128);
 
-        // Literal, per-target expected backends -- not `report.backend == lane::Backend::current()`,
+        // Literal, per-width expected backends -- not `report.backend == lane::Backend::current()`,
         // which would compare the same compile-time constant against itself and could never fail.
-        // A change to either `lane::Backend::current()`'s target selection or to this pin must fail
-        // this test (AGENTS.md: `x86-64-v3` is pinned to AVX2/FMA, NEON is baseline on AArch64, and
-        // wasm `simd128` is four lanes). Every other target has no row because `lane` refuses to
+        // A change to either `lane::Backend::current()`'s selection or to this pin must fail this
+        // test. The width follows the target features, keyed exactly as `current()` keys it (issue
+        // #1112): `avx2` (`x86-64-v3` pins AVX2/FMA) is eight lanes, and `neon` (baseline on
+        // AArch64) or `simd128` is four. Every other build has no row because `lane` refuses to
         // compile for it (issues #1041 and #1062), so this crate cannot be built there either.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             report.backend,
             lane::Backend::Simd8,
-            "x86-64-v3 is pinned to AVX2, eight f32 lanes"
+            "AVX2 is the 8-lane width, eight f32 lanes"
         );
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(target_feature = "neon")]
         assert_eq!(
             report.backend,
             lane::Backend::Simd4,
-            "AArch64 NEON is baseline, four f32 lanes"
+            "NEON is the 4-lane width, four f32 lanes"
         );
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        #[cfg(target_feature = "simd128")]
         assert_eq!(
             report.backend,
             lane::Backend::Simd4,
-            "the wasm width is four lanes"
+            "wasm simd128 is the 4-lane width, four f32 lanes"
         );
     }
 }

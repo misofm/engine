@@ -5,9 +5,9 @@
 //! The fixture plan is compiled the way every host compiles one: through
 //! [`GraphCompiler::compile_with_builtins`], so the checked-in canonical text, Graphviz rendering
 //! and resource report describe a plan with its builtin banks attached (#963). It is compiled at
-//! the eight-lane launch width, [`Backend::Simd8`], on every host: the corpus is one plan, and a
-//! four-lane AArch64 build (#1017) must verify that plan rather than generate its own. The
-//! checked-in corpus is regenerated with
+//! the eight-lane launch width, `Backend::Simd8`: the corpus is one plan. Only an 8-lane (AVX2)
+//! build has that width, so a 4-lane (NEON/simd128) build refuses every mode and ignores this
+//! binary's tests (issue #1112). The checked-in corpus is regenerated with
 //! `cargo run -p graph-compiler --bin graph_fixture -- --write` and verified byte for byte by
 //! this binary's `checked_in_fixtures_are_the_generated_bytes` test (#947) and by `--check`.
 
@@ -29,6 +29,21 @@ use session::{CompileCaps, compile_session, parse_session_json};
 use sha2::{Digest, Sha256};
 
 const SESSION: &str = include_str!("../../../../fixtures/session/v1/canonical.json");
+
+/// The width the corpus is compiled at: the eight-lane launch width, named rather than read from
+/// `Backend::current()`, because the checked-in corpus describes one plan. Only an 8-lane (AVX2)
+/// build has it (issue #1112).
+#[cfg(target_feature = "avx2")]
+const FIXTURE_DISPATCH: Option<Backend> = Some(Backend::Simd8);
+/// A 4-lane (NEON/simd128) build has no eight-lane width, so it cannot compile the corpus.
+#[cfg(not(target_feature = "avx2"))]
+const FIXTURE_DISPATCH: Option<Backend> = None;
+
+/// Why a 4-lane build refuses every mode, and why it ignores this binary's tests.
+const NO_FIXTURE_WIDTH: &str = concat!(
+    "the graph fixture corpus is the 8-lane (AVX2) plan; ",
+    "generate or check it on an x86-64-v3 build"
+);
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 
 fn main() {
@@ -39,6 +54,9 @@ fn main() {
 }
 
 fn run(arguments: Vec<String>) -> Result<(), String> {
+    if FIXTURE_DISPATCH.is_none() {
+        return Err(NO_FIXTURE_WIDTH.to_owned());
+    }
     let root = default_root();
     match arguments.as_slice() {
         [] => {
@@ -114,10 +132,7 @@ fn compile_fixture() -> PreparedGraphBuiltinsArtifact {
     )
     .unwrap_or_else(|diagnostics| panic!("builtin diagnostics: {diagnostics:?}"));
     GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-        // The eight-lane launch width, named rather than read from `Backend::current()`: the
-        // checked-in corpus describes one plan, which a four-lane AArch64 build (#1017) verifies
-        // byte for byte like the x86-64-v3 build does.
-        dispatch: Backend::Simd8,
+        dispatch: FIXTURE_DISPATCH.expect(NO_FIXTURE_WIDTH),
         plan_id: 0,
         effects: EffectPreparedSession {
             session,
@@ -413,6 +428,10 @@ mod tests {
     /// this red until the corpus is regenerated. Regenerate with
     /// `cargo run -p graph-compiler --bin graph_fixture -- --write` and commit the diff.
     #[test]
+    #[cfg_attr(
+        not(target_feature = "avx2"),
+        ignore = "the graph fixture corpus is the 8-lane (AVX2) plan (issue #1112)"
+    )]
     fn checked_in_fixtures_are_the_generated_bytes() {
         let files = generated();
         let root = default_root();
@@ -439,6 +458,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_feature = "avx2"),
+        ignore = "the graph fixture corpus is the 8-lane (AVX2) plan (issue #1112)"
+    )]
     fn check_rejects_fixture_manifest_missing_and_unlisted_corruption() {
         let root = temporary_root();
         if root.exists() {

@@ -15,6 +15,8 @@
 //! and watching the bits move. Both are `-0.0` cases, and both are why the test is on bit
 //! patterns and not on `==`.
 
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::builtins::{
     InputChainCoef, InputChainPlan, InputChainReport, InputChainState, InputTrimRamp,
     NONFINITE_LIMIT, input_chain_block, input_chain_block_elided, input_chain_block_mono_elided,
@@ -22,7 +24,7 @@ use lane::kernels::builtins::{
     input_chain_ramp_block_mono, input_chain_ramp_block_mono_elided, no_lanes,
 };
 use lane::kernels::{SvfCoef, svf_step};
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 /// Frames per case. Long enough that a real section's recurrence is well past its transient.
 const FRAMES: usize = 512;
@@ -289,6 +291,7 @@ fn elision_is_bit_identical_at_every_width_and_section_pattern() {
         for shapes in 0..16 {
             check_pattern::<f32>("1", pattern, shapes);
             check_pattern::<Simd4>("4", pattern, shapes);
+            #[cfg(target_feature = "avx2")]
             check_pattern::<Simd8>("8", pattern, shapes);
         }
     }
@@ -320,6 +323,7 @@ fn a_single_non_identity_lane_blocks_the_whole_section() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 
@@ -364,6 +368,7 @@ fn identity_coefficients_over_non_zero_state_are_not_elidable() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 
@@ -409,6 +414,7 @@ fn negative_zero_mix_words_are_not_the_identity() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 
@@ -479,6 +485,7 @@ fn negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate() {
     }
     check::<f32>("1");
     check::<Simd4>("4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("8");
 }
 
@@ -698,6 +705,7 @@ fn mixed_elision_matches_frozen_bodies_scalar() {
 fn mixed_elision_matches_frozen_bodies_w4() {
     mixed_reference_cases::<Simd4>();
 }
+#[cfg(target_feature = "avx2")]
 #[test]
 fn mixed_elision_matches_frozen_bodies_w8() {
     mixed_reference_cases::<Simd8>();
@@ -885,5 +893,6 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
     }
     check::<f32>();
     check::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>();
 }

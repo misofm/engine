@@ -10,7 +10,9 @@
 
 mod support;
 
-use lane::{Lane, Simd4, Simd8};
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
+use lane::{Lane, Simd4};
 use support::{ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
 
 /// Frames per case: enough to cross every partition boundary and leave both ramp windows.
@@ -63,5 +65,6 @@ fn p1_every_kernel_is_partition_invariant() {
     assert_eq!(MAX_WIDTH, 8, "the corpus is built for eight lanes");
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }

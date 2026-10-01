@@ -207,12 +207,11 @@ pub(crate) fn native_bank() -> Option<(Backend, BankWidth)> {
     BankWidth::for_backend(backend).map(|width| (backend, width))
 }
 
-/// A kernel backend and width this build does **not** render, for the unavailable-fallback gate.
+/// A kernel backend and width this build does **not** render, for the unavailable-fallback gate:
+/// four lanes in the 8-lane (AVX2) build. A 4-lane (NEON/simd128) build has none (#1112).
+#[cfg(target_feature = "avx2")]
 pub(crate) fn foreign_bank() -> (Backend, BankWidth) {
-    match Backend::current() {
-        Backend::Simd8 => (Backend::Simd4, BankWidth::Four),
-        _ => (Backend::Simd8, BankWidth::Eight),
-    }
+    (Backend::Simd4, BankWidth::Four)
 }
 
 /// Binds a bank of `lanes` identical members at the native width, or `None` if this build has no

@@ -2,21 +2,24 @@
 
 mod support;
 
+#[cfg(target_feature = "avx2")]
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, LinkMode, PreparedAutomationSpan, PreparedNativeEffectBank,
-    ResetKind, StatePayloadInput, StatePayloadOutput,
 };
+use effect_contract::{ResetKind, StatePayloadInput, StatePayloadOutput};
 use gate_expander::STATE_LAYOUT_VERSION;
+#[cfg(target_feature = "avx2")]
+use support::{Values, packed_w8, prepare_bank_at_rate, prepare_bank_w8, snapshot_bank, track_of};
 use support::{
-    Values, active_values, assert_bits_eq, initial_values, noise, packed_w8, prepare,
-    prepare_bank_at_rate, prepare_bank_w8, render_scalar_sidechain, request, retarget_spans,
-    snapshot, snapshot_bank, track_of,
+    active_values, assert_bits_eq, initial_values, noise, prepare, render_scalar_sidechain,
+    request, retarget_spans, snapshot,
 };
 
 fn word(bytes: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().unwrap())
 }
 
+#[cfg(target_feature = "avx2")]
 fn render_bank(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],
@@ -27,6 +30,7 @@ fn render_bank(
     render_bank_with_automation(bank, left, right, block, &[], &offsets);
 }
 
+#[cfg(target_feature = "avx2")]
 fn render_bank_with_automation(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],
@@ -243,7 +247,10 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
                 )
                 .is_err()
         );
+        // The eight-lane bank half: only the 8-lane (AVX2) build has the width (#1112).
+        #[cfg(target_feature = "avx2")]
         let values: [Values; 8] = core::array::from_fn(|_| initial_values());
+        #[cfg(target_feature = "avx2")]
         if let Some(mut bank) = prepare_bank_at_rate(
             &values,
             LinkMode::DualMono,
@@ -282,11 +289,8 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
     }
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let values = active_values();
     let mut effect = prepare(request(&values));
@@ -389,11 +393,8 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
     }
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut values = active_values();
     support::set_parameter(&mut values, 2, 40.0, 40.0);
@@ -601,11 +602,8 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     );
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let values = active_values();
     let source_left = noise(41, 160, 0.3);
@@ -720,11 +718,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     );
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn bank_restore_of_one_track_does_not_mutate_peers() {
     let values: [Values; 8] = core::array::from_fn(|_| initial_values());
     let mut donor_bank =

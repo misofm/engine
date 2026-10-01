@@ -418,5 +418,6 @@ fn ar_one_pole_step_is_width_independent() {
 
     assert_eq!(packed::<f32>(&envelopes, &detectors), scalar);
     assert_eq!(packed::<lane::Simd4>(&envelopes, &detectors), scalar);
+    #[cfg(target_feature = "avx2")]
     assert_eq!(packed::<lane::Simd8>(&envelopes, &detectors), scalar);
 }

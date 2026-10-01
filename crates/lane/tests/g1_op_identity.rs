@@ -16,7 +16,9 @@
 mod support;
 
 use lane::Lane;
-use lane::{Simd4, Simd8};
+use lane::Simd4;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use support::{
     ALL_OPS, EDGES, FUSED_WITNESS_A, FUSED_WITNESS_C, MAX_WIDTH, Op, Xorshift64Star, apply,
     run_op_bits,
@@ -156,6 +158,7 @@ fn g1_directed_edge_pool_is_lane_identical() {
     for op in ALL_OPS {
         let (a, b, c) = directed_pool(*op);
         compare::<Simd4>(*op, "Simd4", &a, &b, &c);
+        #[cfg(target_feature = "avx2")]
         compare::<Simd8>(*op, "Simd8", &a, &b, &c);
     }
 }
@@ -170,6 +173,7 @@ fn g1_random_vectors_are_lane_identical() {
         };
         let (a, b, c) = random_pool(*op, vectors, SEED ^ (op.name().len() as u64));
         compare::<Simd4>(*op, "Simd4", &a, &b, &c);
+        #[cfg(target_feature = "avx2")]
         compare::<Simd8>(*op, "Simd8", &a, &b, &c);
     }
 }
@@ -193,6 +197,7 @@ fn g1_signed_zero_max_and_min_follow_d8() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }
 
@@ -219,6 +224,7 @@ fn g1_nan_max_and_min_follow_d8() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }
 
@@ -265,6 +271,7 @@ fn g1_max_and_min_lowerings_match_the_oracle() {
     let c = vec![0.0f32; a.len()];
     for op in [Op::Max, Op::Min] {
         compare::<Simd4>(op, "Simd4", &a, &b, &c);
+        #[cfg(target_feature = "avx2")]
         compare::<Simd8>(op, "Simd8", &a, &b, &c);
     }
 }
@@ -302,6 +309,7 @@ fn g1_fma_is_unfused_on_every_backend() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }
 
@@ -329,6 +337,7 @@ fn g1_mask_any_matches_the_oracle() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }
 
@@ -357,6 +366,7 @@ fn g1_exp2_int_is_exact_on_the_integer_range() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }
 
@@ -392,5 +402,6 @@ fn g1_frexp_reconstructs_positive_normals() {
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>("Simd8");
 }

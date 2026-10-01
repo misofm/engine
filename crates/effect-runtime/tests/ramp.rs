@@ -118,6 +118,7 @@ fn block_driving_matches_the_scalar_sequence() {
                 &expected,
                 &format!("Simd4, target {target}, {samples} samples, blocks of {frames}"),
             );
+            #[cfg(target_feature = "avx2")]
             assert_bit_equal(
                 &block_sequence::<lane::Simd8>(ramp, 512, frames),
                 &expected,

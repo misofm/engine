@@ -14,13 +14,23 @@
 
 mod support;
 
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::kernels::{
     SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
 };
-use lane::{CanonicalFpEnv, Lane, Simd4, Simd8, flush};
+use lane::{CanonicalFpEnv, Lane, Simd4, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
 };
+
+/// The widest lane type this build has, for a gate whose claim holds at any one vector width: the
+/// 8-lane (AVX2) width where `avx2` is enabled, else the 4-lane (NEON/simd128) width (#1112).
+#[cfg(target_feature = "avx2")]
+type Widest = Simd8;
+/// See the 8-lane definition.
+#[cfg(not(target_feature = "avx2"))]
+type Widest = Simd4;
 
 /// Frames per case. The `--release` count is the gate; a debug run keeps the workspace suite quick.
 const FRAMES: usize = if cfg!(debug_assertions) {
@@ -170,6 +180,7 @@ fn check_ordered_accumulation<L: Lane>() {
 fn ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes() {
     check_ordered_accumulation::<f32>();
     check_ordered_accumulation::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     check_ordered_accumulation::<Simd8>();
 }
 
@@ -523,6 +534,7 @@ fn lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing(
     let _canonical = CanonicalFpEnv::enter();
     check_lane2_bounds_and_identity::<f32>();
     check_lane2_bounds_and_identity::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     check_lane2_bounds_and_identity::<Simd8>();
 }
 
@@ -539,6 +551,7 @@ fn g2_kernels_are_bit_identical_at_every_width() {
                 &oracle,
                 &run_at_width::<Simd4>(*kernel, *signal, &lanes),
             );
+            #[cfg(target_feature = "avx2")]
             compare(
                 *kernel,
                 *signal,
@@ -555,8 +568,8 @@ fn g2_idle_ramped_svf_equals_the_plain_svf() {
     // Amendment A2: `svf_block_ramped` with no ramp is `svf_block`, bit for bit, not merely close.
     for signal in ALL_SIGNALS {
         let lanes = lane_signals(*signal);
-        let plain = run_at_width::<Simd8>(Kernel::SvfLow, *signal, &lanes);
-        let idle = run_at_width::<Simd8>(Kernel::SvfRampedIdle, *signal, &lanes);
+        let plain = run_at_width::<Widest>(Kernel::SvfLow, *signal, &lanes);
+        let idle = run_at_width::<Widest>(Kernel::SvfRampedIdle, *signal, &lanes);
         assert_eq!(
             plain,
             idle,
@@ -574,6 +587,7 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
     for width_outputs in [
         run_at_width::<f32>(Kernel::SvfLow, Signal::Subnormal, &silence),
         run_at_width::<Simd4>(Kernel::SvfLow, Signal::Subnormal, &silence),
+        #[cfg(target_feature = "avx2")]
         run_at_width::<Simd8>(Kernel::SvfLow, Signal::Subnormal, &silence),
     ] {
         for lane in width_outputs {
@@ -672,6 +686,7 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
 
     check::<f32>();
     check::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     check::<Simd8>();
 }
 
@@ -697,6 +712,7 @@ fn g2_interleaved_cascade_equals_a_chain_of_blocks() {
         let lanes = lane_signals(*signal);
         check_cascade::<f32>("Scalar", *signal, &lanes);
         check_cascade::<Simd4>("Simd4", *signal, &lanes);
+        #[cfg(target_feature = "avx2")]
         check_cascade::<Simd8>("Simd8", *signal, &lanes);
     }
 }
@@ -870,6 +886,7 @@ fn g2_skewed_cascade_equals_the_interleaved_cascade() {
     let _canonical = CanonicalFpEnv::enter();
     check_skew_width::<f32>("Scalar");
     check_skew_width::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check_skew_width::<Simd8>("Simd8");
 }
 
@@ -1334,5 +1351,6 @@ fn g2_bounded_cascade_is_the_cascade_and_judges_what_it_stores() {
     let _canonical = CanonicalFpEnv::enter();
     check_bounded_width::<f32>("Scalar");
     check_bounded_width::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     check_bounded_width::<Simd8>("Simd8");
 }

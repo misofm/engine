@@ -10,8 +10,10 @@
 
 mod support;
 
+use lane::Simd4;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::{FLUSH_EPS, Lane, flush};
-use lane::{Simd4, Simd8};
 use support::Xorshift64Star;
 
 /// Step through the subnormal range. The `--release` run is exhaustive (every one of the 2^23
@@ -105,9 +107,11 @@ fn sweep<L: Lane>(width_name: &str) {
 fn g4_flush_law_holds_at_every_width() {
     sweep::<f32>("f32");
     sweep::<Simd4>("Simd4");
+    #[cfg(target_feature = "avx2")]
     sweep::<Simd8>("Simd8");
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
 fn g4_flush_is_lane_wise() {
     // Mixed lanes: only the lanes below the threshold are cleared, and the others keep their bits.

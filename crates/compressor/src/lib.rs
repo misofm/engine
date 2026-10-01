@@ -1302,7 +1302,9 @@ mod width_state_tests {
     use super::{Channel, Detector, Lane, kernel, state};
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
     use effect_contract::LinkMode;
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     const FRAMES: usize = 128;
     const SAMPLE_RATE: u32 = 48_000;
@@ -1382,6 +1384,7 @@ mod width_state_tests {
     fn serialized_state_is_width_invariant_at_w1_w4_w8() {
         state_matches_scalar::<f32>();
         state_matches_scalar::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         state_matches_scalar::<Simd8>();
     }
 }
@@ -1406,7 +1409,9 @@ mod witness_tests {
         PreparedSidechainPort, default_initial_values, expected_prepared_metadata,
     };
     use effect_runtime::ramp::LinearRamp;
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     fn instance<L: Lane>() -> Instance<L> {
         let values: Vec<_> = default_initial_values(&COMPRESSOR_DESCRIPTOR).collect();
@@ -1524,6 +1529,7 @@ mod witness_tests {
             |seed| {
                 witness::<f32>(seed);
                 witness::<Simd4>(seed);
+                #[cfg(target_feature = "avx2")]
                 witness::<Simd8>(seed);
             },
         );

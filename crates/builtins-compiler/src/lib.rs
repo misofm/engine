@@ -4869,15 +4869,17 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 pub use tests::test_only_observed_scalar_pair_binding;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::test_only_prepared_unpaired_graph;
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
 pub use tests::{
     test_only_observed_scalar_declined_split_pair_binding,
-    test_only_observed_scalar_split_pair_binding, test_only_prepared_pair_graph,
-    test_only_prepared_scalar_pair_graph, test_only_prepared_scalar_split_pair_graph,
+    test_only_observed_scalar_split_pair_binding, test_only_prepared_scalar_pair_graph,
+    test_only_prepared_scalar_split_pair_graph,
     test_only_prepared_scalar_split_pair_graph_with_observer_error,
 };
+// The nine-track eight-lane graphs exist in the 8-lane (AVX2) build only (issue #1112).
+#[cfg(feature = "test-support")]
+#[cfg(target_feature = "avx2")]
+#[doc(hidden)]
+pub use tests::{test_only_prepared_pair_graph, test_only_prepared_unpaired_graph};
 
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5408,6 +5410,7 @@ mod tests {
         // level; every post-input node is a member, so no level contributes a scalar tail.
         for (dispatch, expected_sizes) in [
             (Backend::Simd4, &[1, 4, 4, 1, 4, 3][..]),
+            #[cfg(target_feature = "avx2")]
             (Backend::Simd8, &[1, 8, 1, 7][..]),
             // D4: the scalar backend has no bank width at all -- one arithmetic graph everywhere
             // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
@@ -5469,11 +5472,15 @@ mod tests {
             stage: TrackStage::PostInputBuiltins,
         };
         let quantum = 64_u32;
-        for (width, sizes) in [
+        // The eight-lane rows exist in the 8-lane (AVX2) build only (issue #1112).
+        let cases = [
             (effect_contract::BankWidth::Four, &[4, 3][..]),
+            #[cfg(target_feature = "avx2")]
             (effect_contract::BankWidth::Eight, &[8, 1][..]),
+            #[cfg(target_feature = "avx2")]
             (effect_contract::BankWidth::Eight, &[5][..]),
-        ] {
+        ];
+        for (width, sizes) in cases {
             let mut next = 0_usize;
             let groups: Vec<Box<[GraphNodeId]>> = sizes
                 .iter()
@@ -5821,8 +5828,11 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum BoundaryVariant {
         Plain,
+        // Built by the eight-lane serialized-delivery tests only (issue #1112).
+        #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
         Send,
         SelectedSend,
+        #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
         Alias,
         AliasObserved,
         Sidechain,
@@ -6374,6 +6384,7 @@ mod tests {
     /// Actual queued nine-track graph without allocating capture observers, for the installed
     /// allocator's render-only audit. Construction, binding and queue ownership stay off render.
     #[cfg(feature = "test-support")]
+    #[cfg(target_feature = "avx2")]
     #[must_use]
     pub fn test_only_prepared_pair_graph(post_fader_observed: bool) -> PreparedBuiltinsGraphBound {
         prepared_pair_graph_fixture(
@@ -6390,6 +6401,7 @@ mod tests {
     /// The existing queued graph through the direct live-control delivery path, whose separate
     /// fader and matrix consumers make the adjacent runtime memberships decline pairing.
     #[cfg(feature = "test-support")]
+    #[cfg(target_feature = "avx2")]
     #[must_use]
     pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphBound {
         prepared_pair_graph_fixture(false, false, false, false, None, Backend::Simd8, 9)
@@ -9087,6 +9099,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_feature = "avx2")]
     fn actual_graph_mono_collapse_disengages_on_input_command_and_recovers_nonfinite_input() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
@@ -9258,9 +9271,13 @@ mod tests {
         // cohort's lane 0 is the output track, whose post-matrix buffer used to be the graph
         // output and declined the whole cohort, leaving the tail as the one offer. With a
         // dedicated Output every track pairs, so the members are all `tracks`.
-        for (tracks, backend, offers, executed) in
-            [(5, Backend::Simd4, 2, 2), (9, Backend::Simd8, 2, 2)]
-        {
+        // The nine-track eight-lane row exists in the 8-lane (AVX2) build only (issue #1112).
+        let cases = [
+            (5, Backend::Simd4, 2, 2),
+            #[cfg(target_feature = "avx2")]
+            (9, Backend::Simd8, 2, 2),
+        ];
+        for (tracks, backend, offers, executed) in cases {
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
             let (separate, _, _, _) =
@@ -9298,6 +9315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_feature = "avx2")]
     fn a_post_fader_meter_declines_its_cohort_while_the_tail_pair_still_fuses() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
@@ -9388,6 +9406,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_feature = "avx2")]
     fn serialized_send_reader_declines_crossing_fader_while_pcm_matches_separate() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
@@ -9430,6 +9449,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_feature = "avx2")]
     fn serialized_alias_observer_is_the_decline_boundary() {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
@@ -9683,7 +9703,13 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (backend, members) in [(Backend::Simd4, 4), (Backend::Simd8, 5)] {
+        // The eight-lane row exists in the 8-lane (AVX2) build only (issue #1112).
+        let cases = [
+            (Backend::Simd4, 4),
+            #[cfg(target_feature = "avx2")]
+            (Backend::Simd8, 5),
+        ];
+        for (backend, members) in cases {
             let mut fixture = pair_fixture(backend, members);
             FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
@@ -10582,8 +10608,12 @@ mod tests {
         assert!(policy.0.as_any().is::<FaderBankProcessor>());
         assert!(policy.1.as_any().is::<MatrixBankProcessor>());
 
+        // A width mismatch needs a second width: the 8-lane (AVX2) build's (issue #1112).
+        #[cfg(target_feature = "avx2")]
         let four = pair_fixture(Backend::Simd4, 4);
+        #[cfg(target_feature = "avx2")]
         let eight = pair_fixture(Backend::Simd8, 8);
+        #[cfg(target_feature = "avx2")]
         let shape = match make_fader_matrix(
             Box::new(four.separate_fader),
             Box::new(eight.separate_matrix),
@@ -10591,7 +10621,9 @@ mod tests {
             Err(owners) => owners,
             Ok(_) => panic!("width/backend mismatch"),
         };
+        #[cfg(target_feature = "avx2")]
         assert!(shape.0.as_any().is::<FaderBankProcessor>());
+        #[cfg(target_feature = "avx2")]
         assert!(shape.1.as_any().is::<MatrixBankProcessor>());
     }
 
@@ -10747,6 +10779,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd4, 4, true);
+        #[cfg(target_feature = "avx2")]
         assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd8, 8, false);
         assert_late_decline_preserves_real_owners(Backend::Simd4, 3, Backend::Simd4, 4, false);
     }
@@ -11042,11 +11075,13 @@ mod tests {
             graph::GraphScalarOwnerResourceEstimate::default()
         );
 
+        #[cfg(target_feature = "avx2")]
         let bank_selected =
             prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
                 .expect("bank candidates")
                 .graph_scalar_owner_resource(Backend::Simd8, &levels, &classes)
                 .expect("checked vector estimate");
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             bank_selected,
             graph::GraphScalarOwnerResourceEstimate::default(),
@@ -11257,7 +11292,12 @@ mod tests {
             }
             (pcm, observed, snapshots, counts, reports)
         };
-        for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+        for backend in [
+            Backend::Scalar,
+            Backend::Simd4,
+            #[cfg(target_feature = "avx2")]
+            Backend::Simd8,
+        ] {
             for n in [3, 4, 5, 8, 9] {
                 for variant in [
                     BoundaryVariant::Plain,
@@ -11311,7 +11351,13 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline() {
-        for backend in [Backend::Simd4, Backend::Simd8] {
+        // Every vector backend this build has: no eight in a 4-lane (NEON/simd128) build.
+        let backends = [
+            Backend::Simd4,
+            #[cfg(target_feature = "avx2")]
+            Backend::Simd8,
+        ];
+        for backend in backends {
             let mut candidate =
                 prepared_pair_graph_fixture(true, true, false, false, None, backend, 9);
             let mut reference =

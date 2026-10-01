@@ -1,7 +1,9 @@
 #![allow(missing_docs)]
 
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 use lane::{
-    CanonicalFpEnv, Lane, Simd4, Simd8,
+    CanonicalFpEnv, Lane, Simd4,
     kernels::builtins::{
         Matrix2x2Coef, fader_matrix_block, fader_matrix_block_without_identity, gain_mute_block,
         mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity, no_lanes,
@@ -126,6 +128,7 @@ fn settled_fader_matrix_matches_the_two_primitive_oracle() {
     let _canonical = CanonicalFpEnv::enter();
     compare_width::<f32>();
     compare_width::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     compare_width::<Simd8>();
 }
 
@@ -218,6 +221,7 @@ fn select_free_matrix_matches_the_select_form_when_no_lane_is_identity() {
     let _canonical = CanonicalFpEnv::enter();
     select_free_width::<f32>();
     select_free_width::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     select_free_width::<Simd8>();
 }
 
@@ -427,6 +431,7 @@ fn select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity(
     let counts = [
         fused_select_free_width::<f32>(),
         fused_select_free_width::<Simd4>(),
+        #[cfg(target_feature = "avx2")]
         fused_select_free_width::<Simd8>(),
     ];
     println!("NaN-payload differences [oracle A, oracle B] at [f32, Simd4, Simd8]: {counts:?}");
@@ -510,6 +515,7 @@ fn compare_holey_population<L: Lane>() {
 fn holey_populations_keep_neutral_wide_padding() {
     let _canonical = CanonicalFpEnv::enter();
     compare_holey_population::<Simd4>();
+    #[cfg(target_feature = "avx2")]
     compare_holey_population::<Simd8>();
 }
 

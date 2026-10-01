@@ -2561,6 +2561,20 @@ pub fn expected_prepared_metadata(
 mod bank_width_tests {
     use super::{Backend, BankWidth};
 
+    /// Every bank width and backend this build has: no eight where `avx2` is off (issue #1112).
+    const WIDTHS: &[BankWidth] = &[
+        BankWidth::Four,
+        #[cfg(target_feature = "avx2")]
+        BankWidth::Eight,
+    ];
+    /// See [`WIDTHS`].
+    const BACKENDS: &[Backend] = &[
+        Backend::Scalar,
+        Backend::Simd4,
+        #[cfg(target_feature = "avx2")]
+        Backend::Simd8,
+    ];
+
     /// #84 phase A, eval A-2: `for_backend` is the workspace's one backend-to-width law, it is
     /// total over `Backend`, and `matches_backend` agrees with it on every `(width, backend)` pair.
     #[test]
@@ -2570,13 +2584,14 @@ mod bank_width_tests {
             BankWidth::for_backend(Backend::Simd4),
             Some(BankWidth::Four)
         );
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             BankWidth::for_backend(Backend::Simd8),
             Some(BankWidth::Eight)
         );
 
-        for width in [BankWidth::Four, BankWidth::Eight] {
-            for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+        for &width in WIDTHS {
+            for &backend in BACKENDS {
                 assert_eq!(
                     width.matches_backend(backend),
                     BankWidth::for_backend(backend) == Some(width),

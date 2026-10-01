@@ -27,10 +27,9 @@ use dsp_reference::{
     reference_gate_expander_process,
 };
 use effect_contract::LinkMode;
-use support::{
-    Values, initial_values, prepare, prepare_bank_w8, render_scalar, request, set_parameter,
-    track_of,
-};
+use support::{Values, initial_values, prepare, render_scalar, request, set_parameter};
+#[cfg(target_feature = "avx2")]
+use support::{prepare_bank_w8, track_of};
 
 const FRAMES: usize = 48_000;
 const THRESHOLD: f32 = -40.0;
@@ -234,11 +233,8 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
     }
 }
 
+#[cfg(target_feature = "avx2")]
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn oracle_pcm_within_derived_tolerance_w8() {
     let (source_left, source_right) = corpus_signals();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {

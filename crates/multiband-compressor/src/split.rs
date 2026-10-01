@@ -22,7 +22,9 @@
 
 use super::*;
 use effect_contract::{EffectQuality, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
-use lane::{Simd4, Simd8};
+use lane::Simd4;
+#[cfg(target_feature = "avx2")]
+use lane::Simd8;
 
 /// Ramp index of each band's threshold, ratio, attack, release and makeup.
 const LOW_THRESHOLD: usize = 0;
@@ -270,9 +272,12 @@ fn identical(blocks: usize, frames: usize, schedule: Schedule<'_>) {
         let unsplit = run::<Simd4, 4, true>(link_mode, bypass, blocks, frames, schedule);
         assert_eq!(split, unsplit, "simd4, {link_mode:?}, bypass {bypass}");
 
-        let split = run::<Simd8, 8, false>(link_mode, bypass, blocks, frames, schedule);
-        let unsplit = run::<Simd8, 8, true>(link_mode, bypass, blocks, frames, schedule);
-        assert_eq!(split, unsplit, "simd8, {link_mode:?}, bypass {bypass}");
+        #[cfg(target_feature = "avx2")]
+        {
+            let split = run::<Simd8, 8, false>(link_mode, bypass, blocks, frames, schedule);
+            let unsplit = run::<Simd8, 8, true>(link_mode, bypass, blocks, frames, schedule);
+            assert_eq!(split, unsplit, "simd8, {link_mode:?}, bypass {bypass}");
+        }
     }
 }
 
@@ -550,6 +555,7 @@ fn each_channel_advances_its_own_ramps<L: Lane, const W: usize>(label: &str) {
 fn the_ramped_path_advances_both_channels() {
     each_channel_advances_its_own_ramps::<f32, 1>("scalar");
     each_channel_advances_its_own_ramps::<Simd4, 4>("simd4");
+    #[cfg(target_feature = "avx2")]
     each_channel_advances_its_own_ramps::<Simd8, 8>("simd8");
 }
 

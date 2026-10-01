@@ -4880,7 +4880,9 @@ mod tests {
     use effect_contract::{
         PrepareEffectLimits, PreparedPorts, PreparedSidechainPort, validate_descriptor,
     };
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
+    #[cfg(target_feature = "avx2")]
+    use lane::Simd8;
 
     /// Deterministic SplitMix64 noise, so a corpus is a seed and never a file.
     struct Noise(u64);
@@ -5373,6 +5375,7 @@ mod tests {
         for counts in [
             seedless_peaks_match_the_seeded_order::<f32>(),
             seedless_peaks_match_the_seeded_order::<Simd4>(),
+            #[cfg(target_feature = "avx2")]
             seedless_peaks_match_the_seeded_order::<Simd8>(),
         ] {
             assert!(
@@ -5636,6 +5639,7 @@ mod tests {
         detector_chunk_active_window_matches_old_shape::<Simd4>();
     }
 
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn detector_chunk_active_window_matches_old_shape_w8() {
         detector_chunk_active_window_matches_old_shape::<Simd8>();
@@ -5855,6 +5859,7 @@ mod tests {
         }
         check::<f32>();
         check::<lane::Simd4>();
+        #[cfg(target_feature = "avx2")]
         check::<lane::Simd8>();
     }
 
@@ -5921,6 +5926,7 @@ mod tests {
         }
         check::<f32>();
         check::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         check::<Simd8>();
     }
 
@@ -5957,10 +5963,11 @@ mod tests {
                 scalar_out.push((left, right));
             }
 
-            // Every width this build binds: a bank wider than the backend declines, so a four-lane
-            // AArch64 build (#1017) checks W4 and an x86-64-v3 build checks W4 and W8.
+            // Every width this build binds: a bank wider than the backend declines, so a 4-lane
+            // (NEON/simd128) build checks W4 and the 8-lane (AVX2) build checks W4 and W8.
             for (width, backend, lanes) in [
                 (BankWidth::Four, Backend::Simd4, 4_usize),
+                #[cfg(target_feature = "avx2")]
                 (BankWidth::Eight, Backend::Simd8, 8),
             ]
             .into_iter()
@@ -6758,24 +6765,28 @@ mod tests {
     /// the actual selected body proves all four W8 routes and scalar dual/uniform specialization.
     #[test]
     fn stationary_dispatch_matches_runtime_oracle_and_observes_selected_body() {
+        #[cfg(target_feature = "avx2")]
         compare_dispatch_witness_case::<Simd8>(
             "W8 dual per-lane",
             false,
             false,
             DispatchRoute::DualPerLane,
         );
+        #[cfg(target_feature = "avx2")]
         compare_dispatch_witness_case::<Simd8>(
             "W8 dual uniform",
             true,
             false,
             DispatchRoute::DualUniform,
         );
+        #[cfg(target_feature = "avx2")]
         compare_dispatch_witness_case::<Simd8>(
             "W8 mono per-lane",
             false,
             true,
             DispatchRoute::MonoPerLane,
         );
+        #[cfg(target_feature = "avx2")]
         compare_dispatch_witness_case::<Simd8>(
             "W8 mono uniform",
             true,
@@ -6894,6 +6905,7 @@ mod tests {
     /// .main_ring)`'s counterpart `block_is_positive_zero(&self.main_ring)`; drop the output test
     /// from the claim; and — caught by the state comparison rather than the sample comparison —
     /// delete `self.cursors.advance(..)` or either `advance_rest_phase(..)` from the fast path.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_settled_silent_limiter_renders_exactly_the_never_fast_path() {
         const SILENT_BLOCKS: usize = 40;
@@ -6958,6 +6970,7 @@ mod tests {
                 "W4",
                 compare_silence_arms::<Simd4>("W4", &plan, -6.0, 2_000.0, 3.0),
             ),
+            #[cfg(target_feature = "avx2")]
             (
                 "W8",
                 compare_silence_arms::<Simd8>("W8", &plan, -6.0, 2_000.0, 3.0),
@@ -6988,6 +7001,7 @@ mod tests {
     ///
     /// The `any(.. == 0x8000_0000)` is the anti-vacuity: it asserts a `-0.0` really did come out
     /// the far end, so the comparison had the divergence available to it.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_negative_zero_input_block_is_not_treated_as_silence() {
         let mut plan = vec![None];
@@ -7129,6 +7143,7 @@ mod tests {
     /// this one is closed by the leg.
     ///
     /// Red mutation: drop `block_is_positive_zero(&self.history)` from `is_at_silent_rest`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_stale_detector_history_refuses_the_claim() {
         fn arm<L: Lane>(force_slow: bool) -> SilenceArm {
@@ -7377,6 +7392,7 @@ mod tests {
     /// the withdrawal is defence rather than a hole-plug at this crate.
     ///
     /// Red mutation: delete `if !block.automation.is_empty()` from `process_bank`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn automation_withdraws_the_claim_on_the_bank_path_too() {
         let values = values_with(-6.0, 100.0, 5.0);
@@ -7691,14 +7707,17 @@ mod tests {
         assert_eq!(key.state_sizes.total(), Some(11_808));
         assert_eq!(bank.metadata().width, width);
 
-        // Mismatched backend and width are rejected before anything is prepared.
+        // Mismatched backend and width are rejected before anything is prepared. Only the 8-lane
+        // (AVX2) build has a second width to mismatch.
         let requests: Vec<_> = members.iter().map(|values| request(values)).collect();
+        #[cfg(target_feature = "avx2")]
         let mismatched = TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
             backend: Backend::Simd4,
             width: BankWidth::Eight,
             requests: &requests,
             active_mask: BankWidth::Eight.full_mask(),
         });
+        #[cfg(target_feature = "avx2")]
         assert_eq!(
             mismatched.err().map(|error| error.code),
             Some("effect.bank.requests")
@@ -7742,12 +7761,13 @@ mod tests {
         );
     }
 
-    /// The bank widths this build binds: `Four` and `Eight` on x86-64-v3, `Four` on AArch64
-    /// (#1017). A bank wider than the backend declines, so a padded bank is tested at every width
+    /// The bank widths this build binds: `Four` and `Eight` in the 8-lane (AVX2) build, `Four` in
+    /// a 4-lane (NEON/simd128) build (#1017, #1112). A bank wider than the backend declines, so a padded bank is tested at every width
     /// that binds rather than returning early on the other one.
     fn bank_widths() -> Vec<(BankWidth, Backend)> {
         let widths: Vec<(BankWidth, Backend)> = [
             (BankWidth::Four, Backend::Simd4),
+            #[cfg(target_feature = "avx2")]
             (BankWidth::Eight, Backend::Simd8),
         ]
         .into_iter()
@@ -8251,6 +8271,7 @@ mod tests {
             }
         }
         at::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         at::<Simd8>();
     }
 
@@ -8386,6 +8407,7 @@ mod tests {
     #[test]
     fn a_failed_lane_is_recovered_and_reported_alone() {
         a_failed_lane_is_recovered_and_reported_alone_at::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         a_failed_lane_is_recovered_and_reported_alone_at::<Simd8>();
     }
 
@@ -8514,6 +8536,7 @@ mod tests {
         }
         at::<f32>();
         at::<Simd4>();
+        #[cfg(target_feature = "avx2")]
         at::<Simd8>();
     }
 
@@ -9355,6 +9378,7 @@ mod tests {
     fn the_linked_body_renders_exactly_the_unmodified_kernel() {
         linked_identity_matrix::<f32>("scalar");
         linked_identity_matrix::<Simd4>("W4");
+        #[cfg(target_feature = "avx2")]
         linked_identity_matrix::<Simd8>("W8");
     }
 
@@ -9509,6 +9533,7 @@ mod tests {
                 linked_scenario::<f32> as fn(u64, &str) -> (u32, u32),
             ),
             ("W4", linked_scenario::<Simd4>),
+            #[cfg(target_feature = "avx2")]
             ("W8", linked_scenario::<Simd8>),
         ] {
             let mut engaged = 0;
@@ -9779,6 +9804,7 @@ mod tests {
                 segment_scenario::<f32> as fn(u64, &str, &mut SegmentRun),
             ),
             ("W4", segment_scenario::<Simd4>),
+            #[cfg(target_feature = "avx2")]
             ("W8", segment_scenario::<Simd8>),
         ] {
             let _ = take_census();
@@ -9876,6 +9902,7 @@ mod tests {
         }
         run::<f32>("scalar");
         run::<Simd4>("W4");
+        #[cfg(target_feature = "avx2")]
         run::<Simd8>("W8");
     }
 
@@ -10202,6 +10229,7 @@ mod tests {
     fn the_linked_body_engages_exactly_where_the_record_allows() {
         linked_engagement_witness::<f32>("scalar");
         linked_engagement_witness::<Simd4>("W4");
+        #[cfg(target_feature = "avx2")]
         linked_engagement_witness::<Simd8>("W8");
     }
 }

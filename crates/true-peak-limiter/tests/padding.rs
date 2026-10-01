@@ -137,6 +137,7 @@ fn request(values: &Values, link: LinkMode) -> PrepareEffectRequest<'_> {
 fn bank_widths() -> Vec<(BankWidth, Backend)> {
     let widths: Vec<(BankWidth, Backend)> = [
         (BankWidth::Four, Backend::Simd4),
+        #[cfg(target_feature = "avx2")]
         (BankWidth::Eight, Backend::Simd8),
     ]
     .into_iter()

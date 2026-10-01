@@ -448,6 +448,15 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
+    /// Every bank width this build has: no eight in a 4-lane (NEON/simd128) build (issue #1112).
+    /// A seeded corpus takes its width from this by case, so it alternates both widths in the
+    /// 8-lane (AVX2) build and runs every case at four lanes in a 4-lane one.
+    const WIDTHS: &[BankWidth] = &[
+        BankWidth::Four,
+        #[cfg(target_feature = "avx2")]
+        BankWidth::Eight,
+    ];
+
     fn key(index: usize) -> EffectProgramKey {
         key_with(index, PreparedSidechainPort::None)
     }
@@ -563,11 +572,7 @@ mod tests {
     fn single_slot_programs_reproduce_exact_equal_chunking() {
         let mut state = 0x5eed_0096_u64;
         for case in 0..200u32 {
-            let width = if case % 2 == 0 {
-                BankWidth::Four
-            } else {
-                BankWidth::Eight
-            };
+            let width = WIDTHS[case as usize % WIDTHS.len()];
             let lanes = width.lanes() as usize;
             let count = 1 + (splitmix(&mut state) % 40) as u32;
             let programs = 1 + (splitmix(&mut state) % 3) as usize;
@@ -794,7 +799,7 @@ mod tests {
     /// ruling in both directions.
     #[test]
     fn a_subsequence_program_still_emits_ascending_banks() {
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in WIDTHS {
             let lanes = width.lanes() as usize;
             // 64 tracks, `id` ascending, all running the full two-slot strip except id 0.
             let mut candidates: Vec<CohortCandidate<u32>> = (0..64u32)
@@ -839,7 +844,7 @@ mod tests {
     /// same assertion fails.
     #[test]
     fn the_pool_class_partitions_cohorts_and_leaves_a_uniform_session_alone() {
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in WIDTHS {
             let lanes = width.lanes();
             let count = 4 * lanes;
             let alternating: Vec<_> = (0..count)
@@ -949,11 +954,7 @@ mod tests {
     fn pooling_is_exhaustive_so_no_member_is_stranded() {
         let mut state = 0x0517_2600_u64;
         for case in 0..200u32 {
-            let width = if case.is_multiple_of(2) {
-                BankWidth::Four
-            } else {
-                BankWidth::Eight
-            };
+            let width = WIDTHS[case as usize % WIDTHS.len()];
             let lanes = width.lanes() as usize;
             let count = 1 + (splitmix(&mut state) % 30) as u32;
             let mut candidates = Vec::new();
@@ -1001,11 +1002,7 @@ mod tests {
     fn every_slot_cohort_is_homogeneous() {
         let mut state = 0x9500_0096_u64;
         for case in 0..200u32 {
-            let width = if case.is_multiple_of(2) {
-                BankWidth::Four
-            } else {
-                BankWidth::Eight
-            };
+            let width = WIDTHS[case as usize % WIDTHS.len()];
             let count = 1 + (splitmix(&mut state) % 25) as u32;
             let mut candidates = Vec::new();
             for id in 0..count {
@@ -1107,11 +1104,7 @@ mod tests {
     fn invariants_hold_on_seeded_corpus() {
         let mut state = 0x1234_5678_u64;
         for case in 0..200u32 {
-            let width = if case % 2 == 0 {
-                BankWidth::Four
-            } else {
-                BankWidth::Eight
-            };
+            let width = WIDTHS[case as usize % WIDTHS.len()];
             let lanes = width.lanes() as usize;
             let count = 1 + (splitmix(&mut state) % 25) as u32;
             let mut by_level: BTreeMap<u64, Vec<CohortCandidate<u32>>> = BTreeMap::new();

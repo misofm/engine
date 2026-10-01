@@ -16,10 +16,11 @@ use effect_contract::BankWidth;
 use engine::LAUNCH_SAMPLE_RATES;
 use lane::Backend;
 
-/// Both bank widths, exercised on every host: `wide` implements four and eight lanes everywhere,
-/// so a width difference cannot hide behind a target difference.
-const BANKS: [(Backend, BankWidth); 2] = [
+/// Every bank width this build has: both in the 8-lane (AVX2) build, and four alone in a 4-lane
+/// (NEON/simd128) build, which has no eight-lane type (issue #1112).
+const BANKS: &[(Backend, BankWidth)] = &[
     (Backend::Simd4, BankWidth::Four),
+    #[cfg(target_feature = "avx2")]
     (Backend::Simd8, BankWidth::Eight),
 ];
 
@@ -205,7 +206,7 @@ fn scalar_stage_is_bit_identical_to_reference_recurrence() {
 /// T3: a bank is the scalar stage at another width, and a padding lane changes nothing.
 #[test]
 fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             let mut scalar: Vec<InputBuiltins> = (0..members)
@@ -332,7 +333,7 @@ fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
 /// T6: the block boundary check is per lane and per block, and it never crosses lanes.
 #[test]
 fn boundary_check_is_lane_local_per_block() {
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let build = || {
             let inputs: Vec<InputBuiltins> = (0..lanes)
@@ -611,7 +612,7 @@ fn polarity_trim_fader_and_matrix_are_exact() {
 /// The bank constructor contract owned by this crate and consumed by #86.
 #[test]
 fn bank_construction_accepts_one_to_width_members_only() {
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let inputs = |count: usize| -> Vec<InputBuiltins> {
             (0..count)
@@ -629,10 +630,13 @@ fn bank_construction_accepts_one_to_width_members_only() {
         // The scalar backend has no bank width, so it is refused whatever width is asked for.
         assert!(BuiltinInputBank::new(Backend::Scalar, width, inputs(1)).is_err());
         // So is the *other* vector backend: a bank's width must be the one its backend selects.
+        // Only the 8-lane (AVX2) build has a second vector backend.
+        #[cfg(target_feature = "avx2")]
         let other = match backend {
             Backend::Simd4 => Backend::Simd8,
             _ => Backend::Simd4,
         };
+        #[cfg(target_feature = "avx2")]
         assert!(BuiltinInputBank::new(other, width, inputs(1)).is_err());
     }
     // #84 phase A: `BankWidth::for_backend` is the workspace's one backend-to-width law.
@@ -641,6 +645,7 @@ fn bank_construction_accepts_one_to_width_members_only() {
         BankWidth::for_backend(Backend::Simd4),
         Some(BankWidth::Four)
     );
+    #[cfg(target_feature = "avx2")]
     assert_eq!(
         BankWidth::for_backend(Backend::Simd8),
         Some(BankWidth::Eight)
@@ -687,7 +692,7 @@ fn identity_sections_are_elided_only_when_every_lane_and_word_says_so() {
         "a real low-pass blocks the low-pass section and nothing else"
     );
 
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let build = |real_lanes: usize| {
             let inputs: Vec<InputBuiltins> = (0..lanes)
@@ -1063,7 +1068,7 @@ fn render_per_track(
 #[test]
 fn banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections() {
     const BLOCKS: usize = 9;
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             // Partitions chosen against the script's windows so a ramp is always mid-flight at a
@@ -1104,7 +1109,7 @@ fn banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections() {
 /// and fails the `-0.0` assertion below.
 #[test]
 fn a_settled_banked_mute_is_exactly_positive_zero() {
-    for (backend, width) in BANKS {
+    for &(backend, width) in BANKS {
         let lanes = width.lanes() as usize;
         let mut bank = BuiltinFaderBank::new(
             backend,

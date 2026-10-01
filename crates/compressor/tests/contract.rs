@@ -313,14 +313,15 @@ fn causal_processing_starts_at_sample_zero() {
 /// Red mutation: move the `Backend::current().width() != lanes` check above the per-request
 /// validation loop in `bind_homogeneous_bank` — RED on the first case.
 #[test]
+#[cfg_attr(
+    not(target_feature = "avx2"),
+    ignore = "a 4-lane (NEON/simd128) build has no bank width it cannot run (#1112)"
+)]
 fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
     let factory = CompressorFactory;
-    // A width this build cannot run, chosen so the fallback path is the one under test.
-    let (backend, width) = if cfg!(target_arch = "x86_64") {
-        (Backend::Simd4, BankWidth::Four)
-    } else {
-        (Backend::Simd8, BankWidth::Eight)
-    };
+    // A width this build cannot run, chosen so the fallback path is the one under test: four
+    // lanes in the 8-lane (AVX2) build, the one build with a bank width it does not run.
+    let (backend, width) = (Backend::Simd4, BankWidth::Four);
     let lanes = width.lanes() as usize;
 
     let mut malformed = vec![initial_values(); lanes];
@@ -668,22 +669,22 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
         Some(refusal),
         "a padded lane's request is validated like a member's"
     );
-    // A width this build does not execute: the fallback comes after the member loop.
-    let (other_backend, other_width) = if cfg!(target_arch = "x86_64") {
-        (Backend::Simd4, BankWidth::Four)
-    } else {
-        (Backend::Simd8, BankWidth::Eight)
-    };
-    let other_lanes = other_width.lanes() as usize;
-    let mut other = vec![request(&values); other_lanes];
-    other[1] = request(&malformed_values);
-    assert_eq!(
-        bind(other_backend, other_width, &other, &prefix(2, other_lanes))
-            .err()
-            .map(|error| error.code),
-        Some(refusal),
-        "an unavailable width never hides a malformed non-first member"
-    );
+    // A width this build does not execute: the fallback comes after the member loop. Only the
+    // 8-lane (AVX2) build has one, four lanes; a 4-lane (NEON/simd128) build has none (#1112).
+    #[cfg(target_feature = "avx2")]
+    {
+        let (other_backend, other_width) = (Backend::Simd4, BankWidth::Four);
+        let other_lanes = other_width.lanes() as usize;
+        let mut other = vec![request(&values); other_lanes];
+        other[1] = request(&malformed_values);
+        assert_eq!(
+            bind(other_backend, other_width, &other, &prefix(2, other_lanes))
+                .err()
+                .map(|error| error.code),
+            Some(refusal),
+            "an unavailable width never hides a malformed non-first member"
+        );
+    }
     // A connected sidechain: the same.
     let mut connected = malformed.clone();
     for item in &mut connected {

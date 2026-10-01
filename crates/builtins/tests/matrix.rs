@@ -356,6 +356,15 @@ fn hostile_pair(frame: usize, state: &mut u64) -> (f32, f32) {
     }
 }
 
+/// Every bank width this build has: both in the 8-lane (AVX2) build, and four alone in a 4-lane
+/// (NEON/simd128) build, which has no eight-lane type (issue #1112). The two scenario gates below
+/// fold every width into one digest, so each pins one digest per build.
+const BANK_WIDTHS: &[(lane::Backend, effect_contract::BankWidth)] = &[
+    (lane::Backend::Simd4, effect_contract::BankWidth::Four),
+    #[cfg(target_feature = "avx2")]
+    (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
+];
+
 /// Issue #944 gate 3: every settled-matrix shape renders the bits the base commit rendered.
 ///
 /// One deterministic scenario, 24 blocks of 128 frames, through [`BuiltinMatrixBank`] at both bank
@@ -374,7 +383,12 @@ fn hostile_pair(frame: usize, state: &mut u64) -> (f32, f32) {
 /// moves it through shape (a).
 #[test]
 fn settled_matrix_shapes_render_the_base_bits() {
-    const BASE_DIGEST: &str = "0e1c5af8e3aa66b66b2bb127149a8eaf10529fed838d69a4912c73bf345640c3";
+    // One digest per build (see `BANK_WIDTHS`): the 4-lane pin is this scenario at four lanes alone.
+    const BASE_DIGEST: &str = if cfg!(target_feature = "avx2") {
+        "0e1c5af8e3aa66b66b2bb127149a8eaf10529fed838d69a4912c73bf345640c3"
+    } else {
+        "1c6d3055ea57737e00dce442398ddf208ba449e3bb9a3f783ff2a70ad43d15e8"
+    };
     const BLOCKS: usize = 24;
     const FRAMES: usize = 128;
     const RETARGET_BLOCK: usize = 3;
@@ -383,10 +397,7 @@ fn settled_matrix_shapes_render_the_base_bits() {
     const RAMP_END_BLOCK: usize = RETARGET_BLOCK + (WINDOW as usize - 1) / FRAMES;
     let _canonical = lane::CanonicalFpEnv::enter();
     let mut sink = bench_support::digest::Sha256Sink::new();
-    for (backend, width) in [
-        (lane::Backend::Simd4, effect_contract::BankWidth::Four),
-        (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
-    ] {
+    for &(backend, width) in BANK_WIDTHS {
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             for shape in [
@@ -532,19 +543,26 @@ fn fused_fader(lane: usize) -> BuiltinParameters {
 /// `lr` and `rl` swapped in the select-free fused kernel, moves it through shape (a).
 #[test]
 fn fused_fader_matrix_shapes_render_the_base_bits() {
-    const BASE_DIGEST: &str = "46cc00962fac4916a0d5dfed9b197fb12c85082acd0cae806774876c3744abce";
-    /// 384 blocks, less the 16 a matrix or fader ramp holds on the split stages.
-    const FUSED_BLOCKS: usize = 368;
+    // One digest per build (see `BANK_WIDTHS`): the 4-lane pin is this scenario at four lanes alone.
+    const BASE_DIGEST: &str = if cfg!(target_feature = "avx2") {
+        "46cc00962fac4916a0d5dfed9b197fb12c85082acd0cae806774876c3744abce"
+    } else {
+        "2703b0f2653aca3d1d617e8d94deea260549c0df9475392e9d3c3f1b0d380b6e"
+    };
+    /// 384 blocks, less the 16 a matrix or fader ramp holds on the split stages, in the 8-lane
+    /// (AVX2) build; the four-lane width's half of them in a 4-lane (NEON/simd128) build.
+    const FUSED_BLOCKS: usize = if cfg!(target_feature = "avx2") {
+        368
+    } else {
+        184
+    };
     const BLOCKS: usize = 16;
     const FRAMES: usize = 128;
     const WINDOW: u32 = 200;
     let _canonical = lane::CanonicalFpEnv::enter();
     let mut sink = bench_support::digest::Sha256Sink::new();
     let mut fused_blocks = 0_usize;
-    for (backend, width) in [
-        (lane::Backend::Simd4, effect_contract::BankWidth::Four),
-        (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
-    ] {
+    for &(backend, width) in BANK_WIDTHS {
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             for shape in [

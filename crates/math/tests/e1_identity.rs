@@ -4,6 +4,11 @@
 //! compares it to the current scalar implementation for every `f32` bit pattern and also checks
 //! Simd4 and Simd8 against that current scalar result. This includes NaN payloads, infinities,
 //! subnormals, clamp rails, and the negative fractions whose `x - floor(x)` rounds to `1.0`.
+//!
+//! Its sweep walks the patterns in 8-lane (AVX2) groups, so it exists only where `avx2` is enabled
+//! (issue #1112); `m2_lane_identity` compares the 4-lane (NEON/simd128) `exp2_lane` with the
+//! scalar one on every build.
+#![cfg(target_feature = "avx2")]
 
 use std::thread;
 
