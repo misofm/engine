@@ -29,4 +29,10 @@ Root test-value decision after the complete read: retain current `MISO-GRAPH-V1`
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 — focused checkpoint
+
+Worker B read every production/test file, the fixture data and mutation notes before editing; related #888/#889/#931/#932/#967/#969 scopes stay separate. Temporary PDC, reduction, effect-level and bank-membership indexes now borrow IDs/strings; returned records, prepared owners and diagnostics retain their ownership and order. Three causal-effect/limiter PDC tests share one body with all compressor, multiband and gate cases and their bypass/486-sample assertions retained.
+
+Removed the same-visitor random identity-length comparison (independent literal/UTF-8/nested-identity gate survives), historical executor-size comparison (compiled lowering/order/elision/protected-bank-storage assertions survive), seeded PCM transcript and optional long-run PCM hash (all generators, independent ordered scalar PCM, membership/callback/RT/pointer assertions survive), old-platform gain witness (current canonical compiler coefficient and independent gain-range oracle survive), and the ruled merged-span 256/129 measurement test (current lowering/window, scalar/vector dataflow and resource-cap owners survive; #931 retains the finding and optimization scope). Reverse-submix and track-delay `MISO-GRAPH-V1` format identities remain.
+
+Focused locked library filters `identity_tokens compiled_plans_lower seeded_builtin mixed_causal effect_control_resource issue122 timing_`: **8 passed**, including every consolidated PDC case. Production and test code compile; package formatting applied and `git diff --check` passed. First local invocation exposed the now-unused `stages` import, removed before the clean rerun using `CARGO_TARGET_DIR=/home/bl/misofm/engine/target/housekeeping-b`. No timing claim or optional long sweep. Product edits paused for root's exact-path checkpoint; remaining package/feature/lint/target evidence follows afterward.

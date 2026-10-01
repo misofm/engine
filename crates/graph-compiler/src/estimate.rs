@@ -175,9 +175,9 @@ pub(crate) fn effect_control_resource(
 ) -> Option<GraphScalarOwnerResourceEstimate> {
     let bytes = |value: usize| u64::try_from(value).ok();
     let span_bytes = bytes(core::mem::size_of::<PreparedAutomationSpan>())?;
-    // `graph`'s `runtime::LiveControlEffect` is exactly these five fields; its
-    // `observation_size_accounting` test pins that identity, and `bypass_cohorts`'
-    // allocator-observed estimate test sees the box if it ever outgrows this sum.
+    // Charge the five fields retained by `graph`'s `runtime::LiveControlEffect`.
+    // `bypass_resources`' allocator-observed estimate test sees the box if it
+    // ever outgrows this sum.
     let live_control_effect_bytes = bytes(core::mem::size_of::<GraphPreparedEffect>())?
         .checked_add(bytes(core::mem::size_of::<Box<EffectControlLane>>())?)?
         .checked_add(bytes(core::mem::size_of::<Box<[PreparedAutomationSpan]>>())?)?
@@ -188,7 +188,7 @@ pub(crate) fn effect_control_resource(
         .saturating_sub(bytes(core::mem::size_of::<rack::EffectBankStage>())?);
     let mut total = 0_u64;
     let mut largest = 0_u64;
-    let mut banked: BTreeSet<(String, EffectRack, String)> = BTreeSet::new();
+    let mut banked: BTreeSet<(&str, EffectRack, &str)> = BTreeSet::new();
     for bank in banks {
         for member in &bank.members {
             let rack = match member.rack {
@@ -196,11 +196,7 @@ pub(crate) fn effect_control_resource(
                 RackId::Dynamic => EffectRack::Dynamic,
                 RackId::Simd2 => EffectRack::Simd2,
             };
-            banked.insert((
-                member.track_id.as_str().to_owned(),
-                rack,
-                member.effect_id.as_str().to_owned(),
-            ));
+            banked.insert((member.track_id.as_str(), rack, member.effect_id.as_str()));
         }
     }
     for entry in effects {
@@ -215,7 +211,11 @@ pub(crate) fn effect_control_resource(
         let target = u64::try_from(control.target_staging_retained_bytes()).ok()?;
         total = total.checked_add(target)?;
         largest = largest.max(target);
-        let key = (entry.track_id.clone(), entry.rack, entry.effect_id.clone());
+        let key = (
+            entry.track_id.as_str(),
+            entry.rack,
+            entry.effect_id.as_str(),
+        );
         if !banked.contains(&key) {
             let lane =
                 u64::try_from(core::mem::size_of::<effect_contract::EffectControlLane>()).ok()?;
