@@ -72,6 +72,14 @@ impl CompiledSession {
     pub fn canonical_json(&self) -> &str {
         &self.canonical_json
     }
+    /// Consume this control-plane artifact and move its validated canonical JSON snapshot.
+    ///
+    /// Call on a control thread: the remaining model and index fields are dropped on the caller's
+    /// thread.
+    #[must_use]
+    pub fn into_canonical_json(self) -> String {
+        self.canonical_json
+    }
     /// Explicit session sample rate in hertz.
     #[must_use]
     pub const fn sample_rate(&self) -> SampleRateHz {
