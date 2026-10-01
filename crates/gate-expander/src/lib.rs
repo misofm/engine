@@ -1012,8 +1012,8 @@ macro_rules! bank_impl {
 }
 
 bank_impl!(Simd4);
-// Issue #1110: no eight-lane type on wasm32 (`effect_contract::BankWidth`).
-#[cfg(not(target_arch = "wasm32"))]
+// Issues #1110 and #1112: an eight-lane type only where `avx2` is enabled (`BankWidth`).
+#[cfg(target_feature = "avx2")]
 bank_impl!(lane::Simd8);
 
 /// Validates one prepare request's initial values against the frozen domains.

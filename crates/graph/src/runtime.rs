@@ -311,15 +311,15 @@ use crate::{
 ///
 /// Frames are independent, so this is purely a width choice: master plan #83 §4.2 pins every one
 /// of these kernels to a width-independent result, and gate G2 proves it, so the rendered bits do
-/// not depend on which arm of this `cfg` a target takes. There is no third arm: `lane` refuses to
-/// compile for every other target (issues #1041 and #1062).
-#[cfg(target_arch = "x86_64")]
+/// not depend on which arm of this `cfg` a build takes. Each arm is its width's own predicate, the
+/// one `lane::Backend::current` selects by (issue #1112): `avx2` for the 8-lane (AVX2) width, and
+/// `neon` or `simd128` for the 4-lane (NEON/simd128) width. The width follows the target features
+/// a build enables, never the architecture's name. There is no third arm: `lane` refuses to
+/// compile every other build (issues #1041 and #1062).
+#[cfg(target_feature = "avx2")]
 pub(crate) type FrameLane = lane::Simd8;
 /// See [`FrameLane`].
-#[cfg(any(
-    target_arch = "aarch64",
-    all(target_arch = "wasm32", target_feature = "simd128")
-))]
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
 pub(crate) type FrameLane = lane::Simd4;
 
 // REALTIME_POLICY_BEGIN
@@ -1668,8 +1668,8 @@ impl BankMembers for ArenaMembers<'_> {
                     frames,
                 )?)
             }
-            // No eight-lane bank on wasm32 (issue #1110, `effect_contract::BankWidth`).
-            #[cfg(not(target_arch = "wasm32"))]
+            // An eight-lane bank only where `avx2` is enabled (#1110, #1112, `BankWidth`).
+            #[cfg(target_feature = "avx2")]
             8 => {
                 let buffers: [u32; 8] = self.outputs.get(..8)?.try_into().ok()?;
                 Some(BankPlaneViews::from_eight(

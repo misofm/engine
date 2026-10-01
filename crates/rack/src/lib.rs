@@ -523,12 +523,12 @@ pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
 
 pub struct BankPlaneViews<'a>(BankPlaneViewsInner<'a>);
 
-/// The views of a four- or an eight-lane bank. `Eight`, [`BankPlaneViews::from_eight`] and their
-/// arms are absent on `wasm32`, which has no eight-lane bank (issue #1110,
-/// [`BankWidth`](effect_contract::BankWidth)).
+/// The views of a four- or an eight-lane bank. `Eight`, `BankPlaneViews::from_eight` and their
+/// arms exist only where `avx2` is enabled, the one build with an eight-lane bank (issues #1110
+/// and #1112, [`BankWidth`](effect_contract::BankWidth)).
 enum BankPlaneViewsInner<'a> {
     Four([BankPlanePair<'a>; 4], usize),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     Eight([BankPlanePair<'a>; 8], usize),
 }
 
@@ -547,7 +547,7 @@ impl<'a> BankPlaneViews<'a> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Four(pairs, frames)))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     pub fn from_eight(pairs: [BankPlanePair<'a>; 8], frames: usize) -> Option<Self> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Eight(pairs, frames)))
     }
@@ -556,7 +556,7 @@ impl<'a> BankPlaneViews<'a> {
     fn supports(&self, width: usize, frames: usize) -> bool {
         match &self.0 {
             BankPlaneViewsInner::Four(_, capacity) => width == 4 && *capacity >= frames,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             BankPlaneViewsInner::Eight(_, capacity) => width == 8 && *capacity >= frames,
         }
     }
@@ -3047,7 +3047,7 @@ impl BankChain {
                             transpose_tile_4,
                         );
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(target_feature = "avx2")]
                     BankPlaneViewsInner::Eight(pairs, _) => {
                         tile_scatter_direct_plane(
                             &self.scratch.left,

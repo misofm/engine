@@ -275,11 +275,11 @@ fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
     result
 }
 
-/// Every bank width this target has, with the backend that executes it. No eight on `wasm32`,
-/// which has no eight-lane type (issue #1110, `effect_contract::BankWidth`).
+/// Every bank width this build has, with the backend that executes it. No eight where `avx2` is
+/// off, as no eight-lane type is (issues #1110 and #1112, `effect_contract::BankWidth`).
 const WIDTHS: &[(BankWidth, Backend)] = &[
     (BankWidth::Four, Backend::Simd4),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     (BankWidth::Eight, Backend::Simd8),
 ];
 
@@ -1713,7 +1713,7 @@ fn bind_eligibility(
     let short = &base[..lanes - 1];
     let mut long = base.clone();
     long.push(base[0]);
-    // Absent where the target has one bank width, as `wasm32` does (issue #1110).
+    // Absent where the build has one bank width, as every 4-lane build does (#1110, #1112).
     let other_backend = WIDTHS
         .iter()
         .map(|&(_, other)| other)
