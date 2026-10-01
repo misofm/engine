@@ -35,9 +35,5 @@ required-features = ["lane"]
 name = "f1_fast_db_bounds"
 required-features = ["lane"]
 
-[[test]]
-name = "e1_identity"
-required-features = ["lane"]
-
 [lints]
 workspace = true
