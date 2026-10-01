@@ -14,7 +14,7 @@
 //!   `ulp(48) = 3.8e-6`, giving `3.8e-6 / b + 4.8e-5 = 0.0184 dB`. The product is smaller than
 //!   `b * 48 < 0.01`, so its rounding contributes less than `5e-6 dB` after accumulation. The
 //!   preceding subtraction contributes at most another `ulp(48)` to the accumulated error.
-//!   1 ms attack has a larger `b`, and therefore a smaller accumulated bound.
+//!   The 1 ms attack has a larger `b`, and therefore a smaller accumulated bound.
 //! * `fast_gain_from_db` is qualified below `7.431e-6 dB` on negative gain values, again by F1.
 //!
 //! Total under the unchanged `0.02 dB` limit asserted below.

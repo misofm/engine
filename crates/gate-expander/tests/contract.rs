@@ -3,10 +3,9 @@
 mod support;
 
 use effect_contract::{
-    BankWidth, InitialParameterValue, LatencySamples, LinkMode, NativeEffectFactory,
-    ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits, PreparedPorts,
-    PreparedSidechainPort, ResetKind, StatePayloadInput, StatePayloadOutput, TailSamples,
-    validate_descriptor,
+    BankWidth, InitialParameterValue, LatencySamples, NativeEffectFactory, ParameterChannel,
+    PrepareEffectBankRequest, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort, ResetKind,
+    StatePayloadInput, StatePayloadOutput, TailSamples, validate_descriptor,
 };
 use gate_expander::{
     GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory, STATE_LAYOUT_VERSION,
