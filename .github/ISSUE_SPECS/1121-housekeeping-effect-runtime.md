@@ -118,3 +118,36 @@ GitHub synchronization remain pending.
 Root adversarial verdict: REQUEST CHANGES. The shared mask body preserves strict threshold/NaN comparisons, accumulation order, empty-block behavior, debug guards and lane attribution; retained numeric/width/partition/fault gates pass. The main historical test scaffolding is correctly removed, and direct stationary and finite-reciprocal expectations preserve useful contracts. Two bounded cleanup items remain: the subnormal test's `(value + 0.0)` assertion attempts to check a global FP environment through a constant-foldable expression, rather than defending the runtime's hoist behavior; remove it while retaining all actual predicate/state/output checks. Also correct the discovered envelope documentation to describe the unchanged NaN/nonpositive, zero-rate and positive-infinity/overflow behavior. Neither correction requires a product decision or changes DSP semantics.
 
 Attempt 2 is authorized only for that assertion deletion, accurate coefficient documentation and concise evidence. Run the stationary family, formatting/diff checks and package clippy; reuse the completed product/target/RT gates because production expressions are unchanged. Test value: retained stationary cases reject losing exact subnormal words, incorrectly arming a redundant target, swallowing a signed-zero or one-ULP movement, or leaving a stale target/step after mid-flight and block-boundary retargets. The current coefficient-law gate still rejects a wrong finite reciprocal or one-ULP overflow boundary over its existing dense domain. No new test or benchmark is needed.
+
+### Attempt 2 — GPT-6.1 Sol xhigh worker A, 2026-10-01
+
+Root checkpoint `e587bc7d` deletes the constant-foldable `(value + 0.0)` environment assertion;
+all subnormal predicate, settled state and exact output checks remain. Coefficient documentation
+now accurately states the unchanged NaN/nonpositive/zero-rate/product-underflow instantaneous
+behavior and nonzero-rate positive-infinity/product-overflow freeze. No DSP expression changed,
+and the documentation discrepancy reported in attempt 1 is resolved without a new product decision.
+Correction +5/-8 (**net -3 LoC**); cumulative package cleanup **net -210 LoC**.
+
+Locked all-feature `stationary_hoist`: **8/8 passed**. Strict package all-target/all-feature clippy
+exited 0 without warnings; formatting and diff checks passed, using the same target directory.
+Root approved reuse of attempt 1's full debug/release, lane/numeric/partition, supported-target
+and realtime gates for this test/doc-only correction. No new test, benchmark or broader gate was
+added. Worker paused product edits at focused-green; final root verdict/synchronization is pending.
+
+### Root adversarial review — attempt 2
+
+Root adversarial verdict: PASS. The final revision changes no production expression: documentation now matches the guarded zero/NaN and positive-infinity/overflow paths, and the unreliable FP-environment expression is removed while actual subnormal predicate/state/output checks remain. The shared mask scan and all retained current-law/width/numeric/fault/partition/state gates were reviewed and passed in attempt 1; the final stationary family, strict clippy and formatting/diff checks pass. No measured allocation, timing, device-execution or additional SIMD result is claimed.
+
+Rewritten test value, by distinct behavior:
+- Redundant finite retarget rejects arming a stationary value even when its emitted PCM happens to agree.
+- Negative-zero retarget rejects skipping its armed intermediate positive zeros or losing the final negative-zero snap.
+- Sign-flipping zero targets reject treating opposite zero signs as a stationary pair; the same-negative-zero case cannot catch that pair.
+- Subnormal retarget rejects excluding or flushing exact subnormal words absent from the normal-value cases.
+- Nonfinite predicate rejects infinite stationary admission, which finite and NaN-only cases cannot expose.
+- Mid-flight retarget rejects retaining an old target/step or requiring rest before cancelling a flight at its live value.
+- Closing-block segment rejects stale ramp state/segment words after a completed block and redundant retarget, rather than only a freshly fixed ramp.
+- One-ULP movement rejects a tolerant stationary predicate swallowing a real change; the wider movement cases would pass.
+- The finite-reciprocal knee gate rejects exact coefficient and one-ULP overflow-transition defects hidden by curve tolerances/directed widths.
+- Reused ramp and boundary buffers preserve every previous frame/lane/position witness, while the removed identical partition run and unrelated clean-channel call added no independent defect.
+
+The documented infinity mismatch is corrected without changing its behavior. No owner question remains for this crate.
