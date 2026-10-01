@@ -5,7 +5,6 @@
 //! A native tool: #1075 retired the `protocol` subject, the last one with a wasm32 build (owner
 //! ruling R9, only real host paths are benchmarked).
 
-use std::ffi::OsString;
 use std::process::Command;
 
 mod console;
@@ -60,8 +59,7 @@ fn main() {
     if !SUBJECTS.contains(&subject.as_str()) {
         usage();
     }
-    let subject_args: Vec<OsString> = args.collect();
     let mut command = Command::new(std::env::current_exe().expect("current executable path"));
-    command.args(subject_args).env(INTERNAL_SUBJECT, subject);
+    command.args(args).env(INTERNAL_SUBJECT, subject);
     launch(command);
 }

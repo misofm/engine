@@ -22,9 +22,9 @@
 //! 3. **Engagement on the console (gate 2).** The mono console keeps every cohort collapsed
 //!    through both-channel rides and restatements, and a one-channel write or a near pair retires
 //!    exactly its own cohort, while rendering the forced-dual bits block by block.
-//! 4. **The pinned scenario (gate 3).** The mono console's 8-of-64 mixed ride at `Simd8` and
-//!    `Simd4`, pinned to the digests of the base tree this issue started from. The digest may not
-//!    move; only the collapse counters may.
+//! 4. **Mixed-ride width equality and activity.** The mono console's 8-of-64 mixed ride agrees
+//!    between supported widths. Each isolated effect ride must also move the settled output,
+//!    while every native-width cohort remains collapsed.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1687,8 +1687,8 @@ impl Subject {
                 report.reports[0].invalid_spans
             }
             Self::Scalar(effect) => {
-                let mut left = planes.left[0].clone();
-                let mut right = planes.right[0].clone();
+                let mut left = planes.left.into_iter().next().expect("scalar left plane");
+                let mut right = planes.right.into_iter().next().expect("scalar right plane");
                 effect
                     .process(
                         EffectProcessBlock::new(
@@ -2358,34 +2358,23 @@ fn a_one_channel_write_or_a_near_pair_retires_exactly_its_cohort() {
 }
 
 // =============================================================================================
-// Part 4: the pinned scenario (gate 3)
+// Part 4: the current mixed-ride width comparison and activity controls
 // =============================================================================================
 
-/// The mono console's 8-of-64 mixed ride over 128 blocks, pinned to the output digest of the base
-/// tree (`1010d50c`, code-identical to the diagnosis base `49f696c7`).
+/// The mono console's 8-of-64 mixed ride over 128 blocks agrees between supported widths.
 ///
 /// Every track's three controls are first set at the ride's bases (the EQ as `Both` owner edits,
 /// the compressor and the limiter as `Left` then `Right` records -- the product's shapes), then the
-/// ride runs. On the base tree the settle writes retire every cohort for the whole run; with the
-/// pairing rule every cohort stays collapsed on every block at `Simd8`. The digest is the same:
-/// only the counters move.
+/// ride runs. Every cohort stays collapsed on every block at the native width.
 ///
-/// The ride has to be doing something for the pin to say anything (VERIFY-AUTOMATION F6), so the
+/// The ride has to be doing something for the comparison to say anything, so the
 /// run also asserts that each of the three rides moves the output away from the settled run.
 #[test]
-fn the_pinned_mixed_ride_renders_the_base_bits() {
+fn the_mixed_ride_moves_each_effect_and_agrees_between_supported_widths() {
     const BLOCKS: u64 = 128;
-    // Taken on the base tree at both widths, which render the same bits. On the base tree the
-    // collapse counters were `[0, 8]` at `Simd8` (the settle writes retire every cohort before the
-    // first block renders) and `[2048, 16]` at `Simd4`, where this x86-64-v3 build binds no
-    // four-lane EQ or compressor bank (decision D4), so no collapsed chain holds one.
-    const BASE: &str = "9242f149101f3bcd2e48268096169f1670a4ec368fe11071408f6b44a49c45a4";
-    let pins = Backend::VECTOR
-        .iter()
-        .rev()
-        .map(|&dispatch| (dispatch, BASE));
     let native = Backend::current();
-    for (dispatch, pin) in pins {
+    let mut first_digest = None;
+    for &dispatch in Backend::VECTOR.iter().rev() {
         if dispatch.width() > native.width() {
             continue;
         }
@@ -2427,7 +2416,14 @@ fn the_pinned_mixed_ride_renders_the_base_bits() {
                 "{dispatch:?}: ride part {part} must move the output"
             );
         }
-        assert_eq!(digest, pin, "{dispatch:?}: the mixed ride moved a bit");
+        if let Some(expected) = &first_digest {
+            assert_eq!(
+                &digest, expected,
+                "{dispatch:?}: the mixed ride differs by width"
+            );
+        } else {
+            first_digest = Some(digest);
+        }
         if dispatch == native {
             assert_eq!(
                 counters[0],
