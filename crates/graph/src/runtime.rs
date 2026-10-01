@@ -8009,16 +8009,14 @@ mod tests {
 
     /// Independent D9 definition: one scalar left-to-right chain per frame.
     fn reference_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
-        let reference: Vec<f32> = (0..lease.frames())
-            .map(|frame| {
-                inputs
-                    .iter()
-                    .map(|input| lease.read(plane, *input)[frame])
-                    .reduce(|left, right| left + right)
-                    .unwrap_or(0.0)
-            })
-            .collect();
-        lease.write(plane, out).copy_from_slice(&reference);
+        for frame in 0..lease.frames() {
+            let value = inputs
+                .iter()
+                .map(|input| lease.read(plane, *input)[frame])
+                .reduce(|left, right| left + right)
+                .unwrap_or(0.0);
+            lease.write(plane, out)[frame] = value;
+        }
     }
 
     fn assert_width_matches_reference<L: Lane>() {
