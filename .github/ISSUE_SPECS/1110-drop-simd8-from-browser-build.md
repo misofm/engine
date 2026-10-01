@@ -469,3 +469,113 @@ module is still `cd49dc1c…` and its named twin `369d858a…`.
   and for `wasm32` with `simd128`. rustdoc `-D warnings` on them too.
 - `test-ci-path-routing.py` and `check-ci-path-routing.py`.
 - The lint job's hermetic steps: 25 of 25.
+
+## Batch boundary evidence
+
+**PASS, nothing fixed.** Terra checked the merged batch once, as `qualification.yml` would. The
+batch is `codex/batch-wasm-size-1` at `0eabf578` on `origin/main` `7d030945`. It merges #1109 (the
+shipped module drops its `name` section; the gates read the named twin) and #1110 (no eight-lane
+code in the browser build; the wasm guest is Scalar against `Simd4`), with root's post-verdict gate
+hardening (M1, L1-L3), root's roster-row deletion and the removal of three closed specs.
+- The router gives `route=full`, `math_closure=true`, `release_inputs=true` and all five
+  `self_tests` (`env-vocabulary`, `conformance-boundaries`, `console-benchmark`, `sdk-deletions`,
+  `dsp-research`), for `--event push` and `--event pull_request` alike, base `7d030945`.
+- 110 steps ran on an x86-64-v3 host (AMD EPYC 7313P) with rustc 1.97.1, `CARGO_INCREMENTAL=0` and
+  the worktree's `target/`. Every step exited 0.
+- No merge-interaction defect was found, and nothing needed a commit beyond this record.
+- No timed benchmark ran.
+
+| Job | Gate (command) | Result |
+|---|---|---|
+| route | `check-ci-path-routing.py`, `test-ci-path-routing.py` (the batch changes CI steps) | ok |
+| docs-gates | `check-dsp-research.sh`, `check-builtins-listening.sh` | ok |
+| lint | `cargo fmt --all -- --check` | ok |
+| lint | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| lint | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | ok |
+| lint | the job's other 25 steps, the same list as C4's, including script reachability (`strip-wasm-names.py` is reached) | all ok |
+| lint | the three sub-v3 probes: scalar and AVX2-without-FMA are refused with "requires x86-64-v3", and AVX2+FMA compiles | ok |
+| gate-self-tests | the five routed suites: `test-env-vocabulary.sh`, `test-conformance-boundaries.sh`, `test-console-benchmark.sh`, `check-sdk-deletions.py --self-test`, `test-dsp-research.sh` | all ok |
+| new self-tests | `strip-wasm-names.py --self-test` (every mutation caught); `check-web-audioworklet-callgraph.py --self-test` (case (g), eight lanes); `check-web-audioworklet-v8-spill.py --self-test` (19 cases); `web-audioworklet-identity.py --self-test`; the residency self-test inside `run-wasm-gates.sh` | all ok |
+| test-debug-a | `cargo test --locked --workspace --all-targets --exclude …` with the job's features | 96 binaries, 1150 passed, 0 failed |
+| test-debug-b | `cargo test --locked --all-targets -p lane … -p conformance` with the job's features; `conformance_fixtures -- --check` | 151 binaries, 834 passed, 0 failed; fixtures ok |
+| test-release | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | 109 passed; `g5_native_digests_match_pins` ok, every `Simd8` pin included |
+| test-release | the M3 FMA cfg check; loom `spsc_loom`; M1 `m1_exhaustive` and F1 `f1_fast_db_bounds` `--ignored` (math closure) | ok |
+| audit-native | release build; `cargo test --release -p audit -p bench -p console-workload` | 114 passed, 0 failed |
+| audit-native | `audit capi` and its record validator (`pcm_digest` `ff6cdcb96cdcdad5`, unchanged); `audit delay`, `compressor` and `parametric-eq` at 100,000 blocks; `audit gate-expander` (bank width 8, `bank_available`) | every counter 0, `total_violations` 0 |
+| audit-native | the builtins, builtins-graph, graph, realtime and effect-contract traces at 1,000,000 blocks; the protocol allocation audit; the realtime, builtins and builtins-graph probe mutations | ok |
+| audit-native | `check-capi-abi.sh` and `--self-test`; scalar oracle absent from `libcapi.so`; graph determinism 100/100; builtins fixtures (50 files); console fixtures; `check-effect-contract.sh` (8 factories, 0 failed gates) | ok |
+| wasm-guests | runner build; simd128 probe; evidence crates; `check-protocol-wasm-parity.sh`; `run-wasm-gates.sh --without-v8-spill --without-native` | ok: wasm 142 cases, 250 comparisons at Scalar and `Simd4`, 0 mismatches; residency scanned 7 limiter functions |
+| wasm gates, full | `run-wasm-gates.sh` with no flags | ok: native 358 comparisons at three widths, wasm 250, 0 mismatches; the `f64` censuses and the V8 EQ loops pass |
+| cross-target | `scripts/check-cross-targets.sh` | PASS. The iOS `memset_pattern16` rows are the #1018 expected failures (parametric-eq 146). |
+| release-shape | `check-release-shape.py`; `CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets` | ok |
+| artifact | `build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts` | shipped `cd49dc1c…d408`, named twin `369d858a…cfcde`, closure `02ca569e…b259` |
+| artifact-identity | a twin `--module-only` build from another path and `CARGO_HOME`; `web-audioworklet-identity.py --self-test` and `report --event push --before 7d030945` | reproducible; **ARTIFACT CHANGED** |
+| artifact-gates | the named twin against the shipped module: `strip-wasm-names.py --self-test` and `check` | ok: 9 non-custom and 2 other custom sections byte-identical; the `name` section is 373,186 B |
+| artifact-gates | `check-web-audioworklet.sh --without-metadata-regeneration` on the shipped closure and the named twin; `check-browser-expected-resources.py --artifacts` | ok: 12 kernels on `4wide6f32x4` against `--kernel-min 11`, all ten roster rows ok, "eight lanes: none among 2456 functions"; `expected.json` digests and rows agree |
+| artifact-gates | `check-scalar-oracle-absent.py --wasm` on the named twin; `test-web-audioworklet.sh`; the V8 spill self-test and gate on the named twin (Node 22.23.2) | ok |
+| #1109 gate 3 | the call graph, scalar-oracle and V8 spill gates fed the shipped module | each refuses it with its typed "no `name` section … give it the named twin" message (exit 1, 1 and 2) |
+| sdk | from a clean `npm ci`: `check-sdk-generated.sh`, `check-sdk-deletions.py`, `check-sdk-types.sh`, `check-sdk-headless.sh` (329 passed) and `sdk-package.sh check` | ok |
+| browser | `npm run qualify -- … --check-matrix --self-test-mutations` on the shipped module, for Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, each in CI's source-bundle mode | all qualification gates passed; the exact 7-file shipped set is pinned |
+| console benchmark | `scripts/test-console-benchmark.sh`; `operator/preflight-console-benchmark.sh --step terra-wasm-boundary-scratch` | PASS; the preflight PASS has 0 workload launches and wrote no step directory |
+| V8 harness | `run-web-mixing-automation-benchmark.sh prepare` and then `preflight`, into empty scratch directories, at the head and at `7d030945` | PASS |
+| aarch64-debug/-release | see below | resolved; not run (no arm64 host) |
+
+**Artifact.** ARTIFACT CHANGED. The committed pin (`6c952a2c…`) was not touched; under #1061 it is
+checked only at release.
+
+| | main `7d030945` | batch named twin (not shipped) | batch shipped module |
+|---|---|---|---|
+| Digest | `ac3a9353e8107fa409398c16fb27de7cc9846b3c5b0cecf8f864535ad302efc9` | `369d858a0dcb1a26c46ebf73cfa2f342f3f932fdaf56c1d1585f64488aacfcde` | `cd49dc1c4926fd98b9d5240b9b97dd9dd807f2df0e237cf1918c57abe21fd408` |
+| Size | 3,289,705 B | 3,044,007 B (−245,698 B, −7.47 %: #1110) | 2,670,821 B (−618,884 B, −18.81 %: #1110 and #1109) |
+
+- The main digest is the `audioworklet-sha256` status that main's own run recorded. The V8
+  harness's `prepare` on a detached clone of `7d030945` reproduces it byte for byte.
+- The digests and sizes are the ones Sol's #1110 verdict and the post-verdict fixes report.
+
+**Class A.** The head and a detached clone of `7d030945` each got their own release build, with
+the base's in `target/ci/base-7d030945`.
+- **Console digests.** `cargo test --release -p console-workload --test gain_pan_profile digests
+  -- --ignored`: **22 of 22 rows are identical**, including `sixty_four_track_app_shape`
+  `c740fa2dd904` and the nine-, ten- and thirteen-track ragged strips.
+- **`bench console --preflight`.** The output is identical (16 lines).
+- **V8 preflight.** Apart from `module_sha256`, the output is identical to the base's. The 7 arm
+  digests also equal S0's record (`preflight_output_sha256`): quiet and restated `014e5f5b…`,
+  automated `e7025b5c…`, EQ `2540aff4…`, compressor `c29d12a7…`, limiter `8db18991…`. Both
+  documents are identical: console `d913ad961d2d` and app `3dd8b2fff4b9`. `controls.json` is
+  identical (`a32cb879…`).
+- **S0's baselines, untimed.** As in C4: a `git archive` of the head, built into its own target
+  directory, with `bench_support::timing::timed` returning 0 without reading the clock and nothing
+  else changed. One run of its `bench console` subject (round marker `1`, output in scratch) gives
+  all 30 of S0's round-1 records in `artifacts/steps/console-strip-base/`.
+  - **All 50 render-digest fields are equal**, every row's `output_sha256` among them.
+  - Besides timing, only the app row's `strip_layout` differs (`inserts:` -> `pre_insert:`), as in
+    C3 and C4.
+- The wasm gates (Scalar against `Simd4`), the G5 native corpus (every `Simd8` pin), the browsers'
+  native-digest gate and `expected.json` all pass on pins this batch does not edit.
+
+**AArch64 legs.** They cannot run on this host: there is no arm64 machine, cross linker or
+`qemu-aarch64`. Resolved:
+- **Debug leg.** The 25 product crates (`capi`'s closure, from `scripts/lib/product-crates.sh`)
+  plus `dsp-reference`, `conformance` and `target-smoke`. It has no expected-failure rows.
+- **Release leg.** `lane` and `math` with `math/lane`, then `console-workload`, then the capi,
+  delay, compressor, parametric-eq and gate-expander audits. It has two #1019 rows:
+  `m2_exp2_lane_identity` and `m2_log2_lane_identity`, both in `math`'s `m2_lane_identity`.
+  `aarch64-release`'s G5 step is unfiltered.
+- **Checks run here.**
+  - The no-silent-skip scan, exactly as the script writes it (rg exit 1, no match).
+  - The known-defect self-test.
+  - `judge-skips` over each leg's `--list`: debug 1817 tests, release 114 tests. The listings come
+    from x86 builds of the same packages and features. #1110's predicate is
+    `not(target_arch = "wasm32")`, so it adds or removes no AArch64 test. Every row names exactly
+    one test.
+
+**Local deviations, none a gate change.**
+- The twin build's second checkout is a `git archive` of `HEAD`, with a fresh `CARGO_HOME`, both
+  in scratch.
+- The identity report ran as the main push will: `--event push --before 7d030945`.
+- The release-shape unwind check used its own target directory, `target/ci/unwind`.
+- The wasm guest builds in `target/ci/wasm-gates-*` were cargo-fresh from an earlier build of this
+  head.
+- The browser legs' pulse sockets and `TMPDIR` used short `/tmp` paths, as in C2 to C4.
+- The `sdk/dist` that `sdk-package.sh check` leaves was removed before the browser legs, so all
+  three ran in CI's source-bundle mode.
