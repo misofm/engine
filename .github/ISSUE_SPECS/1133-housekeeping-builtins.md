@@ -150,3 +150,19 @@ keeps every original field/comparison/early-exit order and preserves the approve
 determinism and test reductions. The one-time comparison above is evidence of why the abstraction
 was rejected; no permanent historical code or code-generation pin is added. Prior full package,
 supported-target and downstream results remain applicable; revision gates/results follow below.
+
+- One-time source comparison confirms both complete restored symmetry bodies equal the pre-attempt
+  source, with the rejected helper absent; there is no new arithmetic or extraction path to qualify.
+- `cargo fmt -p builtins --check`, `git diff --check`, and locked all-feature library tests: PASS
+  (15, including independent masks, extraction counts, settled exclusions, asymmetric filter steps,
+  dual/mono prefix bounds and actual dispatch witnesses).
+- Strict all-target/all-feature package Clippy: exit 0, same pre-existing `clippy.toml` path warnings.
+- Final package delta versus the pre-attempt base: Rust +148/-428, net -280; history notes +13,
+  total net -267. No additional package, target or timed workload was run for this exact restoration.
+  Root final verdict and remote issue closure are pending.
+
+### Root adversarial review — attempt 2
+
+Root adversarial verdict: PASS for the frozen housekeeping scope. Root reviewed the complete implementation/test diff and narrow revision: symmetry bodies exactly restore the pre-attempt operation/extraction order, avoiding the newly demonstrated W8/scalar materialization; borrowed current/target readback and direct lattice fields preserve their order and values. The failed factoring remains candid evidence, with no timing claim. All existing package/target/downstream gates plus focused revision tests and strict Clippy support this bounded result.
+
+Test value: the rewritten bank fused-matrix family detects hostile signed-zero or padded/retargeted PCM/state changes that finite-input separate-stage comparisons and dispatch counters cannot inspect, including the preserved 200-sample identity endpoint. The scalar family detects the same faults at the live scalar fused call site, comparing every retained ramp word and direct eligibility. Determinism still rejects nonfinite/empty/insufficiently diverse case output while replacing its set with owned-vector sorting. Identity-elision still rejects wrong negative-zero, padded-lane, seeded-state or reset predicates; its deleted comparison ran the same construction twice. Removed subset symmetry and one-sample stage smoke have the named stronger current owners. No new fixture pin, historical implementation, DSP expression or feature change.
