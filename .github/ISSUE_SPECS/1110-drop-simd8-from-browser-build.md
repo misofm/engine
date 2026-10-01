@@ -405,3 +405,67 @@ specs and `docs/`. So every digest gate above passing means its digests equal `7
     (`crates/transient-shaper/src/corpus.rs:65` and `:178`) could use `for_lanes` with
     `match_bank_width!`, as the EQ corpus does. The per-crate rlib identity they preserve is not
     product code, because fat LTO drops the corpus from the linked library.
+
+## Post-verdict fixes (root-directed)
+
+Terra, 2026-10-01, on `codex/batch-wasm-size-1` from `50ad88df`. This closes Sol's M1, L1, L2 and
+L3. L4 is out of scope and untouched. Only the gates and the gate guest changed, so the shipped
+module is still `cd49dc1c…` and its named twin `369d858a…`.
+
+- **M1** (`d327b705`, `089a566e`).
+  - The guest exports `miso_gate_lane_width(index)`: the `Lane::WIDTH` of the type `at_width!`
+    binds at that index (`wasm_gate_corpus::lane_width`).
+  - The host's `ExpectedBackend::widths()` became `lane_widths()`, which is `[1, 4]` for `simd4`.
+    The guest's per-index lane counts must equal it exactly.
+  - Mutation "`at_width!` index 1 runs `f32`" is now red: "guest digests at lane widths [1, 1] but
+    a simd4 guest has [1, 4]". It was green before, with 250 comparisons and 0 mismatches.
+- **L1** (`5b3cf97a`).
+  - The residency pin counts the in-scope `true_peak_limiter` functions it scans, and fails on zero.
+    The `simd128` guest has 7.
+  - A hermetic self-test runs before the guest build, on synthetic disassembly:
+    - a 192-byte `memory.copy` in a limiter function is red;
+    - a disassembly with no limiter function is red;
+    - the same function copying 64 bytes is green.
+  - Both scanner mutations turn the self-test red: removing the zero check, and breaking the size
+    match.
+  - The guest with its `name` section stripped is red. The old pin passed it.
+- **L2** (`45f5b488`).
+  - `--kernel-shape` also runs a fourth rule, `check_no_eight_lanes`: no function name may match
+    `EIGHT_LANE`, which covers `f32x8`, `f64x8`, `u32x8`, `i32x8`, `simd8` and `transpose_tile_8`.
+  - The ratchet pattern is now `4wide6f32x4`.
+  - `7d030945`'s named module (`ac3a9353…`) is red, with 29 eight-lane functions named. The old
+    gate passed it, counting 15 kernels.
+  - The batch's named twin is green: 12 kernels, and no eight-lane name among its 2,456 functions.
+  - Self-test case (g) shows each spelling red. A crate hash that merely contains `x8` is not red;
+    the base module had three such hashes.
+  - A const-generic `8` (`Kj8_`) is left out of the rule. All 19 of those in the base module also
+    name `f32x8`, and an eight-element array is not a lane width.
+- **L3** (`45f5b488`).
+  - In `check-web-audioworklet.sh`, the multiband `f32x8` row is now a historical note, and
+    "thirteen kernels, two-kernel slack" now reads twelve kernels with a slack of one.
+  - In the analyser, `KERNEL_ROSTER` has nine rows. The collapsed limiter's kernel, held by the
+    forwarding rule, makes ten. Seven of the ten carry zero scalar arithmetic; the old prose said
+    four of eight.
+
+**Test value.** Each new check, and the plausible defect only it turns red:
+- **M1's host pin:** a guest whose width index 1 runs a lane type other than `Simd4`. Such a guest
+  digests the scalar oracle twice and matches every pin.
+- **L1's zero-scan assertion and its self-test:** a guest without names, or a renamed limiter crate,
+  which the pin used to pass unread; and a residency scanner whose size match broke.
+- **L2's rule and case (g):** eight lanes coming back to the browser build in full, through a
+  reverted predicate. Every other gate passes the base module.
+
+**Gates.** All green.
+- `bash scripts/check-web-audioworklet.sh`, in its self-building no-argument form. It reports
+  `cd49dc1c…`, 12 kernels, all ten roster rows ok, and no eight-lane name.
+- The call-graph `--self-test`, inside `test-web-audioworklet.sh`.
+- `run-wasm-gates.sh`, full.
+  - Native: 358 comparisons. Wasm: 250. 0 mismatches.
+  - Residency: 7 limiter functions scanned.
+  - The `f64` censuses and the V8 EQ loops pass.
+- `cargo test --release -p wasm-gates -p wasm-gate-corpus`: 9 passed.
+- fmt.
+- Clippy `-D warnings` on the three touched crates: natively with `--all-targets --all-features`,
+  and for `wasm32` with `simd128`. rustdoc `-D warnings` on them too.
+- `test-ci-path-routing.py` and `check-ci-path-routing.py`.
+- The lint job's hermetic steps: 25 of 25.
