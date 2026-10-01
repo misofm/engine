@@ -70,9 +70,15 @@
 //! the schema tag and `abiVersion` are unmoved, and the new key is *never absent*, so there is no
 //! "document predates ports" state for a reader to have to distinguish.
 
+macro_rules! append {
+    ($out:expr, $($arguments:tt)*) => {
+        std::fmt::Write::write_fmt($out, format_args!($($arguments)*))
+            .expect("writing to a String cannot fail")
+    };
+}
+
 pub mod abi_layout;
 
-use std::fmt::{Arguments, Write as _};
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -134,15 +140,15 @@ pub fn render() -> String {
     let registry = launch_native_effect_registry().expect("launch effect registry");
     let mut out = String::with_capacity(1 << 16);
     out.push_str("{\n");
-    append(&mut out, format_args!("  \"schema\": \"{SCHEMA}\",\n"));
-    append(&mut out, format_args!("  \"abiVersion\": {ABI_VERSION},\n"));
-    append(
+    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
+    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
+    append!(
         &mut out,
-        format_args!("  \"commandRecordBytes\": {COMMAND_RECORD_BYTES},\n"),
+        "  \"commandRecordBytes\": {COMMAND_RECORD_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("  \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"),
+        "  \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     );
     out.push_str("  \"commandKinds\": [\n");
     let kinds = [
@@ -175,13 +181,11 @@ pub fn render() -> String {
         (COMMAND_INPUT_FILTERS, "inputFilters", true, PLANE_RENDER),
     ];
     for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
-        append(
+        append!(
             &mut out,
-            format_args!(
-                "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied}, \
+            "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied}, \
              \"plane\": \"{plane}\" }}{}\n",
-                comma(index, kinds.len())
-            ),
+            comma(index, kinds.len())
         );
     }
     out.push_str("  ],\n");
@@ -206,12 +210,10 @@ pub fn render() -> String {
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
-        append(
+        append!(
             &mut out,
-            format_args!(
-                "    {{ \"value\": {value}, \"name\": \"{name}\" }}{}\n",
-                comma(index, reasons.len())
-            ),
+            "    {{ \"value\": {value}, \"name\": \"{name}\" }}{}\n",
+            comma(index, reasons.len())
         );
     }
     out.push_str("  ],\n");
@@ -253,20 +255,15 @@ pub fn render() -> String {
         ),
     ];
     for (index, (name, rows)) in vocabularies.iter().enumerate() {
-        append(&mut out, format_args!("    \"{name}\": ["));
+        append!(&mut out, "    \"{name}\": [");
         for (row, (value, label)) in rows.iter().enumerate() {
-            append(
+            append!(
                 &mut out,
-                format_args!(
-                    "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
-                    if row + 1 == rows.len() { "" } else { ", " }
-                ),
+                "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
+                if row + 1 == rows.len() { "" } else { ", " }
             );
         }
-        append(
-            &mut out,
-            format_args!("]{}\n", comma(index, vocabularies.len())),
-        );
+        append!(&mut out, "]{}\n", comma(index, vocabularies.len()));
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"response\": ");
@@ -275,7 +272,7 @@ pub fn render() -> String {
     let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {
         builtin_parameter(&mut out, parameter);
-        append(&mut out, format_args!("{}\n", comma(index, builtins.len())));
+        append!(&mut out, "{}\n", comma(index, builtins.len()));
     }
     out.push_str("    ]\n  },\n");
     out.push_str("  \"effects\": [\n");
@@ -284,7 +281,7 @@ pub fn render() -> String {
             .get_ascii(descriptor.id.as_str())
             .and_then(|factory| factory.response_analysis());
         effect(&mut out, descriptor, response);
-        append(&mut out, format_args!("{}\n", comma(index, registry.len())));
+        append!(&mut out, "{}\n", comma(index, registry.len()));
     }
     out.push_str("  ]\n}\n");
     out
@@ -292,11 +289,6 @@ pub fn render() -> String {
 
 fn comma(index: usize, total: usize) -> &'static str {
     if index + 1 == total { "" } else { "," }
-}
-
-fn append(out: &mut String, arguments: Arguments<'_>) {
-    out.write_fmt(arguments)
-        .expect("writing to a String cannot fail");
 }
 
 /// Finite `f32` as JSON. Non-finite values cannot occur: every descriptor field is validated
@@ -321,31 +313,27 @@ fn effect(
     response: Option<&dyn NativeEffectResponseFactory>,
 ) {
     out.push_str("    {\n");
-    append(
+    append!(
         out,
-        format_args!("      \"id\": \"{}\",\n", escape(descriptor.id.as_str())),
+        "      \"id\": \"{}\",\n",
+        escape(descriptor.id.as_str())
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "      \"displayName\": \"{}\",\n",
-            escape(descriptor.display_name)
-        ),
+        "      \"displayName\": \"{}\",\n",
+        escape(descriptor.display_name)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "      \"contractMajor\": {}, \"contractMinor\": {}, \"stateLayoutVersion\": {},\n",
-            descriptor.contract_major, descriptor.contract_minor, descriptor.state_layout_version
-        ),
+        "      \"contractMajor\": {}, \"contractMinor\": {}, \"stateLayoutVersion\": {},\n",
+        descriptor.contract_major,
+        descriptor.contract_minor,
+        descriptor.state_layout_version
     );
     out.push_str("      \"parameters\": [\n");
     for (index, parameter) in descriptor.parameters.iter().enumerate() {
         effect_parameter(out, parameter);
-        append(
-            out,
-            format_args!("{}\n", comma(index, descriptor.parameters.len())),
-        );
+        append!(out, "{}\n", comma(index, descriptor.parameters.len()));
     }
     out.push_str("      ],\n");
     // Issue #278: the declared port table, in the descriptor's own order (role ascending), and
@@ -390,51 +378,41 @@ fn effect(
 
 fn response_descriptor(out: &mut String, descriptor: &ResponseAnalysisDescriptor) {
     out.push_str("{ ");
-    append(
+    append!(
         out,
-        format_args!(
-            "\"id\": {}, \"name\": \"{}\", \"axisUnit\": \"{}\", \"unit\": \"{}\", ",
-            descriptor.id,
-            escape(descriptor.name),
-            response_axis_unit(descriptor.axis_unit),
-            response_axis_unit(descriptor.unit),
-        ),
+        "\"id\": {}, \"name\": \"{}\", \"axisUnit\": \"{}\", \"unit\": \"{}\", ",
+        descriptor.id,
+        escape(descriptor.name),
+        response_axis_unit(descriptor.axis_unit),
+        response_axis_unit(descriptor.unit),
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "\"amplitudeReference\": \"{}\", \"channels\": \"{}\", \"mode\": \"{}\", ",
-            response_amplitude_reference(descriptor.amplitude_reference),
-            response_channels(descriptor.channels),
-            response_mode(descriptor.mode),
-        ),
+        "\"amplitudeReference\": \"{}\", \"channels\": \"{}\", \"mode\": \"{}\", ",
+        response_amplitude_reference(descriptor.amplitude_reference),
+        response_channels(descriptor.channels),
+        response_mode(descriptor.mode),
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "\"cadence\": \"{}\", \"sectionOutput\": \"{}\", \"cost\": \"computed\", ",
-            response_cadence(descriptor.cadence),
-            response_section_output(descriptor.section_output),
-        ),
+        "\"cadence\": \"{}\", \"sectionOutput\": \"{}\", \"cost\": \"computed\", ",
+        response_cadence(descriptor.cadence),
+        response_section_output(descriptor.section_output),
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "\"floorDb\": {}, \"totalScope\": \"{}\", \"bypass\": \"{}\", \"sections\": [",
-            number(descriptor.floor_db),
-            response_scope(descriptor.total_scope),
-            response_bypass(descriptor.bypass),
-        ),
+        "\"floorDb\": {}, \"totalScope\": \"{}\", \"bypass\": \"{}\", \"sections\": [",
+        number(descriptor.floor_db),
+        response_scope(descriptor.total_scope),
+        response_bypass(descriptor.bypass),
     );
     for (index, section) in descriptor.sections.iter().enumerate() {
-        append(
+        append!(
             out,
-            format_args!(
-                "{{ \"id\": {}, \"name\": \"{}\" }}{}",
-                section.id,
-                escape(section.name),
-                comma(index, descriptor.sections.len()),
-            ),
+            "{{ \"id\": {}, \"name\": \"{}\" }}{}",
+            section.id,
+            escape(section.name),
+            comma(index, descriptor.sections.len()),
         );
     }
     out.push_str("] }");
@@ -498,18 +476,16 @@ const fn response_bypass(bypass: ResponseBypassSemantics) -> &'static str {
 /// observation's `kind`: the descriptor wire and the C inspect record carry the `u32`, and a
 /// consumer that resolves it from this document never keeps a second table of its own.
 fn effect_port(out: &mut String, port: &PortDescriptor) {
-    append(
+    append!(
         out,
-        format_args!(
-            "        {{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{}\", \
+        "        {{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{}\", \
 \"required\": {}, \"layout\": {}, \"layoutName\": \"{}\" }}",
-            escape(port.id.as_str()),
-            port.role as u32,
-            port_role_name(port.role),
-            port.required,
-            port.layout as u32,
-            port_layout_name(port.layout),
-        ),
+        escape(port.id.as_str()),
+        port.role as u32,
+        port_role_name(port.role),
+        port.required,
+        port.layout as u32,
+        port_layout_name(port.layout),
     );
 }
 
@@ -535,33 +511,31 @@ fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
     // derived rather than written down -- and why the schema gate refuses a computed tap that
     // claims to be subscribable.
     let subscribable = matches!(observation.cost, ObservationCost::Resident);
-    append(
+    append!(
         out,
-        format_args!(
-            "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
+        "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
 \"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
 \"cost\": {}, \"costName\": \"{}\", \"cadence\": {}, \"cadenceName\": \"{}\", \
 \"fold\": {}, \"foldName\": \"{}\", \"channels\": {}, \"channelsName\": \"{}\", \
 \"minimum\": {}, \"maximum\": {}, \"subscribable\": {} }}",
-            observation.id.0,
-            escape(observation.display_name),
-            escape(observation.display_unit),
-            observation.kind as u32,
-            observation_kind_name(observation.kind),
-            observation.unit as u32,
-            unit_name(observation.unit),
-            observation.cost as u32,
-            observation_cost_name(observation.cost),
-            observation.cadence as u32,
-            observation_cadence_name(observation.cadence),
-            observation.fold as u32,
-            observation_fold_name(observation.fold),
-            observation.channels as u32,
-            observation_channels_name(observation.channels),
-            number(observation.minimum),
-            number(observation.maximum),
-            subscribable,
-        ),
+        observation.id.0,
+        escape(observation.display_name),
+        escape(observation.display_unit),
+        observation.kind as u32,
+        observation_kind_name(observation.kind),
+        observation.unit as u32,
+        unit_name(observation.unit),
+        observation.cost as u32,
+        observation_cost_name(observation.cost),
+        observation.cadence as u32,
+        observation_cadence_name(observation.cadence),
+        observation.fold as u32,
+        observation_fold_name(observation.fold),
+        observation.channels as u32,
+        observation_channels_name(observation.channels),
+        number(observation.minimum),
+        number(observation.maximum),
+        subscribable,
     );
 }
 
@@ -606,20 +580,18 @@ const fn observation_channels_name(channels: ObservationChannels) -> &'static st
 /// declared `f32` exactly -- a ratio row's authority really is the decimal `1.02`, and rendering
 /// it at the row's own eight-decimal value precision would spell it `1.01999998`.
 fn step_object(out: &mut String, lattice: ParameterLattice) {
-    append(
+    append!(
         out,
-        format_args!(
-            "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
+        "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
 {{ \"xs\": {}, \"sm\": {}, \"md\": {}, \"lg\": {}, \"xl\": {} }} }}",
-            step_unit_name(lattice.step_unit),
-            lattice.step,
-            lattice.precision,
-            lattice.ladder.multiple(StepSize::Xs),
-            lattice.ladder.multiple(StepSize::Sm),
-            lattice.ladder.multiple(StepSize::Md),
-            lattice.ladder.multiple(StepSize::Lg),
-            lattice.ladder.multiple(StepSize::Xl),
-        ),
+        step_unit_name(lattice.step_unit),
+        lattice.step,
+        lattice.precision,
+        lattice.ladder.multiple(StepSize::Xs),
+        lattice.ladder.multiple(StepSize::Sm),
+        lattice.ladder.multiple(StepSize::Md),
+        lattice.ladder.multiple(StepSize::Lg),
+        lattice.ladder.multiple(StepSize::Xl),
     );
 }
 
@@ -634,109 +606,89 @@ const fn step_unit_name(unit: StepUnit) -> &'static str {
 
 fn effect_parameter(out: &mut String, parameter: &ParameterDescriptor) {
     out.push_str("        {\n");
-    append(out, format_args!("          \"id\": {},\n", parameter.id.0));
-    append(
+    append!(out, "          \"id\": {},\n", parameter.id.0);
+    append!(
         out,
-        format_args!(
-            "          \"name\": \"{}\",\n",
-            escape(parameter.display_name)
-        ),
+        "          \"name\": \"{}\",\n",
+        escape(parameter.display_name)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"displayUnit\": \"{}\",\n",
-            escape(parameter.display_unit)
-        ),
+        "          \"displayUnit\": \"{}\",\n",
+        escape(parameter.display_unit)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"unit\": {}, \"unitName\": \"{}\",\n",
-            parameter.unit as u32,
-            unit_name(parameter.unit)
-        ),
+        "          \"unit\": {}, \"unitName\": \"{}\",\n",
+        parameter.unit as u32,
+        unit_name(parameter.unit)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"domain\": {}, \"domainName\": \"{}\",\n",
-            parameter.domain as u32,
-            domain_name(parameter.domain)
-        ),
+        "          \"domain\": {}, \"domainName\": \"{}\",\n",
+        parameter.domain as u32,
+        domain_name(parameter.domain)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"minimum\": {}, \"maximum\": {}, \"default\": {},\n",
-            optional_number(parameter.minimum),
-            optional_number(parameter.maximum),
-            number(parameter.default_value)
-        ),
+        "          \"minimum\": {}, \"maximum\": {}, \"default\": {},\n",
+        optional_number(parameter.minimum),
+        optional_number(parameter.maximum),
+        number(parameter.default_value)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"mapping\": {}, \"mappingName\": \"{}\",\n",
-            parameter.mapping as u32,
-            mapping_name(parameter.mapping)
-        ),
+        "          \"mapping\": {}, \"mappingName\": \"{}\",\n",
+        parameter.mapping as u32,
+        mapping_name(parameter.mapping)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"automationRate\": {}, \"automationRateName\": \"{}\",\n",
-            parameter.automation_rate as u32,
-            automation_rate_name(parameter.automation_rate)
-        ),
+        "          \"automationRate\": {}, \"automationRateName\": \"{}\",\n",
+        parameter.automation_rate as u32,
+        automation_rate_name(parameter.automation_rate)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"channelPolicy\": {}, \"channelPolicyName\": \"{}\",\n",
-            parameter.channel_policy as u32,
-            channel_policy_name(parameter.channel_policy)
-        ),
+        "          \"channelPolicy\": {}, \"channelPolicyName\": \"{}\",\n",
+        parameter.channel_policy as u32,
+        channel_policy_name(parameter.channel_policy)
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"smoothing\": {}, \"smoothingName\": \"{}\", \"smoothingSamples\": {},\n",
-            parameter.smoothing as u32,
-            smoothing_name(parameter.smoothing),
-            parameter.smoothing_samples
-        ),
+        "          \"smoothing\": {}, \"smoothingName\": \"{}\", \"smoothingSamples\": {},\n",
+        parameter.smoothing as u32,
+        smoothing_name(parameter.smoothing),
+        parameter.smoothing_samples
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "          \"readable\": {}, \"automatable\": {},\n",
-            parameter.readable, parameter.automatable
-        ),
+        "          \"readable\": {}, \"automatable\": {},\n",
+        parameter.readable,
+        parameter.automatable
     );
     // Issue #140 A: the live-control command path now feeds an admitted parameter into the
     // running plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own
     // descriptor says it can be automated. The two statements are the same statement, which is
     // why this is derived from `automatable` rather than written down. A parameter that declares
     // `AutomationRate::None` has no span the effect would accept and stays `false`.
-    append(
+    append!(
         out,
-        format_args!("          \"liveUpdatable\": {},\n", parameter.automatable),
+        "          \"liveUpdatable\": {},\n",
+        parameter.automatable
     );
     out.push_str("          \"enumChoices\": [");
     for (index, choice) in parameter.enum_choices.iter().enumerate() {
-        append(
+        append!(
             out,
-            format_args!(
-                "{{ \"value\": {}, \"label\": \"{}\" }}{}",
-                number(choice.value),
-                escape(choice.label),
-                if index + 1 == parameter.enum_choices.len() {
-                    ""
-                } else {
-                    ", "
-                }
-            ),
+            "{{ \"value\": {}, \"label\": \"{}\" }}{}",
+            number(choice.value),
+            escape(choice.label),
+            if index + 1 == parameter.enum_choices.len() {
+                ""
+            } else {
+                ", "
+            }
         );
     }
     out.push_str("],\n");
@@ -767,29 +719,27 @@ fn builtin_parameter(out: &mut String, parameter: &BuiltinParameterDescriptor) {
         parameter.update_rate,
         BuiltinParameterUpdateRate::BlockTarget
     );
-    append(
+    append!(
         out,
-        format_args!(
-            "      {{ \"id\": {}, \"name\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
+        "      {{ \"id\": {}, \"name\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
 \"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": ",
-            parameter.id,
-            escape(parameter.name),
-            unit as u32,
-            unit_name(unit),
-            match parameter.scope {
-                BuiltinParameterScope::PerLane => "perLane",
-                BuiltinParameterScope::MatrixShared => "matrixShared",
-            },
-            match parameter.mapping {
-                BuiltinParameterMapping::Boolean => "boolean",
-                BuiltinParameterMapping::DecibelAmplitude => "decibelAmplitude",
-                BuiltinParameterMapping::Hertz => "hertz",
-                BuiltinParameterMapping::Linear => "linear",
-            },
-            domain_name,
-            optional_number(minimum),
-            optional_number(maximum),
-        ),
+        parameter.id,
+        escape(parameter.name),
+        unit as u32,
+        unit_name(unit),
+        match parameter.scope {
+            BuiltinParameterScope::PerLane => "perLane",
+            BuiltinParameterScope::MatrixShared => "matrixShared",
+        },
+        match parameter.mapping {
+            BuiltinParameterMapping::Boolean => "boolean",
+            BuiltinParameterMapping::DecibelAmplitude => "decibelAmplitude",
+            BuiltinParameterMapping::Hertz => "hertz",
+            BuiltinParameterMapping::Linear => "linear",
+        },
+        domain_name,
+        optional_number(minimum),
+        optional_number(maximum),
     );
     if matches!(
         parameter.domain,
@@ -797,45 +747,41 @@ fn builtin_parameter(out: &mut String, parameter: &BuiltinParameterDescriptor) {
     ) {
         out.push_str("{ ");
         for (index, rate) in LAUNCH_RATES_HZ.iter().enumerate() {
-            append(
+            append!(
                 out,
-                format_args!(
-                    "\"{rate}\": {}{}",
-                    optional_number(builtin_filter_cutoff_maximum_hz(*rate)),
-                    if index + 1 == LAUNCH_RATES_HZ.len() {
-                        ""
-                    } else {
-                        ", "
-                    },
-                ),
+                "\"{rate}\": {}{}",
+                optional_number(builtin_filter_cutoff_maximum_hz(*rate)),
+                if index + 1 == LAUNCH_RATES_HZ.len() {
+                    ""
+                } else {
+                    ", "
+                },
             );
         }
         out.push_str(" }");
     } else {
         out.push_str("null");
     }
-    append(
+    append!(
         out,
-        format_args!(
-            ", \"default\": {}, \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
+        ", \"default\": {}, \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
 \"liveUpdatable\": {}, \"step\": ",
-            number(parameter.default),
-            match parameter.update_rate {
-                BuiltinParameterUpdateRate::PreparedOnly => "preparedOnly",
-                BuiltinParameterUpdateRate::BlockTarget => "blockTarget",
-            },
-            match parameter.smoothing {
-                BuiltinSmoothingPolicy::None => "none",
-                BuiltinSmoothingPolicy::LinearNUpdates => "linearNUpdates",
-                BuiltinSmoothingPolicy::Linear64CoefficientUpdates => "linear64CoefficientUpdates",
-            },
-            match parameter.reset {
-                BuiltinParameterReset::RestorePreparedValue => "restorePreparedValue",
-                BuiltinParameterReset::KeepTargetResetCurrent => "keepTargetResetCurrent",
-            },
-            optional_number(parameter.disabled_value),
-            live,
-        ),
+        number(parameter.default),
+        match parameter.update_rate {
+            BuiltinParameterUpdateRate::PreparedOnly => "preparedOnly",
+            BuiltinParameterUpdateRate::BlockTarget => "blockTarget",
+        },
+        match parameter.smoothing {
+            BuiltinSmoothingPolicy::None => "none",
+            BuiltinSmoothingPolicy::LinearNUpdates => "linearNUpdates",
+            BuiltinSmoothingPolicy::Linear64CoefficientUpdates => "linear64CoefficientUpdates",
+        },
+        match parameter.reset {
+            BuiltinParameterReset::RestorePreparedValue => "restorePreparedValue",
+            BuiltinParameterReset::KeepTargetResetCurrent => "keepTargetResetCurrent",
+        },
+        optional_number(parameter.disabled_value),
+        live,
     );
     step_object(out, parameter.lattice);
     out.push_str(" }");
