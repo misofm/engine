@@ -25,6 +25,8 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+Scope amendment 2026-10-01: current scalar/bank and full/padded transcript comparisons may compare canonical bytes directly instead of paired cryptographic hashes, preserving NaN folding, signed zero, ordering, output/state/report and fault coverage. Historical pre-change digest tables are retired; the existing single-owned G5 cross-target corpus remains unchanged. If no SHA-256 consumer remains in this package, remove its `sha2` dev-dependency and only the corresponding `parametric-eq` package dependency row in `Cargo.lock`; no unrelated lockfile update is authorized.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.

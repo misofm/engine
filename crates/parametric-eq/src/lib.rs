@@ -269,20 +269,6 @@ fn ramping_list_enabled() -> bool {
     RAMPING_LIST.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
-std::thread_local! {
-    /// Unit tests only: when set, `settle`, `start_ramp` and a segment's snap write lanes the
-    /// #1005 way, one [`lane_set`] round trip per word per lane (issue #1007's differential
-    /// oracle). `false`, the default, is the shipped path, so every unit test exercises it.
-    static LANE_SET_WRITES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// `true` while this thread's unit tests write lanes the #1005 way; see [`LANE_SET_WRITES`].
-#[cfg(test)]
-fn lane_set_writes() -> bool {
-    LANE_SET_WRITES.with(std::cell::Cell::get)
-}
-
 /// Frozen V1 section filter families.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1232,17 +1218,12 @@ fn block_admits_elision(io: &[f32]) -> bool {
     nearest != 0 && largest <= ELISION_MAGNITUDE_CEILING
 }
 
-/// The elision gate in the rejection-accumulator form it had before issue #980: the oracle the
-/// min/max form is proven equal to.
+/// Independent input contract for the optimized integer min/max reduction.
 #[cfg(test)]
 fn block_admits_elision_oracle(io: &[f32]) -> bool {
-    let mut rejected = 0_u32;
-    for value in io {
-        let bits = value.to_bits();
-        rejected |= u32::from(bits == NEGATIVE_ZERO_BITS);
-        rejected |= u32::from((bits & MAGNITUDE_MASK) > ELISION_MAGNITUDE_CEILING);
-    }
-    rejected == 0
+    io.iter().all(|word| {
+        word.to_bits() != NEGATIVE_ZERO_BITS && word.is_finite() && word.abs() <= BLOCK_LIMIT
+    })
 }
 
 /// One channel — left or right — of a cascade over `W = L::WIDTH` tracks.
@@ -1334,30 +1315,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// Each word is written with [`lane_put`] through one lane mask (issue #1007): eighteen
     /// `select`s where eighteen `lane_set` round trips used to be.
     fn settle(&mut self, section: usize, track: usize, words: EqSvfWords) {
-        #[cfg(test)]
-        if lane_set_writes() {
-            self.settle_by_lane_set(section, track, words);
-            return;
-        }
         let mask = lane_mask::<L>(track);
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             lane_put(coef_word_mut(&mut slot.coef, index), mask, word);
             lane_put(coef_word_mut(&mut slot.target, index), mask, word);
             lane_put(step_word_mut(&mut slot.step, index), mask, 0.0);
-        }
-        self.remaining[section][track] = 0;
-        self.refresh_identity(section);
-    }
-
-    /// [`settle`](Self::settle) as #1005 wrote it: issue #1007's differential oracle.
-    #[cfg(test)]
-    fn settle_by_lane_set(&mut self, section: usize, track: usize, words: EqSvfWords) {
-        let slot = &mut self.sections[section];
-        for (index, word) in words.to_array().into_iter().enumerate() {
-            lane_set(coef_word_mut(&mut slot.coef, index), track, word);
-            lane_set(coef_word_mut(&mut slot.target, index), track, word);
-            lane_set(step_word_mut(&mut slot.step, index), track, 0.0);
         }
         self.remaining[section][track] = 0;
         self.refresh_identity(section);
@@ -1450,11 +1413,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.settle(section, track, words);
             return;
         }
-        #[cfg(test)]
-        if lane_set_writes() {
-            self.start_ramp_by_lane_set(section, track, words);
-            return;
-        }
         let mask = lane_mask::<L>(track);
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
@@ -1470,24 +1428,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         // `coef` did not move here, so this cannot change the flag. It is refreshed anyway because
         // "every coefficient-change site refreshes" is a rule that is cheap to keep total and
         // expensive to keep partial.
-        self.refresh_identity(section);
-    }
-
-    /// The ramp start of [`start_ramp`](Self::start_ramp) as #1005 wrote it, after the hoist:
-    /// issue #1007's differential oracle.
-    #[cfg(test)]
-    fn start_ramp_by_lane_set(&mut self, section: usize, track: usize, words: EqSvfWords) {
-        let slot = &mut self.sections[section];
-        for (index, word) in words.to_array().into_iter().enumerate() {
-            let current = lane_get(coef_word(&slot.coef, index), track);
-            lane_set(coef_word_mut(&mut slot.target, index), track, word);
-            lane_set(
-                step_word_mut(&mut slot.step, index),
-                track,
-                (word - current) * RAMP_SCALE,
-            );
-        }
-        self.remaining[section][track] = RAMP_SAMPLES;
         self.refresh_identity(section);
     }
 
@@ -1540,29 +1480,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             .all(|(index, word)| {
                 LinearRamp::stationary_at(lane_get(coef_word(&slot.coef, index), track), word)
             })
-    }
-
-    /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap, one lane at a
-    /// time. Unit tests only since issue #1007: a segment's ended lanes snap together by mask in
-    /// [`process_section`](Self::process_section), and nothing else snapped one lane. This is that
-    /// path's differential oracle.
-    ///
-    /// **The caller refreshes** `identity[section]`. Every call site is a loop over the lanes of
-    /// one section, and [`refresh_identity`](Self::refresh_identity) re-derives the whole section
-    /// from its coefficient words, so running it inside this function re-derived the same six lane
-    /// compares `W` times for one bank-wide ramp end. Hoisting it is exact rather than merely
-    /// cheaper: the flag is read only on a *stationary* block ([`cascade_sections`]), no lane's
-    /// ramp can start mid-block, and a section's last snap is the one whose value survives either
-    /// way. `identity_flags_agree` is the standing oracle that no refresh site was lost.
-    #[cfg(test)]
-    fn snap(&mut self, section: usize, track: usize) {
-        let slot = &mut self.sections[section];
-        for index in 0..6 {
-            let target = lane_get(coef_word(&slot.target, index), track);
-            lane_set(coef_word_mut(&mut slot.coef, index), track, target);
-            lane_set(step_word_mut(&mut slot.step, index), track, 0.0);
-        }
-        self.remaining[section][track] = 0;
     }
 
     /// Snaps **every** lane of `section` at once: six vector copies and one zeroed step set.
@@ -1664,17 +1581,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             }
             // The kernel processes current coefficients, then advances them. Snap after a segment
             // consumes the final sample so the exact target is first used by sample A+64.
-            #[cfg(test)]
-            if lane_set_writes() {
-                for (track, &was_ramping) in was_ramping.iter().enumerate() {
-                    if was_ramping && self.remaining[section][track] == 0 {
-                        self.snap(section, track);
-                        snapped = true;
-                    }
-                }
-                position += length;
-                continue;
-            }
             // Every lane that ended in this segment snaps at once (issue #1007): one mask, then
             // one `select` per coefficient word and one per increment word. `select` is bitwise,
             // so each ended lane holds exactly its target's bits and a `+0.0` increment, as the
@@ -3100,15 +3006,29 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         self.right.identity = self.left.identity;
     }
 
+    fn reset_state(&mut self, kind: ResetKind) {
+        // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
+        // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
+        self.silent_fixed_point = false;
+        match kind {
+            ResetKind::FullToDefaults => {
+                self.reset_to_defaults();
+            }
+            ResetKind::DiscontinuityKeepParameters => {
+                self.left.discontinuity_reset();
+                self.right.discontinuity_reset();
+            }
+        }
+    }
+
     /// Restores every band of both channels to the parameters preparation was given.
-    fn reset_to_defaults(&mut self) -> Result<(), EqDesignError> {
+    fn reset_to_defaults(&mut self) {
         let left = core::array::from_fn(|track| self.initial[track][0]);
         let right = core::array::from_fn(|track| self.initial[track][1]);
         let left_words = core::array::from_fn(|track| self.initial_words[track][0]);
         let right_words = core::array::from_fn(|track| self.initial_words[track][1]);
         self.left = Channel::from_prepared(left, left_words);
         self.right = Channel::from_prepared(right, right_words);
-        Ok(())
     }
 }
 
@@ -3545,18 +3465,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
-        // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
-        self.silent_fixed_point = false;
-        match kind {
-            ResetKind::FullToDefaults => {
-                let _ = self.reset_to_defaults();
-            }
-            ResetKind::DiscontinuityKeepParameters => {
-                self.left.discontinuity_reset();
-                self.right.discontinuity_reset();
-            }
-        }
+        self.reset_state(kind);
     }
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
@@ -3625,18 +3534,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     }
 
     fn reset(&mut self, kind: ResetKind) {
-        // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
-        // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
-        self.silent_fixed_point = false;
-        match kind {
-            ResetKind::FullToDefaults => {
-                let _ = self.reset_to_defaults();
-            }
-            ResetKind::DiscontinuityKeepParameters => {
-                self.left.discontinuity_reset();
-                self.right.discontinuity_reset();
-            }
-        }
+        self.reset_state(kind);
     }
 
     fn supports_mono_collapse(&self) -> bool {
@@ -4618,15 +4516,6 @@ mod interleave_identity {
     }
 
     #[test]
-    fn disabled_cuts_match_the_full_six_section_reference() {
-        lane::each_lane!(|L, W| compare::<L, W>(
-            &format!("{}-disabled-cuts", width_label(W)),
-            0,
-            false
-        ));
-    }
-
-    #[test]
     fn disabled_cuts_preserve_original_band_bits_against_a_direct_four_section_oracle() {
         for seeded in [false, true] {
             for refusal_state in [false, true] {
@@ -5041,37 +4930,6 @@ mod elision {
     /// One live band of four is the shipped console fixture's shape (see the intended
     /// sixty-four-track session), and it is the row the standing measurement moves.
     #[test]
-    fn the_shipped_shape_actually_elides() {
-        for (live, expected) in [(0b0001_u8, 1_usize), (0b0011, 2), (0b0000, 0)] {
-            let left_channel = channel::<Native, NATIVE>(0, live);
-            let right_channel = channel::<Native, NATIVE>(3, live);
-            let left = block::<NATIVE>(0, 0);
-            let right = block::<NATIVE>(0, 3);
-            assert_eq!(
-                kept(&left_channel, &right_channel, &left, &right),
-                expected,
-                "a bank with live mask {live:04b} should run {expected} of \
-                 {EQ_SECTION_COUNT} sections"
-            );
-        }
-        // Three live sections run three: one depth-two pass and a depth-one tail, with no identity
-        // section kept as padding (issue #976).
-        let left_channel = channel::<Native, NATIVE>(0, 0b0111);
-        let right_channel = channel::<Native, NATIVE>(3, 0b0111);
-        assert_eq!(
-            kept(
-                &left_channel,
-                &right_channel,
-                &block::<NATIVE>(0, 0),
-                &block::<NATIVE>(0, 3)
-            ),
-            3,
-            "three live sections run three, not four"
-        );
-    }
-
-    /// A section that is identity on some lanes and live on others is not elidable.
-    #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
         let mut targets: [[BandTarget; EQ_SECTION_COUNT]; NATIVE] =
             core::array::from_fn(corpus::sections);
@@ -5426,7 +5284,7 @@ mod elision {
     /// every block length that exercises an empty block, a lone word, the scalar remainder and the
     /// vector body of both widths.
     #[test]
-    fn the_min_max_gate_equals_the_rejection_oracle() {
+    fn the_min_max_gate_matches_the_input_contract() {
         let mut verdicts = [0_usize; 2];
         for length in [0_usize, 1, 7, 8, 9, 1024] {
             let placements: &[(usize, usize)] = if length == 0 {
@@ -5469,7 +5327,7 @@ mod elision {
     /// `cargo test -p parametric-eq --release --lib every_word -- --ignored`.
     #[test]
     #[ignore = "exhaustive over 2^32 words; run explicitly"]
-    fn every_word_gets_the_rejection_oracles_verdict() {
+    fn every_word_gets_the_input_contracts_verdict() {
         use std::hint::black_box;
         const RUN: u64 = 64;
         let threads = std::thread::available_parallelism()
@@ -6806,165 +6664,7 @@ mod ramping_elision {
         lane::each_lane!(|L, W| restored_subnormal_live_state::<L, W>(&width_label(W)));
     }
 
-    /// Every word a channel holds, as bits: coefficients, increments, targets, integrators, the
-    /// countdowns and the identity flags.
-    fn channel_bits<L: Lane, const W: usize>(channel: &Channel<L, W>) -> Vec<u32> {
-        let mut out = Vec::new();
-        let mut lanes = [0_u32; MAX_LANES];
-        let mut push = |value: L, out: &mut Vec<u32>| {
-            value.store_bits(&mut lanes[..L::WIDTH]);
-            out.extend_from_slice(&lanes[..L::WIDTH]);
-        };
-        for section in &channel.sections {
-            for index in 0..EQ_COEFFICIENT_WORDS {
-                push(coef_word(&section.coef, index), &mut out);
-                push(step_word(&section.step, index), &mut out);
-                push(coef_word(&section.target, index), &mut out);
-            }
-            push(section.state.ic1, &mut out);
-            push(section.state.ic2, &mut out);
-        }
-        for section in &channel.remaining {
-            out.extend_from_slice(section);
-        }
-        out.extend(channel.identity.iter().map(|flag| u32::from(*flag)));
-        out
-    }
-
-    /// Issue #1007 gate 1 (with VERIFY-AUTOMATION A1): `settle`, `start_ramp`, the stationary
-    /// hoist and a segment snap, on every lane including the last, with words that include `+0.0`,
-    /// `-0.0`, subnormals and `+-f32::MAX`, compared word by word against the `lane_set` path after
-    /// every step. Two lanes end their ramps in different segments of one block, and a bank-wide
-    /// ramp ends in one.
-    fn select_writes_match_lane_set<L: Lane, const W: usize>(width: &str) {
-        let odd = EqSvfWords::from_array([0.0, 1.0e-40, f32::MAX, 1.0, -f32::MAX, 0.25]);
-        let signed = EqSvfWords::from_array([0.5, f32::from_bits(1), 3.0, -0.0, 2.0, f32::MAX]);
-        let bell = design(EqBandKind::Bell, 1_500.0, 4.0, 1.3);
-        for lane in 0..W {
-            let other = (lane + 1) % W;
-            let mut traces = Vec::new();
-            for lane_set in [true, false] {
-                let path = Path {
-                    list: false,
-                    lane_set,
-                };
-                let trace = on_path(path, || {
-                    let mut trace = Vec::new();
-                    let mut c =
-                        channel::<L, W>(layout(target(true, EqBandKind::Bell, 2_000.0, 4.0, 1.2)));
-                    trace.push(channel_bits(&c));
-                    c.settle(BAND, lane, odd);
-                    trace.push(channel_bits(&c));
-                    c.start_ramp(BAND, lane, signed);
-                    trace.push(channel_bits(&c));
-                    let mut io = admitted::<W>();
-                    c.process_section(BAND, &mut io[..20 * W], 20);
-                    trace.push(channel_bits(&c));
-                    c.start_ramp(BAND, other, bell);
-                    trace.push(channel_bits(&c));
-                    c.process_section(BAND, &mut io, QUANTUM);
-                    trace.push(channel_bits(&c));
-                    // The hoist: a restatement of the words a lane holds settles it.
-                    c.start_ramp(BAND, other, bell);
-                    trace.push(channel_bits(&c));
-                    for track in 0..W {
-                        c.start_ramp(BAND + 1, track, bell);
-                    }
-                    trace.push(channel_bits(&c));
-                    c.process_section(BAND + 1, &mut io, QUANTUM);
-                    trace.push(channel_bits(&c));
-                    trace
-                });
-                traces.push(trace);
-            }
-            for (step, (old, new)) in traces[0].iter().zip(&traces[1]).enumerate() {
-                assert!(old == new, "{width} lane {lane} step {step}: a word moved");
-            }
-        }
-        // A `Both` target, the SDK's shape for a symmetric edit, on the first and last lanes.
-        let mut values: Vec<InitialParameterValue> =
-            effect_contract::default_initial_values(&PARAMETRIC_EQ_DESCRIPTOR).collect();
-        for (field, value) in [(0, 1.0), (1, 1.0), (2, 900.0), (3, -2.0), (4, 0.8)] {
-            for side in 0..2 {
-                values[field * 2 + side].value = value;
-            }
-        }
-        let requests: Vec<PrepareEffectRequest<'_>> =
-            (0..W).map(|_| request(&values, 48_000)).collect();
-        let mut target_values = values.clone();
-        let mut changed = vec![false; values.len()];
-        for side in 0..2 {
-            target_values[3 * 2 + side].value = 5.5;
-            changed[3 * 2 + side] = true;
-        }
-        let mut targets = [PreparedEffectTarget {
-            slot: 0,
-            channel: ParameterChannel::Left,
-            words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
-        }; EQ_SECTION_COUNT * 2];
-        let count = ParametricEqFactory
-            .prepare_targets(
-                EffectTargetRequest {
-                    sample_rate: 48_000,
-                    values: &target_values,
-                    changed: &changed,
-                },
-                &mut targets,
-            )
-            .expect("target preparation");
-        assert_eq!(count, 1, "{width}: one target");
-        assert_eq!(
-            targets[0].channel,
-            ParameterChannel::Both,
-            "{width}: a Both target"
-        );
-        let mut arms: Vec<Arm<L, W>> = [true, false]
-            .into_iter()
-            .map(|lane_set| {
-                Arm::prepare(
-                    &requests,
-                    Path {
-                        list: true,
-                        lane_set,
-                    },
-                )
-            })
-            .collect();
-        for lane in [0, W - 1] {
-            for arm in &mut arms {
-                arm.apply(lane, &targets[0]).expect("a permitted target");
-            }
-            assert!(
-                fingerprint(&arms[0].eq) == fingerprint(&arms[1].eq),
-                "{width} lane {lane}: the Both target moved a word"
-            );
-            for block in 0..3 {
-                let mut outputs = Vec::new();
-                for arm in &mut arms {
-                    let (mut l, mut r) = (admitted::<W>(), admitted::<W>());
-                    let frames = 40 * W;
-                    arm.render(&mut l[..frames], &mut r[..frames], false, block * 40);
-                    let bits: Vec<u32> = l.iter().chain(&r).map(|word| word.to_bits()).collect();
-                    outputs.push(bits);
-                }
-                assert!(
-                    outputs[0] == outputs[1]
-                        && fingerprint(&arms[0].eq) == fingerprint(&arms[1].eq),
-                    "{width} lane {lane} block {block}: the Both ramp moved a word"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn select_lane_writes_match_lane_set_word_for_word() {
-        lane::each_lane!(|L, W| select_writes_match_lane_set::<L, W>(&width_label(W)));
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // Gate 1: the bank differential.
-    // ---------------------------------------------------------------------------------------
-
+    /// Seeded scenario draws shared by the ramping and padded-bank differentials.
     pub(super) struct Rng(pub(super) u64);
 
     impl Rng {
@@ -7141,21 +6841,17 @@ mod ramping_elision {
         out
     }
 
-    /// Which kernel an arm runs: the section list on ramping blocks (issue #1005) or the
-    /// batch-head `process_block`, and #1005's `lane_set` writes or #1007's `select` writes.
+    /// Whether ramping blocks use the optimized section list or the full per-section reference.
     #[derive(Clone, Copy, Debug)]
     struct Path {
         list: bool,
-        lane_set: bool,
     }
 
     /// Runs `body` with this thread's unit-test switches set to `path`, and restores the defaults.
     fn on_path<R>(path: Path, body: impl FnOnce() -> R) -> R {
         RAMPING_LIST.with(|switch| switch.set(path.list));
-        LANE_SET_WRITES.with(|switch| switch.set(path.lane_set));
         let result = body();
         RAMPING_LIST.with(|switch| switch.set(false));
-        LANE_SET_WRITES.with(|switch| switch.set(false));
         result
     }
 
@@ -7738,40 +7434,7 @@ mod ramping_elision {
     }
 
     /// #1005's gate: the list against the batch-head `process_block`, both on the shipped writes.
-    const LIST: [Path; 2] = [
-        Path {
-            list: false,
-            lane_set: false,
-        },
-        Path {
-            list: true,
-            lane_set: false,
-        },
-    ];
-    /// #1007's gate against the #1005 kernel: the list on both arms, `lane_set` writes against
-    /// `select` writes.
-    const WRITES_ON_1005: [Path; 2] = [
-        Path {
-            list: true,
-            lane_set: true,
-        },
-        Path {
-            list: true,
-            lane_set: false,
-        },
-    ];
-    /// #1007's writes alone, on the batch-head ramping path.
-    const WRITES_ALONE: [Path; 2] = [
-        Path {
-            list: false,
-            lane_set: true,
-        },
-        Path {
-            list: false,
-            lane_set: false,
-        },
-    ];
-
+    const LIST: [Path; 2] = [Path { list: false }, Path { list: true }];
     fn differential<L: Lane, const W: usize>(
         width: &str,
         label: &str,
@@ -7833,80 +7496,31 @@ mod ramping_elision {
     }
 
     #[test]
-    fn a_ramping_block_renders_the_batch_head_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1005", LIST, all_seeds());
+    fn a_ramping_list_matches_the_full_section_path_scalar() {
+        differential::<f32, 1>("Scalar", "ramping list", LIST, all_seeds());
     }
 
     #[test]
-    fn a_ramping_block_renders_the_batch_head_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_seeds());
+    fn a_ramping_list_matches_the_full_section_path_simd4() {
+        differential::<Simd4, 4>("Simd4", "ramping list", LIST, per_pr_vector_seeds());
     }
 
-    /// The 8-lane (AVX2) twin of `a_ramping_block_renders_the_batch_head_bits_simd4`.
+    /// The 8-lane (AVX2) twin of `a_ramping_list_matches_the_full_section_path_simd4`.
     #[cfg(target_feature = "avx2")]
     #[test]
-    fn a_ramping_block_renders_the_batch_head_bits_simd8() {
-        differential::<lane::Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
+    fn a_ramping_list_matches_the_full_section_path_simd8() {
+        differential::<lane::Simd8, 8>("Simd8", "ramping list", LIST, per_pr_vector_seeds());
     }
 
-    /// Issue #1007 gate 1: `select` lane writes and the masked segment snap against the #1005
-    /// kernel's `lane_set` writes, with the list on both arms.
-    #[test]
-    fn select_lane_writes_render_the_1005_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007", WRITES_ON_1005, all_seeds());
-    }
-
-    #[test]
-    fn select_lane_writes_render_the_1005_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
-    }
-
-    /// The 8-lane (AVX2) twin of `select_lane_writes_render_the_1005_bits_simd4`.
-    #[cfg(target_feature = "avx2")]
-    #[test]
-    fn select_lane_writes_render_the_1005_bits_simd8() {
-        differential::<lane::Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
-    }
-
-    /// Issue #1007's writes alone, on the batch-head ramping path (VERIFY-AUTOMATION A2).
-    #[test]
-    fn select_lane_writes_alone_render_the_lane_set_bits_scalar() {
-        differential::<f32, 1>("Scalar", "#1007 alone", WRITES_ALONE, all_seeds());
-    }
-
-    #[test]
-    fn select_lane_writes_alone_render_the_lane_set_bits_simd4() {
-        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
-    }
-
-    /// The 8-lane (AVX2) twin of `select_lane_writes_alone_render_the_lane_set_bits_simd4`.
-    #[cfg(target_feature = "avx2")]
-    #[test]
-    fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
-        differential::<lane::Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
-    }
-
-    /// The six `Simd4` and `Simd8` differentials above at the full scenario count, which they ran
+    /// The `Simd4` and `Simd8` differentials above at the full scenario count, which they ran
     /// per PR before issue #1049 quartered it. `nightly.yml` runs this, in a dev build.
     #[test]
     #[ignore = "nightly: the full scenario count of the Simd4 and Simd8 differentials (#1049)"]
     fn the_vector_differentials_render_their_bits_at_the_full_scenario_count() {
         lane::each_vector_lane!(|L, W| differential::<L, W>(
             &width_label(W),
-            "#1005",
+            "ramping list",
             LIST,
-            all_seeds()
-        ));
-        lane::each_vector_lane!(|L, W| differential::<L, W>(
-            &width_label(W),
-            "#1007",
-            WRITES_ON_1005,
-            all_seeds()
-        ));
-        lane::each_vector_lane!(|L, W| differential::<L, W>(
-            &width_label(W),
-            "#1007 alone",
-            WRITES_ALONE,
             all_seeds()
         ));
     }

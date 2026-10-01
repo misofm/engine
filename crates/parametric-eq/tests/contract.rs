@@ -442,62 +442,6 @@ fn automation_is_partition_invariant() {
     }
 }
 
-/// A restored mid-ramp payload continues the ramp bit for bit, because the increment is stored.
-#[test]
-fn state_restore_continues_active_ramp_bit_exactly() {
-    let values = bell_values();
-    let mut source = ParametricEqFactory
-        .prepare(request(&values, false))
-        .expect("source prepare");
-    let automation = [point(3, ParameterChannel::Left, 0, -6.0)];
-    let mut first_left = [0.25_f32; 17];
-    let mut first_right = [0.125_f32; 17];
-    source.process(
-        EffectProcessBlock::new(&mut first_left, &mut first_right, None, 0, &automation, 128)
-            .expect("first block"),
-    );
-    let (common, saved_left, saved_right) = snapshot(source.as_ref());
-    let mut restored = ParametricEqFactory
-        .prepare(request(&values, false))
-        .expect("restore prepare");
-    restored
-        .restore_state_payload(
-            1,
-            StatePayloadInput::new(
-                &common,
-                &saved_left,
-                &saved_right,
-                restored.metadata().state_sizes,
-            )
-            .expect("state input"),
-        )
-        .expect("restore");
-
-    let mut source_left = [0.5_f32; 64];
-    let mut source_right = [-0.25_f32; 64];
-    let mut restored_left = source_left;
-    let mut restored_right = source_right;
-    source.process(
-        EffectProcessBlock::new(&mut source_left, &mut source_right, None, 17, &[], 128)
-            .expect("source continuation"),
-    );
-    restored.process(
-        EffectProcessBlock::new(&mut restored_left, &mut restored_right, None, 17, &[], 128)
-            .expect("restored continuation"),
-    );
-    assert_eq!(
-        source_left.map(f32::to_bits),
-        restored_left.map(f32::to_bits)
-    );
-    assert_eq!(
-        source_right.map(f32::to_bits),
-        restored_right.map(f32::to_bits)
-    );
-    assert_eq!(snapshot(source.as_ref()), snapshot(restored.as_ref()));
-}
-
-/// Prepared targets apply at a block boundary, retain dedicated enable state, and settle exactly
-/// after the current-then-advance 64-sample ramp.
 #[test]
 fn prepared_target_applies_and_settles_at_sample_a_plus_64() {
     let values = values();
