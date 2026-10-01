@@ -71,6 +71,7 @@ mod tests {
     #[test]
     fn hashing_outside_the_timer_is_how_it_is_done() {
         let mut sink = Sha256Sink::new();
+        untimed(|| sink.update(b"evidence"));
         let (_, product) = timed(|| 7u64 * 6);
         untimed(|| sink.update(product.to_le_bytes()));
         assert_eq!(sink.finish_hex().len(), 64);

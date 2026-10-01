@@ -34,6 +34,10 @@ impl Metadata {
             .map_err(VarError::NotUnicode)
     }
 
+    fn unicode_value(&self, name: &str) -> Option<&str> {
+        self.values.get(OsStr::new(name))?.to_str()
+    }
+
     /// Return a nonempty snapshot value, or "unknown" when it is absent, non-Unicode, or empty.
     #[must_use]
     pub fn nonempty_or_unknown(&self, name: &str) -> String {
@@ -78,7 +82,7 @@ impl Metadata {
     pub fn missing(&self) -> Vec<String> {
         let mut missing: Vec<String> = Self::RECORD_NAMES
             .iter()
-            .filter(|name| self.var(name).is_err())
+            .filter(|name| self.unicode_value(name).is_none())
             .map(|name| Self::record_key(name).to_ascii_lowercase())
             .collect();
         missing.sort();
@@ -92,16 +96,11 @@ impl Metadata {
     /// "the runner did not export this" from "this host has no such value".
     #[must_use]
     pub fn record_fields(&self) -> String {
-        let field = |name: &str| match self.var(name) {
-            Ok(value) => format!("\"{}\"", crate::json::escape(&value)),
-            Err(_) => "null".to_string(),
+        let field = |name: &str| match self.unicode_value(name) {
+            Some(value) => format!("\"{}\"", crate::json::escape(value)),
+            None => "null".to_string(),
         };
-        let missing = self
-            .missing()
-            .into_iter()
-            .map(|name| format!("\"{name}\""))
-            .collect::<Vec<_>>()
-            .join(",");
+        let missing = crate::json::json_string_array(&self.missing());
         format!(
             concat!(
                 "\"cpu_model\":{cpu},\"os\":\"{os}\",\"governor_or_power_mode\":{governor},",
@@ -109,7 +108,7 @@ impl Metadata {
                 "\"target_features\":{features},\"profile\":{profile},",
                 "\"background_load_note\":{load},\"measurement_control\":{control},",
                 "\"cpu_affinity\":{affinity},\"candidate_commit\":{commit},",
-                "\"missing_metadata\":[{missing}],",
+                "\"missing_metadata\":{missing},",
             ),
             cpu = field("MISO_ENGINE_BENCH_CPU_MODEL"),
             os = std::env::consts::OS,
