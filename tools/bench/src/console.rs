@@ -864,8 +864,8 @@ impl HoistArm {
             .collect();
 
         // Both target sets are prepared once, before any timing, and selected by block parity
-        // inside the render call. The timed region only copies fixed-size words into prepared
-        // lanes; it never invokes the EQ designer or allocates.
+        // inside the render call. The timed region borrows each target prefix and copies its
+        // fixed-size words into prepared lanes; it never invokes the EQ designer or allocates.
         let build = |offset_db: f32| {
             let mut targets = Vec::with_capacity(banks * lanes);
             let capability = eq
@@ -948,8 +948,8 @@ impl HoistArm {
         for (index, bank) in self.banks.iter_mut().enumerate() {
             let range = index * stride..(index + 1) * stride;
             for lane in 0..self.lanes {
-                let (prepared, count) = targets[index * self.lanes + lane];
-                for target in &prepared[..count] {
+                let (prepared, count) = &targets[index * self.lanes + lane];
+                for target in &prepared[..*count] {
                     bank.apply_prepared_target_lane(lane, target)
                         .expect("prepared EQ target application");
                 }
