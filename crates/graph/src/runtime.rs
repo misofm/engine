@@ -311,16 +311,16 @@ use crate::{
 ///
 /// Frames are independent, so this is purely a width choice: master plan #83 §4.2 pins every one
 /// of these kernels to a width-independent result, and gate G2 proves it, so the rendered bits do
-/// not depend on which arm of this `cfg` a target takes. There is no third arm: `lane` refuses to
-/// compile for every other target (issues #1041 and #1062).
-#[cfg(target_arch = "x86_64")]
-pub(crate) type FrameLane = lane::Simd8;
-/// See [`FrameLane`].
-#[cfg(any(
-    target_arch = "aarch64",
-    all(target_arch = "wasm32", target_feature = "simd128")
-))]
-pub(crate) type FrameLane = lane::Simd4;
+/// not depend on which width a build takes. It is the build's own width, [`lane::Native`]: `Simd8`,
+/// the 8-lane (AVX2) width, where `avx2` is enabled, and `Simd4`, the 4-lane (NEON/simd128) width,
+/// where `neon` or `simd128` is (issue #1112). The width follows the target features a build
+/// enables, never the architecture's name, and `lane` holds the one copy of those predicates.
+///
+/// There is no third width: `lane` refuses to compile every other build (issues #1041 and #1062),
+/// and `Native` is defined exactly where `lane::Backend::current` selects a vector backend. The
+/// alias is kept, rather than naming `lane::Native` at each kernel call, so the frame loops read as
+/// what they are: vectorised over frames, not over a bank's lanes.
+pub(crate) type FrameLane = lane::Native;
 
 // REALTIME_POLICY_BEGIN
 
@@ -1668,8 +1668,8 @@ impl BankMembers for ArenaMembers<'_> {
                     frames,
                 )?)
             }
-            // No eight-lane bank on wasm32 (issue #1110, `effect_contract::BankWidth`).
-            #[cfg(not(target_arch = "wasm32"))]
+            // An eight-lane bank only where `avx2` is enabled (#1110, #1112, `BankWidth`).
+            #[cfg(target_feature = "avx2")]
             8 => {
                 let buffers: [u32; 8] = self.outputs.get(..8)?.try_into().ok()?;
                 Some(BankPlaneViews::from_eight(
@@ -6916,6 +6916,11 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    /// The 64-track console fixtures' bank width: the build's own (issue #1112), eight lanes in the
+    /// 8-lane (AVX2) build and four in a 4-lane (NEON/simd128) build.
+    const CONSOLE_WIDTH: BankWidth =
+        BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
+
     #[test]
     fn runtime_response_capture_uses_declared_owner_mapping_and_opaque_sink() {
         struct Owner;
@@ -7289,8 +7294,10 @@ mod tests {
                 .collect(),
         };
         // Cases: ordinary adjacency; retired non-emitted run; intervening emitted scalar;
-        // smaller/larger predecessor populations; incompatible widths; scalar predecessor.
-        for case in 0..7 {
+        // smaller/larger predecessor populations; incompatible widths; scalar predecessor. Case 5,
+        // incompatible widths, needs a second width, which only the 8-lane (AVX2) build has.
+        let other_width = BankWidth::ALL.get(1).copied();
+        for case in (0..7).filter(|&case| case != 5 || other_width.is_some()) {
             let a = if case == 3 {
                 1
             } else if case == 4 {
@@ -7305,7 +7312,7 @@ mod tests {
                 bank(
                     a,
                     if case == 5 {
-                        effect_contract::BankWidth::Eight
+                        other_width.expect("case 5 runs only with a second width")
                     } else {
                         effect_contract::BankWidth::Four
                     },
@@ -7391,7 +7398,7 @@ mod tests {
             "the largest exact f32 count"
         );
         let seeds = [[0.5_f64; 8]; 2];
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let over = vec![0.0_f32; (BANK_METER_MAX_FRAMES + 1) * lanes];
             assert!(
@@ -8187,9 +8194,7 @@ mod tests {
 
     #[test]
     fn every_lane_width_matches_the_frozen_old_kernel_on_hostile_values() {
-        assert_width_matches_old::<f32>();
-        assert_width_matches_old::<lane::Simd4>();
-        assert_width_matches_old::<lane::Simd8>();
+        lane::each_lane!(|L| assert_width_matches_old::<L>());
     }
 
     /// Frozen pre-#898 oracle: `reduce_many` exactly as it stood before issue #898, re-deriving
@@ -8406,9 +8411,9 @@ mod tests {
                 }
             }
 
-            assert_hoisting_matches_frozen::<f32>(frames, &contents, &ids, &reference);
-            assert_hoisting_matches_frozen::<lane::Simd4>(frames, &contents, &ids, &reference);
-            assert_hoisting_matches_frozen::<lane::Simd8>(frames, &contents, &ids, &reference);
+            lane::each_lane!(|L| assert_hoisting_matches_frozen::<L>(
+                frames, &contents, &ids, &reference
+            ));
             let production = hoisting_reduction_bits(frames, &contents, |lease, plane| {
                 reduce_plane(lease, plane, 1, &ids);
             });
@@ -9086,7 +9091,7 @@ mod tests {
         const OUTPUT_POISON: u32 = 0x7fc0_3917;
         let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
         let mut state = 0x0915_f05e_d0e1_1095_u64;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for frames in [lanes, 13, 16, 128] {
                 for cohorts in [1_usize, 2] {
@@ -9213,7 +9218,7 @@ mod tests {
     fn a_resident_fold_declines_before_writing_on_a_broken_premise() {
         const FRAMES: usize = 13;
         const POISON: [u32; 2] = [0x7fc0_3918, 0x7fc0_3919];
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let left: Vec<f32> = (0..FRAMES * lanes).map(|word| word as f32 + 0.5).collect();
             let right: Vec<f32> = left.iter().map(|word| -word).collect();
@@ -9285,7 +9290,7 @@ mod tests {
     fn a_resident_fold_stores_its_first_contributor_so_a_negative_zero_master_keeps_its_sign() {
         let _canonical = lane::fpenv::CanonicalFpEnv::enter();
         const FRAMES: usize = 13;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let zeros = vec![-0.0_f32; FRAMES * lanes];
             let cohort = ResidentFoldCohort::new(&zeros, &zeros, width, FRAMES).expect("cohort");
@@ -10351,10 +10356,7 @@ mod tests {
             quantum: engine::QuantumFrames(fixture.frames),
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
-        let backend = match fixture.width {
-            BankWidth::Four => lane::Backend::Simd4,
-            BankWidth::Eight => lane::Backend::Simd8,
-        };
+        let backend = fixture.width.backend();
         let builtin_banks = members
             .chunks(fixture.width.lanes() as usize)
             .enumerate()
@@ -10544,7 +10546,8 @@ mod tests {
     /// zero folds. Answering `true` for every node -- the post-fader arm folds.
     #[test]
     fn a_post_matrix_meter_on_every_track_of_a_full_bank_keeps_the_fold_armed() {
-        for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
+        for &width in BankWidth::ALL {
+            let tracks = width.lanes() as usize;
             let published = Published::default();
             let folds = |fixture| fold_fixture(fixture, &published).bank_route_folds();
             let metered = FoldFixture::metered(width, tracks, 13);
@@ -10617,12 +10620,12 @@ mod tests {
     #[test]
     fn a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit() {
         const BLOCKS: u64 = 6;
-        for (width, tracks, frames) in [
-            (BankWidth::Four, 4, 13),
-            (BankWidth::Eight, 8, 13),
-            (BankWidth::Four, 8, 16),
-            (BankWidth::Four, 6, 5),
-        ] {
+        let full_banks = BankWidth::ALL
+            .iter()
+            .map(|&width| (width, width.lanes() as usize, 13));
+        for (width, tracks, frames) in
+            full_banks.chain([(BankWidth::Four, 8, 16), (BankWidth::Four, 6, 5)])
+        {
             let metered = FoldFixture::metered(width, tracks, frames);
             let run = |fixture: FoldFixture, resident_disabled: bool| {
                 let published = Published::default();
@@ -11422,8 +11425,8 @@ mod tests {
                 (plan, bindings)
             };
             let (plan, bindings) = match self {
-                Self::Folded(frames) => console(64, BankWidth::Eight, frames),
-                Self::Unfolded => console(64, BankWidth::Eight, 13),
+                Self::Folded(frames) => console(64, CONSOLE_WIDTH, frames),
+                Self::Unfolded => console(64, CONSOLE_WIDTH, 13),
                 Self::OneRouteFolded | Self::OneRouteUnfolded => console(1, BankWidth::Four, 13),
                 Self::Submix => folded_bus_parts(3, Some(published)),
                 Self::SubmixOnATrackSlot => folded_bus_parts(0, Some(published)),
@@ -11801,8 +11804,8 @@ mod tests {
     /// Where issue #916's gate-3 render fails.
     #[derive(Clone, Copy, Debug)]
     enum HostFailure {
-        /// Cohort 5 of 8 fails its bank processor, after five folded cohorts wrote the host's
-        /// planes.
+        /// Cohort 5 of the console's (8 at eight lanes, 16 at four) fails its bank processor,
+        /// after five folded cohorts wrote the host's planes.
         Unit,
         /// An Output observer fails after the Output op wrote the whole master.
         Observer,
@@ -11864,14 +11867,14 @@ mod tests {
                 HostFailure::Unit => {
                     let fixture = FoldFixture {
                         failing_cohort: Some(5),
-                        ..quiet(BankWidth::Eight, 64)
+                        ..quiet(CONSOLE_WIDTH, 64)
                     };
                     let (plan, bindings, _) = fold_fixture_parts(fixture, &published);
                     (bind_executor(plan, bindings, None).0, 64)
                 }
                 HostFailure::Observer => {
                     let (plan, mut bindings, _) =
-                        fold_fixture_parts(quiet(BankWidth::Eight, 64), &published);
+                        fold_fixture_parts(quiet(CONSOLE_WIDTH, 64), &published);
                     let observer = Box::new(FailingObserver {
                         from_sample: u64::from(FRAMES),
                     });
@@ -11947,7 +11950,7 @@ mod tests {
         // Rejections made before any unit runs keep the planes' words: the executor's own length
         // check, its stereo check, and the plan's `OutputShape` check in front of both.
         let published = Published::default();
-        let (plan, bindings, _) = fold_fixture_parts(quiet(BankWidth::Eight, 64), &published);
+        let (plan, bindings, _) = fold_fixture_parts(quiet(CONSOLE_WIDTH, 64), &published);
         let (mut executor, _) = bind_executor(plan, bindings, None);
         let mut storage = vec![pad; 2 * stride];
         render_host(
@@ -11985,7 +11988,7 @@ mod tests {
                 "a rejection leaves the planes alone"
             );
         }
-        let mut plan = fold_fixture(quiet(BankWidth::Eight, 64), &published);
+        let mut plan = fold_fixture(quiet(CONSOLE_WIDTH, 64), &published);
         let mut storage = vec![pad; 2 * stride];
         let time = |block: u64| engine::realtime::RenderTime {
             absolute_sample: block * u64::from(FRAMES),
@@ -12108,7 +12111,8 @@ mod tests {
     /// at the later tap do. Neither declines the consumer's-node arm.
     #[test]
     fn an_observer_of_the_scattered_lane_keeps_the_direct_scatter_armed() {
-        for (width, tracks) in [(BankWidth::Four, 4), (BankWidth::Eight, 8)] {
+        for &width in BankWidth::ALL {
+            let tracks = width.lanes() as usize;
             let lanes = tracks as u64;
             let metered = FoldFixture::scattered(width, tracks, 13);
             assert_eq!(
@@ -12225,12 +12229,12 @@ mod tests {
     /// arms (and the unredirected resident control) publish other words.
     #[test]
     fn a_redirected_metered_plan_is_the_unredirected_plans_master_and_meters_bit_for_bit() {
-        for (width, tracks, frames) in [
-            (BankWidth::Four, 4, 13),
-            (BankWidth::Eight, 8, 13),
-            (BankWidth::Four, 8, 16),
-            (BankWidth::Four, 6, 5),
-        ] {
+        let full_banks = BankWidth::ALL
+            .iter()
+            .map(|&width| (width, width.lanes() as usize, 13));
+        for (width, tracks, frames) in
+            full_banks.chain([(BankWidth::Four, 8, 16), (BankWidth::Four, 6, 5)])
+        {
             let scattered = FoldFixture::scattered(width, tracks, frames);
             for (consumer, metered) in [
                 ("fader", scattered),
@@ -12385,7 +12389,9 @@ mod tests {
     /// unmetered arms select a split fader.
     #[test]
     fn a_metered_redirect_consumer_stays_out_of_the_split_pair_and_keeps_the_bits() {
-        for (width, tracks, frames) in [(BankWidth::Four, 4, 13), (BankWidth::Eight, 8, 13)] {
+        for &width in BankWidth::ALL {
+            let tracks = width.lanes() as usize;
+            let frames = 13;
             let shape = format!("{width:?}/{tracks}/split pair");
             let metered = FoldFixture {
                 split_pair: true,
@@ -12779,10 +12785,7 @@ mod tests {
             quantum: engine::QuantumFrames(shape.frames),
             output_channels: NonZeroUsize::new(2).expect("stereo"),
         };
-        let backend = match shape.width {
-            BankWidth::Four => lane::Backend::Simd4,
-            BankWidth::Eight => lane::Backend::Simd8,
-        };
+        let backend = shape.width.backend();
         let builtin_banks = stages
             .iter()
             .zip(&chain)
@@ -13063,7 +13066,8 @@ mod tests {
     /// Issue #918 gate 1: the copy arm's digest ([`SourceRun::digest`]) of each shape, recorded by
     /// this fixture on the executor as it stood before the issue (`63eeebf0`, where every claim was
     /// copied), and the claims each shape binds on the copy.
-    const SOURCE_SHAPES: [(SourceShape, u64, &[usize]); 9] = [
+    const SOURCE_SHAPES: &[(SourceShape, u64, &[usize])] = &[
+        #[cfg(target_feature = "avx2")]
         (
             SourceShape::banked(BankWidth::Eight, 8, 13),
             0x7da8_2488_c5b7_8876,
@@ -13089,6 +13093,7 @@ mod tests {
             0x25f5_d764_10a6_b66a,
             &[1, 2, 4],
         ),
+        #[cfg(target_feature = "avx2")]
         (
             SourceShape {
                 redirect_declined: true,
@@ -13111,6 +13116,7 @@ mod tests {
             0x6c18_6a5b_3585_e2a6,
             &[],
         ),
+        #[cfg(target_feature = "avx2")]
         (
             SourceShape::scalar_fader(BankWidth::Eight, 8, &[]),
             0x0be8_59e1_1a6e_5267,
@@ -13149,6 +13155,8 @@ mod tests {
     /// 9. The `W4 x 6` plan with a compensation delay on one track's edge into its bank: that
     ///    member stages the input's buffer through its delay line, so the claim keeps the copy.
     ///
+    /// Shapes 1, 5 and 8 are eight-lane, so only an 8-lane (AVX2) build has them (issue #1112).
+    ///
     /// Per shape:
     ///
     /// * **The mode table.** In place: every claim whose input only a bank gathers. On the copy:
@@ -13175,7 +13183,7 @@ mod tests {
             .iter()
             .filter(|block| matches!(block, PlayedBlock::Underrun))
             .count() as u64;
-        for (shape, pre_change, copied) in SOURCE_SHAPES {
+        for &(shape, pre_change, copied) in SOURCE_SHAPES {
             let in_place = render_source_shape(shape, false);
             let copy = render_source_shape(shape, true);
             let expected: Vec<bool> = (0..shape.tracks)

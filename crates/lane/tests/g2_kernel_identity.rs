@@ -17,7 +17,7 @@ mod support;
 use lane::kernels::{
     SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
 };
-use lane::{CanonicalFpEnv, Lane, Simd4, Simd8, flush};
+use lane::{CanonicalFpEnv, Lane, flush};
 use support::{
     ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
 };
@@ -168,9 +168,7 @@ fn check_ordered_accumulation<L: Lane>() {
 
 #[test]
 fn ordered_accumulation_matches_the_existing_d9_primitives_and_rejects_shapes() {
-    check_ordered_accumulation::<f32>();
-    check_ordered_accumulation::<Simd4>();
-    check_ordered_accumulation::<Simd8>();
+    lane::each_lane!(|L| check_ordered_accumulation::<L>());
 }
 
 fn caught(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
@@ -521,9 +519,7 @@ fn check_lane2_hostile_categories<L: Lane>() {
 #[test]
 fn lane2_kernels_preserve_original_words_and_reject_short_inputs_before_writing() {
     let _canonical = CanonicalFpEnv::enter();
-    check_lane2_bounds_and_identity::<f32>();
-    check_lane2_bounds_and_identity::<Simd4>();
-    check_lane2_bounds_and_identity::<Simd8>();
+    lane::each_lane!(|L| check_lane2_bounds_and_identity::<L>());
 }
 
 #[test]
@@ -532,20 +528,13 @@ fn g2_kernels_are_bit_identical_at_every_width() {
         for signal in ALL_SIGNALS {
             let lanes = lane_signals(*signal);
             let oracle = run_at_width::<f32>(*kernel, *signal, &lanes);
-            compare(
+            lane::each_vector_lane!(|L| compare(
                 *kernel,
                 *signal,
-                "Simd4",
+                core::any::type_name::<L>(),
                 &oracle,
-                &run_at_width::<Simd4>(*kernel, *signal, &lanes),
-            );
-            compare(
-                *kernel,
-                *signal,
-                "Simd8",
-                &oracle,
-                &run_at_width::<Simd8>(*kernel, *signal, &lanes),
-            );
+                &run_at_width::<L>(*kernel, *signal, &lanes),
+            ));
         }
     }
 }
@@ -555,8 +544,9 @@ fn g2_idle_ramped_svf_equals_the_plain_svf() {
     // Amendment A2: `svf_block_ramped` with no ramp is `svf_block`, bit for bit, not merely close.
     for signal in ALL_SIGNALS {
         let lanes = lane_signals(*signal);
-        let plain = run_at_width::<Simd8>(Kernel::SvfLow, *signal, &lanes);
-        let idle = run_at_width::<Simd8>(Kernel::SvfRampedIdle, *signal, &lanes);
+        // At the build's own width: eight lanes where `avx2` is enabled, four otherwise (#1112).
+        let plain = run_at_width::<lane::Native>(Kernel::SvfLow, *signal, &lanes);
+        let idle = run_at_width::<lane::Native>(Kernel::SvfRampedIdle, *signal, &lanes);
         assert_eq!(
             plain,
             idle,
@@ -571,19 +561,15 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
     // Non-vacuity for the subnormal case: with a subnormal seed and a silent input the SVF state
     // has to reach exactly zero, at every width, rather than decaying through the subnormal range.
     let silence = vec![vec![0.0f32; FRAMES]; MAX_WIDTH];
-    for width_outputs in [
-        run_at_width::<f32>(Kernel::SvfLow, Signal::Subnormal, &silence),
-        run_at_width::<Simd4>(Kernel::SvfLow, Signal::Subnormal, &silence),
-        run_at_width::<Simd8>(Kernel::SvfLow, Signal::Subnormal, &silence),
-    ] {
-        for lane in width_outputs {
+    lane::each_lane!(|L| {
+        for lane in run_at_width::<L>(Kernel::SvfLow, Signal::Subnormal, &silence) {
             assert_eq!(
                 lane[FRAMES - 1],
                 0,
                 "G2: a subnormal-seeded state must flush to +0.0"
             );
         }
-    }
+    });
 }
 
 /// [`svf_step`] delivers both taps of **one** state.
@@ -670,9 +656,7 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
         }
     }
 
-    check::<f32>();
-    check::<Simd4>();
-    check::<Simd8>();
+    lane::each_lane!(|L| check::<L>());
 }
 
 /// [`svf_cascade_interleaved`] is a chain of [`svf_block`] calls, bit for bit (issue #163 phase 3).
@@ -695,9 +679,7 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
 fn g2_interleaved_cascade_equals_a_chain_of_blocks() {
     for signal in ALL_SIGNALS {
         let lanes = lane_signals(*signal);
-        check_cascade::<f32>("Scalar", *signal, &lanes);
-        check_cascade::<Simd4>("Simd4", *signal, &lanes);
-        check_cascade::<Simd8>("Simd8", *signal, &lanes);
+        lane::each_lane!(|L| check_cascade::<L>(core::any::type_name::<L>(), *signal, &lanes));
     }
 }
 
@@ -868,9 +850,7 @@ const SKEW_GUARD_WORD: u32 = 0x7fa5_a5a5;
 #[test]
 fn g2_skewed_cascade_equals_the_interleaved_cascade() {
     let _canonical = CanonicalFpEnv::enter();
-    check_skew_width::<f32>("Scalar");
-    check_skew_width::<Simd4>("Simd4");
-    check_skew_width::<Simd8>("Simd8");
+    lane::each_lane!(|L| check_skew_width::<L>(core::any::type_name::<L>()));
 }
 
 fn check_skew_width<L: Lane>(width: &str) {
@@ -1332,7 +1312,5 @@ fn check_bounded_width<L: Lane>(width: &str) {
 #[test]
 fn g2_bounded_cascade_is_the_cascade_and_judges_what_it_stores() {
     let _canonical = CanonicalFpEnv::enter();
-    check_bounded_width::<f32>("Scalar");
-    check_bounded_width::<Simd4>("Simd4");
-    check_bounded_width::<Simd8>("Simd8");
+    lane::each_lane!(|L| check_bounded_width::<L>(core::any::type_name::<L>()));
 }

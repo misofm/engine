@@ -12,9 +12,9 @@
 //!    signals of [`FRAMES`] frames. At width `W` the corpus is processed in `LANES / W` groups of
 //!    an AoSoA block and read back *lane-major* before hashing, so the digest describes the
 //!    arithmetic and not the layout. `W = 1`, `W = 4` and `W = 8` must produce the same 32 bytes,
-//!    on every target — which is why every case is digested at every width a target has: all
-//!    three natively, and `W = 1` and `W = 4` on `wasm32`, which has no eight-lane type (issue
-//!    #1110; see [`WIDTHS`]).
+//!    on every target — which is why every case is digested at every width a build has: all
+//!    three where `avx2` is enabled, and `W = 1` and `W = 4` in the 4-lane (NEON/simd128) builds,
+//!    which have no eight-lane type (issues #1110 and #1112; see [`WIDTHS`]).
 //! 2. **No NaN reaches a digest.** D5 excludes NaN payloads because wasm canonicalises them. Every
 //!    case is built so its outputs are finite, and the host crate asserts that rather than assuming
 //!    it.
@@ -71,15 +71,15 @@ pub const FRAMES: usize = 1024;
 /// The lane widths every case is digested at, numbered as [`digest_case`] numbers them: `f32` (0),
 /// `Simd4` (1) and `Simd8` (2).
 ///
-/// Three natively, where `Simd4` and `Simd8` are both implemented (on AArch64 `wide` lowers `f32x8`
-/// to two four-lane values), so a width difference cannot hide behind a target difference. Two on
-/// `wasm32`, which has no eight-lane type (issue #1110): the browser runs four lanes only, so the
-/// wasm leg checks `Simd4` against the scalar oracle and the native legs check all three.
-pub const WIDTHS: usize = if cfg!(target_arch = "wasm32") { 2 } else { 3 };
+/// Three where `avx2` is enabled, the 8-lane (AVX2) build, where `Simd4` and `Simd8` both exist.
+/// Two in the 4-lane (NEON/simd128) builds, the browser's and the phones', which have no eight-lane
+/// type (issues #1110 and #1112): they run four lanes only, so their legs check `Simd4` against the
+/// scalar oracle, and the 8-lane build checks all three.
+pub const WIDTHS: usize = 1 + lane::Backend::VECTOR.len();
 
 /// Evaluates `$body` with `$lane` naming the lane type of width index `$width` (see [`WIDTHS`]):
 /// this corpus's one dispatch from a width index to a lane type, and the one place it names the
-/// eight-lane type, which does not exist on `wasm32`.
+/// eight-lane type, which exists only where `avx2` is enabled.
 macro_rules! at_width {
     ($width:expr, |$lane:ident| $body:expr) => {
         match $width {
@@ -91,7 +91,7 @@ macro_rules! at_width {
                 type $lane = lane::Simd4;
                 $body
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             2 => {
                 type $lane = lane::Simd8;
                 $body
@@ -1062,7 +1062,7 @@ pub fn width_name(width: usize) -> &'static str {
 }
 
 /// The lane count width index `width` runs at: the `Lane::WIDTH` of the type this crate's one
-/// width dispatch (`at_width!`) binds there, so `1`, `4` and, off `wasm32`, `8`.
+/// width dispatch (`at_width!`) binds there, so `1`, `4` and, where `avx2` is enabled, `8`.
 ///
 /// Read from that type, not from a table, so it reports what a digest at that index actually ran.
 /// The wasm gate host holds a `simd128` guest's indices to exactly `[1, 4]`: a guest whose index 1
@@ -1108,7 +1108,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
 
 /// Digests one case at one width.
 ///
-/// `width` selects `f32` (0), `Simd4` (1) or, off `wasm32`, `Simd8` (2). A math case ignores it.
+/// `width` selects `f32` (0), `Simd4` (1) or, with `avx2`, `Simd8` (2). A math case ignores it.
 ///
 /// # Panics
 ///

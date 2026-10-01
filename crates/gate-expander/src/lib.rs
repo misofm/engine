@@ -1012,8 +1012,8 @@ macro_rules! bank_impl {
 }
 
 bank_impl!(Simd4);
-// Issue #1110: no eight-lane type on wasm32 (`effect_contract::BankWidth`).
-#[cfg(not(target_arch = "wasm32"))]
+// Issues #1110 and #1112: an eight-lane type only where `avx2` is enabled (`BankWidth`).
+#[cfg(target_feature = "avx2")]
 bank_impl!(lane::Simd8);
 
 /// Validates one prepare request's initial values against the frozen domains.
@@ -1164,7 +1164,6 @@ mod tests {
     use super::*;
     use effect_contract::{PrepareEffectLimits, PreparedPorts, validate_descriptor};
     use effect_runtime::params::ParameterKind;
-    use lane::Simd8;
 
     impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         /// Test-only fault injection: makes one lane's smoothed gain a NaN.
@@ -1262,16 +1261,14 @@ mod tests {
     }
 
     /// A NaN injected into one lane's gain recovers that lane alone, at this build's native bank
-    /// width: eight lanes on x86-64-v3, four on AArch64 NEON (#1017). The bank is compared with a
-    /// per-lane scalar peer and with an uninjected control bank of the same width.
+    /// width, `lane::Native`: eight lanes in the 8-lane (AVX2) build, four in a 4-lane
+    /// (NEON/simd128) build (#1017, #1112). The bank is compared with a per-lane scalar peer and
+    /// with an uninjected control bank of the same width.
     #[test]
     fn injected_nonfinite_gain_has_scalar_parity_at_the_native_width() {
-        match BankWidth::for_backend(Backend::current())
-            .expect("no product target renders scalar banks")
-        {
-            BankWidth::Eight => injected_nonfinite_gain_parity::<Simd8>(BankWidth::Eight),
-            BankWidth::Four => injected_nonfinite_gain_parity::<Simd4>(BankWidth::Four),
-        }
+        let width = BankWidth::for_backend(Backend::current())
+            .expect("no product target renders scalar banks");
+        injected_nonfinite_gain_parity::<lane::Native>(width);
     }
 
     fn injected_nonfinite_gain_parity<L: Lane>(width: BankWidth) {

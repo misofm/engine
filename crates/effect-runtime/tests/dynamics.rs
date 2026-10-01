@@ -7,7 +7,7 @@ use effect_runtime::dynamics::{
     GainComputerCoef, MIN_SOFT_KNEE_DB, gain_computer_db, gain_delta_db, gain_from_db,
     knee_coefficients, level_db,
 };
-use lane::{Lane, Simd4, Simd8};
+use lane::Lane;
 
 /// Equation 4, transcribed from the paper in `f64`. Independent of the implementation: it is
 /// written in the paper's own variables and branches, with no shared helper.
@@ -462,8 +462,6 @@ fn a_randomized_sweep_never_leaves_the_finite_curve() {
             levels.push(threshold + knee * (generator.unit() - 0.5));
         }
         let scalar = GainComputerCoef::<f32>::new(threshold, ratio, knee);
-        let four = GainComputerCoef::<Simd4>::new(threshold, ratio, knee);
-        let eight = GainComputerCoef::<Simd8>::new(threshold, ratio, knee);
         for level in levels {
             evaluated += 1;
             let delta = gain_delta_db::<f32>(level, &scalar);
@@ -474,16 +472,15 @@ fn a_randomized_sweep_never_leaves_the_finite_curve() {
                  output {output}",
                 knee.to_bits()
             );
-            assert_eq!(
-                lane_bits(gain_delta_db::<Simd4>(Simd4::splat(level), &four)),
-                delta.to_bits(),
-                "Simd4 W {knee:e} T {threshold:e} R {ratio} x {level:e}"
-            );
-            assert_eq!(
-                lane_bits(gain_delta_db::<Simd8>(Simd8::splat(level), &eight)),
-                delta.to_bits(),
-                "Simd8 W {knee:e} T {threshold:e} R {ratio} x {level:e}"
-            );
+            lane::each_vector_lane!(|L| {
+                let coef = GainComputerCoef::<L>::new(threshold, ratio, knee);
+                assert_eq!(
+                    lane_bits(gain_delta_db::<L>(L::splat(level), &coef)),
+                    delta.to_bits(),
+                    "{} W {knee:e} T {threshold:e} R {ratio} x {level:e}",
+                    core::any::type_name::<L>()
+                );
+            });
             let expected = oracle(
                 f64::from(level),
                 f64::from(threshold),

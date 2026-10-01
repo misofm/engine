@@ -208,11 +208,18 @@ pub(crate) fn native_bank() -> Option<(Backend, BankWidth)> {
 }
 
 /// A kernel backend and width this build does **not** render, for the unavailable-fallback gate.
+///
+/// Only a build with a second vector width has one: four lanes in the 8-lane (AVX2) build, and none
+/// in a 4-lane (NEON/simd128) build (#1112).
 pub(crate) fn foreign_bank() -> (Backend, BankWidth) {
-    match Backend::current() {
-        Backend::Simd8 => (Backend::Simd4, BankWidth::Four),
-        _ => (Backend::Simd8, BankWidth::Eight),
-    }
+    let backend = *Backend::VECTOR
+        .iter()
+        .find(|&&backend| backend != Backend::current())
+        .expect("a build with a second vector width");
+    (
+        backend,
+        BankWidth::for_backend(backend).expect("a vector backend"),
+    )
 }
 
 /// Binds a bank of `lanes` identical members at the native width, or `None` if this build has no

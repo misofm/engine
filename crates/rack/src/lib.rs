@@ -523,12 +523,12 @@ pub type BankPlanePair<'a> = (&'a mut [f32], &'a mut [f32]);
 
 pub struct BankPlaneViews<'a>(BankPlaneViewsInner<'a>);
 
-/// The views of a four- or an eight-lane bank. `Eight`, [`BankPlaneViews::from_eight`] and their
-/// arms are absent on `wasm32`, which has no eight-lane bank (issue #1110,
-/// [`BankWidth`](effect_contract::BankWidth)).
+/// The views of a four- or an eight-lane bank. `Eight`, `BankPlaneViews::from_eight` and their
+/// arms exist only where `avx2` is enabled, the one build with an eight-lane bank (issues #1110
+/// and #1112, [`BankWidth`](effect_contract::BankWidth)).
 enum BankPlaneViewsInner<'a> {
     Four([BankPlanePair<'a>; 4], usize),
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     Eight([BankPlanePair<'a>; 8], usize),
 }
 
@@ -547,7 +547,7 @@ impl<'a> BankPlaneViews<'a> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Four(pairs, frames)))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     pub fn from_eight(pairs: [BankPlanePair<'a>; 8], frames: usize) -> Option<Self> {
         Self::capacity(&pairs, frames).then_some(Self(BankPlaneViewsInner::Eight(pairs, frames)))
     }
@@ -556,7 +556,7 @@ impl<'a> BankPlaneViews<'a> {
     fn supports(&self, width: usize, frames: usize) -> bool {
         match &self.0 {
             BankPlaneViewsInner::Four(_, capacity) => width == 4 && *capacity >= frames,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             BankPlaneViewsInner::Eight(_, capacity) => width == 8 && *capacity >= frames,
         }
     }
@@ -3047,7 +3047,7 @@ impl BankChain {
                             transpose_tile_4,
                         );
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(target_feature = "avx2")]
                     BankPlaneViewsInner::Eight(pairs, _) => {
                         tile_scatter_direct_plane(
                             &self.scratch.left,
@@ -3239,9 +3239,14 @@ impl BankChain {
 mod tests {
     use super::*;
 
+    /// The widest bank this build has: eight lanes on an 8-lane (AVX2) build, four on a 4-lane
+    /// (NEON/simd128) one (`BankWidth::ALL`, issue #1112). A test whose claim holds at any one
+    /// width runs here, so every build runs it at the width it ships.
+    const WIDEST: BankWidth = BankWidth::ALL[BankWidth::ALL.len() - 1];
+
     #[test]
     fn prepared_fold_configuration_preserves_masks_and_constructor_checks() {
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             assert!(matches!(
                 PreparedFoldConfiguration::new(
@@ -3310,25 +3315,23 @@ mod tests {
                 active.into_boxed_slice(),
             )
             .expect("configuration");
-            let other = if width == BankWidth::Four {
-                BankWidth::Eight
-            } else {
-                BankWidth::Four
-            };
-            assert!(matches!(
-                BankChain::new_with_prepared_fold(
-                    AoSoaScratch::new(other, 16).expect("scratch"),
-                    configuration,
-                    Vec::new()
-                ),
-                Err(RackError::WidthMismatch)
-            ));
+            // Another width's scratch is refused; only an 8-lane (AVX2) build has another width.
+            if let Some(&other) = BankWidth::ALL.iter().find(|&&other| other != width) {
+                assert!(matches!(
+                    BankChain::new_with_prepared_fold(
+                        AoSoaScratch::new(other, 16).expect("scratch"),
+                        configuration,
+                        Vec::new()
+                    ),
+                    Err(RackError::WidthMismatch)
+                ));
+            }
         }
     }
 
     #[test]
     fn resident_output_lane_checks_shape_and_preserves_final_planes_after_collapse() {
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for population in [1, lanes - 1, lanes] {
                 let active: Vec<_> = (0..lanes).map(|lane| lane < population).collect();
@@ -3408,7 +3411,7 @@ mod tests {
 
     #[test]
     fn rt9_resident_copy_matches_scalar_gather_and_preserves_poisoned_words() {
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let quantum = 17;
             for partial in [false, true] {
@@ -3499,7 +3502,9 @@ mod tests {
                     TraceKind::Dual
                 }),
             ] {
-                for mismatch in 0..5 {
+                // Mismatch 1, a source of another width, needs a build with two widths (#1112).
+                for mismatch in (0..5).filter(|&mismatch| mismatch != 1 || BankWidth::ALL.len() > 1)
+                {
                     let spec = TraceSpec {
                         id: 0,
                         mask: [true; 4],
@@ -3515,14 +3520,22 @@ mod tests {
                         let mut source = BankChain::new(
                             AoSoaScratch::new(
                                 if mismatch == 1 {
-                                    BankWidth::Eight
+                                    WIDEST
                                 } else {
                                     BankWidth::Four
                                 },
                                 if mismatch == 2 { 4 } else { 3 },
                             )
                             .expect("scratch"),
-                            vec![true; if mismatch == 1 { 8 } else { 4 }].into_boxed_slice(),
+                            vec![
+                                true;
+                                if mismatch == 1 {
+                                    WIDEST.lanes() as usize
+                                } else {
+                                    4
+                                }
+                            ]
+                            .into_boxed_slice(),
                             vec![],
                         )
                         .expect("source");
@@ -3634,26 +3647,32 @@ mod tests {
                 return None;
             }
             let (left, right) = (&mut self.left, &mut self.right);
-            if lanes == 4 {
-                let mut left = left.iter_mut();
-                let mut right = right.iter_mut();
-                let pairs: [BankPlanePair<'_>; 4] = std::array::from_fn(|_| {
-                    (
-                        &mut **left.next().expect("validated lane"),
-                        &mut **right.next().expect("validated lane"),
-                    )
-                });
-                BankPlaneViews::from_four(pairs, frames)
-            } else {
-                let mut left = left.iter_mut();
-                let mut right = right.iter_mut();
-                let pairs: [BankPlanePair<'_>; 8] = std::array::from_fn(|_| {
-                    (
-                        &mut **left.next().expect("validated lane"),
-                        &mut **right.next().expect("validated lane"),
-                    )
-                });
-                BankPlaneViews::from_eight(pairs, frames)
+            match lanes {
+                4 => {
+                    let mut left = left.iter_mut();
+                    let mut right = right.iter_mut();
+                    let pairs: [BankPlanePair<'_>; 4] = std::array::from_fn(|_| {
+                        (
+                            &mut **left.next().expect("validated lane"),
+                            &mut **right.next().expect("validated lane"),
+                        )
+                    });
+                    BankPlaneViews::from_four(pairs, frames)
+                }
+                // `from_eight` exists where eight-lane banks do (issue #1112).
+                #[cfg(target_feature = "avx2")]
+                8 => {
+                    let mut left = left.iter_mut();
+                    let mut right = right.iter_mut();
+                    let pairs: [BankPlanePair<'_>; 8] = std::array::from_fn(|_| {
+                        (
+                            &mut **left.next().expect("validated lane"),
+                            &mut **right.next().expect("validated lane"),
+                        )
+                    });
+                    BankPlaneViews::from_eight(pairs, frames)
+                }
+                _ => None,
             }
         }
     }
@@ -3668,10 +3687,12 @@ mod tests {
         }
     }
 
+    #[cfg(target_feature = "avx2")]
     struct WrongWidthPlanes {
         planes: Planes,
         per_lane_writes: usize,
     }
+    #[cfg(target_feature = "avx2")]
     impl BankMembers for WrongWidthPlanes {
         fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
             self.planes.plane(lane)
@@ -4125,7 +4146,8 @@ mod tests {
             core::mem::size_of::<BankChain>(),
             core::mem::align_of::<BankChain>()
         );
-        for (width, lanes) in [(BankWidth::Four, 4_usize), (BankWidth::Eight, 8_usize)] {
+        for &width in BankWidth::ALL {
+            let lanes = width.lanes() as usize;
             let scratch = || AoSoaScratch::new(width, 4).expect("scratch");
             assert_eq!(
                 BankChain::new(
@@ -4702,7 +4724,10 @@ mod tests {
         assert_planes_bit_equal(&members.planes, &expected, "direct call sentinel");
     }
 
+    /// An other-width probe: the provider offers a four-lane view to an eight-lane chain, so it
+    /// exists where eight-lane banks do (issue #1112).
     #[test]
+    #[cfg(target_feature = "avx2")]
     fn wrong_width_provider_is_dropped_before_complete_staged_fallback() {
         let mut state = 0x3994_3995_3996_3997;
         let source = hostile_planes(8, 11, &mut state);
@@ -4786,7 +4811,7 @@ mod tests {
     #[test]
     fn full_bank_gather_scatter_round_trip_is_bit_exact() {
         let mut state = 0x5eed_1234_abcd_0001_u64;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for frames in frame_shapes(lanes) {
                 let mut planes = hostile_planes(lanes, frames, &mut state);
@@ -4850,7 +4875,7 @@ mod tests {
         }
 
         let mut state = 0x5eed_1234_abcd_0002_u64;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for frames in frame_shapes(lanes) {
                 let source = hostile_planes(lanes, frames, &mut state);
@@ -4960,8 +4985,11 @@ mod tests {
     #[test]
     fn the_auxiliary_destination_seam_is_absent_by_default_and_accumulates_when_armed() {
         let frames = 64_u32;
-        let lanes = 8_usize;
-        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        // The build's widest bank (#1112): lanes 2 and 5 of eight share the destination, and lanes
+        // 1 and 2 of four.
+        let lanes = WIDEST.lanes() as usize;
+        let (first, second) = (lanes / 4, lanes * 5 / 8);
+        let scratch = AoSoaScratch::new(WIDEST, frames).expect("scratch");
         let mut chain = BankChain::new(
             scratch,
             vec![true; lanes].into_boxed_slice(),
@@ -4990,10 +5018,10 @@ mod tests {
             "an unarmed chain must not write an auxiliary destination"
         );
 
-        // (3) Arm lanes 2 and 5, which share one destination.
+        // (3) Arm two lanes, which share one destination.
         let mut armed_mask = vec![false; lanes];
-        armed_mask[2] = true;
-        armed_mask[5] = true;
+        armed_mask[first] = true;
+        armed_mask[second] = true;
         chain
             .arm_aux(armed_mask.clone().into_boxed_slice())
             .expect("arm");
@@ -5011,15 +5039,15 @@ mod tests {
                 );
             }
             // (3) The shared destination carries the *sum* of both armed lanes, on top of what it
-            // already held. Assigning instead of accumulating would give 5.0 and 10.0.
+            // already held. Assigning instead of accumulating would give the second lane's alone.
             assert_eq!(
                 armed.aux_left[frame],
-                0.5 + 2.0 + 5.0,
+                0.5 + first as f32 + second as f32,
                 "frame {frame}: two armed lanes must sum into one destination"
             );
             assert_eq!(
                 armed.aux_right[frame],
-                -0.5 + 4.0 + 10.0,
+                -0.5 + 2.0 * first as f32 + 2.0 * second as f32,
                 "frame {frame}: two armed lanes must sum into one destination"
             );
         }
@@ -5098,7 +5126,7 @@ mod tests {
     #[test]
     fn prepared_fold_constructor_preserves_pcm_and_disarm() {
         const FRAMES: u32 = 13;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for shape in 0..3 {
                 let mut active = vec![true; lanes];
@@ -5222,12 +5250,13 @@ mod tests {
     #[test]
     fn the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed() {
         let frames = 48_u32;
-        let lanes = 8_usize;
+        // The build's widest bank (#1112); the partial bank drops its last two lanes.
+        let lanes = WIDEST.lanes() as usize;
         for full in [true, false] {
             let mut active = vec![true; lanes];
             if !full {
-                active[6] = false;
-                active[7] = false;
+                active[lanes - 2] = false;
+                active[lanes - 1] = false;
             }
             let build = || PlanesWithFold {
                 planes: Planes {
@@ -5247,7 +5276,7 @@ mod tests {
             };
             let chain = |active: &[bool]| {
                 BankChain::new(
-                    AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch"),
+                    AoSoaScratch::new(WIDEST, frames).expect("scratch"),
                     active.to_vec().into_boxed_slice(),
                     vec![slot(active.to_vec(), Box::new(ScaleByLane))],
                 )
@@ -5342,18 +5371,26 @@ mod tests {
     #[test]
     fn all_active_folded_masks_use_one_cohort_with_physical_lane_ids() {
         let frames = 13_u32;
-        for (width, active) in [
-            (BankWidth::Four, vec![true, true, true, true]),
-            (BankWidth::Eight, vec![true; 8]),
-            (
-                BankWidth::Eight,
-                vec![true, false, true, false, false, true, false, false],
-            ),
-            (
-                BankWidth::Eight,
-                vec![false, false, true, false, false, false, false, false],
-            ),
-        ] {
+        // A full four-lane bank; a full, a scattered and a one-lane eight-lane bank, where a
+        // build has eight lanes (issue #1112).
+        let masks = BankWidth::ALL.iter().flat_map(|&width| {
+            if width.lanes() == 4 {
+                vec![(width, vec![true, true, true, true])]
+            } else {
+                vec![
+                    (width, vec![true; 8]),
+                    (
+                        width,
+                        vec![true, false, true, false, false, true, false, false],
+                    ),
+                    (
+                        width,
+                        vec![false, false, true, false, false, false, false, false],
+                    ),
+                ]
+            }
+        });
+        for (width, active) in masks {
             let lanes = width.lanes() as usize;
             let build = || PlanesWithFold {
                 planes: Planes {
@@ -5492,7 +5529,7 @@ mod tests {
         const STAGING_LEFT: u32 = 0x7fc0_3915;
         const STAGING_RIGHT: u32 = 0x7fc0_3916;
         let mut state = 0x5eed_0915_abcd_0001_u64;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             for frames in frame_shapes(lanes) {
                 let source = hostile_planes(lanes, frames, &mut state);
@@ -5651,7 +5688,9 @@ mod tests {
     fn resident_fold_cohort_constructor_rejects_every_invalid_shape() {
         let left = [1.0_f32; 16];
         let right = [-1.0_f32; 16];
-        for (width, frames) in [(BankWidth::Four, 4), (BankWidth::Eight, 2)] {
+        for &width in BankWidth::ALL {
+            // The frames that fill sixteen words.
+            let frames = 16 / width.lanes() as usize;
             let cohort =
                 ResidentFoldCohort::new(&left, &right, width, frames).expect("exact shape");
             assert_eq!(cohort.width(), width);
@@ -5679,7 +5718,7 @@ mod tests {
             Err(RackError::Shape)
         ));
         assert!(matches!(
-            ResidentFoldCohort::new(&left, &right, BankWidth::Eight, usize::MAX),
+            ResidentFoldCohort::new(&left, &right, WIDEST, usize::MAX),
             Err(RackError::Overflow)
         ));
     }
@@ -5886,10 +5925,11 @@ mod tests {
     #[test]
     fn arming_a_fold_refuses_an_unrenderable_mask() {
         let frames = 32_u32;
-        let lanes = 8_usize;
+        // The build's widest bank, its last lane not rendered (#1112).
+        let lanes = WIDEST.lanes() as usize;
         let mut active = vec![true; lanes];
-        active[7] = false;
-        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        active[lanes - 1] = false;
+        let scratch = AoSoaScratch::new(WIDEST, frames).expect("scratch");
         let mut chain = BankChain::new(
             scratch,
             active.clone().into_boxed_slice(),
@@ -5904,7 +5944,7 @@ mod tests {
         assert_eq!(
             chain.arm_fold(vec![true; lanes].into_boxed_slice()),
             Err(RackError::Shape),
-            "folding lane 7, which this chain does not render, is refused"
+            "folding the last lane, which this chain does not render, is refused"
         );
         assert!(
             chain.fold_lanes().is_empty(),
@@ -5925,10 +5965,11 @@ mod tests {
     #[test]
     fn arming_an_auxiliary_destination_refuses_an_unrenderable_mask() {
         let frames = 32_u32;
-        let lanes = 8_usize;
+        // The build's widest bank, its last lane not rendered (#1112).
+        let lanes = WIDEST.lanes() as usize;
         let mut active = vec![true; lanes];
-        active[7] = false;
-        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        active[lanes - 1] = false;
+        let scratch = AoSoaScratch::new(WIDEST, frames).expect("scratch");
         let mut chain = BankChain::new(
             scratch,
             active.clone().into_boxed_slice(),
@@ -5943,7 +5984,7 @@ mod tests {
         assert_eq!(
             chain.arm_aux(vec![true; lanes].into_boxed_slice()),
             Err(RackError::Shape),
-            "arming lane 7, which this chain does not render, is refused"
+            "arming the last lane, which this chain does not render, is refused"
         );
         assert!(
             chain.aux_lanes().is_empty(),
@@ -5957,7 +5998,8 @@ mod tests {
     #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;
-        let lanes = 8_usize;
+        // The build's widest bank (#1112).
+        let lanes = WIDEST.lanes() as usize;
         let mut state = 0x0123_4567_89ab_cdef_u64;
         let mut planes = Planes {
             left: (0..lanes)
@@ -5985,9 +6027,10 @@ mod tests {
         }
         let expected_left = planes.left.clone();
         let expected_right = planes.right.clone();
-        let active = vec![true, true, false, true, true, true, false, true];
+        // Lanes 2 and 6 of eight inactive; lane 2 of four.
+        let active: Vec<bool> = (0..lanes).map(|lane| lane % 4 != 2).collect();
         let mut chain = BankChain::new(
-            AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch"),
+            AoSoaScratch::new(WIDEST, frames).expect("scratch"),
             active.clone().into_boxed_slice(),
             vec![slot(active.clone(), Box::new(PassThrough))],
         )
@@ -6157,9 +6200,9 @@ mod tests {
     /// T5: the scratch is exactly two planes per bank (#96 F9 deleted the sidechain pair).
     #[test]
     fn scratch_allocates_exactly_two_planes() {
-        let scratch = AoSoaScratch::new(BankWidth::Eight, 128).expect("scratch");
-        assert_eq!(scratch.left.len(), 1024);
-        assert_eq!(scratch.right.len(), 1024);
+        let scratch = AoSoaScratch::new(WIDEST, 128).expect("scratch");
+        assert_eq!(scratch.left.len(), 128 * WIDEST.lanes() as usize);
+        assert_eq!(scratch.right.len(), 128 * WIDEST.lanes() as usize);
         assert_eq!(
             core::mem::size_of::<AoSoaScratch>(),
             core::mem::size_of::<(Box<[f32]>, Box<[f32]>, u32, BankWidth)>(),
@@ -6197,7 +6240,8 @@ mod tests {
             }
         }
         let frames = 512_usize;
-        let lanes = 8_usize;
+        // The build's widest bank (#1112).
+        let lanes = WIDEST.lanes() as usize;
         let mut state = 0x0bad_c0de_u64;
         let source: Vec<Vec<f32>> = (0..lanes)
             .map(|_| {
@@ -6208,7 +6252,7 @@ mod tests {
             .collect();
         let render = |partition: usize| -> Vec<Vec<f32>> {
             let mut chain = BankChain::new(
-                AoSoaScratch::new(BankWidth::Eight, 512).expect("scratch"),
+                AoSoaScratch::new(WIDEST, 512).expect("scratch"),
                 vec![true; lanes].into_boxed_slice(),
                 vec![slot(
                     vec![true; lanes],
@@ -6380,11 +6424,7 @@ mod tests {
 
     fn mono_chain(lanes: usize, frames: u32, slots: Vec<Box<dyn BankStage>>) -> BankChain {
         let active: Vec<bool> = vec![true; lanes];
-        let width = if lanes == 4 {
-            BankWidth::Four
-        } else {
-            BankWidth::Eight
-        };
+        let width = BankWidth::for_lanes(lanes).expect("a bank width");
         let slots = slots
             .into_iter()
             .map(|stage| slot(active.clone(), stage))
@@ -6533,7 +6573,7 @@ mod tests {
             witnesses: values,
         });
         let unclassified: Box<dyn BankStage> = Box::new(PassThrough);
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             for mask in [0, 0x55, 0xff] {
                 reset_witness_calls();
                 let bank = classified.lane_symmetry_bank(width, mask);
@@ -6561,7 +6601,7 @@ mod tests {
     #[test]
     fn stage_witness_bank_aggregates_exact_terms_for_full_partial_and_identity_lanes() {
         let symmetric = ChannelSymmetryWitness::SYMMETRIC;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let valid = if lanes == 4 { 0x0f } else { 0xff };
             for active_mask in [valid, valid & 0x55] {
@@ -6659,7 +6699,7 @@ mod tests {
     #[test]
     fn stage_witness_bank_entire_armed_decision_publishes_once_even_when_declining() {
         let symmetric = ChannelSymmetryWitness::SYMMETRIC;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let valid = if lanes == 4 { 0x0f } else { 0xff };
             for mask in [valid, valid & 0x55] {
@@ -7109,7 +7149,7 @@ mod tests {
         use test_only_bank_phase_profile as profile;
         const FRAMES: u32 = 16;
         let mut state = 0x5eed_0960_0000_0001_u64;
-        for width in [BankWidth::Four, BankWidth::Eight] {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let all = vec![true; lanes];
             let mut partial = all.clone();

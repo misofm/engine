@@ -4869,7 +4869,7 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
 pub use tests::test_only_observed_scalar_pair_binding;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::test_only_prepared_unpaired_graph;
+pub use tests::{TEST_ONLY_PAIR_GRAPH_TRACKS, test_only_prepared_unpaired_graph};
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use tests::{
@@ -5408,6 +5408,7 @@ mod tests {
         // level; every post-input node is a member, so no level contributes a scalar tail.
         for (dispatch, expected_sizes) in [
             (Backend::Simd4, &[1, 4, 4, 1, 4, 3][..]),
+            #[cfg(target_feature = "avx2")]
             (Backend::Simd8, &[1, 8, 1, 7][..]),
             // D4: the scalar backend has no bank width at all -- one arithmetic graph everywhere
             // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
@@ -5469,11 +5470,15 @@ mod tests {
             stage: TrackStage::PostInputBuiltins,
         };
         let quantum = 64_u32;
-        for (width, sizes) in [
-            (effect_contract::BankWidth::Four, &[4, 3][..]),
-            (effect_contract::BankWidth::Eight, &[8, 1][..]),
-            (effect_contract::BankWidth::Eight, &[5][..]),
-        ] {
+        // A full and a padded bank at four lanes; a full-plus-one and a padded bank at eight.
+        let cases = effect_contract::BankWidth::ALL.iter().flat_map(|&width| {
+            if width.lanes() == 4 {
+                vec![(width, &[4, 3][..])]
+            } else {
+                vec![(width, &[8, 1][..]), (width, &[5][..])]
+            }
+        });
+        for (width, sizes) in cases {
             let mut next = 0_usize;
             let groups: Vec<Box<[GraphNodeId]>> = sizes
                 .iter()
@@ -6371,7 +6376,23 @@ mod tests {
         (bits, bank_count, Vec::new(), output)
     }
 
-    /// Actual queued nine-track graph without allocating capture observers, for the installed
+    /// The pair graph's own-width fixture (issue #1112): the build's vector backend, and one full
+    /// bank of it plus a one-track tail -- `Simd8` and nine tracks on an 8-lane (AVX2) build,
+    /// `Simd4` and five on a 4-lane (NEON/simd128) one.
+    const PAIR_GRAPH_BACKEND: Backend = Backend::current();
+
+    /// The track count of [`test_only_prepared_pair_graph`]'s graph (see `PAIR_GRAPH_BACKEND`).
+    pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = PAIR_GRAPH_BACKEND.width() + 1;
+
+    /// [`TEST_ONLY_PAIR_GRAPH_TRACKS`] as a witness member count.
+    const PAIR_GRAPH_MEMBERS: u64 = TEST_ONLY_PAIR_GRAPH_TRACKS as u64;
+
+    /// The pair graph's one-lane tail track.
+    fn pair_graph_tail_id() -> String {
+        format!("t{:02}", TEST_ONLY_PAIR_GRAPH_TRACKS - 1)
+    }
+
+    /// Actual queued own-width graph without allocating capture observers, for the installed
     /// allocator's render-only audit. Construction, binding and queue ownership stay off render.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -6382,8 +6403,8 @@ mod tests {
             false,
             true,
             None,
-            Backend::Simd8,
-            9,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
         )
     }
 
@@ -6392,7 +6413,15 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn test_only_prepared_unpaired_graph() -> PreparedBuiltinsGraphBound {
-        prepared_pair_graph_fixture(false, false, false, false, None, Backend::Simd8, 9)
+        prepared_pair_graph_fixture(
+            false,
+            false,
+            false,
+            false,
+            None,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+        )
     }
 
     #[cfg(feature = "test-support")]
@@ -9099,8 +9128,8 @@ mod tests {
             false,
             true,
             Some(Arc::clone(&collapsed_capture)),
-            Backend::Simd8,
-            9,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
         let mut separate = prepared_pair_graph_fixture(
             false,
@@ -9108,8 +9137,8 @@ mod tests {
             false,
             false,
             Some(Arc::clone(&separate_capture)),
-            Backend::Simd8,
-            9,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
         collapsed.plan.arm_mono_collapse(&|_| true);
         separate.plan.force_mono_collapse_off(true);
@@ -9130,16 +9159,16 @@ mod tests {
             "real input bank collapsed"
         );
         assert_eq!(separate.plan.bank_collapse_counters()[0], 0);
-        // Issue #916: both cohorts pair, the eight-lane first cohort and the one-lane tail. The
+        // Issue #916: both cohorts pair, the full first cohort and the one-lane tail. The
         // first cohort's lane 0 is the output track, whose post-matrix buffer used to be the
-        // graph output and declined the cohort. So each block runs two fused pairs over all nine
+        // graph output and declined the cohort. So each block runs two fused pairs over all the
         // members, where it ran the tail's one.
         assert_eq!(
             (pair_witness.fused_calls, pair_witness.fallback_calls),
             (2, 0)
         );
         assert_eq!(
-            pair_witness.process_members, 9,
+            pair_witness.process_members, PAIR_GRAPH_MEMBERS,
             "the first cohort's pair and the tail pair executed"
         );
 
@@ -9154,7 +9183,7 @@ mod tests {
             bound
                 .track_controls
                 .iter_mut()
-                .find(|control| control.track_id.as_ref() == "t08")
+                .find(|control| control.track_id.as_ref() == pair_graph_tail_id())
                 .expect("selected tail controls")
                 .input
                 .try_push(command)
@@ -9185,8 +9214,8 @@ mod tests {
             true,
             true,
             Some(Arc::clone(&recovered_capture)),
-            Backend::Simd8,
-            9,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
         let mut recovery_reference = prepared_pair_graph_fixture(
             false,
@@ -9194,8 +9223,8 @@ mod tests {
             true,
             false,
             Some(Arc::clone(&reference_capture)),
-            Backend::Simd8,
-            9,
+            PAIR_GRAPH_BACKEND,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
         );
         recovered.plan.arm_mono_collapse(&|_| true);
         recovery_reference.plan.force_mono_collapse_off(true);
@@ -9212,7 +9241,7 @@ mod tests {
         );
         assert_eq!(
             (hostile_witness.fused_calls, hostile_witness.process_members),
-            (2, 9)
+            (2, PAIR_GRAPH_MEMBERS)
         );
         test_only_reset_fader_matrix_witness();
         let _ = render_bound(&mut recovered, HARNESS_QUANTUM as u64);
@@ -9236,7 +9265,7 @@ mod tests {
         );
         assert_eq!(
             (clean_witness.fused_calls, clean_witness.process_members),
-            (2, 9)
+            (2, PAIR_GRAPH_MEMBERS)
         );
     }
 
@@ -9258,9 +9287,10 @@ mod tests {
         // cohort's lane 0 is the output track, whose post-matrix buffer used to be the graph
         // output and declined the whole cohort, leaving the tail as the one offer. With a
         // dedicated Output every track pairs, so the members are all `tracks`.
-        for (tracks, backend, offers, executed) in
-            [(5, Backend::Simd4, 2, 2), (9, Backend::Simd8, 2, 2)]
-        {
+        // One full bank and a one-track tail at every vector width: 5 tracks at four lanes, 9 at
+        // eight.
+        for &backend in Backend::VECTOR {
+            let (tracks, offers, executed) = (backend.width() + 1, 2, 2);
             FADER_MATRIX_PROCESS_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
             let (separate, _, _, _) =
@@ -9303,12 +9333,20 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_only_reset_fader_matrix_witness();
-        let (observed, banks, paired_windows, _) =
-            render_post_input_bits_with_delivery(9, Backend::Simd8, true, true);
+        let (observed, banks, paired_windows, _) = render_post_input_bits_with_delivery(
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
+            true,
+            true,
+        );
         let witness = test_only_fader_matrix_witness();
-        let (separate, _, separate_windows, _) =
-            render_post_input_bits_with_delivery(9, Backend::Simd8, false, true);
-        assert_eq!(observed.len(), 9);
+        let (separate, _, separate_windows, _) = render_post_input_bits_with_delivery(
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
+            false,
+            true,
+        );
+        assert_eq!(observed.len(), TEST_ONLY_PAIR_GRAPH_TRACKS);
         assert!(observed.iter().all(|track| !track.is_empty()));
         assert_eq!(observed, separate, "observed post-matrix PCM words");
         assert_eq!(paired_windows.len(), separate_windows.len());
@@ -9396,16 +9434,16 @@ mod tests {
         FADER_MATRIX_FACTORY_CALLS.store(0, Ordering::Relaxed);
         test_only_reset_fader_matrix_witness();
         let (paired, _, _, paired_output) = render_post_input_bits_with_variant(
-            9,
-            Backend::Simd8,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
             true,
             false,
             BoundaryVariant::Send,
         );
         let paired_witness = test_only_fader_matrix_witness();
         let (separate, _, _, separate_output) = render_post_input_bits_with_variant(
-            9,
-            Backend::Simd8,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
             false,
             false,
             BoundaryVariant::Send,
@@ -9436,8 +9474,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_only_reset_fader_matrix_witness();
         let (eligible, _, _, _) = render_post_input_bits_with_variant(
-            9,
-            Backend::Simd8,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
             true,
             false,
             BoundaryVariant::Alias,
@@ -9446,8 +9484,8 @@ mod tests {
         test_only_reset_fader_matrix_witness();
         ALIAS_OBSERVATIONS.with(|count| count.set(0));
         let (observed, _, _, _) = render_post_input_bits_with_variant(
-            9,
-            Backend::Simd8,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
             true,
             false,
             BoundaryVariant::AliasObserved,
@@ -9457,8 +9495,8 @@ mod tests {
         let observed_calls = ALIAS_OBSERVATIONS.with(std::cell::Cell::get);
         let paired_alias = ALIAS_CAPTURE.with(|capture| capture.borrow().clone());
         let (separate_observed, _, _, _) = render_post_input_bits_with_variant(
-            9,
-            Backend::Simd8,
+            TEST_ONLY_PAIR_GRAPH_TRACKS,
+            PAIR_GRAPH_BACKEND,
             false,
             false,
             BoundaryVariant::AliasObserved,
@@ -9480,24 +9518,26 @@ mod tests {
             observed_calls, HARNESS_BLOCKS as usize,
             "the lowered alias observer executes on every block"
         );
-        // Issue #916: the first cohort (tracks 0 to 7) pairs too. Its lane 0 is the output track,
-        // whose post-matrix buffer used to be the graph output and declined the whole cohort. The
-        // Output is dedicated storage now, so both cohorts are eligible, and the alias observer
-        // discriminates the tail alone: 2 pairs over 9 members unobserved, 1 over 8 observed.
+        // Issue #916: the first cohort (every track but the tail) pairs too. Its lane 0 is the
+        // output track, whose post-matrix buffer used to be the graph output and declined the
+        // whole cohort. The Output is dedicated storage now, so both cohorts are eligible, and the
+        // alias observer discriminates the tail alone: 2 pairs over all the members unobserved,
+        // 1 over the first cohort observed (9 and 8 at eight lanes).
         assert_eq!(
             eligible_witness.factory_calls, 2,
             "the unobserved alias leaves the tail eligible beside the first cohort"
         );
         assert_eq!(
-            eligible_witness.factory_members, 9,
-            "the accepted cohorts are the eight-lane first cohort and the one-lane tail"
+            eligible_witness.factory_members, PAIR_GRAPH_MEMBERS,
+            "the accepted cohorts are the full first cohort and the one-lane tail"
         );
         assert_eq!(
             observed_witness.factory_calls, 1,
             "observing that same lowered alias rejects the otherwise-eligible tail"
         );
         assert_eq!(
-            observed_witness.factory_members, 8,
+            observed_witness.factory_members,
+            PAIR_GRAPH_MEMBERS - 1,
             "and only the tail: the first cohort still pairs"
         );
     }
@@ -9683,7 +9723,9 @@ mod tests {
         let _guard = PAIR_WITNESS_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (backend, members) in [(Backend::Simd4, 4), (Backend::Simd8, 5)] {
+        // A full four-lane bank, and a partial eight-lane one.
+        for &backend in Backend::VECTOR {
+            let members = if backend.width() == 4 { 4 } else { 5 };
             let mut fixture = pair_fixture(backend, members);
             FADER_MATRIX_FUSED_CALLS.store(0, Ordering::Relaxed);
             FADER_MATRIX_FALLBACK_CALLS.store(0, Ordering::Relaxed);
@@ -10582,17 +10624,21 @@ mod tests {
         assert!(policy.0.as_any().is::<FaderBankProcessor>());
         assert!(policy.1.as_any().is::<MatrixBankProcessor>());
 
-        let four = pair_fixture(Backend::Simd4, 4);
-        let eight = pair_fixture(Backend::Simd8, 8);
-        let shape = match make_fader_matrix(
-            Box::new(four.separate_fader),
-            Box::new(eight.separate_matrix),
-        ) {
-            Err(owners) => owners,
-            Ok(_) => panic!("width/backend mismatch"),
-        };
-        assert!(shape.0.as_any().is::<FaderBankProcessor>());
-        assert!(shape.1.as_any().is::<MatrixBankProcessor>());
+        // A width mismatch needs a second width, which only an 8-lane (AVX2) build has (#1112).
+        #[cfg(target_feature = "avx2")]
+        {
+            let four = pair_fixture(Backend::Simd4, 4);
+            let eight = pair_fixture(Backend::Simd8, 8);
+            let shape = match make_fader_matrix(
+                Box::new(four.separate_fader),
+                Box::new(eight.separate_matrix),
+            ) {
+                Err(owners) => owners,
+                Ok(_) => panic!("width/backend mismatch"),
+            };
+            assert!(shape.0.as_any().is::<FaderBankProcessor>());
+            assert!(shape.1.as_any().is::<MatrixBankProcessor>());
+        }
     }
 
     fn assert_late_decline_preserves_real_owners(
@@ -10747,6 +10793,8 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd4, 4, true);
+        // The width guard needs a second width: an 8-lane (AVX2) build's (#1112).
+        #[cfg(target_feature = "avx2")]
         assert_late_decline_preserves_real_owners(Backend::Simd4, 4, Backend::Simd8, 8, false);
         assert_late_decline_preserves_real_owners(Backend::Simd4, 3, Backend::Simd4, 4, false);
     }
@@ -11045,7 +11093,7 @@ mod tests {
         let bank_selected =
             prepare_session_builtins_between_render_calls(&compiled, &[], &controls, caps())
                 .expect("bank candidates")
-                .graph_scalar_owner_resource(Backend::Simd8, &levels, &classes)
+                .graph_scalar_owner_resource(Backend::current(), &levels, &classes)
                 .expect("checked vector estimate");
         assert_eq!(
             bank_selected,
@@ -11257,7 +11305,10 @@ mod tests {
             }
             (pcm, observed, snapshots, counts, reports)
         };
-        for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+        for backend in [Backend::Scalar]
+            .into_iter()
+            .chain(Backend::VECTOR.iter().copied())
+        {
             for n in [3, 4, 5, 8, 9] {
                 for variant in [
                     BoundaryVariant::Plain,
@@ -11311,7 +11362,7 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[test]
     fn resident_meter_accepted_plan_avoids_planar_acquisition_and_matches_decline() {
-        for backend in [Backend::Simd4, Backend::Simd8] {
+        for &backend in Backend::VECTOR {
             let mut candidate =
                 prepared_pair_graph_fixture(true, true, false, false, None, backend, 9);
             let mut reference =

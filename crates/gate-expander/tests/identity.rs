@@ -5,9 +5,9 @@ mod support;
 use effect_contract::{BankWidth, EffectBankProcessBlock, LinkMode, PreparedNativeEffectBank};
 use lane::Backend;
 use support::{
-    Values, active_values, assert_bits_eq, initial_values, noise, packed_w8, prepare, prepare_bank,
-    prepare_bank_w8, render_scalar_sidechain, request, request_at, retarget_spans, set_parameter,
-    snapshot, snapshot_bank, track_of,
+    NATIVE_LANES, Values, active_values, assert_bits_eq, initial_values, native_width, noise,
+    packed, prepare, prepare_bank, prepare_bank_native, render_scalar_sidechain, request,
+    request_at, retarget_spans, set_parameter, snapshot, snapshot_bank, track_of,
 };
 
 fn track_values() -> [Values; 8] {
@@ -29,20 +29,21 @@ fn track_values() -> [Values; 8] {
     })
 }
 
-fn render_bank8(
+/// Renders a bank of this build's own width (#1112) in blocks of `block` frames.
+fn render_bank_native(
     bank: &mut dyn PreparedNativeEffectBank,
     left: &mut [f32],
     right: &mut [f32],
     block: usize,
     automation: &[effect_contract::PreparedAutomationSpan],
 ) {
-    let frames = left.len() / 8;
+    let frames = left.len() / NATIVE_LANES;
     let mut start = 0;
     while start < frames {
         let end = (start + block).min(frames);
         let mut spans = Vec::new();
-        let mut offsets = [0_u32; 9];
-        for track in 0..8 {
+        let mut offsets = [0_u32; NATIVE_LANES + 1];
+        for track in 0..NATIVE_LANES {
             if start == 0 {
                 spans.extend_from_slice(automation);
             }
@@ -50,11 +51,11 @@ fn render_bank8(
         }
         bank.process_bank(
             EffectBankProcessBlock::new(
-                &mut left[start * 8..end * 8],
-                &mut right[start * 8..end * 8],
+                &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
+                &mut right[start * NATIVE_LANES..end * NATIVE_LANES],
                 None,
                 (end - start) as u32,
-                BankWidth::Eight,
+                native_width(),
                 start as u64,
                 &spans,
                 &offsets,
@@ -66,15 +67,13 @@ fn render_bank8(
     }
 }
 
+/// At the build's own width: W8 in the 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) build
+/// (#1112).
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
     let values = track_values();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
-        let mut bank = prepare_bank_w8(&values, link).expect("an eight-lane build binds W8");
+        let mut bank = prepare_bank_native(&values, link).expect("the build's own width binds");
         let mut scalar = Vec::new();
         for values in &values {
             let mut request = request(values);
@@ -82,22 +81,22 @@ fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
             scalar.push(prepare(request));
         }
         let frames = 257;
-        let left_source: Vec<Vec<f32>> = (0..8)
+        let left_source: Vec<Vec<f32>> = (0..NATIVE_LANES)
             .map(|track| noise(11 + track as u64, frames, 0.3))
             .collect();
-        let right_source: Vec<Vec<f32>> = (0..8)
+        let right_source: Vec<Vec<f32>> = (0..NATIVE_LANES)
             .map(|track| noise(91 + track as u64, frames, 0.3))
             .collect();
-        let mut bank_left = packed_w8(&left_source);
-        let mut bank_right = packed_w8(&right_source);
-        render_bank8(
+        let mut bank_left = packed(&left_source);
+        let mut bank_right = packed(&right_source);
+        render_bank_native(
             &mut *bank,
             &mut bank_left,
             &mut bank_right,
             17,
             &retarget_spans(0),
         );
-        for track in 0..8 {
+        for track in 0..NATIVE_LANES {
             let mut left = left_source[track].clone();
             let mut right = right_source[track].clone();
             let spans = retarget_spans(0);
@@ -111,12 +110,12 @@ fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
                 0,
             );
             assert_bits_eq(
-                &track_of(&bank_left, track, 8),
+                &track_of(&bank_left, track, NATIVE_LANES),
                 &left,
                 &format!("{link:?} left {track}"),
             );
             assert_bits_eq(
-                &track_of(&bank_right, track, 8),
+                &track_of(&bank_right, track, NATIVE_LANES),
                 &right,
                 &format!("{link:?} right {track}"),
             );
@@ -223,8 +222,8 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
 
 #[test]
 #[cfg_attr(
-    target_arch = "x86_64",
-    ignore = "a four-lane bank binds only on a four-lane build; the AArch64 legs run it (#1017)"
+    target_feature = "avx2",
+    ignore = "a four-lane bank binds only in a 4-lane (NEON/simd128) build, whose legs run it (#1017)"
 )]
 fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {
     assert_eq!(Backend::current(), Backend::Simd4, "a four-lane build");

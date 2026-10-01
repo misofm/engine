@@ -86,7 +86,6 @@ pub(crate) fn link_levels<L: Lane, const MODE: u8>(left: L, right: L) -> (L, L) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lane::{Simd4, Simd8};
 
     /// The smoother is `target + c * (y - target)`, and the attack coefficient is the one selected
     /// when the target asks for more reduction.
@@ -233,6 +232,14 @@ mod tests {
             }
         }
 
+        fn linked_in<L: Lane>(mode: u8, left: &[f32], right: &[f32], out: &mut [u32]) {
+            match mode {
+                LINK_MAXIMUM => linked::<L, LINK_MAXIMUM>(left, right, out),
+                LINK_AVERAGE => linked::<L, LINK_AVERAGE>(left, right, out),
+                _ => linked::<L, LINK_DUAL_MONO>(left, right, out),
+            }
+        }
+
         let mut y = [0.0f32; 8];
         let mut target = [0.0f32; 8];
         for lane in 0..8 {
@@ -240,34 +247,22 @@ mod tests {
             target[lane] = 0.6 - lane as f32 * 0.19;
         }
 
-        let (mut scalar, mut four, mut eight) = ([0u32; 8], [0u32; 8], [0u32; 8]);
+        let mut scalar = [0u32; 8];
         smoothed::<f32>(&y, &target, &mut scalar);
-        smoothed::<Simd4>(&y, &target, &mut four);
-        smoothed::<Simd8>(&y, &target, &mut eight);
-        assert_eq!(scalar, four, "branching_smooth at W=4");
-        assert_eq!(scalar, eight, "branching_smooth at W=8");
+        lane::each_vector_lane!(|L, W| {
+            let mut words = [0u32; 8];
+            smoothed::<L>(&y, &target, &mut words);
+            assert_eq!(scalar, words, "branching_smooth at W={W}");
+        });
 
         for mode in [LINK_DUAL_MONO, LINK_MAXIMUM, LINK_AVERAGE] {
-            let (mut scalar, mut four, mut eight) = ([0u32; 8], [0u32; 8], [0u32; 8]);
-            match mode {
-                LINK_MAXIMUM => {
-                    linked::<f32, LINK_MAXIMUM>(&y, &target, &mut scalar);
-                    linked::<Simd4, LINK_MAXIMUM>(&y, &target, &mut four);
-                    linked::<Simd8, LINK_MAXIMUM>(&y, &target, &mut eight);
-                }
-                LINK_AVERAGE => {
-                    linked::<f32, LINK_AVERAGE>(&y, &target, &mut scalar);
-                    linked::<Simd4, LINK_AVERAGE>(&y, &target, &mut four);
-                    linked::<Simd8, LINK_AVERAGE>(&y, &target, &mut eight);
-                }
-                _ => {
-                    linked::<f32, LINK_DUAL_MONO>(&y, &target, &mut scalar);
-                    linked::<Simd4, LINK_DUAL_MONO>(&y, &target, &mut four);
-                    linked::<Simd8, LINK_DUAL_MONO>(&y, &target, &mut eight);
-                }
-            }
-            assert_eq!(scalar, four, "link mode {mode} at W=4");
-            assert_eq!(scalar, eight, "link mode {mode} at W=8");
+            let mut scalar = [0u32; 8];
+            linked_in::<f32>(mode, &y, &target, &mut scalar);
+            lane::each_vector_lane!(|L, W| {
+                let mut words = [0u32; 8];
+                linked_in::<L>(mode, &y, &target, &mut words);
+                assert_eq!(scalar, words, "link mode {mode} at W={W}");
+            });
         }
     }
 }

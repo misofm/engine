@@ -62,11 +62,11 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 ];
 
 /// The widths every case is digested at.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_feature = "avx2")]
 pub const WIDTHS: [usize; 3] = [1, 4, 8];
-/// The widths every case is digested at: no eight on `wasm32`, which has no eight-lane type
-/// (issue #1110, `effect_contract::BankWidth`).
-#[cfg(target_arch = "wasm32")]
+/// The widths every case is digested at: no eight where `avx2` is off, as no eight-lane type is
+/// (issues #1110 and #1112, `effect_contract::BankWidth`).
+#[cfg(not(target_feature = "avx2"))]
 pub const WIDTHS: [usize; 2] = [1, 4];
 
 /// SHA-256 of each case's word stream, pinned from the scalar `Lane` instantiation.
@@ -175,8 +175,8 @@ pub fn run_case(case: usize, width: usize, out: &mut [u32]) {
     match width {
         1 => run::<f32, 1>(case, out),
         4 => run::<Simd4, 4>(case, out),
-        // Issue #1110: no eight-lane type on wasm32, as in `WIDTHS`.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Issues #1110 and #1112: an eight-lane type only where `avx2` is, as in `WIDTHS`.
+        #[cfg(target_feature = "avx2")]
         8 => run::<lane::Simd8, 8>(case, out),
         _ => panic!("corpus width must be 1, 4 or 8"),
     }

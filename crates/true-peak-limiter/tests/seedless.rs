@@ -468,20 +468,14 @@ fn check(label: &str, digest: String, pin: &str) {
 
 #[test]
 fn the_seedless_scenario_renders_the_pinned_base_words() {
-    let backend = Backend::current();
-    if backend.width() >= 8 {
-        check(
-            "W8",
-            bank_digest(BankWidth::Eight, Backend::Simd8),
-            W8_DIGEST,
-        );
-    }
-    if backend.width() >= 4 {
-        check(
-            "W4",
-            bank_digest(BankWidth::Four, Backend::Simd4),
-            W4_DIGEST,
-        );
+    // Every bank width this build has, widest first, each against its own pin (issue #1112).
+    for &width in BankWidth::ALL.iter().rev() {
+        let (label, pin) = if width.lanes() == 8 {
+            ("W8", W8_DIGEST)
+        } else {
+            ("W4", W4_DIGEST)
+        };
+        check(label, bank_digest(width, width.backend()), pin);
     }
     check("scalar", scalar_digest(), SCALAR_DIGEST);
 }

@@ -207,7 +207,7 @@ fn both_variants_answer_the_hook_identically_for_the_same_selector() {
 ///   records.
 ///
 /// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the
-/// eight-lane cohort and one-lane tail of the SIMD fixture) and the scalar one
+/// full cohort and one-lane tail of the SIMD fixture, at the build's own width) and the scalar one
 /// (`LiveControlInputProcessor::process`, through the scalar-dispatch fixture).
 ///
 /// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,

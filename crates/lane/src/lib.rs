@@ -40,8 +40,8 @@
 //! The `f32` lane is live code at every width: it is each effect's one-lane leg and every frame
 //! loop's tail. Selecting it for a *whole plan* is not: `Backend::Scalar` exists only with this
 //! crate's `test-support` feature, as the oracle vector banking is tested against (issue #1059).
-//! `Simd8` does not exist on `wasm32` at all, where the browser runs four lanes only (issue #1110;
-//! [`Simd8`] says how).
+//! `Simd8` exists only where `avx2` is enabled: the 4-lane (NEON/simd128) builds never select it,
+//! so they do not compile it (issues #1110 and #1112; `Simd8`'s own documentation says how).
 //!
 //! # `f64` lanes
 //!
@@ -124,8 +124,8 @@ pub mod fpenv;
 pub mod kernels;
 mod scalar;
 mod simd4;
-// Issue #1110: eight lanes exist only where they can run. See `Simd8` below.
-#[cfg(not(target_arch = "wasm32"))]
+// Issues #1110 and #1112: eight lanes exist only where they can run. See `Simd8` below.
+#[cfg(target_feature = "avx2")]
 mod simd8;
 pub mod softfma;
 mod wide_impl;
@@ -134,30 +134,30 @@ pub use backend::{Backend, HostAttestation, attest_host};
 pub use f64_lane::{LaneF64, Widen};
 pub use fpenv::{CanonicalFpEnv, FpEnvironmentRejection, attest_fp_environment};
 
-/// The four-lane production width: NEON on AArch64, `v128` on wasm with `simd128`.
+/// The 4-lane (NEON/simd128) production width: a NEON `float32x4_t` or a wasm `v128`.
 ///
 /// Re-exported under a neutral name so that no crate outside this one has to name `wide`
 /// (master plan §4.3: effects are generic over [`Lane`] and never name a vector library or an
 /// intrinsic). `scripts/check-lane-policy.sh` enforces that.
 pub use wide::f32x4 as Simd4;
 
-/// The eight-lane production width: one `__m256` on `x86-64-v3`.
+/// The 8-lane (AVX2) production width: one `__m256`.
 ///
 /// Re-exported under a neutral name, like [`Simd4`].
 ///
-/// # Absent on wasm32 (issue #1110)
+/// # Only where `avx2` is enabled (issues #1110 and #1112)
 ///
-/// The browser runs four lanes and nothing else ([`Backend::current`] is `Simd4` there, and
-/// `docs/rulings/wasm-simd8-null.md` is why), so on `wasm32` this type, its [`Lane`] and [`Widen`]
-/// implementations and [`Backend::Simd8`] do not exist. They are removed by one predicate,
-/// `#[cfg(not(target_arch = "wasm32"))]`, on the items themselves; a crate that names any of them
-/// in code the browser build compiles fails to compile, so an eight-lane instantiation cannot
-/// reach the shipped module by accident. The lane width is the only thing that differs: every
-/// kernel is still one generic body. Downstream, the width is chosen through
-/// `effect_contract::BankWidth`, whose `Eight` variant carries the same predicate, and through the
-/// `effect_contract::match_bank_width!` dispatch. AArch64 keeps the type: it runs four lanes too,
-/// but its code generation is outside #1110's scope.
-#[cfg(not(target_arch = "wasm32"))]
+/// A 4-lane (NEON/simd128) build runs four lanes and nothing else ([`Backend::current`] is `Simd4`
+/// there), so in it this type, its [`Lane`] and [`Widen`] implementations and `Backend::Simd8` do
+/// not exist: not in the browser module, and not in the iOS or Android library. One predicate,
+/// `#[cfg(target_feature = "avx2")]`, removes them, on the items themselves, and it is the one
+/// [`Backend::current`] selects this width by; a crate that names any of them in code a 4-lane
+/// build compiles fails to compile, so an eight-lane instantiation cannot reach one by accident.
+/// The lane width is the only thing that differs: every kernel is still one generic body.
+/// Downstream, the width is chosen through `effect_contract::BankWidth`, whose `Eight` variant
+/// carries the same predicate, and through the `effect_contract::match_bank_width!` dispatch.
+/// The width follows the target features, not the architecture's name (owner, issue #1112).
+#[cfg(target_feature = "avx2")]
 pub use wide::f32x8 as Simd8;
 
 /// Magnitude below which a recursive state word is flushed to `+0.0` by [`flush`].
@@ -392,4 +392,56 @@ pub trait Lane: Copy + Send + Sync + 'static {
     ///
     /// Panics if `dst` is shorter than [`Lane::WIDTH`].
     fn store_bits(self, dst: &mut [u32]);
+}
+
+/// The lane type this build runs its banks and frame loops at: `Simd8`, the 8-lane (AVX2) width,
+/// where `avx2` is enabled, and [`Simd4`], the 4-lane (NEON/simd128) width, where `neon` or
+/// `simd128` is (issue #1112).
+///
+/// Its two definitions carry the width predicates [`Backend::current`] selects by, and the
+/// assertion after them holds the two to one width. Code that runs at the build's own width names
+/// this alias rather than restating the predicates, and so does a test whose claim holds at any one
+/// vector width: every build then runs it at the width it ships.
+#[cfg(target_feature = "avx2")]
+pub type Native = Simd8;
+/// The 4-lane (NEON/simd128) `Native`; see the 8-lane definition.
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+pub type Native = Simd4;
+
+// `Native` and `Backend::current()` are chosen by the same two predicates; they must agree. (Not
+// under `cfg(doc)`: rustdoc gets no `avx2` on x86-64, so neither `Native` exists there.)
+#[cfg(not(doc))]
+const _: () = assert!(Backend::current().width() == <Native as Lane>::WIDTH);
+
+/// Evaluates `$body` once for each lane type this build has, narrowest first: `f32`, [`Simd4`],
+/// and `Simd8` where `avx2` is enabled (issue #1112).
+///
+/// `each_lane!(|L| body)` binds `L` to each lane type in turn; `each_lane!(|L, N| body)` also binds
+/// `N`, its lane count, as a `usize` constant. The one source tests and gates take their widths
+/// from: an 8-lane (AVX2) build runs `body` three times, a 4-lane (NEON/simd128) build twice, and no
+/// caller restates which widths a build has. Each run is a block in the caller, so `?` and
+/// `return` act on the caller. The `cfg` is a target feature, which one build sets for every crate
+/// it compiles, so it means the same thing wherever the macro expands, as `match_bank_width!`'s
+/// does. [`each_vector_lane!`] is the same without `f32`.
+#[macro_export]
+macro_rules! each_lane {
+    (|$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        $crate::each_lane!(@at f32, 1, |$lane $(, $lanes)?| $body);
+        $crate::each_vector_lane!(|$lane $(, $lanes)?| $body);
+    }};
+    (@at $type:ty, $count:literal, |$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        type $lane = $type;
+        $(const $lanes: usize = $count;)?
+        $body;
+    }};
+}
+
+/// [`each_lane!`] over the vector lane types only: [`Simd4`], and `Simd8` where `avx2` is enabled.
+#[macro_export]
+macro_rules! each_vector_lane {
+    (|$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        $crate::each_lane!(@at $crate::Simd4, 4, |$lane $(, $lanes)?| $body);
+        #[cfg(target_feature = "avx2")]
+        $crate::each_lane!(@at $crate::Simd8, 8, |$lane $(, $lanes)?| $body);
+    }};
 }

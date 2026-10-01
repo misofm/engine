@@ -3861,10 +3861,10 @@ mod interleave_identity {
     use super::{
         BAND_SECTION_OFFSET, BandTarget, Channel, EQ_BAND_COUNT, EQ_SECTION_COUNT, EqBandKind,
         HPF_SECTION, LPF_SECTION, MAX_LANES, RAMP_SAMPLES, SampleRateHz, Section, cascade_sections,
-        cascade_sections_mono, corpus, process_channels, process_channels_mono,
+        cascade_sections_mono, corpus, process_channels, process_channels_mono, width_label,
     };
+    use lane::Lane;
     use lane::kernels::svf_block;
-    use lane::{Lane, Simd4, Simd8};
 
     /// `true` when both integrator words of `section` are exactly `+0.0` on every lane.
     ///
@@ -4290,9 +4290,7 @@ mod interleave_identity {
         // its caller passes `stationary = false` -- so the stationary cases are 0 and 2.
         for case in [0_usize, 2] {
             for seeded in [false, true] {
-                compare::<f32, 1>("Scalar", case, seeded);
-                compare::<Simd4, 4>("Simd4", case, seeded);
-                compare::<Simd8, 8>("Simd8", case, seeded);
+                lane::each_lane!(|L, W| compare::<L, W>(&width_label(W), case, seeded));
             }
         }
     }
@@ -4348,9 +4346,7 @@ mod interleave_identity {
             }
         }
 
-        run::<f32, 1>();
-        run::<Simd4, 4>();
-        run::<Simd8, 8>();
+        lane::each_lane!(|L, W| run::<L, W>());
     }
 
     /// Builds a cut-only matrix. The four original bands are disabled so each scalar lane can
@@ -4500,8 +4496,7 @@ mod interleave_identity {
 
     #[test]
     fn mixed_dedicated_cut_masks_match_scalar_lanes_bit_for_bit() {
-        mixed_cut_scalar_parity::<Simd4, 4>("Simd4");
-        mixed_cut_scalar_parity::<Simd8, 8>("Simd8");
+        lane::each_vector_lane!(|L, W| mixed_cut_scalar_parity::<L, W>(&width_label(W)));
     }
 
     /// A general-band ramp must keep the old four-band oracle in lockstep while dedicated cuts stay
@@ -4574,20 +4569,12 @@ mod interleave_identity {
 
     #[test]
     fn disabled_cuts_with_an_original_band_ramp_match_the_four_section_oracle() {
-        disabled_cuts_general_ramp_parity::<f32, 1>("Scalar");
-        disabled_cuts_general_ramp_parity::<Simd4, 4>("Simd4");
-        disabled_cuts_general_ramp_parity::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| disabled_cuts_general_ramp_parity::<L, W>(&width_label(W)));
     }
 
     #[test]
     fn a_tiny_restored_disabled_cut_state_refuses_elision_but_preserves_old_bands() {
-        for width in [1_usize, 4, 8] {
-            match width {
-                1 => tiny_disabled_cut_state::<f32, 1>("Scalar"),
-                4 => tiny_disabled_cut_state::<Simd4, 4>("Simd4"),
-                _ => tiny_disabled_cut_state::<Simd8, 8>("Simd8"),
-            }
-        }
+        lane::each_lane!(|L, W| tiny_disabled_cut_state::<L, W>(&width_label(W)));
     }
 
     fn tiny_disabled_cut_state<L: Lane, const W: usize>(width: &str) {
@@ -4632,13 +4619,11 @@ mod interleave_identity {
 
     #[test]
     fn disabled_cuts_match_the_full_six_section_reference() {
-        for width in [1_usize, 4, 8] {
-            match width {
-                1 => compare::<f32, 1>("Scalar-disabled-cuts", 0, false),
-                4 => compare::<Simd4, 4>("Simd4-disabled-cuts", 0, false),
-                _ => compare::<Simd8, 8>("Simd8-disabled-cuts", 0, false),
-            }
-        }
+        lane::each_lane!(|L, W| compare::<L, W>(
+            &format!("{}-disabled-cuts", width_label(W)),
+            0,
+            false
+        ));
     }
 
     #[test]
@@ -4648,30 +4633,16 @@ mod interleave_identity {
                 for negative_zero in [false, true] {
                     for case in [0_usize, 2] {
                         for mono in [false, true] {
-                            compare_disabled_cuts_to_original_four::<f32, 1>(
-                                "Scalar",
-                                case,
-                                seeded,
-                                mono,
-                                refusal_state,
-                                negative_zero,
-                            );
-                            compare_disabled_cuts_to_original_four::<Simd4, 4>(
-                                "Simd4",
-                                case,
-                                seeded,
-                                mono,
-                                refusal_state,
-                                negative_zero,
-                            );
-                            compare_disabled_cuts_to_original_four::<Simd8, 8>(
-                                "Simd8",
-                                case,
-                                seeded,
-                                mono,
-                                refusal_state,
-                                negative_zero,
-                            );
+                            lane::each_lane!(|L, W| {
+                                compare_disabled_cuts_to_original_four::<L, W>(
+                                    &width_label(W),
+                                    case,
+                                    seeded,
+                                    mono,
+                                    refusal_state,
+                                    negative_zero,
+                                );
+                            });
                         }
                     }
                 }
@@ -4710,9 +4681,11 @@ mod interleave_identity {
                 if mono && plane == 1 {
                     continue;
                 }
-                compare_signed_zero_refusal::<f32, 1>("Scalar", mono, plane);
-                compare_signed_zero_refusal::<Simd4, 4>("Simd4", mono, plane);
-                compare_signed_zero_refusal::<Simd8, 8>("Simd8", mono, plane);
+                lane::each_lane!(|L, W| compare_signed_zero_refusal::<L, W>(
+                    &width_label(W),
+                    mono,
+                    plane
+                ));
             }
         }
     }
@@ -4743,9 +4716,14 @@ mod elision {
         STATE_WORDS_PER_BAND, block_admits_elision, block_admits_elision_oracle, cascade_sections,
         cascade_sections_mono, corpus, masked_pair_pass_count, process_channels,
         process_channels_mono, reset_masked_pair_passes, reset_select_free_tail_passes,
-        select_free_tail_pass_count,
+        select_free_tail_pass_count, width_label,
     };
-    use lane::{Lane, Simd4, Simd8};
+    use lane::{Lane, Simd4};
+
+    /// The build's own lane type and its lane count, which the single-width tests below run at:
+    /// W8 in the 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) one (issue #1112).
+    type Native = lane::Native;
+    const NATIVE: usize = <Native as Lane>::WIDTH;
 
     const FRAMES: usize = corpus::FRAMES;
     /// Every subset of the six cascade positions, as a bitmask of *live* sections.
@@ -4946,22 +4924,29 @@ mod elision {
             for seeded in [false, true] {
                 for live in MASKS {
                     let count = live.count_ones() as usize;
-                    let ran = [
-                        compare::<f32, 1>("Scalar", case, live, live, seeded),
-                        compare::<Simd4, 4>("Simd4", case, live, live, seeded),
-                        compare::<Simd8, 8>("Simd8", case, live, live, seeded),
-                    ];
+                    let mut ran = Vec::new();
+                    lane::each_lane!(|L, W| ran.push(compare::<L, W>(
+                        &width_label(W),
+                        case,
+                        live,
+                        live,
+                        seeded
+                    )));
                     assert_eq!(
-                        ran, [count; 3],
+                        ran,
+                        vec![count; ran.len()],
                         "the dual cascade keeps exactly the live sections ({live:06b})"
                     );
-                    let ran = [
-                        compare_mono::<f32, 1>("Scalar", case, live, seeded),
-                        compare_mono::<Simd4, 4>("Simd4", case, live, seeded),
-                        compare_mono::<Simd8, 8>("Simd8", case, live, seeded),
-                    ];
+                    let mut ran = Vec::new();
+                    lane::each_lane!(|L, W| ran.push(compare_mono::<L, W>(
+                        &width_label(W),
+                        case,
+                        live,
+                        seeded
+                    )));
                     assert_eq!(
-                        ran, [count; 3],
+                        ran,
+                        vec![count; ran.len()],
                         "the mono cascade keeps exactly the live sections ({live:06b})"
                     );
                 }
@@ -5004,9 +4989,7 @@ mod elision {
                 );
             }
         }
-        run::<f32, 1>("Scalar");
-        run::<Simd4, 4>("Simd4");
-        run::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| run::<L, W>(&width_label(W)));
     }
 
     /// Splits the live sections `union` between the channels: a section is live on the left only,
@@ -5060,10 +5043,10 @@ mod elision {
     #[test]
     fn the_shipped_shape_actually_elides() {
         for (live, expected) in [(0b0001_u8, 1_usize), (0b0011, 2), (0b0000, 0)] {
-            let left_channel = channel::<Simd8, 8>(0, live);
-            let right_channel = channel::<Simd8, 8>(3, live);
-            let left = block::<8>(0, 0);
-            let right = block::<8>(0, 3);
+            let left_channel = channel::<Native, NATIVE>(0, live);
+            let right_channel = channel::<Native, NATIVE>(3, live);
+            let left = block::<NATIVE>(0, 0);
+            let right = block::<NATIVE>(0, 3);
             assert_eq!(
                 kept(&left_channel, &right_channel, &left, &right),
                 expected,
@@ -5073,14 +5056,14 @@ mod elision {
         }
         // Three live sections run three: one depth-two pass and a depth-one tail, with no identity
         // section kept as padding (issue #976).
-        let left_channel = channel::<Simd8, 8>(0, 0b0111);
-        let right_channel = channel::<Simd8, 8>(3, 0b0111);
+        let left_channel = channel::<Native, NATIVE>(0, 0b0111);
+        let right_channel = channel::<Native, NATIVE>(3, 0b0111);
         assert_eq!(
             kept(
                 &left_channel,
                 &right_channel,
-                &block::<8>(0, 0),
-                &block::<8>(0, 3)
+                &block::<NATIVE>(0, 0),
+                &block::<NATIVE>(0, 3)
             ),
             3,
             "three live sections run three, not four"
@@ -5090,27 +5073,27 @@ mod elision {
     /// A section that is identity on some lanes and live on others is not elidable.
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
-        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] =
+        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; NATIVE] =
             core::array::from_fn(corpus::sections);
         for bands in &mut targets {
             for band in bands.iter_mut() {
                 band.enabled = false;
             }
         }
-        // Lane 5 alone keeps section 2.
-        targets[5][2].enabled = true;
+        // Lane `NATIVE - 3` (lane 5 at W8) alone keeps section 2.
+        targets[NATIVE - 3][2].enabled = true;
         let left_channel =
-            Channel::<Simd8, 8>::new(targets, corpus::CORPUS_RATE).expect("legal design");
-        let right_channel = channel::<Simd8, 8>(3, 0b0000);
-        let left = block::<8>(0, 0);
-        let right = block::<8>(0, 3);
+            Channel::<Native, NATIVE>::new(targets, corpus::CORPUS_RATE).expect("legal design");
+        let right_channel = channel::<Native, NATIVE>(3, 0b0000);
+        let left = block::<NATIVE>(0, 0);
+        let right = block::<NATIVE>(0, 3);
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
             1,
             "one live lane keeps its whole section, and only that section"
         );
         // And it renders the same bits as the full cascade.
-        let ran = compare::<Simd8, 8>("Simd8", 0, 0b0100, 0b0000, false);
+        let ran = compare::<Native, NATIVE>("native", 0, 0b0100, 0b0000, false);
         assert_eq!(ran, 1, "the mixed-lane case must still engage");
     }
 
@@ -5121,11 +5104,11 @@ mod elision {
     #[test]
     fn a_negative_zero_input_refuses_elision() {
         for plane in 0..2 {
-            for position in [0_usize, 1, FRAMES * 8 - 1] {
-                let left_channel = channel::<Simd8, 8>(0, 0b0001);
-                let right_channel = channel::<Simd8, 8>(3, 0b0001);
-                let mut left = block::<8>(0, 0);
-                let mut right = block::<8>(0, 3);
+            for position in [0_usize, 1, FRAMES * NATIVE - 1] {
+                let left_channel = channel::<Native, NATIVE>(0, 0b0001);
+                let right_channel = channel::<Native, NATIVE>(3, 0b0001);
+                let mut left = block::<NATIVE>(0, 0);
+                let mut right = block::<NATIVE>(0, 3);
                 if plane == 0 {
                     left[position] = -0.0;
                 } else {
@@ -5137,8 +5120,8 @@ mod elision {
                     "a -0.0 at word {position} of plane {plane} must refuse elision"
                 );
                 // A `+0.0` in the same place must not.
-                let mut left = block::<8>(0, 0);
-                let mut right = block::<8>(0, 3);
+                let mut left = block::<NATIVE>(0, 0);
+                let mut right = block::<NATIVE>(0, 3);
                 if plane == 0 {
                     left[position] = 0.0;
                 } else {
@@ -5164,10 +5147,10 @@ mod elision {
             -1.0e31,
             f32::MAX,
         ] {
-            let left_channel = channel::<Simd8, 8>(0, 0b0001);
-            let right_channel = channel::<Simd8, 8>(3, 0b0001);
-            let mut left = block::<8>(0, 0);
-            let right = block::<8>(0, 3);
+            let left_channel = channel::<Native, NATIVE>(0, 0b0001);
+            let right_channel = channel::<Native, NATIVE>(3, 0b0001);
+            let mut left = block::<NATIVE>(0, 0);
+            let right = block::<NATIVE>(0, 3);
             left[17] = sample;
             assert_eq!(
                 kept(&left_channel, &right_channel, &left, &right),
@@ -5176,10 +5159,10 @@ mod elision {
             );
         }
         // The bound is inclusive on the legal side: 1e29 is an ordinary, if absurd, sample.
-        let left_channel = channel::<Simd8, 8>(0, 0b0001);
-        let right_channel = channel::<Simd8, 8>(3, 0b0001);
-        let mut left = block::<8>(0, 0);
-        let right = block::<8>(0, 3);
+        let left_channel = channel::<Native, NATIVE>(0, 0b0001);
+        let right_channel = channel::<Native, NATIVE>(3, 0b0001);
+        let mut left = block::<NATIVE>(0, 0);
+        let right = block::<NATIVE>(0, 3);
         left[17] = 1.0e29;
         assert_eq!(
             kept(&left_channel, &right_channel, &left, &right),
@@ -5222,17 +5205,17 @@ mod elision {
                 let mut arms = Vec::new();
                 let mut ran = EQ_SECTION_COUNT;
                 for stationary in [true, false] {
-                    let mut left_channel = channel::<Simd8, 8>(0, 0b0000_0010);
-                    let mut right_channel = channel::<Simd8, 8>(3, 0b0000_0010);
+                    let mut left_channel = channel::<Native, NATIVE>(0, 0b0000_0010);
+                    let mut right_channel = channel::<Native, NATIVE>(3, 0b0000_0010);
                     let mut words = [0_u32; STATE_LANE_WORDS];
-                    left_channel.snapshot_track(5, &mut words);
+                    left_channel.snapshot_track(NATIVE - 3, &mut words);
                     words[3 * STATE_WORDS_PER_BAND + integrator] = word.to_bits();
-                    let configuration = left_channel.targets[5];
+                    let configuration = left_channel.targets[NATIVE - 3];
                     left_channel
-                        .restore_track(5, &words, &configuration, corpus::CORPUS_RATE)
+                        .restore_track(NATIVE - 3, &words, &configuration, corpus::CORPUS_RATE)
                         .expect("a finite integrator restores");
-                    let mut left = block::<8>(0, 0);
-                    let mut right = block::<8>(0, 3);
+                    let mut left = block::<NATIVE>(0, 0);
+                    let mut right = block::<NATIVE>(0, 3);
                     if stationary {
                         ran = kept(&left_channel, &right_channel, &left, &right);
                     }
@@ -5371,9 +5354,7 @@ mod elision {
                 );
             }
         }
-        run::<f32, 1>("Scalar");
-        run::<Simd4, 4>("Simd4");
-        run::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| run::<L, W>(&width_label(W)));
     }
 
     /// A `-0.0` integrator in a *live* section refuses the elision.
@@ -5384,11 +5365,11 @@ mod elision {
     #[test]
     fn a_negative_zero_state_in_a_live_section_refuses_elision() {
         for word in [0_usize, 1] {
-            let mut left_channel = channel::<Simd8, 8>(0, 0b0001);
-            let right_channel = channel::<Simd8, 8>(3, 0b0001);
-            let mut lanes = [0.0_f32; 8];
-            lanes[6] = -0.0;
-            let seeded = Simd8::load(&lanes);
+            let mut left_channel = channel::<Native, NATIVE>(0, 0b0001);
+            let right_channel = channel::<Native, NATIVE>(3, 0b0001);
+            let mut lanes = [0.0_f32; NATIVE];
+            lanes[NATIVE - 2] = -0.0;
+            let seeded = Native::load(&lanes);
             if word == 0 {
                 left_channel.sections[0].state.ic1 = seeded;
             } else {
@@ -5398,8 +5379,8 @@ mod elision {
                 kept(
                     &left_channel,
                     &right_channel,
-                    &block::<8>(0, 0),
-                    &block::<8>(0, 3)
+                    &block::<NATIVE>(0, 0),
+                    &block::<NATIVE>(0, 3)
                 ),
                 EQ_SECTION_COUNT,
                 "a live section holding -0.0 in integrator {word} must refuse elision"
@@ -5675,9 +5656,7 @@ mod elision {
                 );
             }
         }
-        run::<f32, 1>("Scalar");
-        run::<Simd4, 4>("Simd4");
-        run::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| run::<L, W>(&width_label(W)));
     }
 
     /// A non-finite integrator in a *live* section refuses the elision (issue #977, leg (c)).
@@ -5690,35 +5669,36 @@ mod elision {
     fn a_non_finite_state_in_a_live_section_refuses_elision() {
         for word in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -f32::NAN] {
             for integrator in [0_usize, 1] {
-                // The HPF is live on lane 0 only, so lane 6 is a dry lane of a live section.
-                let mut left_channel = dry_cut_channel::<Simd8, 8>(0, 0b0000_0001, 0);
-                let right_channel = dry_cut_channel::<Simd8, 8>(3, 0, 0);
-                let mut lanes = [0.25_f32; 8];
-                lanes[6] = word;
-                let seeded = Simd8::load(&lanes);
+                // The HPF is live on lane 0 only, so lane `NATIVE - 2` (6 at W8) is a dry lane of
+                // a live section.
+                let mut left_channel = dry_cut_channel::<Native, NATIVE>(0, 0b0000_0001, 0);
+                let right_channel = dry_cut_channel::<Native, NATIVE>(3, 0, 0);
+                let mut lanes = [0.25_f32; NATIVE];
+                lanes[NATIVE - 2] = word;
+                let seeded = Native::load(&lanes);
                 if integrator == 0 {
                     left_channel.sections[HPF_SECTION].state.ic1 = seeded;
                 } else {
                     left_channel.sections[HPF_SECTION].state.ic2 = seeded;
                 }
-                let (left, right) = (block::<8>(0, 0), block::<8>(0, 3));
+                let (left, right) = (block::<NATIVE>(0, 0), block::<NATIVE>(0, 3));
                 assert_eq!(
                     kept(&left_channel, &right_channel, &left, &right),
                     EQ_SECTION_COUNT,
                     "a live section holding {word} in integrator {integrator} must refuse elision"
                 );
                 assert_eq!(
-                    cascade_sections_mono::<Simd8, 8>(&left_channel, &left, FRAMES).1,
+                    cascade_sections_mono::<Native, NATIVE>(&left_channel, &left, FRAMES).1,
                     EQ_SECTION_COUNT,
                     "and so must its mono body"
                 );
             }
         }
         // A finite state there is admitted: the term refuses non-finite words, not large ones.
-        let mut left_channel = dry_cut_channel::<Simd8, 8>(0, 0b0000_0001, 0);
-        let right_channel = dry_cut_channel::<Simd8, 8>(3, 0, 0);
-        left_channel.sections[HPF_SECTION].state.ic2 = Simd8::splat(-f32::MAX);
-        let (left, right) = (block::<8>(0, 0), block::<8>(0, 3));
+        let mut left_channel = dry_cut_channel::<Native, NATIVE>(0, 0b0000_0001, 0);
+        let right_channel = dry_cut_channel::<Native, NATIVE>(3, 0, 0);
+        left_channel.sections[HPF_SECTION].state.ic2 = Native::splat(-f32::MAX);
+        let (left, right) = (block::<NATIVE>(0, 0), block::<NATIVE>(0, 3));
         assert_eq!(kept(&left_channel, &right_channel, &left, &right), 3);
     }
 
@@ -5733,14 +5713,14 @@ mod elision {
     fn the_negative_zero_refusal_is_load_bearing() {
         let mut moved = 0_usize;
         for stationary in [true, false] {
-            let mut left_channel = channel::<Simd8, 8>(0, 0b0000);
-            let mut right_channel = channel::<Simd8, 8>(3, 0b0000);
-            let mut left = vec![-0.0_f32; FRAMES * 8];
-            let mut right = vec![-0.0_f32; FRAMES * 8];
+            let mut left_channel = channel::<Native, NATIVE>(0, 0b0000);
+            let mut right_channel = channel::<Native, NATIVE>(3, 0b0000);
+            let mut left = vec![-0.0_f32; FRAMES * NATIVE];
+            let mut right = vec![-0.0_f32; FRAMES * NATIVE];
             if stationary {
                 // The list the gate refuses to hand out: an all-identity cascade elides to zero
                 // sections, so the elided arm writes nothing at all.
-                super::interleave::<Simd8, 8, 2>(
+                super::interleave::<Native, NATIVE, 2>(
                     (&mut left_channel, &mut right_channel),
                     &mut left,
                     &mut right,
@@ -5764,9 +5744,9 @@ mod elision {
              agree the gate is not protecting anything"
         );
         // And the gate does refuse this block.
-        let left_channel = channel::<Simd8, 8>(0, 0b0000);
-        let right_channel = channel::<Simd8, 8>(3, 0b0000);
-        let negative = vec![-0.0_f32; FRAMES * 8];
+        let left_channel = channel::<Native, NATIVE>(0, 0b0000);
+        let right_channel = channel::<Native, NATIVE>(3, 0b0000);
+        let negative = vec![-0.0_f32; FRAMES * NATIVE];
         assert_eq!(
             kept(&left_channel, &right_channel, &negative, &negative),
             EQ_SECTION_COUNT,
@@ -5786,13 +5766,13 @@ mod elision {
         let mut engaged = 0_usize;
         let mut arms = Vec::new();
         for elide in [true, false] {
-            let mut left_channel = channel::<Simd8, 8>(0, 0b0001);
-            let mut right_channel = channel::<Simd8, 8>(3, 0b0001);
+            let mut left_channel = channel::<Native, NATIVE>(0, 0b0001);
+            let mut right_channel = channel::<Native, NATIVE>(3, 0b0001);
             let mut rendered: Vec<u32> = Vec::new();
             for step in 0..BLOCKS {
                 if step == 2 {
                     // Band 3 comes on, on every lane of both channels.
-                    for lane in 0..8 {
+                    for lane in 0..NATIVE {
                         let mut band = corpus::bands(lane % corpus::LANES)[2];
                         band.enabled = true;
                         let words = band.words(corpus::CORPUS_RATE).expect("legal design");
@@ -5802,13 +5782,13 @@ mod elision {
                 }
                 if step == 5 {
                     // And goes off again.
-                    for lane in 0..8 {
+                    for lane in 0..NATIVE {
                         left_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
                         right_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
                     }
                 }
-                let mut left = block::<8>(0, step % corpus::LANES);
-                let mut right = block::<8>(0, (step + 3) % corpus::LANES);
+                let mut left = block::<NATIVE>(0, step % corpus::LANES);
+                let mut right = block::<NATIVE>(0, (step + 3) % corpus::LANES);
                 let stationary =
                     left_channel.no_ramp_in_flight() && right_channel.no_ramp_in_flight();
                 // The two arms differ only in whether the stationary path may shorten the
@@ -5965,9 +5945,7 @@ mod elision {
     /// The mid-ramp discontinuity reset, at all three widths.
     #[test]
     fn a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag() {
-        reset_mid_ramp_case::<f32, 1>("Scalar");
-        reset_mid_ramp_case::<Simd4, 4>("Simd4");
-        reset_mid_ramp_case::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| reset_mid_ramp_case::<L, W>(&width_label(W)));
     }
 }
 
@@ -5996,9 +5974,9 @@ mod boundary_fold {
     use super::{
         BLOCK_LIMIT, Channel, EQ_SECTION_COUNT, EqSvfWords, cascade_sections,
         cascade_sections_mono, check_block, corpus, lane_set, process_channels,
-        process_channels_mono,
+        process_channels_mono, width_label,
     };
-    use lane::{Lane, Simd4, Simd8};
+    use lane::Lane;
 
     /// `2^104`: times `1e30` it overflows, times `1.0` it does not.
     const HUGE: f32 = f32::from_bits(0x7380_0000);
@@ -6352,9 +6330,7 @@ mod boundary_fold {
 
     #[test]
     fn the_folded_verdict_is_the_boundary_scan() {
-        check::<f32, 1>("Scalar");
-        check::<Simd4, 4>("Simd4");
-        check::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| check::<L, W>(&width_label(W)));
     }
 }
 
@@ -6485,7 +6461,7 @@ mod ramping_elision {
     use effect_contract::{
         EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
     };
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const QUANTUM: usize = 128;
@@ -6714,9 +6690,7 @@ mod ramping_elision {
     /// Gate 2 at every width, dual and collapsed.
     #[test]
     fn the_unsafe_ramp_rule_keeps_every_dead_section_after_it() {
-        unsafe_ramp_rule::<f32, 1>("Scalar");
-        unsafe_ramp_rule::<Simd4, 4>("Simd4");
-        unsafe_ramp_rule::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| unsafe_ramp_rule::<L, W>(&width_label(W)));
     }
 
     /// A ramping identity section is not dead, on either list: the identity flag of a section
@@ -6754,9 +6728,7 @@ mod ramping_elision {
 
     #[test]
     fn a_ramping_identity_section_is_never_dead() {
-        ramping_identity_runs::<f32, 1>("Scalar");
-        ramping_identity_runs::<Simd4, 4>("Simd4");
-        ramping_identity_runs::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| ramping_identity_runs::<L, W>(&width_label(W)));
     }
 
     /// The one restored state leg (c) as the stationary gate writes it lets past: a live high shelf
@@ -6831,9 +6803,7 @@ mod ramping_elision {
 
     #[test]
     fn a_restored_subnormal_live_state_refuses_the_list() {
-        restored_subnormal_live_state::<f32, 1>("Scalar");
-        restored_subnormal_live_state::<Simd4, 4>("Simd4");
-        restored_subnormal_live_state::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| restored_subnormal_live_state::<L, W>(&width_label(W)));
     }
 
     /// Every word a channel holds, as bits: coefficients, increments, targets, integrators, the
@@ -6988,9 +6958,7 @@ mod ramping_elision {
 
     #[test]
     fn select_lane_writes_match_lane_set_word_for_word() {
-        select_writes_match_lane_set::<f32, 1>("Scalar");
-        select_writes_match_lane_set::<Simd4, 4>("Simd4");
-        select_writes_match_lane_set::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| select_writes_match_lane_set::<L, W>(&width_label(W)));
     }
 
     // ---------------------------------------------------------------------------------------
@@ -7202,11 +7170,7 @@ mod ramping_elision {
         fn prepare(requests: &[PrepareEffectRequest<'_>], path: Path) -> Self {
             let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0])
                 .expect("metadata");
-            let width = if W == 8 {
-                BankWidth::Eight
-            } else {
-                BankWidth::Four
-            };
+            let width = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
             Self {
                 eq: on_path(path, || {
                     prepare_width::<L, W>(metadata, width, requests, &[true; W])
@@ -7526,11 +7490,7 @@ mod ramping_elision {
         // A shape whose designs are not all legal (a frequency past the rate's range) is not a
         // scenario; the draw moves on.
         let metadata = expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, requests[0]);
-        let width = if W == 8 {
-            BankWidth::Eight
-        } else {
-            BankWidth::Four
-        };
+        let width = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
         if metadata.is_err()
             || prepare_width::<L, W>(metadata.expect("checked"), width, &requests, &[true; W])
                 .is_err()
@@ -7882,9 +7842,11 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1005", LIST, per_pr_vector_seeds());
     }
 
+    /// The 8-lane (AVX2) twin of `a_ramping_block_renders_the_batch_head_bits_simd4`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn a_ramping_block_renders_the_batch_head_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
+        differential::<lane::Simd8, 8>("Simd8", "#1005", LIST, per_pr_vector_seeds());
     }
 
     /// Issue #1007 gate 1: `select` lane writes and the masked segment snap against the #1005
@@ -7899,9 +7861,11 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
+    /// The 8-lane (AVX2) twin of `select_lane_writes_render_the_1005_bits_simd4`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn select_lane_writes_render_the_1005_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
+        differential::<lane::Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, per_pr_vector_seeds());
     }
 
     /// Issue #1007's writes alone, on the batch-head ramping path (VERIFY-AUTOMATION A2).
@@ -7915,9 +7879,11 @@ mod ramping_elision {
         differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
+    /// The 8-lane (AVX2) twin of `select_lane_writes_alone_render_the_lane_set_bits_simd4`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn select_lane_writes_alone_render_the_lane_set_bits_simd8() {
-        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
+        differential::<lane::Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, per_pr_vector_seeds());
     }
 
     /// The six `Simd4` and `Simd8` differentials above at the full scenario count, which they ran
@@ -7925,12 +7891,24 @@ mod ramping_elision {
     #[test]
     #[ignore = "nightly: the full scenario count of the Simd4 and Simd8 differentials (#1049)"]
     fn the_vector_differentials_render_their_bits_at_the_full_scenario_count() {
-        differential::<Simd4, 4>("Simd4", "#1005", LIST, all_seeds());
-        differential::<Simd8, 8>("Simd8", "#1005", LIST, all_seeds());
-        differential::<Simd4, 4>("Simd4", "#1007", WRITES_ON_1005, all_seeds());
-        differential::<Simd8, 8>("Simd8", "#1007", WRITES_ON_1005, all_seeds());
-        differential::<Simd4, 4>("Simd4", "#1007 alone", WRITES_ALONE, all_seeds());
-        differential::<Simd8, 8>("Simd8", "#1007 alone", WRITES_ALONE, all_seeds());
+        lane::each_vector_lane!(|L, W| differential::<L, W>(
+            &width_label(W),
+            "#1005",
+            LIST,
+            all_seeds()
+        ));
+        lane::each_vector_lane!(|L, W| differential::<L, W>(
+            &width_label(W),
+            "#1007",
+            WRITES_ON_1005,
+            all_seeds()
+        ));
+        lane::each_vector_lane!(|L, W| differential::<L, W>(
+            &width_label(W),
+            "#1007 alone",
+            WRITES_ALONE,
+            all_seeds()
+        ));
     }
 }
 
@@ -7944,7 +7922,6 @@ mod ramping_elision {
 #[cfg(test)]
 mod stationary_subnormal {
     use super::*;
-    use lane::{Simd4, Simd8};
 
     const RATE: SampleRateHz = SampleRateHz(48_000);
     const FRAMES: usize = 16;
@@ -8066,11 +8043,7 @@ mod stationary_subnormal {
         let requests = vec![request; W];
         let metadata =
             expected_prepared_metadata(&PARAMETRIC_EQ_DESCRIPTOR, request).expect("metadata");
-        let width_tag = if W == 8 {
-            BankWidth::Eight
-        } else {
-            BankWidth::Four
-        };
+        let width_tag = BankWidth::for_lanes(W).unwrap_or(BankWidth::Four);
         let prepare =
             || prepare_width::<L, W>(metadata, width_tag, &requests, &[true; W]).expect("prepared");
         let lane = W - 1;
@@ -8174,18 +8147,14 @@ mod stationary_subnormal {
     #[test]
     fn a_restored_subnormal_live_state_renders_the_full_cascade_bits() {
         let mut mismatches = Vec::new();
-        channel_level::<f32, 1>("Scalar", &mut mismatches);
-        channel_level::<Simd4, 4>("Simd4", &mut mismatches);
-        channel_level::<Simd8, 8>("Simd8", &mut mismatches);
+        lane::each_lane!(|L, W| channel_level::<L, W>(&width_label(W), &mut mismatches));
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]
     fn a_restored_subnormal_live_state_renders_the_full_cascade_bits_through_the_contract() {
         let mut mismatches = Vec::new();
-        contract_level::<f32, 1>("Scalar", &mut mismatches);
-        contract_level::<Simd4, 4>("Simd4", &mut mismatches);
-        contract_level::<Simd8, 8>("Simd8", &mut mismatches);
+        lane::each_lane!(|L, W| contract_level::<L, W>(&width_label(W), &mut mismatches));
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
@@ -8294,9 +8263,7 @@ mod stationary_subnormal {
 
     #[test]
     fn leg_c_refuses_below_flush_eps_admits_it_and_re_engages() {
-        flush_eps_boundary::<f32, 1>("Scalar");
-        flush_eps_boundary::<Simd4, 4>("Simd4");
-        flush_eps_boundary::<Simd8, 8>("Simd8");
+        lane::each_lane!(|L, W| flush_eps_boundary::<L, W>(&width_label(W)));
     }
 }
 
@@ -8319,18 +8286,19 @@ mod padded_banks {
         BypassShunt, EffectBankProcessBlock, EffectTargetRequest, NativeEffectTargetPreparation,
         PreparedAutomationSpan,
     };
-    use lane::{Simd4, Simd8};
 
     const QUANTUM: usize = 128;
     const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
     /// The bank width, and the backend that agrees with it, for `lanes` lanes.
     fn width(lanes: usize) -> (BankWidth, Backend) {
-        if lanes == 8 {
-            (BankWidth::Eight, Backend::Simd8)
-        } else {
-            (BankWidth::Four, Backend::Simd4)
-        }
+        let width = BankWidth::for_lanes(lanes).unwrap_or(BankWidth::Four);
+        (width, width.backend())
+    }
+
+    /// The lane count of every bank width this build has (issue #1112).
+    fn lane_counts() -> impl Iterator<Item = usize> {
+        BankWidth::ALL.iter().map(|width| width.lanes() as usize)
     }
 
     /// Binds one bank of `lanes` lanes through the production bind body.
@@ -8854,7 +8822,7 @@ mod padded_banks {
     /// reported, or if the bind declines a padded request (the `expect` in `bind`).
     #[test]
     fn a_padded_bank_renders_its_per_node_instances() {
-        for lanes in [4, 8] {
+        for lanes in lane_counts() {
             let mut reach = Reach::default();
             for members in 1..=lanes {
                 for seed in 0..seeds() {
@@ -8898,7 +8866,7 @@ mod padded_banks {
         let rate = 48_000;
         let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
         let mut blocks = 0_u64;
-        for lanes in [4, 8] {
+        for lanes in lane_counts() {
             for kind in 1..=6_u32 {
                 for (gain, q) in [(-24.0, 0.1), (24.0, 18.0), (-24.0, 18.0), (24.0, 0.1)] {
                     let mut values = Vec::with_capacity(parameters * 2);
@@ -9049,8 +9017,7 @@ mod padded_banks {
     /// that did not fail.
     #[test]
     fn a_planted_non_finite_state_recovers_its_own_lane_alone() {
-        planted::<Simd4, 4>();
-        planted::<Simd8, 8>();
+        lane::each_vector_lane!(|L, W| planted::<L, W>());
     }
 
     fn planted<L: Lane, const W: usize>() {
@@ -9225,7 +9192,7 @@ mod padded_banks {
     fn a_bypassed_lane_fed_a_tripping_value_leaves_its_bank_mates_bits() {
         let rate = 48_000;
         let mut faults = 0_u64;
-        for lanes in [4, 8] {
+        for lanes in lane_counts() {
             for members in 1..=lanes {
                 for bypassed in 0..members {
                     // Every member boosts 1 kHz by +24 dB, the gain domain's edge, detuned per
@@ -9400,7 +9367,7 @@ mod padded_banks {
     fn a_padded_lane_is_never_written_reported_or_charged() {
         let rate = 48_000;
         let mut rng = Rng(0x1089_0003);
-        for lanes in [4, 8] {
+        for lanes in lane_counts() {
             let members = lanes - 1 - rng.below(lanes - 1);
             let initial: Vec<Vec<InitialParameterValue>> =
                 (0..members).map(|_| configuration(&mut rng)).collect();
@@ -9555,5 +9522,16 @@ mod padded_banks {
                 );
             }
         }
+    }
+}
+
+/// The label these tests give a lane width: `Scalar`, `Simd4` or `Simd8` (issue #1112: every
+/// width a build has comes from `lane::each_lane!`, which hands out the lane count).
+#[cfg(test)]
+fn width_label(lanes: usize) -> String {
+    if lanes == 1 {
+        "Scalar".to_owned()
+    } else {
+        format!("Simd{lanes}")
     }
 }

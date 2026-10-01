@@ -13,8 +13,8 @@ use std::sync::Mutex;
 
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
-    BuiltinCompileCaps, MeterRequest, TestOnlyFaderMatrixPair, TrackControlRecord,
-    TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
+    BuiltinCompileCaps, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS, TestOnlyFaderMatrixPair,
+    TrackControlRecord, TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
     test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
     test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
     test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
@@ -305,22 +305,29 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     test_only_reset_fader_matrix_witness();
     let mut eligible = builtins_compiler::test_only_prepared_pair_graph(false);
     let prepared = test_only_fader_matrix_witness();
-    // Issue #916: the eight-lane first cohort pairs beside the one-lane tail. Its lane 0 is the
+    // The graph is one full bank of the build's own width and a one-lane tail: nine tracks on an
+    // 8-lane (AVX2) build, five on a 4-lane one (issue #1112).
+    let members = TEST_ONLY_PAIR_GRAPH_TRACKS as u64;
+    let tail_id = format!("t{:02}", TEST_ONLY_PAIR_GRAPH_TRACKS - 1);
+    // Issue #916: the full first cohort pairs beside the one-lane tail. Its lane 0 is the
     // output track, whose post-matrix buffer used to be the graph output and declined the
-    // cohort; the Output is dedicated storage now. So 2 pairs over 9 members, and every block
+    // cohort; the Output is dedicated storage now. So 2 pairs over every member, and every block
     // below counts the first cohort's settled pair (always fused: nothing is queued for it) on
     // top of the tail's branch.
-    assert_eq!((prepared.factory_calls, prepared.factory_members), (2, 9));
+    assert_eq!(
+        (prepared.factory_calls, prepared.factory_members),
+        (2, members)
+    );
 
     let settled = audit_graph_render(&mut eligible, &mut output, 0);
     assert_eq!((settled.fused_calls, settled.fallback_calls), (2, 0));
-    assert_eq!(settled.process_members, 9);
+    assert_eq!(settled.process_members, members);
 
     {
         let tail = eligible
             .track_controls
             .iter_mut()
-            .find(|control| control.track_id.as_ref() == "t08")
+            .find(|control| control.track_id.as_ref() == tail_id)
             .expect("eligible tail controls");
         tail.fader
             .try_push(TrackFaderRecord::FaderDb {
@@ -349,7 +356,7 @@ fn actual_queued_graph_phases_allocate_and_free_nothing() {
     eligible
         .track_controls
         .iter_mut()
-        .find(|control| control.track_id.as_ref() == "t08")
+        .find(|control| control.track_id.as_ref() == tail_id)
         .expect("eligible tail controls")
         .fader
         .try_push(TrackFaderRecord::FaderDb {
@@ -471,8 +478,8 @@ fn actual_queued_scalar_graph_allocates_and_frees_nothing() {
 }
 
 /// Input trim records drained into a running graph allocate and free nothing, through the banked
-/// drain (`BuiltinBankProcessor::begin_block`) of the fixture's eight-lane cohort and its one-lane
-/// tail.
+/// drain (`BuiltinBankProcessor::begin_block`) of the fixture's full cohort (eight lanes on an
+/// 8-lane (AVX2) build, four on a 4-lane one) and its one-lane tail.
 ///
 /// Every track's input queue receives a `TrimDb { Both, -6 / -12 dB, 256 }` on each of four
 /// blocks, so each drain retargets a ramp still in flight; the uncommanded twin shows the records
@@ -494,8 +501,8 @@ fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
     let mut quiet = builtins_compiler::test_only_prepared_pair_graph(false);
     assert_eq!(
         ridden.track_controls.len(),
-        9,
-        "an eight-lane cohort and a one-lane tail"
+        TEST_ONLY_PAIR_GRAPH_TRACKS,
+        "a full cohort and a one-lane tail"
     );
     let mut ridden_output = [0.0_f32; 128];
     let mut quiet_output = [0.0_f32; 128];
@@ -814,10 +821,7 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
             .map_or(0, |layout| layout.allocation_count)
     };
     let mut prepared_unit_layout = None;
-    for width in [
-        effect_contract::BankWidth::Four,
-        effect_contract::BankWidth::Eight,
-    ] {
+    for &width in effect_contract::BankWidth::ALL {
         let lanes = width.lanes() as usize;
         for slot_count in [0_usize, 1, 3, 9] {
             // Stage storage, chain mask and scratch are created before the measured conversion.
@@ -984,7 +988,7 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     let paired_facts = graph::test_only_bank_chain_construction_facts();
     let paired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
         paired_facts.prepared_memberships as u64,
-        Some(effect_contract::BankWidth::Eight),
+        effect_contract::BankWidth::for_backend(lane::Backend::current()),
     )
     .expect("paired allowance");
     assert!(paired_facts.runtime_slots < paired_facts.run_memberships);
@@ -1006,7 +1010,7 @@ fn actual_runtime_bank_slot_owners_fit_retained_largest_and_conversion_reservati
     let unpaired_facts = graph::test_only_bank_chain_construction_facts();
     let unpaired_allowance = graph::GraphBankSlotResourceEstimate::checked_for(
         unpaired_facts.prepared_memberships as u64,
-        Some(effect_contract::BankWidth::Eight),
+        effect_contract::BankWidth::for_backend(lane::Backend::current()),
     )
     .expect("unpaired allowance");
     assert!(

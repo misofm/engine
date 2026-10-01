@@ -17,8 +17,7 @@ use effect_contract::{
 };
 use soft_clip::SoftClipFactory;
 use support::{
-    as_input, bank_available, bits, initial_values, prepare, prepare_bank, process, process_bank,
-    values_from, word,
+    as_input, bits, initial_values, prepare, prepare_bank, process, process_bank, values_from, word,
 };
 
 const FRAMES: usize = 64;
@@ -88,13 +87,7 @@ fn a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit() {
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
 #[test]
 fn a_bank_track_restore_is_position_independent_and_lane_local() {
-    let width = if bank_available(BankWidth::Eight) {
-        BankWidth::Eight
-    } else if bank_available(BankWidth::Four) {
-        BankWidth::Four
-    } else {
-        return;
-    };
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = values_from([(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)]);
     let per_lane: Vec<Vec<_>> = (0..lanes).map(|_| values.to_vec()).collect();

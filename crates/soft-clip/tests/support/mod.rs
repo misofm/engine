@@ -93,21 +93,13 @@ pub fn process(
 
 /// The backend token a bank of `width` lanes is requested with on this host.
 pub fn backend(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        BankWidth::Eight => Backend::Simd8,
-    }
+    width.backend()
 }
 
-/// `true` if this artifact runs banks of `width` lanes natively.
+/// `true` if this artifact runs banks of `width` lanes natively: the width `Backend::current()`
+/// selects (#1112).
 pub fn bank_available(width: BankWidth) -> bool {
-    match width {
-        BankWidth::Four => cfg!(any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        )),
-        BankWidth::Eight => cfg!(target_arch = "x86_64"),
-    }
+    BankWidth::for_backend(Backend::current()) == Some(width)
 }
 
 /// A prepared bank whose lanes all carry `values`, or `None` where the host has no such width.

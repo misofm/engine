@@ -107,6 +107,15 @@ aarch64_row aarch64-linux-android
 # row for a crate outside the product closure each fail here. The defect reads fixed only when every
 # row is gone. A fresh `--emit` path per run keeps cargo from treating a crate as fresh and
 # skipping its assembly.
+#
+# The same assembly also proves that no eight-lane code is back in the AArch64 library (#1112).
+# The phones run the 4-lane (NEON) width only, and the eight-lane items (`lane::Simd8`,
+# `BankWidth::Eight` and everything instantiated at them) exist only where `avx2` is enabled. Any
+# line that spells an eight-lane instantiation -- a function label, a call, or the name of a
+# function inlined into a four-lane caller, which the release profile's line tables keep -- fails
+# the row. `EIGHT_LANE` is the browser module's rule (scripts/check-web-audioworklet-callgraph.py).
+# On 089ef456, before #1112, eight crates matched (builtins 451 lines, multiband-compressor 255).
+eight_lane='(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8'
 known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
 "${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
 asm_out="$(mktemp -d)"
@@ -118,10 +127,39 @@ while read -r crate; do
     [[ -s "$asm_out/$crate.s" ]] || fail "no iOS release assembly for $crate"
     count="$(rg -c '^\tbl\t_memset_pattern16$' "$asm_out/$crate.s" || true)"
     printf '%s %s\n' "$crate" "${count:-0}" >>"$asm_out/counts"
+    eight="$(rg -c "$eight_lane" "$asm_out/$crate.s")" || {
+        status=$?
+        ((status == 1)) || fail "the eight-lane scan could not read $crate's assembly (rg exit $status)"
+        eight=0
+    }
+    ((eight == 0)) || printf '%s %s\n' "$crate" "$eight" >>"$asm_out/eight"
 done <<<"$product_list"
 printf '%s\n' "$product_list" >"$asm_out/products"
 "${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||
     fail 'ios-asm-memset-pattern16 moved; see above'
+if [[ -s "$asm_out/eight" ]]; then
+    printf 'eight-lane lines in iOS release assembly, by crate:\n' >&2
+    cat "$asm_out/eight" >&2
+    fail 'eight-lane code is back in the AArch64 product crates (#1112): the phones run four lanes only, so it can never execute; gate it with target_feature = "avx2"'
+fi
+
+# --- no eight-lane code in the Android library (#1112) -----------------------------------------
+# The same rule over the library an Android app links: `capi` as the release staticlib, which the
+# release profile's fat LTO makes one module, so its assembly is every function the app ships,
+# after inlining. A staticlib links nothing, so no NDK is needed. iOS and Android set the same
+# width predicates, so this row differs from the iOS scan only if a regression keys eight lanes
+# on the operating system. On 089ef456 it matched 832 lines and 28 function labels.
+CARGO_TARGET_DIR="$base_target_dir/aarch64-linux-android-asm" \
+    cargo rustc --quiet --locked --release --target aarch64-linux-android -p capi --lib \
+    --crate-type staticlib -- --emit "asm=$asm_out/android-capi.s"
+[[ -s "$asm_out/android-capi.s" ]] || fail 'no Android release assembly for capi'
+if android_eight="$(rg -n "$eight_lane" "$asm_out/android-capi.s")"; then
+    head -n 20 <<<"$android_eight" >&2
+    fail "eight-lane code is back in the Android library (#1112): $(wc -l <<<"$android_eight") lines; gate it with target_feature = \"avx2\""
+else
+    status=$?
+    ((status == 1)) || fail "the Android eight-lane scan could not read the assembly (rg exit $status)"
+fi
 
 # --- wasm32 without simd128 is refused (#1062) ----------------------------------------------------
 # Owner ruling 2026-09-28, decision 7: the scalar (non-`simd128`) wasm builds and CI legs are
@@ -166,4 +204,4 @@ CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
     cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
     -p conformance
 
-printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); no eight-lane code in the iOS or Android library (#1112); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'

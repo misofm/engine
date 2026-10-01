@@ -41,7 +41,7 @@ pub use symmetry::{
 
 use core::{fmt, hash::Hash};
 use engine::{LAUNCH_SAMPLE_RATES, SampleRateHz, is_launch_sample_rate};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_feature = "avx2")]
 use lane::Simd8;
 use lane::{Backend, Simd4};
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,25 +231,25 @@ pub type PortKind = PortRole;
 scalar_enum!(PortLayout {DualMonoPlanar=1});
 /// The lane count of a homogeneous bank.
 ///
-/// # `Eight` is absent on wasm32 (issue #1110)
+/// # `Eight` exists only where `avx2` is enabled (issues #1110 and #1112)
 ///
-/// The browser runs four lanes only, so on `wasm32` this enum has one variant, as `lane` has no
-/// `Simd8` and no `Backend::Simd8` there. The predicate, `#[cfg(not(target_arch = "wasm32"))]`, is
-/// written on the variant, on this type's own arms, and on the eight-lane arm of
-/// [`match_bank_width!`], the one dispatch through which every other crate turns a width into a
-/// lane type. Nothing else changes by target: the variant set is the only difference, and every
-/// kernel is one generic body.
+/// A 4-lane (NEON/simd128) build runs four lanes only, so in it this enum has one variant, as
+/// `lane` has no `Simd8` and no `Backend::Simd8` there. The predicate, `lane`'s own
+/// `#[cfg(target_feature = "avx2")]`, is written on the variant, on this type's own arms, and on
+/// the eight-lane arm of [`match_bank_width!`], the one dispatch through which every other crate
+/// turns a width into a lane type. Nothing else changes by build: the variant set is the only
+/// difference, and every kernel is one generic body.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum BankWidth {
     Four,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     Eight,
 }
 impl BankWidth {
     pub const fn lanes(self) -> u32 {
         match self {
             Self::Four => 4,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             Self::Eight => 8,
         }
     }
@@ -266,14 +266,14 @@ impl BankWidth {
     }
 
     /// The bank width of `lanes` lanes, or `None` for a lane count no bank has on this target:
-    /// the one-lane scalar path, and eight lanes on `wasm32` (issue #1110).
+    /// the one-lane scalar path, and eight lanes where `avx2` is off (issues #1110 and #1112).
     ///
     /// What turns a lane type's `WIDTH` into a width [`match_bank_width!`] can dispatch on.
     #[must_use]
     pub const fn for_lanes(lanes: usize) -> Option<Self> {
         match lanes {
             4 => Some(Self::Four),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             8 => Some(Self::Eight),
             _ => None,
         }
@@ -284,7 +284,7 @@ impl BankWidth {
     pub const fn matches_backend(self, backend: Backend) -> bool {
         match (self, Self::for_backend(backend)) {
             (Self::Four, Some(Self::Four)) => true,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             (Self::Eight, Some(Self::Eight)) => true,
             _ => false,
         }
@@ -299,7 +299,7 @@ impl BankWidth {
     pub const fn full_mask(self) -> &'static [bool] {
         match self {
             Self::Four => &[true; 4],
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             Self::Eight => &[true; 8],
         }
     }
@@ -319,11 +319,11 @@ impl BankWidth {
 ///
 /// # Why a macro
 ///
-/// `BankWidth::Eight` and `lane::Simd8` do not exist on `wasm32` (see [`BankWidth`]). A `match`
-/// written out at each site would need `#[cfg]` on its eight-lane arm, and a `use` of `Simd8`
-/// beside it, at every site; this macro is the one place outside `lane` and this type where the
-/// eight-lane arm is written. Its `cfg` is on the target architecture, which is the same for every
-/// crate in a build, so it means the same thing wherever the macro expands.
+/// `BankWidth::Eight` and `lane::Simd8` exist only where `avx2` is enabled (see [`BankWidth`]). A
+/// `match` written out at each site would need `#[cfg]` on its eight-lane arm, and a `use` of
+/// `Simd8` beside it, at every site; this macro is the one place outside `lane` and this type where
+/// the eight-lane arm is written. Its `cfg` is on a target feature, which one build sets for every
+/// crate it compiles, so it means the same thing wherever the macro expands.
 #[macro_export]
 macro_rules! match_bank_width {
     ($width:expr, |$lane:tt $(, $lanes:ident $(, $tile:ident)?)?| $body:expr) => {
@@ -336,7 +336,7 @@ macro_rules! match_bank_width {
                 )?
                 $body
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             $crate::BankWidth::Eight => {
                 $crate::match_bank_width!(@lane $lane = $crate::__private::Simd8);
                 $(
@@ -357,7 +357,7 @@ macro_rules! match_bank_width {
 #[doc(hidden)]
 pub mod __private {
     pub use lane::Simd4;
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_feature = "avx2")]
     pub use lane::Simd8;
 }
 
@@ -382,11 +382,11 @@ pub fn transpose_tile_4(rows: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 
 /// Transpose one eight-by-eight tile of 32-bit words: `out[k][lane] == rows[lane][k]`.
 ///
-/// The eight-lane twin of [`transpose_tile_4`]; see it for why this is bit-exact. On `x86-64-v3`
-/// [`Simd8`]'s `transpose` is the 24-shuffle AVX pattern (eight `unpack`, eight `shuffle`, eight
-/// `permute2f128`); on a target where `wide` lowers `f32x8` to two 128-bit halves it is the scalar
-/// element permutation, which is equally bit-exact and equally correct.
-#[cfg(not(target_arch = "wasm32"))]
+/// The eight-lane twin of [`transpose_tile_4`]; see it for why this is bit-exact. [`Simd8`]'s
+/// `transpose` is the 24-shuffle AVX pattern (eight `unpack`, eight `shuffle`, eight
+/// `permute2f128`). It exists only where `avx2` is enabled, the 8-lane (AVX2) builds (issues #1110
+/// and #1112), so no build compiles the two-half lowering `wide` would give `f32x8` elsewhere.
+#[cfg(target_feature = "avx2")]
 #[inline(always)]
 #[must_use]
 pub fn transpose_tile_8(rows: [[f32; 8]; 8]) -> [[f32; 8]; 8] {
@@ -2566,17 +2566,15 @@ mod bank_width_tests {
     #[test]
     fn bank_width_for_backend_is_total() {
         assert_eq!(BankWidth::for_backend(Backend::Scalar), None);
-        assert_eq!(
-            BankWidth::for_backend(Backend::Simd4),
-            Some(BankWidth::Four)
-        );
-        assert_eq!(
-            BankWidth::for_backend(Backend::Simd8),
-            Some(BankWidth::Eight)
-        );
+        // Each vector backend this build has, beside the width it executes: `(Simd4, Four)`, and
+        // `(Simd8, Eight)` where `avx2` is enabled (issue #1112).
+        assert_eq!(Backend::VECTOR.len(), BankWidth::ALL.len());
+        for (&backend, &width) in Backend::VECTOR.iter().zip(BankWidth::ALL) {
+            assert_eq!(BankWidth::for_backend(backend), Some(width));
+        }
 
-        for width in [BankWidth::Four, BankWidth::Eight] {
-            for backend in [Backend::Scalar, Backend::Simd4, Backend::Simd8] {
+        for &width in BankWidth::ALL {
+            for &backend in [Backend::Scalar].iter().chain(Backend::VECTOR) {
                 assert_eq!(
                     width.matches_backend(backend),
                     BankWidth::for_backend(backend) == Some(width),
@@ -2861,6 +2859,39 @@ mod continuous_mapping_validity_tests {
                         panic!("missing diagnostics for {mapping:?} {minimum:?}: {expected:?}");
                     }
                 }
+            }
+        }
+    }
+}
+
+/// [`BankWidth::ALL`] and [`BankWidth::backend`] (issue #1112).
+///
+/// In a module of their own, and at the end of the file, so that adding them moves nothing that
+/// was already compiled: no line of this file (panic locations carry line numbers), and no impl
+/// disambiguator of the crate root (every symbol name of the derived impls there).
+mod bank_widths {
+    use super::{Backend, BankWidth};
+
+    impl BankWidth {
+        /// Every bank width this build has, narrowest first: `Four`, and `Eight` where `avx2` is
+        /// enabled (issue #1112).
+        ///
+        /// The one list of them: tests and gates that run a claim at every bank width iterate this
+        /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four
+        /// lanes.
+        pub const ALL: &'static [Self] = &[
+            Self::Four,
+            #[cfg(target_feature = "avx2")]
+            Self::Eight,
+        ];
+
+        /// The vector backend that executes this width: the inverse of [`BankWidth::for_backend`].
+        #[must_use]
+        pub const fn backend(self) -> Backend {
+            match self {
+                Self::Four => Backend::Simd4,
+                #[cfg(target_feature = "avx2")]
+                Self::Eight => Backend::Simd8,
             }
         }
     }

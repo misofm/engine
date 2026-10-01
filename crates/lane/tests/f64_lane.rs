@@ -25,13 +25,7 @@
 use core::hint::black_box;
 use std::time::Instant;
 
-use lane::{LaneF64, Simd4, Simd8, Widen};
-
-/// The `f64` companion of `Simd4`, named the way a crate outside `lane` must name it.
-type Simd4F64 = <Simd4 as Widen>::F64;
-
-/// The `f64` companion of `Simd8`.
-type Simd8F64 = <Simd8 as Widen>::F64;
+use lane::{LaneF64, Widen};
 
 /// Widest lane count under test.
 const MAX_WIDTH: usize = 8;
@@ -215,16 +209,14 @@ fn gate1_oracle_is_the_conversion_on_known_values() {
 fn gate1_widen_is_exact_on_the_directed_pool_and_the_sparse_sweep() {
     let mut patterns = sparse_patterns();
     patterns.extend_from_slice(&WIDEN_POOL);
-    for (name, mismatches) in [
-        ("f32", widen_list_mismatches::<f32>(&patterns)),
-        ("Simd4", widen_list_mismatches::<Simd4>(&patterns)),
-        ("Simd8", widen_list_mismatches::<Simd8>(&patterns)),
-    ] {
+    lane::each_lane!(|L| {
+        let name = core::any::type_name::<L>();
         assert_eq!(
-            mismatches, 0,
+            widen_list_mismatches::<L>(&patterns),
+            0,
             "gate 1: widen at {name} over the directed pool and sparse sweep"
         );
-    }
+    });
 }
 
 #[test]
@@ -233,17 +225,10 @@ fn gate1_widen_is_exact_on_every_f32_bit_pattern() {
         // The exhaustive sweep is the release gate; the debug build runs the sparse sweep above.
         return;
     }
-    assert_eq!(widen_exhaustive::<f32>("f32"), 0, "gate 1: widen at f32");
-    assert_eq!(
-        widen_exhaustive::<Simd4>("Simd4"),
-        0,
-        "gate 1: widen at Simd4"
-    );
-    assert_eq!(
-        widen_exhaustive::<Simd8>("Simd8"),
-        0,
-        "gate 1: widen at Simd8"
-    );
+    lane::each_lane!(|L| {
+        let name = core::any::type_name::<L>();
+        assert_eq!(widen_exhaustive::<L>(name), 0, "gate 1: widen at {name}");
+    });
 }
 
 /// Gate 2's directed pool: both zeros, the smallest and largest subnormal and `MIN_POSITIVE` of
@@ -393,13 +378,12 @@ fn random_pair_mismatches<F: LaneF64>(seed: u64, pairs: usize) -> u64 {
 #[test]
 fn gate2_add_and_mul_are_exact_on_every_ordered_pool_pair() {
     let pool = f64_pool();
-    for (name, mismatches) in [
-        ("f64", pool_pair_mismatches::<f64>(&pool)),
-        ("Simd4", pool_pair_mismatches::<Simd4F64>(&pool)),
-        ("Simd8", pool_pair_mismatches::<Simd8F64>(&pool)),
-    ] {
+    // Each `f32` lane type's `f64` companion: `f64`, then the vector widths this build has.
+    lane::each_lane!(|L| {
+        let name = core::any::type_name::<<L as Widen>::F64>();
+        let mismatches = pool_pair_mismatches::<<L as Widen>::F64>(&pool);
         assert_eq!(mismatches, 0, "gate 2: add/mul at {name} over the pool");
-    }
+    });
 }
 
 #[test]
@@ -409,21 +393,16 @@ fn gate2_add_and_mul_are_exact_on_seeded_random_pairs() {
     } else {
         1_000_000
     };
-    for (name, mismatches) in [
-        (
-            "Simd4",
-            random_pair_mismatches::<Simd4F64>(0x0949_F64A_DD00_0004, pairs),
-        ),
-        (
-            "Simd8",
-            random_pair_mismatches::<Simd8F64>(0x0949_F64A_DD00_0008, pairs),
-        ),
-    ] {
+    // One seed per width: `0x0949_F64A_DD00_0000` plus the lane count.
+    lane::each_vector_lane!(|L, N| {
+        let name = core::any::type_name::<<L as Widen>::F64>();
+        let seed = 0x0949_F64A_DD00_0000 + N as u64;
         assert_eq!(
-            mismatches, 0,
+            random_pair_mismatches::<<L as Widen>::F64>(seed, pairs),
+            0,
             "gate 2: add/mul at {name} over {pairs} random pairs"
         );
-    }
+    });
 }
 
 /// Gate 3's oracle: `x * x` for a finite `x = ±M * 2^E`, as `(M * M) * 2^(2E)`.
@@ -506,11 +485,12 @@ fn gate3_the_square_of_a_widened_f32_is_exact() {
             finite += 1;
         }
     }
-    for (name, mismatches) in [
-        ("f32", square_mismatches::<f32>(&inputs)),
-        ("Simd4", square_mismatches::<Simd4>(&inputs)),
-        ("Simd8", square_mismatches::<Simd8>(&inputs)),
-    ] {
-        assert_eq!(mismatches, 0, "gate 3: square witness at {name}");
-    }
+    lane::each_lane!(|L| {
+        let name = core::any::type_name::<L>();
+        assert_eq!(
+            square_mismatches::<L>(&inputs),
+            0,
+            "gate 3: square witness at {name}"
+        );
+    });
 }

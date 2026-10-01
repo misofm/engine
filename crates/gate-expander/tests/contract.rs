@@ -151,14 +151,18 @@ fn extra_initial_record_is_rejected_before_preparation() {
 
 #[test]
 fn malformed_bank_member_is_rejected_before_scalar_fallback() {
+    // The build's own width: eight lanes in the 8-lane (AVX2) build, four in a 4-lane
+    // (NEON/simd128) build, which has no other (#1112).
+    let backend = lane::Backend::current();
+    let width = BankWidth::for_backend(backend).expect("a vector build");
     let mut values = [initial_values(); 8];
     values[3][0].parameter_index = 99;
     let requests: Vec<_> = values.iter().map(|values| request(values)).collect();
     let result = GateExpanderFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-        backend: lane::Backend::Simd8,
-        width: BankWidth::Eight,
-        requests: &requests,
-        active_mask: BankWidth::Eight.full_mask(),
+        backend,
+        width,
+        requests: &requests[..width.lanes() as usize],
+        active_mask: width.full_mask(),
     });
     assert_eq!(
         result.err().expect("malformed member").code,

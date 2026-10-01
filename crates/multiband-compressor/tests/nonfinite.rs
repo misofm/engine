@@ -190,28 +190,31 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
         );
     }
 
-    let sets = (0..8).map(varied_values).collect::<Vec<_>>();
+    // The bank half runs at the build's own bank width (issue #1112).
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
+    let lanes = width.lanes() as usize;
+    let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
     let requests = sets
         .iter()
         .map(|set| request_with(set, LinkMode::DualMono, FRAMES as u32, false))
         .collect::<Vec<_>>();
-    let mut bank = support::bank(BankWidth::Eight, &requests);
-    let mut left = support::signal(FRAMES * 8 * BLOCKS, 0x1111_2222);
-    let mut right = support::signal(FRAMES * 8 * BLOCKS, 0x3333_4444);
-    left[5 * 8 + 3] = f32::NAN;
+    let mut bank = support::bank(width, &requests);
+    let mut left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
+    let mut right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
+    left[5 * lanes + 3] = f32::NAN;
     let failing = 5 / FRAMES;
     for block in 0..BLOCKS {
-        let start = block * FRAMES * 8;
+        let start = block * FRAMES * lanes;
         let report = bank.process_bank(
             EffectBankProcessBlock::new(
-                &mut left[start..start + FRAMES * 8],
-                &mut right[start..start + FRAMES * 8],
+                &mut left[start..start + FRAMES * lanes],
+                &mut right[start..start + FRAMES * lanes],
                 None,
                 FRAMES as u32,
-                BankWidth::Eight,
+                width,
                 (block * FRAMES) as u64,
                 &[],
-                &[0u32; 9],
+                &vec![0u32; lanes + 1],
                 FRAMES as u32,
             )
             .expect("bank block"),
@@ -227,9 +230,9 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
             continue;
         }
         assert!(
-            left[start..start + FRAMES * 8]
+            left[start..start + FRAMES * lanes]
                 .iter()
-                .chain(right[start..start + FRAMES * 8].iter())
+                .chain(right[start..start + FRAMES * lanes].iter())
                 .all(|sample| *sample == 0.0),
             "a bank shares its reset, so a failing lane zeroes the whole block"
         );

@@ -23,10 +23,11 @@ use builtins::*;
 use effect_contract::{BankWidth, ChannelSymmetryWitness};
 use lane::Backend;
 
-const BANKS: [(Backend, BankWidth); 2] = [
-    (Backend::Simd4, BankWidth::Four),
-    (Backend::Simd8, BankWidth::Eight),
-];
+/// Every bank width this build has, with the backend that executes it: both in the 8-lane (AVX2)
+/// build, four alone in a 4-lane (NEON/simd128) one (`BankWidth::ALL`, issue #1112).
+fn banks() -> impl Iterator<Item = (Backend, BankWidth)> {
+    BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+}
 
 /// A symmetric track: both channels designed from one set of values, which is what makes the bank
 /// collapse-eligible at all.
@@ -96,7 +97,7 @@ fn bits(values: &[f32]) -> Vec<u32> {
 /// reported symmetric at the retarget block and this fails.
 #[test]
 fn an_asymmetric_retarget_declines_the_lane_on_the_admitting_block() {
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         for command in ["trim", "polarity"] {
             let mut bank = bank(backend, width);
             assert!(
@@ -140,7 +141,7 @@ fn an_asymmetric_retarget_declines_the_lane_on_the_admitting_block() {
 #[test]
 fn a_symmetric_retarget_keeps_the_lane_eligible() {
     const FRAMES: usize = 32;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let mut bank = bank(backend, width);
         bank.set_trim_db(0, BuiltinLaneSelector::Both, -18.0, 96)
@@ -178,7 +179,7 @@ fn a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 10;
     const DISENGAGE: usize = 6;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let mut collapsing = bank(backend, width);
         let mut never = bank(backend, width);
@@ -258,7 +259,7 @@ fn a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits() {
 /// `trim_ramp_channels_agree()` conjunct) -> an asymmetrically-ridden bank claims agreement.
 #[test]
 fn channels_agree_covers_the_trim_ramp_record() {
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let mut bank = bank(backend, width);
         assert!(
             bank.channels_agree(),
@@ -296,7 +297,7 @@ fn channels_agree_covers_the_trim_ramp_record() {
 #[test]
 fn a_collapsed_block_keeps_the_two_channels_ramp_records_equal() {
     const FRAMES: usize = 16;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let mut bank = bank(backend, width);
         for lane in 0..lanes {
@@ -340,7 +341,7 @@ fn a_collapsed_block_keeps_the_two_channels_ramp_records_equal() {
 /// (`builtins-compiler/tests/input_drain.rs`).
 #[test]
 fn re_equalising_the_words_restores_the_designed_term_and_nothing_more() {
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let mut bank = bank(backend, width);
         let settled = bank_trim_ramp_words(&bank, 0);
         bank.set_trim_db(0, BuiltinLaneSelector::Left, -30.0, 0)
@@ -396,7 +397,7 @@ fn a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 8;
     const COLLAPSED: usize = 3;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         for lanes_addressed in [BuiltinLaneSelector::Left, BuiltinLaneSelector::Right] {
             for snap in [0_u32, 96] {
                 let lane_count = width.lanes() as usize;
@@ -489,7 +490,7 @@ fn a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy() {
 #[test]
 fn the_disengage_copy_still_restores_the_integrators() {
     const FRAMES: usize = 32;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lane_count = width.lanes() as usize;
         let mut collapsing = bank(backend, width);
         let mut never = bank(backend, width);

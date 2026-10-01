@@ -20,10 +20,11 @@ use builtins::*;
 use effect_contract::BankWidth;
 use lane::Backend;
 
-const BANKS: [(Backend, BankWidth); 2] = [
-    (Backend::Simd4, BankWidth::Four),
-    (Backend::Simd8, BankWidth::Eight),
-];
+/// Every bank width this build has, with the backend that executes it: both in the 8-lane (AVX2)
+/// build, four alone in a 4-lane (NEON/simd128) one (`BankWidth::ALL`, issue #1112).
+fn banks() -> impl Iterator<Item = (Backend, BankWidth)> {
+    BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+}
 
 /// A symmetric track: the two channels are designed from one set of values, which is what makes
 /// the bank collapse-eligible at all (`lane_channel_symmetry` is a bitwise word comparison).
@@ -100,7 +101,7 @@ fn poisoned_block(frames: usize, lanes: usize) -> Vec<f32> {
 #[test]
 fn the_collapsed_body_publishes_the_dual_bodys_report() {
     const FRAMES: usize = 64;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let mut collapsed = bank(backend, width);
         let mut dual = bank(backend, width);
@@ -191,7 +192,7 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     const FRAMES: usize = 32;
     const BLOCKS: usize = 8;
     const SWITCH: usize = 4;
-    for (backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let mut mixed = bank(backend, width);
         let mut never = bank(backend, width);

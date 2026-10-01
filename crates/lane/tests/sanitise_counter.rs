@@ -23,12 +23,12 @@
 //! way, so only the counter can see a miscount. The qualification corpus embeds the counters in its
 //! digest (`builtins`), which is the other end of the same rope.
 
+use lane::Lane;
 use lane::kernels::builtins::{
     InputChainCoef, InputChainPlan, InputChainState, NONFINITE_LIMIT, input_chain_block,
     input_chain_block_elided, input_chain_plan, sanitize_gain_block,
 };
 use lane::kernels::{SvfCoef, svf_step};
-use lane::{Lane, Simd4, Simd8};
 
 /// Frames per block.
 const FRAMES: usize = 128;
@@ -299,9 +299,7 @@ fn the_and_form_is_the_select_form_on_every_lane_subset() {
             }
         }
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 /// The kernels, over 64 hostile blocks of evolving state: the tree's counter words and output
@@ -462,9 +460,7 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
             "width={width}: sanitize_gain_block vs scalar oracle"
         );
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 /// The disabled section, as `builtins` prepares it.

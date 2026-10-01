@@ -29,32 +29,35 @@ struct Rule {
     forbidden_calls: Vec<String>,
 }
 
-#[cfg(target_arch = "x86_64")]
+// The probed width is the build's lane shape, keyed by the width predicates `lane` selects by
+// (issue #1112, the owner's rule: a lane shape is not a CPU architecture). The labels and the
+// allowlist keep their architecture names, because the instructions they name are an ISA's.
+#[cfg(target_feature = "avx2")]
 const ACTIVE_BACKEND: &str = "x86_64-avx2";
-#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "neon")]
 const ACTIVE_BACKEND: &str = "aarch64-neon";
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_feature = "avx2", target_feature = "neon")))]
 const ACTIVE_BACKEND: &str = "unsupported";
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_feature = "avx2")]
 const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd8", "probe_sum2_simd8", "probe_svf_simd8"];
-#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "neon")]
 const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd4", "probe_sum2_simd4", "probe_svf_simd4"];
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(not(any(target_feature = "avx2", target_feature = "neon")))]
 const ACTIVE_REGISTRY: &[&str] = &[];
 
 // The gain value stays opaque (`black_box`) so the probe measures the kernel on a runtime
 // gain instead of a folded constant, and the typed rebind keeps the array's static length so
 // `Simd8::load`'s in-range check stays provable: no `slice_index_fail` trampoline enters the
 // captured body, which the allowlist's no-call assertion forbids (issue #372).
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_feature = "avx2")]
 #[inline(never)]
 fn probe_gain_simd8(io: &mut [f32; PROBE_FRAMES * 8], gain: &[f32; 8]) {
     let gain: &[f32; 8] = black_box(gain);
     gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(gain));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_feature = "avx2")]
 #[inline(never)]
 fn probe_sum2_simd8(
     out: &mut [f32; PROBE_FRAMES * 8],
@@ -64,7 +67,7 @@ fn probe_sum2_simd8(
     sum2_block::<lane::Simd8>(out, a, b);
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_feature = "avx2")]
 #[inline(never)]
 fn probe_svf_simd8(
     io: &mut [f32; PROBE_FRAMES * 8],
@@ -74,15 +77,15 @@ fn probe_svf_simd8(
     svf_block::<lane::Simd8>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
 }
 
-// Same rationale as the x86 gain probe above: opaque value, static length (issue #372).
-#[cfg(target_arch = "aarch64")]
+// Same rationale as the 8-lane (AVX2) gain probe above: opaque value, static length (#372).
+#[cfg(target_feature = "neon")]
 #[inline(never)]
 fn probe_gain_simd4(io: &mut [f32; PROBE_FRAMES * 4], gain: &[f32; 4]) {
     let gain: &[f32; 4] = black_box(gain);
     gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(gain));
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "neon")]
 #[inline(never)]
 fn probe_sum2_simd4(
     out: &mut [f32; PROBE_FRAMES * 4],
@@ -92,7 +95,7 @@ fn probe_sum2_simd4(
     sum2_block::<lane::Simd4>(out, a, b);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(target_feature = "neon")]
 #[inline(never)]
 fn probe_svf_simd4(
     io: &mut [f32; PROBE_FRAMES * 4],
@@ -103,7 +106,7 @@ fn probe_svf_simd4(
 }
 
 fn execute_probes() {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(target_feature = "avx2")]
     {
         let mut io = [0.25f32; PROBE_FRAMES * 8];
         let a = [0.5f32; PROBE_FRAMES * 8];
@@ -125,7 +128,7 @@ fn execute_probes() {
         probe_svf_simd8(&mut io, &coefficients, &mut state);
         black_box((io, state));
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(target_feature = "neon")]
     {
         let mut io = [0.25f32; PROBE_FRAMES * 4];
         let a = [0.5f32; PROBE_FRAMES * 4];

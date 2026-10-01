@@ -14,7 +14,7 @@
 mod support;
 
 use effect_contract::BankWidth;
-use support::{bank_available, bits, initial_values, prepare, prepare_bank, process, process_bank};
+use support::{bits, initial_values, prepare, prepare_bank, process, process_bank};
 
 const FRAMES: usize = 64;
 
@@ -99,13 +99,7 @@ fn a_finite_but_out_of_range_block_also_fails() {
 /// failing lane keeps any history.
 #[test]
 fn a_bank_block_fails_and_recovers_the_failing_lane_alone() {
-    let width = if bank_available(BankWidth::Eight) {
-        BankWidth::Eight
-    } else if bank_available(BankWidth::Four) {
-        BankWidth::Four
-    } else {
-        return;
-    };
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = initial_values();
     let per_lane: Vec<Vec<_>> = (0..lanes).map(|_| values.to_vec()).collect();

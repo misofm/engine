@@ -3,14 +3,14 @@
 mod support;
 
 use effect_contract::{
-    BankWidth, EffectBankProcessBlock, LinkMode, PreparedAutomationSpan, PreparedNativeEffectBank,
-    ResetKind, StatePayloadInput, StatePayloadOutput,
+    EffectBankProcessBlock, LinkMode, PreparedAutomationSpan, PreparedNativeEffectBank, ResetKind,
+    StatePayloadInput, StatePayloadOutput,
 };
 use gate_expander::STATE_LAYOUT_VERSION;
 use support::{
-    Values, active_values, assert_bits_eq, initial_values, noise, packed_w8, prepare,
-    prepare_bank_at_rate, prepare_bank_w8, render_scalar_sidechain, request, retarget_spans,
-    snapshot, snapshot_bank, track_of,
+    NATIVE_LANES, Values, active_values, assert_bits_eq, initial_values, native_width, noise,
+    packed, prepare, prepare_bank_at_rate, prepare_bank_native, render_scalar_sidechain, request,
+    retarget_spans, snapshot, snapshot_bank, track_of,
 };
 
 fn word(bytes: &[u8], index: usize) -> u32 {
@@ -23,7 +23,7 @@ fn render_bank(
     right: &mut [f32],
     block: usize,
 ) {
-    let offsets = [0_u32; 9];
+    let offsets = [0_u32; NATIVE_LANES + 1];
     render_bank_with_automation(bank, left, right, block, &[], &offsets);
 }
 
@@ -35,8 +35,8 @@ fn render_bank_with_automation(
     automation: &[PreparedAutomationSpan],
     automation_offsets: &[u32],
 ) {
-    let frames = left.len() / 8;
-    let empty_offsets = [0_u32; 9];
+    let frames = left.len() / NATIVE_LANES;
+    let empty_offsets = [0_u32; NATIVE_LANES + 1];
     let mut start = 0;
     while start < frames {
         let end = (start + block).min(frames);
@@ -47,11 +47,11 @@ fn render_bank_with_automation(
         };
         bank.process_bank(
             EffectBankProcessBlock::new(
-                &mut left[start * 8..end * 8],
-                &mut right[start * 8..end * 8],
+                &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
+                &mut right[start * NATIVE_LANES..end * NATIVE_LANES],
                 None,
                 (end - start) as u32,
-                BankWidth::Eight,
+                native_width(),
                 start as u64,
                 block_automation,
                 block_offsets,
@@ -247,8 +247,8 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
         if let Some(mut bank) = prepare_bank_at_rate(
             &values,
             LinkMode::DualMono,
-            BankWidth::Eight,
-            lane::Backend::Simd8,
+            native_width(),
+            lane::Backend::current(),
             128,
             rate,
         ) {
@@ -283,10 +283,6 @@ fn old_lengths_and_one_byte_short_payloads_reject_scalar_and_bank() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn malformed_final_right_word_leaves_both_channels_unchanged() {
     let values = active_values();
     let mut effect = prepare(request(&values));
@@ -320,10 +316,10 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         values
     });
     let mut control =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut target =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
-    let prefix_left = packed_w8(&vec![vec![0.01_f32; 17]; 8]);
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
+    let prefix_left = packed(&vec![vec![0.01_f32; 17]; NATIVE_LANES]);
     let prefix_right = prefix_left.clone();
     let mut control_prefix_left = prefix_left.clone();
     let mut control_prefix_right = prefix_right.clone();
@@ -341,7 +337,9 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         &mut target_prefix_right,
         17,
     );
-    let state_before: Vec<_> = (0..8).map(|track| snapshot_bank(&*target, track)).collect();
+    let state_before: Vec<_> = (0..NATIVE_LANES as u32)
+        .map(|track| snapshot_bank(&*target, track))
+        .collect();
     assert!(state_before.iter().any(|payload| word(&payload.1, 0) != 0));
     let mut malformed_right = state_before[3].2.clone();
     malformed_right[87] = 0xff;
@@ -361,39 +359,35 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
             )
             .is_err()
     );
-    for track in 0..8 {
+    for track in 0..NATIVE_LANES as u32 {
         assert_eq!(
             snapshot_bank(&*target, track),
             state_before[track as usize],
             "bank lane {track} survives malformed right restore"
         );
     }
-    let continuation = packed_w8(&vec![vec![0.01_f32; 17]; 8]);
+    let continuation = packed(&vec![vec![0.01_f32; 17]; NATIVE_LANES]);
     let mut control_left = continuation.clone();
     let mut control_right = continuation.clone();
     let mut target_left = continuation.clone();
     let mut target_right = continuation;
     render_bank(&mut *control, &mut control_left, &mut control_right, 17);
     render_bank(&mut *target, &mut target_left, &mut target_right, 17);
-    for track in 0..8 {
+    for track in 0..NATIVE_LANES {
         assert_bits_eq(
-            &track_of(&target_left, track, 8),
-            &track_of(&control_left, track, 8),
+            &track_of(&target_left, track, NATIVE_LANES),
+            &track_of(&control_left, track, NATIVE_LANES),
             &format!("bank lane {track} left after rejected restore"),
         );
         assert_bits_eq(
-            &track_of(&target_right, track, 8),
-            &track_of(&control_right, track, 8),
+            &track_of(&target_right, track, NATIVE_LANES),
+            &track_of(&control_right, track, NATIVE_LANES),
             &format!("bank lane {track} right after rejected restore"),
         );
     }
 }
 
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_bank_recovery_is_channel_and_lane_local() {
     let mut values = active_values();
     support::set_parameter(&mut values, 2, 40.0, 40.0);
@@ -475,19 +469,19 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         values
     });
     let mut control =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut bank =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
-    let warm_left = packed_w8(&vec![vec![0.01; 17]; 8]);
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
+    let warm_left = packed(&vec![vec![0.01; 17]; NATIVE_LANES]);
     let warm_right = warm_left.clone();
     let mut control_warm_left = warm_left.clone();
     let mut control_warm_right = warm_right.clone();
     let mut bank_warm_left = warm_left;
     let mut bank_warm_right = warm_right;
     let bank_automation_one = retarget_spans(0);
-    let bank_automation: [PreparedAutomationSpan; 64] =
+    let bank_automation: [PreparedAutomationSpan; 8 * NATIVE_LANES] =
         core::array::from_fn(|index| bank_automation_one[index % bank_automation_one.len()]);
-    let bank_automation_offsets: [u32; 9] =
+    let bank_automation_offsets: [u32; NATIVE_LANES + 1] =
         core::array::from_fn(|index| (index * bank_automation_one.len()) as u32);
     render_bank_with_automation(
         &mut *control,
@@ -505,7 +499,9 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         &bank_automation,
         &bank_automation_offsets,
     );
-    let before_bank: Vec<_> = (0..8).map(|track| snapshot_bank(&*bank, track)).collect();
+    let before_bank: Vec<_> = (0..NATIVE_LANES as u32)
+        .map(|track| snapshot_bank(&*bank, track))
+        .collect();
     assert!(before_bank.iter().all(|payload| word(&payload.1, 0) != 0));
     for (track, payload) in before_bank.iter().enumerate() {
         for ramp in 0..4 {
@@ -532,19 +528,19 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
             );
         }
     }
-    let mut packed_left = packed_w8(&vec![vec![0.2; 128]; 8]);
+    let mut packed_left = packed(&vec![vec![0.2; 128]; NATIVE_LANES]);
     let mut packed_right = packed_left.clone();
     packed_left[3] = f32::INFINITY;
-    let mut control_left = packed_w8(&vec![vec![0.2; 128]; 8]);
+    let mut control_left = packed(&vec![vec![0.2; 128]; NATIVE_LANES]);
     let mut control_right = control_left.clone();
-    let offsets = [0_u32; 9];
+    let offsets = [0_u32; NATIVE_LANES + 1];
     let control_report = control.process_bank(
         EffectBankProcessBlock::new(
             &mut control_left,
             &mut control_right,
             None,
             128,
-            BankWidth::Eight,
+            native_width(),
             17,
             &[],
             &offsets,
@@ -558,7 +554,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
             &mut packed_right,
             None,
             128,
-            BankWidth::Eight,
+            native_width(),
             17,
             &[],
             &offsets,
@@ -567,11 +563,11 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         .unwrap(),
     );
     assert_eq!(report.reports[3].nonfinite_left_blocks, 128);
-    for track in 0..8 {
+    for track in 0..NATIVE_LANES {
         if track != 3 {
             assert_bits_eq(
-                &track_of(&packed_left, track, 8),
-                &track_of(&control_left, track, 8),
+                &track_of(&packed_left, track, NATIVE_LANES),
+                &track_of(&control_left, track, NATIVE_LANES),
                 &format!("peer track {track} left PCM"),
             );
             assert_eq!(
@@ -589,11 +585,12 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         "fault lane right serialized state remains equal to no-fault control"
     );
     assert_bits_eq(
-        &track_of(&packed_right, 3, 8),
-        &track_of(&control_right, 3, 8),
+        &track_of(&packed_right, 3, NATIVE_LANES),
+        &track_of(&control_right, 3, NATIVE_LANES),
         "fault lane right PCM remains live",
     );
-    let fresh_bank = prepare_bank_w8(&values, LinkMode::DualMono).expect("W8 backend");
+    let fresh_bank =
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     assert_eq!(
         snapshot_bank(&*bank, 3).1,
         snapshot_bank(&*fresh_bank, 3).1,
@@ -602,16 +599,13 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
 }
 
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     let values = active_values();
     let source_left = noise(41, 160, 0.3);
     let source_right = noise(42, 160, 0.3);
 
-    // Scalar -> bank: restore one scalar track after a partial render and continue it in W8.
+    // Scalar -> bank: restore one scalar track after a partial render and continue it in a bank of
+    // the build's own width (W8 in the 8-lane (AVX2) build, W4 in a 4-lane one).
     let mut scalar = prepare(request(&values));
     let mut scalar_prefix_left = source_left[..17].to_vec();
     let mut scalar_prefix_right = source_right[..17].to_vec();
@@ -639,7 +633,7 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
 
     let bank_values = [values; 8];
     let mut scalar_to_bank =
-        prepare_bank_w8(&bank_values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+        prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
     let sizes = scalar_to_bank.metadata().program_key.state_sizes;
     scalar_to_bank
         .restore_track_state_payload(
@@ -654,25 +648,25 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
             .unwrap(),
         )
         .unwrap();
-    let mut bank_left = packed_w8(&vec![source_left[17..].to_vec(); 8]);
-    let mut bank_right = packed_w8(&vec![source_right[17..].to_vec(); 8]);
+    let mut bank_left = packed(&vec![source_left[17..].to_vec(); NATIVE_LANES]);
+    let mut bank_right = packed(&vec![source_right[17..].to_vec(); NATIVE_LANES]);
     render_bank(&mut *scalar_to_bank, &mut bank_left, &mut bank_right, 128);
     assert_bits_eq(
-        &track_of(&bank_left, 3, 8),
+        &track_of(&bank_left, 3, NATIVE_LANES),
         &scalar_expected_left,
         "scalar to bank left",
     );
     assert_bits_eq(
-        &track_of(&bank_right, 3, 8),
+        &track_of(&bank_right, 3, NATIVE_LANES),
         &scalar_expected_right,
         "scalar to bank right",
     );
 
-    // Bank -> scalar: snapshot the same track after a partial W8 render and continue it in W1.
+    // Bank -> scalar: snapshot the same track after a partial bank render and continue it in W1.
     let mut bank =
-        prepare_bank_w8(&bank_values, LinkMode::DualMono).expect("an eight-lane build binds W8");
-    let mut bank_prefix_left = packed_w8(&vec![source_left[..17].to_vec(); 8]);
-    let mut bank_prefix_right = packed_w8(&vec![source_right[..17].to_vec(); 8]);
+        prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
+    let mut bank_prefix_left = packed(&vec![source_left[..17].to_vec(); NATIVE_LANES]);
+    let mut bank_prefix_right = packed(&vec![source_right[..17].to_vec(); NATIVE_LANES]);
     render_bank(
         &mut *bank,
         &mut bank_prefix_left,
@@ -700,8 +694,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
         &[],
         17,
     );
-    let mut bank_continuation_left = packed_w8(&vec![source_left[17..].to_vec(); 8]);
-    let mut bank_continuation_right = packed_w8(&vec![source_right[17..].to_vec(); 8]);
+    let mut bank_continuation_left = packed(&vec![source_left[17..].to_vec(); NATIVE_LANES]);
+    let mut bank_continuation_right = packed(&vec![source_right[17..].to_vec(); NATIVE_LANES]);
     render_bank(
         &mut *bank,
         &mut bank_continuation_left,
@@ -710,32 +704,30 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     );
     assert_bits_eq(
         &scalar_left,
-        &track_of(&bank_continuation_left, 3, 8),
+        &track_of(&bank_continuation_left, 3, NATIVE_LANES),
         "bank to scalar left",
     );
     assert_bits_eq(
         &scalar_right,
-        &track_of(&bank_continuation_right, 3, 8),
+        &track_of(&bank_continuation_right, 3, NATIVE_LANES),
         "bank to scalar right",
     );
 }
 
 #[test]
-#[cfg_attr(
-    not(target_arch = "x86_64"),
-    ignore = "an eight-lane bank binds only on the eight-lane launch build (#1017)"
-)]
 fn bank_restore_of_one_track_does_not_mutate_peers() {
     let values: [Values; 8] = core::array::from_fn(|_| initial_values());
     let mut donor_bank =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut target_bank =
-        prepare_bank_w8(&values, LinkMode::DualMono).expect("an eight-lane build binds W8");
-    let mut left = packed_w8(&vec![vec![0.1; 128]; 8]);
+        prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
+    let mut left = packed(&vec![vec![0.1; 128]; NATIVE_LANES]);
     let mut right = left.clone();
     render_bank(&mut *donor_bank, &mut left, &mut right, 128);
     let donor = snapshot_bank(&*donor_bank, 3);
-    let peer_before = snapshot_bank(&*target_bank, 4);
+    // Track 4 in the 8-lane (AVX2) build, track 0 in a 4-lane (NEON/simd128) one (#1112).
+    let peer = 4 % NATIVE_LANES as u32;
+    let peer_before = snapshot_bank(&*target_bank, peer);
     let sizes = target_bank.metadata().program_key.state_sizes;
     target_bank
         .restore_track_state_payload(
@@ -744,5 +736,5 @@ fn bank_restore_of_one_track_does_not_mutate_peers() {
             StatePayloadInput::new(&donor.0, &donor.1, &donor.2, sizes).unwrap(),
         )
         .unwrap();
-    assert_eq!(snapshot_bank(&*target_bank, 4), peer_before);
+    assert_eq!(snapshot_bank(&*target_bank, peer), peer_before);
 }

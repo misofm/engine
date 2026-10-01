@@ -12,21 +12,20 @@
 //! * gate 4: a non-finite lane recovers and is charged alone, and a tripping lane (the wet path of
 //!   a bypassed track, which the rack's `BypassShunt` later discards) leaves its bank-mates' bits.
 //!
-//! (Gate 2 is the gate/expander's.) Every test runs at both bank widths on every host. The build's
-//! native width binds through the public `bind_homogeneous_bank`; the other width binds through
-//! `bind_bank::<false>`, the same code without the D4 width check. So the four-lane
-//! bank runs on x86-64 as well as on AArch64, and the eight-lane one on AArch64 as well as on
-//! x86-64.
+//! (Gate 2 is the gate/expander's.) Every test runs at every bank width the build has
+//! (`BankWidth::ALL`). The build's native width binds through the public `bind_homogeneous_bank`;
+//! the other width binds through `bind_bank::<false>`, the same code without the D4 width check.
+//! So the four-lane bank runs in the 8-lane (AVX2) build as well as in a 4-lane (NEON/simd128)
+//! one, which has no eight-lane bank (#1112).
 //!
 //! NaNs fold to one word before any comparison (decision 10).
 
 use super::*;
 use effect_contract::BankWidth;
 use effect_contract::{PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
-use lane::{Simd4, Simd8};
 
 const QUANTUM: u32 = 128;
-const WIDTHS: [BankWidth; 2] = [BankWidth::Four, BankWidth::Eight];
+const WIDTHS: &[BankWidth] = BankWidth::ALL;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
@@ -72,10 +71,7 @@ fn native(width: BankWidth) -> bool {
 }
 
 fn backend(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        BankWidth::Eight => Backend::Simd8,
-    }
+    width.backend()
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
@@ -568,7 +564,7 @@ fn random_blocks(draw: &mut Draw, members: usize, count: usize) -> Vec<Block> {
 #[test]
 fn every_padded_bank_renders_its_members_per_node_bits() {
     let mut cases = 0;
-    for width in WIDTHS {
+    for &width in WIDTHS {
         let lanes = width.lanes() as usize;
         for members in 1..lanes {
             for (index, link) in LINKS.into_iter().enumerate() {
@@ -594,7 +590,8 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
             }
         }
     }
-    assert_eq!(cases, (3 + 7) * LINKS.len());
+    let padded_counts: usize = WIDTHS.iter().map(|width| width.lanes() as usize - 1).sum();
+    assert_eq!(cases, padded_counts * LINKS.len());
 }
 
 /// The conformance PCM fixtures, in their rows' order.
@@ -629,7 +626,7 @@ fn padded_banks_render_the_fixtures_per_node() {
             let level = [1.0_f32, 0.25, 0.03, 2.0][member % 4];
             samples[channel * frames + (frame + 29 * member) % frames] * level
         };
-        for width in WIDTHS {
+        for &width in WIDTHS {
             let lanes = width.lanes() as usize;
             for members in 1..lanes {
                 let values: Vec<Values> = (0..members)
@@ -696,7 +693,7 @@ fn padded_banks_render_the_fixtures_per_node() {
 /// padded lane's parameters.
 #[test]
 fn active_lanes_do_not_depend_on_the_clone_source() {
-    for width in WIDTHS {
+    for &width in WIDTHS {
         let lanes = width.lanes() as usize;
         let masks: Vec<Vec<bool>> = [1, 2, lanes / 2 + 1, lanes - 1]
             .into_iter()
@@ -928,8 +925,9 @@ fn planted_nonfinite_state<L: Lane, const W: usize>(width: BankWidth) {
 
 #[test]
 fn a_planted_nonfinite_state_recovers_and_is_charged_to_its_lane_alone() {
-    planted_nonfinite_state::<Simd4, 4>(BankWidth::Four);
-    planted_nonfinite_state::<Simd8, 8>(BankWidth::Eight);
+    lane::each_vector_lane!(|L, N| planted_nonfinite_state::<L, N>(
+        BankWidth::for_lanes(N).expect("a bank width")
+    ));
 }
 
 /// Gate 4's bypassed lane: a lane fed a tripping value leaves every bank-mate's bits.
@@ -990,6 +988,5 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
             }
         }
     }
-    at::<Simd4, 4>(BankWidth::Four);
-    at::<Simd8, 8>(BankWidth::Eight);
+    lane::each_vector_lane!(|L, N| at::<L, N>(BankWidth::for_lanes(N).expect("a bank width")));
 }

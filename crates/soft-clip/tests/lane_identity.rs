@@ -148,10 +148,11 @@ fn lane_identity_at(width: BankWidth) {
 
 #[test]
 fn the_hosts_bank_width_matches_the_scalar_instantiation() {
-    lane_identity_at(BankWidth::Four);
-    lane_identity_at(BankWidth::Eight);
+    for &width in BankWidth::ALL {
+        lane_identity_at(width);
+    }
     assert!(
-        bank_available(BankWidth::Four) || bank_available(BankWidth::Eight),
+        BankWidth::ALL.iter().copied().any(bank_available),
         "no bank width is native to this artifact, so this test proved nothing"
     );
 }
