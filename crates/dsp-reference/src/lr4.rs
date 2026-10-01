@@ -127,14 +127,12 @@ mod tests {
     const HALF_POWER_DB: f64 = 6.020_599_913_279_624;
     const IMPULSE_FRAMES: usize = 4_096;
 
-    fn probes(rate: f64) -> Vec<f64> {
+    fn probes(rate: f64) -> impl Iterator<Item = f64> {
         let (low, high) = (20.0_f64, 20_000.0_f64.min(0.5 * rate));
-        (0..PROBES)
-            .map(|index| {
-                let ratio = index as f64 / (PROBES - 1) as f64;
-                low * (high / low).powf(ratio)
-            })
-            .collect()
+        (0..PROBES).map(move |index| {
+            let ratio = index as f64 / (PROBES - 1) as f64;
+            low * (high / low).powf(ratio)
+        })
     }
 
     /// E3: `LP4 + HP4` is the second-order Butterworth all-pass, and each band is at -6.02 dB at

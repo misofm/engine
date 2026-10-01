@@ -45,16 +45,13 @@ fn delayed_delta_and_exact_bin_sine_have_known_spectra() {
         assert!((value.re.hypot(value.im) - 1.0).abs() < 1e-12);
     }
     let sine = deterministic_sine(1, 64, 64.0, 7.0).unwrap();
-    let magnitudes = (0..33)
+    let peak = (0..33)
         .map(|bin| {
             let value = direct_dft_bin(sine.channel(0).unwrap(), bin).unwrap();
             value.re.hypot(value.im)
         })
-        .collect::<Vec<_>>();
-    let peak = magnitudes
-        .iter()
         .enumerate()
-        .max_by(|left, right| left.1.total_cmp(right.1))
+        .max_by(|left, right| left.1.total_cmp(&right.1))
         .map(|(index, _)| index)
         .unwrap();
     assert_eq!(peak, 7);

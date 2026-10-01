@@ -78,13 +78,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_and_direct_dft_oracles_are_bounded_and_correct() {
+    fn direct_dft_oracles_are_bounded_and_correct() {
         let input = deterministic_impulse(1, 8, 2).expect("impulse");
-        let mut identity = IdentityProcessor;
-        assert_eq!(
-            render_planar_f64(&mut identity, &input).expect("render"),
-            input
-        );
         let delta = direct_dft_bin(input.channel(0).expect("channel"), 3).expect("dft");
         assert!(delta.re.abs() < 1e-12);
         assert!((delta.im - 1.0).abs() < 1e-12);

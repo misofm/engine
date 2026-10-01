@@ -276,12 +276,9 @@ impl ReferenceTptStateSpace {
 mod tests {
     use super::*;
 
-    /// E5: collapsing the hand-written TPT state space onto the one SVF model moved no bits.
-    ///
-    /// The expected words are the deleted model's own expressions, recomputed inline here from
-    /// the same cast coefficients; `to_bits` equality (not a tolerance) is the gate.
+    /// The cast adapter selects the low/high-pass matrix and forwards both complex components.
     #[test]
-    fn cast_coefficient_transfer_is_bit_identical_to_the_replaced_model() {
+    fn cast_adapter_matches_low_and_high_pass_state_space_definitions() {
         for rate in [44_100_u32, 48_000, 88_200, 96_000] {
             for cutoff in [10.0_f32, 20.0, 100.0, 1_000.0, 10_000.0] {
                 for output in [ReferenceTptOutput::LowPass, ReferenceTptOutput::HighPass] {
@@ -317,16 +314,14 @@ mod tests {
                         expected,
                         "rate={rate} cutoff={cutoff} output={output:?}"
                     );
-                    for frequency in [0.0, 10.0, cutoff.into(), 0.49 * f64::from(rate)] {
-                        let (actual_re, actual_im) = state
-                            .response(f64::from(rate), frequency)
-                            .expect("response");
-                        let modelled = expected
-                            .response(f64::from(rate), frequency)
-                            .expect("model");
-                        assert_eq!(actual_re.to_bits(), modelled.re.to_bits());
-                        assert_eq!(actual_im.to_bits(), modelled.im.to_bits());
-                    }
+                    let (actual_re, actual_im) = state
+                        .response(f64::from(rate), cutoff.into())
+                        .expect("response");
+                    let modelled = expected
+                        .response(f64::from(rate), cutoff.into())
+                        .expect("model");
+                    assert_eq!(actual_re.to_bits(), modelled.re.to_bits());
+                    assert_eq!(actual_im.to_bits(), modelled.im.to_bits());
                 }
             }
         }

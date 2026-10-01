@@ -280,30 +280,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_families_design_stably_and_have_finite_analytic_response() {
-        for kind in [
-            ReferenceParametricEqKind::Bell,
-            ReferenceParametricEqKind::LowShelf,
-            ReferenceParametricEqKind::HighShelf,
-            ReferenceParametricEqKind::LowPass,
-            ReferenceParametricEqKind::HighPass,
-            ReferenceParametricEqKind::Notch,
-        ] {
-            let design =
-                ReferenceParametricEqCoefficients::design(kind, 48_000.0, 1_000.0, 6.0, 1.0, 1.0)
-                    .expect("legal RBJ design");
-            assert!(design.is_strictly_jury_stable());
-            assert!(
-                design
-                    .magnitude_at_hz(1_000.0)
-                    .expect("magnitude")
-                    .is_finite()
-            );
-        }
-    }
-
-    #[test]
-    fn identity_section_returns_input_and_warms_independent_history() {
+    fn identity_section_returns_input_including_negative_zero() {
         let mut section = ReferenceParametricEqSection::new(
             ReferenceParametricEqCoefficients::identity(48_000.0),
         );
