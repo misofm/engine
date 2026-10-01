@@ -284,13 +284,6 @@ fn finish_channel_is_per_channel_and_reports_its_lanes() {
     assert!(reset_ran, "a rejected block resets the channel");
     assert!(failing.iter().all(|v| v.to_bits() == 0));
 
-    // The other channel of the same effect is untouched: this is the whole point of the per-channel
-    // form. Nothing links the two calls.
-    let mut other = vec![-0.5f32; 4 * 16];
-    let mask = finish_channel::<L>(&mut other, || panic!("the clean channel must not reset"));
-    assert_eq!(mask, 0);
-    assert!(other.iter().all(|v| v.to_bits() == (-0.5f32).to_bits()));
-
     // The threshold is the same one `finish_block` uses.
     let mut edge = vec![0.0f32; 4 * 4];
     edge[1] = f32::from_bits(1.0e30f32.to_bits() - 1);

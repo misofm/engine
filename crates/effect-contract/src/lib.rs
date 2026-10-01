@@ -54,25 +54,8 @@ pub enum StaticIdError {
     FirstCharacter,
     Character,
 }
-fn valid_static_id(value: &str) -> Result<(), StaticIdError> {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() {
-        return Err(StaticIdError::Empty);
-    }
-    if bytes.len() > 127 {
-        return Err(StaticIdError::TooLong);
-    }
-    if !bytes[0].is_ascii_lowercase() {
-        return Err(StaticIdError::FirstCharacter);
-    }
-    if bytes[1..]
-        .iter()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
-    {
-        Ok(())
-    } else {
-        Err(StaticIdError::Character)
-    }
+fn valid_static_id(value: &'static str) -> Result<(), StaticIdError> {
+    EffectId::new(value).map(|_| ())
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectId(&'static str);
@@ -2263,7 +2246,7 @@ pub trait PreparedNativeEffectBank: Send {
 }
 #[derive(Default)]
 pub struct NativeEffectRegistry {
-    factories: BTreeMap<EffectId, Arc<dyn NativeEffectFactory>>,
+    factories: BTreeMap<&'static str, Arc<dyn NativeEffectFactory>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -2291,7 +2274,7 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
-            if m.insert(d.id, Arc::from(x)).is_some() {
+            if m.insert(d.id.as_str(), Arc::from(x)).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
                     id: Some(d.id),
@@ -2301,18 +2284,14 @@ impl NativeEffectRegistry {
         Ok(Self { factories: m })
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
-        self.factories.get(&id).map(Arc::as_ref)
+        self.factories.get(id.as_str()).map(Arc::as_ref)
     }
     pub fn get_ascii(&self, id: &str) -> Option<&dyn NativeEffectFactory> {
-        self.factories
-            .iter()
-            .find_map(|(key, value)| (key.as_str() == id).then_some(value.as_ref()))
+        self.factories.get(id).map(Arc::as_ref)
     }
     /// Clone the immutable factory handle for an off-render prepared plan.
     pub fn get_shared_ascii(&self, id: &str) -> Option<Arc<dyn NativeEffectFactory>> {
-        self.factories
-            .iter()
-            .find_map(|(key, value)| (key.as_str() == id).then_some(Arc::clone(value)))
+        self.factories.get(id).map(Arc::clone)
     }
     pub fn len(&self) -> usize {
         self.factories.len()

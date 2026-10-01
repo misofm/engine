@@ -80,14 +80,14 @@ fn ramp_segments_are_width_independent() {
 #[test]
 fn the_boundary_check_is_width_independent() {
     let dirty = [f32::NAN, f32::INFINITY, 1e31, -1e31, f32::MAX];
+    let mut block = [0.25f32; 64];
+    lane::each_lane!(|L| assert!(check_block::<L>(&block)));
     for position in 0..64usize {
         for value in dirty {
-            let mut block = vec![0.25f32; 64];
             block[position] = value;
             lane::each_lane!(|L, N| assert!(!check_block::<L>(&block), "W={N} at {position}"));
         }
-        let clean = vec![0.25f32; 64];
-        lane::each_lane!(|L| assert!(check_block::<L>(&clean)));
+        block[position] = 0.25;
     }
 }
 

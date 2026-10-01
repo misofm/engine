@@ -13,13 +13,15 @@ fn scalar_sequence(mut ramp: LinearRamp, count: usize) -> Vec<f32> {
 /// `frames`. The buffer holds `1.0` so the applied gain is the value itself.
 fn block_sequence<L: Lane>(mut ramp: LinearRamp, count: usize, frames: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(count);
+    let mut buffer = vec![1.0f32; frames.min(count) * L::WIDTH];
     let mut done = 0;
     while done < count {
         let this = frames.min(count - done);
         let segment: RampSegment<L> = ramp.advance_block::<L>(this);
-        let mut buffer = vec![1.0f32; this * L::WIDTH];
-        ramp_block::<L>(&mut buffer, this, &segment);
-        for frame in buffer.chunks_exact(L::WIDTH) {
+        let block = &mut buffer[..this * L::WIDTH];
+        block.fill(1.0);
+        ramp_block::<L>(block, this, &segment);
+        for frame in block.chunks_exact(L::WIDTH) {
             // Every lane carries the same scalar ramp, so lane 0 is the sequence.
             out.push(frame[0]);
             for value in frame {

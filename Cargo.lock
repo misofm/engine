@@ -586,7 +586,6 @@ dependencies = [
  "multiband-compressor",
  "parametric-eq",
  "session",
- "sha2 0.11.0",
  "soft-clip",
  "transient-shaper",
  "true-peak-limiter",
@@ -1973,7 +1972,6 @@ dependencies = [
  "engine",
  "graph",
  "session",
- "sha2 0.11.0",
 ]
 
 [[package]]

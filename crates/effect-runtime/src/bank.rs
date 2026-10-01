@@ -79,13 +79,19 @@ impl NonFiniteReport {
 #[must_use]
 pub fn check_block<L: Lane>(io: &[f32]) -> bool {
     debug_assert_eq!(io.len() % L::WIDTH, 0);
+    !L::mask_any(L::mask_not(block_ok_mask::<L>(io)))
+}
+
+/// Per-lane acceptance over the entire block, shared by validation and failure attribution.
+#[inline(always)]
+fn block_ok_mask<L: Lane>(io: &[f32]) -> L::Mask {
     let limit = L::splat(BLOCK_LIMIT);
     let mut ok = L::zero().eq(L::zero());
     for frame in io.chunks_exact(L::WIDTH) {
         let x = L::load(frame);
         ok = L::mask_and(ok, x.abs().lt(limit));
     }
-    !L::mask_any(L::mask_not(ok))
+    ok
 }
 
 /// `true` when every word of `io` is **exactly** `+0.0` (bit pattern zero).
@@ -189,12 +195,7 @@ pub fn lane_is_positive_zero<L: Lane>(value: L) -> bool {
 pub fn nonfinite_lane_mask<L: Lane>(io: &[f32]) -> u32 {
     debug_assert_eq!(io.len() % L::WIDTH, 0);
     debug_assert!(L::WIDTH <= 32);
-    let limit = L::splat(BLOCK_LIMIT);
-    let mut ok = L::zero().eq(L::zero());
-    for frame in io.chunks_exact(L::WIDTH) {
-        let x = L::load(frame);
-        ok = L::mask_and(ok, x.abs().lt(limit));
-    }
+    let ok = block_ok_mask::<L>(io);
     let mut words = [0u32; 32];
     L::select(ok, L::zero(), L::splat(1.0)).store_bits(&mut words);
     let mut mask = 0u32;
