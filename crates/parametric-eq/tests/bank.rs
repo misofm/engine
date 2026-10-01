@@ -949,6 +949,17 @@ fn fold_payload(transcript: &mut Vec<u8>, payload: &Payload) {
     }
 }
 
+/// Compares every canonical byte without dumping the whole transcript on failure.
+fn assert_transcript_eq(actual: &[u8], expected: &[u8], context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}: transcript length");
+    if let Some(offset) = actual.iter().zip(expected).position(|(a, b)| a != b) {
+        panic!(
+            "{context}: transcript byte {offset}: actual {:#04x}, expected {:#04x}",
+            actual[offset], expected[offset]
+        );
+    }
+}
+
 /// How a scenario's tracks sit in banks (issue #1089, console strip P2b).
 ///
 /// Each bank carries `members` consecutive tracks on its first lanes, in track order, and pads its
@@ -1063,7 +1074,7 @@ impl Layout {
         right: Option<&[f32]>,
         report: &effect_contract::BankProcessReport,
     ) {
-        for lane in 0..self.lanes {
+        for (lane, bound_payload) in at_bind[..self.lanes].iter().enumerate() {
             if self.track(bank, lane).is_some() {
                 match right {
                     None => fold_words(transcript, self.column(left, lane, frames)),
@@ -1091,7 +1102,7 @@ impl Layout {
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) was reported"
             );
             assert!(
-                snapshot_bank(processor, lane as u32) == at_bind[lane],
+                &snapshot_bank(processor, lane as u32) == bound_payload,
                 "#1089: padded lane {lane} of bank {bank} ({self:?}) moved its state"
             );
         }
@@ -1266,11 +1277,13 @@ fn assert_padded_legs(
     };
     for members in 1..width.lanes() as usize {
         for (mono, full) in [(false, full[0]), (true, full[1])] {
-            assert_eq!(
-                transcript(width, backend, members, mono),
+            assert_transcript_eq(
+                &transcript(width, backend, members, mono),
                 full,
-                "#1089 gate 1: the {scenario} scenario in banks of {members} members (mono \
-                 {mono}) is not the full bank's render"
+                &format!(
+                    "#1089 gate 1: the {scenario} scenario in banks of {members} members (mono \
+                     {mono}) is not the full bank's render"
+                ),
             );
         }
     }
@@ -1315,10 +1328,10 @@ fn odd_live_counts_match_scalar_and_padded_banks() {
         }
     }
     if native_bank().is_some() {
-        assert_eq!(
-            leg(&legs, "bank").0,
-            leg(&legs, "scalar").0,
-            "#1089: the dual bank leg must render its per-node instances"
+        assert_transcript_eq(
+            &leg(&legs, "bank").0,
+            &leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances",
         );
         assert_padded_legs(
             "odd-live",
@@ -1805,10 +1818,10 @@ fn admitted_blocks_match_scalar_and_padded_banks_without_selects() {
         }
     }
     if native_bank().is_some() {
-        assert_eq!(
-            leg(&legs, "bank").0,
-            leg(&legs, "scalar").0,
-            "#1089: the dual bank leg must render its per-node instances"
+        assert_transcript_eq(
+            &leg(&legs, "bank").0,
+            &leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances",
         );
         assert_padded_legs(
             "admitted-select",
@@ -2069,10 +2082,10 @@ fn two_and_four_live_sections_match_scalar_and_padded_banks() {
         println!("skewed-pass transcript {leg}: {} bytes", transcript.len());
     }
     if native_bank().is_some() {
-        assert_eq!(
+        assert_transcript_eq(
             leg(&legs, "bank"),
             leg(&legs, "scalar"),
-            "#1089: the dual bank leg must render its per-node instances"
+            "#1089: the dual bank leg must render its per-node instances",
         );
         assert_padded_legs(
             "skewed-pass",
@@ -2433,10 +2446,10 @@ fn a_cut_switched_off_keeps_the_bank_eliding() {
         );
     }
     if native_bank().is_some() {
-        assert_eq!(
-            leg(&legs, "bank").0,
-            cliff_scalar_transcript(CLIFF_TRACKS).0,
-            "#1089: the dual bank leg must render its per-node instances"
+        assert_transcript_eq(
+            &leg(&legs, "bank").0,
+            &cliff_scalar_transcript(CLIFF_TRACKS).0,
+            "#1089: the dual bank leg must render its per-node instances",
         );
         assert_padded_legs(
             "switched-off-cut",
@@ -2895,10 +2908,10 @@ fn admitted_blocks_over_the_block_limit_match_scalar_and_padded_banks() {
         }
     }
     if native_bank().is_some() {
-        assert_eq!(
-            leg(&legs, "bank").0,
-            leg(&legs, "scalar").0,
-            "#1089: the dual bank leg must render its per-node instances"
+        assert_transcript_eq(
+            &leg(&legs, "bank").0,
+            &leg(&legs, "scalar").0,
+            "#1089: the dual bank leg must render its per-node instances",
         );
         assert_padded_legs(
             "block-limit",
