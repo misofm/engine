@@ -18,7 +18,6 @@ session.workspace = true
 # Issue #1051: the seeded, edge-biased generator of the randomized ring schedules.
 dsp-reference.workspace = true
 effect-contract.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

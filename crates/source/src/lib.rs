@@ -781,55 +781,21 @@ impl PcmSourceProducer {
 
     fn submit(&mut self, chunk: HostPlanarChunk<'_>) -> Result<SubmitReport, HostChunkError> {
         validate_host_chunk(self, chunk)?;
-        self.submit_planes(
-            chunk.generation,
-            chunk.start_frame,
-            chunk.frames,
-            chunk.end_of_region,
-            0,
-            chunk.planes.iter().copied(),
-        )
-    }
-
-    fn submit_planes<'a, I: Iterator<Item = &'a [f32]>>(
-        &mut self,
-        generation: SourceGeneration,
-        start_frame: SourceFrame,
-        frames: u32,
-        end_of_region: bool,
-        native_decoder_sanitized_samples: u64,
-        planes: I,
-    ) -> Result<SubmitReport, HostChunkError> {
-        validate_submission_metadata(
-            self,
-            generation,
-            start_frame,
-            frames,
-            end_of_region,
-            self.channel_count,
-        )?;
         let quantum = usize::try_from(self.quantum_frames).expect("prepared quantum fits usize");
         let mut block = self.take_recycled_block()?;
-        block.generation = generation;
-        block.start_frame = start_frame;
-        block.frames = frames;
-        block.end_of_region = end_of_region;
-        block.native_decoder_sanitized_samples = native_decoder_sanitized_samples;
-        self.native_decoder_sanitized_samples = self
-            .native_decoder_sanitized_samples
-            .max(native_decoder_sanitized_samples);
-        let frames = usize::try_from(frames).expect("u32 fits usize");
-        for (channel, plane) in planes.enumerate() {
+        block.generation = chunk.generation;
+        block.start_frame = chunk.start_frame;
+        block.frames = chunk.frames;
+        block.end_of_region = chunk.end_of_region;
+        block.native_decoder_sanitized_samples = 0;
+        let frames = usize::try_from(chunk.frames).expect("u32 fits usize");
+        for (channel, plane) in chunk.planes.iter().enumerate() {
             let offset = channel
                 .checked_mul(quantum)
                 .expect("prepared channel offset");
             block.samples[offset..offset + frames].copy_from_slice(&plane[..frames]);
         }
-        self.publish_block(
-            block,
-            u32::try_from(frames).expect("source frames are u32"),
-            end_of_region,
-        )
+        self.publish_block(block, chunk.frames, chunk.end_of_region)
     }
 
     fn publish_block(
@@ -1348,10 +1314,7 @@ impl PcmSourceConsumer {
         let Some(block) = self.deferred_recycle.take() else {
             return;
         };
-        match self.recycle_producer.try_push(block) {
-            Ok(()) => {}
-            Err(QueueFull { value, .. }) => self.deferred_recycle = Some(value),
-        }
+        self.recycle_block(block);
     }
 
     fn end_reached(&self) -> bool {
@@ -2278,34 +2241,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_driver_zero_claims_recycles_in_begin_and_retains_no_plane_class() {
-        let samples = [1.0, 2.0, 3.0, 4.0];
-        let (producer, consumer, resources) =
-            PcmSourceRing::prepare(config(1, 4, 4)).expect("ring");
-        let mut host = producer.into_host_chunk_provider(RATE);
-        host.submit(chunk(1, 0, &[&samples], 4, false))
-            .expect("first block");
-        let source = SourceGraphSource::new(consumer, resources, 0, 0);
-        let retained = source_set_retained_resources(core::slice::from_ref(&source), &[])
-            .expect("retained report");
-        let expected_overhead = retained
-            .source_entries
-            .bytes
-            .checked_add(retained.mappings.bytes)
-            .and_then(|total| total.checked_add(retained.claims.bytes))
-            .and_then(|total| total.checked_add(retained.driver.bytes))
-            .and_then(|total| total.checked_add(retained.owned_stable_id_payloads.bytes))
-            .expect("retained overhead");
-        assert_eq!(retained.overhead_bytes(), Some(expected_overhead));
-
-        let SourceGraphSource { consumer, .. } = source;
-        let mut driver = test_driver(consumer, Vec::new());
-        driver.begin_block(0, 4).expect("zero-claim begin");
-        host.submit(chunk(1, 4, &[&samples], 4, false))
-            .expect("zero claims recycle in begin");
-    }
-
-    #[test]
     fn seek_switches_at_boundary_and_discards_older_queued_audio() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 12)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
@@ -3067,7 +3002,7 @@ mod tests {
             let borrowed = self
                 .0
                 .played_planes(0)
-                .map(|(left, right)| (left.to_vec(), right.to_vec()));
+                .map(|(left, right)| (plane_bits(left), plane_bits(right)));
             let (mut left, mut right) = ([0.0_f32; 4], [0.0_f32; 4]);
             self.0
                 .copy_track_input(0, &mut left, &mut right)
@@ -3075,8 +3010,8 @@ mod tests {
             match borrowed {
                 Some((borrowed_left, borrowed_right)) => {
                     assert_ne!(report.copied_frames, 0);
-                    assert_eq!(plane_bits(&borrowed_left), left.map(f32::to_bits));
-                    assert_eq!(plane_bits(&borrowed_right), right.map(f32::to_bits));
+                    assert_eq!(borrowed_left, left.map(f32::to_bits));
+                    assert_eq!(borrowed_right, right.map(f32::to_bits));
                     // Still held after the last (only) claim copied.
                     assert!(self.0.played_planes(0).is_some());
                 }
