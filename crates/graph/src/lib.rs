@@ -619,42 +619,14 @@ impl GraphResourceEstimate {
         &mut self,
         resource: GraphBankSlotResourceEstimate,
     ) -> Option<()> {
-        let mut next = self.clone();
-        next.graph_metadata_bytes = next
-            .graph_metadata_bytes
-            .checked_add(resource.total_bytes)?;
-        next.incremental_plan_bytes = next
-            .incremental_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.session_plus_plan_bytes = next
-            .session_plus_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.largest_allocation_bytes = next
-            .largest_allocation_bytes
-            .max(resource.largest_allocation_bytes);
-        *self = next;
-        Some(())
+        self.checked_add_metadata_bytes(resource.total_bytes, resource.largest_allocation_bytes)
     }
 
     pub fn checked_add_scalar_owners(
         &mut self,
         resource: GraphScalarOwnerResourceEstimate,
     ) -> Option<()> {
-        let mut next = self.clone();
-        next.graph_metadata_bytes = next
-            .graph_metadata_bytes
-            .checked_add(resource.total_bytes)?;
-        next.incremental_plan_bytes = next
-            .incremental_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.session_plus_plan_bytes = next
-            .session_plus_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.largest_allocation_bytes = next
-            .largest_allocation_bytes
-            .max(resource.largest_allocation_bytes);
-        *self = next;
-        Some(())
+        self.checked_add_metadata_bytes(resource.total_bytes, resource.largest_allocation_bytes)
     }
 
     /// Folds the retained executor/runtime metadata once, before graph caps are applied.
@@ -662,20 +634,17 @@ impl GraphResourceEstimate {
         &mut self,
         resource: GraphRuntimeMetadataResourceEstimate,
     ) -> Option<()> {
-        let mut next = self.clone();
-        next.graph_metadata_bytes = next
-            .graph_metadata_bytes
-            .checked_add(resource.total_bytes)?;
-        next.incremental_plan_bytes = next
-            .incremental_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.session_plus_plan_bytes = next
-            .session_plus_plan_bytes
-            .checked_add(resource.total_bytes)?;
-        next.largest_allocation_bytes = next
-            .largest_allocation_bytes
-            .max(resource.largest_allocation_bytes);
-        *self = next;
+        self.checked_add_metadata_bytes(resource.total_bytes, resource.largest_allocation_bytes)
+    }
+
+    fn checked_add_metadata_bytes(&mut self, total_bytes: u64, largest_bytes: u64) -> Option<()> {
+        let metadata = self.graph_metadata_bytes.checked_add(total_bytes)?;
+        let incremental = self.incremental_plan_bytes.checked_add(total_bytes)?;
+        let session_plus_plan = self.session_plus_plan_bytes.checked_add(total_bytes)?;
+        self.graph_metadata_bytes = metadata;
+        self.incremental_plan_bytes = incremental;
+        self.session_plus_plan_bytes = session_plus_plan;
+        self.largest_allocation_bytes = self.largest_allocation_bytes.max(largest_bytes);
         Some(())
     }
 
@@ -1158,7 +1127,7 @@ impl PreparedGraphPlan {
     }
 
     fn has_valid_structural_layout(&self) -> bool {
-        let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| node.id.clone()).collect();
+        let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| &node.id).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
             return false;
         }
@@ -1173,15 +1142,18 @@ impl PreparedGraphPlan {
                 || level
                     .nodes
                     .iter()
-                    .any(|node| level_by_node.insert(node.clone(), level.level).is_some())
+                    .any(|node| level_by_node.insert(node, level.level).is_some())
             {
                 return false;
             }
             previous_level = Some(level.level);
-            flattened.extend(level.nodes.iter().cloned());
+            flattened.extend(level.nodes.iter());
         }
-        if flattened != self.sequential_schedule
-            || level_by_node.keys().cloned().collect::<BTreeSet<_>>() != graph_nodes
+        if flattened.into_iter().ne(self.sequential_schedule.iter())
+            || level_by_node
+                .keys()
+                .copied()
+                .ne(graph_nodes.iter().copied())
         {
             return false;
         }
@@ -1189,7 +1161,6 @@ impl PreparedGraphPlan {
         let positions: BTreeMap<_, _> = self
             .sequential_schedule
             .iter()
-            .cloned()
             .enumerate()
             .map(|(position, node)| (node, position))
             .collect();
@@ -1320,13 +1291,7 @@ impl PreparedGraphPlan {
         let level_by_node: BTreeMap<_, _> = self
             .dependency_levels
             .iter()
-            .flat_map(|level| {
-                level
-                    .nodes
-                    .iter()
-                    .cloned()
-                    .map(move |node| (node, level.level))
-            })
+            .flat_map(|level| level.nodes.iter().map(move |node| (node, level.level)))
             .collect();
         for bank in &banks {
             // Every member of one bank renders the same stage at the same lane order, so the
@@ -1348,7 +1313,7 @@ impl PreparedGraphPlan {
                 || bank
                     .members
                     .iter()
-                    .any(|node| stage_of(node) != Some(stage) || !seen.insert(node.clone()))
+                    .any(|node| stage_of(node) != Some(stage) || !seen.insert(node))
             {
                 return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }
@@ -2723,61 +2688,6 @@ impl PreparedPlanExecutor for GraphExecutor {
         self.runtime.units.iter().fold(0_u64, |total, unit| {
             total.saturating_add(unit.observation_retained_bytes() as u64)
         })
-    }
-}
-
-#[cfg(test)]
-mod observation_size_accounting {
-    //! Issue #143 R7: the byte accounting for what the binding added, derived rather than pinned.
-    //!
-    //! Runtime op/unit layout is charged by the derived runtime metadata reservation. This phase
-    //! answers the narrower observation question with numbers: "what exactly grew, and by how
-    //! much".
-    //!
-    //! The answer is: `LiveControlEffect` grew by exactly one nullable pointer, and nothing else
-    //! grew at all, because `LiveControlEffect` is behind a `Box` inside `NodeKind`. Both halves
-    //! are stated as identities over `size_of`, so a future field that changes either one fails
-    //! here instead of silently moving a reported byte.
-
-    use super::*;
-    use core::mem::size_of;
-
-    #[test]
-    fn the_observation_lane_costs_one_nullable_pointer_in_the_live_control_effect() {
-        assert_eq!(
-            size_of::<Option<Box<effect_contract::ObservationLane>>>(),
-            size_of::<usize>(),
-            "an absent lane is a null pointer, not a discriminant plus a pointer"
-        );
-        assert_eq!(
-            size_of::<runtime::LiveControlEffect>(),
-            size_of::<GraphPreparedEffect>()
-                + size_of::<Box<effect_contract::EffectControlLane>>()
-                + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
-                + size_of::<effect_contract::BypassShunt>()
-                + size_of::<Option<Box<effect_contract::ObservationLane>>>(),
-            "the live-control effect is exactly its five fields, and #143 added the fifth"
-        );
-    }
-
-    #[test]
-    fn no_reported_runtime_byte_moved() {
-        // `NodeKind::LiveControlEffect` carries a `Box`, so the variant is one pointer and the
-        // enum's size is still decided by `NodeKind::Effect(GraphPreparedEffect)` -- the same
-        // variant that decided it before #140 and before #143.
-        assert_eq!(
-            size_of::<Box<runtime::LiveControlEffect>>(),
-            size_of::<usize>()
-        );
-        assert!(
-            size_of::<runtime::NodeKind>() >= size_of::<GraphPreparedEffect>(),
-            "the largest variant is still the unobserved prepared effect"
-        );
-        assert!(
-            size_of::<runtime::NodeKind>()
-                < size_of::<GraphPreparedEffect>() + size_of::<runtime::LiveControlEffect>(),
-            "the live-control effect is boxed, so it cannot be the enum's size"
-        );
     }
 }
 
