@@ -10,8 +10,8 @@ CompiledSession privately owns canonical_json: String and has no Drop implementa
 
 ## Objective gates and test value
 
-- Implement only the consuming canonical accessor and exercise it through the existing canonical compile test after that test has checked the compiled fields. Preserve the independent expected canonical document; do not add a duplicate test or a digest/resource-byte pin.
-- The rewritten existing test must catch a wrong or empty owned snapshot from the new accessor that the borrowed getter alone cannot exercise. The session-validator existing canonical-output/fixed-point/no-op/transactional/native-render tests qualify its callers in #1151.
+- Implement only the consuming canonical accessor and exercise it through the existing canonical compile test after that test has checked the compiled fields. Preserve the independent expected canonical document and verify that the consuming accessor retains the original nonempty String backing allocation. This storage identity check catches cloning instead of moving, the specific ownership claim; do not add a duplicate test or a digest/resource-byte pin.
+- The rewritten existing test must catch a wrong/empty owned snapshot or a copied backing allocation from the new accessor that the borrowed getter alone cannot exercise. The session-validator existing canonical-output/fixed-point/no-op/transactional/native-render tests qualify its callers in #1151.
 - Focused locked session tests, fmt/diff and strict package lint. Reuse the full original #1118 crate audit and unchanged algorithm/RT evidence candidly. Supported simd128/iOS/Android compile checks are compile-only. No benchmark, corpus/harness expansion or additional API.
 - First coherent focused-green exact-path checkpoint pauses for root commit/push. One root adversarial verdict per coherent attempt, maximum two attempts; do not broaden this issue if a public ownership or destructor constraint appears.
 
