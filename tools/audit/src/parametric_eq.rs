@@ -36,7 +36,7 @@ pub(crate) fn main() {
     // silently absent audit reports success for every gate below it.
     bench_alloc::assert_installed();
     assert_eq!(
-        parse_blocks(),
+        crate::parse_blocks(BLOCKS),
         BLOCKS,
         "Issue-042 audit is frozen at 100,000 blocks"
     );
@@ -153,17 +153,4 @@ fn set(
             ParameterChannel::Both => panic!("per-lane prepared values"),
         }]
     .value = value;
-}
-
-fn parse_blocks() -> u64 {
-    let mut arguments = std::env::args().skip(1);
-    match arguments.next().as_deref() {
-        None => BLOCKS,
-        Some("--blocks") => arguments
-            .next()
-            .expect("--blocks value")
-            .parse()
-            .expect("integer block count"),
-        Some(_) => panic!("unknown audit argument"),
-    }
 }

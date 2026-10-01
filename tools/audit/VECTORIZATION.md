@@ -24,11 +24,11 @@ On the release artifact used for the #758 qualification, LLVM `llvm-objdump` 18.
 spelling and no retained suffix. The ordinary report passed with either disassembler against the
 same artifact; the focused tests retain coverage for the narrowly supported Rust disambiguator.
 
-Native AArch64 (`aarch64-neon`) is unsupported; no claim (owner ruling 2026-09-04, #378): the three
-`aarch64-neon` rows are retired from the registry. See the deferred-defect register in
-`docs/TARGET_MATRIX.md` and #378, including the Darwin `svf_block` `flush()` `bl _memset_pattern16`
-finding this registry used to carry as a known-red row -- a future revival of native AArch64 must
-reopen that entry before restoring the row. On an aarch64 host the audit is red by design:
+Native AArch64 is an official mobile target under the 2026-09-28 owner ruling
+(`docs/rulings/engine-footprint-2026-09-28.md`). This report's three `aarch64-neon` allowlist rows
+remain retired and unqualified. The deferred-defect register in `docs/TARGET_MATRIX.md` preserves
+the Darwin `svf_block` `flush()` `bl _memset_pattern16` finding that was a known-red row; #377 owns
+the parser and cross-artifact qualification work. On an AArch64 host this audit is red by design:
 `certify()` reports `allowlist registry mismatch for aarch64-neon` until the rows are restored.
 
 The subject artifact is intentionally reported as
