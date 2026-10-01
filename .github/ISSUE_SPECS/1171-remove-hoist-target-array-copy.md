@@ -2,7 +2,7 @@
 
 ## Finding and bounded product slice
 
-The complete bench housekeeping audit #1145 found an actual per-lane target-array copy in HoistArm::render. In the unchanged source at tools/bench/src/console.rs, targets selects one of two precomputed immutable target tables, then `let (prepared, count) = targets[index * self.lanes + lane]` copies the twelve-target tuple before iterating the valid prefix. The pinned AVX2/FMA shipping-profile generated assembly from checkpoint753fb5c7 has a936-byte frame and memcpy length672 at that tuple load, followed by the count load. Root independently inspected the source and workerB's /tmp/engine-housekeeping-b-1145/hoist-render.s.txt. No timed invocation, cycle estimate, projected speedup or production-engine copy claim is made.
+The complete bench housekeeping audit #1145 found an actual per-lane target-array copy in HoistArm::render. In the unchanged source at tools/bench/src/console.rs, targets selects one of two precomputed immutable target tables, then `let (prepared, count) = targets[index * self.lanes + lane]` copies the twelve-target tuple before iterating the valid prefix. The pinned AVX2/FMA shipping-profile generated assembly from checkpoint `753fb5c7` has a 936-byte frame and memcpy length672 at that tuple load, followed by the count load. Root independently inspected the source and worker B's /tmp/engine-housekeeping-b-1145/hoist-render.s.txt. No timed invocation, cycle estimate, projected speedup or production-engine copy claim is made.
 
 Smallest closable slice: borrow the selected tuple and its valid prepared-target prefix while retaining the exact same bank/lane/application order. Confirm that synchronous target application cannot retain or mutate that input. This is a bounded tooling/optimization successor to the fixed untimed result-ownership slice #1145; it does not reopen a DSP algorithm or pursue a descriptive timing number.
 
@@ -20,4 +20,4 @@ Only the bench target-selection/copy statements and their accurate comment, plus
 
 ## Sol brief approval
 
-Approved by rootSol2026-10-01 within the user's practical copy-efficiency request. Implementation starts only after #1145 is remotely synchronized. Two requested GPT-6.1 Sol xhigh workers remain the team; workerB implements and root reviews. No owner decision, measured gain or implementation is claimed yet.
+Approved by root Sol, 2026-10-01 within the user's practical copy-efficiency request. Implementation starts only after #1145 is remotely synchronized. Two requested GPT-6.1 Sol xhigh workers remain the team; worker B implements and root reviews. No owner decision, measured gain or implementation is claimed yet.
