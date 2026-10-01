@@ -18,20 +18,18 @@ use builtins::corpus::{CASE_NAMES, case_values};
 #[test]
 fn no_corpus_case_is_vacuous_or_carries_a_nan() {
     for (case, name) in CASE_NAMES.iter().enumerate() {
-        let values = case_values::<f32>(case);
+        let mut values = case_values::<f32>(case);
         assert!(!values.is_empty(), "case {name} is empty");
         assert!(
             values.iter().all(|value| value.is_finite()),
             "case {name} carries a non-finite word; the D5 claim excludes NaN payloads"
         );
-        let distinct = values
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<std::collections::BTreeSet<_>>();
+        values.sort_unstable_by_key(|value| value.to_bits());
+        values.dedup_by_key(|value| value.to_bits());
         assert!(
-            distinct.len() > 64,
+            values.len() > 64,
             "case {name} has only {} distinct words",
-            distinct.len()
+            values.len()
         );
     }
 }

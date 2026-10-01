@@ -208,6 +208,11 @@ Three rows: two red, one argued-equivalent with its premise asserted in code (C-
 
 ## Issue #944 — the settled matrix's select-free arm
 
+Housekeeping #1133 retired the historical gate-3 digest below. Current coverage is the lane
+select/general-kernel comparison, the settled dispatch witness and signed-zero law, plus
+`fused_fader_matrix_shapes_match_the_separate_stages`'s partial/full/padded banks and explicit
+200-sample ramp-to-identity endpoint. The original mutation results below remain historical evidence.
+
 `MatrixStage::settled_block` takes `matrix2x2_block_without_identity` when
 `L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
 `matrix2x2_block` otherwise; both settled call sites (the `maximum == 0` block and the post-ramp
@@ -262,6 +267,14 @@ asserts their published peaks are `+0.0`, and the row is red. The lane rows are 
 `crates/lane/tests/MUTATIONS.md`.
 
 ## Issue #954 — the fused fader/matrix's select-free arm
+
+Housekeeping #1133 replaced the two historical scenario digests below with
+`fused_fader_matrix_shapes_match_the_separate_stages` and
+`scalar_fused_fader_matrix_matches_the_separate_stages`: current split-stage PCM/state comparisons
+over the same hostile words and control transitions, with direct settled-admission assertions.
+The duplicate historical whole-chain arm is covered by
+`full_public_chain_matches_the_three_section_reference` and
+`eligibility_sequence_uses_whole_call_fallback_then_fuses_the_next_call`.
 
 `MatrixStage::fused_settled_block` takes `fader_matrix_block_without_identity` when
 `L::mask_any(coef.identity)` is false over all `L::WIDTH` lanes, padding included, and
