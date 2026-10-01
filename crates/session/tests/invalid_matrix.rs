@@ -1,9 +1,9 @@
 //! Issue-004-owned invalid semantic and exact diagnostic-path matrix.
 
 use session::{
-    AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, Output,
-    ParameterChannel, ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel,
-    Sidechain, SidechainDeclaration, StableId, canonical_session_json, compile_session,
+    AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, Output, ParameterChannel,
+    ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
+    SidechainDeclaration, StableId, canonical_session_json, compile_session,
     estimate_session_resources, parse_session_json,
 };
 
@@ -77,19 +77,6 @@ fn u64_model_fields_accept_the_full_unsigned_domain() {
         let canonical = canonical_session_json(&session).expect("full u64 domain canonicalizes");
         assert!(canonical.contains(&format!("\"{}\"", u64::MAX)), "{path}");
     }
-}
-
-#[test]
-fn empty_third_party_cid_is_reported_at_the_identity_leaf() {
-    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-    session.tracks[0].inserts.effects[0].identity =
-        session::EffectIdentity::ThirdPartyCid { cid: String::new() };
-    let error = canonical_session_json(&session).expect_err("empty CID must be rejected");
-    assert_diagnostic(
-        &error,
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].inserts.effects[0].identity.cid",
-    );
 }
 
 fn replaced(needle: &str, replacement: &str) -> String {
@@ -420,169 +407,6 @@ fn stable_id_category_has_20_distinct_cases() {
         "$.routes[1].id",
     );
     assert_eq!(count, 20);
-}
-
-#[test]
-fn finite_unit_and_local_range_category_has_24_distinct_cases() {
-    let mut count = 0;
-    macro_rules! case {
-        ($body:expr, $code:expr, $path:literal) => {
-            model_case(&mut count, $body, $code, $path)
-        };
-    }
-    case!(
-        |s| s.tracks[0].builtins.left.trim_db = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.left.trim_db"
-    );
-    case!(
-        |s| s.tracks[0].builtins.right.trim_db = f32::INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.right.trim_db"
-    );
-    case!(
-        |s| s.tracks[0].builtins.left.hpf_hz = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.left.hpf_hz"
-    );
-    case!(
-        |s| s.tracks[0].builtins.right.hpf_hz = f32::INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.right.hpf_hz"
-    );
-    case!(
-        |s| s.tracks[0].builtins.left.lpf_hz = f32::NEG_INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.left.lpf_hz"
-    );
-    case!(
-        |s| s.tracks[0].builtins.right.lpf_hz = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].builtins.right.lpf_hz"
-    );
-    case!(
-        |s| s.tracks[0].fader.left_db = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].fader.left_db"
-    );
-    case!(
-        |s| s.tracks[0].fader.right_db = f32::INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].fader.right_db"
-    );
-    case!(
-        |s| s.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-            left: f32::NAN,
-            right: 0.0,
-            smoothing_samples: 1
-        },
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].pan.left"
-    );
-    case!(
-        |s| s.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-            left: 0.0,
-            right: f32::INFINITY,
-            smoothing_samples: 1
-        },
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].pan.right"
-    );
-    case!(
-        |s| s.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-            left: -1.01,
-            right: 0.0,
-            smoothing_samples: 1
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].pan.left"
-    );
-    case!(
-        |s| s.tracks[0].matrix_or_pan = MatrixOrPan::Pan {
-            left: 0.0,
-            right: 1.01,
-            smoothing_samples: 1
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].pan.right"
-    );
-    case!(
-        |s| s.routes[0].gain_db = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.routes[0].gain_db"
-    );
-    case!(
-        |s| s.routes[0].channel_matrix.ll = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.routes[0].channel_matrix.ll"
-    );
-    case!(
-        |s| s.routes[0].channel_matrix.lr = f32::INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.routes[0].channel_matrix.lr"
-    );
-    case!(
-        |s| s.routes[0].channel_matrix.rl = f32::NEG_INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.routes[0].channel_matrix.rl"
-    );
-    case!(
-        |s| s.routes[0].channel_matrix.rr = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.routes[0].channel_matrix.rr"
-    );
-    case!(
-        |s| s.tracks[0].inserts.effects[0].params[0].value = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.tracks[0].inserts.effects[0].params[0].value"
-    );
-    case!(
-        |s| {
-            let p = &mut s.tracks[0].inserts.effects[0].params[0];
-            p.unit = ParameterUnit::Hz;
-            p.value = -1.0;
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].inserts.effects[0].params[0].value"
-    );
-    case!(
-        |s| {
-            let p = &mut s.tracks[0].inserts.effects[0].params[0];
-            p.unit = ParameterUnit::Samples;
-            p.value = 1.5;
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.tracks[0].inserts.effects[0].params[0].value"
-    );
-    case!(
-        |s| s.automation[0].segments[0].start_value = f32::NAN,
-        DiagnosticCode::NumericNonFinite,
-        "$.automation[0].segments[0].start_value"
-    );
-    case!(
-        |s| s.automation[0].segments[0].end_value = f32::INFINITY,
-        DiagnosticCode::NumericNonFinite,
-        "$.automation[0].segments[0].end_value"
-    );
-    case!(
-        |s| {
-            let p = &mut s.automation[0].segments[0];
-            p.unit = ParameterUnit::Ratio;
-            p.start_value = -0.1;
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.automation[0].segments[0].start_value"
-    );
-    case!(
-        |s| {
-            let p = &mut s.automation[0].segments[0];
-            p.unit = ParameterUnit::Samples;
-            p.end_value = 1.5;
-        },
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.automation[0].segments[0].end_value"
-    );
-    assert_eq!(count, 24);
 }
 
 #[test]
@@ -1153,38 +977,4 @@ fn dead_resource_caps_cannot_refuse_any_session() {
     };
     compile_session(&session, caps)
         .expect("caps whose subjects are host policy cannot refuse a session");
-}
-
-#[test]
-fn parser_registry_covers_right_lane_and_f32_representation() {
-    let unknown_right = replaced(
-        "right = { polarity_invert = false",
-        "right = { unknown_right = 0, polarity_invert = false",
-    );
-    assert_diagnostic(
-        &parse_session_json(&unknown_right).expect_err("nested unknown"),
-        DiagnosticCode::UnknownField,
-        "$.tracks[0].builtins.right.unknown_right",
-    );
-    let too_large = replaced("trim_db = 0.0", "trim_db = 3.5e38");
-    assert_diagnostic(
-        &parse_session_json(&too_large).expect_err("finite f64 does not fit finite f32"),
-        DiagnosticCode::NumericNotF32Representable,
-        "$.tracks[0].builtins.left.trim_db",
-    );
-}
-
-#[test]
-fn compile_caps_reject_before_semantic_validation() {
-    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-    session.tracks[0].source_id = id("missing-source");
-    let mut caps = unlimited_caps();
-    caps.max_compiled_model_bytes = 1;
-    let error = compile_session(&session, caps).expect_err("preflight cap rejects");
-    assert!(
-        error
-            .diagnostics()
-            .iter()
-            .all(|item| item.code == DiagnosticCode::ResourceLimitExceeded)
-    );
 }

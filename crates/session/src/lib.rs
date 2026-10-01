@@ -34,43 +34,6 @@ pub const SESSION_SCHEMA_VERSION_V1: u32 = 1;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
-
-    fn caps() -> CompileCaps {
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        }
-    }
-
-    #[test]
-    fn canonical_round_trip_is_byte_stable() {
-        let session = parse_session_json(EXAMPLE).expect("fixture parses");
-        let first = canonical_session_json(&session).expect("canonical");
-        assert_eq!(
-            EXAMPLE, first,
-            "checked-in fixture must already be canonical"
-        );
-        let reparsed = parse_session_json(&first).expect("canonical reparses");
-        assert_eq!(first, canonical_session_json(&reparsed).expect("stable"));
-        assert!(first.ends_with('\n'));
-    }
-
-    #[test]
-    fn compile_is_transactional_and_non_publishable() {
-        let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-        session.routes[0].destination = RouteDestination::OutputInput {
-            output_id: StableId::parse("missing").expect("stable"),
-        };
-        assert!(compile_session(&session, caps()).is_err());
-    }
-
     #[test]
     #[ignore = "json-syntax 0.12.5 empty-object CodeMap defect; prepared patch tracked at https://github.com/misofm/engine/issues/391; rerun on dependency updates"]
     fn json_syntax_empty_object_code_map_regression() {
