@@ -2887,11 +2887,10 @@ mod tests {
     /// in plan shape exactly by its fused fader and matrix, and every track publishes one
     /// sample-peak snapshot per twelve-block window, on time, with none dropped.
     ///
-    /// Sixty-four blocks of both rows, digested by `hash_output`. The pin is the standing console
-    /// row's 64-block digest (`tests/chain_shape.rs`,
-    /// `the_select_free_matrix_arm_renders_the_base_bits`), and the metered row reproduces it,
-    /// because a meter observes and never changes signal flow and the fused fader and matrix render
-    /// the split pair's bits.
+    /// Sixty-four blocks of both current rows, digested by `hash_output` and compared directly:
+    /// a meter observes without changing signal flow. Independent lane matrix laws, the settled
+    /// dispatch witness, and the builtin fused/split-stage PCM and state comparisons own matrix
+    /// correctness; #1146 retired the historical standing-row digest pin.
     ///
     /// The plan shape is **not** the standing row's, and this test pins how it differs. The
     /// metered row is prepared with between-render-calls delivery, the default web boot's, which
