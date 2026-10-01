@@ -17,7 +17,6 @@
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::sync::atomic::{AtomicU64, Ordering};
-use std::collections::BTreeMap;
 
 use builtins::{
     BuiltinLaneSelector, Matrix2x2, MeterMetricSet, MeterSnapshot, MeterTap,
@@ -1495,9 +1494,6 @@ struct ReadyOwnership {
     /// Test-only proof that incomplete master intervals never reach effect-reader scanning.
     #[cfg(test)]
     meter_effect_scan_count: u64,
-    /// Test-only switch for timing the exact pre-#520 poll body.
-    #[cfg(test)]
-    meter_bypass_readiness: bool,
     /// The compiled session model, retained so the browser bridge keeps charging itself for what
     /// it holds -- and, since issue #207, read by the source-introspection queries.
     ///
@@ -2561,13 +2557,6 @@ impl AudioWorkletEngineHost {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_meter_readiness_bypass(&mut self, bypass: bool) {
-        if let Some(ready) = self.ready.as_mut() {
-            ready.meter_bypass_readiness = bypass;
-        }
-    }
-
     /// Whether meter observers were attached at preparation (issue #137 D2).
     #[must_use]
     pub fn meters_attached(&self) -> bool {
@@ -2902,12 +2891,11 @@ impl AudioWorkletEngineHost {
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
-        let Some(source_index) = ready
+        let Ok(source_index) = ready
             .session
             .normalized_model()
             .sources
-            .iter()
-            .position(|source| source.id.as_str().as_bytes() == source_id)
+            .binary_search_by(|source| source.id.as_str().as_bytes().cmp(source_id))
         else {
             return self.record(RESULT_INVALID_ARGUMENT);
         };
@@ -3171,11 +3159,7 @@ impl AudioWorkletEngineHost {
         // count only when the configured master interval closes. An empty ring therefore proves
         // that no coherent track/master publication can exist. Preserve pending/public bytes and
         // avoid walking every track consumer on incomplete quanta.
-        #[cfg(not(test))]
-        let master_not_ready = ready.master_count == 0;
-        #[cfg(test)]
-        let master_not_ready = ready.master_count == 0 && !ready.meter_bypass_readiness;
-        if master_not_ready {
+        if ready.master_count == 0 {
             return 0;
         }
         let mut drain_budget = 1_usize;
@@ -5091,9 +5075,8 @@ fn resolve_observation(
 ) -> Result<(usize, usize), ObservationReadError> {
     let track = ready
         .tracks
-        .iter()
-        .position(|id| id.as_ref() == selection.track_id)
-        .ok_or(ObservationReadError::InvalidSelection)?;
+        .binary_search_by(|id| id.as_ref().cmp(selection.track_id))
+        .map_err(|_| ObservationReadError::InvalidSelection)?;
     let [pre_insert, inserts, post_insert] = ready
         .rack_effects
         .get(track)
@@ -5930,19 +5913,16 @@ fn compile_ready(
                 .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
         }
     }
-    let track_index: BTreeMap<&str, usize> = handles
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.as_ref(), index))
-        .collect();
     let mut effect_controls: Vec<Option<EffectControlProducer>> = Vec::new();
     effect_controls
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     effect_controls.resize_with(total_effects as usize, || None);
     for producer in handles.effect_controls {
-        let Some(track) = track_index.get(producer.track_id.as_ref()).copied() else {
+        let Ok(track) = handles
+            .tracks
+            .binary_search_by(|id| id.as_ref().cmp(producer.track_id.as_ref()))
+        else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         let Some(entry) =
@@ -6008,7 +5988,10 @@ fn compile_ready(
     let mut observation_tracks = vec![u32::MAX; total_effects as usize];
     let observation_present = vec![false; track_count];
     for handle in handles.effect_observations {
-        let Some(track) = track_index.get(handle.track_id.as_ref()).copied() else {
+        let Ok(track) = handles
+            .tracks
+            .binary_search_by(|id| id.as_ref().cmp(handle.track_id.as_ref()))
+        else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
         let Some(slot) = dense_effect_slot(effect_base[track], rack_effects[track], handle.address)
@@ -6176,8 +6159,6 @@ fn compile_ready(
         meter_windows: 0,
         #[cfg(test)]
         meter_effect_scan_count: 0,
-        #[cfg(test)]
-        meter_bypass_readiness: false,
         session,
     };
     Ok((ready, report))
