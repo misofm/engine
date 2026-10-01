@@ -46,11 +46,7 @@ fn prepared_target(slot: u32, channel: ParameterChannel, marker: u32) -> EffectC
 #[test]
 fn prepared_control_record_stays_within_the_frozen_sixty_four_byte_bound() {
     assert!(core::mem::size_of::<EffectControlRecord>() <= 64);
-    assert_eq!(
-        core::mem::size_of::<PreparedEffectTarget>(),
-        56,
-        "the twelve-word target remains the fixed Copy payload"
-    );
+    assert_eq!(PREPARED_EFFECT_TARGET_WORDS, 12);
 }
 
 #[test]

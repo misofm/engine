@@ -72,7 +72,11 @@ fn declared_bounds_and_default_are_always_members() {
     assert_eq!(points.last().expect("maximum").canonical, "20000.000");
     assert!(points.first().expect("minimum").intrinsic);
     assert!(points.last().expect("maximum").intrinsic);
-    assert!(contains(&points, "80.000"));
+    assert!(
+        points
+            .iter()
+            .any(|point| point.canonical == "80.000" && point.intrinsic)
+    );
     // 20 kHz is exactly spellable, which is the whole point of the amendment.
     assert!(lattice_index_for_decimal(&points, "20000.0").is_ok());
     assert!(lattice_index_for_decimal(&points, "20000").is_ok());
@@ -107,6 +111,7 @@ fn geometric_ratio_row_keeps_its_round_maximum_and_meaningful_default() {
         ParameterLattice::ratio(1.02, 8),
     ))
     .expect("q lattice");
+    assert_eq!(q.last().expect("maximum").canonical, "18.00000000");
     let index = lattice_index_for_decimal(&q, "0.70710677").expect("butterworth default");
     let point = &q[index as usize];
     assert!(point.intrinsic);

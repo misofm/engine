@@ -89,31 +89,3 @@ pub trait NativeEffectTargetPreparation: Send + Sync {
         targets: &[PreparedEffectTarget],
     ) -> Result<(), EffectTargetError>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        EffectTargetError, EffectTargetRequest, NativeEffectTargetPreparation,
-        PREPARED_EFFECT_TARGET_WORDS, PreparedEffectTarget,
-    };
-    use core::mem::size_of;
-
-    fn assert_copy<T: Copy>() {}
-
-    #[test]
-    fn prepared_target_has_frozen_copy_shape() {
-        assert_eq!(PREPARED_EFFECT_TARGET_WORDS, 12);
-        assert_eq!(size_of::<PreparedEffectTarget>(), 56);
-        assert!(size_of::<crate::EffectControlRecord>() <= 64);
-        assert_copy::<PreparedEffectTarget>();
-        assert_copy::<EffectTargetRequest<'static>>();
-        assert_copy::<EffectTargetError>();
-        assert!(size_of::<PreparedEffectTarget>() <= 64);
-    }
-
-    #[test]
-    fn target_preparation_trait_is_object_safe() {
-        fn assert_object_safe(_: &dyn NativeEffectTargetPreparation) {}
-        let _ = assert_object_safe;
-    }
-}

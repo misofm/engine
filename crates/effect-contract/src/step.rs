@@ -141,7 +141,9 @@ pub const fn default_parameter_lattice(
             ParameterLattice::indices()
         }
         crate::ParameterDomain::Continuous => match mapping {
-            crate::ParameterMapping::Linear => match unit {
+            // `Exponential` is a normalized-control mapping over a finite inclusive value domain;
+            // unlike `Logarithmic`, it does not turn the persisted unit into a ratio domain.
+            crate::ParameterMapping::Linear | crate::ParameterMapping::Exponential => match unit {
                 crate::ParameterUnit::Db => ParameterLattice::arithmetic(0.1, 1),
                 crate::ParameterUnit::Hz => ParameterLattice::arithmetic(0.001, 3),
                 crate::ParameterUnit::Milliseconds => ParameterLattice::arithmetic(0.1, 1),
@@ -159,16 +161,6 @@ pub const fn default_parameter_lattice(
                 crate::ParameterUnit::Db
                 | crate::ParameterUnit::Samples
                 | crate::ParameterUnit::Linear => ParameterLattice::ratio(1.02, 3),
-            },
-            // `Exponential` is a normalized-control mapping over a finite inclusive value domain;
-            // unlike `Logarithmic`, it does not turn the persisted unit into a ratio domain.
-            crate::ParameterMapping::Exponential => match unit {
-                crate::ParameterUnit::Db => ParameterLattice::arithmetic(0.1, 1),
-                crate::ParameterUnit::Hz => ParameterLattice::arithmetic(0.001, 3),
-                crate::ParameterUnit::Milliseconds => ParameterLattice::arithmetic(0.1, 1),
-                crate::ParameterUnit::Samples => ParameterLattice::arithmetic(1.0, 0),
-                crate::ParameterUnit::Linear => ParameterLattice::arithmetic(0.01, 2),
-                crate::ParameterUnit::Ratio => ParameterLattice::arithmetic(0.1, 1),
             },
             crate::ParameterMapping::Stepped => ParameterLattice::arithmetic(1.0, 0),
         },
@@ -350,11 +342,10 @@ fn intrinsic_values(
             // declared default are lattice members by declaration. A rate-keyed
             // maximum is not a declared bound -- it is S1's clamp -- so that
             // one shape asks for the top point to be generated, not admitted.
-            let mut intrinsic = vec![minimum, default_value];
-            if maximum_is_member {
-                intrinsic.push(maximum);
-            }
-            for value in intrinsic {
+            for value in [minimum, default_value]
+                .into_iter()
+                .chain(maximum_is_member.then_some(maximum))
+            {
                 insert_decimal(
                     &mut values,
                     intrinsic_decimal(value, precision)?,
@@ -808,7 +799,7 @@ impl ExactDecimal {
                 if digits.len() + pad > MAXIMUM_DECIMAL_CHARACTERS {
                     return None;
                 }
-                digits.push_str(&"0".repeat(pad));
+                digits.extend(core::iter::repeat_n('0', pad));
             }
         }
         let (integer, fraction) = digits.split_at(point);
@@ -942,37 +933,6 @@ mod tests {
             enum_choices: &[],
             lattice,
         }
-    }
-
-    #[test]
-    fn cents_lattice_retains_round_endpoint_and_declared_default() {
-        let points = parameter_lattice_points(&parameter(ParameterLattice::cents(20.0, 3)))
-            .expect("cents lattice");
-        assert_eq!(points.first().unwrap().canonical, "10.000");
-        assert_eq!(points.last().unwrap().canonical, "20000.000");
-        assert!(
-            points
-                .iter()
-                .any(|point| point.canonical == "80.000" && point.intrinsic)
-        );
-        assert!(points.last().unwrap().intrinsic);
-    }
-
-    #[test]
-    fn ratio_lattice_retains_butterworth_default() {
-        let mut parameter = parameter(ParameterLattice::ratio(1.02, 8));
-        parameter.unit = ParameterUnit::Ratio;
-        parameter.display_unit = ":1";
-        parameter.minimum = Some(0.1);
-        parameter.maximum = Some(18.0);
-        parameter.default_value = 0.70710677;
-        let points = parameter_lattice_points(&parameter).expect("ratio lattice");
-        assert!(
-            points
-                .iter()
-                .any(|point| point.canonical == "0.70710677" && point.intrinsic)
-        );
-        assert_eq!(points.last().unwrap().canonical, "18.00000000");
     }
 
     /// An enumeration is INDEXED by ordinal but SPELLED by choice value.
