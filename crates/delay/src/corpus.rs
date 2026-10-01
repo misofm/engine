@@ -16,8 +16,7 @@
 //!
 //! A gathered two-second ring has no `W4`/`W8` kernel: the delay is a `W = 1` effect (master plan
 //! #83 §4.1), so a case is run once and its digest cannot depend on a backend width. What the wasm
-//! leg is actually testing here is the software FMA of §3.5, which the kernel reaches six times per
-//! stereo frame.
+//! leg tests the kernel's frozen, separately rounded `Lane::fma` operations and state updates.
 //!
 //! # No NaN
 //!

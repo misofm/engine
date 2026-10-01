@@ -24,8 +24,6 @@ bench-support.workspace = true
 conformance = { workspace = true, features = ["realtime-audit"] }
 # The independent f64 delay oracle is test-only and unreachable from production rendering.
 dsp-reference.workspace = true
-engine.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true
