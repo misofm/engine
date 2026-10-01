@@ -47,8 +47,8 @@
 //! Each was run against the same oracle over the same domain, and each must push the measured
 //! error over the gate — a bound with no red mutation is decoration. These are measured, not
 //! predicted. The degree-drop mutations below deliberately truncate the shipped polynomial;
-//! they do not establish the bound for a refitted lower-degree polynomial. That comparison is
-//! measured separately by `f1_lower_degree_refits_exhaustive`.
+//! they do not establish the bound for a refitted lower-degree polynomial. The rejected refit
+//! measurements are research evidence from #880 F-3, preserved in repository history.
 //!
 //! | mutation | measured | gate |
 //! |---|---|---|
@@ -57,8 +57,8 @@
 //! | drop `EXP2_P[4]` (degree 3, same coefficients) | `fast_gain_from_db` `8.115e-3` dB | `1.0e-5` — red |
 //! | drop `LOG2_Q[5]` (degree 4, same coefficients) | `fast_level_db` `1.593e-1` dB | `4.0e-5` — red |
 //!
-//! The last two show why truncating a minimax polynomial is not a lower-degree fit. The refitted
-//! candidate measurements below are the evidence about whether a lower degree can satisfy F1.
+//! The last two show why truncating a minimax polynomial is not a lower-degree fit. The archived
+//! #880 F-3 measurements address whether refitted lower degrees can satisfy F1.
 //!
 //! The monotonicity assertion also has a real red mutation: changing `LOG2_Q[0]` from
 //! `0x3fb8_a595` to `0x3fb8_a8dc` changed the exhaustive count from 77 to 95 and failed the
@@ -436,7 +436,7 @@ fn f1_gain_from_db_exhaustive() {
         "fast_gain_from_db negative exhaustive",
         negative,
         GAIN_MAX_DB,
-        1_000_000_000,
+        1_126_170_625,
     );
     println!(
         "fast_gain_from_db negative domain: {} decreasing steps",
@@ -449,7 +449,7 @@ fn f1_gain_from_db_exhaustive() {
         "fast_gain_from_db positive exhaustive",
         positive,
         GAIN_MAX_DB,
-        1_000_000_000,
+        1_103_101_953,
     );
     println!(
         "fast_gain_from_db positive domain: {} decreasing steps",
@@ -469,92 +469,6 @@ fn f1_level_db_exhaustive() {
     );
     assert_eq!(level.decreasing_steps, 77);
     assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 257_176_458);
-}
-
-// Refitted lower-degree rows recorded by issue #880 F-3. Coefficients are in Horner order:
-// highest order first, matching the coefficient words printed in the issue.
-const REFIT_GAIN_DEGREE3: [f32; 4] = [
-    f32::from_bits(0x3c5b_f2e2),
-    f32::from_bits(0x3d55_ffe6),
-    f32::from_bits(0x3e77_11ca),
-    f32::from_bits(0x3f31_6b63),
-];
-const REFIT_LEVEL_DEGREE4: [f32; 5] = [
-    f32::from_bits(0x3d3e_0145),
-    f32::from_bits(0xbe48_fcca),
-    f32::from_bits(0x3ed5_d00c),
-    f32::from_bits(0xbf35_aca2),
-    f32::from_bits(0x3fb8_9252),
-];
-
-const LOG2_PER_DB_F32: f32 = (core::f64::consts::LOG2_10 / 20.0) as f32;
-const DB_PER_LOG2_F32: f32 = (20.0_f64 * core::f64::consts::LOG10_2) as f32;
-
-fn refit_gain_degree3(db: f32) -> f32 {
-    let x = db.mul(f32::splat(LOG2_PER_DB_F32)).clamp(-126.0, 127.0);
-    let xi = x.floor();
-    let f = x.sub(xi);
-    let mut p = REFIT_GAIN_DEGREE3[0];
-    for coefficient in &REFIT_GAIN_DEGREE3[1..] {
-        p = p.mul(f).add(*coefficient);
-    }
-    f32::splat(1.0)
-        .add(f.mul(p))
-        .mul(f32::exp2_int_in_range(xi))
-}
-
-fn refit_level_degree4(x: f32) -> f32 {
-    let (m, e) = x.max(f32::MIN_POSITIVE).frexp();
-    let t = m.sub(1.0);
-    let mut q = REFIT_LEVEL_DEGREE4[0];
-    for coefficient in &REFIT_LEVEL_DEGREE4[1..] {
-        q = q.mul(t).add(*coefficient);
-    }
-    e.add(t.mul(q)).mul(DB_PER_LOG2_F32)
-}
-
-fn refit_gain_error_db(db: f32) -> Measurement {
-    let got = f64::from(refit_gain_degree3(db));
-    let want = oracle_gain(f64::from(db));
-    Measurement {
-        error_db: Some(((got - want) / want).abs() * DB_PER_RELATIVE),
-        value: got as f32,
-    }
-}
-
-fn refit_level_error_db(x: f32) -> Measurement {
-    let got = f64::from(refit_level_degree4(x));
-    let want = oracle_level_db(f64::from(x));
-    Measurement {
-        error_db: Some((got - want).abs()),
-        value: got as f32,
-    }
-}
-
-/// Remeasures the recorded refits over F1's actual domains and rejects both against its gates.
-#[test]
-#[ignore = "full-domain refit measurement: run with --release -- --ignored"]
-fn f1_lower_degree_refits_exhaustive() {
-    let (lo, hi) = gain_domain();
-    let gain_negative = sweep(lo, hi, 1, refit_gain_error_db);
-    let (lo, hi) = gain_domain_positive();
-    let gain_positive = sweep(lo, hi, 1, refit_gain_error_db);
-    let (lo, hi) = level_domain();
-    let level = sweep(lo, hi, 1, refit_level_error_db);
-
-    let gain_negative_db = gain_negative.worst_scaled as f64 / SCALE;
-    let gain_positive_db = gain_positive.worst_scaled as f64 / SCALE;
-    let level_db = level.worst_scaled as f64 / SCALE;
-    assert_eq!(gain_negative.checked, 1_126_170_625);
-    assert_eq!(gain_positive.checked, 1_103_101_953);
-    assert_eq!(level.checked, 257_176_458);
-    println!(
-        "refit P degree 3: negative {gain_negative_db:.6e} dB, positive {gain_positive_db:.6e} dB"
-    );
-    println!("refit Q degree 4: {level_db:.6e} dB");
-    assert!(gain_negative_db > GAIN_MAX_DB);
-    assert!(gain_positive_db > GAIN_MAX_DB);
-    assert!(level_db > LEVEL_MAX_DB);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1035,32 +949,4 @@ fn f1_crossing_domains_match_independent_definitions() {
         );
         println!("crossings {crossings}: {worst:.6e} dB");
     }
-}
-
-/// Full-domain site-specific proof for X8, split at zero because signed `f32` bit patterns are
-/// monotone in magnitude on each side and not across zero.
-#[test]
-#[ignore = "full X8 crossing sweep: run with --release -- --ignored"]
-fn f1_exhaustive_x8_transient_shaper_applied_gain() {
-    let negative = sweep(
-        (-0.0_f32).to_bits(),
-        (-18.0_f32).to_bits(),
-        1,
-        gain_error_db,
-    );
-    let positive = sweep(0.0_f32.to_bits(), 18.0_f32.to_bits(), 1, gain_error_db);
-    let negative_count = u64::from((-18.0_f32).to_bits() - (-0.0_f32).to_bits()) + 1;
-    let positive_count = u64::from(18.0_f32.to_bits()) + 1;
-    assert_sweep(
-        "crossing X8 negative transient-shaper applied gain",
-        negative,
-        GAIN_MAX_DB,
-        negative_count,
-    );
-    assert_sweep(
-        "crossing X8 positive transient-shaper applied gain",
-        positive,
-        GAIN_MAX_DB,
-        positive_count,
-    );
 }
