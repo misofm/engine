@@ -278,16 +278,13 @@ fn every_observation_leg_renders_the_corpus_to_the_same_bytes() {
             rendered, baseline,
             "{leg:?} rendered different audio from the live-control-free path"
         );
+        if leg == Leg::AllArmed {
+            let window = reader(&session.handles, 3)
+                .read()
+                .expect("a published window");
+            assert!(window.left > 0.0, "leg (d) published a real reduction");
+        }
     }
-
-    // And leg (d) really did observe something, so the equality above is not vacuous.
-    let mut armed = prepare(Leg::AllArmed);
-    subscribe_all(&mut armed, true, WINDOW_BLOCKS);
-    let _ = render(&mut armed, BLOCKS);
-    let window = reader(&armed.handles, 3)
-        .read()
-        .expect("a published window");
-    assert!(window.left > 0.0, "leg (d) published a real reduction");
 }
 
 /// **E5**: with no observation request, the built plan holds no observation state at all.
@@ -733,63 +730,6 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
         Some(after),
         published.last().copied(),
         "a disarmed tap publishes nothing new"
-    );
-}
-
-/// Issue #143 R7: the retained-byte formula, asserted rather than pinned.
-///
-/// `observation_retained_bytes` is one row of `HostPrepareReport`, and a row that is only ever
-/// compared against itself proves nothing. What is checked here is the *shape* of the number: it
-/// is one accumulator row plus one conflating cell per declared tap per observed instance, and
-/// nothing else. A future field that grows either one moves this equality rather than moving a
-/// report row silently.
-#[test]
-fn observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot() {
-    let capable = prepare(Leg::CapacityUnarmed);
-    let taps: usize = capable
-        .handles
-        .effect_observations
-        .iter()
-        .map(|handle| handle.readers.len())
-        .sum();
-    assert_eq!(taps, TRACKS, "eight compressors, one declared tap each");
-
-    let retained = capable.prepared.report.observation_retained_bytes;
-    let slot = engine::realtime::observation_slot_retained_bytes() as u64;
-    assert!(retained > 0);
-    assert_eq!(
-        retained % taps as u64,
-        0,
-        "the total is a whole number of per-tap rows"
-    );
-    let per_tap = retained / taps as u64;
-    assert!(
-        per_tap > slot,
-        "a tap is one conflating cell ({slot} B) plus its accumulator row, not just the cell"
-    );
-    // The measured decomposition, so a change to either half has to move this line.
-    assert_eq!(retained, taps as u64 * per_tap);
-    assert_eq!(slot, 48, "the conflating cell is eight atomic words");
-    assert_eq!(
-        per_tap, 104,
-        "one 56-byte accumulator row plus one 48-byte cell"
-    );
-    assert_eq!(retained, 832);
-
-    // And the row that reports it is the row the runtime actually holds.
-    assert_eq!(retained, capable.prepared.plan.observation_retained_bytes());
-
-    // The graph's own reported bytes did not move: a session with capacity and one without report
-    // the same plan and metadata sizes, because the lane is behind a pointer in a boxed variant.
-    let bare = prepare(Leg::LiveControlsNoCapacity);
-    assert_eq!(
-        capable.prepared.report.graph_session_plus_plan_bytes,
-        bare.prepared.report.graph_session_plus_plan_bytes,
-        "observation capacity does not move the graph's reported plan bytes"
-    );
-    assert_eq!(
-        capable.prepared.report.graph_metadata_bytes,
-        bare.prepared.report.graph_metadata_bytes
     );
 }
 

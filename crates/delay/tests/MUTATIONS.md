@@ -1,5 +1,8 @@
 # Red mutations for the issue-#93 delay gates
 
+This is historical mutation evidence. Housekeeping #1129 preserved the test functions and
+behavioral scenarios while reducing test copies; it did not run a new mutation campaign.
+
 Every test in `crates/delay` (the `tests` module of `src/lib.rs` and
 `tests/determinism.rs`) was seen **red** under the mutation named here before it was committed
 green, per issue #125's rule and master plan #83 §1.6. Each row is one edit to production code, the

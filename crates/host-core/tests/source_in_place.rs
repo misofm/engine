@@ -159,18 +159,6 @@ fn render(document: &str, declined: bool) -> Run {
     }
 }
 
-/// FNV-1a over every master word, in render order.
-fn digest(masters: &[Vec<u32>]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for word in masters.iter().flatten() {
-        for byte in word.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    hash
-}
-
 /// Gate 2 of issue #918, on the eight-track bank console, its mono-mapped twin (whose bank
 /// collapses on every block and so gathers one plane), and the nine-track fixture: the in-place
 /// arm's master is the
@@ -208,11 +196,6 @@ fn a_ring_fed_banked_session_gathers_in_place_with_the_copy_bits() {
                 "{name}, block {block}: the in-place master is the copy arm's"
             );
         }
-        assert_eq!(
-            digest(&in_place.masters),
-            digest(&copy.masters),
-            "{name}: the output digests agree"
-        );
         for block in [0, 5, 7, 8, 9] {
             assert!(
                 copy.masters[block].iter().any(|word| *word != 0),

@@ -1,7 +1,9 @@
-//! Issues #996 and #997: the standing 64-track console, fed non-repeating hot noise, renders the
-//! pre-#990 limiter's words at every bank width the build has (`Simd8` where `avx2` is enabled,
-//! `Simd4` and `Scalar`; issue #1112) while its linked stereo pairs link, ramp, unlink and are
-//! made equal again mid-run.
+//! The single cross-target owner of the 64-track linked-limiter session corpus (#996/#997).
+//! Non-repeating hot noise exercises linked ramps, gain-ring mirroring, one-sided unlinks and
+//! later equal designed words at every available width (`Simd8` with `avx2`, `Simd4`, `Scalar`).
+//! Its shared master/observation pin detects common scalar/vector mirroring and premature-relink
+//! defects that comparing the current widths alone cannot detect. The pin's pre-#990 provenance
+//! is recorded below; this is a current state-transition contract, not a timing witness.
 //!
 //! # Why this test exists
 //!
@@ -143,9 +145,10 @@
 //!
 //! A unit test, so that it can prepare through `prepare_host_runtime_with_live_controls_backend`,
 //! the `#[cfg(test)]` seam that is `prepare_host_runtime_with_live_controls` at a named backend. It
-//! renders all three widths on every host, CI's `x86-64-v3` arm included. The wasm guest is not
-//! covered: it plays one frozen block per track, and a per-block source there is tooling (the #996
-//! verdict's owner ruling).
+//! renders W8/W4/Scalar in CI's x86-64-v3 debug and release package runs, and W4/Scalar in the
+//! AArch64 product debug run. AArch64 release's package subset does not run host-core. The Wasm
+//! guest does not contain this corpus: it plays one frozen block per track, and a per-block source
+//! there is tooling (the #996 verdict's owner ruling).
 
 use core::num::NonZeroUsize;
 use core::ops::RangeInclusive;

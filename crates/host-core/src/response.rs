@@ -579,11 +579,12 @@ fn apply_overrides(
     overrides: &[ResponseParameterOverride],
 ) -> Result<(), ResponsePreviewError> {
     for (index, override_value) in overrides.iter().enumerate() {
-        let parameter = descriptor
+        let parameter_index = descriptor
             .parameters
             .iter()
-            .find(|parameter| parameter.id.0 == override_value.parameter_id)
+            .position(|parameter| parameter.id.0 == override_value.parameter_id)
             .ok_or(ResponsePreviewError::InvalidParameter)?;
+        let parameter = &descriptor.parameters[parameter_index];
         let expected_channel = match parameter.channel_policy {
             effect_contract::ParameterChannelPolicy::Shared => {
                 if override_value.channel != ParameterChannel::Both {
@@ -599,8 +600,7 @@ fn apply_overrides(
             }
         };
         let Some(slot) = initial_values.iter_mut().find(|value| {
-            value.parameter_index == index_of_parameter(descriptor, parameter)
-                && value.channel == expected_channel
+            value.parameter_index == parameter_index as u32 && value.channel == expected_channel
         }) else {
             return Err(ResponsePreviewError::InvalidParameter);
         };
@@ -621,17 +621,6 @@ fn apply_overrides(
         slot.value = override_value.value;
     }
     Ok(())
-}
-
-fn index_of_parameter(
-    descriptor: &'static effect_contract::EffectDescriptor,
-    parameter: &effect_contract::ParameterDescriptor,
-) -> u32 {
-    descriptor
-        .parameters
-        .iter()
-        .position(|candidate| core::ptr::eq(candidate, parameter))
-        .expect("parameter came from descriptor") as u32
 }
 
 /// Generate and validate one explicit frequency axis with portable f64 interpolation.

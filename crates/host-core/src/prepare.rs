@@ -931,14 +931,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(shape("host.meter.period"));
     }
-    let meter_tracks: Vec<(Box<str>, MeterTap, MeterMetricSet)> = match selected_meters {
+    let meter_tracks: Vec<(&str, MeterTap, MeterMetricSet)> = match selected_meters {
         Some(meters) => meters
             .iter()
-            .map(|meter| (meter.track_id.clone(), meter.tap, meter.metrics))
+            .map(|meter| (meter.track_id.as_ref(), meter.tap, meter.metrics))
             .collect(),
         None => live_control_tracks
             .iter()
-            .map(|track| (track.clone(), live_controls.meter_tap, MeterMetricSet::ALL))
+            .map(|track| (track.as_ref(), live_controls.meter_tap, MeterMetricSet::ALL))
             .collect(),
     };
     let meter_requests: Vec<SelectedMeterRequest> = match live_controls.meter_period_frames {
@@ -1054,7 +1054,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             ),
         )
     })?;
-    let graph_report = artifact.report().clone();
+    let output_latency = artifact.report().output_latency;
+    let output_tail = artifact.report().output_tail;
     let graph_resources = artifact.graph_resource_estimate().clone();
     let session_resources = compiled.resource_estimate();
     let spectrum_resources: Option<SpectrumCaptureResources> = match spectrum_request {
@@ -1239,8 +1240,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         track_count,
         route_count,
         effect_count,
-        latency_samples: graph_report.output_latency.0,
-        output_tail: graph_report.output_tail,
+        latency_samples: output_latency.0,
+        output_tail,
         graph_session_plus_plan_bytes: graph_resources.session_plus_plan_bytes,
         graph_incremental_plan_bytes: graph_resources.incremental_plan_bytes,
         graph_metadata_bytes: graph_resources.graph_metadata_bytes,
