@@ -38,3 +38,44 @@ Worker B reviewed the complete package (`Cargo.toml` and its sole source/test fi
 - **Data structures:** eliminate the intermediate group vector and the test-only ordered maps for dense generated IDs. The production level `BTreeMap` still supplies ascending level order; output programs/IDs/masks remain owned, and public APIs, leader selection, chunk ordering and width handling are unchanged.
 
 Focused gate: `CARGO_TARGET_DIR=/home/bl/misofm/engine/target/housekeeping-b cargo test --locked -p rack-compiler` — PASS (13 unit tests, zero doc-tests). Product edits paused for root exact-path checkpoint. Release/clippy/fmt/policies, supported target builds and proportional downstream evidence pending; no timing or rendered-bit claim is made.
+
+### Attempt 1 — completed local evidence
+
+Root checkpointed the exact two owned paths as `401e3738`, integrated/pushed through `73b67238`. Source changes are +55/−129 Rust lines (net −74); dependencies and public APIs are unchanged. No additional product tranche followed the checkpoint.
+
+**Retained test purposes (all 13):**
+
+- `single_slot_programs_partition_by_level_and_key`: seeded mixed-level/key pools at both available widths conserve every ID exactly once, retain trailing padding and mask agreement, and never place a candidate in another dependency level or key. The other mixed-program structural test does not independently compare candidate and group levels.
+- `empty_programs_and_connected_sidechains_never_bank`: empty/connected programs stay scalar while an unconnected sidechain can fill a bank.
+- `subsequence_uses_program_equality_not_occurrence`: repeated keys match greedily by equality; insufficient repeats, longer programs and another rack refuse. This is the directed subsequence gate; `rack` has no duplicate test.
+- `longest_program_leads_and_full_programs_fill_first`: short programs with smaller IDs cannot displace full-program members; exact chunk membership, identity slots and padded masks preserve the two-stage ordering contract.
+- `a_subsequence_program_still_emits_ascending_banks`: issue #206's 64-member legal-session repro remains strictly ascending and complete at both widths without moving its short-program member into the first bank.
+- Pool-class partition and prepare-witness tests: classes cannot mix lanes or reduce uniform-session bank occupancy; only SOURCE/DESIGNED classify at preparation, while live/bypass/restore terms cannot repartition cohorts.
+- `pooling_is_exhaustive_so_no_member_is_stranded`: seeded repeated-key programs cannot leave an earlier free lane that a later member could legally occupy.
+- `every_slot_cohort_is_homogeneous`: an independent reading of active leader keys reproduces each candidate's complete ordered key sequence; a padding lane cannot execute a slot.
+- `output_is_input_order_invariant`: seeded permutations leave the complete plan identical.
+- `duplicate_ids_are_rejected_across_levels`: duplicate IDs refuse within and across levels before emitting a plan.
+- `invariants_hold_on_seeded_corpus`: mixed empty/nonempty programs across levels/racks preserve dimensions, ascending/padding layout, unique IDs, candidate rack and exact full subsequence masks; scalar IDs remain sorted. The explicit invariant call and slice equality execute in release too.
+- `program_comparison_is_a_total_order`: the public comparator honors equality, key order and rack precedence for callers reproducing planner order.
+
+**Deletion/survivor mapping:** the old `legacy_full_banks` body and pre-#96 comparison branch are removed; the same single-slot test retains current conservation, level/key partition and padding claims. Directed longest/full-first placement and ascending-bank repro, exhaustive pooling, and permutation invariance retain current chunk/ordering claims. No entire behavioral test is removed. Replaced sorted-copy assertions retain the same adjacent-order predicates; dense borrowed test references retain the original seeds, generated bits/order and full ordered-key comparisons. No historical output pin or new test is added.
+
+Root identified that the homogeneity iterator's `zip` would truncate an overlong activity mask. The surviving release gate is `invariants_hold_on_seeded_corpus`: for every active lane it compares the **entire** activity slice with `subsequence_mask`'s leader-sized result, rejecting an extra flag independently of the production debug assertion. Its explicit invariant assertion additionally rejects overlong padding masks in release; the directed full-first test asserts exact active and padded three-flag masks. This limitation of the individual homogeneity assertion is recorded rather than presented as standalone dimension coverage.
+
+**Generated code/data structures:** inspected the native optimized `plan_bank_groups::<u32, EffectProgramKey>` and member-order comparator monomorphization from the release unit-test binary (`objdump`; temporary `/tmp/issue1132-planner.asm` and `/tmp/issue1132-member-order.asm`). LLVM already emits AVX2 integer `vpmovzxbq`/`vpaddq` reductions for sufficiently long boolean masks and scalar byte-add tails; no hand-written SIMD is justified for opaque key comparisons and control-plane sorting. Materialization staging and cloned debug/test data are removed, while the ascending-level `BTreeMap`, total leader scan and stable member sorts retain their deterministic roles. Repeated comparator mask scans and cohort searches remain; no missed budget or measurement justifies a new algorithm. No timing claim is made.
+
+**Actual checks:** all Cargo commands used `CARGO_TARGET_DIR=/home/bl/misofm/engine/target/housekeeping-b`.
+
+- `cargo test --locked -p rack-compiler` and the same command with `--release`: PASS, 13 tests each plus zero doc-tests.
+- `cargo clippy --locked -p rack-compiler --all-targets --all-features -- -D warnings`: exit 0. Existing workspace `clippy.toml` unresolved fast-dB path warnings were emitted by dependencies/package; no new Rust lint failure.
+- `cargo test --locked -p graph-compiler --test compile_shapes --test bank_levels --test bypass_cohorts`: PASS, 3 + 9 + 6 tests. These cover mixed depth/sidechain preparation, bank alignment and randomized scalar/SIMD render comparisons, and bypass/nonfinite/negative-zero behavior.
+- `cargo fmt --all --check`, `git diff --check`; `bash scripts/check-rack-policy.sh`, `check-graph-determinism.sh` (100 fresh-process comparisons), `check-lane-policy.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`: PASS.
+- `cargo check --locked -p rack-compiler --lib --all-features --target wasm32-unknown-unknown` with `RUSTFLAGS='-C target-feature=+simd128'`, and the same lib check for `aarch64-apple-ios` and `aarch64-linux-android`: PASS. These are supported production compile checks; no browser/mobile execution or device ABI qualification is claimed.
+
+No benchmark, new owner question, DSP algorithm, resource-accounting policy, live queue/owner, latency/PDC or feature change. Related insert identity-slot and live packing outcomes remain deferred to their existing issues. Root adversarial verdict and remote issue closure pending.
+
+### Root adversarial verdict: PASS — attempt 1, 2026-10-01
+
+Root reviewed the full source diff and the leader's borrow lifetime, cohort/chunk traversal, ownership, deterministic ordering and release mask survivor. Each output retains its required single owned program clone; the staging vector and cohort-level clone are unnecessary. Materialization changes allocation placement on the control plane, with no render arithmetic or realtime contract change. The rewritten iterator checks retain their current purposes and the release exact-slice gate covers the recorded zip limitation. The package and downstream/target evidence is proportional; unresolved existing clippy configuration warnings and absence of measured speedup are disclosed.
+
+Unique-defect verdicts for rewritten tests: `single_slot_programs_partition_by_level_and_key` reaches mixed dependency-level/key cases and rejects assigning a candidate to the wrong level, which the general structural corpus does not compare; `longest_program_leads_and_full_programs_fill_first` rejects sacrificing full-program occupancy to smaller short-program IDs; `a_subsequence_program_still_emits_ascending_banks` preserves the 64-member ordering regression; `pooling_is_exhaustive_so_no_member_is_stranded` reaches repeated-key pools and rejects leaving a compatible later member behind a free lane; `every_slot_cohort_is_homogeneous` independently reconstructs each ordered active-key sequence across its seeded generator; `invariants_hold_on_seeded_corpus` reaches mixed empty programs, racks and levels and rejects malformed full masks and scalar order. The latter two randomized tests are judged by these generators' reachable properties, rather than claims of unique sampled catches. No new test, old implementation oracle or arbitrary pin is introduced.
