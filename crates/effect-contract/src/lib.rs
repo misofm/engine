@@ -2864,25 +2864,35 @@ mod continuous_mapping_validity_tests {
     }
 }
 
-impl BankWidth {
-    /// Every bank width this build has, narrowest first: `Four`, and `Eight` where `avx2` is
-    /// enabled (issue #1112).
-    ///
-    /// The one list of them: tests and gates that run a claim at every bank width iterate this
-    /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four lanes.
-    pub const ALL: &'static [Self] = &[
-        Self::Four,
-        #[cfg(target_feature = "avx2")]
-        Self::Eight,
-    ];
+/// [`BankWidth::ALL`] and [`BankWidth::backend`] (issue #1112).
+///
+/// In a module of their own, and at the end of the file, so that adding them moves nothing that
+/// was already compiled: no line of this file (panic locations carry line numbers), and no impl
+/// disambiguator of the crate root (every symbol name of the derived impls there).
+mod bank_widths {
+    use super::{Backend, BankWidth};
 
-    /// The vector backend that executes this width: the inverse of [`BankWidth::for_backend`].
-    #[must_use]
-    pub const fn backend(self) -> Backend {
-        match self {
-            Self::Four => Backend::Simd4,
+    impl BankWidth {
+        /// Every bank width this build has, narrowest first: `Four`, and `Eight` where `avx2` is
+        /// enabled (issue #1112).
+        ///
+        /// The one list of them: tests and gates that run a claim at every bank width iterate this
+        /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four
+        /// lanes.
+        pub const ALL: &'static [Self] = &[
+            Self::Four,
             #[cfg(target_feature = "avx2")]
-            Self::Eight => Backend::Simd8,
+            Self::Eight,
+        ];
+
+        /// The vector backend that executes this width: the inverse of [`BankWidth::for_backend`].
+        #[must_use]
+        pub const fn backend(self) -> Backend {
+            match self {
+                Self::Four => Backend::Simd4,
+                #[cfg(target_feature = "avx2")]
+                Self::Eight => Backend::Simd8,
+            }
         }
     }
 }
