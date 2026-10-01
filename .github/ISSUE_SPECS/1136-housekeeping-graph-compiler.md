@@ -25,6 +25,8 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+Root test-value decision after the complete read: retain current `MISO-GRAPH-V1` canonical-format identities in the reverse-submix and track-delay gates. Retire `the_merged_span_hold_costs_the_input_slots` and its measurement-only commentary: its only assertions pin the current 256/129 arena inefficiency, with no distinct dataflow or admission behavior. Independent lowering/dataflow and transactional resource-cap gates remain. Root reconciles the historical measurement/test reference in #931's spec and GitHub body; #931's colouring implementation and product objectives remain outside this issue.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
