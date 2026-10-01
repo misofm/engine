@@ -69,12 +69,10 @@ fn the_scalar_product_is_partition_invariant() {
         while start < frames {
             let end = (start + block).min(frames);
             let spans: &[_] = if start == 0 { &spans } else { &[] };
-            let mut chunk_left = out_left[start..end].to_vec();
-            let mut chunk_right = out_right[start..end].to_vec();
             effect.process(
                 EffectProcessBlock::new(
-                    &mut chunk_left,
-                    &mut chunk_right,
+                    &mut out_left[start..end],
+                    &mut out_right[start..end],
                     None,
                     start as u64,
                     spans,
@@ -82,8 +80,6 @@ fn the_scalar_product_is_partition_invariant() {
                 )
                 .expect("partition block"),
             );
-            out_left[start..end].copy_from_slice(&chunk_left);
-            out_right[start..end].copy_from_slice(&chunk_right);
             start = end;
         }
         let state = snapshot(effect.as_ref());
@@ -103,16 +99,18 @@ fn the_scalar_product_is_partition_invariant() {
         changed > frames / 2,
         "only {changed} of {frames} samples moved"
     );
+    let reference_left = reference.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let reference_right = reference.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     for block in PARTITIONS {
         let candidate = render(block);
         assert_eq!(
             candidate.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            reference_left,
             "left PCM at block size {block}"
         );
         assert_eq!(
             candidate.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            reference_right,
             "right PCM at block size {block}"
         );
         assert_eq!(candidate.2, reference.2, "state at block size {block}");
@@ -162,12 +160,10 @@ fn the_bank_is_partition_invariant() {
             } else {
                 (&[], &[0; 9][..lanes + 1])
             };
-            let mut chunk_left = left[start * lanes..end * lanes].to_vec();
-            let mut chunk_right = right[start * lanes..end * lanes].to_vec();
             bank.process_bank(
                 EffectBankProcessBlock::new(
-                    &mut chunk_left,
-                    &mut chunk_right,
+                    &mut left[start * lanes..end * lanes],
+                    &mut right[start * lanes..end * lanes],
                     None,
                     (end - start) as u32,
                     width,
@@ -178,8 +174,6 @@ fn the_bank_is_partition_invariant() {
                 )
                 .expect("bank partition block"),
             );
-            left[start * lanes..end * lanes].copy_from_slice(&chunk_left);
-            right[start * lanes..end * lanes].copy_from_slice(&chunk_right);
             start = end;
         }
         let sizes = transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
@@ -200,16 +194,18 @@ fn the_bank_is_partition_invariant() {
         "only {changed} of {} bank samples moved",
         frames * lanes
     );
+    let reference_left = reference.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let reference_right = reference.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     for block in PARTITIONS {
         let candidate = render(block);
         assert_eq!(
             candidate.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference.0.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            reference_left,
             "bank left PCM at block size {block}"
         );
         assert_eq!(
             candidate.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-            reference.1.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            reference_right,
             "bank right PCM at block size {block}"
         );
         assert_eq!(candidate.2, reference.2, "bank state at block size {block}");

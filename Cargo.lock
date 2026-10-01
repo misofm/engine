@@ -2150,7 +2150,6 @@ dependencies = [
  "effect-runtime",
  "lane",
  "math",
- "sha2 0.11.0",
 ]
 
 [[package]]

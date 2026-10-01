@@ -25,7 +25,6 @@ conformance = { workspace = true, features = ["realtime-audit"] }
 # The f64 oracle is test-only and never reachable from production rendering.
 dsp-reference.workspace = true
 lane.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true

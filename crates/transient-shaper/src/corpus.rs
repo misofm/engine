@@ -21,7 +21,8 @@
 //! bypassing `mix = 0` lane, unity and partial mixes, both signs of both shape amounts, `-0.0` in
 //! the first frame (the signed-zero identity contract), impulses, a long decay into the follower's
 //! release, and a subnormal input. Every case retargets all three parameters at frame 0, so the
-//! D11 ramp prefix runs; blocks are 128 frames, so the prefix spans a block boundary.
+//! D11 ramp prefix runs for 64 samples within the first 128-frame block. The partition tests own
+//! continuations across shorter block boundaries.
 //!
 //! # No NaN
 //!

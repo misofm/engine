@@ -271,8 +271,9 @@ struct Params<L: Lane> {
 /// Detector linking, monomorphised over the link mode so the loop body is straight line.
 ///
 /// Frozen operation order: rectify both channels, then `Maximum` is the D8 select `max` and
-/// `Average` is `0.5 * l + 0.5 * r` — two products and a sum, never `0.5 * (l + r)`, which has one
-/// fewer rounding and different bits.
+/// `Average` is `0.5 * l + 0.5 * r` — two products and a sum. Keep this order even where scaling
+/// by one half makes `0.5 * (l + r)` produce the same bits; overflow and subnormal rounding can
+/// distinguish the expressions.
 #[inline(always)]
 fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
     let left = left.abs();
@@ -298,7 +299,8 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
 /// 3. `contrast = fast_level_db(ratio)`, clamped `min` then `max` to ±24 dB (X7)
 /// 4. `shape = attack * max(contrast, 0) + sustain * max(-contrast, 0)`, clamped to ±18 dB
 /// 5. `gain = fast_gain_from_db(shape)` — `fast_gain_from_db(+0.0)` is exactly `1` (X8)
-/// 6. `wet = gain_mix_step(x, gain, mix)` = `fma(mix, x * gain - x, x)`
+/// 6. `wet = gain_mix_step(x, gain, mix)` = `fma(mix, x * gain - x, x)`; `Lane::fma`
+///    uses separate multiply/add rounding on every target
 /// 7. `select(bypass or mix == 0 or shape == 0, x, wet)` — the signed-zero identity contract:
 ///    `fma(mix, +0.0, -0.0)` is `+0.0`, so the dry value has to be selected, not computed
 ///
@@ -646,9 +648,9 @@ struct LaneWords {
 
 /// Validates and decodes one lane's eleven state words.
 ///
-/// The D11 `step` is **derived**, not persisted: `(target - current) / remaining`, which reproduces
-/// the pre-audit per-sample division exactly for the pinned continuation row and resumes within one
-/// ulp of the original increment in general. That is what keeps the layout eleven words.
+/// The D11 `step` is **derived**, not persisted: `(target - current) / remaining` while a ramp is
+/// active. This keeps the layout eleven words. The representable continuation in the contract
+/// test resumes exactly; iteratively rounded currents need not reconstruct the original step.
 fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     let fast = read_f32(bytes, 0);
     let slow = read_f32(bytes, 1);
@@ -918,7 +920,7 @@ fn bind<L: Lane, const W: usize, const NATIVE_ONLY: bool>(
     let mut left = [first_left; W];
     let mut right = [first_right; W];
     let mut same_program = true;
-    for (track, item) in request.requests.iter().copied().enumerate() {
+    for (track, item) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;

@@ -3,8 +3,9 @@
 //! The workspace's audited global allocator (`bench_support::alloc`) counts every allocation and
 //! free per thread. The render loop is bracketed by a snapshot of this thread's counters, so
 //! preparation -- which does allocate, once, for the boxed product -- is outside the measurement,
-//! and no other test thread can enter it. Automation is applied on every block, so the ramp
-//! retarget path is inside it too. The counters' own positive controls (same-thread allocation
+//! and no other test thread can enter it. Sample-zero points are offered every fourth block:
+//! the first batch is accepted, later batches are rejected because their start sample is stale.
+//! Accepted retargeting and rejection are both measured. The counters' own positive controls (same-thread allocation
 //! and free are counted; a foreign thread's are not) are `bench-support`'s tests.
 
 mod common;
