@@ -42,8 +42,8 @@ fn a_nan_is_caught_at_the_block_boundary_not_per_sample() {
     );
 
     let mut effect = prepare(request(&values));
-    let mut left = clean_left.clone();
-    let mut right = clean_right.clone();
+    let mut left = clean_left;
+    let mut right = clean_right;
     right[0] = f32::NAN;
     let mut blocks = Vec::new();
     let mut state_after_the_rejected_block = None;

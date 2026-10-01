@@ -2,23 +2,22 @@
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Gate 7.3: the rendered gain agrees with an independent `f64` model inside a derived tolerance.
 //!
-//! The pin is `dsp_reference::reference_gate_expander_process`, an `f64` transcription
-//! of brief 014 that shares no type and no line of code with the engine. It is never the old
-//! production bits: those are what the audit found wrong (master plan #83 §8).
+//! The reference is `dsp_reference::reference_gate_expander_process`, an `f64` transcription
+//! of the current causal gate law that shares no type or arithmetic helper with this effect.
 //!
 //! # Where the tolerance comes from
 //!
-//! * `log2_lane` is qualified at 2 ulp (gate M1). At the top of the level range one ulp of a
-//!   `log2` result near `2^5` is `2^-19`, so `|dX| <= 2 * 2^-19 * 6.0206 = 2.3e-5 dB`; taking the
-//!   whole clamped range into account and rounding up, `|dX| <= 4.8e-5 dB`.
-//! * That error enters the one-pole as a disturbance: `e' = a * e + delta` with
-//!   `|delta| <= ulp(48) + (1 - a) * 4.8e-5`, whose steady state is `|delta| / (1 - a)`. The
-//!   slowest release in this case is 100 ms at 48 kHz, `1 - a = 2.08e-4`, and `ulp(48) = 3.8e-6`,
-//!   so the accumulated bound is `3.8e-6 / 2.08e-4 + 4.8e-5 = 0.0184 dB`.
-//! * `exp2_lane` is qualified at 2 ulp, worth about `2e-6 dB` on the applied gain.
+//! * The sealed `fast_level_db` tier is qualified at at most `2.810e-5 dB` on the detector
+//!   domain (`math::fast_db`'s exhaustive F1 bounds). Keep the conservative `4.8e-5 dB` allowance.
+//! * The rate recurrence subtracts, multiplies and adds with separate rounding. At the slowest
+//!   release here (100 ms at 48 kHz), `b = 2.08e-4`; the state-addition error is bounded by
+//!   `ulp(48) = 3.8e-6`, giving `3.8e-6 / b + 4.8e-5 = 0.0184 dB`. The product is smaller than
+//!   `b * 48 < 0.01`, so its rounding contributes less than `5e-6 dB` after accumulation. The
+//!   preceding subtraction contributes at most another `ulp(48)` to the accumulated error.
+//!   The 1 ms attack has a larger `b`, and therefore a smaller accumulated bound.
+//! * `fast_gain_from_db` is qualified below `7.431e-6 dB` on negative gain values, again by F1.
 //!
-//! Total under `0.02 dB`, which is the number asserted. It is not loosened: if the assertion
-//! fails, the cause is an operation order or a coefficient, not the polynomials.
+//! Total under the unchanged `0.02 dB` limit asserted below.
 
 mod support;
 
@@ -237,13 +236,13 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
 /// At the build's own width: W8 in the 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) build
 /// (#1112).
 #[test]
-fn oracle_pcm_within_derived_tolerance_w8() {
+fn oracle_pcm_within_derived_tolerance_native_bank() {
     let (source_left, source_right) = corpus_signals();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let values = [corpus_values(); 8];
         let mut bank = prepare_bank_native(&values, link).expect("the build's own width binds");
-        let mut left = support::packed(&vec![source_left.clone(); NATIVE_LANES]);
-        let mut right = support::packed(&vec![source_right.clone(); NATIVE_LANES]);
+        let mut left = support::packed(&[source_left.as_slice(); NATIVE_LANES]);
+        let mut right = support::packed(&[source_right.as_slice(); NATIVE_LANES]);
         let offsets = [0_u32; NATIVE_LANES + 1];
         let mut start = 0;
         while start < FRAMES {

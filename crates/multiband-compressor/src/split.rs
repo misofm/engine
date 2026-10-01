@@ -329,12 +329,12 @@ fn a_ramp_in_flight_when_a_block_opens_stays_in_flight() {
     );
 }
 
-/// Two overlapping windows on different tracks, retargeted again while the first is still open.
+/// Several windows on different tracks, with more traffic after the first windows arrive.
 ///
-/// This is the case whole-bank granularity is about: one track's window keeps every other track on
-/// the ramped path, and a retarget mid-flight re-derives the step from the value in force.
+/// One track's window keeps every other track on the ramped path. The 128-frame blocks exceed the
+/// 64-sample windows, so the next block's retarget starts from a settled value.
 #[test]
-fn overlapping_windows_on_different_tracks_agree() {
+fn windows_on_different_tracks_agree() {
     identical(
         8,
         128,
@@ -373,12 +373,12 @@ fn a_restated_parameter_stays_on_the_flat_path() {
     identical(6, 128, &[(1, RESTATED), (2, RESTATED), (3, RESTATED)]);
 }
 
-/// A restatement of a value a ramp is still travelling towards, delivered mid-flight.
+/// A restatement after the preceding block's ramp has reached its target.
 ///
-/// The hoist cancels the flight by settling at the value in force, which drops the bank onto the
-/// flat path in the middle of a window rather than at its end.
+/// The first 128-frame block completes the 64-sample window; the repeated target keeps the next
+/// block settled, with no new ramp arithmetic or write-back needed.
 #[test]
-fn a_restatement_mid_flight_agrees() {
+fn a_restatement_after_arrival_agrees() {
     identical(
         8,
         128,

@@ -102,14 +102,7 @@ impl<L: Lane> Channel<L> {
             for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
                 ramp[lane] = LinearRamp::fixed(values[parameter]);
             }
-            let smoothed: [f32; RAMP_COUNT] = core::array::from_fn(|index| values[index]);
-            design_lane(
-                &smoothed,
-                sample_rate,
-                ALL_PARAMETERS,
-                &mut self.words,
-                lane,
-            );
+            design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
             self.seed_rate_ramps(lane);
         }
     }
@@ -1772,34 +1765,21 @@ mod coefficient_ramp_tests {
 
 #[cfg(test)]
 mod settled_body_tests {
-    //! The settled body against the base kernel (issues #981-#985, and #995 for the sidechained
-    //! body).
+    //! Chunked bodies against the current one-frame law, without a ramping/settled block split.
     //!
-    //! [`reference`] is `process_block` and `process_block_mono` exactly as they stood before
-    //! #981, one-pass `frames_loop` bodies included. It lives here, in the test code, so that every
-    //! change to the production bodies is measured against one fixed oracle. It is built only from
-    //! the frame law -- `link_frame`, `one_frame`, `Coef`, `Invariants` and
-    //! `Channel::advance_ramps` -- which none of #981-#985 edits.
+    //! The reference advances ramps, reads coefficients and renders each frame before proceeding
+    //! to the next. It shares the physical frame primitives; the independent f64 numeric oracles
+    //! live in `tests/oracle.rs` and `tests/static_curve.rs`.
     //!
-    //! Three kinds of gate live here:
+    //! The deterministic grid covers mixed and compressing track tables, every link and detector,
+    //! bypass, ragged chunks, prefixes of 0, 1, 18 and 40 frames, and hostile words. The seeded
+    //! differentials add extreme parameters, retargets, resets, restores and bypass toggles, dual
+    //! and collapsed, at every supported width. Dispatch witnesses defend the all-wet cost path.
     //!
-    //! * the deterministic grid (`the_settled_body_is_the_base_body_*`, #981 gate 1): the corpus
-    //!   track table, every link mode, both `bypass` values, every detector kind, ramp prefixes of
-    //!   0, 1, 18 and 40 frames, and the hostile words of the brief;
-    //! * the randomized differential (`randomized_differential_*`): seeded blocks with hostile
-    //!   input, parameter extremes, automation that ends mid-block, resets, bypass toggles and every
-    //!   detector kind, dual and collapsed, at `f32`, `Simd4` and `Simd8`;
-    //! * the #1006 scenario digest (`scenario_1006_ramping_prefix_is_pinned`), pinned on the
-    //!   unmodified base before the change it gates. A digest pinned after the change would only
-    //!   prove the change deterministic (the #944 lesson). The earlier slices' digests (#981-#983,
-    //!   #985 and #995) and #982's all-wet grid were retired by #1049 once their slices had landed:
-    //!   the grid and the randomized differentials catch every mutant they caught.
-    //!
-    //! Every comparison is class-A (issue #1065): the same bits, with every NaN read as one value
-    //! through `dsp_reference::class_a`, over rendered words, the recursive words, every coefficient
-    //! word and every ramp field, then the `finish_channel` masks, and the same words again after
-    //! it. Digests fold the same way. A NaN payload may differ only in a block the boundary check
-    //! rejects, which each step asserts, so the fold cannot hide a NaN in an accepted block.
+    //! Comparisons cover rendered words, recursive words, coefficients, parameter/rate ramp
+    //! fields and boundary-check masks, before and after `finish_channel`. Only NaN payloads fold
+    //! through `dsp_reference::class_a`; each NaN-producing channel must be rejected, so folding
+    //! cannot hide a NaN in an accepted block.
 
     use super::{
         Channel, Detector, RAMPING_DUAL_BLOCKS, RAMPING_MONO_BLOCKS, RAMPING_WET_BLOCKS,
@@ -1811,7 +1791,6 @@ mod settled_body_tests {
     use dsp_reference::class_a;
     use effect_contract::LinkMode;
     use lane::{Lane, Simd4};
-    use sha2::{Digest, Sha256};
 
     type Defaults = [[f32; PARAMETER_COUNT]; MAX_WIDTH];
 
@@ -1819,7 +1798,7 @@ mod settled_body_tests {
     const QUANTUM: usize = 128;
     const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
-    /// The kernel before #981: its block split and its one-pass bodies, verbatim.
+    /// One-frame scheduling reference: settled ramps are holds, so advance them unconditionally.
     mod reference {
         use super::super::{Channel, Coef, Detector, Invariants, link_frame, one_frame};
         use effect_contract::LinkMode;
@@ -1837,64 +1816,13 @@ mod settled_body_tests {
             channels: (&mut Channel<L>, &mut Channel<L>),
         ) {
             let (channel_left, channel_right) = channels;
-            let remaining = channel_left
-                .max_remaining()
-                .max(channel_right.max_remaining()) as usize;
-            let ramping = remaining.min(frames);
-            if ramping > 0 {
-                frames_loop::<L, true>(
-                    left,
-                    right,
-                    detector,
-                    0,
-                    ramping,
-                    link,
-                    bypass,
-                    sample_rate,
-                    channel_left,
-                    channel_right,
-                );
-            }
-            if ramping < frames {
-                frames_loop::<L, false>(
-                    left,
-                    right,
-                    detector,
-                    ramping,
-                    frames,
-                    link,
-                    bypass,
-                    sample_rate,
-                    channel_left,
-                    channel_right,
-                );
-            }
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        fn frames_loop<L: Lane, const RAMPING: bool>(
-            left: &mut [f32],
-            right: &mut [f32],
-            detector: Detector<'_>,
-            start: usize,
-            end: usize,
-            link: LinkMode,
-            bypass: bool,
-            sample_rate: u32,
-            channel_left: &mut Channel<L>,
-            channel_right: &mut Channel<L>,
-        ) {
             let width = L::WIDTH;
             let invariants = Invariants::<L>::new(link, bypass);
-            let mut coef_left = Coef::load(&channel_left.words);
-            let mut coef_right = Coef::load(&channel_right.words);
-            for frame in start..end {
-                if RAMPING {
-                    channel_left.advance_ramps(sample_rate);
-                    channel_right.advance_ramps(sample_rate);
-                    coef_left = Coef::load(&channel_left.words);
-                    coef_right = Coef::load(&channel_right.words);
-                }
+            for frame in 0..frames {
+                channel_left.advance_ramps(sample_rate);
+                channel_right.advance_ramps(sample_rate);
+                let coef_left = Coef::load(&channel_left.words);
+                let coef_right = Coef::load(&channel_right.words);
                 let slot = frame * width;
                 let main_left = L::load(&left[slot..]);
                 let main_right = L::load(&right[slot..]);
@@ -1929,53 +1857,11 @@ mod settled_body_tests {
             sample_rate: u32,
             channel_left: &mut Channel<L>,
         ) {
-            let remaining = channel_left.max_remaining() as usize;
-            let ramping = remaining.min(frames);
-            if ramping > 0 {
-                frames_loop_mono::<L, true>(
-                    left,
-                    detector,
-                    0,
-                    ramping,
-                    link,
-                    bypass,
-                    sample_rate,
-                    channel_left,
-                );
-            }
-            if ramping < frames {
-                frames_loop_mono::<L, false>(
-                    left,
-                    detector,
-                    ramping,
-                    frames,
-                    link,
-                    bypass,
-                    sample_rate,
-                    channel_left,
-                );
-            }
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        fn frames_loop_mono<L: Lane, const RAMPING: bool>(
-            left: &mut [f32],
-            detector: Detector<'_>,
-            start: usize,
-            end: usize,
-            link: LinkMode,
-            bypass: bool,
-            sample_rate: u32,
-            channel_left: &mut Channel<L>,
-        ) {
             let width = L::WIDTH;
             let invariants = Invariants::<L>::new(link, bypass);
-            let mut coef_left = Coef::load(&channel_left.words);
-            for frame in start..end {
-                if RAMPING {
-                    channel_left.advance_ramps(sample_rate);
-                    coef_left = Coef::load(&channel_left.words);
-                }
+            for frame in 0..frames {
+                channel_left.advance_ramps(sample_rate);
+                let coef_left = Coef::load(&channel_left.words);
                 let slot = frame * width;
                 let main = L::load(&left[slot..]);
                 let (detected, _) = link_frame(detector, slot, main, main, &invariants);
@@ -2888,7 +2774,7 @@ mod settled_body_tests {
     }
 
     #[test]
-    fn the_settled_body_is_the_base_body_on_the_corpus_table() {
+    fn the_chunked_bodies_match_the_frame_law_on_the_corpus_table() {
         grid_all(&CORPUS_TRACKS, false);
     }
 
@@ -2904,11 +2790,9 @@ mod settled_body_tests {
         [-80.0, 4.0, 18.0, 10.0, 500.0, 24.0, 1.0],
     ];
 
-    /// #985 gate 1's all-wet compressing set, through the collapsed body as well as the dual one:
-    /// with the corpus table (mixed) above, it is also #982's all-wet gate 1 since #1049 retired
-    /// the all-wet grid, whose catch set was this test's.
+    /// The all-wet compressing set exercises both dual and collapsed chunked bodies.
     #[test]
-    fn the_collapsed_settled_body_is_the_base_body_on_the_three_parameter_sets() {
+    fn the_chunked_bodies_match_the_frame_law_on_the_compressing_table() {
         let coverage = grid_all(&COMPRESSING_TRACKS, true);
         assert!(
             coverage.all_wet_settled > 0,
@@ -3193,27 +3077,6 @@ mod settled_body_tests {
         randomized_width::<lane::Simd8>();
     }
 
-    /// Folds a plane into a digest by its class-A words: every NaN as one word (#1065).
-    fn fold(hasher: &mut Sha256, words: &[f32]) {
-        for word in words {
-            hasher.update(class_a::bits(*word).to_le_bytes());
-        }
-    }
-
-    fn fold_state<L: Lane>(hasher: &mut Sha256, channel: &Channel<L>) {
-        for bits in &channel.recursive_bits()[..L::WIDTH] {
-            hasher.update(class_a::word(*bits).to_le_bytes());
-        }
-    }
-
-    fn hex(hasher: Sha256) -> String {
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    }
-
     /// The standing console fixture's first eight compressors
     /// (`fixtures/session/v1/console-sixty-four-track-intended.json`, tracks 0-7): heterogeneous
     /// and all-wet, so every `Simd4` and `Simd8` bank of them takes the all-wet arm (#982).
@@ -3227,262 +3090,4 @@ mod settled_body_tests {
         [-15.0, 6.0, 4.5, 11.0, 130.0, 3.0, 1.0],
         [-16.5, 6.75, 6.0, 12.5, 145.0, 0.0, 1.0],
     ];
-
-    /// One block of the #1006 ramping scenario: its frame count and the events before it.
-    #[derive(Clone, Copy, Default)]
-    struct RideEvents {
-        frames: usize,
-        /// Threshold to `-30` or `-20` dB on lane 1, both channels.
-        threshold: Option<f32>,
-        /// Threshold on lane 1, left channel only.
-        threshold_left: Option<f32>,
-        /// Attack on every lane, both channels.
-        attack: Option<f32>,
-        /// Makeup on every lane, both channels.
-        makeup: Option<f32>,
-        /// Mix on lane 0, both channels.
-        mix: Option<f32>,
-        /// A discontinuity reset before the block (after its events).
-        reset: bool,
-        /// A payload restore of lane 0 with its threshold ramp at `remaining = 0`,
-        /// `current != target`.
-        restore: bool,
-    }
-
-    /// The #1006 schedule: 128 blocks of mixed lengths, so that windows open in one block and
-    /// close in the next, with a threshold ride on one lane, an attack ride on every lane, a
-    /// makeup and mix ride, two discontinuity resets and one restore.
-    fn ride_schedule(wet: bool) -> Vec<RideEvents> {
-        const FRAMES: [usize; 12] = [128, 37, 64, 1, 100, 31, 33, 128, 50, 97, 7, 63];
-        (0..128)
-            .map(|block| {
-                let mut events = RideEvents {
-                    frames: FRAMES[block % FRAMES.len()],
-                    ..RideEvents::default()
-                };
-                if block.is_multiple_of(2) {
-                    events.threshold = Some(if block.is_multiple_of(4) {
-                        -30.0
-                    } else {
-                        -20.0
-                    });
-                }
-                if block % 11 == 3 {
-                    events.threshold_left = Some(-12.5);
-                }
-                if block % 5 == 1 {
-                    events.attack = Some(if block % 10 == 1 { 3.0 } else { 12.0 });
-                }
-                if wet && block % 4 == 1 {
-                    events.makeup = Some(if block % 8 == 1 { 3.0 } else { 0.0 });
-                }
-                if wet && block % 7 == 2 {
-                    events.mix = Some(if block % 14 == 2 { 0.8 } else { 1.0 });
-                }
-                events.reset = block == 51 || block == 90;
-                events.restore = block == 70;
-                events
-            })
-            .collect()
-    }
-
-    /// Applies one block's events to a channel, as `apply_automation` and the resets do.
-    fn apply_ride<L: Lane>(channel: &mut Channel<L>, events: &RideEvents, right: bool) {
-        let width = L::WIDTH;
-        let lane = 1 % width;
-        if let Some(value) = events.threshold {
-            channel.set_parameter_target(0, lane, value, SAMPLE_RATE);
-        }
-        if let (Some(value), false) = (events.threshold_left, right) {
-            channel.set_parameter_target(0, lane, value, SAMPLE_RATE);
-        }
-        for lane in 0..width {
-            if let Some(value) = events.attack {
-                channel.set_parameter_target(3, lane, value, SAMPLE_RATE);
-            }
-            if let Some(value) = events.makeup {
-                channel.set_parameter_target(5, lane, value, SAMPLE_RATE);
-            }
-        }
-        if let Some(value) = events.mix {
-            channel.set_parameter_target(6, 0, value, SAMPLE_RATE);
-        }
-        if events.restore {
-            let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
-            write_channel(&mut bytes, channel, 0);
-            bytes[4..8].copy_from_slice(&(-25.0_f32).to_le_bytes());
-            bytes[8..12].copy_from_slice(&(-15.0_f32).to_le_bytes());
-            bytes[12..16].copy_from_slice(&0_u32.to_le_bytes());
-            validate_channel(&bytes).expect("a legal payload");
-            commit_channel(&bytes, channel, 0, SAMPLE_RATE);
-        }
-        if events.reset {
-            channel.discontinuity_reset(SAMPLE_RATE);
-        }
-    }
-
-    /// Folds every lane's version-1 payload words of one channel, by their class-A words.
-    fn fold_payload<L: Lane>(hasher: &mut Sha256, channel: &Channel<L>) {
-        for lane in 0..L::WIDTH {
-            let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
-            write_channel(&mut bytes, channel, lane);
-            for word in class_a::le_words(&bytes) {
-                hasher.update(word);
-            }
-        }
-    }
-
-    /// What the #1006 scenario reached, for its coverage assertions.
-    #[derive(Default)]
-    struct RideCoverage {
-        /// Blocks that began with a window open.
-        ramping: usize,
-        /// Blocks whose windows closed inside the block, so a settled body followed the prefix.
-        closed_mid_block: usize,
-        /// Blocks that ended with a window still open.
-        open_at_end: usize,
-        /// Discontinuity resets applied while a window was open.
-        resets_mid_ramp: usize,
-        /// Kernel words that were NaN before the boundary check, which the digest folds as one
-        /// value (#1065).
-        nan_words: usize,
-    }
-
-    /// Renders the #1006 scenario for one width, table and link mode, dual and collapsed, and
-    /// folds every kernel word, recursive word, mask, finished word and payload word.
-    fn ride_width<L: Lane>(
-        hasher: &mut Sha256,
-        table: &[[f32; PARAMETER_COUNT]; 8],
-        wet: bool,
-        link: LinkMode,
-        coverage: &mut RideCoverage,
-    ) {
-        let width = L::WIDTH;
-        let schedule = ride_schedule(wet);
-        for group in 0..8 / width {
-            let left_defaults = table_defaults(table, group * width, 0);
-            let right_defaults = table_defaults(table, group * width, 3);
-            let mut dual = (
-                Channel::<L>::new(&left_defaults, SAMPLE_RATE),
-                Channel::<L>::new(&right_defaults, SAMPLE_RATE),
-            );
-            let mut mono = Channel::<L>::new(&left_defaults, SAMPLE_RATE);
-            let mut rng = Rng::new(0x1006 + group as u64);
-            for (block, events) in schedule.iter().enumerate() {
-                let open = dual.0.max_remaining().max(dual.1.max_remaining()) > 0;
-                if events.reset && open {
-                    coverage.resets_mid_ramp += 1;
-                }
-                apply_ride(&mut dual.0, events, false);
-                apply_ride(&mut dual.1, events, true);
-                apply_ride(&mut mono, events, false);
-                let frames = events.frames;
-                let remaining = dual.0.max_remaining().max(dual.1.max_remaining()) as usize;
-                coverage.ramping += usize::from(remaining > 0);
-                coverage.closed_mid_block += usize::from(remaining > 0 && remaining < frames);
-                coverage.open_at_end += usize::from(remaining > frames);
-                let mut left = vec![0.0_f32; frames * width];
-                let mut right = vec![0.0_f32; frames * width];
-                fill(&mut rng, block % PROFILES, width, &mut left);
-                fill(&mut rng, (block + 3) % PROFILES, width, &mut right);
-                let mut plane = left.clone();
-                process_block::<L>(
-                    &mut left,
-                    &mut right,
-                    Detector::Main,
-                    frames,
-                    link,
-                    false,
-                    SAMPLE_RATE,
-                    (&mut dual.0, &mut dual.1),
-                );
-                process_block_mono::<L>(
-                    &mut plane,
-                    Detector::Main,
-                    frames,
-                    link,
-                    false,
-                    SAMPLE_RATE,
-                    &mut mono,
-                );
-                for (words, channel) in [(&mut left, &mut dual.0), (&mut right, &mut dual.1)]
-                    .into_iter()
-                    .chain([(&mut plane, &mut mono)])
-                {
-                    coverage.nan_words += words.iter().filter(|word| word.is_nan()).count();
-                    fold(hasher, words);
-                    fold_state(hasher, channel);
-                    let mask = finish_channel::<L>(words, channel);
-                    hasher.update(mask.to_le_bytes());
-                    // The boundary check's promise, and the place the fold must never reach: no
-                    // finished word is NaN, so no NaN can hide in the digest's finished words.
-                    assert!(
-                        words.iter().all(|word| word.is_finite()),
-                        "a finished word is not finite (block {block}, W{width})"
-                    );
-                    fold(hasher, words);
-                    fold_state(hasher, channel);
-                    fold_payload(hasher, channel);
-                }
-            }
-        }
-    }
-
-    /// #1006 gate 3: the ramping prefix under a threshold ride on one lane, an attack ride on
-    /// every lane, a makeup and mix ride on an all-wet table, discontinuity resets mid-ramp, a
-    /// restored `remaining = 0, current != target` ramp and hostile input, at `f32`, `Simd4` and
-    /// `Simd8`, DualMono and Maximum, dual and collapsed. Every word folds by class-A (#1065).
-    ///
-    /// Pinned on the unmodified batch head (`081fdc6c`), in dev and release, as `162979dd…`, which
-    /// folded NaNs only in the all-wet table's kernel words. #1065 re-pinned it with every NaN
-    /// folded, and only NaN words moved: the same render hashed the old way still gives
-    /// `162979dd…`, and its other 16,280 NaN words (input payloads, quieted signalling NaNs and
-    /// x86's `0xFFC0_0000`, none of them `0x7FC0_0000`) are the only words the fold changes.
-    ///
-    /// That is the fold of every width the 8-lane (AVX2) build has. A 4-lane (NEON/simd128) build
-    /// has no `Simd8`, so its fold of every width is [`SCENARIO_1006_FOUR`] (#1112).
-    const SCENARIO_1006: &str = "bd3d711f86bbd00f015a0ead7e04116daabd154b2b8e9d8ef17dc6e616b7382c";
-    /// The same rides at `f32` and `Simd4` alone, folded in the same order (#1112). Every build
-    /// checks it, so the 8-lane build proves the pin a 4-lane build is held to.
-    const SCENARIO_1006_FOUR: &str =
-        "5d99e861d79206ba012b7cce5a6dee119a0be9b0d7b2e54622a34f8240b6a1cc";
-
-    #[test]
-    fn scenario_1006_ramping_prefix_is_pinned() {
-        let mut hasher = Sha256::new();
-        let mut four = Sha256::new();
-        let mut coverage = RideCoverage::default();
-        for link in [LinkMode::DualMono, LinkMode::Maximum] {
-            for (table, wet) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
-                lane::each_lane!(|L| ride_width::<L>(&mut hasher, table, wet, link, &mut coverage));
-                let mut rides = RideCoverage::default();
-                ride_width::<f32>(&mut four, table, wet, link, &mut rides);
-                ride_width::<Simd4>(&mut four, table, wet, link, &mut rides);
-            }
-        }
-        assert!(coverage.ramping > 0 && coverage.closed_mid_block > 0);
-        assert!(
-            coverage.open_at_end > 0,
-            "some windows must cross a block boundary"
-        );
-        assert!(coverage.resets_mid_ramp > 0, "a reset must land mid-ramp");
-        // #1065's guard that NaN still appears where it should: the hostile NaN inputs still
-        // render NaN kernel words, passed through by a dry lane and propagated by the wet
-        // arithmetic, until the boundary check zeroes their blocks.
-        assert!(
-            coverage.nan_words > 0,
-            "the hostile NaNs must still reach the kernel words"
-        );
-        let four = hex(four);
-        println!("scenario 1006 four-lane digest {four}");
-        assert_eq!(four, SCENARIO_1006_FOUR);
-        let digest = hex(hasher);
-        println!("scenario 1006 digest {digest}");
-        let every_width = if cfg!(target_feature = "avx2") {
-            SCENARIO_1006
-        } else {
-            SCENARIO_1006_FOUR
-        };
-        assert_eq!(digest, every_width);
-    }
 }

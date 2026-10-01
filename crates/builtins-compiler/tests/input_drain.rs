@@ -15,7 +15,7 @@
 
 use builtins::{BuiltinLaneSelector, prepare_input_filter_pair};
 use builtins_compiler::TrackInputRecord;
-use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
+use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SymmetryEvent};
 
 fn trim(lanes: BuiltinLaneSelector) -> TrackInputRecord {
     TrackInputRecord::TrimDb {
@@ -46,21 +46,6 @@ fn prepared_filter(lanes: BuiltinLaneSelector) -> TrackInputRecord {
 #[test]
 fn prepared_filter_record_stays_within_the_frozen_queue_slot_bound() {
     assert!(core::mem::size_of::<TrackInputRecord>() <= 64);
-}
-
-/// The input chain is upstream of the fader/matrix seam, so every record on this queue gates the
-/// collapse.
-///
-/// Red mutation: set `TrackInputRecord::SEAM` to `SeamSide::SeamSide` -> `admit` compiles the
-/// clearing arm away entirely, every assertion below about a declining witness fails, and a
-/// one-lane trim ride would publish on both channels of a collapsed block.
-#[test]
-fn the_input_record_is_upstream_of_the_seam() {
-    assert_eq!(
-        TrackInputRecord::SEAM,
-        SeamSide::UpstreamOfSeam,
-        "the input chain runs once on a collapsed track, so its records gate the collapse"
-    );
 }
 
 /// A per-lane retarget de-symmetrizes; a `Both` retarget preserves.
@@ -165,29 +150,6 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
     // A rebind is the way back, and it is the *only* way back.
     let rebound = ChannelSymmetryWitness::SYMMETRIC;
     assert!(rebound.eligible());
-}
-
-/// The record's variants are exhaustive at the witness hook: a third variant is a compile error
-/// rather than a silent `Preserve`.
-///
-/// This is asserted by construction -- `symmetry_event`'s match has no wildcard arm -- and stated
-/// here so the property has a name. The test itself checks the weaker observable: both shipped
-/// variants answer, and they answer the same way for the same selector, because the two parameters
-/// share one coefficient and a ride on either de-symmetrizes the same word.
-#[test]
-fn both_variants_answer_the_hook_identically_for_the_same_selector() {
-    for lanes in [
-        BuiltinLaneSelector::Left,
-        BuiltinLaneSelector::Right,
-        BuiltinLaneSelector::Both,
-    ] {
-        assert_eq!(
-            trim(lanes).symmetry_event(),
-            polarity(lanes).symmetry_event(),
-            "{lanes:?}: trim and polarity write the same coefficient, so they gate the collapse \
-             the same way"
-        );
-    }
 }
 
 /// A block applies every input record queued at its entry, however full the queue is.

@@ -54,6 +54,11 @@ rate=44100 crossover=80 probe=20 flatness=-5.774936116386891e-1 dB
 
 ## Wave 2
 
+Housekeeping #1124 retires the narrower `lane_identity_across_widths` case; the current
+`heterogeneous_programs_preserve_public_identity` gate keeps its signal, programs, links, widths,
+Left-threshold point and full PCM/state/report comparisons, adding Right-threshold and both
+makeup points and nonvacuity. Recorded mutation results below retain their historical names.
+
 Same procedure: apply, run, record, revert. Every row below was executed once in this session.
 
 | # | mutation | file | test | result |

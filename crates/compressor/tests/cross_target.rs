@@ -11,43 +11,18 @@
 //! `tests/static_curve.rs` is what says the curve is Giannoulis, Massberg and Reiss equation 4.
 
 use compressor::corpus::{CASE_COUNT, CASE_NAMES, POINTS, run_case};
-use sha2::{Digest, Sha256};
-
-fn digest(words: &[u32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for word in words {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
-}
-
-/// The corpus is NaN-free and Inf-free, so the pins survive wasm's NaN canonicalisation (D5).
-///
-/// Claim: a corpus change that makes a case emit NaN or an infinity turns this red.
+/// Every case is finite, has many distinct nonzero words, and differs from the other cases.
+/// This rejects nonfinite output, silent or repetitive renders, and duplicated case dispatch.
 #[test]
-fn the_corpus_is_finite() {
-    let mut out = vec![0_u32; POINTS];
+fn the_corpus_is_finite_and_nonvacuous() {
+    let mut cases = Vec::with_capacity(CASE_COUNT);
     for (case, name) in CASE_NAMES.iter().enumerate() {
+        let mut out = vec![0_u32; POINTS];
         run_case::<f32>(case, &mut out);
         for (index, word) in out.iter().enumerate() {
             let value = f32::from_bits(*word);
             assert!(value.abs() <= f32::MAX, "{name}: word {index} is {value}");
         }
-    }
-}
-
-/// No case is vacuous: each one produces many distinct non-zero values, and the cases differ from
-/// one another. Without this a corpus that rendered silence would agree with itself on every target
-/// and prove nothing.
-///
-/// Claim: a corpus change that silences a case, collapses it to few words, or makes two cases the
-/// same computation turns this red.
-#[test]
-fn no_case_is_vacuous() {
-    let mut digests = Vec::new();
-    for (case, name) in CASE_NAMES.iter().enumerate() {
-        let mut out = vec![0_u32; POINTS];
-        run_case::<f32>(case, &mut out);
         let nonzero = out
             .iter()
             .filter(|word| f32::from_bits(**word) != 0.0)
@@ -56,7 +31,7 @@ fn no_case_is_vacuous() {
             nonzero > POINTS / 2,
             "{name}: only {nonzero} of {POINTS} words are non-zero"
         );
-        let mut distinct: Vec<u32> = out.clone();
+        let mut distinct = out.clone();
         distinct.sort_unstable();
         distinct.dedup();
         assert!(
@@ -64,10 +39,10 @@ fn no_case_is_vacuous() {
             "{name}: only {} distinct words",
             distinct.len()
         );
-        digests.push(digest(&out));
+        assert!(
+            !cases.contains(&out),
+            "{name}: two cases render the same words"
+        );
+        cases.push(out);
     }
-    let mut unique = digests.clone();
-    unique.sort_unstable();
-    unique.dedup();
-    assert_eq!(unique.len(), CASE_COUNT, "two cases render the same words");
 }

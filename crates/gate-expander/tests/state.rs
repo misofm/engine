@@ -147,7 +147,7 @@ fn reset_seeds_gain_open_hold_and_preserves_or_restores_parameters() {
 }
 
 #[test]
-fn active_state_restore_continues_bit_exactly_across_partitions() {
+fn active_state_restore_continues_an_uninterrupted_donor() {
     let values = active_values();
     let source_left = noise(101, 1024, 0.4);
     let source_right = noise(202, 1024, 0.4);
@@ -167,22 +167,13 @@ fn active_state_restore_continues_bit_exactly_across_partitions() {
     let payload = snapshot(donor.as_ref());
     assert_eq!(word(&payload.1, 6 + 3), 47.0_f32.to_bits());
 
-    let mut uninterrupted = prepare(request(&values));
-    let mut expected_left = source_left.clone();
-    let mut expected_right = source_right.clone();
+    let mut uninterrupted = donor;
+    let mut expected_left = source_left[17..].to_vec();
+    let mut expected_right = source_right[17..].to_vec();
     render_scalar_sidechain(
         uninterrupted.as_mut(),
-        &mut expected_left[..17],
-        &mut expected_right[..17],
-        None,
-        17,
-        &spans,
-        0,
-    );
-    render_scalar_sidechain(
-        uninterrupted.as_mut(),
-        &mut expected_left[17..],
-        &mut expected_right[17..],
+        &mut expected_left,
+        &mut expected_right,
         None,
         128,
         &[],
@@ -208,8 +199,8 @@ fn active_state_restore_continues_bit_exactly_across_partitions() {
         &[],
         17,
     );
-    assert_bits_eq(&actual_left, &expected_left[17..], "restored left");
-    assert_bits_eq(&actual_right, &expected_right[17..], "restored right");
+    assert_bits_eq(&actual_left, &expected_left, "restored left");
+    assert_bits_eq(&actual_right, &expected_right, "restored right");
     assert_eq!(
         snapshot(restored.as_ref()),
         snapshot(uninterrupted.as_ref())
@@ -319,7 +310,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut target =
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
-    let prefix_left = packed(&vec![vec![0.01_f32; 17]; NATIVE_LANES]);
+    let prefix_left = packed(&[&[0.01_f32; 17]; NATIVE_LANES]);
     let prefix_right = prefix_left.clone();
     let mut control_prefix_left = prefix_left.clone();
     let mut control_prefix_right = prefix_right.clone();
@@ -366,7 +357,7 @@ fn malformed_final_right_word_leaves_both_channels_unchanged() {
             "bank lane {track} survives malformed right restore"
         );
     }
-    let continuation = packed(&vec![vec![0.01_f32; 17]; NATIVE_LANES]);
+    let continuation = packed(&[&[0.01_f32; 17]; NATIVE_LANES]);
     let mut control_left = continuation.clone();
     let mut control_right = continuation.clone();
     let mut target_left = continuation.clone();
@@ -472,7 +463,7 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut bank =
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
-    let warm_left = packed(&vec![vec![0.01; 17]; NATIVE_LANES]);
+    let warm_left = packed(&[&[0.01; 17]; NATIVE_LANES]);
     let warm_right = warm_left.clone();
     let mut control_warm_left = warm_left.clone();
     let mut control_warm_right = warm_right.clone();
@@ -528,10 +519,10 @@ fn scalar_and_bank_recovery_is_channel_and_lane_local() {
             );
         }
     }
-    let mut packed_left = packed(&vec![vec![0.2; 128]; NATIVE_LANES]);
+    let mut packed_left = packed(&[&[0.2; 128]; NATIVE_LANES]);
     let mut packed_right = packed_left.clone();
     packed_left[3] = f32::INFINITY;
-    let mut control_left = packed(&vec![vec![0.2; 128]; NATIVE_LANES]);
+    let mut control_left = packed(&[&[0.2; 128]; NATIVE_LANES]);
     let mut control_right = control_left.clone();
     let offsets = [0_u32; NATIVE_LANES + 1];
     let control_report = control.process_bank(
@@ -648,8 +639,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
             .unwrap(),
         )
         .unwrap();
-    let mut bank_left = packed(&vec![source_left[17..].to_vec(); NATIVE_LANES]);
-    let mut bank_right = packed(&vec![source_right[17..].to_vec(); NATIVE_LANES]);
+    let mut bank_left = packed(&[&source_left[17..]; NATIVE_LANES]);
+    let mut bank_right = packed(&[&source_right[17..]; NATIVE_LANES]);
     render_bank(&mut *scalar_to_bank, &mut bank_left, &mut bank_right, 128);
     assert_bits_eq(
         &track_of(&bank_left, 3, NATIVE_LANES),
@@ -665,8 +656,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
     // Bank -> scalar: snapshot the same track after a partial bank render and continue it in W1.
     let mut bank =
         prepare_bank_native(&bank_values, LinkMode::DualMono).expect("the build's own width binds");
-    let mut bank_prefix_left = packed(&vec![source_left[..17].to_vec(); NATIVE_LANES]);
-    let mut bank_prefix_right = packed(&vec![source_right[..17].to_vec(); NATIVE_LANES]);
+    let mut bank_prefix_left = packed(&[&source_left[..17]; NATIVE_LANES]);
+    let mut bank_prefix_right = packed(&[&source_right[..17]; NATIVE_LANES]);
     render_bank(
         &mut *bank,
         &mut bank_prefix_left,
@@ -694,8 +685,8 @@ fn scalar_and_bank_state_payloads_interchange_without_changing_audio() {
         &[],
         17,
     );
-    let mut bank_continuation_left = packed(&vec![source_left[17..].to_vec(); NATIVE_LANES]);
-    let mut bank_continuation_right = packed(&vec![source_right[17..].to_vec(); NATIVE_LANES]);
+    let mut bank_continuation_left = packed(&[&source_left[17..]; NATIVE_LANES]);
+    let mut bank_continuation_right = packed(&[&source_right[17..]; NATIVE_LANES]);
     render_bank(
         &mut *bank,
         &mut bank_continuation_left,
@@ -721,7 +712,7 @@ fn bank_restore_of_one_track_does_not_mutate_peers() {
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
     let mut target_bank =
         prepare_bank_native(&values, LinkMode::DualMono).expect("the build's own width binds");
-    let mut left = packed(&vec![vec![0.1; 128]; NATIVE_LANES]);
+    let mut left = packed(&[&[0.1; 128]; NATIVE_LANES]);
     let mut right = left.clone();
     render_bank(&mut *donor_bank, &mut left, &mut right, 128);
     let donor = snapshot_bank(&*donor_bank, 3);

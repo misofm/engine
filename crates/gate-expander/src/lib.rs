@@ -304,7 +304,7 @@ pub const GATE_EXPANDER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 ///
 /// The descriptor stays the contract; this is the same table in the shape
 /// `effect_runtime::params` validates against, so the gate has no domain check of its
-/// own. `descriptor_and_specs_agree` (tests/contract.rs) asserts the two cannot drift.
+/// own. `the_runtime_parameter_specs_agree_with_the_frozen_descriptor` asserts the two cannot drift.
 const GATE_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
     ParameterSpec::continuous(-80.0, 0.0, -40.0),
     ParameterSpec::logarithmic(1.0, 20.0, 4.0),
@@ -650,7 +650,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
     ///
     /// The scan and the lane attribution are `effect_runtime::bank`'s §4.4 forms. The
     /// gain words are scanned as a one-frame block of their own, because a NaN `G` produces a
-    /// perfectly finite output: `exp2_lane` clamps its argument with the D8 `max`/`min`, which
+    /// perfectly finite output: `fast_gain_from_db` clamps its argument with the D8 `max`/`min`, which
     /// swallow NaN, so the output block alone would never show it.
     ///
     /// Recovery is *lane-local and channel-local*, which is where this departs from
@@ -801,7 +801,6 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         channel: usize,
         lane: usize,
         parsed: &LaneRestore,
-        _bytes: &[u8],
     ) -> Result<(), StatePayloadError> {
         self.timing[lane][channel] = parsed.timing;
         self.rederive_lane(channel, lane)
@@ -839,8 +838,8 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         payload::read_header(&layout, input.common).map_err(codec_error)?;
         let left = self.parse_lane(input.left)?;
         let right = self.parse_lane(input.right)?;
-        self.commit_lane(0, lane, &left, input.left)?;
-        self.commit_lane(1, lane, &right, input.right)
+        self.commit_lane(0, lane, &left)?;
+        self.commit_lane(1, lane, &right)
     }
 }
 
@@ -1112,7 +1111,7 @@ fn bind_bank<const NATIVE_ONLY: bool>(
     let metadata = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, first)?;
     let mut defaults = [initial_defaults(first.initial_values)?; MAX_WIDTH];
     let mut same_program = true;
-    for (track, item) in request.requests.iter().copied().enumerate() {
+    for (track, item) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(&GATE_EXPANDER_DESCRIPTOR, item)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;
@@ -1170,7 +1169,7 @@ mod tests {
         ///
         /// Issue #48 forbids a public injection API, so this exists only under `cfg(test)` and is
         /// the only way to reach the case where the *state* is non-finite while the output block
-        /// is not — which is exactly the case `exp2_lane`'s NaN-swallowing clamp creates.
+        /// is not — which is exactly the case `fast_gain_from_db`'s NaN-swallowing clamp creates.
         pub(crate) fn inject_nonfinite_gain(&mut self, lane: usize, channel: usize) {
             lane_set(&mut self.state[channel].gain_db, lane, f32::NAN);
         }
@@ -1355,7 +1354,7 @@ mod tests {
             }
         }
 
-        // The NaN never reaches the output: `exp2_lane`'s D8 clamp swallows it, so `A` is finite
+        // The NaN never reaches the output: `fast_gain_from_db`'s D8 clamp swallows it, so `A` is finite
         // and `z * A` is finite. Only the block-end scan of the gain words sees it.
         for track in 0..lanes {
             for frame in 0..FRAMES {
@@ -1469,9 +1468,11 @@ mod tests {
         let mut donor_right = vec![0.0_f32; continuation_frames * WIDTH];
         let mut restored_left = donor_left.clone();
         let mut restored_right = donor_right.clone();
-        for frame in 0..continuation_frames {
-            for lane in 0..WIDTH {
-                let sample = noise(101 + lane as u64, continuation_frames)[frame];
+        for lane in 0..WIDTH {
+            for (frame, sample) in noise(101 + lane as u64, continuation_frames)
+                .into_iter()
+                .enumerate()
+            {
                 donor_left[frame * WIDTH + lane] = sample;
                 donor_right[frame * WIDTH + lane] = -sample;
                 restored_left[frame * WIDTH + lane] = sample;

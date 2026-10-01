@@ -392,8 +392,7 @@ pub fn builtin_parameter_lattice_points(
     sample_rate: u32,
 ) -> Result<BuiltinLatticePoints, effect_contract::LatticeError> {
     use effect_contract::{
-        AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
-        ParameterMapping, SmoothingRule, canonical_descriptor_decimal,
+        ParameterDomain, ParameterMapping, canonical_descriptor_decimal,
         parameter_lattice_points_parts,
     };
 
@@ -430,37 +429,15 @@ pub fn builtin_parameter_lattice_points(
             ParameterMapping::Linear
         }
     };
-    let parameter = ParameterDescriptor {
-        id: effect_contract::ParameterId(descriptor.id),
-        display_name: descriptor.name,
-        display_unit: "builtin",
+    let points = parameter_lattice_points_parts(
         unit,
         domain,
+        mapping,
         minimum,
         maximum,
         default_value,
-        mapping,
-        automation_rate: AutomationRate::None,
-        channel_policy: match descriptor.scope {
-            BuiltinParameterScope::PerLane => ParameterChannelPolicy::PerLane,
-            BuiltinParameterScope::MatrixShared => ParameterChannelPolicy::Shared,
-        },
-        smoothing: SmoothingRule::None,
-        smoothing_samples: 0,
-        readable: true,
-        automatable: false,
-        enum_choices: &[],
-        lattice: descriptor.lattice,
-    };
-    let points = parameter_lattice_points_parts(
-        parameter.unit,
-        parameter.domain,
-        parameter.mapping,
-        parameter.minimum,
-        parameter.maximum,
-        parameter.default_value,
         &[],
-        parameter.lattice,
+        descriptor.lattice,
         maximum_is_member,
     )?;
     let disabled = descriptor
@@ -2180,44 +2157,21 @@ impl<L: Lane> InputStage<L> {
     /// would be the defect this crate exists to remove -- and it is what a bank is built from, so
     /// the two would have to agree forever.
     fn lane_track(&self, lane: usize) -> PreparedInputTrack {
-        let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
-        let section = |channel: usize, index: usize| -> SvfSection {
-            let coef = &self.coef.section[channel][index];
-            let (m0, m1, m2) = (
-                lane_read::<L>(coef.m0)[lane],
-                lane_read::<L>(coef.m1)[lane],
-                lane_read::<L>(coef.m2)[lane],
-            );
-            let enabled = !(m0 == 1.0 && m1 == 0.0 && m2 == 0.0);
-            SvfSection {
-                c1: lane_read::<L>(coef.c1)[lane],
-                a2: lane_read::<L>(coef.a2)[lane],
-                a3: lane_read::<L>(coef.a3)[lane],
-                k: if enabled { BUTTERWORTH_K } else { 0.0 },
-                m0,
-                m1,
-                m2,
-                enabled,
-            }
-        };
-        PreparedInputTrack {
-            left: InputLane {
-                trim_signed: trim[0],
-                hpf: section(0, 0),
-                lpf: section(0, 1),
-            },
-            right: InputLane {
-                trim_signed: trim[1],
-                hpf: section(1, 0),
-                lpf: section(1, 1),
-            },
-        }
+        self.lane_track_from_sections(lane, &self.coef.section)
     }
 
     fn target_lane_track(&self, lane: usize) -> PreparedInputTrack {
-        let trim = self.coef.trim.map(|value| lane_read::<L>(value)[lane]);
+        self.lane_track_from_sections(lane, &self.filter_target)
+    }
+
+    fn lane_track_from_sections(
+        &self,
+        lane: usize,
+        sections: &[[SvfCoef<L>; 2]; 2],
+    ) -> PreparedInputTrack {
+        let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
         let section = |channel: usize, index: usize| -> SvfSection {
-            let coef = &self.filter_target[channel][index];
+            let coef = &sections[channel][index];
             let (m0, m1, m2) = (
                 lane_read::<L>(coef.m0)[lane],
                 lane_read::<L>(coef.m1)[lane],

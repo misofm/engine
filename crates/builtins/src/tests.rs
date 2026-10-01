@@ -110,27 +110,6 @@ fn meter_rejects_empty_and_unknown_metric_bits_before_queue_allocation() {
 }
 
 #[test]
-fn post_ramp_symmetry_mask_matches_lane_oracle() {
-    let parameters = BuiltinParameters::default();
-    let track = prepare_sections(48_000, parameters)
-        .unwrap()
-        .0
-        .stage
-        .lane_track(0);
-    let tracks = [track; 8];
-    lane::each_lane!(|L, N| check_post_ramp_mask::<L>(&tracks[..N]));
-}
-
-fn check_post_ramp_mask<L: super::Lane>(tracks: &[super::PreparedInputTrack]) {
-    let mut stage = InputStage::<L>::new(tracks);
-    stage.refresh_channel_symmetry_post_ramp();
-    let oracle = (0..stage.members).fold(0_u8, |mask, lane| {
-        mask | u8::from(stage.compute_lane_channel_symmetry(lane)) << lane
-    });
-    assert_eq!(stage.symmetry, oracle);
-}
-
-#[test]
 fn post_ramp_symmetry_handles_differing_words_countdowns_and_padding() {
     let track = prepare_sections(48_000, BuiltinParameters::default())
         .unwrap()

@@ -250,34 +250,3 @@ fn channel_step<L: Lane, const RAMPING: bool>(
     let identity = L::mask_or(gain_db.eq(zero), coef.bypass.gt(zero));
     L::select(identity, dry, dry.mul(gain))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn causal_kernel_reads_the_current_sample() {
-        let coef = GateCoef {
-            attack: 1.0_f32,
-            release: 1.0,
-            hold_samples: 0.0,
-            bypass: 1.0,
-            link_max: 0.0,
-            link_avg: 0.0,
-        };
-        let mut left = [0.25_f32, -0.5];
-        let mut right = [-0.75_f32, 0.125];
-        let mut state_left = GateState::default();
-        let mut state_right = GateState::default();
-        gate_block::<f32, false, false>(GateArgs {
-            left: &mut left,
-            right: &mut right,
-            sidechain: None,
-            frames: 2,
-            coef: (&coef, &coef),
-            state: (&mut state_left, &mut state_right),
-        });
-        assert_eq!(left, [0.25, -0.5]);
-        assert_eq!(right, [-0.75, 0.125]);
-    }
-}

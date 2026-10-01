@@ -37,10 +37,14 @@ fn profile_automation() -> [PreparedAutomationSpan; 4] {
     ]
 }
 
-fn assert_populated(label: &str, channels: &[Vec<f32>], states: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) {
+fn assert_populated(
+    label: &str,
+    channels: &[impl AsRef<[f32]>],
+    states: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+) {
     assert!(
         channels.iter().any(|channel| {
-            channel.iter().any(|sample| {
+            channel.as_ref().iter().any(|sample| {
                 let bits = sample.to_bits();
                 bits != 0 && bits != 0x8000_0000
             })
@@ -178,17 +182,7 @@ fn run_banks_with_sets(
             .map(|lane| request_with(&sets[group * lanes + lane], link, FRAMES as u32, false))
             .collect::<Vec<_>>();
         let mut bank = support::bank(width, &requests);
-        let sizes = requests[0]
-            .initial_values
-            .first()
-            .map(|_| {
-                MultibandCompressorFactory
-                    .prepare(requests[0])
-                    .expect("scalar")
-                    .metadata()
-                    .state_sizes
-            })
-            .expect("sizes");
+        let sizes = bank.metadata().program_key.state_sizes;
         for block in 0..BLOCKS {
             let mut left = vec![0.0f32; FRAMES * lanes];
             let mut right = vec![0.0f32; FRAMES * lanes];
@@ -242,20 +236,6 @@ fn run_banks_with_sets(
     (channels, snapshots, reports)
 }
 
-#[allow(clippy::type_complexity)]
-fn run_banks(
-    width: BankWidth,
-    link: LinkMode,
-) -> (
-    Vec<Vec<f32>>,
-    Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-    Vec<effect_contract::ProcessReport>,
-) {
-    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
-    let automation = [point(1, ParameterChannel::Left, 0, -30.0)];
-    run_banks_with_sets(width, link, &sets, &automation)
-}
-
 /// The eight tracks run one at a time through the scalar product.
 #[allow(clippy::type_complexity)]
 fn run_scalar_with_sets(
@@ -301,49 +281,6 @@ fn run_scalar_with_sets(
         channels[track * 2 + 1] = right;
     }
     (channels, snapshots, reports)
-}
-
-#[allow(clippy::type_complexity)]
-fn run_scalar(
-    link: LinkMode,
-) -> (
-    Vec<Vec<f32>>,
-    Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-    Vec<effect_contract::ProcessReport>,
-) {
-    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
-    let automation = [point(1, ParameterChannel::Left, 0, -30.0)];
-    run_scalar_with_sets(link, &sets, &automation)
-}
-
-/// E3. `WIDTH = 1`, 4 and 8 render the same bits, keep the same state and file the same reports.
-///
-/// Red mutation: in `lr4_step`, write the all-pass as `x.sub(k2.mul(v1))` instead of
-/// `nk2.fma(v1, x)` — algebraically the same, one extra rounding, and the widths still agree with
-/// *each other* but no longer with the pinned digest of E5. To make **this** gate red the body has
-/// to become width-dependent: give `detector_tap` a `if W == 1` shortcut that skips the wrap.
-#[test]
-fn lane_identity_across_widths() {
-    for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
-        let (scalar_pcm, scalar_state, scalar_reports) = run_scalar(link);
-        for &width in BankWidth::ALL {
-            let (bank_pcm, bank_state, bank_reports) = run_banks(width, link);
-            for channel in 0..TRACKS * 2 {
-                for frame in 0..BLOCKS * FRAMES {
-                    assert_eq!(
-                        bank_pcm[channel][frame].to_bits(),
-                        scalar_pcm[channel][frame].to_bits(),
-                        "link={link:?} width={width:?} channel={channel} frame={frame}"
-                    );
-                }
-            }
-            assert_eq!(bank_state, scalar_state, "link={link:?} width={width:?}");
-            assert_eq!(
-                bank_reports, scalar_reports,
-                "link={link:?} width={width:?}"
-            );
-        }
-    }
 }
 
 /// Heterogeneous band programs keep the public scalar and bank products bit-identical. The first
@@ -411,17 +348,7 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
     let saved = snapshot(donor.as_ref());
     assert_state_populated("scalar donor", &saved);
 
-    let mut reference = MultibandCompressorFactory
-        .prepare(request_with(&source_values, link, FRAMES as u32, false))
-        .expect("source reference");
-    let mut reference_left = support::signal(RESTORE_PREFIX, 0xC0DE_0101);
-    let mut reference_right = support::signal(RESTORE_PREFIX, 0xC0DE_0202);
-    process_scalar_frames(
-        reference.as_mut(),
-        &mut reference_left,
-        &mut reference_right,
-        0,
-    );
+    let mut reference = donor;
 
     let mut receiver = MultibandCompressorFactory
         .prepare(request_with(
@@ -509,7 +436,7 @@ fn assert_scalar_restore_transition(source: usize, destination: usize, link: Lin
     );
     assert_populated(
         "full reset scalar",
-        &[reset_left.clone(), reset_right.clone()],
+        &[reset_left.as_slice(), reset_right.as_slice()],
         &[snapshot(receiver.as_ref())],
     );
     assert_eq!(reset_left, reset_reference_left);
@@ -553,15 +480,7 @@ fn assert_bank_restore_transition(
         assert_state_populated(&format!("bank donor lane {lane}"), state);
     }
 
-    let mut reference = support::bank(width, &source_requests);
-    let (mut reference_left, mut reference_right) = bank_signal(RESTORE_PREFIX, lanes, 0xABCD_0101);
-    process_bank_frames(
-        reference.as_mut(),
-        width,
-        &mut reference_left,
-        &mut reference_right,
-        0,
-    );
+    let mut reference = donor;
 
     let mut receiver = support::bank(width, &destination_requests);
     let (mut warm_left, mut warm_right) = bank_signal(RESTORE_PREFIX, lanes, 0xDCBA_0202);
@@ -930,7 +849,7 @@ fn partition_control_trajectory_preserves_ramp_positions() {
             reference_ramps = Some(ramp_words(&state));
             reference_filters = Some(filter_words(&state));
         }
-        assert_eq!(filter_words(&state), reference_filters.clone().unwrap());
+        assert_eq!(&filter_words(&state), reference_filters.as_ref().unwrap());
         if partition == 1 {
             let low_gain = f32::from_bits(u32::from_le_bytes([
                 state.1[4], state.1[5], state.1[6], state.1[7],

@@ -270,14 +270,14 @@ pub fn assert_bits_eq(actual: &[f32], expected: &[f32], context: &str) {
 }
 
 /// Interleaves one per-track signal per lane into one AoSoA block, as wide as `samples` is long.
-pub fn packed(samples: &[Vec<f32>]) -> Vec<f32> {
+pub fn packed(samples: &[impl AsRef<[f32]>]) -> Vec<f32> {
     let width = samples.len();
-    let frames = samples[0].len();
-    assert!(samples.iter().all(|track| track.len() == frames));
+    let frames = samples[0].as_ref().len();
+    assert!(samples.iter().all(|track| track.as_ref().len() == frames));
     let mut packed = vec![0.0; frames * width];
     for frame in 0..frames {
         for track in 0..width {
-            packed[frame * width + track] = samples[track][frame];
+            packed[frame * width + track] = samples[track].as_ref()[frame];
         }
     }
     packed

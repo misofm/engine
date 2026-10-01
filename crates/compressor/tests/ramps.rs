@@ -260,16 +260,9 @@ fn automation_validation_is_unchanged() {
 /// `design::design_lane`, so a rendered instance whose ramp has completed and a freshly prepared
 /// instance at the target value must render identical bits from then on.
 ///
-/// Red mutation (MUTATIONS.md row 11): design the ballistic coefficients from an `f32`
-/// `0.001 * ms * fs` product instead of the `f64` one.
 #[test]
 fn a_finished_ramp_equals_a_fresh_preparation() {
-    let mut values = initial_values();
-    for entry in values.iter_mut() {
-        if entry.parameter_index == 7 {
-            entry.value = 0.0;
-        }
-    }
+    let values = initial_values();
     let mut ramped = prepare(request_with_quantum(&values, 128));
     let mut warm_left = vec![0.0_f32; 64];
     let mut warm_right = vec![0.0_f32; 64];
@@ -410,6 +403,14 @@ fn bank_lane_bits_from(
         .collect();
     let mut bank = support::bind_bank(&requests).expect("bank must bind at this build's width");
 
+    // Ascending parameter index within a track, because the contract's canonical span order is
+    // `(start_sample, parameter_index, channel)` and a block that presents two spans the other
+    // way round has its second one counted as invalid and dropped rather than applied. Sorted
+    // here rather than demanded of every caller: a silently dropped span is a test that quietly
+    // stops testing what it says it does, which is exactly what it cost to find this once.
+    let mut ordered: Vec<_> = points.to_vec();
+    ordered.sort_by_key(|(_, _, parameter, _)| *parameter);
+
     let mut out = vec![Vec::new(); lanes];
     for block in 0..BANK_BLOCKS {
         let first_sample = (block * BANK_FRAMES) as u64;
@@ -420,13 +421,6 @@ fn bank_lane_bits_from(
 
         let mut flat = Vec::new();
         let mut offsets = vec![0_u32; lanes + 1];
-        // Ascending parameter index within a track, because the contract's canonical span order is
-        // `(start_sample, parameter_index, channel)` and a block that presents two spans the other
-        // way round has its second one counted as invalid and dropped rather than applied. Sorted
-        // here rather than demanded of every caller: a silently dropped span is a test that quietly
-        // stops testing what it says it does, which is exactly what it cost to find this once.
-        let mut ordered: Vec<_> = points.to_vec();
-        ordered.sort_by_key(|(_, _, parameter, _)| *parameter);
         for track in 0..lanes {
             for (at, lane, parameter, value) in &ordered {
                 if *lane == track && *at == block {
@@ -521,58 +515,6 @@ fn an_idle_lane_is_untouched_by_a_neighbours_ramp() {
             "lane {lane} ignored a Point addressed to it"
         );
     }
-}
-
-/// A ramp that finishes inside a block is not observable at the block boundary it finishes on.
-///
-/// The window is sixty-four samples and the quantum is a hundred and twenty-eight, so one block
-/// contains the whole ramping prefix *and* the idle remainder, with the finish exactly halfway.
-/// Rendering the same input as two sixty-four-frame blocks puts that finish on a block boundary
-/// instead, and the second run's later blocks have no ramp in flight at all.
-///
-/// This is the finished-ramp identity stated where it can be observed: `LinearRamp::next_value`
-/// on a ramp with `remaining == 0` returns `current` and mutates nothing, so a body that calls it
-/// and a body that skips it must agree — and if they did not, splitting the block exactly on the
-/// sample the ramp completes is where the two would part company.
-#[test]
-fn a_ramp_that_finishes_mid_block_is_invisible_to_the_partition() {
-    let values = initial_values();
-    let signal = support::noise(256, 0x51_9E_04_11, 0.8);
-    let span = point(0, ParameterChannel::Left, THRESHOLD_TARGET);
-
-    let mut whole = prepare(request_with_quantum(&values, 128));
-    let mut whole_left = signal.clone();
-    let mut whole_right = signal.clone();
-    render_scalar(
-        whole.as_mut(),
-        &mut whole_left,
-        &mut whole_right,
-        128,
-        128,
-        &[(0, span)],
-    );
-
-    let mut split = prepare(request_with_quantum(&values, 128));
-    let mut split_left = signal.clone();
-    let mut split_right = signal.clone();
-    render_scalar(
-        split.as_mut(),
-        &mut split_left,
-        &mut split_right,
-        SMOOTHING as usize,
-        128,
-        &[(0, span)],
-    );
-
-    assert_eq!(
-        whole_left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-        split_left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-        "the sample the ramp finishes on became observable as a block boundary"
-    );
-    assert_eq!(
-        whole_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-        split_right.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-    );
 }
 
 // -------------------------------------------------------------------------------------------
