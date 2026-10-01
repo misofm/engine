@@ -595,6 +595,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Compile builtins-compiler tests with default features
+        run: cargo test --locked -p builtins-compiler --no-run
       # Every DSP crate moves to test-debug-b; audit/bench/console-workload/wasm-* move to
       # audit-native and wasm-guests in release. Explicit --features (design §10 finding 1): a
       # local reproduction must name the same features to compile the same program. Dev-dependency
