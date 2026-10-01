@@ -134,24 +134,12 @@ pub fn estimate_session_resources(
     vector!(session.routes, crate::Route, "$.routes");
     vector!(session.automation, crate::Automation, "$.automation");
     for track in &session.tracks {
-        let path = "$.tracks.console";
-        let bytes = checked_mul(
-            count(track.console.len(), path, &mut errors),
-            size::<crate::ConsoleEntry>(),
-            path,
-            &mut errors,
+        vector!(track.console, crate::ConsoleEntry, "$.tracks.console");
+        vector!(
+            track.inserts.effects,
+            crate::Effect,
+            "$.tracks.inserts.effects"
         );
-        model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
-        largest_model_allocation = largest_model_allocation.max(bytes);
-        let path = "$.tracks.inserts.effects";
-        let bytes = checked_mul(
-            count(track.inserts.effects.len(), path, &mut errors),
-            size::<crate::Effect>(),
-            path,
-            &mut errors,
-        );
-        model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
-        largest_model_allocation = largest_model_allocation.max(bytes);
         let params = track.console.iter().map(|entry| entry.params.len()).chain(
             track
                 .inserts
@@ -172,15 +160,11 @@ pub fn estimate_session_resources(
         }
     }
     for automation in &session.automation {
-        let path = "$.automation.segments";
-        let bytes = checked_mul(
-            count(automation.segments.len(), path, &mut errors),
-            size::<crate::AutomationSegment>(),
-            path,
-            &mut errors,
+        vector!(
+            automation.segments,
+            crate::AutomationSegment,
+            "$.automation.segments"
         );
-        model_vector_bytes = checked_add(model_vector_bytes, bytes, path, &mut errors);
-        largest_model_allocation = largest_model_allocation.max(bytes);
     }
 
     let index_node_bytes = checked_mul(entity_count, 128, "$.compiled_indexes", &mut errors);

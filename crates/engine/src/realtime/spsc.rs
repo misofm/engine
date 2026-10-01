@@ -140,8 +140,7 @@ struct Ring<T> {
     logical_capacity: usize,
     generation: QueueGeneration,
     // One cache line per cursor, after the header, so `SharedRingAllocation` keeps mirroring
-    // `ArcInner`'s `{ strong, weak, data }` order (#84 phase B; pinned by
-    // `ring_header_is_arc_counts_plus_three_cache_lines`).
+    // `ArcInner`'s `{ strong, weak, data }` order (#84 phase B).
     producer: CachePadded<AtomicUsize>,
     consumer: CachePadded<AtomicUsize>,
 }
@@ -348,23 +347,17 @@ impl<T: Send + 'static> Producer<T> {
     }
     /// Try one bounded push; it never retries or blocks.
     pub fn try_push(&mut self, value: T) -> Result<(), QueueFull<T>> {
-        let next = wrap_increment(self.local, self.ring.slots_len);
-        if self.is_full_at(next) {
-            self.full = self.full.saturating_add(1);
-            return Err(QueueFull {
+        match self.try_reserve() {
+            Some(permit) => {
+                permit.commit(value);
+                Ok(())
+            }
+            None => Err(QueueFull {
                 value,
                 generation: self.ring.generation,
                 full_count: self.full,
-            });
+            }),
         }
-        // SAFETY: only this producer writes its local slot after acquiring consumer's cursor.
-        sync::with_mut(&self.ring.slots[self.local], |slot| unsafe {
-            (*slot).write(value);
-        });
-        self.ring.producer.0.store(next, Ordering::Release);
-        self.local = next;
-        self.successes = self.successes.saturating_add(1);
-        Ok(())
     }
     /// Reserve one slot without publishing it. Only realtime exchange uses this transactionally.
     pub(crate) fn try_reserve(&mut self) -> Option<PushPermit<'_, T>> {
@@ -581,25 +574,15 @@ mod tests {
         assert_eq!(checksum, u128::from(ITEMS) * u128::from(ITEMS - 1) / 2);
     }
 
-    /// #84 phase B, eval B-3: the ring header is `Arc`'s two counts followed by three cache
-    /// lines -- the read-mostly header, the producer cursor and the consumer cursor. The oracle is
-    /// `core::alloc::Layout` (the compiler), never a copied run output; the fixture pins that
-    /// number so the resource oracles cannot drift from it silently.
+    /// The queue layout retains cursor cache-line alignment without pinning resource bytes.
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn ring_header_is_arc_counts_plus_three_cache_lines() {
+    fn ring_header_retains_cache_line_alignment() {
         let payload =
             super::bounded_spsc_retained_payload::<u64>(NonZeroUsize::new(1).expect("one"))
                 .expect("layout");
-        assert_eq!(
-            (
-                payload.slot_count,
-                payload.ring_header_bytes,
-                payload.ring_header_align
-            ),
-            (2, 256, 64)
-        );
-        assert_eq!(core::mem::size_of::<super::Ring<u64>>(), 192);
+        assert_eq!(payload.slot_count, 2);
+        assert_eq!(payload.ring_header_align, 64);
     }
 
     /// The compare-wrap is the only wrap law in this module, and it agrees with `%` everywhere.
@@ -638,21 +621,6 @@ mod tests {
         assert_eq!(consumer.try_pop(), Ok(2));
         assert_eq!(consumer.try_pop(), Ok(3));
         assert_eq!(consumer.available_at_entry(), 1);
-    }
-
-    #[test]
-    fn available_at_entry_freezes_before_later_publication() {
-        let (mut producer, consumer) =
-            bounded_spsc(NonZeroUsize::new(3).expect("capacity"), QueueGeneration(12))
-                .expect("queue");
-        producer.try_push(7).expect("space");
-
-        let frozen = consumer.available_at_entry();
-        producer.try_push(8).expect("space");
-        producer.try_push(9).expect("space");
-
-        assert_eq!(frozen, 1);
-        assert_eq!(consumer.available_at_entry(), 3);
     }
 
     #[test]

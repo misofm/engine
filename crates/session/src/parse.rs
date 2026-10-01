@@ -97,19 +97,7 @@ impl<'i> Parser<'i> {
     }
 
     fn keys(&mut self, table: TableRef<'_>, allowed: &[&str], path: &DiagnosticPath<'_>) {
-        for entry in table.table.iter_mapped(self.code_map, table.offset) {
-            let key = entry.value.key;
-            let name = key.value.as_str();
-            if !allowed.contains(&name) {
-                let span = code_span(self.code_map, key.offset);
-                self.error_at(
-                    DiagnosticCode::UnknownField,
-                    path.key(name),
-                    span,
-                    "key is not part of SESSION_SCHEMA_VERSION_V1",
-                );
-            }
-        }
+        self.keys_explained(table, allowed, &[], path);
     }
 
     /// [`Self::keys`] for an object where some unknown keys deserve a specific reason: a retired

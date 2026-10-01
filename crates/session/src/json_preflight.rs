@@ -153,15 +153,7 @@ impl Scanner<'_> {
 
     /// Materialize the structured path to the value currently being scanned.
     fn current_path(&self) -> DiagnosticPath {
-        let mut path = DiagnosticPath::root();
-        for segment in &self.path {
-            path = match segment {
-                PathSegment::Field(value) => path.key(value),
-                PathSegment::Index(value) => path.index(*value),
-                PathSegment::Id(_) => unreachable!(),
-            };
-        }
-        path
+        DiagnosticPath::from_segments(self.path.clone())
     }
 
     fn string(&mut self) -> Result<&str, ()> {

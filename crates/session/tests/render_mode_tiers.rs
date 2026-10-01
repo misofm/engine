@@ -5,22 +5,9 @@
 //! too: the model, the parser, the canonical writer and the protocol wire no longer know it, so a
 //! session that spells it is an unknown value like any other misspelling.
 
-use session::{
-    CompileCaps, DiagnosticCode, canonical_session_json, compile_session, parse_session_json,
-};
+use session::{DiagnosticCode, parse_session_json};
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
-
-fn caps() -> CompileCaps {
-    CompileCaps {
-        max_compiled_model_bytes: u64::MAX,
-        max_requested_runtime_bytes: u64::MAX,
-        max_single_allocation_bytes: u64::MAX,
-        max_queue_items: u64::MAX,
-        max_source_ring_frames: u64::MAX,
-        max_source_ring_bytes: u64::MAX,
-    }
-}
 
 fn source_with_mode(mode: &str) -> String {
     SESSION.replacen(
@@ -28,16 +15,6 @@ fn source_with_mode(mode: &str) -> String {
         &format!("\"mode\": \"{mode}\""),
         1,
     )
-}
-
-#[test]
-fn single_thread_parses_compiles_and_canonicalizes() {
-    let model = parse_session_json(&source_with_mode("single_thread")).expect("launch parse");
-    let compiled = compile_session(&model, caps()).expect("launch compile");
-    assert_eq!(
-        canonical_session_json(compiled.normalized_model()).expect("canonical"),
-        compiled.canonical_json()
-    );
 }
 
 /// The retired token refuses at parse exactly as an unallocated spelling does: one

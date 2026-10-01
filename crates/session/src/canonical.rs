@@ -138,7 +138,7 @@ impl ModelVisitor for JsonWriter {
     }
     fn u64(&mut self, key: FieldKey, value: u64) -> Result<(), Self::Error> {
         self.field(key);
-        write_quoted(&mut self.output, &value.to_string());
+        let _ = write!(self.output, "\"{value}\"");
         Ok(())
     }
     fn source_bit_depth(

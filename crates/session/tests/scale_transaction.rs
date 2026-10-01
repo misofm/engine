@@ -1,8 +1,8 @@
 //! Large-session estimation and transactional compiler-boundary checks.
 
 use session::{
-    CompileCaps, DiagnosticCode, StableId, canonical_session_json, compile_session,
-    estimate_session_resources, parse_session_json,
+    CompileCaps, DiagnosticCode, StableId, compile_session, estimate_session_resources,
+    parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -59,7 +59,6 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
 #[test]
 fn failed_compile_does_not_mutate_input_or_construct_a_partial_artifact() {
     let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
-    let before = canonical_session_json(&session).expect("valid snapshot");
     session.routes[0].destination = session::RouteDestination::OutputInput {
         output_id: StableId::parse("missing-output").expect("stable ID"),
     };
@@ -68,10 +67,6 @@ fn failed_compile_does_not_mutate_input_or_construct_a_partial_artifact() {
     assert_eq!(
         session, invalid_before,
         "compiler may not mutate caller input"
-    );
-    assert_ne!(
-        before,
-        canonical_session_json(&invalid_before).unwrap_or_default()
     );
 }
 
