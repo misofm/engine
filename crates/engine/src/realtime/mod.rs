@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn move_only_spsc_preserves_full_value_and_drops_once_after_transfer() {
+    fn move_only_spsc_preserves_full_value_and_transfers_to_consumer() {
         #[derive(Debug)]
         struct MoveOnly(u32);
         let (mut producer, mut consumer) =

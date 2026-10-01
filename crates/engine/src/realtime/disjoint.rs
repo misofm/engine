@@ -1003,30 +1003,32 @@ mod tests {
         let (arena, leases) = build.finish().expect("valid lease set");
         let mut leases = leases;
         for round in 0..ROUNDS {
-            let handles: Vec<_> = leases
-                .drain(..)
-                .enumerate()
-                .map(|(index, mut lease)| {
-                    let buffers = owned[index].clone();
-                    std::thread::spawn(move || {
-                        let tag = (round * LEASES + index) as f32;
-                        for (position, buffer) in buffers.iter().enumerate() {
-                            // Stagger the writes so they overlap rather than serialise.
-                            for _ in 0..(index * 32 + position * 8) {
-                                core::hint::spin_loop();
+            leases = std::thread::scope(|scope| {
+                let handles: Vec<_> = leases
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, mut lease)| {
+                        let buffers = &owned[index];
+                        scope.spawn(move || {
+                            let tag = (round * LEASES + index) as f32;
+                            for (position, buffer) in buffers.iter().enumerate() {
+                                // Stagger the writes so they overlap rather than serialise.
+                                for _ in 0..(index * 32 + position * 8) {
+                                    core::hint::spin_loop();
+                                }
+                                for plane in 0..2 {
+                                    lease.write(plane, *buffer).fill(tag);
+                                }
                             }
-                            for plane in 0..2 {
-                                lease.write(plane, *buffer).fill(tag);
-                            }
-                        }
-                        lease
+                            lease
+                        })
                     })
-                })
-                .collect();
-            leases = handles
-                .into_iter()
-                .map(|handle| handle.join().expect("lease writer"))
-                .collect();
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("lease writer"))
+                    .collect()
+            });
             for (index, buffers) in owned.iter().enumerate() {
                 let tag = (round * LEASES + index) as f32;
                 for buffer in buffers {
