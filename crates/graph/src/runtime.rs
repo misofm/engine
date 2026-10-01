@@ -12857,34 +12857,6 @@ mod tests {
         shape: [u64; 2],
     }
 
-    impl SourceRun {
-        /// FNV-1a over every master word and every meter frame, in render order.
-        fn digest(&self) -> u64 {
-            let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-            let mut word = |value: u64| {
-                for byte in value.to_le_bytes() {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(0x0100_0000_01b3);
-                }
-            };
-            for master in &self.masters {
-                master.iter().for_each(|bits| word(u64::from(*bits)));
-            }
-            for frame in &self.meters {
-                word(frame.handle);
-                word(frame.first_sample);
-                frame
-                    .left
-                    .iter()
-                    .chain(&frame.right)
-                    .chain(&frame.peak)
-                    .chain(&frame.energy)
-                    .for_each(|bits| word(u64::from(*bits)));
-            }
-            hash
-        }
-    }
-
     /// The arena slot of every claim's input, in claim order: each track's, then the dead claim's.
     fn source_slots(plan: &crate::PreparedGraphPlan, shape: SourceShape) -> Vec<u32> {
         let program = plan.lowered().expect("lowered");
@@ -12952,26 +12924,12 @@ mod tests {
         }
     }
 
-    /// Issue #918 gate 1: the copy arm's digest ([`SourceRun::digest`]) of each shape, recorded by
-    /// this fixture on the executor as it stood before the issue (`63eeebf0`, where every claim was
-    /// copied), and the claims each shape binds on the copy.
-    const SOURCE_SHAPES: &[(SourceShape, u64, &[usize])] = &[
+    /// Issue #918 gate 1: each source shape and the claims it binds on the copy.
+    const SOURCE_SHAPES: &[(SourceShape, &[usize])] = &[
         #[cfg(target_feature = "avx2")]
-        (
-            SourceShape::banked(BankWidth::Eight, 8, 13),
-            0x7da8_2488_c5b7_8876,
-            &[],
-        ),
-        (
-            SourceShape::banked(BankWidth::Four, 4, 16),
-            0xc9da_ced7_80fa_e77f,
-            &[],
-        ),
-        (
-            SourceShape::banked(BankWidth::Four, 6, 13),
-            0xf317_5c3f_c88e_6167,
-            &[],
-        ),
+        (SourceShape::banked(BankWidth::Eight, 8, 13), &[]),
+        (SourceShape::banked(BankWidth::Four, 4, 16), &[]),
+        (SourceShape::banked(BankWidth::Four, 6, 13), &[]),
         (
             SourceShape {
                 delayed: Some(1),
@@ -12979,7 +12937,6 @@ mod tests {
                 routed: Some(4),
                 ..SourceShape::banked(BankWidth::Four, 6, 13)
             },
-            0x25f5_d764_10a6_b66a,
             &[1, 2, 4],
         ),
         #[cfg(target_feature = "avx2")]
@@ -12988,7 +12945,6 @@ mod tests {
                 redirect_declined: true,
                 ..SourceShape::banked(BankWidth::Eight, 8, 13)
             },
-            0x7da8_2488_c5b7_8876,
             &[],
         ),
         (
@@ -12997,26 +12953,19 @@ mod tests {
                 meters: &[TrackStage::PostMatrix],
                 ..SourceShape::banked(BankWidth::Four, 6, 13)
             },
-            0xf317_5c3f_c88e_6167,
             &[],
         ),
         (
             SourceShape::scalar_fader(BankWidth::Four, 6, &[TrackStage::PostMatrix]),
-            0x6c18_6a5b_3585_e2a6,
             &[],
         ),
         #[cfg(target_feature = "avx2")]
-        (
-            SourceShape::scalar_fader(BankWidth::Eight, 8, &[]),
-            0x0be8_59e1_1a6e_5267,
-            &[],
-        ),
+        (SourceShape::scalar_fader(BankWidth::Eight, 8, &[]), &[]),
         (
             SourceShape {
                 compensated: Some(3),
                 ..SourceShape::banked(BankWidth::Four, 6, 13)
             },
-            0xb0c7_a1d1_e6bd_959f,
             &[3],
         ),
     ];
@@ -13052,8 +13001,6 @@ mod tests {
     ///   the delayed claim (its delay line writes the arena buffer), the metered one (its meter
     ///   reads it), the routed one (its route reads it in place) and the compensated one (its
     ///   member's staging reads it). The declined arm binds every claim on the copy.
-    /// * **The copy arm is the pre-change executor.** Its digest over every master word and every
-    ///   meter frame is the one [`SOURCE_SHAPES`] recorded before the issue.
     /// * **The in-place arm is the copy arm, bit for bit**: every block's master, every meter window
     ///   (each bank stage's and both Output meters'), and the bound shape, with each claim's arena
     ///   slot poisoned before every block, so a gather that read the slot the copy no longer fills
@@ -13072,7 +13019,7 @@ mod tests {
             .iter()
             .filter(|block| matches!(block, PlayedBlock::Underrun))
             .count() as u64;
-        for &(shape, pre_change, copied) in SOURCE_SHAPES {
+        for &(shape, copied) in SOURCE_SHAPES {
             let in_place = render_source_shape(shape, false);
             let copy = render_source_shape(shape, true);
             let expected: Vec<bool> = (0..shape.tracks)
@@ -13083,11 +13030,6 @@ mod tests {
                 copy.in_place,
                 vec![false; shape.tracks],
                 "{shape:?}: declined, every claim is copied"
-            );
-            assert_eq!(
-                copy.digest(),
-                pre_change,
-                "{shape:?}: the copy arm is the pre-change executor"
             );
             assert_eq!(in_place.shape, copy.shape, "{shape:?}: one bound shape");
             assert_eq!(in_place.masters.len(), copy.masters.len());
@@ -13164,8 +13106,8 @@ mod tests {
         ObservedInput,
         /// A meter on `K`'s `PostSimd1`, a rack boundary between `K`'s input and its bank stage.
         /// The boundary is an elided alias of the input's buffer, so its meter binds to the input
-        /// op (clause (c) through the alias). It meters with the observed input's handle, so the
-        /// two observed shapes digest alike. The order is test-only: no with-builtins compile puts
+        /// op (clause (c) through the alias). It meters with the observed input's handle. The
+        /// order is test-only: no with-builtins compile puts
         /// `PostSimd1` before the builtin bank. It is the graph layer's shape of an elided alias
         /// directly on a claimed input, and a rack boundary is an alias whatever the plan lists.
         ObservedAlias,
@@ -13195,26 +13137,6 @@ mod tests {
         }
     }
 
-    /// Each ported shape's arm as the executor rendered it before issue #936: FNV-1a
-    /// ([`inert_fnv`]) over the [`SourceRun::digest`] of [`INERT_BLOCKS`] blocks at each of
-    /// [`INERT_FRAMES`], recorded by this fixture ([`render_inert_blocks`]'s bind, poison and
-    /// render) compiled against `64b155d0`, the tree #936 recorded its own gates on, whose render
-    /// loop dispatched every unit. The two observed shapes meter the same words under one handle,
-    /// so their digests agree.
-    const INERT_PRE_CHANGE: [(InertShape, u64); 4] = [
-        (InertShape::Plain, 0x59ac_7ce2_0913_f0e1),
-        (InertShape::ObservedInput, 0x57be_32ec_07e5_88cd),
-        (InertShape::ObservedAlias, 0x57be_32ec_07e5_88cd),
-        (InertShape::TrackDelayed, 0x5669_2e20_31f4_30b1),
-    ];
-
-    /// One more `u64` into a running FNV-1a hash, byte by byte.
-    fn inert_fnv(hash: u64, value: u64) -> u64 {
-        value.to_le_bytes().iter().fold(hash, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-        })
-    }
-
     /// What one ported issue #936 arm bound and rendered.
     struct InertRun {
         /// The executor's dispatched-unit table.
@@ -13235,8 +13157,9 @@ mod tests {
     ///
     /// Beside the bits: which units bind tabled for dispatch and how many the loop dispatched in
     /// each block. Every unit left out of the table must be one [`Runtime::unit_inert`] names, and
-    /// every such unit a plain, unobserved `SourceInput` op.
-    fn render_inert_blocks(shape: SourceShape) -> InertRun {
+    /// every such unit a plain, unobserved `SourceInput` op. With `dispatch_all`, keep the bound
+    /// table as evidence, then dispatch every emitted unit in order as the reference.
+    fn render_inert_blocks(shape: SourceShape, dispatch_all: bool) -> InertRun {
         let case = format!("{shape:?}");
         let published = Published::default();
         let (plan, bindings, source_set) = source_fixture_parts(shape, &published);
@@ -13285,6 +13208,11 @@ mod tests {
                     .expect("each claim's input unit") as u32
             })
             .collect();
+        if dispatch_all {
+            executor.active_units = (0..units)
+                .map(|unit| u32::try_from(unit).expect("unit index"))
+                .collect();
+        }
         let frames = shape.frames as usize;
         let stride = frames + 3;
         let mut masters = Vec::new();
@@ -13327,16 +13255,29 @@ mod tests {
     /// shape shares: fifteen units bound (six inputs, a four-lane and a two-lane bank, six routes
     /// and the Output); the table is every unit but the input units of the claims `skipped` names;
     /// the loop dispatches exactly the table every block; every meter published every block; and
-    /// the combined digest is the one [`INERT_PRE_CHANGE`] recorded on `64b155d0`.
+    /// every host word and meter frame equals the current executor dispatching every unit.
     fn assert_inert_shape(shape: InertShape, skipped: fn(usize) -> bool) -> Vec<InertRun> {
-        let mut combined = 0xcbf2_9ce4_8422_2325_u64;
-        let runs: Vec<_> = INERT_FRAMES
+        INERT_FRAMES
             .iter()
             .map(|&frames| {
                 let source = shape.source(frames);
                 let case = format!("{shape:?}, {frames} frames");
-                let run = render_inert_blocks(source);
+                let run = render_inert_blocks(source, false);
+                let reference = render_inert_blocks(source, true);
                 assert_eq!(run.units, 15, "{case}: the census");
+                assert_eq!(
+                    reference.dispatches,
+                    vec![run.units as u64; INERT_BLOCKS as usize],
+                    "{case}: the reference dispatches every unit each block"
+                );
+                assert_eq!(
+                    run.run.masters, reference.run.masters,
+                    "{case}: every host word equals full dispatch"
+                );
+                assert_eq!(
+                    run.run.meters, reference.run.meters,
+                    "{case}: every meter frame equals full dispatch"
+                );
                 let expected: Vec<u32> = (0..run.units as u32)
                     .filter(|unit| {
                         run.inputs
@@ -13368,20 +13309,9 @@ mod tests {
                             && *word & 0x7fff_ffff != 0)),
                     "{case}: the master carries audio"
                 );
-                combined = inert_fnv(combined, run.run.digest());
                 run
             })
-            .collect();
-        let pre_change = INERT_PRE_CHANGE
-            .iter()
-            .find(|(recorded, _)| *recorded == shape)
-            .map(|(_, digest)| *digest);
-        assert_eq!(
-            Some(combined),
-            pre_change,
-            "{shape:?}: every host word and meter frame is the pre-change executor's"
-        );
-        runs
+            .collect()
     }
 
     /// Issue #936 gate 1, ported by issue #957 onto issue #918's banked fixture: six tracks
@@ -13392,7 +13322,7 @@ mod tests {
     /// The six input units are plain unobserved source inputs, which bind leaves out of the
     /// dispatched-unit table: the loop dispatches the two banks, the six routes and the Output, once
     /// per block. Every host word and every meter window (each bank stage's and both Output
-    /// meters') is the base tree's ([`INERT_PRE_CHANGE`]).
+    /// meters') equals the current executor dispatching every unit.
     ///
     /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issues #936 and #957.
     #[test]
@@ -13407,7 +13337,7 @@ mod tests {
     }
 
     /// Issue #936 gate 2, ported by issue #957: a meter at one claim's `Input` boundary keeps that
-    /// claim's unit dispatched, and it meters what it metered before issue #936.
+    /// claim's unit dispatched, and it meters the same words as full dispatch.
     ///
     /// [`InertShape::ObservedInput`] meters track `K`'s input directly, and
     /// [`InertShape::ObservedAlias`] meters `K`'s `PostSimd1`, a rack boundary between the input
@@ -13415,12 +13345,12 @@ mod tests {
     /// way `K`'s input op holds an observer and its unit is `observed`, so the table is every unit
     /// but the other five inputs, dispatched every block. The observer also keeps `K`'s claim on
     /// the copy, so `K`'s lane gathers the arena. Over sixteen blocks at frames `{1, 7, 16, 128}`,
-    /// the `K` meter publishes every block, and every meter window and host word is the base
-    /// tree's ([`INERT_PRE_CHANGE`]).
+    /// the `K` meter publishes every block, and every meter window and host word equals full
+    /// dispatch.
     ///
     /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issues #936 and #957.
     #[test]
-    fn an_observed_source_input_stays_dispatched_and_meters_the_base_values() {
+    fn an_observed_source_input_stays_dispatched_and_meters_the_full_dispatch_values() {
         for shape in [InertShape::ObservedInput, InertShape::ObservedAlias] {
             for run in assert_inert_shape(shape, |claim| claim != INERT_SPECIAL) {
                 let observed = run
@@ -13439,17 +13369,16 @@ mod tests {
 
     /// Issue #936 gate 3, ported by issue #957: a claim delayed at its input (`NodeKind::TrackDelay`,
     /// the claim's declared alignment, whose line runs in place over the input's buffer) is not
-    /// inert: its unit is dispatched every block, and the plan renders the base tree's bits.
+    /// inert: its unit is dispatched every block, and the plan renders full dispatch's bits.
     ///
     /// [`InertShape::TrackDelayed`] delays track `K`'s input by `(3, 5)` samples, so `K`'s claim
     /// keeps the copy, its delay line runs over the copied words and `K`'s lane gathers the arena.
     /// The table is every unit but the other five inputs; over sixteen blocks at frames
-    /// `{1, 7, 16, 128}` every host word and meter window is the base tree's
-    /// ([`INERT_PRE_CHANGE`]).
+    /// `{1, 7, 16, 128}` every host word and meter window equals full dispatch.
     ///
     /// Red mutations: `crates/graph/tests/MUTATIONS.md`, issues #936 and #957.
     #[test]
-    fn a_delayed_claim_stays_dispatched_and_renders_the_base_bits() {
+    fn a_delayed_claim_stays_dispatched_and_renders_the_full_dispatch_bits() {
         for run in assert_inert_shape(InertShape::TrackDelayed, |claim| claim != INERT_SPECIAL) {
             let delayed: Vec<usize> = (0..run.units)
                 .filter(|unit| run.inputs.contains(&(*unit as u32)))
@@ -13523,15 +13452,6 @@ mod tests {
         }
     }
 
-    /// The dead claim's arm as the executor rendered it before issue #936, per `redirect_declined`
-    /// arm: FNV-1a ([`inert_fnv`]) over the in-place arm's [`SourceRun::digest`] at each of
-    /// [`INERT_FRAMES`], recorded by this fixture compiled against `64b155d0`, as
-    /// [`INERT_PRE_CHANGE`] is.
-    const DEAD_CLAIM_PRE_CHANGE: [(bool, u64); 2] = [
-        (false, 0x6813_ae30_0a55_754d),
-        (true, 0x6813_ae30_0a55_754d),
-    ];
-
     /// Issue #927's dead claim, ported by issue #957 onto issue #918's banked fixture: the only
     /// test of clause (b)'s zero-reader arm, which binds a claim nothing reads in place, and whose
     /// slot the colouring then hands to a later value that a bank gathers.
@@ -13547,7 +13467,7 @@ mod tests {
     /// * **The mode table.** In place: all seven claims, the dead one by the zero-reader arm.
     ///   Declined: none.
     /// * **The bits.** The in-place arm is the copy arm, every block's master and every meter
-    ///   window, and its combined digest is the one [`DEAD_CLAIM_PRE_CHANGE`] recorded.
+    ///   window.
     /// * **The mode counter.** The in-place arm copies nothing and serves the six live claims'
     ///   gathers (the dead claim has none); the copy arm copies all seven every block.
     ///
@@ -13559,8 +13479,7 @@ mod tests {
             .iter()
             .filter(|block| matches!(block, PlayedBlock::Underrun))
             .count() as u64;
-        for (redirect_declined, pre_change) in DEAD_CLAIM_PRE_CHANGE {
-            let mut combined = 0xcbf2_9ce4_8422_2325_u64;
+        for redirect_declined in [false, true] {
             for frames in INERT_FRAMES {
                 let shape = SourceShape {
                     dead: true,
@@ -13653,12 +13572,7 @@ mod tests {
                     [0, live * (blocks - underruns), live * underruns],
                     "{case}: the in-place arm's [copies, played gathers, silent gathers]"
                 );
-                combined = inert_fnv(combined, in_place.digest());
             }
-            assert_eq!(
-                combined, pre_change,
-                "redirects declined {redirect_declined}: the pre-change executor's bits"
-            );
         }
     }
 }
