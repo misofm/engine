@@ -884,18 +884,6 @@ fn svf_coef<L: Lane>(sections: &[SvfSection; MAX_BANK_LANES]) -> SvfCoef<L> {
 }
 
 #[inline]
-fn svf_word_pairs<L: Lane>(left: &SvfCoef<L>, right: &SvfCoef<L>) -> [(L, L); 6] {
-    [
-        (left.c1, right.c1),
-        (left.a2, right.a2),
-        (left.a3, right.a3),
-        (left.m0, right.m0),
-        (left.m1, right.m1),
-        (left.m2, right.m2),
-    ]
-}
-
-#[inline]
 fn zero_svf_coef<L: Lane>() -> SvfCoef<L> {
     SvfCoef {
         c1: L::zero(),
@@ -1142,10 +1130,32 @@ impl<L: Lane> InputStage<L> {
             }
         }
         for section in 0..2 {
-            for (left_word, right_word) in svf_word_pairs(
-                &self.coef.section[0][section],
-                &self.coef.section[1][section],
-            ) {
+            for (left_word, right_word) in [
+                (
+                    self.coef.section[0][section].c1,
+                    self.coef.section[1][section].c1,
+                ),
+                (
+                    self.coef.section[0][section].a2,
+                    self.coef.section[1][section].a2,
+                ),
+                (
+                    self.coef.section[0][section].a3,
+                    self.coef.section[1][section].a3,
+                ),
+                (
+                    self.coef.section[0][section].m0,
+                    self.coef.section[1][section].m0,
+                ),
+                (
+                    self.coef.section[0][section].m1,
+                    self.coef.section[1][section].m1,
+                ),
+                (
+                    self.coef.section[0][section].m2,
+                    self.coef.section[1][section].m2,
+                ),
+            ] {
                 if candidate == 0 {
                     break;
                 }
@@ -1169,15 +1179,56 @@ impl<L: Lane> InputStage<L> {
         self.refresh_channel_symmetry_post_ramp();
         let mut candidate = self.symmetry;
         for section in 0..2 {
-            for (left_word, right_word) in svf_word_pairs(
-                &self.filter_target[0][section],
-                &self.filter_target[1][section],
-            )
-            .into_iter()
-            .chain(svf_word_pairs(
-                &self.filter_step[0][section],
-                &self.filter_step[1][section],
-            )) {
+            for (left_word, right_word) in [
+                (
+                    self.filter_target[0][section].c1,
+                    self.filter_target[1][section].c1,
+                ),
+                (
+                    self.filter_target[0][section].a2,
+                    self.filter_target[1][section].a2,
+                ),
+                (
+                    self.filter_target[0][section].a3,
+                    self.filter_target[1][section].a3,
+                ),
+                (
+                    self.filter_target[0][section].m0,
+                    self.filter_target[1][section].m0,
+                ),
+                (
+                    self.filter_target[0][section].m1,
+                    self.filter_target[1][section].m1,
+                ),
+                (
+                    self.filter_target[0][section].m2,
+                    self.filter_target[1][section].m2,
+                ),
+                (
+                    self.filter_step[0][section].c1,
+                    self.filter_step[1][section].c1,
+                ),
+                (
+                    self.filter_step[0][section].a2,
+                    self.filter_step[1][section].a2,
+                ),
+                (
+                    self.filter_step[0][section].a3,
+                    self.filter_step[1][section].a3,
+                ),
+                (
+                    self.filter_step[0][section].m0,
+                    self.filter_step[1][section].m0,
+                ),
+                (
+                    self.filter_step[0][section].m1,
+                    self.filter_step[1][section].m1,
+                ),
+                (
+                    self.filter_step[0][section].m2,
+                    self.filter_step[1][section].m2,
+                ),
+            ] {
                 let left = lane_read::<L>(left_word);
                 let right = lane_read::<L>(right_word);
                 for lane in 0..L::WIDTH {
