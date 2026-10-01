@@ -7,7 +7,8 @@
 //! enforce: *the second copy is the defect*. `scripts/check-bench-policy.sh` fails if a second copy
 //! of any of them reappears under `tools/`.
 //!
-//! This crate is test scaffolding. No package under `crates/` or `hosts/` may depend on it, and
+//! This crate is test scaffolding. Packages under `crates/` and `hosts/` may use it only as a
+//! dev-dependency, and
 //! `scripts/check-realtime-policy.sh` names `src/alloc.rs` as the single file under `tools/`
 //! allowed to contain `allow(unsafe_code)`.
 

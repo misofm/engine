@@ -96,9 +96,12 @@ impl PcmFixture {
             return Err(FixtureError::LengthMismatch);
         }
         let expected_crc = read_u32(bytes, 40);
-        let mut crc_bytes = bytes.to_vec();
-        crc_bytes[40..44].fill(0);
-        if crc32c(&crc_bytes) != expected_crc {
+        let crc_bytes = bytes[..40]
+            .iter()
+            .copied()
+            .chain([0; 4])
+            .chain(bytes[44..].iter().copied());
+        if crc32c_bytes(crc_bytes) != expected_crc {
             return Err(FixtureError::CrcMismatch);
         }
         let samples = bytes[HEADER_LEN..]
@@ -183,9 +186,13 @@ impl PcmFixture {
 
 /// Computes reflected CRC-32C (Castagnoli) using init/final XOR `0xffffffff`.
 pub fn crc32c(bytes: &[u8]) -> u32 {
+    crc32c_bytes(bytes.iter().copied())
+}
+
+fn crc32c_bytes(bytes: impl IntoIterator<Item = u8>) -> u32 {
     let mut crc = 0xffff_ffff_u32;
     for byte in bytes {
-        crc ^= u32::from(*byte);
+        crc ^= u32::from(byte);
         for _ in 0..8 {
             crc = if crc & 1 != 0 {
                 (crc >> 1) ^ 0x82F6_3B78
