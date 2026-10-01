@@ -721,3 +721,111 @@ compressor's `SCENARIO_1006_FOUR` (`kernel.rs:3448`). On x86 both are red: at `m
   `HostAttestation::fmt` move by +10; they are in a sequence at address 0, a discarded section. A
   further 21 rows, `backend.rs:67`, move by −1, from attempt 1's comment change.
 - It is debug information only: every allocated section is identical. No action is needed.
+
+## Batch boundary evidence
+
+**PASS, nothing fixed.** Terra checked the merged batch once, as `qualification.yml` would. The
+batch is `codex/batch-arm-size-1` at `dad8de0d` on `origin/main` `089ef456`. It merges #1112, adds
+the #1113 spec (on hold) and removes the #1109 and #1110 specs. Its code is the tree Sol re-checked
+(`9a55bdf2`); only specs differ.
+- The router gives `route=full`, `math_closure=true`, `release_inputs=false` and `self_tests=[]`,
+  for `--event push` and `--event pull_request` alike, base `089ef456`. CI will therefore skip
+  release-shape and gate-self-tests; both ran here anyway.
+- 150 steps ran on an x86-64-v3 host (AMD EPYC 7313P) with rustc 1.97.1, `CARGO_INCREMENTAL=0` and
+  the worktree's `target/`. Each job's `run:` steps were read from `qualification.yml` and run as
+  written, under `bash -eo pipefail`; only the install steps were skipped. Every step exited 0.
+- No merge-interaction defect was found, and nothing needed a commit beyond this record.
+- No timed benchmark ran.
+
+| Job | Gate (command) | Result |
+|---|---|---|
+| route | `check-ci-path-routing.py`, `test-ci-path-routing.py` | ok |
+| docs-gates | `check-dsp-research.sh`, `check-builtins-listening.sh` | ok |
+| lint | `cargo fmt --all -- --check` | ok |
+| lint | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | ok |
+| lint | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | ok |
+| lint | the job's other 29 steps, including the three sub-v3 probes | all ok |
+| gate-self-tests | all five suites, although none is routed | all ok |
+| other self-tests | `strip-wasm-names.py`, `check-web-audioworklet-v8-spill.py`, `check-web-audioworklet-callgraph.py`, `web-audioworklet-identity.py` and `aarch64-known-defects.py`, each `--self-test` | all ok |
+| test-debug-a | the job's `cargo test` line | 96 binaries, 1,150 passed, 0 failed |
+| test-debug-b | the job's `cargo test` line; `conformance_fixtures -- --check` | 151 binaries, 834 passed, 0 failed; fixtures ok |
+| test-release | `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane` | 109 passed, `g5_native_digests_match_pins` among them |
+| test-release | the M3 FMA cfg check; loom `spsc_loom`; M1 and F1 `--ignored` | ok |
+| audit-native | all 20 run steps | ok: unit tests 114 passed; `audit capi` has 0 violations and `pcm_digest` `ff6cdcb96cdcdad5`; every trace and audit counter is 0; graph determinism 100/100; `check-capi-abi.sh` and its self-test pass |
+| wasm-guests | all five steps, `run-wasm-gates.sh --without-v8-spill --without-native` among them | ok: wasm 142 cases, 250 comparisons, 0 mismatches; residency scanned 7 limiter functions |
+| wasm gates, full | `run-wasm-gates.sh` with no flags | ok: native 358 and wasm 250 comparisons, 0 mismatches; V8 EQ loops pass |
+| cross-target | `scripts/check-cross-targets.sh` | PASS: "no eight-lane code in the iOS or Android library"; the ten memset rows are at their ceilings (builtins 194, gate-expander 91, graph 10, multiband-compressor 566, parametric-eq 132, transient-shaper 268, and four rows that did not move) |
+| AArch64 clippy | `-D warnings` on iOS and Android: the debug leg's set with its features; the release set with `math/lane`; the same set plus `dsp-reference`, `conformance` and `target-smoke` with default features | ok |
+| release-shape | `check-release-shape.py`; the unwind `cargo check` | ok |
+| artifact | `build-web-audioworklet.sh --named-twin …` | shipped `cd49dc1c…d408` (2,670,821 B), named twin `369d858a…cfcde` (3,044,007 B), closure `02ca569e…b259` |
+| artifact-identity | a twin `--module-only` build from another path and `CARGO_HOME`; `report --event push --before 089ef456` | reproducible; **ARTIFACT UNCHANGED** against the digest that `089ef456`'s own run recorded |
+| artifact-gates | all six run steps on the shipped closure and the named twin, the V8 spill gate on Node 22.23.2 included | ok: 12 kernels on `4wide6f32x4`, all ten roster rows ok, "eight lanes: none among 2456 functions" |
+| sdk | from a clean `npm ci`: the job's five checks | ok: `check-sdk-headless.sh` 329 passed |
+| browser | `npm run qualify -- … --check-matrix --self-test-mutations` in CI's source-bundle mode | Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5: all qualification gates passed |
+| console benchmark | `test-console-benchmark.sh`; `operator/preflight-console-benchmark.sh --step terra-arm-boundary-scratch` | PASS; the preflight launched 0 workloads and wrote no step directory |
+| V8 harness | `run-web-mixing-automation-benchmark.sh prepare`, then `preflight`, at the head and at `089ef456` | PASS |
+
+**Class A.** It equals `089ef456`'s. The base was a shared clone of `089ef456` with its own target
+directory.
+- **Console digests.** `gain_pan_profile digests -- --ignored`: all 22 rows are identical.
+- **`bench console --preflight`.** The output is identical (16 lines).
+- **V8 preflight.** The output is identical, `module_sha256` included: both commits build
+  `cd49dc1c…`. The 7 arm digests equal S0's `preflight_output_sha256` in both rounds, and
+  `controls.json` is identical (`a32cb879…`).
+- **S0's render digests, untimed.** The method is C4's: a `git archive` of the head whose
+  `bench_support::timing::timed` returns 0 without reading the clock. One `bench console` run
+  (round 1) gives all 30 of S0's round-1 records.
+  - All 50 render-digest fields are equal.
+  - Besides timing, only the app row's `strip_layout` differs (`inserts:` -> `pre_insert:`), as in
+    C3, C4 and #1110's boundary.
+
+**Code generation.** Base and head were built from one scratch path and one target directory, one
+after the other.
+
+| | `089ef456` | head |
+|---|---|---|
+| x86 `libcapi.so` | | every allocated section byte-identical: `.text` 3,386,963 B (`96c86fd6…`), `.rodata` (`f4e6ad9c…`), `.data.rel.ro` (`38c90f95…`), `.eh_frame`; only the build-id, `.debug_info` and `.debug_line` differ |
+| iOS `capi` object `__text` | 2,469,368 B | 2,276,340 B (−193,028 B, −7.8 %) |
+| iOS archive `__text` (373 members) | 2,531,428 B | 2,338,400 B |
+| iOS eight-lane function symbols | 27 | 0 |
+| Android `capi` object `.text` | 2,377,700 B (2,447 sections) | 2,225,188 B (2,411; −152,512 B, −6.4 %) |
+| Android archive `.text` (404 members) | 2,449,756 B | 2,297,244 B |
+| Android eight-lane function symbols | 28 | 0 |
+
+The mobile libraries are fat-LTO release staticlibs (`cargo rustc --crate-type staticlib`). Every
+figure equals attempt 1's and Sol's.
+
+**AArch64 legs.** There is no arm64 host here. The repository's own emulation needs qemu-user, an
+AArch64 linker and binfmt_misc, and this host has none of them. Resolved here:
+- **Debug leg.** The 25 product crates plus `dsp-reference`, `conformance` and `target-smoke`. It
+  has no expected-failure rows.
+- **Release leg.** It has two #1019 rows, `m2_exp2_lane_identity` and `m2_log2_lane_identity`.
+  `aarch64-release`'s G5 step is unfiltered.
+- **Checks.**
+  - The no-silent-skip scan, as the script writes it: rg exit 1, no match.
+  - The known-defect self-test.
+  - `judge-skips` over each leg's x86 `--list`: debug 1,817 tests, release 114. Each row names
+    exactly one test.
+- **4-lane emulation (#1112's recipe).** This is a scratch `git archive` of the head with `neon` read
+  as `sse2`, lane's x86-64-v3 guard disabled, `-C target-feature=-avx2,-fma -D warnings`, and its
+  own target directory.
+  - Listings: debug 1,807, release 113, console-workload 68, as Sol found. `judge-skips` passes
+    both legs.
+  - Debug leg: 231 binaries, 1,769 passed, 0 failed, 39 ignored.
+  - Release `lane`/`math`: 99 passed, 14 ignored.
+  - console-workload: 65 passed. G5: 9 passed.
+  - `audit capi`: 0 violations, `pcm_digest` `ff6cdcb96cdcdad5`.
+  - The delay, compressor, EQ and gate audits: 0 violations. The gate audit has `bank_width` 4 and
+    `bank_available` true.
+  - CI's arm64 legs remain the NEON gate.
+
+**Local deviations, none a gate change.**
+- The twin build's second checkout is a `git archive` of `HEAD` with a fresh `CARGO_HOME`, both in
+  scratch.
+- The identity report ran as the main push will: `--event push --before 089ef456`.
+- The unwind check used its own target directory, `target/ci/unwind`.
+- The browser legs' pulse sockets and `TMPDIR` used short `/tmp` paths.
+- The `sdk/dist` that `sdk-package.sh check` leaves was removed before the browser legs, so all
+  three ran in CI's source-bundle mode.
+- The jobs ran in parallel chains. A chain held each profile of `target/`, so no two jobs used the
+  same uplifted binaries at once.
