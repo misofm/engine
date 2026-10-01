@@ -423,20 +423,23 @@ fn banked(
             bank.process_bank(process);
         }
         for (lane, member) in layout.iter().enumerate() {
-            let words = |plane: &[f32]| -> Vec<f32> {
-                (0..FRAMES)
-                    .map(|frame| plane[frame * lanes + lane])
-                    .collect()
-            };
             match *member {
                 Some(member) => {
-                    output[member].0.extend(words(&left));
-                    output[member].1.extend(words(&right));
+                    output[member]
+                        .0
+                        .extend(left.iter().skip(lane).step_by(lanes).copied());
+                    output[member]
+                        .1
+                        .extend(right.iter().skip(lane).step_by(lanes).copied());
                 }
                 None => {
                     for (name, plane) in [("left", &left), ("right", &right)] {
                         assert!(
-                            words(plane).iter().all(|word| word.to_bits() == 0),
+                            plane
+                                .iter()
+                                .skip(lane)
+                                .step_by(lanes)
+                                .all(|word| word.to_bits() == 0),
                             "{} {width:?}: padded lane {lane} {name} is not +0.0 after block \
                              {block}",
                             scenario.label
@@ -453,15 +456,11 @@ fn banked(
 /// its right plane unprocessed, so only the left plane is compared there.
 fn assert_members_match(shipped: &Planes, oracle: &Planes, mono: bool, what: &str) {
     for (member, (shipped, oracle)) in shipped.iter().zip(oracle).enumerate() {
-        let channels = if mono {
-            vec![("left", &shipped.0, &oracle.0)]
-        } else {
-            vec![
-                ("left", &shipped.0, &oracle.0),
-                ("right", &shipped.1, &oracle.1),
-            ]
-        };
-        for (name, shipped, oracle) in channels {
+        let channels = [
+            ("left", &shipped.0, &oracle.0),
+            ("right", &shipped.1, &oracle.1),
+        ];
+        for (name, shipped, oracle) in channels.into_iter().take(if mono { 1 } else { 2 }) {
             assert_eq!(
                 shipped.len(),
                 oracle.len(),

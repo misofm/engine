@@ -225,13 +225,13 @@ const PORTS: [PortDescriptor; 2] = [
     },
 ];
 
-/// The state-layout-2 resource row of one launch rate.
+/// The state resource row of one launch rate.
 ///
 /// `lane_words = 27 + B + 2R = 3N + 35`: twenty-seven scalar words, the `B = N + 6` main-delay
-/// ring, and the two `R = N + 1` gain rings the minimum filter and the box ramp need (layout 1 had
-/// no box ring and no minimum-filter words, hence the re-pin). The common section is the two-word
+/// ring, and the two `R = N + 1` gain rings the minimum filter and the box ramp need. The common
+/// section is the two-word
 /// version/length header `effect-runtime` stamps into every payload, which is why
-/// `common_bytes` is eight and no longer zero. The latency column does not move.
+/// `common_bytes` is eight.
 const fn quality(rate: u32) -> effect_contract::QualityDescriptor {
     let lookahead_maximum = rate / 100;
     let lane_words = 3 * lookahead_maximum + 35;
@@ -305,11 +305,9 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 
 /// The state layout this crate reads and writes.
 ///
-/// Bumped from 1 by #90: the wave-2 gain law needs a minimum-filter phase and prefix, an exact box
-/// sum, a box ring and a precomputed ramp step, none of which layout 1 can hold, and the payload
-/// gained the runtime's two-word header. This is the one contract fixture the issue authorises
-/// moving; the latency, the parameter table, the port table, the link set, the Annex-2 coefficients
-/// and `scratch_fixed_bytes` are unchanged.
+/// Layout 1 includes the minimum-filter phase and prefix, exact box sum and ring, coefficient
+/// ramps, delay line and detector history. The common payload section is the runtime's two-word
+/// version/length header.
 pub const STATE_LAYOUT_VERSION: u32 = 1;
 
 /// Factory for the fixed-latency scalar limiter.
@@ -436,9 +434,8 @@ impl<L: Lane> LimiterCoef<L> {
 
 /// The one cursor pair of a whole bank.
 ///
-/// Every lane and both channels advance in lockstep and always have (#90 F3): keeping one pair
-/// instead of `2 * W` removes the redundant state layout 1 carried per lane, and makes the ring
-/// slot of a frame a single uniform index that a vector store can use.
+/// Every lane and both channels advance in lockstep (#90 F3), so one pair makes the ring slot of
+/// a frame a single uniform index that a vector store can use.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Cursors {
     main: u32,
@@ -449,8 +446,8 @@ impl Cursors {
     /// Advances both cursors by a whole block, as `frames` per-sample steps would (#182 S2).
     ///
     /// The `%` here is not the one #90 F6 removed. F6 is about the *render path*: a cursor must not
-    /// cost a division per sample, which is why [`limiter_block_body`] advances with a compare and
-    /// a wrap. This runs once per block on a path that renders nothing at all, in the same position
+    /// cost a division per sample, which is why [`limiter_block_per_lane`] advances with a compare
+    /// and a wrap. This runs once per block on a path that renders nothing at all, in the same position
     /// and for the same reason as the rotation arithmetic in [`commit_lane`].
     fn advance(&mut self, frames: usize, shape: &Shape) {
         self.main = ((self.main as usize + frames % shape.main) % shape.main) as u32;
@@ -546,9 +543,9 @@ impl ChannelState {
     /// Four entries are **not** individually red, and the two groups are not the same kind of
     /// thing:
     ///
-    /// * `lookahead_ms` and `lane` are the prepared window shape. No rendered block writes them --
-    ///   they move only at prepare, restore and a full reset, none of which is reachable on a bound
-    ///   bank -- so nothing can make them diverge today.
+    /// * `lookahead_ms` and `lane` are the prepared window shape. A collapsed frame does not
+    ///   write them. Preparation, restore and reset can write them; collapse eligibility requires
+    ///   them to agree before a collapsed run.
     /// * `prefix` and `phase` are the uniform body's two van Herk registers, and they *are* running
     ///   state: `UniformHot::new` loads them out of this arena and the block write-back stores them
     ///   into it. A collapsed block advances only the left channel's. Dropping either IS red --
@@ -955,8 +952,8 @@ thread_local! {
     /// Issue #990 gate 2: uniform blocks that rendered a linked pair's gain path once, on this
     /// thread. Instrumentation, not render state.
     static LINKED_ENGAGEMENTS: Cell<u32> = const { Cell::new(0) };
-    /// Issue #990 gate 1: route [`limiter_block_linkable`] to the unmodified reference kernel the
-    /// test module keeps, for the oracle arm of the identity harness.
+    /// Routes [`limiter_block_linkable`] to the test module's current per-frame reference for the
+    /// oracle arm of the block differential.
     static REFERENCE_KERNEL: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -1806,8 +1803,9 @@ impl<L: Lane> HotChannel<L> {
 /// 4. **quantise (B)** `m_q = floor(m * 2^14) * 2^-14`; both scalings are exact.
 /// 5. **box (B)** `S += m_q - m_q[n-Wb]`, read before write so `Wb == R` reads the slot it is about
 ///    to overwrite; `s = S / Wb`.
-/// 6. **release (B)** `d = max(1 - s, fma(c, (1 - s) - d, d))`, then the D7 flush. This is the only
-///    `fma` and the only recursive word in the crate. Working in the reduction domain is what makes
+/// 6. **release (B)** `d = max(1 - s, fma(c, (1 - s) - d, d))`, then the D7 flush. `Lane::fma`
+///    currently rounds the multiply and add separately. This is the only recursive word in the
+///    crate. Working in the reduction domain is what makes
 ///    the decay terminate at exactly `+0.0`, and therefore `g` at exactly `1.0`.
 /// 7. **output (A)** read-before-write on the main ring gives a delay of exactly `B = N + 6`;
 ///    `y = select(bypass, z, z * g)` keeps the bypass path bit-exact including signed zero.
@@ -2623,8 +2621,8 @@ fn limiter_block_linkable<L: Lane>(
     cursors: &mut Cursors,
     linked: bool,
 ) {
-    // Issue #990 gate 1: the oracle arm of the identity harness renders the unmodified kernel,
-    // which the test module keeps as a verbatim copy. Test builds only.
+    // The oracle arm renders the current per-frame law rather than an optimized block body.
+    // Test builds only.
     #[cfg(test)]
     if REFERENCE_KERNEL.with(Cell::get) {
         tests::reference_block::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
@@ -3794,7 +3792,7 @@ impl<L: Lane> LimiterCore<L> {
         self.gain_linked = true;
     }
 
-    /// The boundary-check record, for the gates. Wiring it into `ProcessReport` belongs to #95.
+    /// The boundary-check record, for the gates. Missing public recovery counts are tracked by #1073.
     #[cfg(test)]
     const fn nonfinite_report(&self) -> NonFiniteReport {
         self.report
@@ -3809,7 +3807,7 @@ impl<L: Lane> LimiterCore<L> {
 
 /// Applies the accepted automation of one track to its two channels.
 ///
-/// The span validation is unchanged from layout 1 — canonical `Point` spans at `first_sample`, for
+/// Span validation accepts canonical `Point` spans at `first_sample`, for
 /// descriptor positions 0 and 1, on an explicit `Left` or `Right` channel, in strictly ascending
 /// `(parameter, channel)` order, inside the prepared capacity, with no duplicate — because it is
 /// the contract, not an implementation detail. What changed is what an accepted value does: it
@@ -4497,7 +4495,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
 
     /// Runs the cohort's block.
     ///
-    /// The width, quantum and sidechain conditions layout 1 rechecked here are compiler invariants
+    /// The width, quantum and sidechain conditions checked here are compiler invariants
     /// established by `EffectBankProcessBlock::new` and by bank binding, so they are
     /// `debug_assert!`s (#90 F8). The old guard returned the caller's buffers **untouched and
     /// undelayed**, which silently voided the declared `N + 6` latency for that block; nothing on
@@ -5256,7 +5254,7 @@ mod tests {
         streams
     }
 
-    /// The pre-#1013 detector, E1b's oracle: [`detector_peak`] with `annex2_phases_seeded`.
+    /// The brief's independently seeded dot-product order, used to check peak equivalence.
     fn detector_peak_seeded<L: Lane>(
         history: &mut History<L>,
         x: L,
@@ -5456,10 +5454,10 @@ mod tests {
         }
     }
 
-    /// The pre-change frame-at-a-time detector shape, retained only as a private test oracle.
+    /// The current detector stream law, one frame at a time.
     /// Keeping the full input and absolute chunk offset here makes a wrong active window produce
     /// a different result instead of letting the candidate compare against its own slice.
-    fn detector_chunk_old_shape<L: Lane>(
+    fn detector_stream_reference<L: Lane>(
         taps: &mut History<L>,
         io: &[f32],
         chunk: usize,
@@ -5527,10 +5525,10 @@ mod tests {
         }
     }
 
-    /// The candidate must match the old shape for an offset full chunk and an offset short tail.
+    /// Chunking must match the stream law for an offset full chunk and an offset short tail.
     /// The sentinel proves that only the active peak prefix is written; the shifted-window arm is
     /// a wrong-result control for both the peak prefix and all twelve history words.
-    fn detector_chunk_active_window_matches_old_shape<L: Lane>() {
+    fn detector_chunk_matches_the_current_stream<L: Lane>() {
         const TOTAL_FRAMES: usize = 64;
         const CHUNK_OFFSET: usize = 5;
         const SHORT_OFFSET: usize = DETECTOR_CHUNK + 3;
@@ -5557,7 +5555,7 @@ mod tests {
                 &coefficients.fir,
                 &mut candidate_peaks[..words],
             );
-            detector_chunk_old_shape::<L>(
+            detector_stream_reference::<L>(
                 &mut oracle_history,
                 &input,
                 chunk,
@@ -5625,20 +5623,20 @@ mod tests {
     }
 
     #[test]
-    fn detector_chunk_active_window_matches_old_shape_scalar() {
-        detector_chunk_active_window_matches_old_shape::<f32>();
+    fn detector_chunk_matches_the_current_stream_scalar() {
+        detector_chunk_matches_the_current_stream::<f32>();
     }
 
     #[test]
-    fn detector_chunk_active_window_matches_old_shape_w4() {
-        detector_chunk_active_window_matches_old_shape::<Simd4>();
+    fn detector_chunk_matches_the_current_stream_w4() {
+        detector_chunk_matches_the_current_stream::<Simd4>();
     }
 
-    /// The 8-lane (AVX2) twin of `detector_chunk_active_window_matches_old_shape_w4`.
+    /// The 8-lane (AVX2) twin of `detector_chunk_matches_the_current_stream_w4`.
     #[cfg(target_feature = "avx2")]
     #[test]
-    fn detector_chunk_active_window_matches_old_shape_w8() {
-        detector_chunk_active_window_matches_old_shape::<lane::Simd8>();
+    fn detector_chunk_matches_the_current_stream_w8() {
+        detector_chunk_matches_the_current_stream::<lane::Simd8>();
     }
 
     /// E3: the declared latency, the guarded ceiling and the bypass bits (contract, unchanged).
@@ -6127,11 +6125,6 @@ mod tests {
                     .expect("prepare")
             })
             .collect();
-        let mut scalar: Vec<(Vec<f32>, Vec<f32>)> = inputs
-            .iter()
-            .map(|(left, right)| (left.clone(), right.clone()))
-            .collect();
-
         let mut bank = bank_for(tracks, LinkMode::DualMono, width, backend);
         let mut bank_left = vec![0.0_f32; frames * lanes];
         let mut bank_right = vec![0.0_f32; frames * lanes];
@@ -6141,6 +6134,7 @@ mod tests {
                 bank_right[frame * lanes + lane] = inputs[lane].1[frame];
             }
         }
+        let mut scalar = inputs;
 
         for block in 0..blocks {
             if let Some((after, payload)) = swap_after.as_ref()
@@ -6196,22 +6190,6 @@ mod tests {
         }
     }
 
-    /// **A cohort every lane of which shares one window renders exactly the per-lane body.**
-    ///
-    /// Issue #182 S1. This is the arm the vectorised van Herk and the vectorised box-expiry gather
-    /// actually run on: [`lanes_uniform`] accepts it, so `sliding_minimum_uniform` and the
-    /// lane-wide `expired` load replace `W` scalar passes over the arena. A scalar instance is
-    /// `L = f32`, `W = 1`, which is uniform by construction, so the comparison is the vectorised
-    /// path against the same law one lane at a time.
-    ///
-    /// What this test is, precisely, is the **lane-identity** property *of the uniform path*: the
-    /// scalar arm runs `sliding_minimum_uniform` at `W = 1` and the bank arm runs it at `W = 8`, so
-    /// a mutation that treats the wide instantiation differently from the narrow one is red here
-    /// and nowhere else. Its red mutation is the #182 analogue of row 7: guard the uniform suffix
-    /// pass with `complete && width < 2` so it never runs at W4/W8. `lane_identity_holds_across_
-    /// widths` and `a_mixed_lookahead_cohort_falls_back_bit_identically` both stay green under it,
-    /// because every cohort they build falls back.
-    ///
     /// Round 2 R1(d): the segment walk visits exactly the slots a frame-at-a-time walk visits.
     ///
     /// The whole of [`segment`]'s claim is an arithmetic one — that
@@ -6324,15 +6302,9 @@ mod tests {
         }
     }
 
-    /// It is deliberately *not* claimed to gate a mutation that applies at every width — the two
-    /// arms would move together, since a scalar instance is `W = 1` and therefore uniform too.
-    /// Those are gated by the frozen E12 pins (which a moved scalar digest breaks immediately) and
-    /// by `a_mixed_lookahead_cohort_falls_back_bit_identically`, whose bank lanes run the per-lane
-    /// body against scalar twins running this one.
-    ///
-    /// The E12 corpus already carries this path at the digest level — cases 2 and 3 give every lane
-    /// the same lookahead, so they take it at W4 and W8 while cases 0, 1 and 4 take the fallback —
-    /// but a pinned digest says *which* bits, not *why*, and this test names the why.
+    /// A uniform bank renders each scalar twin's bits across the minimum-filter suffix pass.
+    /// Width-specific suffix/address defects are observable here; the mixed-lookahead cohort and
+    /// current frame-law differentials cover defects shared by every uniform width.
     #[test]
     fn a_uniform_cohort_renders_exactly_the_per_lane_path() {
         let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..native_bank().2)
@@ -7479,7 +7451,7 @@ mod tests {
         render(reference.as_mut(), &mut left, &mut right, 512);
         let reference_state = snapshot(reference.as_ref());
 
-        for block in [1_usize, 7, 64, 128, 512] {
+        for block in [1_usize, 7, 64, 128] {
             let mut effect = TruePeakLimiterFactory
                 .prepare(request_at(&values, 48_000, 512))
                 .expect("prepare");
@@ -7598,7 +7570,7 @@ mod tests {
         let tail_right: Vec<f32> = (0..512).map(|_| noise.next() * 4.0).collect();
         let mut source_out = (tail_left.clone(), tail_right.clone());
         render(source.as_mut(), &mut source_out.0, &mut source_out.1, 128);
-        let mut fresh_out = (tail_left.clone(), tail_right.clone());
+        let mut fresh_out = (tail_left, tail_right);
         render(fresh.as_mut(), &mut fresh_out.0, &mut fresh_out.1, 128);
         for frame in 0..512 {
             assert_eq!(
@@ -7647,7 +7619,7 @@ mod tests {
         for (name, corrupt) in corruptions {
             let mut common = reference.0.clone();
             let mut left = reference.1.clone();
-            let right = reference.2.clone();
+            let right = &reference.2;
             if name == "version" {
                 corrupt(&mut common);
             } else {
@@ -7655,7 +7627,7 @@ mod tests {
             }
             let result = peer.restore_state_payload(
                 STATE_LAYOUT_VERSION,
-                StatePayloadInput::new(&common, &left, &right, sizes).expect("sizes"),
+                StatePayloadInput::new(&common, &left, right, sizes).expect("sizes"),
             );
             assert!(result.is_err(), "{name} was accepted");
             assert_eq!(
@@ -8611,22 +8583,18 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Issue #990: the linked gain computer.
-    //
-    // Gate 1 is an identity harness. Every block runs through the shipped kernel and through
-    // `reference_block`, a verbatim copy of the kernel as it stood before #990, kept here in test
-    // code; everything a host or a snapshot can observe is compared after every block, and the
-    // linked-agreement invariant is read straight off the shipped core. Gate 2 is the engagement
-    // witness: `LINKED_ENGAGEMENTS` counts the uniform blocks that actually took the linked body.
+    // Current frame-law differential for the linked gain computer and stationary segment walk.
+    // Every block compares PCM, reports, payloads and complete state. The frame driver avoids the
+    // production block bodies, detector chunks, uniform gathers, segment walks and mirrored writes.
+    // Linked and stationary censuses separately prove that the optimized bodies actually ran.
     // ---------------------------------------------------------------------------------------
 
-    /// The kernel's block entry before issue #990 (`limiter_block`), verbatim.
+    /// The current per-frame law, with independent channel state and scalar ring addressing.
     ///
-    /// The oracle arm of gate 1, reached through `REFERENCE_KERNEL`. It lives in test code so that
-    /// the oracle is the kernel that shipped before the change rather than a switch inside the code
-    /// under test: [`reference_block_uniform`] is the pre-#990 `limiter_block_uniform` token for
-    /// token, and a ragged cohort goes to the per-lane body, which #990 does not touch.
-    /// `#[inline(never)]` keeps the copy's frame out of `process_block`'s in the dev profile.
+    /// Each frame advances both ramps, shifts each detector once, links peaks in the documented
+    /// order, then runs the seven channel stages separately. Cursors advance with modulo rather
+    /// than the optimized segment walk. The independent `f64` law in `gain_law.rs` covers the
+    /// numerical stages shared with this driver; this differential covers block transformations.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn reference_block<L: Lane>(
@@ -8639,187 +8607,60 @@ mod tests {
         right: &mut ChannelState,
         cursors: &mut Cursors,
     ) {
-        let stationary = dual_stationary(left, right);
-        if lanes_uniform(left) && lanes_uniform(right) {
-            if stationary {
-                reference_block_uniform::<DISPATCH_STATIONARY, L>(
-                    left_io, right_io, frames, coef, shape, left, right, cursors, true,
-                );
-            } else {
-                reference_block_uniform::<DISPATCH_RAMPING, L>(
-                    left_io, right_io, frames, coef, shape, left, right, cursors, false,
-                );
-            }
-        } else if stationary {
-            limiter_block_per_lane::<DISPATCH_STATIONARY, L>(
-                left_io, right_io, frames, coef, shape, left, right, cursors, true,
-            );
-        } else {
-            limiter_block_per_lane::<DISPATCH_RAMPING, L>(
-                left_io, right_io, frames, coef, shape, left, right, cursors, false,
-            );
-        }
-    }
-
-    /// `limiter_block_uniform` before issue #990, verbatim but for its name and its inlining.
-    #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    fn reference_block_uniform<const DISPATCH: u8, L: Lane>(
-        left_io: &mut [f32],
-        right_io: &mut [f32],
-        frames: usize,
-        coef: &LimiterCoef<L>,
-        shape: &Shape,
-        left: &mut ChannelState,
-        right: &mut ChannelState,
-        cursors: &mut Cursors,
-        stationary: bool,
-    ) {
         let width = L::WIDTH;
-        debug_assert!(width <= MAXIMUM_WIDTH);
-        debug_assert_eq!(left.width, width);
-        debug_assert_eq!(right.width, width);
-        debug_assert_eq!(left_io.len(), frames * width);
-        debug_assert_eq!(right_io.len(), frames * width);
-
         let mut hot_left = HotChannel::<L>::load(left);
         let mut hot_right = HotChannel::<L>::load(right);
-        #[cfg(test)]
-        observe_dispatch::<DISPATCH>(DispatchRoute::DualUniform);
         let all = L::zero().eq(L::zero());
         let none = L::mask_not(all);
         let link = if coef.link_max { all } else { none };
         let bypass = if coef.bypass { all } else { none };
-        let ring = shape.ring;
-        let main = shape.main;
-        let mut main_cursor = cursors.main as usize;
-        let mut ring_cursor = cursors.ring as usize;
-        let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
-        let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
-
-        // The ring views borrow the two channels for the whole walk, so the two van Herk words come
-        // back out of the scope and are written to the arena below, once.
-        let (left_prefix, left_phase, right_prefix, right_phase) = {
-            let mut uniform_left = UniformHot::<L>::new(left, shape);
-            let mut uniform_right = UniformHot::<L>::new(right, shape);
-
-            // The chunking of the detector is `limiter_block_per_lane`'s, for its reason: only one
-            // channel's twelve history words are live at a time.
-            for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
-                let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
-                let active_base = chunk * width;
-                let active_words = span * width;
-                detector_chunk::<L>(
-                    &mut hot_left.history,
-                    &left_io[active_base..active_base + active_words],
-                    &coef.fir,
-                    &mut peaks_left[..active_words],
-                );
-                detector_chunk::<L>(
-                    &mut hot_right.history,
-                    &right_io[active_base..active_base + active_words],
-                    &coef.fir,
-                    &mut peaks_right[..active_words],
-                );
-
-                let mut frame = 0;
-                while frame < span {
-                    let walk = segment(
-                        shape,
-                        ring_cursor,
-                        main_cursor,
-                        span - frame,
-                        uniform_left.offsets,
-                        uniform_right.offsets,
-                    );
-                    let run = walk.run;
-
-                    let base = (chunk + frame) * width;
-                    let words = run * width;
-                    let left_segment = &mut left_io[base..base + words];
-                    let right_segment = &mut right_io[base..base + words];
-                    let left_peaks = &peaks_left[frame * width..(frame + run) * width];
-                    let right_peaks = &peaks_right[frame * width..(frame + run) * width];
-
-                    for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
-                        .chunks_exact_mut(width)
-                        .zip(right_segment.chunks_exact_mut(width))
-                        .zip(left_peaks.chunks_exact(width))
-                        .zip(right_peaks.chunks_exact(width))
-                        .enumerate()
-                    {
-                        let (limit_left, release_left) = ramp_values::<DISPATCH, L>(
-                            stationary,
-                            &mut hot_left.limit,
-                            &mut hot_left.release,
-                        );
-                        let (limit_right, release_right) = ramp_values::<DISPATCH, L>(
-                            stationary,
-                            &mut hot_right.limit,
-                            &mut hot_right.release,
-                        );
-
-                        let peak_left = L::load(left_peak);
-                        let peak_right = L::load(right_peak);
-                        let linked = peak_right.max(peak_left);
-                        let peak_left = L::select(link, linked, peak_left);
-                        let peak_right = L::select(link, linked, peak_right);
-
-                        let x_left = L::load(left_frame);
-                        let x_right = L::load(right_frame);
-
-                        channel_frame_uniform::<L>(
-                            left_frame,
-                            x_left,
-                            peak_left,
-                            limit_left,
-                            release_left,
-                            &mut hot_left,
-                            &mut uniform_left,
-                            ring,
-                            walk.left.advanced(step),
-                            bypass,
-                        );
-                        channel_frame_uniform::<L>(
-                            right_frame,
-                            x_right,
-                            peak_right,
-                            limit_right,
-                            release_right,
-                            &mut hot_right,
-                            &mut uniform_right,
-                            ring,
-                            walk.right.advanced(step),
-                            bypass,
-                        );
-                    }
-
-                    frame += run;
-                    ring_cursor = wrapped(ring_cursor + run, ring);
-                    main_cursor = wrapped(main_cursor + run, main);
-                }
-            }
-
-            (
-                uniform_left.prefix,
-                uniform_left.phase,
-                uniform_right.prefix,
-                uniform_right.phase,
-            )
-        };
-
-        // R1(a)'s write-back. One store of each van Herk word per block, holding what the last frame
-        // of the block computed; `phase` is filled across the cohort because every lane of it shares
-        // the one position `lanes_uniform` established.
-        left_prefix.store(&mut left.prefix);
-        left.phase.fill(left_phase);
-        right_prefix.store(&mut right.prefix);
-        right.phase.fill(right_phase);
-
+        let mut scratch = [0.0; MAXIMUM_WIDTH];
+        for frame in 0..frames {
+            let base = frame * width;
+            let x_left = L::load(&left_io[base..]);
+            let x_right = L::load(&right_io[base..]);
+            let limit_left = hot_left.limit.advance();
+            let release_left = hot_left.release.advance();
+            let limit_right = hot_right.limit.advance();
+            let release_right = hot_right.release.advance();
+            let peak_left = detector_peak(&mut hot_left.history, x_left, &coef.fir);
+            let peak_right = detector_peak(&mut hot_right.history, x_right, &coef.fir);
+            let linked = peak_right.max(peak_left);
+            channel_frame::<L>(
+                left_io,
+                base,
+                x_left,
+                L::select(link, linked, peak_left),
+                limit_left,
+                release_left,
+                &mut hot_left,
+                left,
+                shape.ring,
+                cursors.ring as usize,
+                cursors.main as usize,
+                bypass,
+                &mut scratch,
+            );
+            channel_frame::<L>(
+                right_io,
+                base,
+                x_right,
+                L::select(link, linked, peak_right),
+                limit_right,
+                release_right,
+                &mut hot_right,
+                right,
+                shape.ring,
+                cursors.ring as usize,
+                cursors.main as usize,
+                bypass,
+                &mut scratch,
+            );
+            cursors.main = ((cursors.main as usize + 1) % shape.main) as u32;
+            cursors.ring = ((cursors.ring as usize + 1) % shape.ring) as u32;
+        }
         hot_left.store(left);
         hot_right.store(right);
-        cursors.main = main_cursor as u32;
-        cursors.ring = ring_cursor as u32;
     }
 
     /// SplitMix64 draws for the #990 scenarios, so a scenario is a seed and never a file.
@@ -9346,14 +9187,14 @@ mod tests {
         }
     }
 
-    /// **Gate 1: the linked body renders exactly what the unmodified kernel renders.**
+    /// **The linked body matches the current frame law.**
     ///
     /// Issue #990. Every output word, every track's payload, the complete state (the resident
     /// reduction tap's word included), the silent claim and the non-finite report, after every
-    /// block, against the pre-#990 kernel kept in this module. Red mutations: skip the mirrored
+    /// block, against the independent per-frame driver. Red mutations: skip the mirrored
     /// backward pass (M1), skip the mirrored box store (M2), engage under `DualMono` (M3).
     #[test]
-    fn the_linked_body_renders_exactly_the_unmodified_kernel() {
+    fn the_linked_body_matches_the_current_frame_law() {
         lane::each_lane!(|L, W| linked_identity_matrix::<L>(&width_label(W)));
     }
 
@@ -9485,7 +9326,7 @@ mod tests {
         (pair.engaged, pair.rendered)
     }
 
-    /// **Gate 1, randomized: the linked body is the unmodified kernel under hostile events.**
+    /// **The linked body matches the current frame law under hostile events.**
     ///
     /// Issue #990. Random banks (every launch rate, both links, bypass, ragged and asymmetric
     /// cohorts), random block lengths and signals (including `-0.0`, subnormals, the exact
@@ -9494,7 +9335,7 @@ mod tests {
     /// payloads, and collapse runs with and without `desymmetrize`. Every block is compared as in
     /// the matrix. The linked body must actually have run.
     #[test]
-    fn randomized_scenarios_render_exactly_the_unmodified_kernel() {
+    fn randomized_scenarios_match_the_current_frame_law() {
         // Issue #1051's seed discipline: `MISO_ENGINE_RANDOMIZED_SCALE` multiplies the debug share
         // (the nightly job), `MISO_ENGINE_RANDOMIZED_SEED` replays one scenario.
         let scenarios = if cfg!(debug_assertions) || dsp_reference::randomized::overridden() {
@@ -9509,9 +9350,9 @@ mod tests {
             let mut engaged = 0;
             let mut rendered = 0;
             dsp_reference::randomized::run_seeds(
-                &format!("randomized_scenarios_render_exactly_the_unmodified_kernel {label}"),
+                &format!("randomized_scenarios_match_the_current_frame_law {label}"),
                 "cargo test -p true-peak-limiter --lib -- --exact \
-                 tests::randomized_scenarios_render_exactly_the_unmodified_kernel",
+                 tests::randomized_scenarios_match_the_current_frame_law",
                 scenarios,
                 |scenario| {
                     let (linked, blocks) = run(0x0990_5EED_0000 + scenario, label);
@@ -9531,9 +9372,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Issue #1014 gate 2: the stationary walk against the unmodified kernel, where it is fragile.
+    // The stationary segment walk against the current frame law, where it is fragile.
     //
-    // The oracle is #990's: `reference_block`, the kernel as it stood before #990, token for token,
+    // The oracle is `reference_block`, the current per-frame driver,
     // reached through `LinkedPair`. The generator aims at what the walk turns on -- windows at and
     // around its thresholds, asymmetric channel windows, every block length up to 256, completions
     // on every kind of frame, the ring streams' three wrap cases and their refusals, ramping
@@ -9754,10 +9595,10 @@ mod tests {
         }
     }
 
-    /// **Issue #1014 gate 2: the stationary walk renders exactly the unmodified kernel.**
+    /// **The stationary segment walk matches the current frame law.**
     ///
     /// Randomized scenarios at every width (24 per width in dev, 1,000 in release) against #990's
-    /// oracle, comparing every output word (NaN as "both NaN"), every track's payload and the
+    /// per-frame oracle, comparing every output word (NaN as "both NaN"), every track's payload and the
     /// complete state after every block. Every counter below must be nonzero: segments ending at a
     /// completion on their first frame, on their last frame, on a chunk boundary and on a ring
     /// wrap; dual segments cut by the right channel and asymmetric ones; linked runs of 0, 1, 2, 3
@@ -9766,7 +9607,7 @@ mod tests {
     /// `steady > R - Wb`; ramping blocks that took the fused loop; and restores at phase 0 and at
     /// `Wb - 1`.
     #[test]
-    fn the_stationary_walk_renders_exactly_the_unmodified_kernel() {
+    fn the_stationary_walk_matches_the_current_frame_law() {
         let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
         let mut runs: Vec<(String, SegmentScenario)> = Vec::new();
         lane::each_lane!(|L, W| runs.push((width_label(W), segment_scenario::<L>)));

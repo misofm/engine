@@ -24,7 +24,6 @@ bench-support.workspace = true
 conformance = { workspace = true, features = ["realtime-audit"] }
 engine.workspace = true
 dsp-reference.workspace = true
-sha2.workspace = true
 
 [lints]
 workspace = true
