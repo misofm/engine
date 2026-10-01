@@ -1715,30 +1715,8 @@ impl BankMembers for ArenaMembers<'_> {
         let count = lane_ids.len();
         let frames = cohort.frames();
         let stride = cohort.stride();
-        let Some(max_lane) = lane_ids.iter().copied().max() else {
-            return;
-        };
-        if lane_ids
-            .iter()
-            .enumerate()
-            .any(|(index, lane)| lane_ids[..index].contains(lane))
-        {
-            return;
-        }
-        let Some(required) = max_lane
-            .checked_add(1)
-            .and_then(|lanes| lanes.checked_mul(stride))
-        else {
-            return;
-        };
-        if count == 0
-            || count > 8
-            || stride < frames
-            || cohort.left().len() < required
-            || cohort.right().len() < required
-            || frames > self.lease.frames()
-            || !self.master_writable()
-        {
+        // FoldCohort::new validates lane IDs and lane-major capacity; its fields are private.
+        if frames > self.lease.frames() || !self.master_writable() {
             return;
         }
         let mut coefficients = [[0.0; 4]; 8];
@@ -6910,7 +6888,6 @@ mod tests {
     use super::*;
     use crate::program::{BufferRef, DelayRef, InputRef};
     use core::any::Any;
-    use lane::kernels::sum2_block;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -8030,41 +8007,21 @@ mod tests {
         lease.read(0, 1).to_vec()
     }
 
-    fn old_reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
-        let mut lease = single_lease(frames, inputs.len() + 1);
-        let refs: Vec<u32> = (2..=inputs.len() as u32 + 1).collect();
-        lease.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
-        for (index, input) in inputs.iter().enumerate() {
-            lease.write(0, refs[index]).copy_from_slice(input);
-        }
-        old_reduce_plane(&mut lease, 0, 1, &refs);
-        lease.read(0, 1).to_vec()
+    /// Independent D9 definition: one scalar left-to-right chain per frame.
+    fn reference_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+        let reference: Vec<f32> = (0..lease.frames())
+            .map(|frame| {
+                inputs
+                    .iter()
+                    .map(|input| lease.read(plane, *input)[frame])
+                    .reduce(|left, right| left + right)
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        lease.write(plane, out).copy_from_slice(&reference);
     }
 
-    /// Frozen pre-RT-3 oracle: the old two-kernel left-associated reduction.
-    fn old_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
-        match inputs {
-            [] => lease.write(plane, out).fill(0.0),
-            [single] => {
-                if *single != out {
-                    let (output, input) = lease.write_read(plane, out, *single);
-                    output.copy_from_slice(input);
-                }
-            }
-            [first, second, rest @ ..] => {
-                {
-                    let (output, a, b) = lease.write_read2(plane, out, *first, *second);
-                    sum2_block::<FrameLane>(output, a, b);
-                }
-                for next in rest {
-                    let (output, input) = lease.write_read(plane, out, *next);
-                    sum_into_block::<FrameLane>(output, input);
-                }
-            }
-        }
-    }
-
-    fn assert_width_matches_old<L: Lane>() {
+    fn assert_width_matches_reference<L: Lane>() {
         #[derive(Clone, Copy, Debug)]
         enum Family {
             Finite,
@@ -8139,22 +8096,17 @@ mod tests {
                     })
                     .collect();
                 let mut actual = single_lease(frames, 11);
-                let mut old = single_lease(frames, 11);
                 let ids: Vec<u32> = (2..11).collect();
                 for (index, values) in inputs.iter().enumerate() {
                     actual.write(0, ids[index]).copy_from_slice(values);
-                    old.write(0, ids[index]).copy_from_slice(values);
                 }
                 reduce_many::<L>(&mut actual, 0, 1, &ids);
-                {
-                    let (output, first, second) = old.write_read2(0, 1, ids[0], ids[1]);
-                    sum2_block::<L>(output, first, second);
-                }
-                for id in &ids[2..] {
-                    let (output, input) = old.write_read(0, 1, *id);
-                    sum_into_block::<L>(output, input);
-                }
-                for (frame, expected) in old.read(0, 1).iter().enumerate() {
+                for (frame, value) in actual.read(0, 1).iter().enumerate() {
+                    let reference = inputs
+                        .iter()
+                        .map(|input| input[frame])
+                        .reduce(|left, right| left + right)
+                        .expect("nonempty inputs");
                     let expected_bits = match family {
                         Family::Finite if frame % 2 == 0 => 1.75_f32.to_bits(),
                         Family::Finite => 0.0_f32.to_bits(),
@@ -8164,76 +8116,30 @@ mod tests {
                         Family::Infinity if frame % 2 == 0 => f32::INFINITY.to_bits(),
                         Family::Infinity => f32::NEG_INFINITY.to_bits(),
                         Family::Nan => {
-                            assert!(expected.is_nan(), "old NaN family output at frame {frame}");
-                            expected.to_bits()
+                            assert!(reference.is_nan(), "NaN family reference at frame {frame}");
+                            reference.to_bits()
                         }
                     };
                     assert_eq!(
-                        expected.to_bits(),
+                        reference.to_bits(),
                         expected_bits,
-                        "old {family:?} category at width {} frames {frames} frame {frame}",
+                        "{family:?} category at width {} frames {frames} frame {frame}",
+                        L::WIDTH
+                    );
+                    assert_eq!(
+                        value.to_bits(),
+                        reference.to_bits(),
+                        "{family:?} width {} frames {frames} frame {frame}",
                         L::WIDTH
                     );
                 }
-                assert_eq!(
-                    actual
-                        .read(0, 1)
-                        .iter()
-                        .map(|x| x.to_bits())
-                        .collect::<Vec<_>>(),
-                    old.read(0, 1)
-                        .iter()
-                        .map(|x| x.to_bits())
-                        .collect::<Vec<_>>(),
-                    "{family:?} width {} frames {frames}",
-                    L::WIDTH
-                );
             }
         }
     }
 
     #[test]
-    fn every_lane_width_matches_the_frozen_old_kernel_on_hostile_values() {
-        lane::each_lane!(|L| assert_width_matches_old::<L>());
-    }
-
-    /// Frozen pre-#898 oracle: `reduce_many` exactly as it stood before issue #898, re-deriving
-    /// every input's arena slice once per vector. It is the "before" side of the before/after gate.
-    fn frozen_per_vector_reduce_many<L: Lane>(
-        lease: &mut ArenaLease,
-        plane: usize,
-        out: u32,
-        first: u32,
-        second: u32,
-        rest: &[u32],
-    ) {
-        let frames = lease.frames();
-        let vectored = frames - frames % L::WIDTH;
-        let mut index = 0;
-        while index < vectored {
-            let mut acc = {
-                let source = lease.read(plane, first);
-                L::load(&source[index..])
-            };
-            for input in std::iter::once(second).chain(rest.iter().copied()) {
-                let value = {
-                    let source = lease.read(plane, input);
-                    L::load(&source[index..])
-                };
-                acc = acc.add(value);
-            }
-            acc.store(&mut lease.write(plane, out)[index..]);
-            index += L::WIDTH;
-        }
-        while index < frames {
-            let mut acc = <f32 as lane::Lane>::load(&lease.read(plane, first)[index..]);
-            for input in std::iter::once(second).chain(rest.iter().copied()) {
-                let value = <f32 as lane::Lane>::load(&lease.read(plane, input)[index..]);
-                acc = acc.add(value);
-            }
-            acc.store(&mut lease.write(plane, out)[index..]);
-            index += 1;
-        }
+    fn every_lane_width_matches_the_scalar_reference_on_hostile_values() {
+        lane::each_lane!(|L| assert_width_matches_reference::<L>());
     }
 
     /// The one NaN payload the #898 corpus uses; see `hoisting_word`.
@@ -8297,36 +8203,28 @@ mod tests {
         [bits(lease.read(0, 1)), bits(lease.read(1, 1))]
     }
 
-    /// One width of the #898 gate: the hoisted kernel against the frozen per-vector one.
-    fn assert_hoisting_matches_frozen<L: Lane>(
+    /// One width of the D9 gate against the per-frame scalar reference.
+    fn assert_reduction_matches_reference<L: Lane>(
         frames: usize,
         contents: &[[Vec<f32>; 2]],
         ids: &[u32],
         reference: &[Vec<u32>; 2],
     ) {
-        let hoisted = hoisting_reduction_bits(frames, contents, |lease, plane| {
+        let actual = hoisting_reduction_bits(frames, contents, |lease, plane| {
             reduce_many::<L>(lease, plane, 1, ids);
         });
-        let frozen = hoisting_reduction_bits(frames, contents, |lease, plane| {
-            frozen_per_vector_reduce_many::<L>(lease, plane, 1, ids[0], ids[1], &ids[2..]);
-        });
-        let context = format!(
+        assert_eq!(
+            &actual,
+            reference,
             "width {} fan-in {} frames {frames} ids {ids:?}",
             L::WIDTH,
             ids.len()
         );
-        assert_eq!(hoisted, frozen, "hoisted vs frozen, {context}");
-        assert_eq!(
-            &hoisted, reference,
-            "hoisted vs scalar reference, {context}"
-        );
     }
 
-    /// Issue #898 gate 1: random N-input reductions are bit-identical before and after the arena
-    /// slices were hoisted out of the vector loop.
+    /// Random N-input reductions obey the per-frame scalar left-to-right D9 definition.
     ///
-    /// "Before" is `frozen_per_vector_reduce_many`, the pre-#898 kernel kept verbatim. The scalar
-    /// left-to-right `reduce` is the D9 definition both must equal. Every lane width runs, and so
+    /// Every lane width runs, and so
     /// does the production `reduce_plane`. Fan-in is random in `2..=64` and also pinned at every
     /// group edge up to 65. Block lengths are random, including non-multiples of every lane
     /// width. Edge lists repeat buffers and name the silence buffer, and both planes differ.
@@ -8336,7 +8234,7 @@ mod tests {
     /// Red mutations: start each group after the first from a fresh subtotal, or take the groups
     /// in reverse order. The test checks that its own corpus tells both apart from the reference.
     #[test]
-    fn random_fan_in_reductions_are_bit_identical_before_and_after_slice_hoisting() {
+    fn random_fan_in_reductions_match_the_scalar_reference() {
         use engine::realtime::ARENA_SILENCE_BUFFER;
         let _fp_env = lane::fpenv::CanonicalFpEnv::enter();
         let mut state = 0x0898_5eed_u32;
@@ -8411,7 +8309,7 @@ mod tests {
                 }
             }
 
-            lane::each_lane!(|L| assert_hoisting_matches_frozen::<L>(
+            lane::each_lane!(|L| assert_reduction_matches_reference::<L>(
                 frames, &contents, &ids, &reference
             ));
             let production = hoisting_reduction_bits(frames, &contents, |lease, plane| {
@@ -8483,7 +8381,7 @@ mod tests {
         let ids = [2, 2, 0, 3, 4];
         for plane in 0..2 {
             reduce_plane(&mut actual, plane, 1, &ids);
-            old_reduce_plane(&mut old, plane, 1, &ids);
+            reference_reduce_plane(&mut old, plane, 1, &ids);
         }
         for plane in 0..2 {
             assert_eq!(
@@ -8602,8 +8500,8 @@ mod tests {
             right.fill(-(lane as f32 + 1.0));
             mix2x2_block::<FrameLane>(left, right, coefficients);
         }
-        old_reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
-        old_reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
+        reference_reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
+        reference_reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
         let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
         let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
@@ -8768,8 +8666,8 @@ mod tests {
                 right.copy_from_slice(&tiles[index].1);
                 mix2x2_block::<FrameLane>(left, right, coefficients[index]);
             }
-            old_reduce_plane(&mut lease, 0, master, &routes);
-            old_reduce_plane(&mut lease, 1, master, &routes);
+            reference_reduce_plane(&mut lease, 0, master, &routes);
+            reference_reduce_plane(&mut lease, 1, master, &routes);
             let (oracle_left, oracle_right) = lease.read_stereo(master);
             let oracle: (Vec<u32>, Vec<u32>) = (
                 oracle_left.iter().map(|value| value.to_bits()).collect(),
@@ -9691,9 +9589,7 @@ mod tests {
         let wrong = order[0] + (order[1] + order[2]);
         assert_ne!(old.to_bits(), wrong.to_bits());
         let got = reduce_case(1, &order.map(|value| vec![value]));
-        let old_kernel = old_reduce_case(1, &order.map(|value| vec![value]));
-        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
-        assert_eq!(got[0].to_bits(), old_kernel[0].to_bits());
+        assert_eq!(got[0].to_bits(), old.to_bits());
 
         let many = [
             16_777_216.0_f32,
@@ -9727,12 +9623,7 @@ mod tests {
         let wrong_subtotal = first + second;
         assert_ne!(old.to_bits(), wrong_subtotal.to_bits());
         let inputs = many.map(|value| vec![value]);
-        let old_kernel = old_reduce_case(1, &inputs);
-        assert_eq!(old_kernel[0].to_bits(), old.to_bits());
-        assert_eq!(
-            reduce_case(1, &inputs)[0].to_bits(),
-            old_kernel[0].to_bits()
-        );
+        assert_eq!(reduce_case(1, &inputs)[0].to_bits(), old.to_bits());
 
         // (b) Seeded corpora at several fan-ins, against the one-line scalar reference.
         let mut state = 0x6d69_736fu32;
