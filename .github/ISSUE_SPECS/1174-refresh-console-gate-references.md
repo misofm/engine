@@ -15,3 +15,9 @@ Root inspects the complete two-path diff and the actual current meter and matrix
 ## Decision record
 
 Root brief approved 2026-10-01. Dedicated parent crate issues #1146/#1133 already record retained numeric/behavioral owners. This bounded successor corrects the residual current-reference prose without reopening their verified executable slices.
+
+## Attempt 1 completion evidence
+
+Checkpoint `1c8512d2`, integrated/pushed as `5dd1be38`: changed only the meter-test comment in `tools/console-workload/src/lib.rs` and the current-owner preface in `crates/builtins/tests/MUTATIONS.md` (seven lines added/seven removed). The comment now describes direct equality of the two current 64-block transcripts; the preface records gate 3 retirement under #1133 and gate 4 retirement under #1146. Independent lane matrix/select-form laws, the settled dispatch witness, and builtin fused/split-stage PCM/state comparisons remain current correctness owners. Every executable token, historical gate list and mutation row is unchanged.
+
+`cargo fmt --all --check` PASS (empty `/tmp/housekeeping-a-console-references-fmt.log`); `git diff --check` PASS. No test/build/target/timed invocation was needed or run for these prose-only changes. No owner question. Writing paused for root's single attempt-1 verdict.
