@@ -27,4 +27,10 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 checkpoint and approved ownership completion
+
+Worker B read all six Rust files (4,419 lines), manifest and consumer/issue boundaries. The bounded three-path product checkpoint e41c327f is pushed through 1a9479ef: remove temporary descriptor/probe containers, borrow test parser names and delete two repeated source-ring tail assertions. All ten native tests, formatting and diff checks pass; schemas, probes and test functions are unchanged. Root inspected the complete diff, actual ordered registry iterator and independent ring matrix. No final adversarial verdict is claimed yet.
+
+Root identified remaining unnecessary nested output copies during review. Approved same-attempt completion on2026-10-01, confined to src/lib.rs and src/abi_layout.rs: make the seven private immediate-copy fragment emitters append to the final render-owned String; remove their local builders/returned fragments, and append the four maximumByRate pairs in their original order. Replace format-then-push ABI rows with direct fmt writes using the same literal templates. Keep number/optional_number and escaping authority, all tables/offsets/scenarios/field and whitespace order, output transaction/ownership, exported render API, manifests and dependencies fixed. This changes buffer ownership only, with no new serializer model, algorithm, schema, helper framework or test.
+
+The saved67,855-byte metadata and34,247-byte ABI documents plus69 oracle rows are the one-time base/head evidence; they are not new permanent pins. Existing ten independent parameter/ABI/schema/consumer owners remain. At the first focused-green completion pause for exact root checkpoint before final evidence. Recheck only boundaries actually affected by this new writer ownership; reuse unchanged evidence candidly. No timing or broad matrix. One final root adversarial verdict covers the complete attempt within the original maximum of five.
