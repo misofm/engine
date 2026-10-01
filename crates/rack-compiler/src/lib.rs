@@ -183,11 +183,6 @@ impl<Id> WorkingMember<Id> {
     }
 }
 
-struct WorkingGroup<Id, K> {
-    program: RackProgram<K>,
-    members: Vec<WorkingMember<Id>>,
-}
-
 /// Fixes the cohort's lane order: which members share a bank, and where each one sits in it.
 ///
 /// Two rules, in this order, and they answer two different questions.
@@ -297,7 +292,6 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
                     }
                 });
 
-                let mut rack_groups: Vec<WorkingGroup<Id, K>> = Vec::new();
                 while !pool.is_empty() {
                     let leader = pool
                         .iter()
@@ -312,11 +306,11 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
                         })
                         .map(|(index, _)| index)
                         .unwrap_or(0);
-                    let leader_program = pool[leader].program.clone();
+                    let leader_program = &pool[leader].program;
                     let mut compatible = Vec::new();
                     let mut rest = Vec::new();
                     for candidate in pool {
-                        match candidate.program.subsequence_mask(&leader_program) {
+                        match candidate.program.subsequence_mask(leader_program) {
                             Some(mask) => compatible.push(WorkingMember {
                                 id: candidate.id.clone(),
                                 mask,
@@ -328,19 +322,17 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
                     let mut remaining = compatible.into_iter().peekable();
                     while remaining.peek().is_some() {
                         let members: Vec<_> = remaining.by_ref().take(lanes).collect();
-                        rack_groups.push(WorkingGroup {
-                            program: leader_program.clone(),
+                        groups.push(materialize(
+                            level,
+                            rack,
+                            class,
+                            leader_program,
                             members,
-                        });
+                            lanes,
+                        ));
                     }
                     pool = rest;
                 }
-
-                groups.extend(
-                    rack_groups
-                        .into_iter()
-                        .map(|group| materialize(level, rack, class, group, lanes)),
-                );
             }
         }
     }
@@ -350,17 +342,18 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
     Ok(plan)
 }
 
-fn materialize<Id, K>(
+fn materialize<Id, K: Clone>(
     level: u64,
     rack: RackLocation,
     class: CohortPoolClass,
-    group: WorkingGroup<Id, K>,
+    program: &RackProgram<K>,
+    working_members: Vec<WorkingMember<Id>>,
     lanes: usize,
 ) -> BankGroup<Id, K> {
-    let slots = group.program.slots.len();
+    let slots = program.slots.len();
     let mut members: Vec<Option<Id>> = Vec::with_capacity(lanes);
     let mut active_slots: Vec<Box<[bool]>> = Vec::with_capacity(lanes);
-    for member in group.members {
+    for member in working_members {
         members.push(Some(member.id));
         active_slots.push(member.mask);
     }
@@ -373,18 +366,15 @@ fn materialize<Id, K>(
         level,
         rack,
         class,
-        program: group.program.slots,
+        program: program.slots.clone(),
         members: members.into_boxed_slice(),
         active_mask: active_mask.into_boxed_slice(),
         active_slots: active_slots.into_boxed_slice(),
     }
 }
 
-fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
-    plan: &BankPlan<Id, K>,
-    lanes: usize,
-) -> bool {
-    let mut seen: Vec<Id> = plan.scalar.clone();
+fn plan_invariants_hold<Id: Ord, K: BankSlotKey>(plan: &BankPlan<Id, K>, lanes: usize) -> bool {
+    let mut seen: Vec<&Id> = plan.scalar.iter().collect();
     for group in &plan.groups {
         if group.members.len() != lanes
             || group.active_mask.len() != lanes
@@ -397,16 +387,7 @@ fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
         // has_valid_structural_layout` requires of every bank it validates. Checked here as well
         // as there so a planner regression fails in the planner's own debug assertions rather
         // than as a bind-time refusal three crates away.
-        if group
-            .members
-            .iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        {
-            return false;
-        }
+        let mut previous = None;
         let mut padding = false;
         for lane in 0..lanes {
             let present = group.members[lane].is_some();
@@ -425,7 +406,11 @@ fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
                 }
             }
             if let Some(id) = &group.members[lane] {
-                seen.push(id.clone());
+                if previous.is_some_and(|previous| previous >= id) {
+                    return false;
+                }
+                previous = Some(id);
+                seen.push(id);
             }
         }
     }
@@ -508,8 +493,8 @@ mod tests {
         }]
     }
 
-    fn members(group: &BankGroup<u32>) -> Vec<Option<u32>> {
-        group.members.to_vec()
+    fn members(group: &BankGroup<u32>) -> &[Option<u32>] {
+        &group.members
     }
 
     fn full_group_members(plan: &BankPlan<u32>) -> Vec<Vec<u32>> {
@@ -528,39 +513,9 @@ mod tests {
         z ^ (z >> 31)
     }
 
-    /// The rule `bind_rack_banks` used before #96, reimplemented over the same inputs: group by
-    /// `(rack, program)`, chunk in id order, drop partial chunks and level-mixed chunks.
-    fn legacy_full_banks(
-        candidates: &[(u64, CohortCandidate<u32>)],
-        lanes: usize,
-    ) -> Vec<Vec<u32>> {
-        let mut by_program: BTreeMap<RackProgram, Vec<(u64, u32)>> = BTreeMap::new();
-        for (level, candidate) in candidates {
-            if !candidate.program.is_bankable() {
-                continue;
-            }
-            by_program
-                .entry(candidate.program.clone())
-                .or_default()
-                .push((*level, candidate.id));
-        }
-        let mut banks = Vec::new();
-        for entries in by_program.values_mut() {
-            entries.sort_by_key(|(_, id)| *id);
-            for chunk in entries.chunks(lanes) {
-                if chunk.len() == lanes && chunk.iter().all(|(level, _)| *level == chunk[0].0) {
-                    banks.push(chunk.iter().map(|(_, id)| *id).collect());
-                }
-            }
-        }
-        banks
-    }
-
-    /// P1: on one-slot programs the planner reproduces the pre-#96 chunking exactly whenever no
-    /// `(rack, program)` cohort spans two dependency levels, and otherwise partitions by level
-    /// first (#96 F12) — the only intended membership difference.
+    /// P1: single-slot pools conserve every candidate and partition by dependency level and key.
     #[test]
-    fn single_slot_programs_reproduce_exact_equal_chunking() {
+    fn single_slot_programs_partition_by_level_and_key() {
         let mut state = 0x5eed_0096_u64;
         for case in 0..200u32 {
             let width = BankWidth::ALL[case as usize % BankWidth::ALL.len()];
@@ -611,37 +566,6 @@ mod tests {
                         .expect("known id");
                     assert_eq!(*candidate_level, level);
                     assert_eq!(candidate.program.slots.as_ref(), group.program.as_ref());
-                }
-            }
-
-            let mixed = {
-                let mut level_by_program: BTreeMap<RackProgram, u64> = BTreeMap::new();
-                let mut mixed = false;
-                for (level, candidate) in &flat {
-                    match level_by_program.get(&candidate.program) {
-                        Some(seen) if seen != level => mixed = true,
-                        _ => {
-                            level_by_program.insert(candidate.program.clone(), *level);
-                        }
-                    }
-                }
-                mixed
-            };
-            let legacy = legacy_full_banks(&flat, lanes);
-            let mut planned = full_group_members(&plan);
-            let mut legacy_sorted = legacy.clone();
-            planned.sort();
-            legacy_sorted.sort();
-            if !mixed {
-                assert_eq!(planned, legacy_sorted, "case={case} width={lanes}");
-            } else {
-                // F12: level-mixed cohorts were dropped wholesale before #96; they are now
-                // partitioned by level. Every planned full group must still be a level-uniform,
-                // program-uniform, id-ordered chunk.
-                for group in full_group_members(&plan) {
-                    let mut sorted = group.clone();
-                    sorted.sort_unstable();
-                    assert_eq!(group, sorted, "case={case}");
                 }
             }
         }
@@ -746,15 +670,15 @@ mod tests {
         );
         assert_eq!(
             members(&plan.groups[0]),
-            vec![Some(4), Some(5), Some(6), Some(7)],
+            &[Some(4), Some(5), Some(6), Some(7)],
             "full-program tracks fill the first bank even though their ids are larger"
         );
         assert_eq!(
             members(&plan.groups[1]),
-            vec![Some(0), Some(1), Some(2), Some(8)],
+            &[Some(0), Some(1), Some(2), Some(8)],
             "the same four members F5.2 chose, in the ascending lane order #206 requires"
         );
-        assert_eq!(members(&plan.groups[2]), vec![Some(3), None, None, None]);
+        assert_eq!(members(&plan.groups[2]), &[Some(3), None, None, None]);
         assert_eq!(
             plan.groups[1].active_slots[1].as_ref(),
             &[true, false, true],
@@ -802,11 +726,8 @@ mod tests {
             let mut seen = Vec::new();
             for (index, group) in plan.groups.iter().enumerate() {
                 let members: Vec<u32> = group.members.iter().flatten().copied().collect();
-                let mut sorted = members.clone();
-                sorted.sort_unstable();
-                sorted.dedup();
-                assert_eq!(
-                    members, sorted,
+                assert!(
+                    members.windows(2).all(|pair| pair[0] < pair[1]),
                     "width={lanes}: bank {index} is not strictly ascending: {members:?}"
                 );
                 seen.extend(members);
@@ -963,19 +884,22 @@ mod tests {
                     class: CohortPoolClass::Stereo,
                 });
             }
-            let by_id: BTreeMap<u32, RackProgram> = candidates
+            let input = one_level(candidates);
+            let by_id: Vec<&RackProgram> = input[0]
+                .candidates
                 .iter()
-                .map(|candidate| (candidate.id, candidate.program.clone()))
+                .map(|candidate| &candidate.program)
                 .collect();
-            let plan = plan_bank_groups(&one_level(candidates), width).expect("plan");
+            let plan = plan_bank_groups(&input, width).expect("plan");
             for (index, group) in plan.groups.iter().enumerate() {
                 if group.active_count() == lanes {
                     continue;
                 }
+                let leader = group.program();
                 for later in plan.groups.iter().skip(index + 1) {
                     for member in later.members.iter().flatten() {
                         assert!(
-                            by_id[member].subsequence_mask(&group.program()).is_none(),
+                            by_id[*member as usize].subsequence_mask(&leader).is_none(),
                             "case={case}: id {member} could have filled a free lane in group {index}"
                         );
                     }
@@ -1010,24 +934,26 @@ mod tests {
                     class: CohortPoolClass::Stereo,
                 });
             }
-            let by_id: BTreeMap<u32, RackProgram> = candidates
+            let input = one_level(candidates);
+            let by_id: Vec<&RackProgram> = input[0]
+                .candidates
                 .iter()
-                .map(|candidate| (candidate.id, candidate.program.clone()))
+                .map(|candidate| &candidate.program)
                 .collect();
-            let plan = plan_bank_groups(&one_level(candidates), width).expect("plan");
+            let plan = plan_bank_groups(&input, width).expect("plan");
             for group in &plan.groups {
                 for (lane, member) in group.members.iter().enumerate() {
                     let Some(id) = member else { continue };
                     // The lane's own program, read off in leader-slot order, is exactly the leader
                     // keys at the positions the lane is active on.
-                    let run: Vec<&EffectProgramKey> = group.active_slots[lane]
+                    let run = group.active_slots[lane]
                         .iter()
-                        .enumerate()
-                        .filter(|(_, active)| **active)
-                        .map(|(slot, _)| &group.program[slot])
-                        .collect();
-                    let own: Vec<&EffectProgramKey> = by_id[id].slots.iter().collect();
-                    assert_eq!(run, own, "case={case} lane={lane}");
+                        .zip(group.program.iter())
+                        .filter_map(|(active, key)| active.then_some(key));
+                    assert!(
+                        run.eq(by_id[*id as usize].slots.iter()),
+                        "case={case} lane={lane}"
+                    );
                 }
                 for slot in 0..group.program.len() {
                     if group.slot_is_identity_everywhere(slot) {
@@ -1143,10 +1069,10 @@ mod tests {
                     );
                 }
             }
-            let scalar_ids: Vec<u32> = plan.scalar.clone();
-            let mut sorted = scalar_ids.clone();
-            sorted.sort_unstable();
-            assert_eq!(scalar_ids, sorted, "scalar members are id-ordered");
+            assert!(
+                plan.scalar.windows(2).all(|pair| pair[0] <= pair[1]),
+                "scalar members are id-ordered"
+            );
         }
     }
 

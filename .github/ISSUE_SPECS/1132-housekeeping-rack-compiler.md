@@ -27,4 +27,14 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 — checkpoint
+
+Worker B reviewed the complete package (`Cargo.toml` and its sole source/test file). Root approved the package brief. Related partial-insert banking (#888/#889), partial gather/scatter (#887), and live silent-lane packing (#1107) remain separate scopes.
+
+- **Repetition/LoC:** delete `WorkingGroup` and its staging vector; materialize each final group directly in the same level/rack/class/cohort/chunk traversal. Delete the pre-#96 `legacy_full_banks` implementation oracle and historical mixed-cohort comparison branch. All 13 current behavioral tests remain.
+- **Copies:** borrow the selected leader until each output clones its required owned program; borrowed IDs replace debug-validator ID clones and its per-group temporary vector. Test member assertions borrow slices; seeded candidate programs use dense-ID borrowed references, homogeneity compares iterators, and ascending/scalar checks use adjacent windows.
+- **Test value:** retain current level/key partition, complete candidate conservation, padding/mask, duplicate rejection, greedy repeated-key subsequence, longest/full-first placement, ascending-bank regression, class/witness, exhaustive-pooling, homogeneity, shuffle determinism and comparator gates. Full family purposes and deletion survivor mapping follow below.
+- **Micro SIMD:** this control-plane package compares opaque program keys, sorts IDs and builds masks; it performs no sample arithmetic. No additional ISA implementation or arithmetic change is justified.
+- **Data structures:** eliminate the intermediate group vector and the test-only ordered maps for dense generated IDs. The production level `BTreeMap` still supplies ascending level order; output programs/IDs/masks remain owned, and public APIs, leader selection, chunk ordering and width handling are unchanged.
+
+Focused gate: `CARGO_TARGET_DIR=/home/bl/misofm/engine/target/housekeeping-b cargo test --locked -p rack-compiler` — PASS (13 unit tests, zero doc-tests). Product edits paused for root exact-path checkpoint. Release/clippy/fmt/policies, supported target builds and proportional downstream evidence pending; no timing or rendered-bit claim is made.
