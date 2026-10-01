@@ -372,7 +372,14 @@ pub trait Lane: Copy + Send + Sync + 'static {
     /// in-range input and NaN maps to `-126` (master plan §11). For an integer-valued `n` the
     /// result is exact; for a non-integer `n` the result is unspecified but identical on every
     /// backend, because the clamp, the add and the shift are the same operations everywhere.
-    fn exp2_int(n: Self) -> Self;
+    #[inline(always)]
+    fn exp2_int(n: Self) -> Self {
+        let n = Self::min(
+            Self::max(n, Self::splat(bits::EXP2_INT_MIN)),
+            Self::splat(bits::EXP2_INT_MAX),
+        );
+        Self::exp2_int_in_range(n)
+    }
 
     /// `2^n` for an integer-valued `n` already in `[-126, 127]`.
     ///

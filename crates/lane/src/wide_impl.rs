@@ -32,8 +32,7 @@
 //! its inputs*, argued case by case here and checked against the scalar oracle by gate G1
 //! (`tests/g1_op_identity.rs`), which sweeps every ordered pair of the directed edge pool — both
 //! signed zeros, both NaN payloads in both operand positions, both infinities, both subnormal
-//! boundaries — at `Simd4` and `Simd8`, plus the dedicated per-lowering truth-table test
-//! `g1_max_and_min_lowerings_match_the_oracle`. Rows 1 and 2 of `tests/MUTATIONS.md` record that
+//! boundaries — at `Simd4` and `Simd8`. Rows 1 and 2 of `tests/MUTATIONS.md` record that
 //! same pool going red for exactly these substitutions made wrong.
 //!
 //! ## `select`: `blendv` instead of `bitselect`
@@ -320,15 +319,6 @@ macro_rules! impl_lane_for_wide {
                 {
                     $crate::Lane::select($crate::Lane::lt(self, b), self, b)
                 }
-            }
-
-            #[inline(always)]
-            fn exp2_int(n: Self) -> Self {
-                let n = $crate::Lane::min(
-                    $crate::Lane::max(n, <$simd>::splat($crate::bits::EXP2_INT_MIN)),
-                    <$simd>::splat($crate::bits::EXP2_INT_MAX),
-                );
-                $crate::Lane::exp2_int_in_range(n)
             }
 
             #[inline(always)]

@@ -317,7 +317,6 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
         // Leg 1: the chain kernel against the select-form replica and the oracle.
         let mut tree_state = InputChainState::<L>::default();
         let mut select_state = InputChainState::<L>::default();
-        let mut tree_total = vec![0_u32; L::WIDTH];
         let mut oracle_total = vec![0_u32; L::WIDTH];
         for block in 0..BLOCKS {
             let mut tree_left = vec![0.0_f32; span];
@@ -361,12 +360,10 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
                     "width={width}, block={block}, channel={channel}: counter vs scalar oracle"
                 );
                 for (lane, count) in oracle.iter().enumerate() {
-                    tree_total[lane] += count;
                     oracle_total[lane] += count;
                 }
             }
         }
-        assert_eq!(tree_total, oracle_total, "width={width}: lifetime totals");
         assert!(
             oracle_total.iter().all(|count| *count > 0),
             "width={width}: every lane must sanitise something, or the fixture is vacuous"

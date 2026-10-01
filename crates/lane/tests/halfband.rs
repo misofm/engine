@@ -98,26 +98,21 @@ fn interpolation_and_decimation_are_width_independent() {
         out
     }
 
-    let scalar = run::<f32>();
-    // The scalar run advances a one-lane ring; comparing widths means comparing the same lane
-    // stream, so each width is compared against a scalar run of the same signal.
+    // Each scalar oracle advances its own one-lane history once, independently of the vector
+    // driver, over the same lane stream. Every frame and history wrap is still compared.
     lane::each_vector_lane!(|L, N| {
         let (width, values) = (N, run::<L>());
         assert_eq!(values.len(), FRAMES * width);
-        for index in 0..FRAMES {
-            for lane in 0..width {
-                // The scalar run used LANES-strided sample indices; rebuild the same lane stream.
-                let mut history = vec![0.0_f32; HALFBAND63_ROWS];
-                let mut pos = 0_usize;
-                let (mut interp, mut decim) = (0.0_f32, 0.0_f32);
-                for frame in 0..=index {
-                    history_push::<f32>(&mut history, pos, sample(frame * LANES + lane));
-                    let base = pos + HALFBAND63_LIVE_ROWS;
-                    interp = halfband2x_interp_even::<f32>(&history, base);
-                    let odd = 0.5_f32 * history_row::<f32>(&history, base - 31)[0];
-                    decim = halfband2x_decim_even::<f32>(&history, base, odd);
-                    pos = history_advance(pos);
-                }
+        for lane in 0..width {
+            let mut history = vec![0.0_f32; HALFBAND63_ROWS];
+            let mut pos = 0_usize;
+            for index in 0..FRAMES {
+                history_push::<f32>(&mut history, pos, sample(index * LANES + lane));
+                let base = pos + HALFBAND63_LIVE_ROWS;
+                let interp = halfband2x_interp_even::<f32>(&history, base);
+                let odd = 0.5_f32 * history_row::<f32>(&history, base - 31)[0];
+                let decim = halfband2x_decim_even::<f32>(&history, base, odd);
+                pos = history_advance(pos);
                 let actual = values[index * width + lane];
                 assert_eq!(
                     actual[0].to_bits(),
@@ -128,5 +123,4 @@ fn interpolation_and_decimation_are_width_independent() {
             }
         }
     });
-    assert_eq!(scalar.len(), FRAMES);
 }

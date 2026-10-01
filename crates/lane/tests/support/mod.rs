@@ -97,6 +97,7 @@ pub const EDGES: &[f32] = &[
     f32::NAN,
     -f32::NAN,
     f32::from_bits(0x7FC0_0001),
+    f32::from_bits(0xFFC0_0001),
     f32::from_bits(0xFFC0_0002),
     f32::MIN_POSITIVE,
     -f32::MIN_POSITIVE,
@@ -554,18 +555,6 @@ pub fn interleave(lanes: &[std::vec::Vec<f32>], width: usize, frames: usize) -> 
         }
     }
     block
-}
-
-/// Reads lane `lane_index` back out of an AoSoA block.
-pub fn deinterleave(
-    block: &[f32],
-    width: usize,
-    frames: usize,
-    lane_index: usize,
-) -> std::vec::Vec<f32> {
-    (0..frames)
-        .map(|frame| block[frame * width + lane_index])
-        .collect()
 }
 
 /// The G2 signal corpora: what a kernel is fed.
