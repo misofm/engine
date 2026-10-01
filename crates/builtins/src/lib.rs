@@ -392,8 +392,7 @@ pub fn builtin_parameter_lattice_points(
     sample_rate: u32,
 ) -> Result<BuiltinLatticePoints, effect_contract::LatticeError> {
     use effect_contract::{
-        AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
-        ParameterMapping, SmoothingRule, canonical_descriptor_decimal,
+        ParameterDomain, ParameterMapping, canonical_descriptor_decimal,
         parameter_lattice_points_parts,
     };
 
@@ -430,37 +429,15 @@ pub fn builtin_parameter_lattice_points(
             ParameterMapping::Linear
         }
     };
-    let parameter = ParameterDescriptor {
-        id: effect_contract::ParameterId(descriptor.id),
-        display_name: descriptor.name,
-        display_unit: "builtin",
+    let points = parameter_lattice_points_parts(
         unit,
         domain,
+        mapping,
         minimum,
         maximum,
         default_value,
-        mapping,
-        automation_rate: AutomationRate::None,
-        channel_policy: match descriptor.scope {
-            BuiltinParameterScope::PerLane => ParameterChannelPolicy::PerLane,
-            BuiltinParameterScope::MatrixShared => ParameterChannelPolicy::Shared,
-        },
-        smoothing: SmoothingRule::None,
-        smoothing_samples: 0,
-        readable: true,
-        automatable: false,
-        enum_choices: &[],
-        lattice: descriptor.lattice,
-    };
-    let points = parameter_lattice_points_parts(
-        parameter.unit,
-        parameter.domain,
-        parameter.mapping,
-        parameter.minimum,
-        parameter.maximum,
-        parameter.default_value,
         &[],
-        parameter.lattice,
+        descriptor.lattice,
         maximum_is_member,
     )?;
     let disabled = descriptor
@@ -907,6 +884,18 @@ fn svf_coef<L: Lane>(sections: &[SvfSection; MAX_BANK_LANES]) -> SvfCoef<L> {
 }
 
 #[inline]
+fn svf_word_pairs<L: Lane>(left: &SvfCoef<L>, right: &SvfCoef<L>) -> [(L, L); 6] {
+    [
+        (left.c1, right.c1),
+        (left.a2, right.a2),
+        (left.a3, right.a3),
+        (left.m0, right.m0),
+        (left.m1, right.m1),
+        (left.m2, right.m2),
+    ]
+}
+
+#[inline]
 fn zero_svf_coef<L: Lane>() -> SvfCoef<L> {
     SvfCoef {
         c1: L::zero(),
@@ -1153,32 +1142,10 @@ impl<L: Lane> InputStage<L> {
             }
         }
         for section in 0..2 {
-            for (left_word, right_word) in [
-                (
-                    self.coef.section[0][section].c1,
-                    self.coef.section[1][section].c1,
-                ),
-                (
-                    self.coef.section[0][section].a2,
-                    self.coef.section[1][section].a2,
-                ),
-                (
-                    self.coef.section[0][section].a3,
-                    self.coef.section[1][section].a3,
-                ),
-                (
-                    self.coef.section[0][section].m0,
-                    self.coef.section[1][section].m0,
-                ),
-                (
-                    self.coef.section[0][section].m1,
-                    self.coef.section[1][section].m1,
-                ),
-                (
-                    self.coef.section[0][section].m2,
-                    self.coef.section[1][section].m2,
-                ),
-            ] {
+            for (left_word, right_word) in svf_word_pairs(
+                &self.coef.section[0][section],
+                &self.coef.section[1][section],
+            ) {
                 if candidate == 0 {
                     break;
                 }
@@ -1202,56 +1169,15 @@ impl<L: Lane> InputStage<L> {
         self.refresh_channel_symmetry_post_ramp();
         let mut candidate = self.symmetry;
         for section in 0..2 {
-            for (left_word, right_word) in [
-                (
-                    self.filter_target[0][section].c1,
-                    self.filter_target[1][section].c1,
-                ),
-                (
-                    self.filter_target[0][section].a2,
-                    self.filter_target[1][section].a2,
-                ),
-                (
-                    self.filter_target[0][section].a3,
-                    self.filter_target[1][section].a3,
-                ),
-                (
-                    self.filter_target[0][section].m0,
-                    self.filter_target[1][section].m0,
-                ),
-                (
-                    self.filter_target[0][section].m1,
-                    self.filter_target[1][section].m1,
-                ),
-                (
-                    self.filter_target[0][section].m2,
-                    self.filter_target[1][section].m2,
-                ),
-                (
-                    self.filter_step[0][section].c1,
-                    self.filter_step[1][section].c1,
-                ),
-                (
-                    self.filter_step[0][section].a2,
-                    self.filter_step[1][section].a2,
-                ),
-                (
-                    self.filter_step[0][section].a3,
-                    self.filter_step[1][section].a3,
-                ),
-                (
-                    self.filter_step[0][section].m0,
-                    self.filter_step[1][section].m0,
-                ),
-                (
-                    self.filter_step[0][section].m1,
-                    self.filter_step[1][section].m1,
-                ),
-                (
-                    self.filter_step[0][section].m2,
-                    self.filter_step[1][section].m2,
-                ),
-            ] {
+            for (left_word, right_word) in svf_word_pairs(
+                &self.filter_target[0][section],
+                &self.filter_target[1][section],
+            )
+            .into_iter()
+            .chain(svf_word_pairs(
+                &self.filter_step[0][section],
+                &self.filter_step[1][section],
+            )) {
                 let left = lane_read::<L>(left_word);
                 let right = lane_read::<L>(right_word);
                 for lane in 0..L::WIDTH {
@@ -2180,44 +2106,21 @@ impl<L: Lane> InputStage<L> {
     /// would be the defect this crate exists to remove -- and it is what a bank is built from, so
     /// the two would have to agree forever.
     fn lane_track(&self, lane: usize) -> PreparedInputTrack {
-        let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
-        let section = |channel: usize, index: usize| -> SvfSection {
-            let coef = &self.coef.section[channel][index];
-            let (m0, m1, m2) = (
-                lane_read::<L>(coef.m0)[lane],
-                lane_read::<L>(coef.m1)[lane],
-                lane_read::<L>(coef.m2)[lane],
-            );
-            let enabled = !(m0 == 1.0 && m1 == 0.0 && m2 == 0.0);
-            SvfSection {
-                c1: lane_read::<L>(coef.c1)[lane],
-                a2: lane_read::<L>(coef.a2)[lane],
-                a3: lane_read::<L>(coef.a3)[lane],
-                k: if enabled { BUTTERWORTH_K } else { 0.0 },
-                m0,
-                m1,
-                m2,
-                enabled,
-            }
-        };
-        PreparedInputTrack {
-            left: InputLane {
-                trim_signed: trim[0],
-                hpf: section(0, 0),
-                lpf: section(0, 1),
-            },
-            right: InputLane {
-                trim_signed: trim[1],
-                hpf: section(1, 0),
-                lpf: section(1, 1),
-            },
-        }
+        self.lane_track_from_sections(lane, &self.coef.section)
     }
 
     fn target_lane_track(&self, lane: usize) -> PreparedInputTrack {
-        let trim = self.coef.trim.map(|value| lane_read::<L>(value)[lane]);
+        self.lane_track_from_sections(lane, &self.filter_target)
+    }
+
+    fn lane_track_from_sections(
+        &self,
+        lane: usize,
+        sections: &[[SvfCoef<L>; 2]; 2],
+    ) -> PreparedInputTrack {
+        let trim = self.coef.trim.map(|trim| lane_read::<L>(trim)[lane]);
         let section = |channel: usize, index: usize| -> SvfSection {
-            let coef = &self.filter_target[channel][index];
+            let coef = &sections[channel][index];
             let (m0, m1, m2) = (
                 lane_read::<L>(coef.m0)[lane],
                 lane_read::<L>(coef.m1)[lane],
