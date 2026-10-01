@@ -25,6 +25,10 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+After the full eighteen-file read, root approves the bounded diagnostic/UTF-8/revision-predicate cleanup and strict-subset/repeated-input test removals. The focused-green nine-path tranche is checkpointed as b2143372 before further edits. Preserve every golden wire case, malformed/limit/truncation input, maximum metadata case, queue/replay/admission rule, generator and schedule. Current IO6/IO16 and other open optimization/feature objectives stay separate.
+
+Root resource-test ruling: retire `replay_layout_stays_within_the_capi_resource_oracle` entirely; its four private Rust sizes and repin history are not ABI or a distinct product gate. Current allocator-observed C API accounting/admission owners remain. In `replay_resource_projection_is_bounded_and_overflow_checked`, replace the historical exact 1,248-byte assertion with a 2-KiB ceiling for this four-entry/1-KiB configured fixture; retain the exact configured 1-KiB largest-allocation and maximum-entry overflow checks. This bounds accidental extra retained charges without fixing a private layout. No product padding, resource formula, new test/harness or external budget changes. Record the surviving rewritten test's unique ceiling/overflow purpose and final cumulative metrics.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
