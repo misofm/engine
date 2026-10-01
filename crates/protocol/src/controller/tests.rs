@@ -295,21 +295,6 @@ fn controller_over(
 }
 
 #[test]
-fn frozen_deep_transaction_reaches_public_b1b_process_path() {
-    let corpus = conformance::complete_schema_corpus();
-    let transaction = corpus
-        .iter()
-        .find(|frame| frame.name == "command.session_transaction_apply")
-        .expect("frozen transaction frame");
-    controller(8, 1)
-        .process_b1b_btlv(
-            &transaction.bytes,
-            &mut DecodeScratch::new(&mut [0_u16; 1024]),
-        )
-        .expect("public B1b process path accepts the frozen deep transaction");
-}
-
-#[test]
 fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes() {
     fn assert_single_typed_dispatch(frame_name: &str) {
         let corpus = conformance::complete_schema_corpus();

@@ -37,7 +37,7 @@ pub enum AutomationKind {
     Step = 2,
     /// Interpolate linearly over `[start, end)`.
     Linear = 3,
-    /// Interpolate exponentially over `[start, end)` using strictly positive endpoints.
+    /// Interpolate exponentially over `[start, end)` using finite, nonzero, same-sign endpoints.
     Exponential = 4,
 }
 
@@ -170,7 +170,7 @@ pub enum AutomationBatchError {
     InvalidPoint,
     /// A step/linear range was not strictly increasing.
     InvalidRange,
-    /// An exponential range or strictly-positive endpoint was invalid.
+    /// An exponential range or finite, nonzero, same-sign endpoint pair was invalid.
     InvalidExponential,
     /// The declared slot length exceeds 256.
     TooManyRecords,

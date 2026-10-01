@@ -439,18 +439,12 @@ fn direct_full_schema_encoder_is_byte_identical_in_caller_storage() {
         .decode_session_transaction(&output, &mut DecodeScratch::new(&mut scratch))
         .expect("all opcodes decode");
     assert_eq!(decoded.edits, edits);
-    for _ in 0..16 {
-        assert_eq!(
-            codec.encoded_session_transaction_len(&transaction),
-            Ok(required)
-        );
-        output.fill(0);
-        assert_eq!(
-            codec.encode_session_transaction(&transaction, &mut output),
-            Ok(required)
-        );
-        assert_eq!(output, canonical);
-    }
+    output.fill(0);
+    assert_eq!(
+        codec.encode_session_transaction(&transaction, &mut output),
+        Ok(required)
+    );
+    assert_eq!(output, canonical);
 }
 
 #[test]

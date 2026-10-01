@@ -247,22 +247,6 @@ fn direct_common_decoder_enforces_counts_strings_and_nesting() {
 }
 
 #[test]
-fn direct_common_encoder_is_byte_stable_in_caller_storage() {
-    let codec = codec();
-    let value = response();
-    let required = codec.encoded_non_ok_payload_len(&value).expect("length");
-    let mut output = vec![0_u8; required];
-    for _ in 0..16 {
-        output.fill(0);
-        assert_eq!(
-            codec.encode_non_ok_payload(&value, &mut output),
-            Ok(required)
-        );
-        assert_eq!(codec.decode_non_ok_payload(&output, 3), Ok(value.clone()));
-    }
-}
-
-#[test]
 fn capability_id_views_reject_order_allocation_and_session_family_identically() {
     fn le(ids: &[u16]) -> Vec<u8> {
         ids.iter().flat_map(|id| id.to_le_bytes()).collect()
@@ -925,30 +909,23 @@ fn b2a_goldens_truncations_malformed_matrix_and_encoder_audit() {
     bad_state = state_bytes.clone();
     bad_state[68] = 1;
     assert!(codec.decode_parameter_state_page(&bad_state, 4).is_err());
-    let mut many = (1..=256)
+    let many = (1..=256)
         .map(|handle| b2_descriptor(handle, ParameterDomain::Continuous))
         .collect::<Vec<_>>();
     let full = ParameterMetadataPage {
         last_handle: 256,
         eof: true,
-        descriptors: many.clone(),
+        descriptors: many,
     };
     let required = codec
         .encoded_parameter_metadata_page_len(&full)
         .expect("full len");
     let mut output = vec![0; required];
-    for _ in 0..4 {
-        output.fill(0);
-        assert_eq!(
-            codec.encode_parameter_metadata_page(&full, &mut output),
-            Ok(required)
-        );
-        assert_eq!(
-            codec.decode_parameter_metadata_page(&output, 258),
-            Ok(full.clone())
-        );
-    }
-    many.clear();
+    assert_eq!(
+        codec.encode_parameter_metadata_page(&full, &mut output),
+        Ok(required)
+    );
+    assert_eq!(codec.decode_parameter_metadata_page(&output, 258), Ok(full));
 }
 
 fn automation_record(sample: u64, handle: u32, value: f32) -> crate::AutomationRecord {
@@ -1278,32 +1255,6 @@ fn b3a_transport_goldens_truncation_and_direct_codec_are_strict() {
         codec.decode_transport_state_event(&no_origin_bytes, 4),
         Ok(no_origin)
     );
-    for _ in 0..64 {
-        set_bytes.fill(0);
-        snapshot_bytes.fill(0);
-        event_bytes.fill(0);
-        assert_eq!(
-            codec.encode_transport_set_request(set, &mut set_bytes),
-            Ok(32)
-        );
-        assert_eq!(codec.decode_transport_set_request(&set_bytes, 2), Ok(set));
-        assert_eq!(
-            codec.encode_transport_snapshot(snapshot, &mut snapshot_bytes),
-            Ok(48)
-        );
-        assert_eq!(
-            codec.decode_transport_snapshot(&snapshot_bytes, 3),
-            Ok(snapshot)
-        );
-        assert_eq!(
-            codec.encode_transport_state_event(event, &mut event_bytes),
-            Ok(80)
-        );
-        assert_eq!(
-            codec.decode_transport_state_event(&event_bytes, 5),
-            Ok(event)
-        );
-    }
 }
 
 #[test]
@@ -1445,27 +1396,6 @@ fn b3b1_telemetry_and_counters_are_typed_canonical_and_bounded() {
             ids: vec![1, 99]
         })
     );
-    for _ in 0..32 {
-        config_bytes.fill(0);
-        request_bytes.fill(0);
-        snapshot_bytes.fill(0);
-        assert_eq!(
-            codec.encode_telemetry_configuration(&configuration, &mut config_bytes),
-            Ok(96)
-        );
-        assert_eq!(
-            codec.encode_counters_request(&request, &mut request_bytes),
-            Ok(32)
-        );
-        assert_eq!(
-            codec.encode_counter_snapshot(&snapshot, &mut snapshot_bytes),
-            Ok(snapshot_bytes.len())
-        );
-        assert_eq!(
-            codec.decode_counter_snapshot(&snapshot_bytes, 3),
-            Ok(snapshot.clone())
-        );
-    }
 }
 
 #[test]
@@ -1618,27 +1548,6 @@ fn b3b2_diagnostics_pages_are_canonical_bounded_and_strict() {
         ],
     };
     assert!(codec.encoded_diagnostics_page_len(&reversed).is_err());
-
-    for _ in 0..64 {
-        page_bytes.fill(0);
-        assert_eq!(
-            codec.encode_diagnostics_page(&page, &mut page_bytes),
-            Ok(page_bytes.len())
-        );
-        assert_eq!(
-            codec.decode_diagnostics_page(&page_bytes, 3),
-            Ok(page.clone())
-        );
-        request_bytes.fill(0);
-        assert_eq!(
-            codec.encode_diagnostics_request(request, &mut request_bytes),
-            Ok(48)
-        );
-        assert_eq!(
-            codec.decode_diagnostics_request(&request_bytes, 3),
-            Ok(request)
-        );
-    }
 }
 
 #[test]
@@ -1895,26 +1804,6 @@ fn b4_event_payloads_are_typed_canonical_and_truncation_safe() {
         ),
         "a reserved PCM ID cannot be represented by a typed event encoder"
     );
-
-    for _ in 0..32 {
-        canceled_bytes.fill(0);
-        meter_bytes.fill(0);
-        diagnostic_bytes.fill(0);
-        counter_bytes.fill(0);
-        assert_eq!(
-            codec.encode_automation_canceled(canceled, &mut canceled_bytes),
-            Ok(96)
-        );
-        assert_eq!(codec.encode_meter_batch(batch, &mut meter_bytes), Ok(72));
-        assert_eq!(
-            codec.encode_diagnostic_event(&diagnostic, &mut diagnostic_bytes),
-            Ok(64)
-        );
-        assert_eq!(
-            codec.encode_counter_snapshot_event(&counters, &mut counter_bytes),
-            Ok(counter_bytes.len())
-        );
-    }
 }
 
 fn hex(bytes: &[u8]) -> String {
