@@ -179,6 +179,18 @@ bank both ways rather than by arguing that the bypass is per plane inside the ke
 `lookahead_ms` and `delay` are on the copy list and are **not** individually red: no rendered block
 writes them. See `copy_state_from`'s doc for why they are copied anyway.
 
+## Issue #1123 supersession notice
+
+The records below describe the implementation and test names at the time of those mutations.
+Housekeeping removed the historical #1006 scenario digest gates and replaced the verbatim old
+block splitter with the current one-frame scheduling reference. The mixed/compressing grids and
+all three seeded differentials retain their generators, arithmetic/state comparisons and dispatch
+witnesses. Retargets, resets, restores, hostile inputs and padding have current contract owners;
+the complete survivor mapping is recorded in #1123. G5 remains the sole cross-target digest owner.
+The old `causality` test compared identical API input blocks throughout its asserted prefix; real
+partition and current frame-law gates cover causal scheduling. Historical mutation results stay
+as evidence, without implying that a retired gate still runs.
+
 ## Issues #981-#985 — the settled-body rewrite
 
 `kernel::settled_body_tests` (in `src/kernel.rs`) is the gate for this series. It keeps the kernel

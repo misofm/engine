@@ -111,16 +111,13 @@ fn bank_matches_scalar_per_lane_bits() {
         &spans,
     );
 
-    for track in 0..lanes {
+    for (track, (mut left, mut right)) in per_track.into_iter().enumerate() {
         let mut effect = prepare(request_with_quantum(&values[track], QUANTUM));
         let scalar_spans: Vec<(u64, PreparedAutomationSpan)> = spans
             .iter()
             .filter(|(_, lane, _)| *lane == track)
             .map(|(at, _, span)| (*at, *span))
             .collect();
-        let (input_left, input_right) = &per_track[track];
-        let mut left = input_left.clone();
-        let mut right = input_right.clone();
         render_scalar(
             effect.as_mut(),
             &mut left,
@@ -130,22 +127,18 @@ fn bank_matches_scalar_per_lane_bits() {
             &scalar_spans,
         );
 
-        let bank_lane_left: Vec<u32> = (0..FRAMES)
-            .map(|frame| bank_left[frame * lanes + track].to_bits())
-            .collect();
-        let bank_lane_right: Vec<u32> = (0..FRAMES)
-            .map(|frame| bank_right[frame * lanes + track].to_bits())
-            .collect();
-        assert_eq!(
-            bank_lane_left,
-            left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-            "track {track}, left"
-        );
-        assert_eq!(
-            bank_lane_right,
-            right.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
-            "track {track}, right"
-        );
+        for frame in 0..FRAMES {
+            assert_eq!(
+                bank_left[frame * lanes + track].to_bits(),
+                left[frame].to_bits(),
+                "track {track}, frame {frame}, left"
+            );
+            assert_eq!(
+                bank_right[frame * lanes + track].to_bits(),
+                right[frame].to_bits(),
+                "track {track}, frame {frame}, right"
+            );
+        }
         assert!(
             left[1_500..].iter().any(|sample| *sample != 0.0),
             "track {track} rendered nothing"

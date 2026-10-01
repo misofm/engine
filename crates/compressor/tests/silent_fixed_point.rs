@@ -150,6 +150,13 @@ fn a_settled_silent_bank_renders_exactly_the_never_fast_path() {
     let fast = render(lanes, false);
     let forced_slow = render(lanes, true);
 
+    let per_block = FRAMES * lanes * 2;
+    let tail = &fast[fast.len() - per_block..];
+    assert!(
+        tail.iter().any(|word| *word != 0),
+        "the block after the silence rendered nothing at all"
+    );
+
     assert_eq!(
         fast.len(),
         forced_slow.len(),
@@ -158,23 +165,6 @@ fn a_settled_silent_bank_renders_exactly_the_never_fast_path() {
     assert_eq!(
         fast, forced_slow,
         "the silent fast path moved a rendered bit against the never-fast-path arm"
-    );
-}
-
-/// The trailing tone is not silence: without it the test above would pass on a fast path that
-/// simply stopped rendering, so this pins that the comparison has something to compare.
-#[test]
-fn the_trailing_tone_is_actually_rendered() {
-    let Some((_, width)) = native_bank_width() else {
-        return;
-    };
-    let lanes = width.lanes() as usize;
-    let bits = render(lanes, false);
-    let per_block = FRAMES * lanes * 2;
-    let tail = &bits[bits.len() - per_block..];
-    assert!(
-        tail.iter().any(|word| *word != 0),
-        "the block after the silence rendered nothing at all"
     );
 }
 
@@ -233,10 +223,8 @@ fn silence_does_not_skip_the_following_tone() {
 ///
 /// The discriminatory strict-predicate gate is the corresponding `parametric-eq` test; this
 /// compressor test remains a fast/forced-slow equivalence check.
-///
-/// The test name and code remain unchanged.
 #[test]
-fn a_negative_zero_input_block_is_not_treated_as_silence() {
+fn negative_zero_blocks_match_the_forced_slow_path() {
     let Some((_, width)) = native_bank_width() else {
         return;
     };
@@ -300,8 +288,5 @@ fn a_negative_zero_input_block_is_not_treated_as_silence() {
 
     let fast = run(lanes, width, false);
     let slow = run(lanes, width, true);
-    assert_eq!(
-        fast, slow,
-        "a -0.0 input block was treated as silence and skipped"
-    );
+    assert_eq!(fast, slow, "the -0.0 fast/forced-slow runs differ");
 }

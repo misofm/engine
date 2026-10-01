@@ -467,8 +467,7 @@ fn banked<L: Lane>(case: &Case, clone_of: usize) -> Rendered {
         for (member, lane) in active.iter().enumerate() {
             let left = (0..frames).map(|frame| left[frame * lanes + lane]);
             let right = (0..frames).map(|frame| right[frame * lanes + lane]);
-            rendered.outputs[member]
-                .extend(left.chain(right).map(class_a::bits).collect::<Vec<_>>());
+            rendered.outputs[member].extend(left.chain(right).map(class_a::bits));
             rendered.reports[member].push(report.reports[*lane]);
         }
         first_sample += frames as u64;
