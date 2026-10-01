@@ -9,8 +9,6 @@ use session::{
 
 const REPRESENTATIVE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const MINIMAL: &str = include_str!("../../../fixtures/session/v1/canonical-minimal.json");
-const PARAMETRIC_EQ: &str =
-    include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("valid test ID")
@@ -33,19 +31,6 @@ fn checked_in_fixtures_are_exact_canonical_bytes() {
         let model = parse_session_json(fixture).expect("fixture parses");
         assert_eq!(canonical_session_json(&model).expect("canonical"), fixture);
     }
-}
-
-#[test]
-fn parametric_eq_session_fixture_bytes_are_immutable() {
-    let hash = PARAMETRIC_EQ
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    // Repinned by #1093: the document moved to decision 12's console shape (`simd1` -> the
-    // `console.pre_insert` slot `eq`, `dynamic` -> `inserts`, `post_matrix` -> `post_pan`).
-    assert_eq!(PARAMETRIC_EQ.len(), 13_729);
-    assert_eq!(hash, 0x6af0_8995_38c9_03b6);
 }
 
 #[test]

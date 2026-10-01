@@ -160,6 +160,10 @@ impl DiagnosticPath {
         &self.0
     }
 
+    pub(crate) fn from_segments(segments: Vec<PathSegment>) -> Self {
+        Self(segments)
+    }
+
     /// Convert internal dotted/index notation into structured components.
     // F13 successor: estimate pseudo-paths are the only remaining caller.
     pub(crate) fn from_dotted(value: &str) -> Self {
@@ -242,24 +246,19 @@ impl<'a> PathRef<'a> {
     }
 
     pub(crate) fn materialize(&self) -> DiagnosticPath {
-        let mut borrowed = Vec::new();
+        let mut segments = Vec::new();
         let mut cursor = Some(self);
         while let Some(path) = cursor {
             if let Some(segment) = path.seg {
-                borrowed.push(segment);
+                segments.push(match segment {
+                    Seg::Key(key) => PathSegment::Field(key.to_owned()),
+                    Seg::Index(index) => PathSegment::Index(index),
+                });
             }
             cursor = path.parent;
         }
-        borrowed.reverse();
-        DiagnosticPath(
-            borrowed
-                .into_iter()
-                .map(|segment| match segment {
-                    Seg::Key(key) => PathSegment::Field(key.to_owned()),
-                    Seg::Index(index) => PathSegment::Index(index),
-                })
-                .collect(),
-        )
+        segments.reverse();
+        DiagnosticPath(segments)
     }
 }
 
