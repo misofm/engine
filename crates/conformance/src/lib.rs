@@ -64,60 +64,10 @@ mod tests {
             for bit in 0..8 {
                 let mut changed = original.clone();
                 changed[index] ^= 1 << bit;
-                assert!(
-                    std::panic::catch_unwind(|| PcmFixture::parse(&changed, Default::default()))
-                        .is_ok()
-                );
-                assert!(PcmFixture::parse(&changed, Default::default()).is_err());
+                let result =
+                    std::panic::catch_unwind(|| PcmFixture::parse(&changed, Default::default()));
+                assert!(result.expect("fixture parsing must not panic").is_err());
             }
-        }
-    }
-
-    #[test]
-    fn fixture_header_limits_and_exact_length_reject() {
-        let original = bytes();
-        assert_eq!(
-            PcmFixture::parse(&original[..47], Default::default()),
-            Err(FixtureError::TruncatedHeader)
-        );
-        let mut flags = original.clone();
-        flags[12] = 1;
-        assert_eq!(
-            PcmFixture::parse(&flags, Default::default()),
-            Err(FixtureError::InvalidField)
-        );
-        let mut payload = original.clone();
-        payload.push(0);
-        assert_eq!(
-            PcmFixture::parse(&payload, Default::default()),
-            Err(FixtureError::LengthMismatch)
-        );
-        assert_eq!(
-            PcmFixture::parse(
-                &original,
-                FixtureLimits {
-                    max_frames: 1,
-                    ..Default::default()
-                }
-            ),
-            Err(FixtureError::LimitsExceeded)
-        );
-    }
-
-    #[test]
-    fn manifest_rejects_invalid_classes() {
-        assert!(
-            parse_manifest(b"miso-engine-fixture-manifest-v1\n00000000\t1\tv1/a.mepcm\n").is_ok()
-        );
-        for invalid in [
-            b"miso-engine-fixture-manifest-v1\r\n".as_slice(),
-            b"wrong\n".as_slice(),
-            b"miso-engine-fixture-manifest-v1\n123\t1\tv1/a.mepcm\n".as_slice(),
-            b"miso-engine-fixture-manifest-v1\n00000000\t1\t../a.mepcm\n".as_slice(),
-            b"miso-engine-fixture-manifest-v1\n00000000\t1\tv1/b.mepcm\n00000000\t1\tv1/a.mepcm\n"
-                .as_slice(),
-        ] {
-            assert!(parse_manifest(invalid).is_err());
         }
     }
 

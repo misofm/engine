@@ -18,18 +18,6 @@ fn checked_in_manifest_lists_only_valid_exact_fixtures() {
     }
 }
 
-#[test]
-fn fixture_trailing_and_truncated_bytes_fail_before_decode() {
-    let mut bytes =
-        include_bytes!("../../../fixtures/conformance/v1/rate-048000-impulse-dual-mono.mepcm")
-            .to_vec();
-    bytes.push(0);
-    assert!(PcmFixture::parse(&bytes, Default::default()).is_err());
-    let bytes =
-        include_bytes!("../../../fixtures/conformance/v1/rate-048000-impulse-dual-mono.mepcm");
-    assert!(PcmFixture::parse(&bytes[..bytes.len() - 1], Default::default()).is_err());
-}
-
 /// Owner ruling R5 (#1036): blocks and fixtures exist at the launch rates only. The former
 /// extended research rates (176.4-384 kHz) refuse exactly like any other rate.
 #[test]

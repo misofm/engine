@@ -30,10 +30,23 @@ fn every_header_field_limit_overflow_truncation_and_eof_is_rejected() {
     for offset in [12, 16, 20, 22, 24, 44] {
         let mut changed = original.clone();
         changed[offset] ^= 1;
-        assert!(PcmFixture::parse(&changed, Default::default()).is_err());
+        let result = PcmFixture::parse(&changed, Default::default());
+        if offset == 12 {
+            assert_eq!(result, Err(FixtureError::InvalidField));
+        } else {
+            assert!(result.is_err());
+        }
     }
     for length in 0..original.len() {
-        assert!(PcmFixture::parse(&original[..length], Default::default()).is_err());
+        let expected = if length < 48 {
+            FixtureError::TruncatedHeader
+        } else {
+            FixtureError::LengthMismatch
+        };
+        assert_eq!(
+            PcmFixture::parse(&original[..length], Default::default()),
+            Err(expected)
+        );
     }
     let mut trailing = original.clone();
     trailing.extend_from_slice(&[0, 1, 2]);
@@ -104,10 +117,16 @@ fn every_bit_and_4096_seeded_mutations_are_panic_free_and_detected() {
 
 #[test]
 fn manifest_rejects_all_noncanonical_text_and_path_classes() {
-    let valid = b"miso-engine-fixture-manifest-v1\n00000000\t48\tv1/a.mepcm\n";
-    assert!(parse_manifest(valid).is_ok());
+    for valid in [
+        b"miso-engine-fixture-manifest-v1\n00000000\t48\tv1/a.mepcm\n".as_slice(),
+        b"miso-engine-fixture-manifest-v1\n00000000\t1\tv1/a.mepcm\n".as_slice(),
+    ] {
+        assert!(parse_manifest(valid).is_ok());
+    }
     for invalid in [
         b"miso-engine-fixture-manifest-v1\r\n".as_slice(),
+        b"wrong\n".as_slice(),
+        b"miso-engine-fixture-manifest-v1\n123\t1\tv1/a.mepcm\n".as_slice(),
         b"miso-engine-fixture-manifest-v1\nABCDEF00\t48\tv1/a.mepcm\n".as_slice(),
         b"miso-engine-fixture-manifest-v1\n00000000\t048\tv1/a.mepcm\n".as_slice(),
         b"miso-engine-fixture-manifest-v1\n00000000\t48\t/a.mepcm\n".as_slice(),

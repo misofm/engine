@@ -1215,8 +1215,8 @@ fn recovered(bank: &BankProcessReport, scalars: &[ProcessReport], lanes: usize) 
         .any(|report| report.nonfinite_left_blocks + report.nonfinite_right_blocks > 0)
 }
 
-fn report_lanes(report: &BankProcessReport, lanes: usize) -> Vec<ProcessReport> {
-    report.reports[..lanes].to_vec()
+fn report_lanes(report: &BankProcessReport, lanes: usize) -> &[ProcessReport] {
+    &report.reports[..lanes]
 }
 
 /// A profile of legal input: finite, and at most `4.0` in magnitude.
@@ -1392,17 +1392,19 @@ fn render_scalar(
         }
         let from = first + start as u64;
         let to = first + end as u64;
-        let pieces: Vec<PreparedAutomationSpan> = spans
-            .iter()
-            .filter(|span| chunk.is_none() || (span.start_sample >= from && span.start_sample < to))
-            .copied()
-            .collect();
+        let pieces = chunk.map(|_| {
+            spans
+                .iter()
+                .filter(|span| span.start_sample >= from && span.start_sample < to)
+                .copied()
+                .collect::<Vec<_>>()
+        });
         let block = EffectProcessBlock::new(
             &mut left[start..end],
             &mut right[start..end],
             side.map(|(l, r)| (&l[start..end], &r[start..end])),
             from,
-            &pieces,
+            pieces.as_deref().unwrap_or(spans),
             quantum,
         )
         .expect("a well-shaped block");
