@@ -217,7 +217,7 @@ pub(crate) fn prepared_capi_resources(
     compiled: &CompiledSession,
     catalog: &PreparedSessionControlCatalog,
     limits: CompileLimits,
-) -> Result<(CapiResources, usize), CompileFailure> {
+) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
         compiled
             .normalized_model()
@@ -234,16 +234,13 @@ pub(crate) fn prepared_capi_resources(
         RENDER_DIAGNOSTIC_SLOTS,
     )
     .map_err(|_| failure("capi.resource.arithmetic"))?;
-    Ok((
-        capi_resources(
-            limits,
-            compiled.source_count(),
-            source_id_bytes,
-            compiled.quantum().0 as usize,
-            provider,
-        )?,
+    capi_resources(
+        limits,
+        compiled.source_count(),
         source_id_bytes,
-    ))
+        compiled.quantum().0 as usize,
+        provider,
+    )
 }
 
 pub(crate) fn controller_retained_capacity(
@@ -409,7 +406,7 @@ pub(crate) fn prepare_runtime(
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
     let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
-    let (capi, _) = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
+    let capi = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
