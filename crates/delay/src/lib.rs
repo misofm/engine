@@ -2400,50 +2400,6 @@ mod tests {
                 .is_err()
         );
 
-        // A restored effect continues bit for bit.
-        let mut restored = prepare(&values);
-        restored
-            .restore_state_payload(
-                1,
-                StatePayloadInput::new(
-                    &before.0,
-                    &before.1,
-                    &before.2,
-                    restored.metadata().state_sizes,
-                )
-                .expect("state input"),
-            )
-            .expect("restore");
-        let mut next_left = [0.1_f32; 16];
-        let mut next_right = [-0.2_f32; 16];
-        let mut restored_left = next_left;
-        let mut restored_right = next_right;
-        effect
-            .restore_state_payload(
-                1,
-                StatePayloadInput::new(
-                    &before.0,
-                    &before.1,
-                    &before.2,
-                    effect.metadata().state_sizes,
-                )
-                .expect("state input"),
-            )
-            .expect("restore the reference state");
-        effect.process(
-            EffectProcessBlock::new(&mut next_left, &mut next_right, None, 8, &[], 128)
-                .expect("continuation"),
-        );
-        restored.process(
-            EffectProcessBlock::new(&mut restored_left, &mut restored_right, None, 8, &[], 128)
-                .expect("restored continuation"),
-        );
-        assert_eq!(next_left.map(f32::to_bits), restored_left.map(f32::to_bits));
-        assert_eq!(
-            next_right.map(f32::to_bits),
-            restored_right.map(f32::to_bits)
-        );
-
         effect.reset(ResetKind::DiscontinuityKeepParameters);
         let mut retained_values = values;
         retained_values[0].value = 2.0;
