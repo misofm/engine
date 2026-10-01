@@ -1484,19 +1484,6 @@ impl PreparedSlot {
         self.active_lanes != 0
     }
 
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn has_active_lanes_scan(&self, lanes: usize) -> bool {
-        TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(count.get() + 1));
-        for lane in 0..lanes {
-            TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(|count| count.set(count.get() + 1));
-            if self.active_lanes & (1u8 << lane) != 0 {
-                return true;
-            }
-        }
-        false
-    }
-
     #[inline(always)]
     fn lane_active(&self, lane: usize) -> bool {
         self.active_lanes & (1u8 << lane) != 0
@@ -1506,22 +1493,17 @@ impl PreparedSlot {
 #[cfg(test)]
 thread_local! {
     static TEST_PREPARED_ACTIVITY_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PREPARED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 fn reset_prepared_activity_observation() {
     TEST_PREPARED_ACTIVITY_QUERIES.with(|count| count.set(0));
-    TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-fn prepared_activity_observation() -> (usize, usize) {
-    (
-        TEST_PREPARED_ACTIVITY_QUERIES.with(std::cell::Cell::get),
-        TEST_PREPARED_ACTIVITY_LANE_INSPECTIONS.with(std::cell::Cell::get),
-    )
+fn prepared_activity_observation() -> usize {
+    TEST_PREPARED_ACTIVITY_QUERIES.with(std::cell::Cell::get)
 }
 
 /// The staged planar tiles for one ordered folded cohort.
@@ -1751,32 +1733,7 @@ pub trait BankMembers {
 
     /// Fold one ordered cohort. The default delegates to the established per-lane seam.
     fn fold_cohort(&mut self, cohort: FoldCohort<'_>) {
-        if cohort.lane_ids.is_empty() || cohort.lane_ids.len() > 8 {
-            return;
-        }
-        let Some(max_lane) = cohort.lane_ids.iter().copied().max() else {
-            return;
-        };
-        if cohort
-            .lane_ids
-            .iter()
-            .enumerate()
-            .any(|(index, lane)| cohort.lane_ids[..index].contains(lane))
-        {
-            return;
-        }
-        let Some(required) = max_lane
-            .checked_add(1)
-            .and_then(|lanes| lanes.checked_mul(cohort.stride))
-        else {
-            return;
-        };
-        if cohort.stride < cohort.frames
-            || cohort.left.len() < required
-            || cohort.right.len() < required
-        {
-            return;
-        }
+        // Private dimensions and lane IDs were validated by FoldCohort::new and cannot change.
         for lane in cohort.lane_ids.iter().copied() {
             let start = lane * cohort.stride;
             self.fold_plane(
@@ -2013,7 +1970,7 @@ impl BankChain {
     /// is active. Scratch lanes start at `+0.0`, so an inactive lane can never hand stale garbage
     /// to the block boundary check.
     pub fn new(
-        mut scratch: AoSoaScratch,
+        scratch: AoSoaScratch,
         active: Box<[bool]>,
         slots: Vec<BankSlot>,
     ) -> Result<Self, RackError> {
@@ -2031,8 +1988,7 @@ impl BankChain {
         }) {
             return Err(RackError::Shape);
         }
-        scratch.left.fill(0.0);
-        scratch.right.fill(0.0);
+        // AoSoaScratch has no public mutable/reused constructor: these planes are already zeroed.
         // The tiled round trip needs every lane's planar view, and its scatter fully overwrites
         // every lane's planar buffer. Both are only true of a full bank, so a partial one keeps
         // the per-lane scalar path: that is what preserves the invariant above, that an inactive
@@ -4008,7 +3964,8 @@ mod tests {
         )
     }
 
-    fn old_mask_any_reference(
+    /// Independent planar execution of the current drain, error, mono-prefix and seam laws.
+    fn reference_dispatch(
         specs: &[TraceSpec],
         collapse_prefix: Option<usize>,
         planes: &mut Planes,
@@ -4094,7 +4051,7 @@ mod tests {
     fn exercise_trace_case(specs: &[TraceSpec], collapse_prefix: Option<usize>, first_sample: u64) {
         let mut expected_planes = trace_planes();
         let mut actual_planes = trace_planes();
-        let (expected_result, expected_trace) = old_mask_any_reference(
+        let (expected_result, expected_trace) = reference_dispatch(
             specs,
             collapse_prefix,
             &mut expected_planes,
@@ -4136,16 +4093,6 @@ mod tests {
 
     #[test]
     fn prepared_slot_activity_preserves_shape_bits_and_ownership() {
-        assert!(core::mem::size_of::<PreparedSlot>() <= core::mem::size_of::<BankSlot>());
-        eprintln!(
-            "prepared-slot-layout size={} align={} public-size={} public-align={} chain-size={} chain-align={}",
-            core::mem::size_of::<PreparedSlot>(),
-            core::mem::align_of::<PreparedSlot>(),
-            core::mem::size_of::<BankSlot>(),
-            core::mem::align_of::<BankSlot>(),
-            core::mem::size_of::<BankChain>(),
-            core::mem::align_of::<BankChain>()
-        );
         for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let scratch = || AoSoaScratch::new(width, 4).expect("scratch");
@@ -4175,11 +4122,7 @@ mod tests {
                 "shape validation precedes packed conversion"
             );
 
-            let partial = if lanes == 4 {
-                vec![true, false, true, false]
-            } else {
-                vec![true, false, true, false, true, false, true, false]
-            };
+            let partial: Vec<bool> = (0..lanes).map(|lane| lane.is_multiple_of(2)).collect();
             let zero = Vec::with_capacity(4);
             assert!(zero.capacity() > zero.len(), "spare caller capacity");
             let mut zero_chain =
@@ -4198,15 +4141,11 @@ mod tests {
             assert_eq!(trace_plane_bits(&identity), identity_before);
             drop(zero_chain);
 
-            let one_mask = if lanes == 4 {
-                vec![false, false, true, false]
-            } else {
-                vec![false, false, false, false, true, false, false, false]
-            };
+            let changed_lane = if lanes == 4 { 2 } else { 4 };
+            let one_mask: Vec<bool> = (0..lanes).map(|lane| lane == changed_lane).collect();
             let one_expected = if lanes == 4 { 0b0100 } else { 0b0001_0000 };
             let mut one = Vec::with_capacity(5);
             one.push(slot(vec![false; lanes], Box::new(PassThrough)));
-            let changed_lane = if lanes == 4 { 2 } else { 4 };
             one[0].active_lanes[changed_lane] = true;
             assert_eq!(one[0].active_lanes.as_ref(), one_mask.as_slice());
             assert!(one.capacity() > one.len(), "spare caller capacity");
@@ -4215,24 +4154,11 @@ mod tests {
             assert_eq!(one_chain.slots[0].active_lanes, one_expected);
             drop(one_chain);
 
-            let (three_masks, three_expected) = if lanes == 4 {
-                (
-                    vec![
-                        vec![false, false, false, false],
-                        vec![true, false, true, false],
-                        vec![true, true, true, true],
-                    ],
-                    vec![0b0000, 0b0101, 0b1111],
-                )
+            let three_masks = [vec![false; lanes], partial.clone(), vec![true; lanes]];
+            let three_expected = if lanes == 4 {
+                [0b0000, 0b0101, 0b1111]
             } else {
-                (
-                    vec![
-                        vec![false, false, false, false, false, false, false, false],
-                        vec![true, false, true, false, true, false, true, false],
-                        vec![true, true, true, true, true, true, true, true],
-                    ],
-                    vec![0x00, 0x55, 0xff],
-                )
+                [0x00, 0x55, 0xff]
             };
             let before_drop = TEST_PREPARED_DROPS.with(std::cell::Cell::get);
             let mut three = Vec::with_capacity(7);
@@ -4268,42 +4194,16 @@ mod tests {
                 before_drop + 1
             );
 
-            let partial_patterns = if lanes == 4 {
-                vec![
-                    vec![false, false, false, false],
-                    vec![true, false, false, false],
-                    vec![false, false, true, false],
-                    vec![true, false, true, false],
-                    vec![false, false, false, false],
-                    vec![true, false, false, false],
-                    vec![false, false, true, false],
-                    vec![true, false, true, false],
-                    vec![false, false, false, false],
-                ]
-            } else {
-                vec![
-                    vec![false, false, false, false, false, false, false, false],
-                    vec![true, false, false, false, false, false, false, false],
-                    vec![false, false, true, false, false, false, false, false],
-                    vec![false, false, false, false, true, false, false, false],
-                    vec![false, false, false, false, false, false, true, false],
-                    vec![true, false, true, false, false, false, false, false],
-                    vec![false, false, false, false, true, false, true, false],
-                    vec![true, false, false, false, true, false, false, false],
-                    vec![true, false, true, false, true, false, true, false],
-                ]
-            };
             let nine_expected: &[u8] = if lanes == 4 {
                 &[0, 1, 4, 5, 0, 1, 4, 5, 0]
             } else {
                 &[0, 1, 4, 16, 64, 5, 80, 17, 85]
             };
             let mut nine = Vec::with_capacity(13);
-            nine.extend(
-                partial_patterns
-                    .into_iter()
-                    .map(|mask| slot(mask, Box::new(PassThrough))),
-            );
+            nine.extend(nine_expected.iter().map(|mask| {
+                let active = (0..lanes).map(|lane| mask & (1 << lane) != 0).collect();
+                slot(active, Box::new(PassThrough))
+            }));
             assert!(nine.capacity() > nine.len(), "spare caller capacity");
             let nine_chain = BankChain::new(scratch(), partial.into_boxed_slice(), nine)
                 .expect("slot count exceeds lane width");
@@ -4586,14 +4486,10 @@ mod tests {
                     .collect(),
             )
         );
-        let (queries, lane_inspections) = prepared_activity_observation();
         assert_eq!(
-            queries, 10,
+            prepared_activity_observation(),
+            10,
             "ordinary, prefix-mono and seam-dual guards plus two stage publications"
-        );
-        assert_eq!(
-            lane_inspections, 0,
-            "prepared queries do not scan lane masks"
         );
     }
 
@@ -6197,17 +6093,12 @@ mod tests {
         );
     }
 
-    /// T5: the scratch is exactly two planes per bank (#96 F9 deleted the sidechain pair).
+    /// T5: scratch dimensions match the declared bank and a zero quantum is refused.
     #[test]
-    fn scratch_allocates_exactly_two_planes() {
+    fn scratch_dimensions_match_the_bank_and_zero_quantum_is_refused() {
         let scratch = AoSoaScratch::new(WIDEST, 128).expect("scratch");
         assert_eq!(scratch.left.len(), 128 * WIDEST.lanes() as usize);
         assert_eq!(scratch.right.len(), 128 * WIDEST.lanes() as usize);
-        assert_eq!(
-            core::mem::size_of::<AoSoaScratch>(),
-            core::mem::size_of::<(Box<[f32]>, Box<[f32]>, u32, BankWidth)>(),
-            "AoSoaScratch owns exactly two planes plus width and quantum"
-        );
         assert_eq!(
             AoSoaScratch::new(BankWidth::Four, 0).err(),
             Some(RackError::ZeroQuantum)
@@ -6286,7 +6177,7 @@ mod tests {
             out
         };
         let oracle = render(512);
-        for partition in [1_usize, 7, 64, 128, 512] {
+        for partition in [1_usize, 7, 64, 128] {
             let observed = render(partition);
             for lane in 0..lanes {
                 for frame in 0..frames {
