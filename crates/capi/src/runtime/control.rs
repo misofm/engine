@@ -452,15 +452,11 @@ impl SessionState {
                 }],
             );
         }
-        let counter_ids = self
-            .controller
-            .telemetry_configuration()
-            .counter_ids
-            .clone();
+        let counter_ids = &self.controller.telemetry_configuration().counter_ids;
         if !counter_ids.is_empty() {
             let values = counter_ids
-                .into_iter()
-                .map(|id| protocol::CounterValue {
+                .iter()
+                .map(|&id| protocol::CounterValue {
                     id,
                     value: sequence,
                 })
