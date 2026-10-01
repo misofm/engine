@@ -2,12 +2,11 @@
 
 mod support;
 
-use effect_contract::{BankWidth, EffectBankProcessBlock, LinkMode, PreparedNativeEffectBank};
-use lane::Backend;
+use effect_contract::{EffectBankProcessBlock, LinkMode, PreparedNativeEffectBank};
 use support::{
     NATIVE_LANES, Values, active_values, assert_bits_eq, initial_values, native_width, noise,
-    packed, prepare, prepare_bank, prepare_bank_native, render_scalar_sidechain, request,
-    request_at, retarget_spans, set_parameter, snapshot, snapshot_bank, track_of,
+    packed, prepare, prepare_bank_native, render_scalar_sidechain, request, request_at,
+    retarget_spans, set_parameter, snapshot, snapshot_bank, track_of,
 };
 
 fn track_values() -> [Values; 8] {
@@ -38,17 +37,20 @@ fn render_bank_native(
     automation: &[effect_contract::PreparedAutomationSpan],
 ) {
     let frames = left.len() / NATIVE_LANES;
+    let spans: Vec<_> = (0..NATIVE_LANES)
+        .flat_map(|_| automation.iter().copied())
+        .collect();
+    let offsets: [u32; NATIVE_LANES + 1] =
+        core::array::from_fn(|track| (track * automation.len()) as u32);
+    let empty_offsets = [0_u32; NATIVE_LANES + 1];
     let mut start = 0;
     while start < frames {
         let end = (start + block).min(frames);
-        let mut spans = Vec::new();
-        let mut offsets = [0_u32; NATIVE_LANES + 1];
-        for track in 0..NATIVE_LANES {
-            if start == 0 {
-                spans.extend_from_slice(automation);
-            }
-            offsets[track + 1] = spans.len() as u32;
-        }
+        let (spans, offsets) = if start == 0 {
+            (&spans[..], &offsets)
+        } else {
+            (&[][..], &empty_offsets)
+        };
         bank.process_bank(
             EffectBankProcessBlock::new(
                 &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
@@ -57,8 +59,8 @@ fn render_bank_native(
                 (end - start) as u32,
                 native_width(),
                 start as u64,
-                &spans,
-                &offsets,
+                spans,
+                offsets,
                 512,
             )
             .expect("bank block"),
@@ -70,7 +72,7 @@ fn render_bank_native(
 /// At the build's own width: W8 in the 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) build
 /// (#1112).
 #[test]
-fn scalar_and_w8_are_bit_exact_for_all_link_modes_and_ramps() {
+fn scalar_and_native_bank_are_bit_exact_for_all_link_modes_and_ramps() {
     let values = track_values();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let mut bank = prepare_bank_native(&values, link).expect("the build's own width binds");
@@ -218,44 +220,4 @@ fn equal_input_is_dual_mono_and_zero_input_has_no_tail() {
     assert!(zero_left.iter().all(|sample| sample.to_bits() == 0));
     assert!(zero_right.iter().all(|sample| sample.to_bits() == 0));
     assert_eq!(report, effect_contract::ProcessReport::default());
-}
-
-#[test]
-#[cfg_attr(
-    target_feature = "avx2",
-    ignore = "a four-lane bank binds only in a 4-lane (NEON/simd128) build, whose legs run it (#1017)"
-)]
-fn w4_binding_is_internal_lane_evidence_without_factory_width_claim() {
-    assert_eq!(Backend::current(), Backend::Simd4, "a four-lane build");
-    let values = track_values();
-    let mut bank = prepare_bank(
-        &values,
-        LinkMode::DualMono,
-        BankWidth::Four,
-        Backend::Simd4,
-        128,
-    )
-    .expect("a four-lane build binds W4");
-    let mut left = vec![0.0_f32; 8 * 4];
-    for frame in 0..8 {
-        for track in 0..4 {
-            left[frame * 4 + track] = noise(3 + track as u64, 8, 0.2)[frame];
-        }
-    }
-    let mut right = left.clone();
-    let offsets = [0_u32; 5];
-    bank.process_bank(
-        EffectBankProcessBlock::new(
-            &mut left,
-            &mut right,
-            None,
-            8,
-            BankWidth::Four,
-            0,
-            &[],
-            &offsets,
-            128,
-        )
-        .unwrap(),
-    );
 }

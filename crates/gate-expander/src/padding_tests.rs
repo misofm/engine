@@ -31,10 +31,6 @@ const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::A
 
 type Values = Vec<InitialParameterValue>;
 
-/// Whether a padded lane's state stays exactly at its prepared value when fed `+0.0`. Not for the gate: fed `+0.0` its detector sits at the level floor, so a padded lane closes and
-/// its gain releases toward the range, as an idle track's does; its parameters never move.
-const PADDED_STATE_IS_CONSTANT: bool = false;
-
 // ---------------------------------------------------------------------------------------------
 // The effect under test
 // ---------------------------------------------------------------------------------------------
@@ -341,7 +337,6 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
     // finite and at rest, block after block. "At rest" is an idle track's state: the state of a
     // scalar instance of the member the lane clones, fed `+0.0` and no automation.
     let idle_request = request(&padded.members[padded.clone_of], padded.rate, padded.link);
-    let rest = payload_of(scalar(idle_request).as_ref(), sizes);
     let mut idle: Vec<Option<Box<dyn PreparedNativeEffect>>> = lanes
         .iter()
         .map(|member| member.is_none().then(|| scalar(idle_request)))
@@ -474,13 +469,6 @@ fn render(padded: &Padded<'_>, blocks: &[Block], context: &str) -> Vec<Vec<u32>>
                 payload_of(idle.as_ref(), sizes),
                 "{context}: block {index}: padded lane {lane}'s state is not an idle track's"
             );
-            if PADDED_STATE_IS_CONSTANT {
-                assert_eq!(
-                    state, rest,
-                    "{context}: block {index}: padded lane {lane}'s state moved from its prepared \
-                     value"
-                );
-            }
         }
         first_sample += frames as u64;
     }
@@ -618,7 +606,7 @@ const FIXTURES: [&[u8]; 7] = [
 /// Gate 1 on the fixtures: each conformance PCM fixture, at its own rate, through padded banks of
 /// every active count at both widths, with the crate's audible fixture parameters and the
 /// descriptor defaults. Member `k` reads the fixture from frame `29k` on, at its own level, so the
-/// lanes of a bank differ. The fixture is played four times over in blocks of 128, 64, 37 and 1.
+/// lanes of a bank differ. The fixture plays four times with a repeating 128, 64, 37, 1 block schedule.
 ///
 /// Red for the same defects as the random test; this one pins them on the shared signals.
 #[test]
@@ -714,9 +702,7 @@ fn no_lane_is_prepared_outside_its_declared_domain() {
                 link: LinkMode::DualMono,
             }
             .bind();
-            let sizes = scalar(request(&values[0], 48_000, LinkMode::DualMono))
-                .metadata()
-                .state_sizes;
+            let sizes = bank.metadata().program_key.state_sizes;
             for lane in 0..lanes {
                 let (common, left, right) = bank_payload(bank.as_ref(), lane, sizes);
                 for (channel, section) in [(0, &left), (1, &right)] {

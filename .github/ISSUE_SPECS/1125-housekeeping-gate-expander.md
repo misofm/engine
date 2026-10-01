@@ -27,4 +27,15 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 — worker A, GPT-6.1 Sol xhigh, 2026-10-01
+
+Read all 15 package files and the related #894 (silent admission), #973 (mono collapse), #1073
+(D7 report units), #559 gate findings and original product/recovery briefs. Preserve those scopes,
+the independent current-law f64 model and G5's sole digest ownership. Root approved the bounded
+cleanup: skip already-validated bank member 0, remove the unused private commit byte argument,
+borrow repeated test PCM columns and continue the unrestored donor, hoist identical W4 generator
+words, remove the permanently false padded-state branch and three weaker tests with stronger
+public/width survivors. Correct current arithmetic/scenario and test-owner documentation in the
+same tranche. Baseline locked all-feature package tests: 49 PASS, 2 ignored (W4 smoke and #1073).
+No dependency/lock, DSP expression, API, feature, generator/schedule or G5 change is authorized.
+Candidate checks and complete five-axis/family evidence follow the exact-path checkpoint.

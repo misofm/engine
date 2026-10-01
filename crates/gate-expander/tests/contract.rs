@@ -87,7 +87,7 @@ fn exact_state_and_scratch_caps_prepare_and_one_byte_below_rejects() {
 }
 
 #[test]
-fn payload_header_is_one_fourty_four_words_and_restore_is_transactional() {
+fn payload_header_is_version_one_and_forty_four_words_and_restore_is_transactional() {
     let values = initial_values();
     let mut effect = prepare(request(&values));
     let (common, left, right) = snapshot(effect.as_ref());
@@ -97,11 +97,11 @@ fn payload_header_is_one_fourty_four_words_and_restore_is_transactional() {
     assert_eq!(word(&common, 0), 1);
     assert_eq!(word(&common, 1), 44);
 
-    let before = (common.clone(), left.clone(), right.clone());
     let mut malformed = right.clone();
+    let before = (common, left, right);
     malformed[87] = 0x7f;
     let sizes = effect.metadata().state_sizes;
-    let input = StatePayloadInput::new(&common, &left, &malformed, sizes).expect("sizes");
+    let input = StatePayloadInput::new(&before.0, &before.1, &malformed, sizes).expect("sizes");
     assert!(
         effect
             .restore_state_payload(STATE_LAYOUT_VERSION, input)
@@ -246,8 +246,8 @@ fn enabled_ratio_one_is_exact_identity_with_a_nonzero_sample_zero() {
 /// Ported by #1027 from the #746 active benchmark's untimed preflight
 /// (`tools/bench/src/gate_active.rs`, `untimed_preflight_runs_the_actual_shapes_without_timing_calls`),
 /// retired with the benchmark: its quiet plateaus had to stay nonzero and below 1 % of the input.
-/// The f64 oracle (`oracle.rs`) stays inside the range on purpose, so before this only the pinned
-/// corpus digest in `determinism.rs` crossed the clamp.
+/// The f64 oracle (`oracle.rs`) stays inside the range on purpose. This gate checks the clamp
+/// numerically; G5 owns the cross-target corpus digests.
 ///
 /// Red mutation: drop `.max(range.neg())` from the curve in `kernel.rs` -> the gain falls far
 /// below the floor and the settled ratio misses it.
@@ -453,38 +453,6 @@ fn opening_and_rearm_are_inclusive_at_exact_thresholds() {
     assert_eq!(word(&below_state, 1), 1.0_f32.to_bits());
     assert_eq!(word(&equal_state, 1), 1.0_f32.to_bits());
     assert_eq!(word(&above_state, 1), 0);
-}
-
-#[test]
-fn connected_sidechain_uses_current_detector_word() {
-    let mut values = support::active_values();
-    support::set_parameter(&mut values, 0, -20.0, -20.0);
-    support::set_parameter(&mut values, 1, 4.0, 4.0);
-    support::set_parameter(&mut values, 2, 48.0, 48.0);
-    let mut preparation = request(&values);
-    preparation.ports = PreparedPorts {
-        sidechain: PreparedSidechainPort::Connected {
-            id: support::sidechain_port(),
-            required: false,
-        },
-    };
-    preparation.link_mode = LinkMode::DualMono;
-    let mut effect = GateExpanderFactory.prepare(preparation).expect("sidechain");
-    let mut main_left = vec![0.5; 8];
-    let mut main_right = vec![0.5; 8];
-    let side_left = vec![0.0; 8];
-    let side_right = vec![0.0; 8];
-    let report = support::render_scalar_sidechain(
-        effect.as_mut(),
-        &mut main_left,
-        &mut main_right,
-        Some((&side_left, &side_right)),
-        8,
-        &[],
-        0,
-    );
-    assert_eq!(report.nonfinite_left_blocks, 0);
-    assert!(main_left.iter().all(|sample| sample.is_finite()));
 }
 
 #[test]
