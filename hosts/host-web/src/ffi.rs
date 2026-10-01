@@ -909,7 +909,8 @@ fn staged_spectrum_request(
     entries
         .try_reserve_exact(count)
         .map_err(|_| RESULT_REFUSED_BUDGET)?;
-    for (index, staged) in staging.collection_entries[..count].iter().enumerate() {
+    let mut id_start = 0_usize;
+    for staged in &staging.collection_entries[..count] {
         if staged.reserved != [0; 3] {
             return Err(RESULT_INVALID_ARGUMENT);
         }
@@ -918,12 +919,6 @@ fn staged_spectrum_request(
         if id_bytes == 0 || id_bytes > SPECTRUM_MAXIMUM_ID_BYTES {
             return Err(RESULT_INVALID_ARGUMENT);
         }
-        let id_start = staging.collection_entries[..index]
-            .iter()
-            .try_fold(0_usize, |offset, previous| {
-                offset.checked_add(usize::try_from(previous.target_id_bytes).ok()?)
-            })
-            .ok_or(RESULT_INVALID_ARGUMENT)?;
         let id_end = id_start
             .checked_add(id_bytes)
             .ok_or(RESULT_INVALID_ARGUMENT)?;
@@ -938,6 +933,7 @@ fn staged_spectrum_request(
             target: spectrum_target(staged.target, id)?,
             channels: spectrum_channels(staged.channels)?,
         });
+        id_start = id_end;
     }
     Ok(Some(SpectrumPreparationRequest::Collection(
         SpectrumCaptureCollectionRequest {

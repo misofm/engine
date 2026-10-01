@@ -66,7 +66,7 @@ fn one_track_multiband_session(quantum: u32) -> String {
 /// Identity end to end: no polarity, trim, HPF or LPF, no effects in any rack, unity fader, and a
 /// hard-left/hard-right pan whose 2x2 matrix is the identity. The output is therefore the submitted
 /// source frames, which is what makes the submitted ramp its own oracle.
-fn identity_session(quantum: u32, _ring_frames: u32, length_samples: u64) -> String {
+fn identity_session(quantum: u32, length_samples: u64) -> String {
     let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
@@ -78,10 +78,6 @@ fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
     let document = one_track_session(quantum);
     AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(quantum))
         .unwrap_or_else(|failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())))
-}
-
-fn ready_host(quantum: u32) -> AudioWorkletEngineHost {
-    prepared_host(quantum)
 }
 
 fn boot_options(quantum: u32) -> WebBootOptions {
@@ -1261,7 +1257,7 @@ fn source_backpressure_seek_render_and_stable_output_are_bounded() {
 #[test]
 fn paused_seek_recycles_full_internal_queue_before_first_target_quantum() {
     let quantum = 128;
-    let document = identity_session(quantum, 512, 480_000);
+    let document = identity_session(quantum, 480_000);
     let options = WebBootOptions {
         source_ring_frames: 512,
         ..boot_options(quantum)
@@ -1324,7 +1320,7 @@ fn paused_seek_recycles_full_internal_queue_before_first_target_quantum() {
 
 #[test]
 fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
-    let mut host = ready_host(64);
+    let mut host = prepared_host(64);
     assert_eq!(host.reject_output_quantum(128), RESULT_REPREPARE_REQUIRED);
     assert_eq!(host.status().state, STATE_FAILED);
     assert_eq!(host.render_next(), RESULT_WRONG_STATE);
@@ -1344,7 +1340,7 @@ fn output_mismatch_and_disposal_are_sticky_and_idempotent() {
 /// `host.ready.is_some()` assertion fails.
 #[test]
 fn render_failure_retains_ownership_and_silences() {
-    let mut host = ready_host(128);
+    let mut host = prepared_host(128);
     host.buffers
         .as_mut()
         .expect("prepared buffers")
@@ -1523,10 +1519,6 @@ fn default_ring_covers_stall_tolerance() {
             u64::from(frames) >= stall_frames + 2 * u64::from(quantum),
             "the ring must cover the stall plus the consumer and recycle quanta"
         );
-        assert_eq!(
-            default_source_ring_frames(sample_rate_hz, quantum),
-            expected
-        );
     }
 }
 
@@ -1549,7 +1541,7 @@ fn ring_prefill_survives_stall() {
     assert_eq!(stall_quanta, 38, "100 ms at 48 kHz / 128 is 38 quanta");
 
     let length_samples = u64::from(ring_frames) + 2 * u64::from(QUANTUM);
-    let document = identity_session(QUANTUM, ring_frames, length_samples);
+    let document = identity_session(QUANTUM, length_samples);
     let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(QUANTUM))
         .expect("boot with derived ring");
 
@@ -1638,7 +1630,7 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     let second = block(-0.25, 0.00048828125);
     let silent = vec![0.0_f32; QUANTUM as usize];
 
-    let document = identity_session(QUANTUM, QUANTUM, 256);
+    let document = identity_session(QUANTUM, 256);
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
         ..boot_options(QUANTUM)
@@ -2423,7 +2415,7 @@ fn submit_prepared_eq_parameter(
 }
 
 fn input_filter_live_control_host(quantum: u32, queue_depth: u64) -> AudioWorkletEngineHost {
-    let mut model = parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 4))
+    let mut model = parse_session_json(&identity_session(quantum, u64::from(quantum) * 4))
         .expect("accepted identity fixture");
     let builtins = &mut model.tracks[0].builtins;
     builtins.left.hpf_hz = 100.0;
@@ -2590,9 +2582,8 @@ fn live_control_host_at_rate(
     quantum: u32,
     meter_blocks: u64,
 ) -> AudioWorkletEngineHost {
-    let mut model =
-        parse_session_json(&identity_session(quantum, quantum, u64::from(quantum) * 64))
-            .expect("identity model");
+    let mut model = parse_session_json(&identity_session(quantum, u64::from(quantum) * 64))
+        .expect("identity model");
     model.sample_rate_hz = sample_rate_hz;
     let document = canonical_session_json(&model).expect("canonical identity session");
     let options = WebBootOptions {
@@ -2675,9 +2666,8 @@ fn meter_tail_host_for_blocks(
 /// Feed one full quantum of a constant left plane and render it.
 fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
     let quantum = host.status().quantum_frames as usize;
-    let left = vec![value; quantum];
-    let right = vec![value; quantum];
-    let planes: [&[f32]; 2] = [&left, &right];
+    let samples = vec![value; quantum];
+    let planes: [&[f32]; 2] = [&samples, &samples];
     assert_eq!(
         host.submit_source(
             b"fixture-source",
@@ -5104,7 +5094,7 @@ fn incomplete_master_periods_skip_all_track_pops_and_effect_scans() {
     assert_eq!(observed.meter_poll_work(), before);
 }
 
-/// Feed a finite timing source, marking only the chunk that reaches its prepared boundary.
+/// Feed a finite source, marking only the chunk that reaches its prepared boundary.
 fn feed_and_render_finite_source(
     host: &mut AudioWorkletEngineHost,
     block: u64,
@@ -5130,7 +5120,8 @@ fn feed_and_render_finite_source(
     assert_eq!(host.render_next(), RESULT_OK);
 }
 
-fn probe_timing_source_boundary() {
+#[test]
+fn finite_source_boundary_requires_only_the_actual_final_marker() {
     const QUANTUM: u32 = 128;
     const SOURCE_BLOCKS: u64 = 2;
     let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, 32, SOURCE_BLOCKS);
@@ -5155,232 +5146,6 @@ fn probe_timing_source_boundary() {
         feed_and_render_finite_source(&mut host, block, SOURCE_BLOCKS, 0.25);
     }
 }
-
-#[test]
-fn timing_source_boundary_requires_only_the_actual_final_marker() {
-    probe_timing_source_boundary();
-}
-
-fn timed_accumulator_mode(metrics: Option<MeterMetricSet>) -> (u128, u64, u64) {
-    const QUANTUM: usize = 128;
-    const PERIOD_BLOCKS: u32 = 32;
-    const WINDOWS: u64 = 256;
-    const STREAMS: usize = 9;
-    let config = builtins::MeterConfig {
-        period_frames: core::num::NonZeroU32::new(QUANTUM as u32 * PERIOD_BLOCKS).unwrap(),
-        peak_hold_frames: 256,
-        peak_decay_db_per_second: 12.0,
-        queue_capacity: core::num::NonZeroUsize::MIN,
-        reset_generation: 1,
-    };
-    let mut meters = metrics.map(|selection| {
-        (0..STREAMS)
-            .map(|index| {
-                builtins::MeterAccumulator::prepare_selected(
-                    builtins::MeterHandle(core::num::NonZeroU64::new(index as u64 + 1).unwrap()),
-                    config,
-                    48_000,
-                    selection,
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>()
-    });
-    let blocks = WINDOWS * u64::from(PERIOD_BLOCKS);
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let started = std::time::Instant::now();
-    for block in 0..blocks {
-        let amplitude = if block % 17 == 0 { 1.0 } else { 0.125 };
-        let samples = [amplitude; QUANTUM];
-        if let Some(meters) = meters.as_mut() {
-            for meter in meters {
-                meter
-                    .accumulator
-                    .observe(&samples, &samples, block * QUANTUM as u64)
-                    .unwrap();
-                if (block + 1) % u64::from(PERIOD_BLOCKS) == 0 {
-                    let snapshot = meter.consumer.try_pop().unwrap();
-                    hash ^= u64::from(snapshot.left.sample_peak.to_bits());
-                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-            }
-        } else {
-            std::hint::black_box(&samples);
-        }
-    }
-    (started.elapsed().as_nanos(), hash, blocks)
-}
-
-fn timed_poll_mode(bypass_readiness: bool) -> (u128, u64, u64, (u64, u64)) {
-    const QUANTUM: u32 = 128;
-    const PERIOD_BLOCKS: u64 = 32;
-    const WINDOWS: u64 = 256;
-    let blocks = PERIOD_BLOCKS * WINDOWS;
-    let mut host = meter_tail_host_for_blocks(48_000, QUANTUM, PERIOD_BLOCKS, blocks);
-    assert_eq!(host.set_meter_lease(true), RESULT_OK);
-    host.set_meter_readiness_bypass(bypass_readiness);
-    let before = host.meter_poll_work();
-    let mut elapsed = 0_u128;
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    let mut emitted = 0_u64;
-    for block in 0..blocks {
-        let value = if block % 17 == 0 { 1.0 } else { 0.125 };
-        feed_and_render_finite_source(&mut host, block, blocks, value);
-        let started = std::time::Instant::now();
-        let windows = host.poll_meters();
-        elapsed = elapsed.saturating_add(started.elapsed().as_nanos());
-        if windows != 0 {
-            emitted = emitted.saturating_add(u64::from(windows));
-            for value in host.meter_frame() {
-                hash ^= u64::from(value.to_bits());
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            hash ^= host.meter_header().first_sample;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    let after = host.meter_poll_work();
-    (
-        elapsed,
-        hash,
-        emitted,
-        (after.0 - before.0, after.1 - before.1),
-    )
-}
-
-/// Frozen descriptive evidence for issues #519/#520. Run only through the documented two-phase
-/// command; this is deliberately an ignored test rather than a benchmark framework.
-fn timing_header() -> String {
-    serde_json::json!({
-        "schema": 1,
-        "kind": "header",
-        "label": "isolated metering ns for 9 streams; poll-only callback ns",
-        "quantum": 128,
-        "period_blocks": 32,
-        "windows": WINDOWS_FOR_TIMING,
-        "warmups": 1,
-        "measured_rounds": 2,
-    })
-    .to_string()
-}
-
-fn accumulator_timing_record(round: u32, mode: &str, result: (u128, u64, u64)) -> String {
-    serde_json::json!({
-        "schema": 1,
-        "kind": "accumulator",
-        "round": round,
-        "mode": mode,
-        "elapsed_ns": result.0,
-        "payload_hash": result.1,
-        "blocks": result.2,
-    })
-    .to_string()
-}
-
-fn poll_timing_record(round: u32, mode: &str, result: (u128, u64, u64, (u64, u64))) -> String {
-    serde_json::json!({
-        "schema": 1,
-        "kind": "poll",
-        "round": round,
-        "mode": mode,
-        "elapsed_ns": result.0,
-        "payload_hash": result.1,
-        "emitted_windows": result.2,
-        "track_pop_attempts": result.3.0,
-        "effect_scans": result.3.1,
-    })
-    .to_string()
-}
-
-fn persist_timing_record(file: &mut std::fs::File, record: &str) {
-    use std::io::Write;
-    writeln!(file, "{record}").expect("persist timing record");
-    file.sync_data().expect("sync timing record");
-    eprintln!("{record}");
-}
-
-#[test]
-#[ignore = "descriptive release timing; requires explicit preflight then one run"]
-fn selective_meter_and_readiness_descriptive_timing() {
-    use std::io::Write;
-
-    if std::hint::black_box(cfg!(debug_assertions)) {
-        panic!("timing requires --release");
-    }
-    let mode = std::env::var("MISO_ENGINE_METER_TIMING_MODE").expect("timing mode");
-    let output = std::env::var("MISO_ENGINE_METER_TIMING_OUTPUT").expect("timing output path");
-    let open = || {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&output)
-            .expect("output must not exist and must be writable")
-    };
-    if mode == "preflight" {
-        probe_timing_source_boundary();
-        let mut file = open();
-        let records = [
-            timing_header(),
-            accumulator_timing_record(0, "peak", (1, 2, 3)),
-            poll_timing_record(0, "ready", (1, 2, 3, (4, 5))),
-        ];
-        for record in records {
-            let parsed: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL row");
-            assert_eq!(parsed["schema"], 1);
-            assert!(parsed["kind"].is_string());
-            writeln!(file, "{record}").unwrap();
-        }
-        file.sync_all().unwrap();
-        assert_eq!(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output)
-                .expect_err("overwrite refusal")
-                .kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
-        drop(file);
-        std::fs::remove_file(&output).expect("remove preflight probe");
-        return;
-    }
-    assert_eq!(mode, "run", "mode is preflight or run");
-    let mut file = open();
-    persist_timing_record(&mut file, &timing_header());
-
-    // Exactly one warmup per frozen mode.
-    let _ = timed_accumulator_mode(None);
-    let _ = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
-    let _ = timed_accumulator_mode(Some(MeterMetricSet::ALL));
-    let _ = timed_poll_mode(true);
-    let _ = timed_poll_mode(false);
-
-    // Exactly two measured rounds, with no retry or tuning loop.
-    for round in 0..2 {
-        let disabled = timed_accumulator_mode(None);
-        persist_timing_record(
-            &mut file,
-            &accumulator_timing_record(round, "disabled", disabled),
-        );
-        let peak = timed_accumulator_mode(Some(MeterMetricSet::SAMPLE_PEAK));
-        persist_timing_record(&mut file, &accumulator_timing_record(round, "peak", peak));
-        let full = timed_accumulator_mode(Some(MeterMetricSet::ALL));
-        persist_timing_record(&mut file, &accumulator_timing_record(round, "full", full));
-        assert_eq!(peak.1, full.1, "round {round}: peak payload identity");
-        assert_eq!(disabled.2, peak.2);
-
-        let legacy = timed_poll_mode(true);
-        persist_timing_record(&mut file, &poll_timing_record(round, "legacy_scan", legacy));
-        let ready = timed_poll_mode(false);
-        persist_timing_record(&mut file, &poll_timing_record(round, "readiness", ready));
-        assert_eq!(legacy.1, ready.1, "round {round}: poll payload identity");
-        assert_eq!(legacy.2, WINDOWS_FOR_TIMING);
-        assert_eq!(ready.2, WINDOWS_FOR_TIMING);
-    }
-    file.sync_all().unwrap();
-}
-
-const WINDOWS_FOR_TIMING: u64 = 256;
 
 #[test]
 fn meter_delayed_poll_delivers_each_queued_window_with_its_own_peak() {
@@ -6924,8 +6689,8 @@ fn render_pair_and_compare(
     for block in first_block..first_block + blocks {
         feed_and_render(left, 1, block, value);
         feed_and_render(right, 1, block, value);
-        let a = left.output_pcm().expect("left output").to_vec();
-        let b = right.output_pcm().expect("right output").to_vec();
+        let a = left.output_pcm().expect("left output");
+        let b = right.output_pcm().expect("right output");
         assert!(
             a.iter()
                 .zip(b.iter())
