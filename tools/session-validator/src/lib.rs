@@ -415,7 +415,7 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
     }
     stages.push(stage(4, StageStatus::Pass, Vec::new()));
 
-    let canonical = compiled.canonical_json().to_owned();
+    let canonical = compiled.into_canonical_json();
     ValidationReport {
         stages,
         canonical: Some(canonical),
@@ -573,6 +573,7 @@ fn fold_mono_document(
     if replacements.is_empty() {
         return Ok(canonical);
     }
+    drop(canonical);
 
     let by_old: HashMap<&str, &IdentityReplacement> = replacements
         .iter()
@@ -661,7 +662,7 @@ fn fold_mono_document(
             diagnostic_text(&set)
         ))
     })?;
-    let output = compiled.canonical_json().to_owned();
+    let output = compiled.into_canonical_json();
     if output.len() > FOLD_MONO_MAX_SESSION_BYTES {
         return Err(fold_error(format!(
             "transformed session exceeds the {}-byte limit",

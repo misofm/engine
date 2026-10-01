@@ -299,6 +299,7 @@ fn native_render_is_bit_identical_for_duplicate_stereo_and_prepared_mono() {
             .iter()
             .map(|value| value.to_bits())
             .eq(mono.iter().map(|value| value.to_bits())),
+        "duplicate stereo and prepared mono output words differ"
     );
 }
 
@@ -314,6 +315,7 @@ fn native_effect_fixture_is_bit_identical_after_mono_preparation() {
             .iter()
             .map(|value| value.to_bits())
             .eq(mono.iter().map(|value| value.to_bits())),
+        "native effect output words differ after mono preparation"
     );
 }
 
