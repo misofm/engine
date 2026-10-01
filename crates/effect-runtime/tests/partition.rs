@@ -17,7 +17,7 @@ use lane::kernels::RampSegment;
 use lane::{Lane, Simd4, flush};
 
 /// The block sizes every block API in the workspace is gated on.
-const PARTITIONS: [usize; 5] = [1, 7, 64, 128, 512];
+const PARTITIONS: [usize; 4] = [1, 7, 64, 128];
 
 /// Total frames rendered by each run.
 const FRAMES: usize = 512;

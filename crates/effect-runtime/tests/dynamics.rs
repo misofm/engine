@@ -254,33 +254,23 @@ const NARROWEST_SOFT_KNEES: [u32; 5] = [
     1.0e-30_f32.to_bits(),
 ];
 
-/// The knee words before issue #994, transcribed: the soft design for every positive width.
-fn old_knee_words(knee_db: f32) -> (f32, f32) {
-    if knee_db > 0.0 {
-        (0.5 * knee_db, 1.0 / (2.0 * knee_db))
-    } else {
-        (0.0, 0.0)
-    }
-}
-
 fn bits(words: (f32, f32)) -> (u32, u32) {
     (words.0.to_bits(), words.1.to_bits())
 }
 
 /// The derived bound is exact: `1 / (2 W)` is finite exactly from [`MIN_SOFT_KNEE_DB`] up, and
-/// the design changes exactly the widths below it and no other.
+/// positive widths below it use the hard-knee words; finite reciprocals use `(W/2, 1/(2W))`.
 ///
 /// Exhaustive over every `f32` from `+0.0` to `f32::MIN_POSITIVE` (about 8.4 million widths, the
 /// whole subnormal range around the bound), then the widths at or below zero, NaN and 24, and a
-/// random million of the admissible `[0, 24]` domain drawn by bit pattern. Every width whose reciprocal is finite must
-/// keep the pre-#994 words bit for bit — that is the class-A claim — and every width whose
-/// reciprocal overflows must get the hard knee's `(+0.0, +0.0)`.
+/// random million of the admissible `[0, 24]` domain drawn by bit pattern. The coefficient law
+/// holds at every width, including the subnormal transition and nonpositive/NaN inputs.
 ///
 /// Red mutations (MUTATIONS.md rows 994-R1 to 994-R3): drop the `is_finite` test, or replace it
 /// with a constant bound one ulp too high (`knee_db >= f32::from_bits(0x0010_0002)`) or one ulp
 /// too low (`0x0010_0000`).
 #[test]
-fn the_overflow_bound_is_exact_and_only_it_moves() {
+fn knee_words_follow_the_finite_reciprocal_rule() {
     assert_eq!(
         f64::from(WIDEST_OVERFLOWING_KNEE),
         2.0_f64.powi(-129),
@@ -294,25 +284,23 @@ fn the_overflow_bound_is_exact_and_only_it_moves() {
     let check = |knee: f32| {
         let reciprocal = 1.0 / (2.0 * core::hint::black_box(knee));
         let designed = knee_coefficients(knee);
-        if knee > 0.0 && !reciprocal.is_finite() {
+        if knee > 0.0 && reciprocal.is_finite() {
             assert!(
-                knee <= WIDEST_OVERFLOWING_KNEE,
-                "{knee:e} ({:#010x}) overflows above the derived bound",
-                knee.to_bits()
-            );
-            assert_eq!(bits(designed), (0, 0), "{knee:e} must be a hard knee");
-        } else {
-            assert!(
-                knee.is_nan() || knee <= 0.0 || knee >= MIN_SOFT_KNEE_DB,
+                knee >= MIN_SOFT_KNEE_DB,
                 "{knee:e} ({:#010x}) is finite below the derived bound",
                 knee.to_bits()
             );
             assert_eq!(
                 bits(designed),
-                bits(old_knee_words(knee)),
-                "{knee:e} ({:#010x}): a finite-safe width must keep its words",
+                ((0.5 * knee).to_bits(), reciprocal.to_bits())
+            );
+        } else {
+            assert!(
+                knee.is_nan() || knee <= WIDEST_OVERFLOWING_KNEE,
+                "{knee:e} ({:#010x}) overflows above the derived bound",
                 knee.to_bits()
             );
+            assert_eq!(bits(designed), (0, 0), "{knee:e} must be a hard knee");
         }
     };
     for word in 0..=0x0080_0000_u32 {
