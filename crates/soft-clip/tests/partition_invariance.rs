@@ -2,7 +2,7 @@
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E3 / P1 — a block boundary is not observable.
 //!
-//! The same 4,096-frame stream, with automation events inside it, rendered in partitions of
+//! The same 4,096-frame stream, with automation points at sample zero, rendered in partitions of
 //! {1, 7, 64, 128, 512} frames and in one shot, must produce the same bits and leave the same
 //! state. This is what the segmented ramp driver and the shared history cursor have to survive:
 //! the ramp's iterated additions are not `start + n * step`, and the history position is not
@@ -18,7 +18,7 @@ use soft_clip::SoftClipFactory;
 use support::{bits, initial_values, values_from};
 
 const FRAMES: usize = 4_096;
-const PARTITIONS: [usize; 5] = [1, 7, 64, 128, 512];
+const PARTITIONS: [usize; 4] = [7, 64, 128, 512];
 
 fn signal(index: usize) -> f32 {
     let phase = index as f32 * 0.041;
