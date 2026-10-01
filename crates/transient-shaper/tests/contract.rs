@@ -19,9 +19,9 @@ use transient_shaper::{
     TRANSIENT_SHAPER_TIME_CONSTANTS_MS, TransientShaperFactory,
 };
 
-/// Red mutation: flip one bit of `TRANSIENT_SHAPER_COEFFICIENT_BITS`.
+/// Descriptor identity, zero latency/tail, state layout and preparation resource refusals.
 #[test]
-fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
+fn descriptor_resources_and_transactional_caps_are_frozen() {
     validate_descriptor(&TRANSIENT_SHAPER_DESCRIPTOR).expect("descriptor");
     assert_eq!(
         TRANSIENT_SHAPER_DESCRIPTOR.id.as_str(),
@@ -30,11 +30,7 @@ fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
     assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.parameters.len(), 3);
     assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.qualities.len(), 4);
     assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version, 1);
-    for (quality, bits) in TRANSIENT_SHAPER_DESCRIPTOR
-        .qualities
-        .iter()
-        .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS)
-    {
+    for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(quality.tail, TailSamples::Finite(0));
         assert_eq!(quality.maximum_state.total(), Some(88));
@@ -44,7 +40,6 @@ fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
         // Re-accounting this row is #95's (audit finding F9); this job only fixed the stale doc.
         assert_eq!(quality.scratch_fixed_bytes, 24);
         assert_eq!(quality.scratch_bytes_per_frame, 0);
-        assert_eq!(bits.len(), 4);
     }
     let values = initial_values();
     let mut too_small = request(&values);
@@ -76,7 +71,7 @@ fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
 /// Every frozen coefficient bit is `exp(-1 / (tau * fs))` rounded once, from two independent
 /// directions: the `f64` oracle in `dsp-reference`, and the runtime's own coefficient design.
 ///
-/// The second half is the bit-compatibility check the re-land owes: this crate's frozen table and
+/// The second half checks the shared coefficient policy: this crate's frozen table and
 /// `effect_runtime::envelope::retention_coefficient` must be the same number, or the
 /// crate is carrying a private coefficient policy after the unification.
 ///
@@ -352,8 +347,8 @@ fn identity_rules_are_bit_exact_and_the_followers_still_warm() {
 /// state word to the last bit. That pins the linking law itself — including `Average`'s frozen
 /// `0.5 * |l| + 0.5 * |r|` operation order — instead of a downstream consequence of it.
 ///
-/// Red mutation: swap the `LINK_MAXIMUM` and `LINK_AVERAGE` constants; or write `Average` as
-/// `0.5 * (|l| + |r|)`, one rounding fewer.
+/// Red mutation: dispatch `LinkMode::Maximum` to `LINK_AVERAGE`. The two half-scaled products
+/// remain the frozen Average law; this row does not require alternative parenthesization to differ.
 #[test]
 fn link_modes_drive_the_detector_as_specified() {
     let values = values_of(1.0, 0.0, 1.0);

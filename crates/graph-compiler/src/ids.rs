@@ -83,13 +83,13 @@ pub(crate) fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec
                 GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
             )
         })
-        .map(|node| (node.id.clone(), Vec::new()))
+        .map(|node| (&node.id, Vec::new()))
         .collect();
     for edge in edges {
         if edge.destination.kind == GraphPortKind::MainInput
             && let Some(contributions) = contributions_by_node.get_mut(&edge.destination.node)
         {
-            contributions.push(edge.id.clone());
+            contributions.push(&edge.id);
         }
     }
     nodes
@@ -99,7 +99,7 @@ pub(crate) fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec
             contributions.sort();
             (contributions.len() > 1).then(|| ReductionRecord {
                 node: node.id.clone(),
-                contributions,
+                contributions: contributions.into_iter().cloned().collect(),
             })
         })
         .collect()

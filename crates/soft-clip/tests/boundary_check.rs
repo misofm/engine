@@ -1,20 +1,14 @@
 #![allow(clippy::disallowed_methods)]
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
-//! E7 — D7: no per-value checking, one boundary check per block per bank.
+//! E7 — D7: a failing lane's two output planes are zeroed and its histories cleared.
 //!
-//! The audit found 258 per-operation store/`is_finite`/`is_subnormal`/reload wrappers per input
-//! sample and per channel, costing about 95 % of the kernel's time (issue #91 F1). They are gone.
-//! What replaces them is master plan §4.4: the block's output is scanned once with a vector
-//! compare, a failing block is zeroed, the state is reset and a counter advances by one *block*.
-//!
-//! The tests below are the behaviour that replaced the old per-lane recovery: a non-finite input
-//! is no longer swallowed sample by sample, it fails its block; and after a failure the effect is
-//! exactly a fresh instance, so nothing of the bad state survives into the next block.
+//! A failed output boundary check snaps ramps to their targets and reports the block's frames
+//! on both channels (#1073 owns the report unit). With default parameters the recovered scalar
+//! instance matches a fresh one. The padded-bank tests cover lane-local recovery at every width.
 
 mod support;
 
-use effect_contract::BankWidth;
-use support::{bits, initial_values, prepare, prepare_bank, process, process_bank};
+use support::{bits, initial_values, prepare, process};
 
 const FRAMES: usize = 64;
 
@@ -23,7 +17,7 @@ fn signal(index: usize) -> f32 {
 }
 
 #[test]
-fn a_non_finite_block_is_zeroed_reset_and_counted_once() {
+fn a_non_finite_block_is_zeroed_reset_and_reports_its_frames() {
     let values = initial_values();
     let mut effect = prepare(&values);
 
@@ -86,107 +80,4 @@ fn a_finite_but_out_of_range_block_also_fails() {
     let report = process(effect.as_mut(), &mut left, &mut right, 0, &[]);
     assert!(left.iter().all(|sample| sample.to_bits() == 0));
     assert_eq!(report.nonfinite_left_blocks, FRAMES as u64);
-}
-
-/// A bank fails and recovers the failing lane alone (issue #1092; decision 12's coupling rule).
-///
-/// The failing lane has both channels zeroed, is charged for the block on both channels, as its
-/// scalar instance charges itself, and comes back as a fresh lane. Every other lane keeps the
-/// output, the empty report and the state of an unpoisoned control bank: one hot track -- a
-/// bypassed one whose wet path still runs (#1087) -- must not silence or charge its bank-mates.
-///
-/// Red if the bank fails, is charged or is reset as a unit (what it did before #1092), or if the
-/// failing lane keeps any history.
-#[test]
-fn a_bank_block_fails_and_recovers_the_failing_lane_alone() {
-    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
-    let lanes = width.lanes() as usize;
-    let values = initial_values();
-    let per_lane: Vec<Vec<_>> = (0..lanes).map(|_| values.to_vec()).collect();
-    let mut bank = prepare_bank(width, &per_lane).expect("bank binds");
-    let mut control = prepare_bank(width, &per_lane).expect("control binds");
-    let offsets = vec![0_u32; lanes + 1];
-
-    for effect in [&mut bank, &mut control] {
-        let mut left = vec![0.0_f32; FRAMES * lanes];
-        let mut right = vec![0.0_f32; FRAMES * lanes];
-        for frame in 0..FRAMES {
-            for lane in 0..lanes {
-                left[frame * lanes + lane] = signal(frame + lane);
-                right[frame * lanes + lane] = signal(frame + lane + 5);
-            }
-        }
-        process_bank(
-            effect.as_mut(),
-            width,
-            &mut left,
-            &mut right,
-            FRAMES,
-            0,
-            &[],
-            &offsets,
-        );
-    }
-
-    let failing = 2;
-    let mut outputs = Vec::new();
-    for (effect, poison) in [(&mut bank, true), (&mut control, false)] {
-        let mut left = vec![0.1_f32; FRAMES * lanes];
-        let mut right = vec![0.1_f32; FRAMES * lanes];
-        if poison {
-            left[3 * lanes + failing] = f32::INFINITY;
-        }
-        let report = process_bank(
-            effect.as_mut(),
-            width,
-            &mut left,
-            &mut right,
-            FRAMES,
-            FRAMES as u64,
-            &[],
-            &offsets,
-        );
-        outputs.push((left, right, report));
-    }
-    let (left, right, report) = &outputs[0];
-    let (control_left, control_right, control_report) = &outputs[1];
-    let fresh = prepare_bank(width, &per_lane).expect("bank binds");
-    for lane in 0..lanes {
-        let words = |plane: &[f32]| -> Vec<u32> {
-            (0..FRAMES)
-                .map(|frame| plane[frame * lanes + lane].to_bits())
-                .collect()
-        };
-        let state = support::snapshot_bank(bank.as_ref(), lane as u32);
-        if lane == failing {
-            assert!(
-                words(left)
-                    .iter()
-                    .chain(&words(right))
-                    .all(|word| *word == 0),
-                "the failing lane's two channels are zeroed"
-            );
-            assert_eq!(report.reports[lane].nonfinite_left_blocks, FRAMES as u64);
-            assert_eq!(report.reports[lane].nonfinite_right_blocks, FRAMES as u64);
-            assert_eq!(
-                state,
-                support::snapshot_bank(fresh.as_ref(), lane as u32),
-                "the failing lane is a fresh lane after the reset"
-            );
-        } else {
-            assert_eq!(words(left), words(control_left), "lane {lane} left");
-            assert_eq!(words(right), words(control_right), "lane {lane} right");
-            assert_eq!(report.reports[lane], control_report.reports[lane]);
-            assert_eq!(
-                report.reports[lane],
-                Default::default(),
-                "lane {lane} is not charged"
-            );
-            assert_eq!(
-                state,
-                support::snapshot_bank(control.as_ref(), lane as u32),
-                "lane {lane}'s state"
-            );
-        }
-    }
 }

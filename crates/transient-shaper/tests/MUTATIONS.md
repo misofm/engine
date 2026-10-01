@@ -4,6 +4,13 @@ Master plan for issue #83, §1.6: *every gate is proven red*. A test that has ne
 gate. Each row below was applied to the working tree, the named test binary was run, the failure was
 recorded, and the mutation was reverted in the same session.
 
+This is historical mutation evidence, not a claim that every current test was re-mutated.
+Housekeeping #1128 retired the narrower native-bank comparison (row 12) and four-frame
+recovery case; current both-width padded differentials and the randomized full-bank driver own
+PCM/report/state identity, while planted-state and full/partial hostile controls own per-lane
+recovery. No new mutation run is claimed. G5 is now the sole owner of cross-target digest pins;
+this package's width test compares all current words directly.
+
 Host: `x86_64` (Zen 5 class), `rustc 1.97.1`, workspace `.cargo/config.toml` pin
 `-C target-feature=+avx2,+fma`, debug profile unless noted.
 
@@ -68,10 +75,10 @@ thread 'automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exa
     panicked at tests/contract.rs:242
 ```
 
-The persisted layout is eleven words and does not carry the D11 `step`, so a restore has to derive
-it. `(target - current) / remaining` is the only derivation that resumes the ramp the writer was
-running; `(target - current) / RAMP_SAMPLES` restarts it, and the restored continuation stops
-matching the uninterrupted one.
+The persisted layout is eleven words and does not carry the D11 `step`, so a restore derives
+`(target - current) / remaining`. The representable contract row resumes exactly; replacing its
+denominator with `RAMP_SAMPLES` restarts the ramp and breaks that continuation. Iteratively
+rounded currents need not reconstruct the original increment in general.
 
 ### 5 — link-mode dispatch
 
@@ -93,8 +100,9 @@ a_nonfinite_bank_block_is_rejected_as_a_unit --- FAILED
 
 Issue #1092 replaced the shared whole-bank `finish_block` with the crate's per-lane
 `Shaper::recover_lanes` (decision 12's coupling rule), and the second test with
-`a_nonfinite_lane_is_rejected_alone`. Skipping the boundary check (the `check_block` early return
-and `recover_lanes`) is the same mutation today, and it turns both tests red the same way.
+`a_nonfinite_lane_is_rejected_alone`, which #1128 later retired as a subset of the current
+both-width planted-state and hostile-control recovery gates. Those gates check zero PCM,
+cleared failing envelopes, active-only counts and unchanged bank-mate continuations.
 
 With `finish_block` gone the NaN reaches the output. This is the D7 replacement for the seven
 per-value `Option` classifications the pre-audit crate ran per lane-sample, so it has to be the
@@ -167,11 +175,9 @@ Two mutations were tried, survived, and are recorded here with the arithmetic ra
 dropped.
 
 * **`Average` link written as `0.5 * (|l| + |r|)`** instead of `0.5 * |l| + 0.5 * |r|`. Scaling by
-  a power of two is exact and rounding commutes with it, so `fl(0.5l + 0.5r)` and `0.5 * fl(l + r)`
-  agree on every pair whose sum is normal. They can differ where `l + r` overflows or where the
-  result is subnormal; the block boundary check excludes the first and `flush` clears the second
-  before it can enter the recurrence. The two-product form is kept anyway, because it is the form
-  the frozen brief writes and because "equivalent under the current guards" is not "equivalent".
+  one half makes many finite normal pairs produce identical bits under both expressions.
+  Overflow or subnormal rounding can distinguish them. The recorded mutant survived its
+  workload; that is not a universal equivalence claim. The frozen two-product form stays.
 * **`prefix = frames`** (evaluate the ramp on every frame rather than only while one is running).
   Bit-identical for the reason given under row 8. It is a performance regression — it puts three
   `LinearRamp::next_value` calls per lane per channel back into the steady-state loop, which is

@@ -50,8 +50,8 @@ pub(crate) fn timings(
             .ok_or_else(|| diag("graph.internal.invariant", &edge.path))?
             .push(edge);
     }
-    let mut arrivals = BTreeMap::<GraphNodeId, u64>::new();
-    let mut extents = BTreeMap::<GraphNodeId, TailSamples>::new();
+    let mut arrivals = BTreeMap::<&GraphNodeId, u64>::new();
+    let mut extents = BTreeMap::<&GraphNodeId, TailSamples>::new();
     let mut total_delay: u64 = 0;
     let mut delay_count: u64 = 0;
     let mut routes = Vec::new();
@@ -98,7 +98,7 @@ pub(crate) fn timings(
         }
         let latency = latencies.get(node).copied().unwrap_or(LatencySamples(0)).0;
         arrivals.insert(
-            node.clone(),
+            node,
             max.checked_add(latency)
                 .ok_or_else(|| diag("graph.pdc.arithmetic_overflow", "$.graph"))?,
         );
@@ -134,7 +134,7 @@ pub(crate) fn timings(
         {
             return Err(diag("graph.tail.limit", "$.graph"));
         }
-        extents.insert(node.clone(), extent);
+        extents.insert(node, extent);
     }
     routes.sort_by(|a, b| a.route_id.cmp(&b.route_id));
     delays.sort_by(|left, right| left.edge_id.cmp(&right.edge_id));

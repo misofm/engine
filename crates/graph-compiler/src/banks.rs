@@ -208,14 +208,13 @@ pub(crate) fn bind_rack_banks_indexed(
         return Ok((Vec::new(), empty(dispatch, chains)));
     };
 
-    let level_by_node: BTreeMap<_, _> = levels
+    let level_by_node: BTreeMap<&EffectNodeId, u64> = levels
         .iter()
         .flat_map(|level| {
-            level
-                .nodes
-                .iter()
-                .cloned()
-                .map(move |node| (node, level.level))
+            level.nodes.iter().filter_map(move |node| match node {
+                GraphNodeId::Effect(node) => Some((node, level.level)),
+                _ => None,
+            })
         })
         .collect();
 
@@ -224,18 +223,12 @@ pub(crate) fn bind_rack_banks_indexed(
         let Some(first) = nodes.first() else {
             continue;
         };
-        let Some(level) = level_by_node
-            .get(&GraphNodeId::Effect(first.clone()))
-            .copied()
-        else {
+        let Some(level) = level_by_node.get(first).copied() else {
             continue;
         };
         // Slot k sits at level + k: a rack chain is a path, so each slot depends on the previous.
         for (offset, node) in nodes.iter().enumerate() {
-            let Some(slot_level) = level_by_node
-                .get(&GraphNodeId::Effect(node.clone()))
-                .copied()
-            else {
+            let Some(slot_level) = level_by_node.get(node).copied() else {
                 return Err(diag("graph.internal.invariant", "$.effects"));
             };
             if slot_level != level + offset as u64 {
@@ -503,7 +496,7 @@ fn stranded_mono_tracks(plan: &BankPlan<RackChainId>) -> Vec<String> {
 fn unbanked_console_slot(
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
     bound_slots: &[GraphRackBoundSlot],
-    level_by_node: &BTreeMap<GraphNodeId, u64>,
+    level_by_node: &BTreeMap<&EffectNodeId, u64>,
     classes: &SessionPoolClasses,
 ) -> Option<GraphDiagnostic> {
     let banked: BTreeSet<&EffectNodeId> = bound_slots
@@ -523,7 +516,7 @@ fn unbanked_console_slot(
         CohortPoolClass::MonoSymmetricAtPrepare => "mono",
         CohortPoolClass::Stereo => "stereo",
     };
-    let Some(level) = level_by_node.get(&GraphNodeId::Effect(node.clone())) else {
+    let Some(level) = level_by_node.get(node) else {
         return Some(diag("graph.internal.invariant", "$.effects"));
     };
     Some(diag(
@@ -546,7 +539,7 @@ fn bind_group_banks(
     group: &BankGroup<RackChainId>,
     padded: bool,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
-    level_by_node: &BTreeMap<GraphNodeId, u64>,
+    level_by_node: &BTreeMap<&EffectNodeId, u64>,
     effects: &EffectPreparedSession,
     prepared: &PreparedEffectIndex<'_>,
     dispatch: Backend,
@@ -636,7 +629,7 @@ fn bindable_slot_members(
     slot: usize,
     padded: bool,
     chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
-    level_by_node: &BTreeMap<GraphNodeId, u64>,
+    level_by_node: &BTreeMap<&EffectNodeId, u64>,
 ) -> Result<Option<Vec<EffectNodeId>>, GraphDiagnostic> {
     // A partial group binds only when it is padded (issue #1088). Unpadded, its members render
     // per node, as every partial group's did before (#96 F7).
@@ -689,11 +682,7 @@ fn bindable_slot_members(
     // some lane skips does. Equal ranks and equal levels are the same condition (the path
     // arithmetic in `bind_rack_banks_indexed` asserts `slot_level == level + offset` for every
     // bankable chain), and this reads the levels because they are what bind checks.
-    let member_level = |node: &EffectNodeId| {
-        level_by_node
-            .get(&GraphNodeId::Effect(node.clone()))
-            .copied()
-    };
+    let member_level = |node: &EffectNodeId| level_by_node.get(node).copied();
     let first_level = member_level(&members[0]);
     if first_level.is_none()
         || members

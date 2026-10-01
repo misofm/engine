@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
-//! E10 — state layout 2 round-trips exactly, into a scalar instance and into one lane of a bank.
+//! E10 — state layout 1 round-trips exactly, into a scalar instance and into one lane of a bank.
 //!
 //! The layout lost the per-lane cursor word (D10: one cursor per bank) and gained a `step` word per
 //! ramp (D11: the increment is precomputed). What replaces the cursor is *age ordering*: the
@@ -16,9 +16,7 @@ use effect_contract::{
     StatePayloadError, StatePayloadInput,
 };
 use soft_clip::SoftClipFactory;
-use support::{
-    as_input, bits, initial_values, prepare, prepare_bank, process, process_bank, values_from, word,
-};
+use support::{as_input, bits, prepare, prepare_bank, process, process_bank, values_from, word};
 
 const FRAMES: usize = 64;
 
@@ -185,7 +183,7 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     let values = values_from([(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)]);
     let mut effect = prepare(&values);
 
-    // An invalid declared version is rejected outright; issue #080's registry owns any converting edge.
+    // An invalid declared version is rejected outright.
     assert_eq!(
         effect.restore_state_payload(0, as_input(&payload)),
         Err(StatePayloadError {
@@ -202,13 +200,13 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
         })
     );
     // A truncated section.
-    let short = payload.1[..payload.1.len() - 4].to_vec();
+    let short = &payload.1[..payload.1.len() - 4];
     assert_eq!(
         effect.restore_state_payload(
             1,
             StatePayloadInput {
                 common: &payload.0,
-                left: &short,
+                left: short,
                 right: &payload.2,
             },
         ),
@@ -286,5 +284,4 @@ fn both_resets_are_word_exact() {
 
     effect.reset(ResetKind::FullToDefaults);
     assert_eq!(support::snapshot(effect.as_ref()), fresh);
-    assert_eq!(initial_values().len(), 6);
 }

@@ -8,7 +8,7 @@
 mod common;
 
 use common::*;
-use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, LinkMode};
+use effect_contract::EffectProcessBlock;
 
 /// A non-finite output zeroes the block and resets the envelopes.
 ///
@@ -60,85 +60,6 @@ fn a_nonfinite_block_is_zeroed_and_the_envelopes_are_reset() {
         left.iter().all(|x| x.to_bits() == 0.0_f32.to_bits()),
         "a block that reaches 1e30 is rejected: {left:?}"
     );
-}
-
-/// A bank rejects a failing lane alone (issue #1092; decision 12's coupling rule).
-///
-/// The failing lane has both channels zeroed and both envelopes reset, exactly as its scalar
-/// instance would; every other lane keeps the bits and the state of an unpoisoned control bank.
-/// Master plan §4.4's "resets the failing effect's state" now reads per lane: a bank is a cohort of
-/// tracks, and one hot track -- a bypassed one whose wet path still runs (#1087) -- must not
-/// silence its bank-mates.
-///
-/// Red if the bank is rejected as a unit (the shared `finish_block` this crate used before), or if
-/// the failing lane keeps its envelopes or its right channel.
-#[test]
-fn a_nonfinite_lane_is_rejected_alone() {
-    let (_, width) = native_bank().expect("every product target banks");
-    let lanes = width.lanes() as usize;
-    let values = vec![values_of(1.0, -1.0, 1.0); lanes];
-    let mut bank = bind_native_bank(&values, LinkMode::DualMono).expect("bank");
-    let mut control = bind_native_bank(&values, LinkMode::DualMono).expect("control");
-    let frames = 4;
-    let offsets = vec![0_u32; lanes + 1];
-    let block = |bank: &mut dyn effect_contract::PreparedNativeEffectBank, poison: bool| {
-        let mut left: Vec<f32> = (0..frames * lanes)
-            .map(|at| 0.5 - at as f32 * 0.01)
-            .collect();
-        let mut right = vec![0.25_f32; frames * lanes];
-        if poison {
-            left[lanes + 2] = f32::NAN;
-        }
-        bank.process_bank(
-            EffectBankProcessBlock::new(
-                &mut left,
-                &mut right,
-                None,
-                frames as u32,
-                width,
-                0,
-                &[],
-                &offsets,
-                128,
-            )
-            .expect("bank block"),
-        );
-        (left, right)
-    };
-    let (left, right) = block(bank.as_mut(), true);
-    let (control_left, control_right) = block(control.as_mut(), false);
-    let sizes = transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
-    for lane in 0..lanes {
-        let state = bank_snapshot(bank.as_ref(), lane as u32, sizes);
-        let words = |plane: &[f32]| -> Vec<u32> {
-            (0..frames)
-                .map(|frame| plane[frame * lanes + lane].to_bits())
-                .collect()
-        };
-        if lane == 2 {
-            assert!(
-                words(&left)
-                    .iter()
-                    .chain(&words(&right))
-                    .all(|word| *word == 0),
-                "the failing lane's two channels are zeroed"
-            );
-            for word in [&state.0, &state.1]
-                .into_iter()
-                .flat_map(|section| [state_f32(section, 0), state_f32(section, 1)])
-            {
-                assert_eq!(word.to_bits(), 0, "the failing lane's envelopes are reset");
-            }
-        } else {
-            assert_eq!(words(&left), words(&control_left), "lane {lane} left");
-            assert_eq!(words(&right), words(&control_right), "lane {lane} right");
-            assert_eq!(
-                state,
-                bank_snapshot(control.as_ref(), lane as u32, sizes),
-                "lane {lane}'s state"
-            );
-        }
-    }
 }
 
 /// A subnormal input is no longer sanitised: it renders, and the envelope word it produces is

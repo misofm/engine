@@ -6,7 +6,11 @@ On the builtins-less plan the identity post-input copy level absorbed the input 
 
 ## Smallest closable slice
 
-Narrow the hold in `program::lower`'s colouring so a slot freed inside a merged span is reused once no later cohort of the span can still read it, without changing which chains merge or any rendered bit. Authorized paths: `crates/graph/src/program.rs` (colouring passes only), `crates/graph/src/program/tests.rs`, the pinned test in `crates/graph-compiler/src/lib.rs` (`banking_costs_no_arena_buffers_with_builtins_and_holds_inputs_without` or its successor name), and this spec. The random-graph corpus's dataflow proof must stay green with zero divergence.
+Narrow the hold in `program::lower`'s colouring so a slot freed inside a merged span is reused once no later cohort of the span can still read it, without changing which chains merge or any rendered bit. Authorized paths: `crates/graph/src/program.rs` (colouring passes only), `crates/graph/src/program/tests.rs`, a focused resource/dataflow regression in `crates/graph-compiler/src/lib.rs`, and this spec. The random-graph corpus's dataflow proof must stay green with zero divergence.
+
+### Housekeeping reconciliation, 2026-10-01 (#1136)
+
+The successor measurement-only test `the_merged_span_hold_costs_the_input_slots` pins 256 banked / 129 per-node buffers. Its comments record that #1098 moved the EQ into inserts for the per-node arm, so the original 193 comparison is historical. Housekeeping retires this exact-count restriction because it defends no distinct dataflow or resource-admission behavior and would reject a colouring improvement. The finding and measurements remain here and in git history; independent random lowering, bank-window/dataflow and transactional cap gates remain active. This is test-reference maintenance only: no colouring optimization or achievement of this issue's product objectives is claimed. Freeze a current comparable reproduction and its behavioral regression before implementing the still-open issue.
 
 ## Non-goals
 

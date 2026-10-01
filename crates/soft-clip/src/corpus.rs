@@ -3,8 +3,8 @@
 //! One definition, run two ways against the same pins: by gate G5
 //! (`tools/wasm-gates/tests/g5_native_corpus.rs`) on this host at all three widths, and by
 //! `tools/wasm-gates` inside a WebAssembly module at the two it has (no `Simd8` there, #1110).
-//! `tests/lane_identity.rs` proves the driver around the kernel. A digest difference between the
-//! legs is a difference in the *target*, which is what master plan #83 D5 says cannot happen.
+//! The padded-bank and randomized differentials check the prepared driver. A digest difference
+//! between the legs is a difference in the target (master plan #83 D5).
 //!
 //! # Why the results are read back lane-major
 //!
@@ -151,7 +151,6 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
     let all = L::zero().eq(L::zero());
     let no_bypass = L::mask_not(all);
     let mut block = vec![0.0_f32; FRAMES * width];
-    let mut words = [0.0_f32; LANES];
 
     for group in 0..LANES / width {
         for frame in 0..FRAMES {
@@ -182,10 +181,8 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         soft_clip_block::<L>(&mut block, FRAMES, &coef, &mut state, &mut history);
         for frame in 0..FRAMES {
             for offset in 0..width {
-                words[offset] = block[frame * width + offset];
-            }
-            for offset in 0..width {
-                out[(group * width + offset) * FRAMES + frame] = words[offset].to_bits();
+                out[(group * width + offset) * FRAMES + frame] =
+                    block[frame * width + offset].to_bits();
             }
         }
     }
