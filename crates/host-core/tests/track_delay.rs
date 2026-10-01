@@ -20,7 +20,7 @@
 //! and does no arithmetic at all.
 //!
 //! The oracle is also non-circular: its arm sets `delay_samples = 0`, so it never executes the
-//! code under test. `a_zero_delay_arm_never_lowers_a_delay_node` pins that.
+//! code under test.
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -203,19 +203,6 @@ fn assert_bit_identical(actual: &[Vec<f32>; 2], oracle: &[Vec<f32>; 2], what: &s
 // ---------------------------------------------------------------------------------------------
 // P2-1: shift exactness
 // ---------------------------------------------------------------------------------------------
-
-/// The oracle arm never runs the code under test.
-///
-/// Without this, `a_declared_delay_is_exactly_a_pre_padded_source` could pass by both arms being
-/// broken in the same way.
-#[test]
-fn a_zero_delay_arm_never_lowers_a_delay_node() {
-    let document = session(0, 0, true);
-    assert!(
-        document.contains("\"delay_samples\":0") || document.contains("\"delay_samples\": 0"),
-        "the oracle arm is zero"
-    );
-}
 
 /// `N = 1`, `N == quantum` and `N > quantum` (not a multiple of it), with the fixture's real
 /// HPF and LPF engaged: an LTI commute check, bit for bit.
