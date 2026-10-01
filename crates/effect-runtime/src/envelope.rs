@@ -22,9 +22,11 @@ use lane::Lane;
 /// `lane::kernels::one_pole_block` take; [`peak_follow`] takes its complement, which
 /// is [`retention_coefficient`].
 ///
-/// * `time_ms <= 0`, or a non-finite `time_ms`, gives `1.0` — an instantaneous follower, the only
-///   continuous extension of the formula as `tau` goes to zero.
-/// * `sample_rate == 0` gives `1.0` for the same reason.
+/// * A NaN or `time_ms <= 0` (including negative infinity) gives `1.0` — an instantaneous follower.
+/// * `sample_rate == 0`, or a positive `time_ms * 0.001 * sample_rate` product that rounds to
+///   zero, also gives `1.0`.
+/// * With a nonzero sample rate, positive infinity or overflow of that positive product gives
+///   `0.0` — a frozen follower, the limit as the time constant goes to infinity.
 /// * The result is clamped to `[0, 1]`, so no rounding of the exponential can make the follower
 ///   unstable or run backwards.
 ///
