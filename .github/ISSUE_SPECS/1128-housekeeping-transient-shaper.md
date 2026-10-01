@@ -25,6 +25,8 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+Root scope amendment after the full read: removing paired hashes that duplicate current full-word comparisons may retire this package's unused `sha2` dev dependency. In addition to package paths and this spec, authorize only removal of the `sha2` entry from the `transient-shaper` dependency list in `Cargo.lock`. Keep shared packages, all other lock rows, G5 inputs/pins and exact current word/coverage assertions unchanged. The bounded first pass may remove the two narrower native-bank/recovery cases only with their existing both-width variable-block/full-bank and hostile recovery owners retained. No algorithm, generator, schedule or feature change is authorized.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
