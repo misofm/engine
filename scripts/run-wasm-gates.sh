@@ -8,7 +8,8 @@
 #   wasm+simd128 -- the same crate built for wasm32-unknown-unknown with simd128 (backend simd4),
 #                   the one wasm build that ships (W4-D1), at every width it has: Scalar and
 #                   Simd4. The browser runs four lanes only, and since #1110 the wasm build has no
-#                   eight-lane type, so the host holds the guest to exactly those two widths.
+#                   eight-lane type, so the host holds the guest's widths to exactly those two
+#                   lane counts, [1, 4].
 #
 # There is no scalar (non-`simd128`) wasm leg: owner ruling 2026-09-28, decision 7, retired it
 # with #1062 once #1017's AArch64 legs ran G5 natively on arm64, and `lane` now refuses that

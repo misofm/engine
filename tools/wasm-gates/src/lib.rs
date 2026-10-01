@@ -70,17 +70,19 @@ impl ExpectedBackend {
         }
     }
 
-    /// How many widths a guest of this backend digests every lane case at, as the guest's
-    /// `miso_gate_widths` export reports it: the scalar oracle and the backend's own width.
+    /// The lane count of each width index a guest of this backend digests every lane case at, as
+    /// the guest's `miso_gate_lane_width` export reports it over its `miso_gate_widths` indices:
+    /// the scalar oracle and the backend's own width.
     ///
-    /// Pinned rather than read from the guest, so a guest that stopped digesting its own width
-    /// fails the leg instead of passing on the scalar run alone. It is not the host's
-    /// `wasm_gate_corpus::WIDTHS`: the host also has `Simd8`, which the wasm build does not
-    /// (issue #1110).
+    /// Pinned per index rather than read from the guest, so the leg fails on a guest that stopped
+    /// digesting its own width (it reports `[1]`) and on one whose index 1 silently runs `f32`
+    /// (it reports `[1, 1]`, digests the scalar oracle twice and would match every pin; issue
+    /// #1110, finding M1). It is not the host's own widths: the host also has `Simd8`, which the
+    /// wasm build does not (issue #1110).
     #[must_use]
-    pub const fn widths(self) -> usize {
+    pub const fn lane_widths(self) -> &'static [usize] {
         match self {
-            Self::Simd4 => 2,
+            Self::Simd4 => &[1, 4],
         }
     }
 
@@ -276,6 +278,8 @@ struct Guest {
     cases: usize,
     /// What `miso_gate_widths()` reported: the widths this guest digests at.
     widths: usize,
+    /// What `miso_gate_lane_width(index)` reported for each of those widths: its lane count.
+    lane_widths: Vec<usize>,
 }
 
 impl Guest {
@@ -297,6 +301,8 @@ impl Guest {
         let case_count: TypedFunc<(), u32> =
             instance.get_typed_func(&mut store, "miso_gate_case_count")?;
         let widths: TypedFunc<(), u32> = instance.get_typed_func(&mut store, "miso_gate_widths")?;
+        let lane_width: TypedFunc<u32, u32> =
+            instance.get_typed_func(&mut store, "miso_gate_lane_width")?;
         let digest_word: TypedFunc<(u32, u32, u32), u32> =
             instance.get_typed_func(&mut store, "miso_gate_digest_word")?;
         let minmax_lowering_mismatches: TypedFunc<u32, u32> =
@@ -320,6 +326,11 @@ impl Guest {
             );
         }
 
+        let mut lane_widths = Vec::with_capacity(guest_widths);
+        for width in 0..guest_widths {
+            lane_widths.push(lane_width.call(&mut store, width as u32)? as usize);
+        }
+
         Ok(Self {
             store,
             digest_word,
@@ -329,6 +340,7 @@ impl Guest {
             backend,
             cases,
             widths: guest_widths,
+            lane_widths,
         })
     }
 
@@ -384,7 +396,7 @@ impl Guest {
 ///
 /// Returns an error if the module fails to compile, validate or instantiate (which is what a guest
 /// that emits a relaxed-SIMD instruction does), if an export is missing, if the guest traps, or if
-/// the backend it reports, or the number of widths it digests at, is not `expected`'s.
+/// the backend it reports, or the lane count of each width it digests at, is not `expected`'s.
 pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<Report> {
     let mut guest = Guest::load(path)?;
     if guest.backend != expected.code() {
@@ -395,12 +407,13 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
             expected.name()
         );
     }
-    if guest.widths != expected.widths() {
+    if guest.lane_widths != expected.lane_widths() {
         wasmtime::bail!(
-            "guest digests at {} widths but a {} guest has {}: the scalar oracle and its own",
-            guest.widths,
+            "guest digests at lane widths {:?} but a {} guest has {:?}: the scalar oracle and its \
+             own",
+            guest.lane_widths,
             expected.name(),
-            expected.widths()
+            expected.lane_widths()
         );
     }
 

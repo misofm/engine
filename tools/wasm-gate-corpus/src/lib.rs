@@ -1061,6 +1061,23 @@ pub fn width_name(width: usize) -> &'static str {
     }
 }
 
+/// The lane count width index `width` runs at: the `Lane::WIDTH` of the type [`at_width!`] binds
+/// there, so `1`, `4` and, off `wasm32`, `8`.
+///
+/// Read from that type, not from a table, so it reports what a digest at that index actually ran.
+/// The wasm gate host holds a `simd128` guest's indices to exactly `[1, 4]`: a guest whose index 1
+/// silently ran `f32` would digest the scalar oracle twice and match every pin, and this is what
+/// turns it red (issue #1110, finding M1).
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn lane_width(width: usize) -> usize {
+    assert!(width < WIDTHS, "width index out of range");
+    at_width!(width, |L| <L as Lane>::WIDTH)
+}
+
 /// The pinned digest of a case.
 ///
 /// This crate's own cases are pinned in [`LANE_DIGESTS`]; the delegated cases return the pins gates
