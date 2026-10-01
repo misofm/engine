@@ -8368,6 +8368,14 @@ mod padded_banks {
     const QUANTUM: usize = 128;
     const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
+    /// The lane count of every bank width this build has: no eight in a 4-lane (NEON/simd128)
+    /// build (issue #1112).
+    const LANE_COUNTS: &[usize] = &[
+        4,
+        #[cfg(target_feature = "avx2")]
+        8,
+    ];
+
     /// The bank width, and the backend that agrees with it, for `lanes` lanes.
     fn width(lanes: usize) -> (BankWidth, Backend) {
         match lanes {
@@ -8898,7 +8906,7 @@ mod padded_banks {
     /// reported, or if the bind declines a padded request (the `expect` in `bind`).
     #[test]
     fn a_padded_bank_renders_its_per_node_instances() {
-        for lanes in [4, 8] {
+        for &lanes in LANE_COUNTS {
             let mut reach = Reach::default();
             for members in 1..=lanes {
                 for seed in 0..seeds() {
@@ -8942,7 +8950,7 @@ mod padded_banks {
         let rate = 48_000;
         let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters.len();
         let mut blocks = 0_u64;
-        for lanes in [4, 8] {
+        for &lanes in LANE_COUNTS {
             for kind in 1..=6_u32 {
                 for (gain, q) in [(-24.0, 0.1), (24.0, 18.0), (-24.0, 18.0), (24.0, 0.1)] {
                     let mut values = Vec::with_capacity(parameters * 2);
@@ -9270,7 +9278,7 @@ mod padded_banks {
     fn a_bypassed_lane_fed_a_tripping_value_leaves_its_bank_mates_bits() {
         let rate = 48_000;
         let mut faults = 0_u64;
-        for lanes in [4, 8] {
+        for &lanes in LANE_COUNTS {
             for members in 1..=lanes {
                 for bypassed in 0..members {
                     // Every member boosts 1 kHz by +24 dB, the gain domain's edge, detuned per
@@ -9445,7 +9453,7 @@ mod padded_banks {
     fn a_padded_lane_is_never_written_reported_or_charged() {
         let rate = 48_000;
         let mut rng = Rng(0x1089_0003);
-        for lanes in [4, 8] {
+        for &lanes in LANE_COUNTS {
             let members = lanes - 1 - rng.below(lanes - 1);
             let initial: Vec<Vec<InitialParameterValue>> =
                 (0..members).map(|_| configuration(&mut rng)).collect();

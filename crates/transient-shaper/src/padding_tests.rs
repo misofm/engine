@@ -601,7 +601,13 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
             }
         }
     }
-    assert_eq!(cases, (3 + 7) * LINKS.len());
+    // Three padded counts at four lanes, and seven more at eight in the 8-lane (AVX2) build.
+    let padded_counts = if cfg!(target_feature = "avx2") {
+        3 + 7
+    } else {
+        3
+    };
+    assert_eq!(cases, padded_counts * LINKS.len());
 }
 
 /// The conformance PCM fixtures, in their rows' order.
