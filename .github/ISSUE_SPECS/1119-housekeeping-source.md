@@ -28,3 +28,7 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
+
+## Scope amendment — dependency cleanup
+
+Root Sol authorizes removal of source's test-only SHA transcript pin and unused sha2 dev dependency while preserving every independent model schedule/assertion. `Cargo.lock` may change only the `source` package dependency list to reflect that removal; no package version, checksum or other dependency list may change. Approved before implementation on 2026-10-01.
