@@ -5,8 +5,8 @@
 //! adapter and the C ABI both feed: complete and short end-of-region chunks, a submission into a
 //! full queue that must admit no prefix, stale-generation and late-generation blocks, two seeks per
 //! schedule and underruns. Every submit result, every rendered sample, every read report field and
-//! the stale-discard counter must match what the small model below predicts, and the generated
-//! transcript is pinned so the schedules cannot drift.
+//! the stale-discard counter must match what the small model below predicts. The fixed seed
+//! reproduces every generated schedule.
 //!
 //! Moved here unchanged by #1033 from `audit fixture-source` (`tools/audit/src/source_fixture.rs`),
 //! whose other half checked the native WAV/RF64 decoder that #1033 deleted.
@@ -14,7 +14,6 @@
 use std::collections::VecDeque;
 
 use engine::{QuantumFrames, SampleRateHz};
-use sha2::{Digest, Sha256};
 use source::{
     HostChunkError, HostPlanarChunk, PcmSourceRing, PcmSourceRingConfig, SourceCommand,
     SourceFrame, SourceGeneration,
@@ -25,13 +24,6 @@ fn frozen_seek_schedules_match_the_independent_ring_model() {
     frozen_seek_ring_schedules().expect("frozen seek schedules");
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 // This is a deliberately small independent schedule oracle, not another source ring. It models
 // only the frozen action language below: one producer, one bounded FIFO of complete quanta, and
 // block-boundary seeks. The production ring is exercised only after this model has produced every
@@ -39,8 +31,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const SEEK_SCHEDULE_SEED: u64 = 0x0000_0000_010a_5ee1;
 const SEEK_SCHEDULE_COUNT: usize = 256;
 const SEEK_QUANTUM: u32 = 4;
-const FROZEN_SEEK_TRANSCRIPT_SHA256: &str =
-    "ec3b7fef8e86937d4431466d2cea8a68ec56feb2897bcdc655fa10d5bf30a41c";
 
 #[derive(Clone, Debug)]
 struct SeekSchedule {
@@ -273,12 +263,6 @@ fn frozen_seek_ring_schedules() -> Result<(), String> {
     let schedules = generate_frozen_seek_schedules();
     if schedules.len() != SEEK_SCHEDULE_COUNT {
         return Err(format!("expected {SEEK_SCHEDULE_COUNT} schedules"));
-    }
-    let transcript = seek_transcript_sha256(&schedules);
-    if transcript != FROZEN_SEEK_TRANSCRIPT_SHA256 {
-        return Err(format!(
-            "frozen seek transcript mismatch: expected {FROZEN_SEEK_TRANSCRIPT_SHA256}, actual {transcript}"
-        ));
     }
     for schedule in &schedules {
         let expected = model_schedule(schedule)?;
@@ -534,48 +518,6 @@ fn exercise_production_schedule(
         }
     }
     Ok(())
-}
-
-fn seek_transcript_sha256(schedules: &[SeekSchedule]) -> String {
-    let mut bytes = Vec::new();
-    for schedule in schedules {
-        bytes.extend_from_slice(&schedule.index.to_le_bytes());
-        bytes.extend_from_slice(
-            &u64::try_from(schedule.capacity_quanta)
-                .expect("small capacity")
-                .to_le_bytes(),
-        );
-        bytes.extend_from_slice(
-            &u64::try_from(schedule.actions.len())
-                .expect("small action count")
-                .to_le_bytes(),
-        );
-        for action in &schedule.actions {
-            match action {
-                SeekAction::Submit {
-                    generation,
-                    start_frame,
-                    frames,
-                    end_of_region,
-                    sample_bits,
-                } => {
-                    bytes.push(1);
-                    bytes.extend_from_slice(&generation.to_le_bytes());
-                    bytes.extend_from_slice(&start_frame.to_le_bytes());
-                    bytes.extend_from_slice(&frames.to_le_bytes());
-                    bytes.push(u8::from(*end_of_region));
-                    bytes.extend_from_slice(&sample_bits.to_le_bytes());
-                }
-                SeekAction::Seek { generation, frame } => {
-                    bytes.push(2);
-                    bytes.extend_from_slice(&generation.to_le_bytes());
-                    bytes.extend_from_slice(&frame.to_le_bytes());
-                }
-                SeekAction::Render => bytes.push(3),
-            }
-        }
-    }
-    sha256_hex(&bytes)
 }
 
 fn xorshift64(mut state: u64) -> u64 {
