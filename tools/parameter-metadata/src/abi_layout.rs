@@ -49,8 +49,6 @@
 
 use core::mem::offset_of;
 
-use super::append;
-
 use host_web::{
     ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BOOT_OPTIONS_BYTES, BUFFER_COMMAND,
     BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
@@ -1773,43 +1771,40 @@ pub fn render() -> String {
 
     let mut out = String::with_capacity(1 << 14);
     out.push_str("{\n");
-    append(&mut out, format_args!("  \"schema\": \"{SCHEMA}\",\n"));
-    append(&mut out, format_args!("  \"abiVersion\": {ABI_VERSION},\n"));
+    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
+    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
     out.push_str("  \"stagingSequence\": [");
     for (index, export) in STAGING_SEQUENCE.iter().enumerate() {
-        append(
+        append!(
             &mut out,
-            format_args!(
-                "\"{export}\"{}",
-                if index + 1 == STAGING_SEQUENCE.len() {
-                    ""
-                } else {
-                    ", "
-                }
-            ),
+            "\"{export}\"{}",
+            if index + 1 == STAGING_SEQUENCE.len() {
+                ""
+            } else {
+                ", "
+            }
         );
     }
     out.push_str("],\n");
     out.push_str("  \"errorPhases\": [");
     for (index, phase) in ERROR_PHASES.iter().enumerate() {
-        append(
+        append!(
             &mut out,
-            format_args!(
-                "\"{phase}\"{}",
-                if index + 1 == ERROR_PHASES.len() {
-                    ""
-                } else {
-                    ", "
-                }
-            ),
+            "\"{phase}\"{}",
+            if index + 1 == ERROR_PHASES.len() {
+                ""
+            } else {
+                ", "
+            }
         );
     }
     out.push_str("],\n");
     out.push_str("  \"exports\": [\n");
     for (index, export) in EXPORTS.iter().enumerate() {
-        append(
+        append!(
             &mut out,
-            format_args!("    \"{export}\"{}\n", comma(index, EXPORTS.len())),
+            "    \"{export}\"{}\n",
+            comma(index, EXPORTS.len())
         );
     }
     out.push_str("  ],\n");
@@ -2007,10 +2002,7 @@ pub fn render() -> String {
     );
     out.push_str("  },\n");
     out.push_str("  \"commandRecord\": {\n");
-    append(
-        &mut out,
-        format_args!("    \"bytes\": {COMMAND_RECORD_BYTES},\n"),
-    );
+    append!(&mut out, "    \"bytes\": {COMMAND_RECORD_BYTES},\n");
     out.push_str("    \"endianness\": \"little\",\n");
     render_fields(&mut out, &command_record_fields(), "    ");
     out.push_str("  },\n");
@@ -2135,135 +2127,120 @@ pub fn render() -> String {
             (SPECTRUM_STREAM_STATUS_READY, "ready"),
         ],
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"),
+        "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"),
+        "    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"
     );
-    append(
+    append!(&mut out, "    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n");
+    append!(
         &mut out,
-        format_args!("    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n"),
+        "    \"defaultCommandQueueRecords\": {DEFAULT_COMMAND_QUEUE_RECORDS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"defaultCommandQueueRecords\": {DEFAULT_COMMAND_QUEUE_RECORDS},\n"),
+        "    \"defaultMeterBlocks\": {DEFAULT_METER_BLOCKS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"defaultMeterBlocks\": {DEFAULT_METER_BLOCKS},\n"),
+        "    \"maximumObservationTaps\": {MAXIMUM_OBSERVATION_TAPS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumObservationTaps\": {MAXIMUM_OBSERVATION_TAPS},\n"),
+        "    \"maximumResponseEffectIdBytes\": {RESPONSE_MAXIMUM_EFFECT_ID_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumResponseEffectIdBytes\": {RESPONSE_MAXIMUM_EFFECT_ID_BYTES},\n"),
+        "    \"maximumResponseParameterOverrides\": {RESPONSE_MAXIMUM_PARAMETER_OVERRIDES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "    \"maximumResponseParameterOverrides\": {RESPONSE_MAXIMUM_PARAMETER_OVERRIDES},\n"
-        ),
+        "    \"maximumResponseResultBytes\": {RESPONSE_MAXIMUM_RESULT_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumResponseResultBytes\": {RESPONSE_MAXIMUM_RESULT_BYTES},\n"),
+        "    \"maximumLiveResponseOwners\": {LIVE_RESPONSE_MAXIMUM_OWNERS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumLiveResponseOwners\": {LIVE_RESPONSE_MAXIMUM_OWNERS},\n"),
+        "    \"maximumLiveResponseSections\": {LIVE_RESPONSE_MAXIMUM_SECTIONS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumLiveResponseSections\": {LIVE_RESPONSE_MAXIMUM_SECTIONS},\n"),
+        "    \"maximumLiveResponseIdBytes\": {LIVE_RESPONSE_MAXIMUM_ID_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumLiveResponseIdBytes\": {LIVE_RESPONSE_MAXIMUM_ID_BYTES},\n"),
+        "    \"maximumLiveResponsePoints\": {LIVE_RESPONSE_MAXIMUM_POINTS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumLiveResponsePoints\": {LIVE_RESPONSE_MAXIMUM_POINTS},\n"),
+        "    \"liveResponseCaptureBytes\": {LIVE_RESPONSE_CAPTURE_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"liveResponseCaptureBytes\": {LIVE_RESPONSE_CAPTURE_BYTES},\n"),
+        "    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"),
+        "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
-        ),
+        "    \"spectrumCollectionRequestBytes\": {SPECTRUM_COLLECTION_REQUEST_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "    \"spectrumCollectionRequestBytes\": {SPECTRUM_COLLECTION_REQUEST_BYTES},\n"
-        ),
+        "    \"spectrumCollectionEntryBytes\": {SPECTRUM_COLLECTION_ENTRY_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumCollectionEntryBytes\": {SPECTRUM_COLLECTION_ENTRY_BYTES},\n"),
+        "    \"spectrumCollectionEntryCapacity\": {SPECTRUM_COLLECTION_ENTRY_CAPACITY},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "    \"spectrumCollectionEntryCapacity\": {SPECTRUM_COLLECTION_ENTRY_CAPACITY},\n"
-        ),
+        "    \"spectrumCollectionTargetIdsBytes\": {SPECTRUM_COLLECTION_TARGET_IDS_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "    \"spectrumCollectionTargetIdsBytes\": {SPECTRUM_COLLECTION_TARGET_IDS_BYTES},\n"
-        ),
+        "    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"),
+        "    \"spectrumWindowHeaderBytes\": {SPECTRUM_WINDOW_HEADER_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumWindowHeaderBytes\": {SPECTRUM_WINDOW_HEADER_BYTES},\n"),
+        "    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"),
+        "    \"spectrumStreamMetadataBytes\": {SPECTRUM_STREAM_METADATA_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumStreamMetadataBytes\": {SPECTRUM_STREAM_METADATA_BYTES},\n"),
+        "    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"),
+        "    \"spectrumBinCount\": {SPECTRUM_BIN_COUNT},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"spectrumBinCount\": {SPECTRUM_BIN_COUNT},\n"),
+        "    \"maximumSpectrumIdBytes\": {SPECTRUM_MAXIMUM_ID_BYTES},\n"
     );
-    append(
+    append!(
         &mut out,
-        format_args!("    \"maximumSpectrumIdBytes\": {SPECTRUM_MAXIMUM_ID_BYTES},\n"),
-    );
-    append(
-        &mut out,
-        format_args!("    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"),
+        "    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"
     );
     out.push_str("    \"sourceRing\": { ");
-    append(
+    append!(
         &mut out,
-        format_args!(
-            "\"stallToleranceMs\": {SOURCE_STALL_TOLERANCE_MS}, \
+        "\"stallToleranceMs\": {SOURCE_STALL_TOLERANCE_MS}, \
          \"reserveQuanta\": {SOURCE_RING_RESERVE_QUANTA} }}\n"
-        ),
     );
     out.push_str("  }\n}\n");
     out
@@ -2276,10 +2253,7 @@ fn render_structure(
     fields: &[Field],
     trailing_comma: bool,
 ) {
-    append(
-        out,
-        format_args!("    \"{name}\": {{\n      \"bytes\": {bytes},\n"),
-    );
+    append!(out, "    \"{name}\": {{\n      \"bytes\": {bytes},\n");
     render_fields(out, fields, "      ");
     out.push_str(if trailing_comma {
         "    },\n"
@@ -2289,28 +2263,24 @@ fn render_structure(
 }
 
 fn render_fields(out: &mut String, fields: &[Field], indent: &str) {
-    append(out, format_args!("{indent}\"fields\": [\n"));
+    append!(out, "{indent}\"fields\": [\n");
     for (index, (name, offset, kind)) in fields.iter().enumerate() {
-        append(
+        append!(
             out,
-            format_args!(
-                "{indent}  {{ \"name\": \"{name}\", \"offset\": {offset}, \"type\": \"{kind}\" }}{}\n",
-                comma(index, fields.len())
-            ),
+            "{indent}  {{ \"name\": \"{name}\", \"offset\": {offset}, \"type\": \"{kind}\" }}{}\n",
+            comma(index, fields.len())
         );
     }
-    append(out, format_args!("{indent}]\n"));
+    append!(out, "{indent}]\n");
 }
 
 fn render_named_constants(out: &mut String, name: &str, values: &[(u32, &str)]) {
-    append(out, format_args!("    \"{name}\": ["));
+    append!(out, "    \"{name}\": [");
     for (index, (value, label)) in values.iter().enumerate() {
-        append(
+        append!(
             out,
-            format_args!(
-                "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
-                if index + 1 == values.len() { "" } else { ", " }
-            ),
+            "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
+            if index + 1 == values.len() { "" } else { ", " }
         );
     }
     out.push_str("],\n");
