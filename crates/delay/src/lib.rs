@@ -15,15 +15,16 @@
 //!
 //! # Where the numerics live
 //!
-//! * Fusion — only `lane::Lane::fma` (D3). The standard library's fused form is
-//!   forbidden here and `scripts/check-lane-policy.sh` greps for it.
+//! * Multiply/add — `lane::Lane::fma` uses separate rounding on every target. The standard
+//!   library's fused form is forbidden here and `scripts/check-lane-policy.sh` greps for it.
 //! * Denormals — `lane::flush` on the two recursive words per lane, the damping state
 //!   and the ring write, once per sample (D7). Nothing else is classified per value.
 //! * Finiteness — once per block per lane, over the output, the ring write window and the damping
 //!   state (D7, master plan §4.4). A failing lane has its output zeroed and its history dropped.
 //! * Ramps — [`effect_runtime::ramp::LinearRamp`]: one division at event time, iterated
 //!   additions, an exact assignment of the target on the final sample (D11).
-//! * Transcendentals — `math` at control rate only (D6). The render path has none.
+//! * Transcendentals — `math` designs damping coefficients during preparation and accepted
+//!   block-start automation (D6); the per-sample kernel has none.
 //!
 //! # Damping
 //!
@@ -351,7 +352,8 @@ const DAMPING_MAX_CUTOFF_HZ: f64 = 19_845.0;
 /// `c <= 0.0745` clamps at 19_845 Hz. `c == 0` maps to exactly `0.0` and selects the identity
 /// path, which is the frozen "damping off is the exact tap" behaviour.
 ///
-/// Control plane only: one `log` and one `tan` per event, never per sample (D6).
+/// One `log` and one `tan` during preparation or per accepted damping event at block start,
+/// never per sample (D6). The exact-zero control returns before either call.
 fn damping_coefficient(c: f32, sample_rate: u32) -> f32 {
     if c == 0.0 {
         return 0.0;
@@ -522,9 +524,6 @@ impl DelayLane {
     const fn tap_is_valid(&self, delay: u32) -> bool {
         delay <= self.valid_history
     }
-}
-
-impl DelayLane {
     /// Fills the chunk's tap windows.
     ///
     /// `old` always receives the active tap; `new` receives the tap being faded towards and is
@@ -1453,7 +1452,7 @@ fn apply_automation(
         for ramp_index in 0..ORDINARY_RAMP_COUNT {
             if let Some(value) = pending[(ramp_index + 1) * 2 + lane_index] {
                 // The damping ramp lives in the coefficient domain: the control is mapped here,
-                // once per event, and never on the render path.
+                // once per accepted event at block start, outside the per-sample kernel.
                 let target = if ramp_index == 1 {
                     damping_coefficient(value, sample_rate)
                 } else {
@@ -1604,9 +1603,9 @@ fn write_ramp(bytes: &mut [u8], word: usize, ramp: LinearRamp) {
 
 /// Reads a ramp triple and re-derives its D11 step.
 ///
-/// The payload stores `(current, target, remaining)`; the step is a function of the three, so it is
-/// recomputed here with the one division `LinearRamp::set_target` performs at event time rather
-/// than stored and trusted. `remaining == 0` must come with `current == target`, which is
+/// The payload stores `(current, target, remaining)`. Restore derives a step from this triple
+/// through `LinearRamp::set_target`; an iteratively rounded current need not reconstruct the
+/// original increment. `remaining == 0` must come with `current == target`, which is
 /// `LinearRamp`'s invariant and which every snapshot this effect writes satisfies.
 fn read_ramp(
     bytes: &[u8],
@@ -2060,7 +2059,7 @@ mod tests {
         left[31] = 1.0e-8;
         left[32] = 0.5;
         left[79] = 1.0;
-        let dry = left.clone();
+        let final_tap = left[31];
         let to_two = [point(0, ParameterChannel::Left, 0, 2.0)];
         let back_to_one = [point(0, ParameterChannel::Left, 64, 1.0)];
         for offset in (0..frames).step_by(64) {
@@ -2088,15 +2087,12 @@ mod tests {
         assert_eq!(left[96].to_bits(), (97.0_f32 / 128.0).to_bits());
         // Update 128 delivers the new tap's bits, not `old + 1 * (new - old)`, which for this pair
         // rounds to `+0.0`.
-        assert_eq!(left[127].to_bits(), dry[31].to_bits());
-        assert_eq!((dry[79] + (dry[31] - dry[79])).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(left[127].to_bits(), final_tap.to_bits());
         assert_eq!(effect.left.active_delay, 96);
         // 128 updates of the queued fade, less the 64 frames of the last block.
         assert_eq!(effect.left.transition_remaining, 64);
         // The queued retarget starts on the sample after the fade completed, at weight 1/128.
-        let queued = 0.5_f32 + (1.0_f32 / 128.0) * (0.0_f32 - 0.5_f32);
-        assert_eq!(left[128].to_bits(), queued.to_bits());
-        assert_eq!(queued.to_bits(), (127.0_f32 / 256.0).to_bits());
+        assert_eq!(left[128].to_bits(), (127.0_f32 / 256.0).to_bits());
         assert_eq!(effect.left.transition_delay, 48);
     }
 
@@ -2232,9 +2228,10 @@ mod tests {
         let mut injected = prepare(&values);
         let mut clean = prepare(&values);
         let (warm_left, warm_right) = partition_signal(128);
-        for effect in [&mut injected, &mut clean] {
-            let mut left = warm_left.clone();
-            let mut right = warm_right.clone();
+        for (effect, mut left, mut right) in [
+            (&mut injected, warm_left.clone(), warm_right.clone()),
+            (&mut clean, warm_left, warm_right),
+        ] {
             let report = effect.process(
                 EffectProcessBlock::new(&mut left, &mut right, None, 0, &[], 128).expect("warm"),
             );
@@ -2343,20 +2340,24 @@ mod tests {
         let after = snapshot(&effect);
         assert_ne!(after, before);
         for (section, word, value) in [(2_usize, 0_usize, f32::NAN), (1, 0, f32::INFINITY)] {
-            let mut invalid = before.clone();
-            let bytes = match section {
-                1 => &mut invalid.1,
-                _ => &mut invalid.2,
+            let mut invalid = match section {
+                1 => before.1.clone(),
+                _ => before.2.clone(),
             };
-            write_f32(bytes, word, value);
+            write_f32(&mut invalid, word, value);
+            let (left, right) = if section == 1 {
+                (&invalid, &before.2)
+            } else {
+                (&before.1, &invalid)
+            };
             assert!(
                 effect
                     .restore_state_payload(
                         1,
                         StatePayloadInput::new(
-                            &invalid.0,
-                            &invalid.1,
-                            &invalid.2,
+                            &before.0,
+                            left,
+                            right,
                             effect.metadata().state_sizes,
                         )
                         .expect("invalid payload shape"),
@@ -2367,16 +2368,16 @@ mod tests {
         }
         // A stale ring word outside the valid history is rejected after the header, and still
         // leaves nothing written.
-        let mut stale = before.clone();
-        write_f32(&mut stale.1, LANE_HEADER_WORDS + 4_000, 0.5);
+        let mut stale = before.1.clone();
+        write_f32(&mut stale, LANE_HEADER_WORDS + 4_000, 0.5);
         assert!(
             effect
                 .restore_state_payload(
                     1,
                     StatePayloadInput::new(
-                        &stale.0,
-                        &stale.1,
-                        &stale.2,
+                        &before.0,
+                        &stale,
+                        &before.2,
                         effect.metadata().state_sizes,
                     )
                     .expect("stale payload shape"),

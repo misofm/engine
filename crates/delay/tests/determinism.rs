@@ -8,15 +8,6 @@
 //! compare; what the corpus carries across the target boundary is the kernel's `Lane::fma` sites.
 
 use delay::corpus;
-use sha2::{Digest, Sha256};
-
-fn digest(words: &[u32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for word in words {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
-}
 
 /// A digest of silence, of NaN payloads, or of two identical cases would pass vacuously. None of
 /// those is what the corpus renders.
@@ -25,30 +16,32 @@ fn digest(words: &[u32]) -> [u8; 32] {
 /// few words, or makes the two cases the same computation turns this red.
 #[test]
 fn corpus_cases_are_finite_distinct_and_alive() {
-    let mut digests = Vec::new();
-    for case in 0..corpus::CASE_COUNT {
-        let mut words = vec![0_u32; corpus::POINTS];
-        corpus::run_case(case, &mut words);
-        let values: Vec<f32> = words.iter().map(|word| f32::from_bits(*word)).collect();
+    let cases: Vec<Vec<u32>> = (0..corpus::CASE_COUNT)
+        .map(|case| {
+            let mut words = vec![0_u32; corpus::POINTS];
+            corpus::run_case(case, &mut words);
+            words
+        })
+        .collect();
+    // Compare every ordered word before sorting; sorting only serves the distinct-word count.
+    assert!(cases[0] != cases[1], "the two corpus cases are identical");
+    for (case, mut words) in cases.into_iter().enumerate() {
         assert!(
-            values.iter().all(|value| value.is_finite()),
+            words.iter().all(|word| f32::from_bits(*word).is_finite()),
             "case {} is not finite",
             corpus::CASE_NAMES[case]
         );
-        let peak = values
+        let peak = words
             .iter()
-            .fold(0.0_f32, |peak, value| peak.max(value.abs()));
+            .fold(0.0_f32, |peak, word| peak.max(f32::from_bits(*word).abs()));
         assert!(peak > 0.25, "case {} is silent", corpus::CASE_NAMES[case]);
-        let distinct = words
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+        words.sort_unstable();
+        words.dedup();
+        let distinct = words.len();
         assert!(
             distinct > corpus::POINTS / 2,
             "case {} has only {distinct} distinct words",
             corpus::CASE_NAMES[case]
         );
-        digests.push(digest(&words));
     }
-    assert_ne!(digests[0], digests[1]);
 }
