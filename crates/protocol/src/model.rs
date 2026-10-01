@@ -163,7 +163,7 @@ impl SessionEditOpcode {
 }
 
 /// One complete typed session mutation. Its payload field ordering is frozen in the issue-005
-/// BTLV specification; the later wire-schema codec maps these variants one-to-one.
+/// BTLV specification; the wire-schema codec maps these variants one-to-one.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(missing_docs)] // Variant docs name the frozen payload; field names are the frozen mapping.
 pub enum SessionEdit {

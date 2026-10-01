@@ -904,44 +904,31 @@ pub unsafe extern "C" fn miso_engine_v1_last_error(
         if live_handle.is_null() || out.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
-        // SAFETY: Every live handle starts with the same header. Reading it through each opaque
-        // representation is valid for the live-handle kinds defined by this library.
-        let recognized = unsafe {
-            engine_kind(live_handle.cast::<Engine>()) == RESULT_OK
-                || session_kind(live_handle.cast::<Session>()) == RESULT_OK
-                || plan_kind(live_handle.cast::<Plan>()) == RESULT_OK
-        };
-        if !recognized {
-            return RESULT_WRONG_HANDLE;
-        }
-        // SAFETY: The pointer is a recognized live handle with the common header representation.
-        let is_engine = unsafe { engine_kind(live_handle.cast::<Engine>()) } == RESULT_OK;
-        if is_engine {
+        // SAFETY: Every live handle starts with the same immutable header. Borrowing only that
+        // prefix never aliases the plan's render-thread-exclusive state.
+        let header = unsafe { &*live_handle.cast::<HandleHeader>() };
+        if header.is_engine() {
             // SAFETY: The recognized header identifies a live engine handle.
             let engine = unsafe { &*live_handle.cast::<Engine>() };
             let bytes = engine.last_error.borrow();
             let len = engine.last_error_len.get().min(bytes.len());
             // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
             unsafe { write_bytes(out, &bytes[..len]) }
+        } else if header.is_session() {
+            // SAFETY: The recognized header identifies a live session handle.
+            let session = unsafe { &*live_handle.cast::<Session>() };
+            let bytes = session.last_error.borrow();
+            // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
+            unsafe { write_bytes(out, bytes.as_slice()) }
+        } else if header.is_plan() {
+            // SAFETY: The recognized header identifies a live plan handle. Only the atomic
+            // diagnostic slot is projected, so this query is safe concurrently with render.
+            let code =
+                unsafe { (*plan_error_slot(live_handle.cast::<Plan>())).load(Ordering::Relaxed) };
+            // SAFETY: The bytes-output contract is validated by `write_bytes` itself.
+            unsafe { write_bytes(out, plan_error::text(code)) }
         } else {
-            // SAFETY: The pointer is a recognized live handle with the common header representation.
-            let is_session = unsafe { session_kind(live_handle.cast::<Session>()) } == RESULT_OK;
-            if is_session {
-                // SAFETY: The recognized header identifies a live session handle.
-                let session = unsafe { &*live_handle.cast::<Session>() };
-                let bytes = session.last_error.borrow();
-                // SAFETY: `write_bytes` completes before this bounded RefCell borrow is dropped.
-                unsafe { write_bytes(out, bytes.as_slice()) }
-            } else {
-                // SAFETY: The recognized header identifies the remaining live plan handle. Only
-                // the atomic diagnostic slot is projected, so this query is safe concurrently with
-                // a render call on another thread.
-                let code = unsafe {
-                    (*plan_error_slot(live_handle.cast::<Plan>())).load(Ordering::Relaxed)
-                };
-                // SAFETY: The bytes-output contract was validated by `write_bytes` itself.
-                unsafe { write_bytes(out, plan_error::text(code)) }
-            }
+            RESULT_WRONG_HANDLE
         }
     })
 }
@@ -1433,37 +1420,8 @@ mod tests {
         assert!(!session.is_null());
         assert!(!plan.is_null());
 
-        let mut resources = PlanResourceReport {
-            struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
-            abi_version: 0,
-            sample_rate_hz: 0,
-            quantum_frames: 0,
-            source_count: 0,
-            track_count: 0,
-            latency_samples: 0,
-            tail_kind: 0,
-            tail_samples: 0,
-            graph_session_plus_plan_bytes: 0,
-            graph_incremental_plan_bytes: 0,
-            graph_metadata_bytes: 0,
-            graph_delay_bytes: 0,
-            effect_bank_scratch_bytes: 0,
-            effect_bank_runtime_buffer_bytes: 0,
-            effect_bank_metadata_bytes: 0,
-            builtin_bank_bytes: 0,
-            builtin_bank_scratch_bytes: 0,
-            source_pcm_payload_bytes: 0,
-            source_overhead_bytes: 0,
-            source_total_bytes: 0,
-            effect_scalar_state_bytes: 0,
-            effect_scalar_scratch_bytes: 0,
-            builtin_processor_payload_bytes: 0,
-            builtin_meter_payload_bytes: 0,
-            builtin_retained_payload_bytes: 0,
-            capi_retained_bytes: 0,
-            largest_named_allocation_bytes: 0,
-            reserved: [u64::MAX; 4],
-        };
+        let mut resources = empty_report();
+        resources.reserved = [u64::MAX; 4];
         assert_eq!(
             // SAFETY: The plan is live and `resources` is writable storage of the exact size.
             unsafe { miso_engine_v1_plan_resources(plan, &mut resources) },

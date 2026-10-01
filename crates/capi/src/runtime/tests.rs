@@ -519,16 +519,17 @@ fn generated_session_prepares_independent_source_and_plan_ownership() {
     let mut children = compile_children(SESSION, limits()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(&failure.diagnostics))
     });
-    assert_eq!(children.plan.resources().sample_rate_hz, 48_000);
-    assert_eq!(children.plan.resources().quantum_frames, 128);
-    assert_eq!(children.plan.resources().source_count, 1);
-    assert_eq!(children.plan.resources().track_count, 9);
-    assert!(children.plan.resources().graph_session_plus_plan_bytes > 0);
-    assert!(children.plan.resources().source_total_bytes > 0);
-    assert!(children.plan.resources().effect_scalar_state_bytes > 0);
-    assert!(children.plan.resources().builtin_retained_payload_bytes > 0);
-    assert!(children.plan.resources().capi_retained_bytes > 0);
-    assert!(children.plan.resources().largest_named_allocation_bytes > 0);
+    let resources = children.plan.resources();
+    assert_eq!(resources.sample_rate_hz, 48_000);
+    assert_eq!(resources.quantum_frames, 128);
+    assert_eq!(resources.source_count, 1);
+    assert_eq!(resources.track_count, 9);
+    assert!(resources.graph_session_plus_plan_bytes > 0);
+    assert!(resources.source_total_bytes > 0);
+    assert!(resources.effect_scalar_state_bytes > 0);
+    assert!(resources.builtin_retained_payload_bytes > 0);
+    assert!(resources.capi_retained_bytes > 0);
+    assert!(resources.largest_named_allocation_bytes > 0);
 
     let left = [0.25_f32; 128];
     let right = [-0.5_f32; 128];

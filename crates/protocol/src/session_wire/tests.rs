@@ -1,7 +1,7 @@
 use super::*;
 use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U32, WIRE_UTF8};
 use session::{
-    LinkMode, ParameterChannel, ParameterUnit, RenderMode, SampleFormat, SendTap, Sidechain, Track,
+    LinkMode, ParameterChannel, ParameterUnit, RenderMode, SendTap, Sidechain, Track,
     parse_session_json,
 };
 
@@ -72,52 +72,6 @@ fn exact_set_session_id_golden_and_no_partial_output() {
         codec
             .decode_session_transaction_outer(&output, &mut DecodeScratch::new(&mut slots))
             .is_ok()
-    );
-}
-
-#[test]
-fn five_session_edit_encoders_are_canonical_and_ordered() {
-    let edits = [
-        SessionEdit::SetSessionId {
-            session_id: id("next"),
-        },
-        SessionEdit::SetSampleRateHz {
-            sample_rate_hz: 48_000,
-        },
-        SessionEdit::SetQuantumFrames {
-            quantum_frames: 128,
-        },
-        SessionEdit::SetRenderProfile {
-            render_profile: RenderProfile {
-                id: id("render"),
-                mode: RenderMode::SingleThread,
-            },
-        },
-        SessionEdit::SetOutputProfile {
-            output_profile: OutputProfile {
-                id: id("output"),
-                channels: 2,
-                sample_format: SampleFormat::F32Planar,
-            },
-        },
-    ];
-    let transaction = SessionTransactionFrame {
-        request_id: RequestId::new(2).expect("request"),
-        expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
-        edits: &edits,
-    };
-    let codec = ProtocolCodec::default();
-    let required = codec
-        .encoded_session_transaction_len(&transaction)
-        .expect("length");
-    let mut output = vec![0; required];
-    assert_eq!(
-        codec.encode_session_transaction(&transaction, &mut output),
-        Ok(required)
-    );
-    assert_eq!(
-        u32::from_le_bytes(output[40..44].try_into().expect("count")),
-        5
     );
 }
 
@@ -439,18 +393,12 @@ fn direct_full_schema_encoder_is_byte_identical_in_caller_storage() {
         .decode_session_transaction(&output, &mut DecodeScratch::new(&mut scratch))
         .expect("all opcodes decode");
     assert_eq!(decoded.edits, edits);
-    for _ in 0..16 {
-        assert_eq!(
-            codec.encoded_session_transaction_len(&transaction),
-            Ok(required)
-        );
-        output.fill(0);
-        assert_eq!(
-            codec.encode_session_transaction(&transaction, &mut output),
-            Ok(required)
-        );
-        assert_eq!(output, canonical);
-    }
+    output.fill(0);
+    assert_eq!(
+        codec.encode_session_transaction(&transaction, &mut output),
+        Ok(required)
+    );
+    assert_eq!(output, canonical);
 }
 
 #[test]

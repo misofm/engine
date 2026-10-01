@@ -1,8 +1,7 @@
 //! Bounded request replay and a control-plane-only protocol dispatcher.
 //!
-//! The dispatcher consumes typed internal commands in this tranche. Later BTLV payload schemas
-//! will construct the same commands after the bounded wire decoder has finished; no decoder calls
-//! a renderer, and this module has no plan-publication capability.
+//! The dispatcher consumes typed commands directly or after bounded BTLV decoding. No decoder
+//! calls a renderer, and this module has no plan-publication capability.
 
 use core::{alloc::Layout, fmt, num::NonZeroUsize, ops::Range};
 use std::sync::{
@@ -2689,7 +2688,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 let index = usize::try_from(diagnostic_slot)
                     .map_err(|_| EventEgressError::DiagnosticStorageFull)?;
                 let diagnostic = match self.diagnostic_event_slots.get(index) {
-                    Some(RetainedDiagnosticSlot::Owned(diagnostic)) => diagnostic.clone(),
+                    Some(RetainedDiagnosticSlot::Owned(diagnostic)) => diagnostic,
                     Some(RetainedDiagnosticSlot::Empty) | None => {
                         return Err(EventEgressError::DiagnosticStorageFull);
                     }
@@ -2697,7 +2696,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 self.codec.encode_event_frame_into(
                     &TypedEventFrame {
                         revision: slot.revision,
-                        payload: EventPayload::Diagnostic(&diagnostic),
+                        payload: EventPayload::Diagnostic(diagnostic),
                     },
                     output,
                 )
@@ -3311,15 +3310,13 @@ impl<P: ControlProvider> ProtocolController<P> {
 
     fn bounded_non_ok_diagnostics(&self, diagnostics: &[Diagnostic]) -> NonOkResponse {
         let maximum = usize::from(self.config.maximum_response_diagnostics);
-        let mut retained = Vec::with_capacity(diagnostics.len().min(maximum));
+        let mut value = NonOkResponse {
+            diagnostics: Vec::with_capacity(diagnostics.len().min(maximum)),
+            omitted_diagnostics: 0,
+            backpressure: None,
+        };
         for diagnostic in diagnostics.iter().take(maximum) {
-            let mut candidate = retained.clone();
-            candidate.push(diagnostic.clone());
-            let value = NonOkResponse {
-                diagnostics: candidate,
-                omitted_diagnostics: 0,
-                backpressure: None,
-            };
+            value.diagnostics.push(diagnostic.clone());
             let fits = self
                 .codec
                 .encoded_non_ok_payload_len(&value)
@@ -3328,16 +3325,14 @@ impl<P: ControlProvider> ProtocolController<P> {
                         <= self.replay.config.max_response_bytes
                 });
             if !fits {
+                value.diagnostics.pop();
                 break;
             }
-            retained.push(diagnostic.clone());
         }
-        NonOkResponse {
-            omitted_diagnostics: u32::try_from(diagnostics.len().saturating_sub(retained.len()))
-                .unwrap_or(u32::MAX),
-            diagnostics: retained,
-            backpressure: None,
-        }
+        value.omitted_diagnostics =
+            u32::try_from(diagnostics.len().saturating_sub(value.diagnostics.len()))
+                .unwrap_or(u32::MAX);
+        value
     }
 
     fn validate_automation_domains(
