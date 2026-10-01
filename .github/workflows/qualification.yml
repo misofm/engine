@@ -403,6 +403,8 @@ jobs:
         run: |
           npm ci
           npx playwright install "${{ matrix.browser }}"
+          # Prefer the runner's official archives; Azure downloads hit the job budget (#1161).
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           npx playwright install-deps "${{ matrix.browser }}"
           sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils
       - name: ${{ matrix.browser }} — attestation, AudioWorklet, native digest, and stall gates
