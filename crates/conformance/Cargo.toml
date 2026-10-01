@@ -19,7 +19,7 @@ session.workspace = true
 
 [features]
 default = []
-# #84 phase D: forwarding opt-in. A regular dependent of this crate never receives core's
+# #84 phase D: forwarding opt-in. A regular dependent of this crate never receives engine's
 # render-audit instrumentation unless it asks; `scripts/check-realtime-audit-leak.sh` proves the
 # default graphs of every shippable package stay clean.
 realtime-audit = ["engine/realtime-audit"]

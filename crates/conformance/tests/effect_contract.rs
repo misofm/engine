@@ -247,8 +247,12 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
             }
         }
         let descriptor = Box::leak(Box::new(descriptor));
-        assert!(std::panic::catch_unwind(|| validate_descriptor(descriptor)).is_ok());
-        assert!(validate_descriptor(descriptor).is_err());
+        let result = std::panic::catch_unwind(|| validate_descriptor(descriptor));
+        assert!(
+            result
+                .expect("descriptor validation must not panic")
+                .is_err()
+        );
     }
 
     let initial = [
@@ -303,11 +307,9 @@ fn ten_thousand_descriptor_and_span_mutations_reject_without_panic() {
             3 => span.end_value = f32::NAN,
             _ => span.end_sample = 1,
         }
-        assert!(
-            std::panic::catch_unwind(|| validate_automation_block(&[span], metadata, 0, 128))
-                .is_ok()
-        );
-        assert!(validate_automation_block(&[span], metadata, 0, 128).is_err());
+        let result =
+            std::panic::catch_unwind(|| validate_automation_block(&[span], metadata, 0, 128));
+        assert!(result.expect("span validation must not panic").is_err());
     }
 }
 
