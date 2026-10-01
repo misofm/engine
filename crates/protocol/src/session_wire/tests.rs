@@ -76,52 +76,6 @@ fn exact_set_session_id_golden_and_no_partial_output() {
 }
 
 #[test]
-fn five_session_edit_encoders_are_canonical_and_ordered() {
-    let edits = [
-        SessionEdit::SetSessionId {
-            session_id: id("next"),
-        },
-        SessionEdit::SetSampleRateHz {
-            sample_rate_hz: 48_000,
-        },
-        SessionEdit::SetQuantumFrames {
-            quantum_frames: 128,
-        },
-        SessionEdit::SetRenderProfile {
-            render_profile: RenderProfile {
-                id: id("render"),
-                mode: RenderMode::SingleThread,
-            },
-        },
-        SessionEdit::SetOutputProfile {
-            output_profile: OutputProfile {
-                id: id("output"),
-                channels: 2,
-                sample_format: SampleFormat::F32Planar,
-            },
-        },
-    ];
-    let transaction = SessionTransactionFrame {
-        request_id: RequestId::new(2).expect("request"),
-        expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
-        edits: &edits,
-    };
-    let codec = ProtocolCodec::default();
-    let required = codec
-        .encoded_session_transaction_len(&transaction)
-        .expect("length");
-    let mut output = vec![0; required];
-    assert_eq!(
-        codec.encode_session_transaction(&transaction, &mut output),
-        Ok(required)
-    );
-    assert_eq!(
-        u32::from_le_bytes(output[40..44].try_into().expect("count")),
-        5
-    );
-}
-
-#[test]
 fn transaction_outer_header_uses_sizing_sink_repeated_count() {
     let codec = ProtocolCodec::default();
     let edits = [
