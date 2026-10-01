@@ -1,7 +1,7 @@
 use super::*;
 use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_MESSAGE, WIRE_U8, WIRE_U32, WIRE_UTF8};
 use session::{
-    LinkMode, ParameterChannel, ParameterUnit, RenderMode, SampleFormat, SendTap, Sidechain, Track,
+    LinkMode, ParameterChannel, ParameterUnit, RenderMode, SendTap, Sidechain, Track,
     parse_session_json,
 };
 
