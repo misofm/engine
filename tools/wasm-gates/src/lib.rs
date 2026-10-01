@@ -21,7 +21,7 @@
 //! fails module validation instead of quietly returning a different digest. Master plan D3 forbids
 //! those instructions; this is where that is enforced against a built artifact and not a grep.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::path::Path;
 
 use wasm_gate_corpus as corpus;
@@ -165,22 +165,8 @@ impl Report {
     /// One machine-readable evidence line, in the shape the other audit tools emit.
     #[must_use]
     pub fn json(&self) -> String {
-        let mismatches: Vec<String> = self
-            .mismatches
-            .iter()
-            .map(|mismatch| {
-                format!(
-                    "{{\"case\":{},\"name\":\"{}\",\"width\":\"{}\",\"expected\":\"{}\",\"actual\":\"{}\"}}",
-                    mismatch.case,
-                    mismatch.name,
-                    corpus::width_name(mismatch.width),
-                    hex(&mismatch.expected),
-                    hex(&mismatch.actual)
-                )
-            })
-            .collect();
-        format!(
-            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"meter_block_mismatches\":{},\"mismatches\":[{}]}}",
+        let mut output = format!(
+            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"f64_lane_mismatches\":{},\"meter_block_mismatches\":{},\"mismatches\":[",
             self.leg,
             WASMTIME_VERSION,
             self.backend,
@@ -189,8 +175,24 @@ impl Report {
             self.minmax_lowering_mismatches,
             self.f64_lane_mismatches,
             self.meter_block_mismatches,
-            mismatches.join(",")
-        )
+        );
+        for (index, mismatch) in self.mismatches.iter().enumerate() {
+            if index > 0 {
+                output.push(',');
+            }
+            write!(
+                output,
+                "{{\"case\":{},\"name\":\"{}\",\"width\":\"{}\",\"expected\":\"{}\",\"actual\":\"{}\"}}",
+                mismatch.case,
+                mismatch.name,
+                corpus::width_name(mismatch.width),
+                hex(&mismatch.expected),
+                hex(&mismatch.actual)
+            )
+            .expect("write report into string");
+        }
+        output.push_str("]}");
+        output
     }
 }
 
@@ -460,7 +462,6 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
 /// requires `Simd4` on every target, and `Simd8` on every 8-lane (AVX2) one, to reproduce it.
 #[must_use]
 pub fn print_lane_pins() -> String {
-    use fmt::Write as _;
     let mut text = String::from("[\n");
     for case in 0..corpus::LANE_CASE_COUNT {
         let digest = corpus::digest_case(case, 0);

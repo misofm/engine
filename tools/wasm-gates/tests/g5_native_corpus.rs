@@ -10,6 +10,8 @@
 //! Without the last of those, a green wasm run would only prove that both targets computed
 //! *something* the same way.
 
+use std::fmt::Write as _;
+
 use wasm_gate_corpus as corpus;
 use wasm_gates::{hex, native_report};
 
@@ -76,17 +78,19 @@ fn scalar_oracle_pins(mismatches: &[wasm_gates::Mismatch]) -> String {
          corpus or operation-order change, in the owning crate's table):\n",
     );
     for mismatch in mismatches.iter().filter(|mismatch| mismatch.width == 0) {
-        let bytes: Vec<String> = mismatch
-            .actual
-            .iter()
-            .map(|byte| format!("0x{byte:02x}"))
-            .collect();
-        text.push_str(&format!(
-            "    // {} (case {})\n    [{}],\n",
-            mismatch.name,
-            mismatch.case,
-            bytes.join(", ")
-        ));
+        write!(
+            text,
+            "    // {} (case {})\n    [",
+            mismatch.name, mismatch.case
+        )
+        .expect("write diagnostic into string");
+        for (index, byte) in mismatch.actual.iter().enumerate() {
+            if index > 0 {
+                text.push_str(", ");
+            }
+            write!(text, "0x{byte:02x}").expect("write diagnostic into string");
+        }
+        text.push_str("],\n");
     }
     text
 }
@@ -159,12 +163,13 @@ fn g5_idle_ramped_svf_equals_the_plain_svf() {
         let Some(signal) = name.strip_prefix(IDLE_PREFIX) else {
             continue;
         };
+        let plain_name = format!("svf_block/low/{signal}");
         let plain = (0..corpus::CASE_COUNT)
-            .find(|other| corpus::case_name(*other) == format!("svf_block/low/{signal}"))
+            .find(|other| corpus::case_name(*other) == plain_name)
             .expect("every idle-ramp case has a plain low-pass counterpart");
         assert_eq!(
-            hex(&corpus::expected_digest(case)),
-            hex(&corpus::expected_digest(plain)),
+            corpus::expected_digest(case),
+            corpus::expected_digest(plain),
             "an idle coefficient ramp changed the output for signal '{signal}'"
         );
     }
@@ -194,8 +199,8 @@ fn g5_fma_case_is_unfused_and_the_case_is_not_vacuous() {
     for width in 0..corpus::WIDTHS {
         let unfused = corpus::unfused_fma_digest(width);
         assert_eq!(
-            hex(&pinned),
-            hex(&unfused),
+            pinned,
+            unfused,
             "Lane::fma must equal an explicit multiply and add at {} (#163 phase 2)",
             corpus::width_name(width)
         );
@@ -211,8 +216,7 @@ fn g5_fma_case_is_unfused_and_the_case_is_not_vacuous() {
     }
     let fused = corpus::digest_of_lanes(&fused_lanes);
     assert_ne!(
-        hex(&fused),
-        hex(&pinned),
+        fused, pinned,
         "the lane_fma corpus no longer separates a fused evaluation from an unfused one: \
          the case proves nothing"
     );

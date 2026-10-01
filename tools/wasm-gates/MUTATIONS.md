@@ -1,5 +1,14 @@
 # Red mutations for gate G5
 
+Current owners are `g5_native_digests_match_pins` and the actual SIMD guest comparison, with the
+independent G6 control arms in `tests/g6_full_corpus_ftz.rs`. Native runs cover Scalar, W4 and W8
+where available; the current guest covers Scalar and W4. The current unfused multiply-add law and
+its operand nonvacuity are held by `g5_fma_case_is_unfused_and_the_case_is_not_vacuous`.
+
+The rows below preserve historical mutation evidence. Their earlier corpus counts, fused/software
+FMA implementations and extra guest width describe those recorded revisions; they do not describe
+the current runner or restore a retired configuration.
+
 ## Full-corpus FTZ/DAZ (issue #144 item 1, closed by issue #146)
 
 `tests/g6_full_corpus_ftz.rs` landed with #144 as an ignored reproducer. It asserted that hardware

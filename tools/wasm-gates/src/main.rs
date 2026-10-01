@@ -6,14 +6,15 @@
 //! wasm_gates --print-pins
 //! ```
 //!
-//! Each run prints one JSON evidence line and exits non-zero on the first mismatch.
+//! Each gate run prints one JSON evidence line, reports every mismatch, and fails if any digest
+//! or differential disagrees.
 //! `scripts/run-wasm-gates.sh` builds the `simd128` guest and runs both legs.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::ExitCode;
 
 use wasm_gates::{
-    ExpectedBackend, WASMTIME_LICENCE, WASMTIME_VERSION, native_report, print_lane_pins,
+    ExpectedBackend, Report, WASMTIME_LICENCE, WASMTIME_VERSION, native_report, print_lane_pins,
     wasm_report,
 };
 
@@ -37,7 +38,7 @@ fn main() -> ExitCode {
         }
         Some(path) if arguments.len() == 3 && arguments[1] == "--expect-backend" => {
             match ExpectedBackend::parse(&arguments[2]) {
-                Ok(expected) => run_wasm(PathBuf::from(path), expected),
+                Ok(expected) => run_wasm(Path::new(path), expected),
                 Err(unknown) => {
                     eprintln!("unknown backend '{unknown}'\n{USAGE}");
                     ExitCode::from(2)
@@ -53,7 +54,10 @@ fn main() -> ExitCode {
 
 /// The native leg: the corpus run in this process at every width against the pins.
 fn run_native() -> ExitCode {
-    let report = native_report();
+    report_outcome(native_report())
+}
+
+fn report_outcome(report: Report) -> ExitCode {
     println!("{}", report.json());
     if report.mismatches.is_empty()
         && report.minmax_lowering_mismatches == 0
@@ -63,11 +67,11 @@ fn run_native() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         for mismatch in &report.mismatches {
-            eprintln!("native mismatch: {mismatch}");
+            eprintln!("{} mismatch: {mismatch}", report.leg);
         }
-        report_minmax_lowering("native", report.minmax_lowering_mismatches);
-        report_f64_lane("native", report.f64_lane_mismatches);
-        report_meter_block("native", report.meter_block_mismatches);
+        report_minmax_lowering(report.leg, report.minmax_lowering_mismatches);
+        report_f64_lane(report.leg, report.f64_lane_mismatches);
+        report_meter_block(report.leg, report.meter_block_mismatches);
         ExitCode::FAILURE
     }
 }
@@ -107,26 +111,9 @@ fn report_meter_block(leg: &str, mismatches: u32) {
 }
 
 /// The wasm leg: the same corpus executed under wasmtime against the same pins.
-fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
-    match wasm_report(&path, expected) {
-        Ok(report) => {
-            println!("{}", report.json());
-            if report.mismatches.is_empty()
-                && report.minmax_lowering_mismatches == 0
-                && report.f64_lane_mismatches == 0
-                && report.meter_block_mismatches == 0
-            {
-                ExitCode::SUCCESS
-            } else {
-                for mismatch in &report.mismatches {
-                    eprintln!("wasm mismatch: {mismatch}");
-                }
-                report_minmax_lowering("wasm", report.minmax_lowering_mismatches);
-                report_f64_lane("wasm", report.f64_lane_mismatches);
-                report_meter_block("wasm", report.meter_block_mismatches);
-                ExitCode::FAILURE
-            }
-        }
+fn run_wasm(path: &Path, expected: ExpectedBackend) -> ExitCode {
+    match wasm_report(path, expected) {
+        Ok(report) => report_outcome(report),
         Err(error) => {
             eprintln!("wasm gate failure: {error:?}");
             ExitCode::FAILURE
