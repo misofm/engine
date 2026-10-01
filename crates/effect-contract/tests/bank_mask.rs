@@ -37,12 +37,10 @@ fn member() -> PrepareEffectRequest<'static> {
     }
 }
 
-/// Every bank width this build has: no eight where `avx2` is off (issue #1112).
-const WIDTHS: &[(Backend, BankWidth)] = &[
-    (Backend::Simd4, BankWidth::Four),
-    #[cfg(target_feature = "avx2")]
-    (Backend::Simd8, BankWidth::Eight),
-];
+/// Every bank width this build has, beside the backend that executes it (issue #1112).
+fn widths() -> impl Iterator<Item = (Backend, BankWidth)> {
+    BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+}
 
 fn code(request: PrepareEffectBankRequest<'_>) -> Option<&'static str> {
     request.validate_shape().err().map(|error| error.code)
@@ -59,7 +57,7 @@ fn code(request: PrepareEffectBankRequest<'_>) -> Option<&'static str> {
 /// mask's `true` entries -- the guard every unpadded factory declines on.
 #[test]
 fn a_mask_is_well_formed_exactly_when_its_members_come_first() {
-    for &(backend, width) in WIDTHS {
+    for (backend, width) in widths() {
         let lanes = width.lanes() as usize;
         let requests = vec![member(); lanes];
         let mut accepted = vec![0_usize; lanes + 1];
@@ -108,7 +106,7 @@ fn a_mask_is_well_formed_exactly_when_its_members_come_first() {
 /// malformed or padded, and so declined by every effect.
 #[test]
 fn the_full_mask_is_a_full_bank() {
-    for &(backend, width) in WIDTHS {
+    for (backend, width) in widths() {
         let requests = vec![member(); width.lanes() as usize];
         let request = PrepareEffectBankRequest {
             backend,
@@ -128,7 +126,7 @@ fn the_full_mask_is_a_full_bank() {
 /// that accepted it would bind a bank no track can reach.
 #[test]
 fn an_empty_mask_is_refused_with_its_code() {
-    for &(backend, width) in WIDTHS {
+    for (backend, width) in widths() {
         let lanes = width.lanes() as usize;
         let requests = vec![member(); lanes];
         let mask = vec![false; lanes];
@@ -150,7 +148,7 @@ fn an_empty_mask_is_refused_with_its_code() {
 /// mask reports `mask_empty` or `requests` instead of its own code.
 #[test]
 fn a_wrong_length_mask_is_refused_with_its_code() {
-    for &(backend, width) in WIDTHS {
+    for (backend, width) in widths() {
         let lanes = width.lanes() as usize;
         let requests = vec![member(); lanes];
         for length in (0..=2 * lanes).filter(|length| *length != lanes) {
@@ -179,7 +177,7 @@ fn a_wrong_length_mask_is_refused_with_its_code() {
 /// is also wrong. The conformance harness counts refusals by that code.
 #[test]
 fn the_request_refusals_keep_their_code_and_come_first() {
-    for &(backend, width) in WIDTHS {
+    for (backend, width) in widths() {
         let lanes = width.lanes() as usize;
         let short = vec![member(); lanes - 1];
         let empty_mask = vec![false; lanes];
@@ -192,22 +190,16 @@ fn the_request_refusals_keep_their_code_and_come_first() {
             };
             assert_eq!(code(request), Some("effect.bank.requests"), "{width:?}");
         }
-        #[cfg(target_feature = "avx2")]
         let requests = vec![member(); lanes];
-        #[cfg(target_feature = "avx2")]
-        let other = if backend == Backend::Simd4 {
-            Backend::Simd8
-        } else {
-            Backend::Simd4
-        };
-        #[cfg(target_feature = "avx2")]
-        let request = PrepareEffectBankRequest {
-            backend: other,
-            width,
-            requests: &requests,
-            active_mask: &empty_mask,
-        };
-        #[cfg(target_feature = "avx2")]
-        assert_eq!(code(request), Some("effect.bank.requests"), "{width:?}");
+        // A backend of another width, which only an 8-lane (AVX2) build has (issue #1112).
+        for &other in Backend::VECTOR.iter().filter(|&&other| other != backend) {
+            let request = PrepareEffectBankRequest {
+                backend: other,
+                width,
+                requests: &requests,
+                active_mask: &empty_mask,
+            };
+            assert_eq!(code(request), Some("effect.bank.requests"), "{width:?}");
+        }
     }
 }

@@ -15,8 +15,6 @@
 //! and watching the bits move. Both are `-0.0` cases, and both are why the test is on bit
 //! patterns and not on `==`.
 
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 use lane::kernels::builtins::{
     InputChainCoef, InputChainPlan, InputChainReport, InputChainState, InputTrimRamp,
     NONFINITE_LIMIT, input_chain_block, input_chain_block_elided, input_chain_block_mono_elided,
@@ -289,10 +287,7 @@ fn check_pattern<L: Lane>(width: &str, pattern: usize, shapes: usize) {
 fn elision_is_bit_identical_at_every_width_and_section_pattern() {
     for pattern in 0..16 {
         for shapes in 0..16 {
-            check_pattern::<f32>("1", pattern, shapes);
-            check_pattern::<Simd4>("4", pattern, shapes);
-            #[cfg(target_feature = "avx2")]
-            check_pattern::<Simd8>("8", pattern, shapes);
+            lane::each_lane!(|L, N| check_pattern::<L>(&N.to_string(), pattern, shapes));
         }
     }
 }
@@ -321,10 +316,7 @@ fn a_single_non_identity_lane_blocks_the_whole_section() {
             assert_eq!(reference, elided, "width={width}, poisoned lane={poisoned}");
         }
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 /// Red test 3, the state arm: a chain whose coefficients are the identity but whose integrators are
@@ -366,10 +358,7 @@ fn identity_coefficients_over_non_zero_state_are_not_elidable() {
              vacuous"
         );
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 /// Red test 3, the coefficient arm: the gate is on **bit patterns**, and `==` is not enough.
@@ -412,10 +401,7 @@ fn negative_zero_mix_words_are_not_the_identity() {
              gold-plating"
         );
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 /// The appendix's correction, made testable: a `-0.0` **state** word is genuinely inert, and the
@@ -483,10 +469,7 @@ fn negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate() {
             );
         }
     }
-    check::<f32>("1");
-    check::<Simd4>("4");
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>("8");
+    lane::each_lane!(|L, N| check::<L>(&N.to_string()));
 }
 
 // Frozen from 413767be8f3a54d47b33296bdf767772aca7da60 for #710. These are the actual
@@ -705,10 +688,11 @@ fn mixed_elision_matches_frozen_bodies_scalar() {
 fn mixed_elision_matches_frozen_bodies_w4() {
     mixed_reference_cases::<Simd4>();
 }
+/// The 8-lane (AVX2) twin of `mixed_elision_matches_frozen_bodies_w4` (issue #1112).
 #[cfg(target_feature = "avx2")]
 #[test]
 fn mixed_elision_matches_frozen_bodies_w8() {
-    mixed_reference_cases::<Simd8>();
+    mixed_reference_cases::<lane::Simd8>();
 }
 
 #[test]
@@ -891,8 +875,5 @@ fn identity_trim_ramp_wrapper_matches_the_unelided_reference() {
             "mono output recovery report"
         );
     }
-    check::<f32>();
-    check::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>();
+    lane::each_lane!(|L| check::<L>());
 }

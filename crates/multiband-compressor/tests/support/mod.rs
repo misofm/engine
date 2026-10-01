@@ -112,24 +112,13 @@ pub fn request_with(
     }
 }
 
-/// Every bank width this build has: `Four`, and `Eight` only in the 8-lane (AVX2) build (#1112).
-pub const BANK_WIDTHS: &[BankWidth] = &[
-    BankWidth::Four,
-    #[cfg(target_feature = "avx2")]
-    BankWidth::Eight,
-];
-
 /// The backend token a bank of `width` lanes must carry under the contract's own rule.
 ///
 /// The token is the contract's, not this crate's: since D4 there is no runtime SIMD dispatch and
 /// the crate picks `Simd4` or `Simd8` from the width alone. Tests still have to fill the field in,
 /// and `BankWidth::matches_backend` decides which value is legal for which width.
 pub const fn backend_for(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        #[cfg(target_feature = "avx2")]
-        BankWidth::Eight => Backend::Simd8,
-    }
+    width.backend()
 }
 
 /// Prepares a bank of `width` lanes over `requests`.

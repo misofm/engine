@@ -315,13 +315,17 @@ fn causal_processing_starts_at_sample_zero() {
 #[test]
 #[cfg_attr(
     not(target_feature = "avx2"),
-    ignore = "a 4-lane (NEON/simd128) build has no bank width it cannot run (#1112)"
+    ignore = "a 4-lane (NEON/simd128) build has no vector width it cannot run (#1112)"
 )]
 fn bank_fallback_never_hides_malformed_or_incompatible_requests() {
     let factory = CompressorFactory;
     // A width this build cannot run, chosen so the fallback path is the one under test: four
-    // lanes in the 8-lane (AVX2) build, the one build with a bank width it does not run.
-    let (backend, width) = (Backend::Simd4, BankWidth::Four);
+    // lanes in the 8-lane (AVX2) build.
+    let backend = *Backend::VECTOR
+        .iter()
+        .find(|&&backend| backend != Backend::current())
+        .expect("a build with a second vector width");
+    let width = BankWidth::for_backend(backend).expect("a vector backend");
     let lanes = width.lanes() as usize;
 
     let mut malformed = vec![initial_values(); lanes];
@@ -669,11 +673,13 @@ fn a_padded_request_binds_after_every_lane_is_validated() {
         Some(refusal),
         "a padded lane's request is validated like a member's"
     );
-    // A width this build does not execute: the fallback comes after the member loop. Only the
-    // 8-lane (AVX2) build has one, four lanes; a 4-lane (NEON/simd128) build has none (#1112).
-    #[cfg(target_feature = "avx2")]
-    {
-        let (other_backend, other_width) = (Backend::Simd4, BankWidth::Four);
+    // Every width this build does not execute: the fallback comes after the member loop. Four
+    // lanes in the 8-lane (AVX2) build; a 4-lane (NEON/simd128) build has none (#1112).
+    for &other_backend in Backend::VECTOR {
+        if other_backend == Backend::current() {
+            continue;
+        }
+        let other_width = BankWidth::for_backend(other_backend).expect("a vector backend");
         let other_lanes = other_width.lanes() as usize;
         let mut other = vec![request(&values); other_lanes];
         other[1] = request(&malformed_values);

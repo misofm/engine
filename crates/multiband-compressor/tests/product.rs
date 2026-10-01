@@ -13,8 +13,8 @@ use effect_contract::{
 };
 use multiband_compressor::{MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory};
 use support::{
-    BANK_WIDTHS, backend_for, new_sections, point, process, request, request_with, restore,
-    snapshot, values, varied_values,
+    backend_for, new_sections, point, process, request, request_with, restore, snapshot, values,
+    varied_values,
 };
 
 fn rms(values: &[f32]) -> f64 {
@@ -142,7 +142,7 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
         assert_eq!(bypass_left, input_left);
         assert_eq!(bypass_right, input_right);
 
-        for &width in BANK_WIDTHS {
+        for &width in BankWidth::ALL {
             let lanes = width.lanes() as usize;
             let bank_values = vec![initial; lanes];
             let mut bank_requests = bank_values
@@ -1005,7 +1005,6 @@ fn dual_mono_bands_compress_each_channel_from_its_own_level() {
 fn bank_requests_are_validated_before_any_fallback() {
     let factory = MultibandCompressorFactory;
     let sets = vec![values(); 4];
-    #[cfg(target_feature = "avx2")]
     let requests = sets.iter().map(|set| request(set)).collect::<Vec<_>>();
     let wrong_count = sets[..3].iter().map(|set| request(set)).collect::<Vec<_>>();
     assert_eq!(
@@ -1021,21 +1020,24 @@ fn bank_requests_are_validated_before_any_fallback() {
             code: "effect.bank.requests"
         })
     );
-    // A backend of another width: only the 8-lane (AVX2) build has a second width.
-    #[cfg(target_feature = "avx2")]
-    assert_eq!(
-        factory
-            .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: backend_for(BankWidth::Four),
-                width: BankWidth::Eight,
-                requests: &requests,
-                active_mask: BankWidth::Eight.full_mask(),
+    // The native width with another width's backend: `Simd4` at `Eight` in the 8-lane (AVX2)
+    // build; a 4-lane (NEON/simd128) build has no second width (issue #1112).
+    let native = BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
+    for &other in BankWidth::ALL.iter().filter(|&&width| width != native) {
+        assert_eq!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: backend_for(other),
+                    width: native,
+                    requests: &requests,
+                    active_mask: native.full_mask(),
+                })
+                .err(),
+            Some(EffectPrepareError {
+                code: "effect.bank.requests"
             })
-            .err(),
-        Some(EffectPrepareError {
-            code: "effect.bank.requests"
-        })
-    );
+        );
+    }
 
     let mut malformed_sets = sets.clone();
     malformed_sets[3][0].value = f32::NAN;
@@ -1097,7 +1099,7 @@ fn bank_requests_are_validated_before_any_fallback() {
     );
     other[0][0].value = 1_000.0;
 
-    for &width in BANK_WIDTHS {
+    for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
         let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
         let requests = sets.iter().map(|set| request(set)).collect::<Vec<_>>();

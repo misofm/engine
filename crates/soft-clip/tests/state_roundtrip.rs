@@ -87,8 +87,6 @@ fn a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit() {
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
 #[test]
 fn a_bank_track_restore_is_position_independent_and_lane_local() {
-    // The build's own width: eight in the 8-lane (AVX2) build, four in a 4-lane (NEON/simd128)
-    // build (#1112).
     let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = values_from([(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)]);

@@ -1,6 +1,6 @@
 //! Issues #996 and #997: the standing 64-track console, fed non-repeating hot noise, renders the
-//! pre-#990 limiter's words at every bank width the build has (`Scalar`, `Simd4`, and `Simd8`
-//! where `avx2` is enabled, issue #1112) while its linked stereo pairs link, ramp, unlink and are
+//! pre-#990 limiter's words at every bank width the build has (`Simd8` where `avx2` is enabled,
+//! `Simd4` and `Scalar`; issue #1112) while its linked stereo pairs link, ramp, unlink and are
 //! made equal again mid-run.
 //!
 //! # Why this test exists
@@ -635,6 +635,7 @@ fn unlinking_lanes(placement: &[(usize, usize)]) -> Vec<usize> {
     first.into_iter().map(|(_, _, lane)| lane).collect()
 }
 
+// The 8-lane (AVX2) twin of the `_at_simd4` and `_at_scalar` tests below (issue #1112).
 #[test]
 #[cfg(target_feature = "avx2")]
 fn the_hot_console_renders_the_pre_990_words_at_simd8() {

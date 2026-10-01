@@ -486,13 +486,15 @@ fn a_mixed_session_bypass_renders_without_allocating() {
     let _restore = RestoreMode(bench_alloc::mode());
     bench_alloc::set_mode(Mode::Count);
     const MASKS: [u64; 3] = [0b1_0010_1001_0110, 0b0_1101_0010_0101, 0b1_0100_1010_1001];
-    let legs = [
-        #[cfg(target_feature = "avx2")]
-        ("inserts", Backend::Simd8),
-        ("inserts", Backend::Simd4),
+    // Every vector width this build has, widest first, then the scalar oracle and the console.
+    let vector = Backend::VECTOR
+        .iter()
+        .rev()
+        .map(|&backend| ("inserts", backend));
+    let legs = vector.chain([
         ("inserts", Backend::Scalar),
         ("console", Backend::current()),
-    ];
+    ]);
     for (placement, dispatch) in legs {
         let console_leg = placement == "console";
         let model = if console_leg {

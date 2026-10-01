@@ -207,7 +207,7 @@ fn both_variants_answer_the_hook_identically_for_the_same_selector() {
 ///   records.
 ///
 /// Both drains are held: the banked one (`BuiltinBankProcessor::begin_block`, through the
-/// eight-lane cohort and one-lane tail of the SIMD fixture) and the scalar one
+/// full cohort and one-lane tail of the SIMD fixture, at the build's own width) and the scalar one
 /// (`LiveControlInputProcessor::process`, through the scalar-dispatch fixture).
 ///
 /// Ported by #1027 from the #600 input-trim qualification (`tools/bench/src/input_symmetry.rs`,
@@ -222,9 +222,10 @@ fn both_variants_answer_the_hook_identically_for_the_same_selector() {
 #[cfg(feature = "test-support")]
 #[test]
 fn a_block_drains_every_input_record_queued_at_its_entry() {
-    #[cfg(target_feature = "avx2")]
-    use builtins_compiler::test_only_prepared_pair_graph;
-    use builtins_compiler::{PreparedBuiltinsGraphBound, test_only_prepared_scalar_pair_graph};
+    use builtins_compiler::{
+        PreparedBuiltinsGraphBound, test_only_prepared_pair_graph,
+        test_only_prepared_scalar_pair_graph,
+    };
     use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 
     fn trim(db: f32) -> TrackInputRecord {
@@ -287,13 +288,11 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
     }
 
     type Build = fn() -> PreparedBuiltinsGraphBound;
-    // The banked arm's nine-track graph is eight-lane: 8-lane (AVX2) build only (issue #1112).
-    let arms: &[(&str, Build)] = &[
-        #[cfg(target_feature = "avx2")]
+    let arms: [(&str, Build); 2] = [
         ("banked", || test_only_prepared_pair_graph(false)),
         ("scalar", || test_only_prepared_scalar_pair_graph(false)),
     ];
-    for &(arm, build) in arms {
+    for (arm, build) in arms {
         let mut filled = build();
         let mut last_only = build();
         let mut quiet = build();

@@ -15,11 +15,11 @@ use std::alloc::{GlobalAlloc, System};
 use std::hint::black_box;
 
 use effect_contract::{
-    EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
+    BankWidth, EffectBankProcessBlock, LinkMode, NativeEffectFactory, ParameterChannel,
     PreparedAutomationSpan, ResetKind, StatePayloadInput, StatePayloadOutput,
 };
 use multiband_compressor::MultibandCompressorFactory;
-use support::{BANK_WIDTHS, new_sections, point, process, request_with, varied_values};
+use support::{new_sections, point, process, request_with, varied_values};
 
 struct TrackingAllocator;
 
@@ -162,7 +162,7 @@ fn the_scalar_render_path_allocates_nothing() {
 
 #[test]
 fn the_bank_render_path_allocates_nothing() {
-    for &width in BANK_WIDTHS {
+    for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
         {
             let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();

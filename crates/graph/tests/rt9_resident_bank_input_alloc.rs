@@ -7,7 +7,6 @@ use engine::{
     realtime::{self, PlanarBufferMut, PreparedRenderPlan, RenderEnvelope, RenderError},
 };
 use graph::*;
-use lane::Backend;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -232,17 +231,13 @@ enum Control {
     Resident,
     Scalar,
     Intervening,
-    /// The second bank at the other width: only an 8-lane (AVX2) build has one (issue #1112).
-    #[cfg(target_feature = "avx2")]
     Incompatible,
 }
 
-/// The bank widths this build has: four, and eight where `avx2` is enabled (issue #1112).
-const BANK_WIDTHS: &[BankWidth] = &[
-    BankWidth::Four,
-    #[cfg(target_feature = "avx2")]
-    BankWidth::Eight,
-];
+/// A bank width this build has other than `width`: only the 8-lane (AVX2) build has two.
+fn other_width(width: BankWidth) -> Option<BankWidth> {
+    BankWidth::ALL.iter().copied().find(|&other| other != width)
+}
 
 fn prepared(
     width: BankWidth,
@@ -355,17 +350,13 @@ fn prepared(
         .enumerate()
         .filter(|_| control != Control::Scalar)
         .map(|(id, group)| {
-            let bank_width = match control {
-                #[cfg(target_feature = "avx2")]
-                Control::Incompatible if id == 1 => BankWidth::Eight,
-                _ => width,
+            let bank_width = if control == Control::Incompatible && id == 1 {
+                other_width(width).expect("an incompatible control needs a second width")
+            } else {
+                width
             };
             GraphPreparedBuiltinBank {
-                backend: match bank_width {
-                    BankWidth::Four => Backend::Simd4,
-                    #[cfg(target_feature = "avx2")]
-                    BankWidth::Eight => Backend::Simd8,
-                },
+                backend: bank_width.backend(),
                 members: groups[group].clone().into_boxed_slice(),
                 processor: Box::new(Stage {
                     id,
@@ -530,7 +521,7 @@ fn render(
 #[test]
 #[cfg(feature = "test-support")]
 fn rt9_resident_observers_extra_reader_failures_and_modes_match_old_acquisition() {
-    for &width in BANK_WIDTHS {
+    for &width in BankWidth::ALL {
         for population in [width.lanes() as usize - 1, width.lanes() as usize] {
             for frames in [1, width.lanes() - 1, width.lanes(), width.lanes() + 1, 17] {
                 for alias in [false, true] {
@@ -613,12 +604,12 @@ fn rt9_resident_observers_extra_reader_failures_and_modes_match_old_acquisition(
 #[test]
 #[cfg(feature = "test-support")]
 fn rt9_crossfeed_delayed_send_matches_scalar_and_admission_controls() {
-    for control in [
-        Control::Resident,
-        Control::Intervening,
-        #[cfg(target_feature = "avx2")]
-        Control::Incompatible,
-    ] {
+    // The incompatible control needs a second width, which only the 8-lane (AVX2) build has.
+    let incompatible = other_width(BankWidth::Four).map(|_| Control::Incompatible);
+    for control in [Control::Resident, Control::Intervening]
+        .into_iter()
+        .chain(incompatible)
+    {
         let (mut scalar, scalar_probe) =
             prepared(BankWidth::Four, 3, 17, true, 0, 0, Control::Scalar);
         let (mut candidate, probe) = prepared(BankWidth::Four, 3, 17, true, 0, 0, control);
@@ -671,7 +662,7 @@ fn rt9_resident_prepared_plan_render_allocates_and_frees_nothing() {
     });
     let live = realtime::audit::snapshot();
     assert!(live.allocations > 0 && live.deallocations > 0);
-    for &width in BANK_WIDTHS {
+    for &width in BankWidth::ALL {
         for population in [width.lanes() as usize - 1, width.lanes() as usize] {
             for mono in 0..4 {
                 let (mut plan, probe) =

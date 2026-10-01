@@ -143,6 +143,24 @@ if [[ -s "$asm_out/eight" ]]; then
     fail 'eight-lane code is back in the AArch64 product crates (#1112): the phones run four lanes only, so it can never execute; gate it with target_feature = "avx2"'
 fi
 
+# --- no eight-lane code in the Android library (#1112) -----------------------------------------
+# The same rule over the library an Android app links: `capi` as the release staticlib, which the
+# release profile's fat LTO makes one module, so its assembly is every function the app ships,
+# after inlining. A staticlib links nothing, so no NDK is needed. iOS and Android set the same
+# width predicates, so this row differs from the iOS scan only if a regression keys eight lanes
+# on the operating system. On 089ef456 it matched 832 lines and 28 function labels.
+CARGO_TARGET_DIR="$base_target_dir/aarch64-linux-android-asm" \
+    cargo rustc --quiet --locked --release --target aarch64-linux-android -p capi --lib \
+    --crate-type staticlib -- --emit "asm=$asm_out/android-capi.s"
+[[ -s "$asm_out/android-capi.s" ]] || fail 'no Android release assembly for capi'
+if android_eight="$(rg -n "$eight_lane" "$asm_out/android-capi.s")"; then
+    head -n 20 <<<"$android_eight" >&2
+    fail "eight-lane code is back in the Android library (#1112): $(wc -l <<<"$android_eight") lines; gate it with target_feature = \"avx2\""
+else
+    status=$?
+    ((status == 1)) || fail "the Android eight-lane scan could not read the assembly (rg exit $status)"
+fi
+
 # --- wasm32 without simd128 is refused (#1062) ----------------------------------------------------
 # Owner ruling 2026-09-28, decision 7: the scalar (non-`simd128`) wasm builds and CI legs are
 # retired now that #1017's AArch64 legs run, and `lane` refuses that build with the same 64-bit-only
@@ -186,4 +204,4 @@ CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
     cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
     -p conformance
 
-printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); no eight-lane code in the iOS or Android library (#1112); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'

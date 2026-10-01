@@ -631,20 +631,22 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
 /// `SessionRuntime` runs its strip as every track's inserts and this build's factories decline
 /// what they cannot bank: the EQ and compressor at four lanes on an 8-lane (AVX2) build (the tail
 /// cohort's limiter group is partial too, so one chain is seam-side only). A 4-lane (NEON/simd128)
-/// build has no other width, so only the 8-lane build runs this test (issue #1112).
+/// build has no other width, so it ignores this test (issue #1112).
 ///
 /// Red mutation: make `runtime::upstream_of_seam` return `true` for `PostFader`/`PostMatrix` ->
 /// no row is vacuous and the first assertion fails. Make it return `false` for
 /// `GraphNodeId::Effect` -> the full strip's chains lose two thirds of their upstream stages and
 /// the last assertion fails.
 #[test]
-#[cfg(target_feature = "avx2")]
+#[cfg_attr(
+    not(target_feature = "avx2"),
+    ignore = "needs a second vector width, which a 4-lane (NEON/simd128) build lacks (#1112)"
+)]
 fn a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible() {
-    let other_width = if Backend::current() == Backend::Simd8 {
-        Backend::Simd4
-    } else {
-        Backend::Simd8
-    };
+    let other_width = *Backend::VECTOR
+        .iter()
+        .find(|&&backend| backend != Backend::current())
+        .expect("the 8-lane (AVX2) build has a second vector width");
     let ragged = SessionRuntime::build_with_dispatch(
         Workload::NineTrackRaggedStrip,
         PlanConfig::BASELINE,

@@ -18,20 +18,13 @@ mod support;
 
 use std::hint::black_box;
 
-use lane::{Lane, flush};
+use lane::{Lane, Native, flush};
 use support::{Kernel, Signal, interleave, run_kernel};
 
-/// The lane type the arms run at: the widest this build has, the 8-lane (AVX2) width where `avx2`
-/// is enabled and the 4-lane (NEON/simd128) width elsewhere (#1112). FTZ inertness is a property of
+/// Lanes per vector: the arms run at the build's own width, [`Native`] (eight lanes where `avx2`
+/// is enabled, four in a 4-lane (NEON/simd128) build, issue #1112). FTZ inertness is a property of
 /// the flush law, so any one vector width carries the claim.
-#[cfg(target_feature = "avx2")]
-type Widest = lane::Simd8;
-/// See the 8-lane definition.
-#[cfg(not(target_feature = "avx2"))]
-type Widest = lane::Simd4;
-
-/// Lanes of [`Widest`].
-const WIDTH: usize = <Widest as Lane>::WIDTH;
+const WIDTH: usize = <Native as Lane>::WIDTH;
 
 /// Frames of the kernel arms.
 const FRAMES: usize = 2_048;
@@ -47,7 +40,7 @@ fn flush_digest() -> Vec<u32> {
             *lane = f32::from_bits(pattern.wrapping_add(index as u32 * 4_099));
         }
         let mut out = [0u32; WIDTH];
-        flush(Widest::load(black_box(&lanes))).store_bits(&mut out);
+        flush(Native::load(black_box(&lanes))).store_bits(&mut out);
         bits.extend_from_slice(&out);
         pattern = pattern.wrapping_add(4_093);
     }
@@ -65,7 +58,7 @@ fn kernel_digest(kernel: Kernel, signal: Signal) -> Vec<u32> {
         })
         .collect();
     let mut block = interleave(&lanes, WIDTH, FRAMES);
-    run_kernel::<Widest>(kernel, black_box(&mut block), FRAMES, 1.0e-40, FRAMES);
+    run_kernel::<Native>(kernel, black_box(&mut block), FRAMES, 1.0e-40, FRAMES);
     block.iter().map(|value| value.to_bits()).collect()
 }
 

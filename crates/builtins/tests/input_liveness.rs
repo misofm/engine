@@ -33,11 +33,11 @@ use builtins::*;
 use effect_contract::{BankWidth, ParameterSmoother, SmoothingRule};
 use lane::Backend;
 
-const BANKS: &[(Backend, BankWidth)] = &[
-    (Backend::Simd4, BankWidth::Four),
-    #[cfg(target_feature = "avx2")]
-    (Backend::Simd8, BankWidth::Eight),
-];
+/// Every bank width this build has, with the backend that executes it: both in the 8-lane (AVX2)
+/// build, four alone in a 4-lane (NEON/simd128) one (`BankWidth::ALL`, issue #1112).
+fn banks() -> impl Iterator<Item = (Backend, BankWidth)> {
+    BankWidth::ALL.iter().map(|&width| (width.backend(), width))
+}
 
 fn channel(trim_db: f32, polarity_invert: bool, hpf_hz: f32, lpf_hz: f32) -> ChannelParameters {
     ChannelParameters {
@@ -203,7 +203,7 @@ fn the_settled_arm_leaves_the_ramp_words_untouched() {
 /// The elision plan an uncommanded bank carries is the plan Job 1 decides, at every width.
 #[test]
 fn an_uncommanded_bank_keeps_its_elision_plan() {
-    for &(backend, width) in BANKS {
+    for (backend, width) in banks() {
         // Every section disabled: the all-elided plan.
         let disabled = parameters(
             channel(-3.0, false, 0.0, 0.0),
@@ -453,7 +453,7 @@ fn settled_and_ramping_paths_agree_on_an_elided_bank() {
 /// The banked form of the same equivalence, at both widths, with the plan read back.
 #[test]
 fn a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero() {
-    for &(backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let disabled = parameters(
             channel(-2.0, false, 0.0, 0.0),
@@ -674,7 +674,7 @@ fn the_live_trim_domain_is_the_declared_one() {
 /// than silently written into a lane no track owns.
 #[test]
 fn a_bank_refuses_a_retarget_addressed_past_its_members() {
-    for &(backend, width) in BANKS {
+    for (backend, width) in banks() {
         let params = parameters(channel(0.0, false, 0.0, 0.0), channel(0.0, false, 0.0, 0.0));
         let mut bank = BuiltinInputBank::new(backend, width, vec![input(params), input(params)])
             .expect("a two-member bank");
@@ -709,7 +709,7 @@ fn a_bank_refuses_a_retarget_addressed_past_its_members() {
 fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
     const FRAMES: usize = 40;
     const SAMPLES: u32 = 24;
-    for &(backend, width) in BANKS {
+    for (backend, width) in banks() {
         let lanes = width.lanes() as usize;
         let params = |index: usize| {
             let value = channel(index as f32 - 3.0, index.is_multiple_of(3), 90.0, 7_000.0);

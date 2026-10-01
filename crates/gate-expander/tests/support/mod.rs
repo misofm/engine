@@ -22,14 +22,22 @@ pub fn sidechain_port() -> PortId {
     PortId::new("sidechain-in").expect("static port id")
 }
 
-/// Prepares an eight-lane bank from eight per-track parameter sets, or `None` when this build has
-/// no eight-lane backend. Only the 8-lane (AVX2) build has the width to name (#1112).
-#[cfg(target_feature = "avx2")]
-pub fn prepare_bank_w8(
+/// The lane count of this build's own bank width: eight in the 8-lane (AVX2) build, four in a
+/// 4-lane (NEON/simd128) build (#1112).
+pub const NATIVE_LANES: usize = <lane::Native as lane::Lane>::WIDTH;
+
+/// This build's own bank width, the one `bind_homogeneous_bank` binds.
+pub fn native_width() -> BankWidth {
+    BankWidth::for_backend(Backend::current()).expect("a vector build")
+}
+
+/// Prepares a bank at this build's own width from the first [`NATIVE_LANES`] per-track parameter
+/// sets: eight lanes in the 8-lane (AVX2) build, four in a 4-lane (NEON/simd128) build (#1112).
+pub fn prepare_bank_native(
     values: &[Values; 8],
     link_mode: LinkMode,
 ) -> Option<Box<dyn PreparedNativeEffectBank>> {
-    prepare_bank(values, link_mode, BankWidth::Eight, Backend::Simd8, 128)
+    prepare_bank(values, link_mode, native_width(), Backend::current(), 128)
 }
 
 /// Prepares a bank of `width` lanes from the first `width` parameter sets.
@@ -261,15 +269,15 @@ pub fn assert_bits_eq(actual: &[f32], expected: &[f32], context: &str) {
     }
 }
 
-/// Interleaves eight per-track signals into one AoSoA block.
-pub fn packed_w8(samples: &[Vec<f32>]) -> Vec<f32> {
-    assert_eq!(samples.len(), 8, "W8 tracks");
+/// Interleaves one per-track signal per lane into one AoSoA block, as wide as `samples` is long.
+pub fn packed(samples: &[Vec<f32>]) -> Vec<f32> {
+    let width = samples.len();
     let frames = samples[0].len();
     assert!(samples.iter().all(|track| track.len() == frames));
-    let mut packed = vec![0.0; frames * 8];
+    let mut packed = vec![0.0; frames * width];
     for frame in 0..frames {
-        for track in 0..8 {
-            packed[frame * 8 + track] = samples[track][frame];
+        for track in 0..width {
+            packed[frame * width + track] = samples[track][frame];
         }
     }
     packed

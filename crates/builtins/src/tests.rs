@@ -1,13 +1,9 @@
 use super::{
     BuiltinChain, BuiltinLaneSelector, BuiltinParameters, BuiltinProcessReport, BuiltinResetKind,
+    CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP,
     CHANNEL_SYMMETRY_PREDICATE_CALLS, Cell, ChannelParameters, DualMonoBlock,
-    FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, Simd4, prepare_sections, test_support,
+    FILTER_PREFIX_KERNEL_FRAMES, InputStage, Matrix2x2, prepare_sections, test_support,
 };
-// Read by the eight-lane post-ramp tests only (issue #1112).
-#[cfg(target_feature = "avx2")]
-use super::{CHANNEL_SYMMETRY_LAST_POST_RAMP_READS, CHANNEL_SYMMETRY_OBSERVE_POST_RAMP};
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 
 fn selected_snapshot(metrics: super::MeterMetricSet) -> super::MeterSnapshot {
     let config = super::MeterConfig {
@@ -122,10 +118,7 @@ fn post_ramp_symmetry_mask_matches_lane_oracle() {
         .stage
         .lane_track(0);
     let tracks = [track; 8];
-    check_post_ramp_mask::<f32>(&tracks[..1]);
-    check_post_ramp_mask::<Simd4>(&tracks[..4]);
-    #[cfg(target_feature = "avx2")]
-    check_post_ramp_mask::<Simd8>(&tracks[..8]);
+    lane::each_lane!(|L, N| check_post_ramp_mask::<L>(&tracks[..N]));
 }
 
 fn check_post_ramp_mask<L: super::Lane>(tracks: &[super::PreparedInputTrack]) {
@@ -242,16 +235,14 @@ fn post_ramp_symmetry_handles_differing_words_countdowns_and_padding() {
     }
     let tracks = [track; 8];
     exercise::<f32>(&tracks[..1]);
-    exercise::<Simd4>(&tracks[..3]);
-    exercise::<Simd4>(&tracks[..4]);
-    #[cfg(target_feature = "avx2")]
-    exercise::<Simd8>(&tracks[..5]);
-    #[cfg(target_feature = "avx2")]
-    exercise::<Simd8>(&tracks[..8]);
+    // A partial bank (3 of 4 lanes, 5 of 8) and a full one at every vector width.
+    lane::each_vector_lane!(|L, N| {
+        exercise::<L>(&tracks[..N / 2 + 1]);
+        exercise::<L>(&tracks[..N]);
+    });
 }
 
 #[test]
-#[cfg(target_feature = "avx2")]
 fn post_ramp_symmetry_extracts_each_word_once() {
     let parameters = BuiltinParameters::default();
     let track = prepare_sections(48_000, parameters)
@@ -259,13 +250,15 @@ fn post_ramp_symmetry_extracts_each_word_once() {
         .0
         .stage
         .lane_track(0);
-    let mut stage = InputStage::<Simd8>::new(&[track; 8]);
-    for lane in 0..8 {
+    // The build's own width: eight lanes on an 8-lane (AVX2) build, four on a 4-lane one (#1112).
+    const LANES: usize = <lane::Native as super::Lane>::WIDTH;
+    let mut stage = InputStage::<lane::Native>::new(&[track; LANES]);
+    for lane in 0..LANES {
         stage.set_trim_db(lane, BuiltinLaneSelector::Both, 2.0, 8);
     }
     CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
-    let mut left = vec![0.0; 8 * 8];
-    let mut right = vec![0.0; 8 * 8];
+    let mut left = vec![0.0; LANES * 8];
+    let mut right = vec![0.0; LANES * 8];
     stage.process(&mut left, &mut right, 8);
     let extractions = CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get);
     let oracle = (0..stage.members).fold(0_u8, |mask, lane| {
@@ -277,11 +270,11 @@ fn post_ramp_symmetry_extracts_each_word_once() {
         "one extraction per side of each of 39 trim/filter word pairs"
     );
 
-    for lane in 0..8 {
+    for lane in 0..LANES {
         stage.set_trim_db(lane, BuiltinLaneSelector::Both, 3.0, 8);
     }
     CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
-    let mut mono = vec![0.0; 8 * 8];
+    let mut mono = vec![0.0; LANES * 8];
     stage.process_mono(&mut mono, 8);
     let mono_extractions = CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get);
     let mono_oracle = (0..stage.members).fold(0_u8, |mask, lane| {
@@ -292,17 +285,18 @@ fn post_ramp_symmetry_extracts_each_word_once() {
 }
 
 #[test]
-#[cfg(target_feature = "avx2")]
 fn post_ramp_symmetry_helper_is_off_for_settled_blocks() {
     let track = prepare_sections(48_000, BuiltinParameters::default())
         .unwrap()
         .0
         .stage
         .lane_track(0);
-    let mut stage = InputStage::<Simd8>::new(&[track; 8]);
+    // The build's own width (#1112).
+    const LANES: usize = <lane::Native as super::Lane>::WIDTH;
+    let mut stage = InputStage::<lane::Native>::new(&[track; LANES]);
     CHANNEL_SYMMETRY_OBSERVE_POST_RAMP.with(|observe| observe.set(true));
-    let mut left = vec![0.0; 8 * 4];
-    let mut right = vec![0.0; 8 * 4];
+    let mut left = vec![0.0; LANES * 4];
+    let mut right = vec![0.0; LANES * 4];
     stage.process(&mut left, &mut right, 4);
     assert_eq!(
         CHANNEL_SYMMETRY_LAST_POST_RAMP_READS.with(Cell::get),
@@ -348,10 +342,7 @@ fn trim_refresh_preserves_asymmetric_settled_filter_steps() {
             "trim must retain the filter mismatch"
         );
     }
-    check::<f32>();
-    check::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    check::<Simd8>();
+    lane::each_lane!(|L| check::<L>());
 }
 
 #[test]
@@ -584,12 +575,11 @@ fn lane_symmetry_retarget_updates_only_the_addressed_predicate() {
         }};
     }
 
-    check_width!(Simd4, 3, 1, 0);
-    check_width!(Simd4, 4, 1, 0);
-    #[cfg(target_feature = "avx2")]
-    check_width!(Simd8, 5, 1, 0);
-    #[cfg(target_feature = "avx2")]
-    check_width!(Simd8, 8, 1, 0);
+    // A partial bank (3 of 4 lanes, 5 of 8) and a full one at every vector width, then `f32`.
+    lane::each_vector_lane!(|L, N| {
+        check_width!(L, N / 2 + 1, 1, 0);
+        check_width!(L, N, 1, 0);
+    });
     check_width!(f32, 1, 0, 0);
 }
 
@@ -884,7 +874,6 @@ fn prepared_filters_design_only_before_runtime_application() {
 fn settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
     use super::{BuiltinMatrixBank, MATRIX_SELECT_FREE_BLOCKS};
     use effect_contract::BankWidth;
-    use lane::Backend;
 
     const FRAMES: usize = 64;
     /// Ends 24 frames into a 64-frame block, so the block has a settled tail.
@@ -906,13 +895,9 @@ fn settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane() {
         MATRIX_SELECT_FREE_BLOCKS.with(Cell::get)
     }
 
-    // Every bank width this build has: no eight in a 4-lane (NEON/simd128) build.
-    const WIDTHS: &[(Backend, BankWidth)] = &[
-        #[cfg(target_feature = "avx2")]
-        (Backend::Simd8, BankWidth::Eight),
-        (Backend::Simd4, BankWidth::Four),
-    ];
-    for &(backend, width) in WIDTHS {
+    // Widest first, as written before #1112.
+    for &width in BankWidth::ALL.iter().rev() {
+        let backend = width.backend();
         let lanes = width.lanes() as usize;
         let bank = |members: usize, identity_member: Option<usize>| {
             let prepared = (0..members)
@@ -1055,7 +1040,6 @@ fn fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane() 
         BuiltinFaderBank, BuiltinMatrixBank, FUSED_SELECT_FREE_BLOCKS, FaderMuteRampBuiltins,
     };
     use effect_contract::BankWidth;
-    use lane::Backend;
 
     const FRAMES: usize = 64;
     const WINDOW: u32 = 24;
@@ -1076,13 +1060,9 @@ fn fused_fader_matrix_takes_the_select_free_arm_only_without_an_identity_lane() 
         FUSED_SELECT_FREE_BLOCKS.with(Cell::get)
     }
 
-    // Every bank width this build has: no eight in a 4-lane (NEON/simd128) build.
-    const WIDTHS: &[(Backend, BankWidth)] = &[
-        #[cfg(target_feature = "avx2")]
-        (Backend::Simd8, BankWidth::Eight),
-        (Backend::Simd4, BankWidth::Four),
-    ];
-    for &(backend, width) in WIDTHS {
+    // Widest first, as written before #1112.
+    for &width in BankWidth::ALL.iter().rev() {
+        let backend = width.backend();
         let lanes = width.lanes() as usize;
         let banks = |members: usize, identity_member: Option<usize>| {
             let matrices = (0..members)

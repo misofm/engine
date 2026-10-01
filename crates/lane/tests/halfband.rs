@@ -6,9 +6,6 @@
 //! history addresses the right sample at every position, and the three widths agree by bits.
 
 use lane::Lane;
-use lane::Simd4;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 use lane::kernels::halfband::{
     HALFBAND63_CENTER, HALFBAND63_CENTER_SPLIT, HALFBAND63_EVEN, HALFBAND63_EVEN_TAPS,
     HALFBAND63_LIVE_ROWS, HALFBAND63_ROWS, halfband2x_decim_even, halfband2x_interp_even,
@@ -104,12 +101,8 @@ fn interpolation_and_decimation_are_width_independent() {
     let scalar = run::<f32>();
     // The scalar run advances a one-lane ring; comparing widths means comparing the same lane
     // stream, so each width is compared against a scalar run of the same signal.
-    let runs = [
-        (4_usize, run::<Simd4>()),
-        #[cfg(target_feature = "avx2")]
-        (8, run::<Simd8>()),
-    ];
-    for (width, values) in runs {
+    lane::each_vector_lane!(|L, N| {
+        let (width, values) = (N, run::<L>());
         assert_eq!(values.len(), FRAMES * width);
         for index in 0..FRAMES {
             for lane in 0..width {
@@ -134,6 +127,6 @@ fn interpolation_and_decimation_are_width_independent() {
                 assert_eq!(actual[1].to_bits(), decim.to_bits(), "decim {index}/{lane}");
             }
         }
-    }
+    });
     assert_eq!(scalar.len(), FRAMES);
 }

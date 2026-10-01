@@ -1875,9 +1875,6 @@ mod knee_tests {
 
     use super::*;
     use effect_runtime::dynamics::MIN_SOFT_KNEE_DB;
-    use lane::Simd4;
-    #[cfg(target_feature = "avx2")]
-    use lane::Simd8;
 
     /// The compile-time knee words are the ones this crate wrote inline before #994, bit for bit.
     ///
@@ -1952,9 +1949,10 @@ mod knee_tests {
                             "W {knee_bits:#010x} T {threshold:e} R {ratio} x {level:e}: {target} \
                              is a duck at the threshold"
                         );
-                        assert_eq!(scalar, target_bits::<Simd4>(level, threshold, ratio, words));
-                        #[cfg(target_feature = "avx2")]
-                        assert_eq!(scalar, target_bits::<Simd8>(level, threshold, ratio, words));
+                        lane::each_vector_lane!(|L| assert_eq!(
+                            scalar,
+                            target_bits::<L>(level, threshold, ratio, words)
+                        ));
                         if knee <= widest_overflowing {
                             assert_eq!(
                                 scalar,

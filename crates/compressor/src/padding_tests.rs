@@ -2,12 +2,12 @@
 //!
 //! These are unit tests rather than integration tests for two reasons:
 //!
-//! * **Every width the build has.** D4 binds only the build's own width, so the 8-lane (AVX2)
-//!   build never binds a `Simd4` bank through the factory. [`BankParts`] is the factory's own
-//!   validation and construction, minus exactly that one gate, and the bank is driven through the
-//!   production `PreparedNativeEffectBank` trait bodies. So the class-A differential below runs at
-//!   `Simd4` everywhere and at `Simd8` too in the 8-lane build; a 4-lane (NEON/simd128) build has
-//!   no `Simd8` (#1112).
+//! * **Every width the build has.** D4 binds only the build's own width, so the 8-lane (AVX2) build
+//!   never binds a `Simd4` bank through the factory. [`BankParts`] is the factory's own validation
+//!   and construction, minus exactly that one gate, and the bank is driven through the production
+//!   `PreparedNativeEffectBank` trait bodies. So the class-A differential below runs at every
+//!   vector width the build has (`lane::each_vector_lane!`): `Simd4` and `Simd8` in the 8-lane
+//!   build, `Simd4` in a 4-lane (NEON/simd128) build, which has no `Simd8` (#1112).
 //! * **Internal witnesses.** Silent admission is invisible in the bits by design, so gate 3 reads
 //!   the test-only [`SILENT_ADMISSIONS`](super::SILENT_ADMISSIONS) counter; and gate 4 plants an
 //!   envelope word no render can reach.
@@ -22,9 +22,6 @@ use effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, LinkMode, PrepareEffectLimits,
     PreparedPorts, PreparedSidechainPort,
 };
-use lane::Simd4;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 
 const QUANTUM: u32 = 128;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
@@ -90,12 +87,9 @@ fn draw_values(draw: &mut Draw, symmetric: bool) -> Values {
 
 /// The bank width of `L`, with the backend that executes it.
 fn width_of<L: Lane>() -> (Backend, BankWidth) {
-    match L::WIDTH {
-        4 => (Backend::Simd4, BankWidth::Four),
-        #[cfg(target_feature = "avx2")]
-        8 => (Backend::Simd8, BankWidth::Eight),
-        width => panic!("no bank of width {width}"),
-    }
+    let width =
+        BankWidth::for_lanes(L::WIDTH).unwrap_or_else(|| panic!("no bank of width {}", L::WIDTH));
+    (width.backend(), width)
 }
 
 /// The bank `bind_homogeneous_bank` binds for `requests` and `mask` at `L`, whatever this host's
@@ -626,9 +620,7 @@ fn a_padded_bank_renders_each_member_as_its_own_instance() {
          padding_tests::a_padded_bank_renders_each_member_as_its_own_instance",
         21,
         |seed| {
-            padded_differential::<Simd4>(seed, &mut reach);
-            #[cfg(target_feature = "avx2")]
-            padded_differential::<Simd8>(seed, &mut reach);
+            lane::each_vector_lane!(|L| padded_differential::<L>(seed, &mut reach));
         },
     );
     println!(
@@ -738,12 +730,10 @@ fn silent_admission<L: Lane>(mono: bool) {
 /// zeroed request, leave the silent detector level below the knee, so the envelope stays `+0.0`.)
 #[test]
 fn a_silent_padded_bank_takes_the_silent_fast_path() {
-    silent_admission::<Simd4>(false);
-    silent_admission::<Simd4>(true);
-    #[cfg(target_feature = "avx2")]
-    silent_admission::<Simd8>(false);
-    #[cfg(target_feature = "avx2")]
-    silent_admission::<Simd8>(true);
+    lane::each_vector_lane!(|L| {
+        silent_admission::<L>(false);
+        silent_admission::<L>(true);
+    });
 }
 
 /// Writes `value` into one lane of an envelope vector.
@@ -937,7 +927,5 @@ fn planted_state<L: Lane>() {
 /// padded lane reported or left writing NaN, and for a report on the wrong lane or channel.
 #[test]
 fn a_planted_envelope_recovers_its_own_lane_alone() {
-    planted_state::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    planted_state::<Simd8>();
+    lane::each_vector_lane!(|L| planted_state::<L>());
 }

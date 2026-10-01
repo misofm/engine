@@ -135,14 +135,11 @@ fn request(values: &Values, link: LinkMode) -> PrepareEffectRequest<'_> {
 /// than the backend declines, so the loop runs every width that binds instead of returning early
 /// on the other one.
 fn bank_widths() -> Vec<(BankWidth, Backend)> {
-    let widths: Vec<(BankWidth, Backend)> = [
-        (BankWidth::Four, Backend::Simd4),
-        #[cfg(target_feature = "avx2")]
-        (BankWidth::Eight, Backend::Simd8),
-    ]
-    .into_iter()
-    .filter(|(width, _)| width.lanes() as usize <= Backend::current().width())
-    .collect();
+    let widths: Vec<(BankWidth, Backend)> = BankWidth::ALL
+        .iter()
+        .map(|&width| (width, width.backend()))
+        .filter(|(width, _)| width.lanes() as usize <= Backend::current().width())
+        .collect();
     let native = BankWidth::for_backend(Backend::current()).expect("a product target");
     assert!(
         widths.iter().any(|(width, _)| *width == native),

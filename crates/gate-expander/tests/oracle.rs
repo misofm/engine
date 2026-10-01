@@ -27,9 +27,10 @@ use dsp_reference::{
     reference_gate_expander_process,
 };
 use effect_contract::LinkMode;
-use support::{Values, initial_values, prepare, render_scalar, request, set_parameter};
-#[cfg(target_feature = "avx2")]
-use support::{prepare_bank_w8, track_of};
+use support::{
+    NATIVE_LANES, Values, initial_values, native_width, prepare, prepare_bank_native,
+    render_scalar, request, set_parameter, track_of,
+};
 
 const FRAMES: usize = 48_000;
 const THRESHOLD: f32 = -40.0;
@@ -233,27 +234,28 @@ fn oracle_pcm_within_derived_tolerance_scalar() {
     }
 }
 
-#[cfg(target_feature = "avx2")]
+/// At the build's own width: W8 in the 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) build
+/// (#1112).
 #[test]
 fn oracle_pcm_within_derived_tolerance_w8() {
     let (source_left, source_right) = corpus_signals();
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let values = [corpus_values(); 8];
-        let mut bank = prepare_bank_w8(&values, link).expect("an eight-lane build binds W8");
-        let mut left = support::packed_w8(&vec![source_left.clone(); 8]);
-        let mut right = support::packed_w8(&vec![source_right.clone(); 8]);
-        let offsets = [0_u32; 9];
+        let mut bank = prepare_bank_native(&values, link).expect("the build's own width binds");
+        let mut left = support::packed(&vec![source_left.clone(); NATIVE_LANES]);
+        let mut right = support::packed(&vec![source_right.clone(); NATIVE_LANES]);
+        let offsets = [0_u32; NATIVE_LANES + 1];
         let mut start = 0;
         while start < FRAMES {
             let end = (start + 128).min(FRAMES);
             let frames = (end - start) as u32;
             bank.process_bank(
                 effect_contract::EffectBankProcessBlock::new(
-                    &mut left[start * 8..end * 8],
-                    &mut right[start * 8..end * 8],
+                    &mut left[start * NATIVE_LANES..end * NATIVE_LANES],
+                    &mut right[start * NATIVE_LANES..end * NATIVE_LANES],
                     None,
                     frames,
-                    effect_contract::BankWidth::Eight,
+                    native_width(),
                     start as u64,
                     &[],
                     &offsets,
@@ -264,20 +266,20 @@ fn oracle_pcm_within_derived_tolerance_w8() {
             start = end;
         }
         let trace = reference(link, &source_left, &source_right);
-        for track in 0..8 {
+        for track in 0..NATIVE_LANES {
             compare(
-                &track_of(&left, track, 8),
+                &track_of(&left, track, NATIVE_LANES),
                 &trace.gain_db_left,
                 &trace.dry_left,
                 &trace.phase_left,
-                &format!("{link:?} W8 track {track} left"),
+                &format!("{link:?} W{NATIVE_LANES} track {track} left"),
             );
             compare(
-                &track_of(&right, track, 8),
+                &track_of(&right, track, NATIVE_LANES),
                 &trace.gain_db_right,
                 &trace.dry_right,
                 &trace.phase_right,
-                &format!("{link:?} W8 track {track} right"),
+                &format!("{link:?} W{NATIVE_LANES} track {track} right"),
             );
         }
     }

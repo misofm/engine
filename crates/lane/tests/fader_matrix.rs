@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 use lane::{
-    CanonicalFpEnv, Lane, Simd4,
+    CanonicalFpEnv, Lane,
     kernels::builtins::{
         Matrix2x2Coef, fader_matrix_block, fader_matrix_block_without_identity, gain_mute_block,
         mask_from_flags, matrix2x2_block, matrix2x2_block_without_identity, no_lanes,
@@ -126,10 +124,7 @@ fn compare_width<L: Lane>() {
 #[test]
 fn settled_fader_matrix_matches_the_two_primitive_oracle() {
     let _canonical = CanonicalFpEnv::enter();
-    compare_width::<f32>();
-    compare_width::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    compare_width::<Simd8>();
+    lane::each_lane!(|L| compare_width::<L>());
 }
 
 /// Class A as issue #944 states it and #1065 rules it (`dsp_reference::class_a`): equal bits,
@@ -219,10 +214,7 @@ fn select_free_width<L: Lane>() {
 #[test]
 fn select_free_matrix_matches_the_select_form_when_no_lane_is_identity() {
     let _canonical = CanonicalFpEnv::enter();
-    select_free_width::<f32>();
-    select_free_width::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    select_free_width::<Simd8>();
+    lane::each_lane!(|L| select_free_width::<L>());
 }
 
 /// The fused gate's input families: the four hostile families, then overflow.
@@ -428,13 +420,11 @@ fn fused_select_free_width<L: Lane>() -> [usize; 2] {
 #[test]
 fn select_free_fused_fader_matrix_matches_both_oracles_when_no_lane_is_identity() {
     let _canonical = CanonicalFpEnv::enter();
-    let counts = [
-        fused_select_free_width::<f32>(),
-        fused_select_free_width::<Simd4>(),
-        #[cfg(target_feature = "avx2")]
-        fused_select_free_width::<Simd8>(),
-    ];
-    println!("NaN-payload differences [oracle A, oracle B] at [f32, Simd4, Simd8]: {counts:?}");
+    let mut counts = Vec::new();
+    lane::each_lane!(|L| counts.push(fused_select_free_width::<L>()));
+    println!(
+        "NaN-payload differences [oracle A, oracle B] at each width, narrowest first: {counts:?}"
+    );
 }
 
 fn compare_holey_population<L: Lane>() {
@@ -514,9 +504,7 @@ fn compare_holey_population<L: Lane>() {
 #[test]
 fn holey_populations_keep_neutral_wide_padding() {
     let _canonical = CanonicalFpEnv::enter();
-    compare_holey_population::<Simd4>();
-    #[cfg(target_feature = "avx2")]
-    compare_holey_population::<Simd8>();
+    lane::each_vector_lane!(|L| compare_holey_population::<L>());
 }
 
 fn run_scalar(

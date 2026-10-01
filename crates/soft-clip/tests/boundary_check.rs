@@ -99,8 +99,6 @@ fn a_finite_but_out_of_range_block_also_fails() {
 /// failing lane keeps any history.
 #[test]
 fn a_bank_block_fails_and_recovers_the_failing_lane_alone() {
-    // The build's own width: eight in the 8-lane (AVX2) build, four in a 4-lane (NEON/simd128)
-    // build (#1112).
     let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = initial_values();

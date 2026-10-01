@@ -1682,9 +1682,6 @@ std::thread_local! {
 #[cfg(test)]
 mod mixed_elision_tests {
     use super::*;
-    use crate::Simd4;
-    #[cfg(target_feature = "avx2")]
-    use crate::Simd8;
 
     fn check<L: Lane>() {
         let zero = L::zero();
@@ -1723,10 +1720,7 @@ mod mixed_elision_tests {
 
     #[test]
     fn mixed_elision_selects_once_per_channel_independent_of_frames() {
-        check::<f32>();
-        check::<Simd4>();
-        #[cfg(target_feature = "avx2")]
-        check::<Simd8>();
+        crate::each_lane!(|L| check::<L>());
     }
 
     #[test]

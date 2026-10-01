@@ -93,21 +93,13 @@ pub fn process(
 
 /// The backend token a bank of `width` lanes is requested with on this host.
 pub fn backend(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        #[cfg(target_feature = "avx2")]
-        BankWidth::Eight => Backend::Simd8,
-    }
+    width.backend()
 }
 
-/// `true` if this artifact runs banks of `width` lanes natively: four in a 4-lane (NEON/simd128)
-/// build, eight in the 8-lane (AVX2) build, the only build that has `Eight` (#1112).
+/// `true` if this artifact runs banks of `width` lanes natively: the width `Backend::current()`
+/// selects (#1112).
 pub fn bank_available(width: BankWidth) -> bool {
-    match width {
-        BankWidth::Four => cfg!(any(target_feature = "neon", target_feature = "simd128")),
-        #[cfg(target_feature = "avx2")]
-        BankWidth::Eight => true,
-    }
+    BankWidth::for_backend(Backend::current()) == Some(width)
 }
 
 /// A prepared bank whose lanes all carry `values`, or `None` where the host has no such width.

@@ -75,7 +75,7 @@ pub const FRAMES: usize = 1024;
 /// Two in the 4-lane (NEON/simd128) builds, the browser's and the phones', which have no eight-lane
 /// type (issues #1110 and #1112): they run four lanes only, so their legs check `Simd4` against the
 /// scalar oracle, and the 8-lane build checks all three.
-pub const WIDTHS: usize = if cfg!(target_feature = "avx2") { 3 } else { 2 };
+pub const WIDTHS: usize = 1 + lane::Backend::VECTOR.len();
 
 /// Evaluates `$body` with `$lane` naming the lane type of width index `$width` (see [`WIDTHS`]):
 /// this corpus's one dispatch from a width index to a lane type, and the one place it names the

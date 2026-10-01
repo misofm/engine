@@ -12,27 +12,20 @@
 //! * gate 4: a non-finite lane recovers and is charged alone, and a tripping lane (the wet path of
 //!   a bypassed track, which the rack's `BypassShunt` later discards) leaves its bank-mates' bits.
 //!
-//! (Gate 2 is the gate/expander's.) Every test runs at every bank width the build has. The build's
-//! native width binds through the public `bind_homogeneous_bank`; the other width binds through
-//! `bind_bank::<false>`, the same code without the D4 width check. So the four-lane bank runs in
-//! the 8-lane (AVX2) build as well; a 4-lane (NEON/simd128) build has no eight-lane bank to bind
-//! (#1112).
+//! (Gate 2 is the gate/expander's.) Every test runs at every bank width the build has
+//! (`BankWidth::ALL`). The build's native width binds through the public `bind_homogeneous_bank`;
+//! the other width binds through `bind_bank::<false>`, the same code without the D4 width check.
+//! So the four-lane bank runs in the 8-lane (AVX2) build as well as in a 4-lane (NEON/simd128)
+//! one, which has no eight-lane bank (#1112).
 //!
 //! NaNs fold to one word before any comparison (decision 10).
 
 use super::*;
 use effect_contract::BankWidth;
 use effect_contract::{PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
-use lane::Simd4;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 
 const QUANTUM: u32 = 128;
-const WIDTHS: &[BankWidth] = &[
-    BankWidth::Four,
-    #[cfg(target_feature = "avx2")]
-    BankWidth::Eight,
-];
+const WIDTHS: &[BankWidth] = BankWidth::ALL;
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const LINKS: [LinkMode; 3] = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
 
@@ -78,11 +71,7 @@ fn native(width: BankWidth) -> bool {
 }
 
 fn backend(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        #[cfg(target_feature = "avx2")]
-        BankWidth::Eight => Backend::Simd8,
-    }
+    width.backend()
 }
 
 /// Binds through the public factory at the native width, and through `bind_bank` otherwise.
@@ -601,12 +590,7 @@ fn every_padded_bank_renders_its_members_per_node_bits() {
             }
         }
     }
-    // Three padded counts at four lanes, and seven more at eight in the 8-lane (AVX2) build.
-    let padded_counts = if cfg!(target_feature = "avx2") {
-        3 + 7
-    } else {
-        3
-    };
+    let padded_counts: usize = WIDTHS.iter().map(|width| width.lanes() as usize - 1).sum();
     assert_eq!(cases, padded_counts * LINKS.len());
 }
 
@@ -941,9 +925,9 @@ fn planted_nonfinite_state<L: Lane, const W: usize>(width: BankWidth) {
 
 #[test]
 fn a_planted_nonfinite_state_recovers_and_is_charged_to_its_lane_alone() {
-    planted_nonfinite_state::<Simd4, 4>(BankWidth::Four);
-    #[cfg(target_feature = "avx2")]
-    planted_nonfinite_state::<Simd8, 8>(BankWidth::Eight);
+    lane::each_vector_lane!(|L, N| planted_nonfinite_state::<L, N>(
+        BankWidth::for_lanes(N).expect("a bank width")
+    ));
 }
 
 /// Gate 4's bypassed lane: a lane fed a tripping value leaves every bank-mate's bits.
@@ -1004,7 +988,5 @@ fn a_tripping_lane_leaves_every_bank_mates_bits() {
             }
         }
     }
-    at::<Simd4, 4>(BankWidth::Four);
-    #[cfg(target_feature = "avx2")]
-    at::<Simd8, 8>(BankWidth::Eight);
+    lane::each_vector_lane!(|L, N| at::<L, N>(BankWidth::for_lanes(N).expect("a bank width")));
 }

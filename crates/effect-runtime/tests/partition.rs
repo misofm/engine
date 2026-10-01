@@ -13,8 +13,6 @@
 use effect_runtime::dynamics::{GainComputerCoef, gain_delta_db, gain_from_db, level_db};
 use effect_runtime::envelope::{peak_follow, retention_coefficient};
 use effect_runtime::ramp::LinearRamp;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 use lane::kernels::RampSegment;
 use lane::{Lane, Simd4, flush};
 
@@ -135,10 +133,11 @@ fn the_composition_is_partition_invariant_at_width_four() {
     assert_partition_invariant::<Simd4>("W=4");
 }
 
+/// The 8-lane (AVX2) twin of `the_composition_is_partition_invariant_at_width_four` (#1112).
 #[cfg(target_feature = "avx2")]
 #[test]
 fn the_composition_is_partition_invariant_at_width_eight() {
-    assert_partition_invariant::<Simd8>("W=8");
+    assert_partition_invariant::<lane::Simd8>("W=8");
 }
 
 /// The whole composition is also width-independent: lane 0 of every width sees the same samples,
@@ -146,20 +145,14 @@ fn the_composition_is_partition_invariant_at_width_eight() {
 #[test]
 fn the_composition_is_width_independent() {
     let (scalar, _) = render::<f32>(64);
-    let (four, _) = render::<Simd4>(64);
-    #[cfg(target_feature = "avx2")]
-    let (eight, _) = render::<Simd8>(64);
-    for frame in 0..FRAMES {
-        assert_eq!(
-            scalar[frame].to_bits(),
-            four[frame * 4].to_bits(),
-            "frame {frame}: W=1 vs W=4 lane 0"
-        );
-        #[cfg(target_feature = "avx2")]
-        assert_eq!(
-            scalar[frame].to_bits(),
-            eight[frame * 8].to_bits(),
-            "frame {frame}: W=1 vs W=8 lane 0"
-        );
-    }
+    lane::each_vector_lane!(|L, N| {
+        let (vector, _) = render::<L>(64);
+        for frame in 0..FRAMES {
+            assert_eq!(
+                scalar[frame].to_bits(),
+                vector[frame * N].to_bits(),
+                "frame {frame}: W=1 vs W={N} lane 0"
+            );
+        }
+    });
 }

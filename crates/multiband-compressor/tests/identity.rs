@@ -14,8 +14,7 @@ use effect_contract::{
 };
 use multiband_compressor::MultibandCompressorFactory;
 use support::{
-    BANK_WIDTHS, PARAMETER_COUNT, point, process, request_with, restore, snapshot, snapshot_track,
-    varied_values,
+    PARAMETER_COUNT, point, process, request_with, restore, snapshot, snapshot_track, varied_values,
 };
 
 /// Twelve blocks of 128 frames over eight tracks, with a threshold point on track 0 at block 0.
@@ -327,7 +326,7 @@ fn run_scalar(
 fn lane_identity_across_widths() {
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         let (scalar_pcm, scalar_state, scalar_reports) = run_scalar(link);
-        for &width in BANK_WIDTHS {
+        for &width in BankWidth::ALL {
             let (bank_pcm, bank_state, bank_reports) = run_banks(width, link);
             for channel in 0..TRACKS * 2 {
                 for frame in 0..BLOCKS * FRAMES {
@@ -357,7 +356,7 @@ fn heterogeneous_programs_preserve_public_identity() {
         let (scalar_pcm, scalar_state, scalar_reports) =
             run_scalar_with_sets(link, &sets, &automation);
         assert_populated("scalar programs", &scalar_pcm, &scalar_state);
-        for &width in BANK_WIDTHS {
+        for &width in BankWidth::ALL {
             let (bank_pcm, bank_state, bank_reports) =
                 run_banks_with_sets(width, link, &sets, &automation);
             assert_populated("bank programs", &bank_pcm, &bank_state);
@@ -643,7 +642,7 @@ fn restored_programs_continue_across_scalar_and_bank() {
     for (source, destination) in [(0, 1), (1, 0)] {
         for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
             assert_scalar_restore_transition(source, destination, link);
-            for &width in BANK_WIDTHS {
+            for &width in BankWidth::ALL {
                 assert_bank_restore_transition(source, destination, link, width);
             }
         }
@@ -779,7 +778,7 @@ fn scalar_and_bank_state_interchange_continues() {
 /// A restored different-crossover bank returns to the receiver's prepared defaults on full reset.
 #[test]
 fn bank_full_reset_restores_different_crossover_defaults() {
-    for &width in BANK_WIDTHS {
+    for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
         let mut source_sets = (0..lanes).map(varied_values).collect::<Vec<_>>();
         for (track, values) in source_sets.iter_mut().enumerate() {
@@ -1075,20 +1074,21 @@ fn partition_invariance() {
     }
 }
 
-/// Both resets bring a bank and the scalar product to the same state, from the same history. The
-/// bank is the 8-lane (AVX2) width, so only that build runs it.
-#[cfg(target_feature = "avx2")]
+/// Both resets bring a bank and the scalar product to the same state, from the same history, at
+/// the build's own bank width (issue #1112).
 #[test]
 fn resets_agree_across_widths() {
-    let sets = (0..TRACKS).map(varied_values).collect::<Vec<_>>();
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector backend");
+    let tracks = width.lanes() as usize;
+    let sets = (0..tracks).map(varied_values).collect::<Vec<_>>();
     for kind in [
         ResetKind::DiscontinuityKeepParameters,
         ResetKind::FullToDefaults,
     ] {
-        let requests = (0..TRACKS)
+        let requests = (0..tracks)
             .map(|track| request_with(&sets[track], LinkMode::DualMono, FRAMES as u32, false))
             .collect::<Vec<_>>();
-        let mut bank = support::bank(BankWidth::Eight, &requests);
+        let mut bank = support::bank(width, &requests);
         let mut scalars = requests
             .iter()
             .map(|request| {
@@ -1098,13 +1098,13 @@ fn resets_agree_across_widths() {
             })
             .collect::<Vec<_>>();
         let sizes = scalars[0].metadata().state_sizes;
-        let mut bank_left = vec![0.0f32; FRAMES * TRACKS];
-        let mut bank_right = vec![0.0f32; FRAMES * TRACKS];
-        for track in 0..TRACKS {
+        let mut bank_left = vec![0.0f32; FRAMES * tracks];
+        let mut bank_right = vec![0.0f32; FRAMES * tracks];
+        for track in 0..tracks {
             let (left, right) = track_signal(track);
             for frame in 0..FRAMES {
-                bank_left[frame * TRACKS + track] = left[frame];
-                bank_right[frame * TRACKS + track] = right[frame];
+                bank_left[frame * tracks + track] = left[frame];
+                bank_right[frame * tracks + track] = right[frame];
             }
             let mut scalar_left = left[..FRAMES].to_vec();
             let mut scalar_right = right[..FRAMES].to_vec();
@@ -1123,10 +1123,10 @@ fn resets_agree_across_widths() {
                 &mut bank_right,
                 None,
                 FRAMES as u32,
-                BankWidth::Eight,
+                width,
                 0,
                 &[],
-                &[0u32; TRACKS + 1],
+                &vec![0u32; tracks + 1],
                 FRAMES as u32,
             )
             .expect("bank block"),

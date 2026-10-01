@@ -276,14 +276,6 @@ mod tests {
         Backend::current()
     }
 
-    /// The vector backends this build has: `Simd4`, and `Simd8` where `avx2` is enabled. A 4-lane
-    /// (NEON/simd128) build has no eight-lane width (issue #1112).
-    const VECTOR_BACKENDS: &[Backend] = &[
-        Backend::Simd4,
-        #[cfg(target_feature = "avx2")]
-        Backend::Simd8,
-    ];
-
     fn indexed_effect_ids(
         prepared: &EffectPreparedSession,
     ) -> (PreparedEffectIndex<'_>, Vec<Option<EffectNodeId>>) {
@@ -3446,12 +3438,13 @@ mod tests {
             None,
             "a populated scalar selection cannot describe bank slots"
         );
-        for (n, width) in [
-            (1, effect_contract::BankWidth::Four),
-            (3, effect_contract::BankWidth::Four),
-            #[cfg(target_feature = "avx2")]
-            (3, effect_contract::BankWidth::Eight),
-        ] {
+        let three_per_width = effect_contract::BankWidth::ALL
+            .iter()
+            .map(|&width| (3, width));
+        for (n, width) in [(1, effect_contract::BankWidth::Four)]
+            .into_iter()
+            .chain(three_per_width)
+        {
             let (total, largest) = literal(n, width);
             let resource = graph::GraphBankSlotResourceEstimate::checked_for(n, Some(width))
                 .expect("checked reservation");
@@ -5219,7 +5212,7 @@ mod tests {
         // Host dispatch is deliberately detected only while preparing the normal artifact above.
         // These direct, off-render binding probes exercise every legal factory width the build
         // has (four, and eight where `avx2` is enabled) without executing a runtime at either.
-        for &dispatch in VECTOR_BACKENDS {
+        for &dispatch in Backend::VECTOR {
             let rebound = prepare_native_session_effects(
                 &session,
                 &registry,
@@ -9793,7 +9786,7 @@ mod tests {
         // happens at.
         let mut compiled = Vec::new();
         let mut refused = Vec::new();
-        for &dispatch in VECTOR_BACKENDS.iter().rev() {
+        for &dispatch in Backend::VECTOR.iter().rev() {
             let (registry, _, bound) = erroring_compressor_registry(None);
             match try_compile_console_model_at(&session(dispatch), 2_092, &[], dispatch, &registry)
             {

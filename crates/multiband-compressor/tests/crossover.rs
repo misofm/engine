@@ -165,8 +165,5 @@ fn the_recursive_words_are_flushed() {
             }
         }
     }
-    check::<f32>();
-    check::<lane::Simd4>();
-    #[cfg(target_feature = "avx2")]
-    check::<lane::Simd8>();
+    lane::each_lane!(|L| check::<L>());
 }

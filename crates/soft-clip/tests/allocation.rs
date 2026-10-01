@@ -141,8 +141,6 @@ fn the_scalar_render_path_never_allocates() {
 
 #[test]
 fn the_bank_render_path_never_allocates() {
-    // The build's own width: eight in the 8-lane (AVX2) build, four in a 4-lane (NEON/simd128)
-    // build (#1112).
     let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
     let lanes = width.lanes() as usize;
     let values = initial_values();

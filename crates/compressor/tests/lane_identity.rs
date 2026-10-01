@@ -5,9 +5,9 @@
 //!
 //! * the **production** half compares a bound bank against `W` separately prepared scalar
 //!   instances, sample by sample, plus their per-track payload bytes and their reports;
-//! * the **width** half runs the frozen corpus through the same kernel at `W = 1`, 4 and, in the
-//!   8-lane (AVX2) build, 8, and compares the result words, which covers the widths a given host
-//!   cannot bind.
+//! * the **width** half runs the frozen corpus through the same kernel at `W = 1` and every vector
+//!   width the build has (`lane::each_vector_lane!`: 4, and 8 in the 8-lane (AVX2) build) and
+//!   compares the result words, which covers the widths a given host cannot bind.
 //!
 //! The tracks are deliberately heterogeneous — different threshold, ratio, knee and mix
 //! — because a bank that used lane 0's coefficients for every lane would pass a homogeneous test.
@@ -16,10 +16,6 @@ mod support;
 
 use compressor::corpus::{CASE_NAMES, POINTS, run_case};
 use effect_contract::{AutomationSpanKind, ParameterChannel, PreparedAutomationSpan};
-use lane::Simd4;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
-
 use support::{
     bind_bank, native_bank_width, noise, prepare, render_bank, render_scalar, request_with_quantum,
     snapshot, snapshot_track, values_with,
@@ -169,7 +165,8 @@ fn bank_matches_scalar_per_lane_bits() {
     }
 }
 
-/// The one kernel body produces identical result words at `W = 1`, 4 and (8-lane (AVX2) build) 8.
+/// The one kernel body produces identical result words at `W = 1` and every vector width the build
+/// has: 4, and 8 in the 8-lane (AVX2) build (#1112).
 ///
 /// Run over the frozen corpus of `tests/cross_target.rs`, so this is the same computation the wasm
 /// leg replays; the difference is that this test compares the three widths to *each other* rather
@@ -178,25 +175,16 @@ fn bank_matches_scalar_per_lane_bits() {
 fn every_width_produces_the_same_words() {
     for (case, name) in CASE_NAMES.iter().enumerate() {
         let mut scalar = vec![0_u32; POINTS];
-        let mut wide4 = vec![0_u32; POINTS];
         run_case::<f32>(case, &mut scalar);
-        run_case::<Simd4>(case, &mut wide4);
-        let widths = [
-            (4, wide4),
-            #[cfg(target_feature = "avx2")]
-            (8, {
-                let mut wide8 = vec![0_u32; POINTS];
-                run_case::<Simd8>(case, &mut wide8);
-                wide8
-            }),
-        ];
-        for (width, words) in &widths {
-            for (index, (one, word)) in scalar.iter().zip(words).enumerate() {
+        lane::each_vector_lane!(|L, N| {
+            let mut wide = vec![0_u32; POINTS];
+            run_case::<L>(case, &mut wide);
+            for (index, (one, word)) in scalar.iter().zip(&wide).enumerate() {
                 assert_eq!(
                     word, one,
-                    "{name}: word {index} differs between W1 and W{width}"
+                    "{name}: word {index} differs between W1 and W{N}"
                 );
             }
-        }
+        });
     }
 }

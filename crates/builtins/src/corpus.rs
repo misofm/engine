@@ -498,7 +498,6 @@ mod elision_tests {
     use super::*;
     use core::cell::Cell;
     use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
-    use lane::Simd4;
     use sha2::{Digest, Sha256};
 
     fn digest(values: &[f32]) -> [u8; 32] {
@@ -727,10 +726,7 @@ mod elision_tests {
     #[test]
     fn appended_cases_execute_identity_and_mixed_dispatch_with_full_controls() {
         for case in 8..10 {
-            dispatch_at::<f32>(case);
-            dispatch_at::<Simd4>(case);
-            #[cfg(target_feature = "avx2")]
-            dispatch_at::<lane::Simd8>(case);
+            lane::each_lane!(|L| dispatch_at::<L>(case));
         }
     }
 }

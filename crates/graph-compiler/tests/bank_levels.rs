@@ -25,9 +25,9 @@
 //! A console slot never renders per node on a vector backend (#1098), and a build's factories
 //! bind only the widths it executes (D4): an 8-lane (AVX2) build binds four-lane banks for the
 //! limiter and the multiband only, and a 4-lane (NEON/simd128) build has no eight-lane width at all
-//! (#1112). So a session whose console this build cannot bank at a width is refused there with
-//! `console.slot.unbanked`, and that width's plan is asserted by the build that runs it:
-//! [`compiled_at`].
+//! (#1112). So a session
+//! whose console this build cannot bank at a width is refused there with `console.slot.unbanked`,
+//! and that width's plan is asserted by the build that runs it: [`compiled_at`].
 //!
 //! Scope: the claim is that bind never refuses a compiled plan for a cross-level *effect* bank.
 //! Builtin banks are pooled by each node's own level, so they cannot form one.
@@ -66,22 +66,13 @@ const MONO: &str = include_str!("../../../fixtures/session/v1/console-sixty-four
 /// folded them into each track's inserts (placement invariance, #163, keeps the bits).
 const REDUCED_MONO: &str = include_str!("data/reduced-nobus-from-970-verify.json");
 
-/// Every width this build compiles for: the scalar oracle, then [`VECTOR_WIDTHS`].
-pub const WIDTHS: [Backend; 1 + VECTOR_WIDTHS.len()] = [
-    Backend::Scalar,
-    Backend::Simd4,
-    #[cfg(target_feature = "avx2")]
-    Backend::Simd8,
-];
-
-/// The vector widths this build compiles for, in [`WIDTHS`] order: the 4-lane (NEON/simd128)
-/// width, and the 8-lane (AVX2) width where `avx2` is enabled. A 4-lane build has no eight-lane
-/// width (issue #1112).
-pub const VECTOR_WIDTHS: [Backend; if cfg!(target_feature = "avx2") { 2 } else { 1 }] = [
-    Backend::Simd4,
-    #[cfg(target_feature = "avx2")]
-    Backend::Simd8,
-];
+/// Every width this build compiles for: the scalar oracle, then [`Backend::VECTOR`] -- the browser
+/// and mobile width, and the 8-lane (AVX2) native width where `avx2` is enabled (#1112).
+fn widths() -> Vec<Backend> {
+    std::iter::once(Backend::Scalar)
+        .chain(Backend::VECTOR.iter().copied())
+        .collect()
+}
 
 /// The blocks a render compares, unless its plan's output arrives too late to leave
 /// [`AUDIBLE_BLOCKS`] of them.
@@ -951,14 +942,17 @@ fn compiled_at(name: &str, dispatch: Backend, outcome: &Outcome) -> bool {
 
 /// Compile, bind and render `model` at every width, unarmed and armed, and require the scalar
 /// plan's bits everywhere a plan compiled ([`compiled_at`]). Returns the unarmed outcomes in
-/// `WIDTHS` order, and the armed ones in `VECTOR_WIDTHS` order.
+/// [`widths`] order, and the armed ones in [`Backend::VECTOR`] order.
 fn assert_binds_and_renders_the_scalar_bits(
     name: &str,
     model: &SessionModel,
-) -> ([Outcome; WIDTHS.len()], [Outcome; VECTOR_WIDTHS.len()]) {
-    let outcomes =
-        WIDTHS.map(|dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Unarmed));
-    for (dispatch, outcome) in WIDTHS.iter().zip(&outcomes) {
+) -> (Vec<Outcome>, Vec<Outcome>) {
+    let widths = widths();
+    let outcomes: Vec<Outcome> = widths
+        .iter()
+        .map(|&dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Unarmed))
+        .collect();
+    for (dispatch, outcome) in widths.iter().zip(&outcomes) {
         if !compiled_at(name, *dispatch, outcome) {
             continue;
         }
@@ -972,9 +966,11 @@ fn assert_binds_and_renders_the_scalar_bits(
             "{name} at {dispatch:?}: banking moved a rendered bit"
         );
     }
-    let armed =
-        VECTOR_WIDTHS.map(|dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Armed));
-    for (dispatch, armed) in VECTOR_WIDTHS.iter().zip(&armed) {
+    let armed: Vec<Outcome> = Backend::VECTOR
+        .iter()
+        .map(|&dispatch| compile_bind_render(model, dispatch, BLOCKS, Collapse::Armed))
+        .collect();
+    for (dispatch, armed) in Backend::VECTOR.iter().zip(&armed) {
         if !compiled_at(name, *dispatch, armed) {
             continue;
         }
@@ -993,10 +989,9 @@ fn assert_binds_and_renders_the_scalar_bits(
 
 /// The planned misaligned slots at `[Simd4, Simd8]`. They are a property of the plan, not of this
 /// build's factories, so each width is asserted on every host that compiles it: always the build's
-/// own, and a foreign one unless its console cannot bank there ([`compiled_at`]). A 4-lane build
-/// has no eight-lane width to compile at (issue #1112).
-fn misaligned_slots(name: &str, outcomes: &[Outcome; WIDTHS.len()], expected: [usize; 2]) {
-    for (vector, &dispatch) in VECTOR_WIDTHS.iter().enumerate() {
+/// own, and a foreign one unless its console cannot bank there ([`compiled_at`]).
+fn misaligned_slots(name: &str, outcomes: &[Outcome], expected: [usize; 2]) {
+    for (vector, &dispatch) in Backend::VECTOR.iter().enumerate() {
         let (index, expected) = (vector + 1, expected[vector]);
         if compiled_at(name, dispatch, &outcomes[index]) {
             assert_eq!(
@@ -1009,13 +1004,8 @@ fn misaligned_slots(name: &str, outcomes: &[Outcome; WIDTHS.len()], expected: [u
 
 /// The ragged lanes of each misaligned slot at `[Simd4, Simd8]`: a property of the plan, so each
 /// width is asserted on every host that compiles it ([`compiled_at`]).
-fn ragged_lanes(
-    name: &str,
-    outcomes: &[Outcome; WIDTHS.len()],
-    simd4: &[&[usize]],
-    simd8: &[&[usize]],
-) {
-    for (vector, &dispatch) in VECTOR_WIDTHS.iter().enumerate() {
+fn ragged_lanes(name: &str, outcomes: &[Outcome], simd4: &[&[usize]], simd8: &[&[usize]]) {
+    for (vector, &dispatch) in Backend::VECTOR.iter().enumerate() {
         let (index, expected) = (vector + 1, [simd4, simd8][vector]);
         if compiled_at(name, dispatch, &outcomes[index]) {
             let expected: Vec<Vec<usize>> = expected.iter().map(|lanes| lanes.to_vec()).collect();
@@ -1025,6 +1015,14 @@ fn ragged_lanes(
             );
         }
     }
+}
+
+/// The position of this build's own width in [`Backend::VECTOR`].
+fn native_index() -> usize {
+    Backend::VECTOR
+        .iter()
+        .position(|&dispatch| dispatch == Backend::current())
+        .expect("the build's own width is a vector width")
 }
 
 /// Effect banks the plan binds at this build's own width, where every launch factory in these
@@ -1039,11 +1037,8 @@ fn ragged_lanes(
 /// partial. The standard console less some EQs splits its `post_insert` limiter by level (H2): the
 /// tracks without an EQ reach it a level early, so their limiters form their own group, and both
 /// that group and the other tracks' remainder bind padded.
-fn native_bank_count(name: &str, outcomes: &[Outcome; WIDTHS.len()], simd4: usize, simd8: usize) {
-    let vector = VECTOR_WIDTHS
-        .iter()
-        .position(|&dispatch| dispatch == Backend::current())
-        .expect("the build's own width is a vector width");
+fn native_bank_count(name: &str, outcomes: &[Outcome], simd4: usize, simd8: usize) {
+    let vector = native_index();
     let (index, expected) = (vector + 1, [simd4, simd8][vector]);
     assert_eq!(
         outcomes[index].effect_banks,
@@ -1126,12 +1121,7 @@ fn the_mono_console_less_one_eq_binds_and_collapses_at_every_width() {
         assert_binds_and_renders_the_scalar_bits(name, &mono_console_less_eqs(&[0]));
     misaligned_slots(name, &outcomes, [1, 1]);
     native_bank_count(name, &outcomes, 47, 23);
-    let native = match Backend::current() {
-        Backend::Simd4 => &armed[0],
-        #[cfg(target_feature = "avx2")]
-        Backend::Simd8 => &armed[1],
-        Backend::Scalar => return,
-    };
+    let native = &armed[native_index()];
     assert!(
         native.collapse[0] > 0,
         "{name}: the armed collapse fired at {:?}: {:?}",
@@ -1210,13 +1200,13 @@ fn env_u64(name: &str, default: u64) -> u64 {
 struct SeedReport {
     shape: Option<Shape>,
     compile_refused: u64,
-    /// Widths, in `WIDTHS` order, at which the compile was refused because this build cannot bank
+    /// Widths, in [`widths`] order, at which the compile was refused because this build cannot bank
     /// the session's console there ([`FOREIGN_CONSOLE_REFUSAL`]): expected, and tallied apart.
-    foreign_refused: [bool; WIDTHS.len()],
+    foreign_refused: [bool; 3],
     /// The plan's output latency in samples: each render runs at least [`AUDIBLE_BLOCKS`] past it.
     latency: u64,
-    /// Seeds with a misaligned planned slot, per `WIDTHS` entry.
-    misaligned: [bool; WIDTHS.len()],
+    /// Seeds with a misaligned planned slot, per [`widths`] entry (the third only with `avx2`).
+    misaligned: [bool; 3],
     refused: Vec<(Backend, &'static str)>,
     rendered: bool,
     silent: bool,
@@ -1230,7 +1220,7 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
         shape: Some(shape),
         ..SeedReport::default()
     };
-    for (index, dispatch) in WIDTHS.into_iter().enumerate() {
+    for (index, dispatch) in widths().into_iter().enumerate() {
         let outcome = compile_bind_render(&model, dispatch, 0, Collapse::Unarmed);
         match outcome.compile.as_deref() {
             None => {}
@@ -1263,7 +1253,7 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
         .tracks
         .iter()
         .any(|track| track.left_source_channel == track.right_source_channel);
-    for dispatch in VECTOR_WIDTHS {
+    for &dispatch in Backend::VECTOR {
         for collapse in [Collapse::Unarmed, Collapse::Armed] {
             if collapse == Collapse::Armed && !armable {
                 continue;
@@ -1331,8 +1321,8 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     let mut moved = Vec::new();
     let mut silent = Vec::new();
     let mut compile_refused = 0;
-    let mut foreign_refused = [0_u64; WIDTHS.len()];
-    let mut misaligned = [0_u64; WIDTHS.len()];
+    let mut foreign_refused = [0_u64; 3];
+    let mut misaligned = [0_u64; 3];
     let mut rendered = 0_u64;
     let mut collapsed = 0_u64;
     let mut latency = 0_u64;
@@ -1369,10 +1359,11 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
         tally[0] += 1;
         tally[1] += u64::from(report.misaligned.contains(&true));
     }
+    let widths = widths();
     eprintln!(
         "seeds {start}..{}: compile refusals {compile_refused}, console refusals at a foreign \
-         width {WIDTHS:?} {foreign_refused:?}, seeds with a misaligned slot \
-         {WIDTHS:?} {misaligned:?}, rendered {rendered}, of which the armed collapse \
+         width {widths:?} {foreign_refused:?}, seeds with a misaligned slot \
+         {widths:?} {misaligned:?}, rendered {rendered}, of which the armed collapse \
          fired in {collapsed}, longest output latency {latency} samples, [seeds, seeds with a \
          misaligned slot] by shape {by_shape:?}",
         start + count
@@ -1391,7 +1382,7 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
         "the generator emits sessions compile accepts"
     );
     assert!(
-        misaligned[1..].iter().all(|&seeds| seeds > 0),
+        misaligned[1..widths.len()].iter().all(|&seeds| seeds > 0),
         "the probe reaches a misaligned cohort slot at every SIMD width: {misaligned:?}"
     );
     assert!(

@@ -32,14 +32,14 @@ fn native_bank() -> Option<(BankWidth, Backend)> {
     BankWidth::for_backend(backend).map(|width| (width, backend))
 }
 
-/// A backend this build cannot execute, for the declining path. Only the 8-lane (AVX2) build has a
-/// second width to decline.
-#[cfg(target_feature = "avx2")]
-fn foreign_bank() -> (BankWidth, Backend) {
-    match native_bank() {
-        Some((BankWidth::Eight, _)) => (BankWidth::Four, Backend::Simd4),
-        _ => (BankWidth::Eight, Backend::Simd8),
-    }
+/// Every bank width this build has but does not execute, for the declining path: `Four` in the
+/// 8-lane (AVX2) build, none in a 4-lane (NEON/simd128) build, which has one width (issue #1112).
+fn foreign_widths() -> impl Iterator<Item = BankWidth> {
+    let native = native_bank().map(|(width, _)| width);
+    BankWidth::ALL
+        .iter()
+        .copied()
+        .filter(move |&width| Some(width) != native)
 }
 
 fn hpf_target() -> PreparedEffectTarget {
@@ -440,9 +440,7 @@ fn bank_rendering_is_partition_invariant() {
 /// Before #95 this crate answered `Ok(None)` to all three, which was the half of the wave-2
 /// divergence that hid planner bugs; every other effect answered `effect.bank.requests` to the
 /// first two. Red mutation: replace `request.validate_shape()?` in `bind_homogeneous_bank` with
-/// the old combined `return Ok(None)` and the two `Err` cases below fail. Its shapes name the
-/// 8-lane (AVX2) width, so only that build runs it.
-#[cfg(target_feature = "avx2")]
+/// the old combined `return Ok(None)` and the two `Err` cases below fail.
 #[test]
 fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
     let factory = ParametricEqFactory;
@@ -450,11 +448,18 @@ fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
     let request = request(&values, false);
 
     // A backend and a width that disagree about the lane count, and a member count that does not
-    // match the declared width: both contradict the request's own fields.
-    for (width, backend, count) in [
-        (BankWidth::Four, Backend::Simd8, 4),
-        (BankWidth::Eight, Backend::Simd8, 4),
-    ] {
+    // match the declared width: both contradict the request's own fields. In the 8-lane (AVX2)
+    // build these are `(Four, Simd8, 4)` and `(Eight, Simd8, 4)`; a 4-lane (NEON/simd128) build has
+    // no second width, so it checks the member count alone (issue #1112).
+    let (native_width, native_backend) = native_bank().expect("a product target");
+    for (width, backend, count) in foreign_widths()
+        .map(|width| (width, native_backend, width.lanes() as usize))
+        .chain([(
+            native_width,
+            native_backend,
+            native_width.lanes() as usize / 2,
+        )])
+    {
         let requests = vec![request; count];
         assert_eq!(
             factory
@@ -473,20 +478,22 @@ fn bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width() {
 
     // A width this artifact was not built for is a capability gap: well formed, not bankable
     // here, and the tracks render as scalar instances.
-    let (foreign_width, foreign_backend) = foreign_bank();
-    let requests = vec![request; foreign_width.lanes() as usize];
-    assert!(
-        factory
-            .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: foreign_backend,
-                width: foreign_width,
-                requests: &requests,
-                active_mask: foreign_width.full_mask(),
-            })
-            .expect("a declined bank is not an error")
-            .is_none(),
-        "{foreign_width:?} {foreign_backend:?} must decline"
-    );
+    for foreign_width in foreign_widths() {
+        let foreign_backend = foreign_width.backend();
+        let requests = vec![request; foreign_width.lanes() as usize];
+        assert!(
+            factory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: foreign_backend,
+                    width: foreign_width,
+                    requests: &requests,
+                    active_mask: foreign_width.full_mask(),
+                })
+                .expect("a declined bank is not an error")
+                .is_none(),
+            "{foreign_width:?} {foreign_backend:?} must decline"
+        );
+    }
 }
 
 /// A bank whose tracks do not share a program key is not a bank.

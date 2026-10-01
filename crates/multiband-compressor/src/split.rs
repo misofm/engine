@@ -23,8 +23,6 @@
 use super::*;
 use effect_contract::{EffectQuality, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort};
 use lane::Simd4;
-#[cfg(target_feature = "avx2")]
-use lane::Simd8;
 
 /// Ramp index of each band's threshold, ratio, attack, release and makeup.
 const LOW_THRESHOLD: usize = 0;
@@ -256,7 +254,7 @@ fn run<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
     rendered
 }
 
-/// Runs one scenario at all three widths and both non-trivial link modes, split on and off.
+/// Runs one scenario at every width the build has and both non-trivial link modes, split on and off.
 fn identical(blocks: usize, frames: usize, schedule: Schedule<'_>) {
     for (link_mode, bypass) in [
         (LinkMode::DualMono, false),
@@ -264,20 +262,11 @@ fn identical(blocks: usize, frames: usize, schedule: Schedule<'_>) {
         (LinkMode::Average, false),
         (LinkMode::DualMono, true),
     ] {
-        let split = run::<f32, 1, false>(link_mode, bypass, blocks, frames, schedule);
-        let unsplit = run::<f32, 1, true>(link_mode, bypass, blocks, frames, schedule);
-        assert_eq!(split, unsplit, "scalar, {link_mode:?}, bypass {bypass}");
-
-        let split = run::<Simd4, 4, false>(link_mode, bypass, blocks, frames, schedule);
-        let unsplit = run::<Simd4, 4, true>(link_mode, bypass, blocks, frames, schedule);
-        assert_eq!(split, unsplit, "simd4, {link_mode:?}, bypass {bypass}");
-
-        #[cfg(target_feature = "avx2")]
-        {
-            let split = run::<Simd8, 8, false>(link_mode, bypass, blocks, frames, schedule);
-            let unsplit = run::<Simd8, 8, true>(link_mode, bypass, blocks, frames, schedule);
-            assert_eq!(split, unsplit, "simd8, {link_mode:?}, bypass {bypass}");
-        }
+        lane::each_lane!(|L, W| {
+            let split = run::<L, W, false>(link_mode, bypass, blocks, frames, schedule);
+            let unsplit = run::<L, W, true>(link_mode, bypass, blocks, frames, schedule);
+            assert_eq!(split, unsplit, "W={W}, {link_mode:?}, bypass {bypass}");
+        });
     }
 }
 
@@ -553,10 +542,7 @@ fn each_channel_advances_its_own_ramps<L: Lane, const W: usize>(label: &str) {
 
 #[test]
 fn the_ramped_path_advances_both_channels() {
-    each_channel_advances_its_own_ramps::<f32, 1>("scalar");
-    each_channel_advances_its_own_ramps::<Simd4, 4>("simd4");
-    #[cfg(target_feature = "avx2")]
-    each_channel_advances_its_own_ramps::<Simd8, 8>("simd8");
+    lane::each_lane!(|L, W| each_channel_advances_its_own_ramps::<L, W>(&format!("W={W}")));
 }
 
 /// D11's snap, pinned: a window ends *on* its target, on the exact sample it was sent to.

@@ -148,17 +148,11 @@ fn lane_identity_at(width: BankWidth) {
 
 #[test]
 fn the_hosts_bank_width_matches_the_scalar_instantiation() {
-    // `Eight` exists only in the 8-lane (AVX2) build (#1112).
-    let widths = [
-        BankWidth::Four,
-        #[cfg(target_feature = "avx2")]
-        BankWidth::Eight,
-    ];
-    for width in widths {
+    for &width in BankWidth::ALL {
         lane_identity_at(width);
     }
     assert!(
-        widths.into_iter().any(bank_available),
+        BankWidth::ALL.iter().copied().any(bank_available),
         "no bank width is native to this artifact, so this test proved nothing"
     );
 }
