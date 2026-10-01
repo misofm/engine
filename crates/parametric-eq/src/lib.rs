@@ -4925,10 +4925,7 @@ mod elision {
         }
     }
 
-    /// Non-vacuity: the shapes this optimisation exists for really do shorten the cascade.
-    ///
-    /// One live band of four is the shipped console fixture's shape (see the intended
-    /// sixty-four-track session), and it is the row the standing measurement moves.
+    /// A section live on only one lane must remain in the bank's cascade.
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
         let mut targets: [[BandTarget; EQ_SECTION_COUNT]; NATIVE] =
