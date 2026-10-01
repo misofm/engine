@@ -29,14 +29,14 @@ Modes
     this export *calls* may trap" while admitting the one checked index the queue primitive emits.
 
 `--kernel-shape --kernel-pattern REGEX --kernel-min K`
-    Assert the artifact still computes in the vector family. Three rules, none of which is a raw
-    op-count minimum:
+    Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
+    none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the eight named kernels in `KERNEL_ROSTER` -- the
-       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library --
-       must match exactly one arithmetic-carrying function. A kernel that vanished, that was
-       renamed, or that de-vectorised so completely it stopped carrying `f32x4` arithmetic at all
-       fails here.
+    1. **Roster presence.** Each of the nine named kernels in `KERNEL_ROSTER` -- the
+       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library; the
+       tenth, the collapsed limiter's, is held by the forwarding rule below -- must match exactly
+       one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
+       de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
     2. **Per-kernel scalar budget (the shape gate).** Each roster kernel's scalar
        `f32.{mul,add,sub,div}` count must satisfy `scalar <= max(ceiling * vector, SCALAR_SLACK)`,
        where `ceiling` is that kernel's roster entry. The rule is a *shape*: it is scale free in
@@ -45,6 +45,10 @@ Modes
     3. **Kernel count.** At least `K` functions matching `REGEX` carry `f32x4.{mul,add,sub,div}`
        arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
        **ratchet**: when a wave adds kernels, raise it. It never drops.
+    4. **No eight lanes (issue #1110).** No function name in the module may spell an eight-lane
+       instantiation (`EIGHT_LANE`). The browser runs four lanes only, and since #1110 the wasm
+       build has no eight-lane type, so a name that carries one means eight lanes came back to
+       `wasm32` -- code no browser can execute, which is what #1110 removed.
 
     The collapsed true-peak limiter is a forwarding entry plus a distinct arithmetic kernel. The
     roster therefore requires exactly one `PreparedTruePeakLimiterBank<f32x4>::process_bank_mono`
@@ -70,7 +74,7 @@ Modes
     absorbs by construction because it is expressed as a multiple of `vector`.
 
 `--self-test`
-    Synthetic disassembly cases (a)-(f) below, each the red mutation of one rule.
+    Synthetic disassembly cases (a)-(g) below, each the red mutation of one rule.
 
 Why the traversal stops at the panic entry functions
 ----------------------------------------------------
@@ -111,9 +115,19 @@ SIMD_ARITH = re.compile(r"^f32x4\.(mul|add|sub)$")
 KERNEL_VECTOR = re.compile(r"^f32x4\.(mul|add|sub|div)$")
 KERNEL_SCALAR = re.compile(r"^f32\.(mul|add|sub|div)$")
 
+# An eight-lane instantiation, as a function name spells it (issue #1110). The `wide` eight-lane
+# types -- `f32x8` and the `f64x8`, `u32x8` and `i32x8` it widens and masks to -- are what every
+# eight-lane kernel, bank or stage is generic over, so their mangled names carry them
+# (`4wide6f32x8_5f32x8`); `simd8` and `transpose_tile_8` are the lane crate's and the bank tile's
+# own spellings. The module at `7d030945` carried 29 such functions, every one naming `f32x8`.
+# A const-generic `8` (`Kj8_`) is not listed: that module's 19 all name `f32x8` too, and an
+# eight-element array is not an eight-lane kernel.
+EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
+
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Four of the eight roster kernels currently emit *zero* scalar `f32` arithmetic, so a ceiling
+# Seven of the ten roster kernels -- the nine `KERNEL_ROSTER` rows and the collapsed limiter's
+# kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
 # well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
@@ -481,6 +495,25 @@ def check_limiter_forwarding(functions: dict[int, Function]) -> int:
     return failures
 
 
+def check_no_eight_lanes(functions: dict[int, Function]) -> int:
+    """Rule 4: no function name spells an eight-lane instantiation (issue #1110)."""
+    eight = sorted(
+        function.name for function in functions.values() if EIGHT_LANE.search(function.name)
+    )
+    if eight:
+        print(
+            f"FAIL eight lanes: {len(eight)} functions name an eight-lane instantiation. The "
+            "browser runs four lanes only and the wasm build has none (#1110); this is code no "
+            "browser can execute.",
+            file=sys.stderr,
+        )
+        for name in eight:
+            print(f"  {name}", file=sys.stderr)
+        return 1
+    print(f"eight lanes: none among {len(functions)} functions")
+    return 0
+
+
 VALID_SHAPE = """\
 000010 func[0] <miso_engine_web_v1_render>:
  000011: 10 01                      | call 1 <render_next>
@@ -776,6 +809,27 @@ def self_test() -> int:
         check_kernel_shape(parse(VALID_SHAPE), "render_next", 2, SELF_TEST_ROSTER) == 1,
     )
 
+    # (g) issue #1110: a function name that spells an eight-lane instantiation fails, whichever of
+    # the spellings it uses, while a crate hash that merely contains `x8` -- the base module had
+    # three -- does not.
+    expect("(g) no eight lanes in the valid shape", check_no_eight_lanes(parse(VALID_SHAPE)) == 0)
+    for label, name in (
+        ("f32x8", "_RNvMs3_NtCs0_4rack5stageINtB2_5StageNtNtCs1_4wide6f32x8_5f32x8E7process"),
+        ("u32x8", "_RNvNtCs0_4lane4mask8from_u32NtNtCs1_4wide6u32x8_5u32x8"),
+        ("simd8", "_RNvNtNtCs0_4lane5simd84load"),
+        ("transpose_tile_8", "_RNvNtCs0_15effect_contract16transpose_tile_8"),
+    ):
+        expect(
+            f"(g) eight-lane name {label}",
+            check_no_eight_lanes(parse(VALID_SHAPE + synthetic_kernel(name, 4, 0, index=2))) == 1,
+        )
+    hash_only = VALID_SHAPE + synthetic_kernel(
+        "_RNvMs3_NtCs5yx8Jh2iHKX_9once_cell4race8once_box4init", 0, 0, index=2
+    )
+    expect(
+        "(g) a hash containing x8 is not eight lanes", check_no_eight_lanes(parse(hash_only)) == 0
+    )
+
     # (e) a missing name section is refused rather than silently passing.
     try:
         parse("000010 func[0]:\n 000011: 0b                         | end\n")
@@ -820,6 +874,7 @@ def main() -> int:
             parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
         failures += check_kernel_shape(functions, args.kernel_pattern, args.kernel_min)
         failures += check_limiter_forwarding(functions)
+        failures += check_no_eight_lanes(functions)
     return 1 if failures else 0
 
 

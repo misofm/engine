@@ -438,9 +438,10 @@ fi
 #     to 4 of #163 exist to lower those counts.
 #
 # Re-measured on the shipped artifact at mono-collapse M2, for the record (vector / scalar). These
-# are the derivation's *input* and are deliberately not asserted:
+# are the derivation's *input* and are deliberately not asserted. (The eight-lane multiband body,
+# 2560/20, left the browser build with #1110.)
 #
-#   multiband f32x8         2560/20    multiband f32x4          1280/20
+#   multiband f32x4         1280/20
 #   transient-shaper f32x4   786/72    gate-expander f32x4       180/8
 #   true-peak-limiter dual   448/0     true-peak-limiter mono    224/0
 #   compressor dual          267/0     compressor mono           138/0
@@ -451,8 +452,15 @@ fi
 # arithmetic, which is what a correct one-plane variant looks like from here.
 #
 # The `--kernel-min` half of the ratchet -- the part that actually counts kernels -- rises from 8
-# to 11, by the three this wave added. It never drops. The artifact carries thirteen, so the floor
-# keeps exactly the two-kernel slack it had before.
+# to 11, by the three this wave added. It never drops. The artifact carried thirteen then; since
+# #1110 removed the eight-lane multiband body it carries twelve, a one-kernel slack.
+#
+# The pattern counts four-lane kernels only (`4wide6f32x4`; it was `4wide6f32x[48]`), so an
+# eight-lane kernel can never pad the count. Eight lanes are refused outright instead: the
+# `--kernel-shape` run also fails on any function name that spells an eight-lane instantiation
+# (`EIGHT_LANE` in the analyser). The browser runs four lanes only and #1110 took eight out of the
+# wasm build, so such a name is code no browser can execute coming back; the module at `7d030945`
+# carried 29 and fails this rule.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 named_disassembly=$(wasm-objdump -d "$named")
 printf '%s
@@ -460,7 +468,7 @@ printf '%s
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
 ' "$named_disassembly" |
-  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11 ||
+  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 11 ||
   exit 1
 
 # #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation
