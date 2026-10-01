@@ -328,42 +328,26 @@ mod tests {
 
     #[test]
     fn curve_is_identity_at_ratio_one_and_range_limited_when_closed() {
-        let identity = ReferenceGateExpanderParameters {
-            threshold_db: -40.0,
-            ratio: 1.0,
-            range_db: 80.0,
-        };
-        assert_eq!(
-            reference_gate_expander_gain_reduction_db(-80.0, identity, ReferenceGatePhase::Closed),
-            Ok(0.0)
-        );
-        let limited = ReferenceGateExpanderParameters {
-            ratio: 20.0,
-            range_db: 12.0,
-            ..identity
-        };
-        assert_eq!(
-            reference_gate_expander_gain_reduction_db(-80.0, limited, ReferenceGatePhase::Closed),
-            Ok(-12.0)
-        );
-    }
-
-    #[test]
-    fn hand_computed_curve_point_is_range_clamped() {
-        let parameters = ReferenceGateExpanderParameters {
-            threshold_db: -40.0,
-            ratio: 4.0,
-            range_db: 48.0,
-        };
-        // (rho - 1) * (X - T) = 3 * (-60 + 40) = -60, clamped by the -48 dB range.
-        assert_eq!(
-            reference_gate_expander_gain_reduction_db(
-                -60.0,
-                parameters,
-                ReferenceGatePhase::Closed
-            ),
-            Ok(-48.0)
-        );
+        for (level, ratio, range, expected) in [
+            (-80.0, 1.0, 80.0, 0.0),
+            (-80.0, 20.0, 12.0, -12.0),
+            // 3 * (-60 + 40) = -60, clamped by the -48 dB range.
+            (-60.0, 4.0, 48.0, -48.0),
+        ] {
+            let parameters = ReferenceGateExpanderParameters {
+                threshold_db: -40.0,
+                ratio,
+                range_db: range,
+            };
+            assert_eq!(
+                reference_gate_expander_gain_reduction_db(
+                    level,
+                    parameters,
+                    ReferenceGatePhase::Closed
+                ),
+                Ok(expected)
+            );
+        }
     }
 
     #[test]

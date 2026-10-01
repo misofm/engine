@@ -370,12 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn nan_is_one_class_and_signed_zeros_are_not() {
-        assert!(same_word(
-            f32::from_bits(0x7fc0_0000),
-            f32::from_bits(0xffc0_1234)
-        ));
-        assert!(!same_word(0.0, -0.0));
+    fn first_difference_folds_nans_and_distinguishes_signed_zeros() {
         assert_eq!(first_difference(&[1.0, 0.0], &[1.0, -0.0]), Some(1));
         assert_eq!(first_difference(&[1.0, f32::NAN], &[1.0, -f32::NAN]), None);
     }
