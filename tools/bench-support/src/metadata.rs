@@ -41,10 +41,10 @@ impl Metadata {
     /// Return a nonempty snapshot value, or "unknown" when it is absent, non-Unicode, or empty.
     #[must_use]
     pub fn nonempty_or_unknown(&self, name: &str) -> String {
-        self.var(name)
-            .ok()
+        self.unicode_value(name)
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "unknown".to_owned())
+            .unwrap_or("unknown")
+            .to_owned()
     }
 
     /// The eleven runner-supplied metadata names, in the order they appear in a record.
