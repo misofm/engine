@@ -27,4 +27,14 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 checkpoint and root adversarial verdict: REQUEST
+
+Worker A read all nine package files and the related #349/#559/#560/#1039 ownership records. Baseline debug/release: 44 active tests passed. Product checkpoint `74e203e1`, integrated/pushed as `a61f34d3`, passed 41 active focused tests, formatting and diff checks. Four Rust paths add 51/remove 49 lines. The JSON array appends into its result through the unchanged escape body; CPU core keys borrow the input; identical counter subtraction is shared without changing loads, updates or failure semantics. Three standalone core-count functions consolidate into the same four exact inputs. No performance timing or new harness was run.
+
+Root inspected all four diffs plus the JSON cases, allocator update-before-System path, topology parser, metadata and timer owners. The core-count matrix catches duplicate (core,socket) identity and empty/header-only fallback; all four original inputs remain. Those edits are sound, but the full crate cleanup still leaves avoidable private metadata copies: `missing` clones values merely to test Unicode presence, and `record_fields` clones values before escaping and builds an extra vector/join for missing names. The existing hashing-outside-timer test only hashes afterwards and checks digest length; pure-timer and digest owners already cover those observations, while preexisting-update exclusion is not exercised. Attempt 1 receives one REQUEST verdict for these bounded copy/test-value gaps; the useful compiling checkpoint is preserved.
+
+### Attempt 2 Sol brief approval
+
+Approved by root Sol, 2026-10-01. Finish this same package with a private borrowed snapshot projection for metadata presence and JSON fields, preserving public `var` ownership and exact missing/non-Unicode/empty handling and every output byte/field/order. Reuse `json_string_array` for the missing-name array; do not change the public format or metadata source/snapshot semantics. Rewrite the existing outside-timer test to update the sink both before and after the timed region, with `untimed` carrying the outside operations. Its purpose is to turn red if timing wrongly includes preexisting digest updates or refuses operations outside the interval; no existing pure-body or inside-timer negative test covers that boundary.
+
+No counter, digest algorithm, percentile, public API, manifest, script or timer implementation changes. No new test or benchmark. First focused-green tranche pauses for root exact-path checkpoint. Then run focused package debug/release, strict lint/fmt/policies, supported compile checks and an existing downstream metadata/allocator owner proportional to these changes; reuse unchanged prior evidence candidly. Retain complete nine-file/five-axis/family evidence. Attempt 2 gets one root adversarial verdict within the maximum of five.
