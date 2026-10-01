@@ -1898,7 +1898,7 @@ impl SessionRuntime {
 /// *shape* -- it is sixteen full banks instead of eight -- and a second 288 KiB fixture would be
 /// 128 tracks of duplicated text to review for no additional coverage.
 fn synthesise_tracks(model: &mut session::SessionModel, tracks: usize) {
-    let template = std::mem::take(&mut model.tracks);
+    let template = std::mem::replace(&mut model.tracks, Vec::with_capacity(tracks));
     let route = model.routes[0].clone();
     model.routes.clear();
     for index in 0..tracks {
