@@ -1,51 +1,16 @@
-//! Issue #1013 gate 4: a bank-API scenario whose digest was pinned on the unmodified kernel.
+//! Signed zeros and subnormals survive the limiter delay line under both links and collapse.
 //!
-//! #1013 starts each of the detector's four Annex-2 accumulators at its first product instead of
-//! at `+0.0`. The two forms differ only when that product is `-0.0`, and then only in the sign of
-//! a zero that `abs` erases before anything reads it, so the change is class A: no output word, no
-//! state payload, no report and no observation may move. This file is the end-to-end statement of
-//! that, written and pinned **before** the change (on `52ad1460`, the branch point of #1013, whose
-//! `crates/true-peak-limiter` tree is `99fed5cb`, the same as on `220c5db5`), so the pins below are
-//! the base kernel's words and not the new one's.
-//!
-//! The scenario feeds every track, block by block, the inputs the seed can see:
-//!
-//! * +3 dBFS noise, so every track limits and every detector phase is a full-magnitude chain;
-//! * all-signed-zero blocks: every sample `+0.0` or `-0.0`, the sign drawn per lane, channel and
-//!   frame, so the history holds mixed signed zeros and a first product is `-0.0` about half the
-//!   time;
-//! * subnormal blocks: random signs and mantissas with a zero exponent. Most products of a
-//!   subnormal and a table coefficient round to a signed zero, the rest stay subnormal;
-//! * one NaN in track 1's left input, whose output a lookahead later trips the §4.4 boundary check
-//!   (zeroed, reset, counted) on track 1 alone. In a bank its bank-mates render on untouched.
-//!
-//! It runs under `LinkMode::Maximum` (the #990 linked body while the pair agrees), under
-//! `LinkMode::DualMono` (the dual body) and, for the banks, through `process_bank_mono` (the
-//! collapsed body), so all three bodies that reach `annex2_phases` are in the pin. After every
-//! block the digest folds every output word, every track's process report, every track's state
-//! payload and the resident gain-reduction observation. One digest per width. Every float word is
-//! folded by its class-A bits (`dsp_reference::class_a`, #1065): the NaN's words hash as one value.
-//!
-//! # The #1091 re-pin of the two bank digests
-//!
-//! #1091 (console strip P2d; decision 12, "Coupling rule") made a bank's §4.4 recovery per lane.
-//! Before it, track 1's NaN zeroed the whole bank's block and reset every lane, so the bank pins
-//! carried every bank-mate's zeroed block and line fill and their reset state. That coupling is what
-//! #1091 removes, so the W8 and W4 pins were re-recorded on #1091's kernel, with the witness below
-//! tightened from "whole blocks zeroed" to "track 1's lane zeroed, and no other". The scalar pin did
-//! not move: a scalar instance's one lane is every lane, and its recovery is the whole reset it
-//! always was. The bank's members are also held to the scalar instances' bits, word for word, by
-//! `tests/padding.rs`.
+//! A NaN in track 1's left input trips recovery after the declared latency, zeroing that lane's
+//! failing block and subsequent line fill only. Limiting, signed-zero and subnormal observations
+//! keep every arm non-vacuous; current differential tests own PCM, reports and state equality.
 
-use dsp_reference::class_a;
 use effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadOutput, StatePayloadSizes,
+    PreparedPorts, PreparedSidechainPort,
 };
 use lane::Backend;
-use sha2::{Digest, Sha256};
 use true_peak_limiter::{TRUE_PEAK_LIMITER_DESCRIPTOR, TruePeakLimiterFactory};
 
 const FRAMES: usize = 128;
@@ -56,13 +21,6 @@ const SCALAR_TRACKS: usize = 8;
 const NAN_BLOCK: usize = 56;
 const NAN_TRACK: usize = 1;
 const NAN_FRAME: usize = 37;
-
-/// SHA-256 of the W8 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
-const W8_DIGEST: &str = "65609fa00abf6862372589cdaa4fce6b429264e8e1c852ab4b2f17f3869f5f87";
-/// SHA-256 of the W4 bank's scenario, re-recorded on #1091's per-lane §4.4 recovery.
-const W4_DIGEST: &str = "2cd5cb70f15bdfb2e3fe143dd5bd09891c56b84ff9975e88b55fadc18f13f017";
-/// SHA-256 of the scalar instances' scenario (tracks 0-7), recorded on the unmodified kernel.
-const SCALAR_DIGEST: &str = "ec135dac1fd3e82d7d0638130cc1a66879a0c330a515036db33692bf415f7ca2";
 
 /// What block `block` feeds every track.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,39 +113,6 @@ fn sample(track: usize, channel: usize, frame: usize) -> f32 {
     }
 }
 
-fn fold_report(hasher: &mut Sha256, report: &ProcessReport) {
-    for word in [
-        report.sanitized_main_samples,
-        report.sanitized_sidechain_samples,
-        report.invalid_spans,
-        report.nonfinite_left_blocks,
-        report.nonfinite_right_blocks,
-    ] {
-        hasher.update(word.to_le_bytes());
-    }
-}
-
-fn fold_observation(hasher: &mut Sha256, sample: &ObservationSample) {
-    hasher.update(class_a::bits(sample.left).to_le_bytes());
-    hasher.update(class_a::bits(sample.right).to_le_bytes());
-}
-
-fn fold_payload(
-    hasher: &mut Sha256,
-    sizes: StatePayloadSizes,
-    write: impl FnOnce(StatePayloadOutput<'_>),
-) {
-    let mut common = vec![0_u8; sizes.common_bytes as usize];
-    let mut left = vec![0_u8; sizes.left_bytes as usize];
-    let mut right = vec![0_u8; sizes.right_bytes as usize];
-    write(StatePayloadOutput::new(&mut common, &mut left, &mut right, sizes).expect("sizes"));
-    for section in [&common, &left, &right] {
-        for word in class_a::le_words(section) {
-            hasher.update(word);
-        }
-    }
-}
-
 /// The fixed latency at 48 kHz, `N + 6` samples.
 fn latency() -> usize {
     TRUE_PEAK_LIMITER_DESCRIPTOR
@@ -261,8 +186,8 @@ enum Body {
     Collapsed,
 }
 
-/// Runs the scenario through one bank of `width` under `body`, folding into `hasher`.
-fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256) -> Witness {
+/// Runs the scenario through one bank of `width` under `body`.
+fn bank_run(width: BankWidth, backend: Backend, body: Body) -> Witness {
     let lanes = width.lanes() as usize;
     let link_mode = match body {
         Body::Dual(link_mode) => link_mode,
@@ -285,7 +210,6 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
     if let Body::Collapsed = body {
         assert!(bank.supports_mono_collapse(), "the limiter collapses");
     }
-    let sizes = bank.metadata().program_key.state_sizes;
     let offsets = vec![0_u32; lanes + 1];
     let mut witness = Witness::default();
     for block in 0..BLOCKS {
@@ -314,39 +238,23 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
             FRAMES as u32,
         )
         .expect("bank block");
-        let report = match body {
+        match body {
             Body::Dual(_) => bank.process_bank(block_request),
             Body::Collapsed => bank.process_bank_mono(block_request),
         };
-        hasher.update([block as u8]);
         match body {
             Body::Dual(_) => {
-                for word in left.iter().chain(right.iter()) {
-                    hasher.update(class_a::bits(*word).to_le_bytes());
-                }
                 witness.block(block, &[&left, &right], lanes);
             }
             Body::Collapsed => {
-                for word in &left {
-                    hasher.update(class_a::bits(*word).to_le_bytes());
-                }
                 witness.block(block, &[&left], lanes);
-                // A collapsed bank's right section is stale until the disengage copy; take it
-                // before every snapshot, which is always sound and leaves the left run alone.
+                // Make the right state current before reading the two-channel resident tap.
                 bank.desymmetrize_channels();
             }
-        }
-        for lane in 0..lanes {
-            fold_report(hasher, &report.reports[lane]);
-            fold_payload(hasher, sizes, |output| {
-                bank.snapshot_track_state_payload(lane as u32, output)
-                    .expect("snapshot");
-            });
         }
         let mut observed = vec![ObservationSample::default(); lanes];
         assert!(bank.observe_resident_bank(0, &mut observed), "resident tap");
         for sample in &observed {
-            fold_observation(hasher, sample);
             witness.deepest = witness.deepest.max(sample.left).max(sample.right);
         }
     }
@@ -354,12 +262,11 @@ fn bank_run(width: BankWidth, backend: Backend, body: Body, hasher: &mut Sha256)
 }
 
 /// Runs the scenario's track `track` through one scalar instance under `link_mode`.
-fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness {
+fn scalar_run(track: usize, link_mode: LinkMode) -> Witness {
     let table = values(track);
     let mut effect: Box<dyn PreparedNativeEffect> = TruePeakLimiterFactory
         .prepare(request(&table, link_mode))
         .expect("prepare");
-    let sizes = effect.metadata().state_sizes;
     let mut witness = Witness::default();
     for block in 0..BLOCKS {
         let mut left: Vec<f32> = (0..FRAMES)
@@ -368,7 +275,7 @@ fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness
         let mut right: Vec<f32> = (0..FRAMES)
             .map(|frame| sample(track, 1, block * FRAMES + frame))
             .collect();
-        let report = effect.process(
+        effect.process(
             EffectProcessBlock::new(
                 &mut left,
                 &mut right,
@@ -379,18 +286,9 @@ fn scalar_run(track: usize, link_mode: LinkMode, hasher: &mut Sha256) -> Witness
             )
             .expect("block"),
         );
-        hasher.update([block as u8]);
-        for word in left.iter().chain(right.iter()) {
-            hasher.update(class_a::bits(*word).to_le_bytes());
-        }
         witness.block(block, &[&left, &right], 1);
-        fold_report(hasher, &report);
-        fold_payload(hasher, sizes, |output| {
-            effect.snapshot_state_payload(output).expect("snapshot");
-        });
         let mut observed = ObservationSample::default();
         assert!(effect.observe_resident(0, &mut observed), "resident tap");
-        fold_observation(hasher, &observed);
         witness.deepest = witness.deepest.max(observed.left).max(observed.right);
     }
     witness
@@ -424,29 +322,24 @@ fn check_witness(label: &str, witness: &Witness, reset_lane: Option<usize>) {
     );
 }
 
-fn bank_digest(width: BankWidth, backend: Backend) -> String {
-    let mut hasher = Sha256::new();
-    for (name, body) in [
-        ("maximum", Body::Dual(LinkMode::Maximum)),
-        ("dual_mono", Body::Dual(LinkMode::DualMono)),
-        ("collapsed", Body::Collapsed),
-    ] {
-        let witness = bank_run(width, backend, body, &mut hasher);
-        // The NaN is in track 1, which is lane 1 of the bank at both widths.
-        check_witness(&format!("{width:?} {name}"), &witness, Some(NAN_TRACK));
+#[test]
+fn signed_zeros_subnormals_and_lane_local_recovery_survive_the_delay() {
+    for &width in BankWidth::ALL.iter().rev() {
+        for (name, body) in [
+            ("maximum", Body::Dual(LinkMode::Maximum)),
+            ("dual_mono", Body::Dual(LinkMode::DualMono)),
+            ("collapsed", Body::Collapsed),
+        ] {
+            let witness = bank_run(width, width.backend(), body);
+            check_witness(&format!("{width:?} {name}"), &witness, Some(NAN_TRACK));
+        }
     }
-    let bytes: [u8; 32] = hasher.finalize().into();
-    bench_support::digest::hex(&bytes)
-}
-
-fn scalar_digest() -> String {
-    let mut hasher = Sha256::new();
     for (name, link_mode) in [
         ("maximum", LinkMode::Maximum),
         ("dual_mono", LinkMode::DualMono),
     ] {
         for track in 0..SCALAR_TRACKS {
-            let witness = scalar_run(track, link_mode, &mut hasher);
+            let witness = scalar_run(track, link_mode);
             check_witness(
                 &format!("scalar {name} track {track}"),
                 &witness,
@@ -454,28 +347,4 @@ fn scalar_digest() -> String {
             );
         }
     }
-    let bytes: [u8; 32] = hasher.finalize().into();
-    bench_support::digest::hex(&bytes)
-}
-
-fn check(label: &str, digest: String, pin: &str) {
-    if std::env::var_os("MISO_ENGINE_REPIN_TRUE_PEAK_LIMITER_SEEDLESS").is_some() {
-        println!("{label}: {digest}");
-        return;
-    }
-    assert_eq!(digest, pin, "{label}: the seedless-scenario digest moved");
-}
-
-#[test]
-fn the_seedless_scenario_renders_the_pinned_base_words() {
-    // Every bank width this build has, widest first, each against its own pin (issue #1112).
-    for &width in BankWidth::ALL.iter().rev() {
-        let (label, pin) = if width.lanes() == 8 {
-            ("W8", W8_DIGEST)
-        } else {
-            ("W4", W4_DIGEST)
-        };
-        check(label, bank_digest(width, width.backend()), pin);
-    }
-    check("scalar", scalar_digest(), SCALAR_DIGEST);
 }

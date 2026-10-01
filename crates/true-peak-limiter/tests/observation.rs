@@ -74,7 +74,7 @@ fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
     sample
 }
 
-/// The reduction word the persisted envelope reports for one lane, as a second route to the same
+/// The reduction word the in-memory state payload reports for one lane, as a second route to the same
 /// kernel state.
 fn snapshot_reduction(effect: &dyn PreparedNativeEffect) -> (f32, f32) {
     let sizes = effect.metadata().state_sizes;

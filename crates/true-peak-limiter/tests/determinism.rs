@@ -6,8 +6,8 @@
 //! every case at every width against `corpus::D90_DIGESTS` in the shipping profile, and the wasm
 //! guests of `scripts/run-wasm-gates.sh` compare the same cases against the same pins.
 //!
-//! This family has no independent `f64` oracle behind its pins -- see the note above `D90_DIGESTS`
-//! and issue #90.
+//! `gain_law.rs` supplies the independent `f64` law and ceiling checks; G5 supplies bit identity
+//! across targets.
 
 use true_peak_limiter::corpus;
 
@@ -26,10 +26,9 @@ fn every_case_is_finite_and_not_vacuous() {
             words.iter().all(|word| f32::from_bits(*word).is_finite()),
             "{name} produced a non-finite sample"
         );
-        let distinct = words
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+        words.sort_unstable();
+        words.dedup();
+        let distinct = words.len();
         assert!(
             distinct > 64,
             "{name} produced only {distinct} distinct words"

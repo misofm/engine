@@ -1,11 +1,9 @@
 //! The mono-collapse body renders the dual body's left plane, and the disengage copy is complete.
 //!
 //! The crate-level statement of what the strip's console gates check end to end, and it is here as
-//! well as there for one reason: the console fixture carries no automation, so **no ramp is ever in
-//! flight while a track is collapse-eligible** -- every parameter write in this engine is addressed
-//! to one channel and therefore clears the witness' `LIVE` term on the block it lands. That makes
-//! the ramp-carrying entries of this effect's disengage copy list unreachable from the engine, and
-//! reachable from here, where the contract call is made directly.
+//! well as there to exercise direct contract calls with automation while collapsed. The repeated
+//! retarget arm covers ramping frames; the disengage arm retargets early, then compares the settled
+//! coefficients and complete retained state before and after the first resumed dual block.
 //!
 //! The content is deliberately **loud** and the ceiling deliberately low: a signal the limiter
 //! never reduces leaves `required_ring` at `1.0` and makes the twelve oversampling history taps
@@ -249,7 +247,7 @@ fn run_block(
 ///
 /// The stationary arm is the one that exercises `limiter_block_uniform_mono` -- the van Herk
 /// segment walk, whose collapsed form hands the walk one channel's window offsets for both of its
-/// arguments -- and the ramping arm the per-lane body beside it.
+/// arguments -- and the ramping arm the uniform ramping body beside it.
 #[test]
 fn the_collapsed_body_renders_the_dual_bodys_left_plane() {
     let Some((width, backend)) = native_bank() else {
@@ -344,19 +342,20 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             never_left.clone()
         };
         let first = (step * FRAMES) as u64;
-        let (spans, packed) = if step == 2 {
-            automation(step, lanes)
-        } else {
-            (Vec::new(), idle.clone())
-        };
+        let automated = (step == 2).then(|| automation(step, lanes));
+        let (spans, packed) = automated
+            .as_ref()
+            .map_or((&[][..], idle.as_slice()), |(spans, packed)| {
+                (spans.as_slice(), packed.as_slice())
+            });
         run_block(
             never.as_mut(),
             &mut never_left,
             &mut never_right,
             width,
             first,
-            &spans,
-            &packed,
+            spans,
+            packed,
             false,
         );
         run_block(
@@ -365,8 +364,8 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
             &mut mixed_right,
             width,
             first,
-            &spans,
-            &packed,
+            spans,
+            packed,
             collapsed_half,
         );
         for (word, (mixed_word, never_word)) in mixed_left.iter().zip(never_left.iter()).enumerate()

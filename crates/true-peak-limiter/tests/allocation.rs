@@ -1,17 +1,13 @@
 //! A1: the render path allocates nothing.
 //!
-//! A counting global allocator, armed only around the calls under test, watches `process` and
+//! The audited allocator's current-thread counters watch `process` and
 //! `process_bank` over a hundred blocks that include automation, a boundary-check failure and both
 //! resets, and a padded bank whose failures recover one lane (#1091). The limiter allocates at preparation and at restore — both control plane — and never
 //! again; before #90 the render path was allocation-free too, and this gate is what keeps it so
 //! now that the arena, the ramps and the payload codec all changed hands.
 
-#![allow(unsafe_code)]
-
-use core::alloc::Layout;
-use core::cell::Cell;
+use bench_support::alloc;
 use lane::Backend;
-use std::alloc::{GlobalAlloc, System};
 
 use effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality,
@@ -23,72 +19,12 @@ use true_peak_limiter::{
     TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
 };
 
-struct TrackingAllocator;
-
-#[global_allocator]
-static ALLOCATOR: TrackingAllocator = TrackingAllocator;
-
-thread_local! {
-    static ACTIVE: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-    static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-fn when_active(action: impl FnOnce()) {
-    ACTIVE.with(|active| {
-        if active.get() {
-            action();
-        }
-    });
-}
-
-// SAFETY: every operation delegates its original pointer and layout unchanged to `System`; the
-// thread-local counters are observational and armed only around a single test-thread call.
-unsafe impl GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: delegates the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            when_active(|| ALLOCATIONS.set(ALLOCATIONS.get() + 1));
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: delegates the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            when_active(|| ALLOCATIONS.set(ALLOCATIONS.get() + 1));
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        when_active(|| DEALLOCATIONS.set(DEALLOCATIONS.get() + 1));
-        // SAFETY: delegates the original pointer and layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: delegates the original pointer, layout and requested size unchanged.
-        let replacement = unsafe { System.realloc(pointer, layout, new_size) };
-        if !replacement.is_null() {
-            when_active(|| {
-                ALLOCATIONS.set(ALLOCATIONS.get() + 1);
-                DEALLOCATIONS.set(DEALLOCATIONS.get() + 1);
-            });
-        }
-        replacement
-    }
-}
-
 fn measure(operation: impl FnOnce()) -> (u64, u64) {
-    ALLOCATIONS.set(0);
-    DEALLOCATIONS.set(0);
-    ACTIVE.set(true);
+    alloc::assert_installed();
+    let mark = alloc::current_thread_counters();
     operation();
-    ACTIVE.set(false);
-    (ALLOCATIONS.get(), DEALLOCATIONS.get())
+    let delta = alloc::current_thread_delta_since(mark);
+    (delta.allocations, delta.deallocations)
 }
 
 #[test]

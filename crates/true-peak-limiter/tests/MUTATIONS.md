@@ -1,5 +1,12 @@
 # Red mutations for `true-peak-limiter` (issue #90, wave 2)
 
+Housekeeping #1126 keeps these historical mutation observations as evidence. The current linked,
+randomized and stationary differentials use the per-frame law (`reference_block`), not the copied
+pre-#990 block body. The historical `linked.rs` and `segments.rs` pins are retired; their transition
+and wrap/completion coverage survives in the linked engagement and stationary scenario families.
+`seedless.rs` retains its explicit limiting, signed-zero, subnormal and delayed lane-local recovery
+witnesses without historical hashes. G5 remains the sole cross-target digest owner.
+
 Every gate in this crate landed with the mutation below applied once and observed red. Each row
 states the edit, the test that failed, and — where it matters — why that test and not the obvious
 one. Restore the file after each run; the mutations are not committed.
