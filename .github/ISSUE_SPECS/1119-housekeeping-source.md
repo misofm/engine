@@ -115,3 +115,44 @@ Root Sol authorizes removal of source's test-only SHA transcript pin and unused 
 Root adversarial verdict: REQUEST CHANGES. Submission validation still precedes storage acquisition/publication; the removed second validation received the same metadata and a constant-zero sanitizer count, and the deferred-recycle helper preserves failed-push ownership. The source-only Cargo.lock removal matches the amended brief. Focused debug/release and supported-target checks are sufficient for those product changes, with clippy configuration warnings recorded honestly. However, the old-copy body and pre-retention literal transcript remain permanent historical equivalence gates. They must be removed before the test-value claim passes.
 
 Attempt 2 is authorized exactly as the frozen revision above: explicit borrowed expected PCM/zero tails for the poison helper, delete redundant assertions and historical admission scaffolding, and retain a small preparation-depth contract gate. Test value: the rewritten poison checks catch stale destination words and incorrect source prefixes across full/short/absent blocks without recomputing expectations from private production state; the preparation-depth gate catches accidental recycling of the consumer's reserved block or consuming prefetched PCM during repeated preparation, neither reached by the read_block models. No product changes or additional target matrix are needed.
+
+### Attempt 2 — GPT-6.1 Sol xhigh worker A, 2026-10-01
+
+Root product checkpoint `0c59a368` changes only tests in `crates/source/src/lib.rs`
+(+71/-500, **net -429 LoC**). Combined package cleanup is **net -553 LoC**, plus the
+single amended lockfile dependency entry. No production code changed in this revision.
+
+- Deleted the verbatim old `copy_channel_oracle`. The four-poison helper now borrows explicit
+  expected PCM slices and positive-zero tails, compares words directly, and allocates only the
+  poisoned destination. Deleted duplicate caller copies/assertions and private played-state
+  assertions. Full, short, absent and EOF cases keep exact hostile-word/zero-write coverage;
+  the separate borrowed-plane test retains reused-storage tail and absence checks.
+- Deleted `PRE_RETENTION_ADMISSION_ORACLE`, `AdmissionScript`, replay/transcript storage and
+  the hold/end/driver wrappers. The retained test-purpose mapping above otherwise still applies:
+  hold, claim, seek, FIFO, allocation/ownership, fault and independent schedule gates remain.
+- Added `seek_preparation_preserves_configured_depth_and_prefetches_without_consuming`: after
+  preparing an empty generation, three configured blocks admit and a fourth refuses; repeated
+  preparation still refuses the fourth, reports zero consumed frames, and the next read returns
+  the supplied first block with four consumed frames. This catches mistakenly recycling the
+  idle retained block during preparation, which increases admission depth, and consuming the
+  prefetched target; existing read-block models never invoke preparation and other paused-seek
+  gates never saturate this prepared-generation refusal boundary. It observes public outcomes,
+  without a historical transcript or deriving expected PCM from private state.
+
+Repetition, test value and avoidable test copies improve as above. Attempt 1's production copy,
+SIMD and bounded-data-structure findings remain applicable; no additional kernel or layout change
+is justified. No new owner decision, benchmark, allocation claim or target execution is added.
+
+Actual checks, using the same target directory: locked package all-feature tests passed in debug
+and release (**19 unit +2 independent-model integration tests** each); zero doctests. Package
+`clippy --all-targets --all-features -- -D warnings` exited 0 with the same two unreachable
+`math::fast_db` configuration warnings recorded in attempt 1, so it remains not warning-free.
+`cargo fmt --all --check` and `git diff --check` passed. Root approved reuse of the supported-target
+and realtime checks from attempt 1 for this test-only revision. Worker paused product edits at
+the focused-green checkpoint; final evidence awaits root's attempt-2 verdict and synchronization.
+
+### Root adversarial review — attempt 2
+
+Root adversarial verdict: PASS. Reviewed the complete revision: all historical transcript/driver wrappers and the copied former production body are deleted; supplied source words and explicit positive-zero tails now determine expectations, with frame-by-frame bit comparisons for every prior poison. The replacement preparation test reaches empty-generation preparation, exact configured capacity, prefetched current-generation PCM, repeated refusal and first-read telemetry through the public API. Existing independent models and fanout/hold/seek gates remain. Product changes were already reviewed in attempt 1; the integrated product tree passed 121 source/effect-contract/effect-compiler tests, and final source debug/release each passed 21 tests. Supported-target and RT checks are reused only because this revision changes tests. Clippy's existing configuration warnings are recorded rather than called warning-free.
+
+Test value: copy_channel_preserves_pcm_and_zeroes_missing_frames rejects missing prefix copies or stale poisoned destination tails, using supplied PCM rather than a copy of the old algorithm. The modified borrowed-plane test uniquely rejects stale reused block tails/consumed repeated borrows and also checks copy output against the same externally supplied samples. seek_preparation_preserves_configured_depth_and_prefetches_without_consuming rejects recycling the idle reserved block into producer credit or consuming the first target block during preparation; read_block-only models and unsaturated paused-seek gates do not reach that refusal boundary. No owner question remains for source.
