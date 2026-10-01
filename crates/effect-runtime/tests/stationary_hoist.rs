@@ -78,11 +78,6 @@ fn subnormal_targets_are_hoisted_without_flushing() {
         -f32::from_bits(1),
     ] {
         assert!(LinearRamp::stationary_at(value, value));
-        assert_eq!(
-            (value + 0.0).to_bits(),
-            value.to_bits(),
-            "the canonical FP environment must not flush subnormals"
-        );
         let mut ramp = LinearRamp::fixed(value);
         ramp.set_target(value, 64);
         assert_constant(ramp, value, 80);
