@@ -16,17 +16,13 @@
 //! add under an FMA target-feature cfg in places. Vendoring strips those, but a future re-vendor
 //! that forgets would only show up numerically on an FMA-enabled build.
 
-use std::collections::HashSet;
-
 use math::corpus::{CASE_COUNT, CASE_NAMES, M3_DIGESTS, POINTS, run_case};
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of one corpus case's result words, little-endian.
-fn case_digest(case: usize) -> [u8; 32] {
-    let mut out = vec![0u64; POINTS];
-    run_case(case, &mut out);
+fn case_digest(out: &[u64]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    for word in &out {
+    for word in out {
         hasher.update(word.to_le_bytes());
     }
     hasher.finalize().into()
@@ -44,9 +40,11 @@ fn hex(bytes: &[u8; 32]) -> String {
 fn m3_corpus_digests_match_pins() {
     let pinning = std::env::var_os("MISO_ENGINE_MATH_PIN").is_some();
     let mut mismatches = Vec::new();
+    let mut out = vec![0u64; POINTS];
 
     for case in 0..CASE_COUNT {
-        let digest = case_digest(case);
+        run_case(case, &mut out);
+        let digest = case_digest(&out);
         if pinning {
             println!("    // {}", CASE_NAMES[case]);
             println!("    {:?},", digest);
@@ -79,8 +77,8 @@ fn m3_corpus_digests_match_pins() {
 /// these digests fail for a reason that is not a real divergence.
 #[test]
 fn m3_corpus_is_nan_free() {
+    let mut out = vec![0u64; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {
-        let mut out = vec![0u64; POINTS];
         run_case(case, &mut out);
         let f32_case = matches!(case, 13..=23 | 25 | 27 | 30 | 31);
         for (index, &word) in out.iter().enumerate() {
@@ -103,17 +101,18 @@ fn m3_corpus_is_nan_free() {
 /// its saturation branches produces a handful of values however many points it has.
 #[test]
 fn m3_corpus_exercises_each_domain() {
+    let mut out = vec![0u64; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {
-        let mut out = vec![0u64; POINTS];
         run_case(case, &mut out);
 
-        let distinct: HashSet<u64> = out.iter().copied().collect();
-        let fraction = distinct.len() as f64 / POINTS as f64;
+        out.sort_unstable();
+        let distinct = 1 + out.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        let fraction = distinct as f64 / POINTS as f64;
         assert!(
             fraction >= 0.50,
             "corpus case {name} produced only {} distinct results in {POINTS} points ({:.1}%); \
              it is not exercising the function",
-            distinct.len(),
+            distinct,
             fraction * 100.0
         );
     }

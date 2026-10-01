@@ -47,8 +47,8 @@
 //! Each was run against the same oracle over the same domain, and each must push the measured
 //! error over the gate — a bound with no red mutation is decoration. These are measured, not
 //! predicted. The degree-drop mutations below deliberately truncate the shipped polynomial;
-//! they do not establish the bound for a refitted lower-degree polynomial. That comparison is
-//! measured separately by `f1_lower_degree_refits_exhaustive`.
+//! they do not establish the bound for a refitted lower-degree polynomial. The rejected refit
+//! measurements are research evidence from #880 F-3, preserved in repository history.
 //!
 //! | mutation | measured | gate |
 //! |---|---|---|
@@ -57,8 +57,8 @@
 //! | drop `EXP2_P[4]` (degree 3, same coefficients) | `fast_gain_from_db` `8.115e-3` dB | `1.0e-5` — red |
 //! | drop `LOG2_Q[5]` (degree 4, same coefficients) | `fast_level_db` `1.593e-1` dB | `4.0e-5` — red |
 //!
-//! The last two show why truncating a minimax polynomial is not a lower-degree fit. The refitted
-//! candidate measurements below are the evidence about whether a lower degree can satisfy F1.
+//! The last two show why truncating a minimax polynomial is not a lower-degree fit. The archived
+//! #880 F-3 measurements address whether refitted lower degrees can satisfy F1.
 //!
 //! The monotonicity assertion also has a real red mutation: changing `LOG2_Q[0]` from
 //! `0x3fb8_a595` to `0x3fb8_a8dc` changed the exhaustive count from 77 to 95 and failed the
@@ -436,7 +436,7 @@ fn f1_gain_from_db_exhaustive() {
         "fast_gain_from_db negative exhaustive",
         negative,
         GAIN_MAX_DB,
-        1_000_000_000,
+        1_126_170_625,
     );
     println!(
         "fast_gain_from_db negative domain: {} decreasing steps",
@@ -449,7 +449,7 @@ fn f1_gain_from_db_exhaustive() {
         "fast_gain_from_db positive exhaustive",
         positive,
         GAIN_MAX_DB,
-        1_000_000_000,
+        1_103_101_953,
     );
     println!(
         "fast_gain_from_db positive domain: {} decreasing steps",
@@ -468,93 +468,7 @@ fn f1_level_db_exhaustive() {
         level.decreasing_steps
     );
     assert_eq!(level.decreasing_steps, 77);
-    assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 250_000_000);
-}
-
-// Refitted lower-degree rows recorded by issue #880 F-3. Coefficients are in Horner order:
-// highest order first, matching the coefficient words printed in the issue.
-const REFIT_GAIN_DEGREE3: [f32; 4] = [
-    f32::from_bits(0x3c5b_f2e2),
-    f32::from_bits(0x3d55_ffe6),
-    f32::from_bits(0x3e77_11ca),
-    f32::from_bits(0x3f31_6b63),
-];
-const REFIT_LEVEL_DEGREE4: [f32; 5] = [
-    f32::from_bits(0x3d3e_0145),
-    f32::from_bits(0xbe48_fcca),
-    f32::from_bits(0x3ed5_d00c),
-    f32::from_bits(0xbf35_aca2),
-    f32::from_bits(0x3fb8_9252),
-];
-
-const LOG2_PER_DB_F32: f32 = (core::f64::consts::LOG2_10 / 20.0) as f32;
-const DB_PER_LOG2_F32: f32 = (20.0_f64 * core::f64::consts::LOG10_2) as f32;
-
-fn refit_gain_degree3(db: f32) -> f32 {
-    let x = db.mul(f32::splat(LOG2_PER_DB_F32)).clamp(-126.0, 127.0);
-    let xi = x.floor();
-    let f = x.sub(xi);
-    let mut p = REFIT_GAIN_DEGREE3[0];
-    for coefficient in &REFIT_GAIN_DEGREE3[1..] {
-        p = p.mul(f).add(*coefficient);
-    }
-    f32::splat(1.0)
-        .add(f.mul(p))
-        .mul(f32::exp2_int_in_range(xi))
-}
-
-fn refit_level_degree4(x: f32) -> f32 {
-    let (m, e) = x.max(f32::MIN_POSITIVE).frexp();
-    let t = m.sub(1.0);
-    let mut q = REFIT_LEVEL_DEGREE4[0];
-    for coefficient in &REFIT_LEVEL_DEGREE4[1..] {
-        q = q.mul(t).add(*coefficient);
-    }
-    e.add(t.mul(q)).mul(DB_PER_LOG2_F32)
-}
-
-fn refit_gain_error_db(db: f32) -> Measurement {
-    let got = f64::from(refit_gain_degree3(db));
-    let want = oracle_gain(f64::from(db));
-    Measurement {
-        error_db: Some(((got - want) / want).abs() * DB_PER_RELATIVE),
-        value: got as f32,
-    }
-}
-
-fn refit_level_error_db(x: f32) -> Measurement {
-    let got = f64::from(refit_level_degree4(x));
-    let want = oracle_level_db(f64::from(x));
-    Measurement {
-        error_db: Some((got - want).abs()),
-        value: got as f32,
-    }
-}
-
-/// Remeasures the recorded refits over F1's actual domains and rejects both against its gates.
-#[test]
-#[ignore = "full-domain refit measurement: run with --release -- --ignored"]
-fn f1_lower_degree_refits_exhaustive() {
-    let (lo, hi) = gain_domain();
-    let gain_negative = sweep(lo, hi, 1, refit_gain_error_db);
-    let (lo, hi) = gain_domain_positive();
-    let gain_positive = sweep(lo, hi, 1, refit_gain_error_db);
-    let (lo, hi) = level_domain();
-    let level = sweep(lo, hi, 1, refit_level_error_db);
-
-    let gain_negative_db = gain_negative.worst_scaled as f64 / SCALE;
-    let gain_positive_db = gain_positive.worst_scaled as f64 / SCALE;
-    let level_db = level.worst_scaled as f64 / SCALE;
-    assert_eq!(gain_negative.checked, 1_126_170_625);
-    assert_eq!(gain_positive.checked, 1_103_101_953);
-    assert_eq!(level.checked, 257_176_458);
-    println!(
-        "refit P degree 3: negative {gain_negative_db:.6e} dB, positive {gain_positive_db:.6e} dB"
-    );
-    println!("refit Q degree 4: {level_db:.6e} dB");
-    assert!(gain_negative_db > GAIN_MAX_DB);
-    assert!(gain_positive_db > GAIN_MAX_DB);
-    assert!(level_db > LEVEL_MAX_DB);
+    assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 257_176_458);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -926,11 +840,10 @@ fn f1_exhaustive_shaper_x7_x8_pipeline_error_and_oracle() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The eight named crossings, each pinned by an independent restatement.
+// The named crossings, grouped by their distinct domains, with an independent restatement.
 //
-// The sweeps above bound the tier over the union of the domains. These bound it over *each
-// crossing's own* domain, named, so that the container's claim -- "exactly six crossings, and this
-// is what each one costs" -- is checked one site at a time rather than in aggregate.
+// The sweeps above bound the tier over the union of the domains. These check the definition over
+// each distinct crossing domain; identical domains need only one conversion sweep.
 //
 // The restatement is deliberately not the `exp2`/`log2` oracle used above. It is
 // `20 * log10(x)` and `pow(10, db/20)` in `f64`, through the vendored `log10` and `pow`, which are
@@ -1011,154 +924,29 @@ fn crossing_worst_db(lo: f32, hi: f32, level: bool) -> f64 {
     worst
 }
 
-/// Crossing X1 — the compressor's detector level (`kernel.rs`, step 4).
+/// Independent definition checks over each distinct named-crossing domain.
 ///
-/// Domain: the detector is rectified and floored to `LEVEL_FLOOR = 1e-8`; the result is clamped
-/// into `[-160, 24]` dB, so amplitudes above about `15.85` cannot affect the output.
+/// X1/X3/X5/X7 share the detector domain, and X2/X6 share the applied-gain domain. These tests
+/// qualify the conversions over those domains; effect tests and the fast-dB seal own the callers.
 #[test]
-fn f1_crossing_x1_compressor_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X1: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X1 (compressor detector level): {worst:.6e} dB");
-}
-
-/// Crossing X2 — the compressor's applied gain (`kernel.rs`, step 7).
-///
-/// Domain: `smoothed + makeup`, where the reduction is clamped to `[-100, 0]` and the makeup
-/// parameter's domain is `[-24, 24]`, so the argument lies in `[-124, 24]` dB.
-#[test]
-fn f1_crossing_x2_compressor_applied_gain() {
-    let worst = crossing_worst_db(-124.0, 24.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X2: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X2 (compressor applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X3 — the gate/expander's detector level (`kernel.rs`).
-///
-/// Same floor and clamps as X1; the clamp *order* differs (`min` then `max`) but the conversion's
-/// domain does not.
-#[test]
-fn f1_crossing_x3_gate_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X3: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X3 (gate detector level): {worst:.6e} dB");
-}
-
-/// Crossing X4 — the gate/expander's applied gain (`kernel.rs`).
-///
-/// Domain: the smoothed `gain_db` tracks a target clamped to `[-range, 0]`, and the range
-/// parameter's maximum is 96 dB, so the argument lies in `[-96, 0]`.
-#[test]
-fn f1_crossing_x4_gate_applied_gain() {
-    let worst = crossing_worst_db(-96.0, 0.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X4: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X4 (gate applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X5 — one multiband band's detector level (`lib.rs`, `band_amplitude`).
-///
-/// Domain: `DETECTOR_FLOOR = 1e-8`, clamped into `[-160, 24]` dB. Same as X1, reached four times
-/// per frame rather than twice because there are two bands.
-#[test]
-fn f1_crossing_x5_multiband_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X5: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X5 (multiband detector level): {worst:.6e} dB");
-}
-
-/// Crossing X6 — one multiband band's applied gain (`lib.rs`, `band_amplitude`).
-///
-/// Domain: `smoothed + makeup`, reduction clamped to `[-100, 0]`, makeup domain `[-24, 24]`.
-#[test]
-fn f1_crossing_x6_multiband_applied_gain() {
-    let worst = crossing_worst_db(-124.0, 24.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X6: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X6 (multiband applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X7 — the transient shaper's fast/slow detector contrast.
-///
-/// Domain: both envelopes are floored to `1e-8`, their ratio stays within `[1e-8, 16]` whenever
-/// contrast is not already clamped, and the result is clamped to ±24 dB.
-#[test]
-fn f1_crossing_x7_transient_shaper_detector_contrast() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X7: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X7 (transient-shaper detector contrast): {worst:.6e} dB");
-}
-
-/// Crossing X8 — the transient shaper's applied gain.
-///
-/// Domain: the shape law's output is clamped to `[-18, 18]` dB before conversion.
-#[test]
-fn f1_crossing_x8_transient_shaper_applied_gain() {
-    let worst = crossing_worst_db(-18.0, 18.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X8: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X8 (transient-shaper applied gain): {worst:.6e} dB");
-}
-
-/// Full-domain site-specific proof for X7, separate from the shared F1 tier sweep.
-#[test]
-#[ignore = "full X7 crossing sweep: run with --release -- --ignored"]
-fn f1_exhaustive_x7_transient_shaper_detector_contrast() {
-    let (lo, hi) = level_domain();
-    let measured = sweep(lo, hi, 1, level_error_db);
-    assert_sweep(
-        "crossing X7 transient-shaper detector contrast",
-        measured,
-        LEVEL_MAX_DB,
-        257_176_458,
-    );
-}
-
-/// Full-domain site-specific proof for X8, split at zero because signed `f32` bit patterns are
-/// monotone in magnitude on each side and not across zero.
-#[test]
-#[ignore = "full X8 crossing sweep: run with --release -- --ignored"]
-fn f1_exhaustive_x8_transient_shaper_applied_gain() {
-    let negative = sweep(
-        (-0.0_f32).to_bits(),
-        (-18.0_f32).to_bits(),
-        1,
-        gain_error_db,
-    );
-    let positive = sweep(0.0_f32.to_bits(), 18.0_f32.to_bits(), 1, gain_error_db);
-    let negative_count = u64::from((-18.0_f32).to_bits() - (-0.0_f32).to_bits()) + 1;
-    let positive_count = u64::from(18.0_f32.to_bits()) + 1;
-    assert_sweep(
-        "crossing X8 negative transient-shaper applied gain",
-        negative,
-        GAIN_MAX_DB,
-        negative_count,
-    );
-    assert_sweep(
-        "crossing X8 positive transient-shaper applied gain",
-        positive,
-        GAIN_MAX_DB,
-        positive_count,
-    );
+fn f1_crossing_domains_match_independent_definitions() {
+    for (crossings, lo, hi, level, gate) in [
+        (
+            "X1/X3/X5/X7 detector level",
+            1.0e-8,
+            16.0,
+            true,
+            LEVEL_MAX_DB,
+        ),
+        ("X2/X6 applied gain", -124.0, 24.0, false, GAIN_MAX_DB),
+        ("X4 gate applied gain", -96.0, 0.0, false, GAIN_MAX_DB),
+        ("X8 shaper applied gain", -18.0, 18.0, false, GAIN_MAX_DB),
+    ] {
+        let worst = crossing_worst_db(lo, hi, level);
+        assert!(
+            worst <= gate,
+            "crossings {crossings}: {worst:.6e} dB exceeds the {gate:.1e} dB gate"
+        );
+        println!("crossings {crossings}: {worst:.6e} dB");
+    }
 }

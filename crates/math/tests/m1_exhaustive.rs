@@ -44,9 +44,8 @@
 //! The former Cephes `LOG2_P` mutation rows do not describe L3 and have been retired. The fresh
 //! mutations above are measured against the new body and its unchanged 2 ulp accuracy gate.
 //!
-//! MA-3 replaces the `exp2_lane` fold compare/select with an equivalent magic-constant round.
-//! The exhaustive bit-identity proof against the pre-change body, including all non-finite and
-//! out-of-domain inputs, lives in `tests/e1_identity.rs`.
+//! Exhaustive scalar/vector bit identity, including non-finite and out-of-domain inputs, lives
+//! in `tests/m2_lane_identity.rs`. MA-3's one-time pre-change comparison is preserved in history.
 //!
 //! Memory note: the sweep iterates ranges of `u32`. Never collect the patterns — 2^31 `u32`s is
 //! 8 GB. Each thread starts its monotonicity chain fresh, so one consecutive pair per thread
