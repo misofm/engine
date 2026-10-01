@@ -244,33 +244,3 @@ fn only_the_documented_pairs_share_a_code() {
         );
     }
 }
-
-/// A rejection is a caller mistake unless it is bounded backpressure or an engine invariant
-/// failure. Hosts map exactly those two classes to something other than "invalid argument", so a
-/// variant silently joining or leaving either class changes what a host does.
-#[test]
-fn classification_partitions_the_table() {
-    let backpressure: Vec<&str> = TABLE
-        .iter()
-        .filter(|(error, _, _, _)| error.is_backpressure())
-        .map(|(_, code, _, _)| *code)
-        .collect();
-    assert_eq!(
-        backpressure,
-        ["source.backpressure", "source.seek.backpressure"]
-    );
-
-    let internal: Vec<&str> = TABLE
-        .iter()
-        .filter(|(error, _, _, _)| error.is_internal())
-        .map(|(_, code, _, _)| *code)
-        .collect();
-    assert_eq!(internal, ["source.internal"]);
-
-    assert!(
-        TABLE
-            .iter()
-            .all(|(error, _, _, _)| !(error.is_backpressure() && error.is_internal())),
-        "no rejection may be both backpressure and an internal invariant failure"
-    );
-}

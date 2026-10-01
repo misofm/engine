@@ -252,10 +252,13 @@ impl ControlProvider for SessionControlProvider {
         &mut self,
         request: ParameterMetadataRequest,
     ) -> Result<ParameterMetadataPage, ParameterProviderError> {
-        let descriptors = self
+        // The catalog builder emits strictly increasing handles, including after replacement.
+        let start = self
             .parameter_metadata
+            .partition_point(|descriptor| descriptor.handle <= request.after_handle);
+        let remaining = &self.parameter_metadata[start..];
+        let descriptors = remaining
             .iter()
-            .filter(|descriptor| descriptor.handle > request.after_handle)
             .take(usize::from(request.limit))
             .cloned()
             .collect::<Vec<_>>();
@@ -264,10 +267,7 @@ impl ControlProvider for SessionControlProvider {
             .map_or(request.after_handle, |descriptor| descriptor.handle);
         Ok(ParameterMetadataPage {
             last_handle,
-            eof: self
-                .parameter_metadata
-                .iter()
-                .all(|descriptor| descriptor.handle <= last_handle),
+            eof: descriptors.len() == remaining.len(),
             descriptors,
         })
     }
@@ -278,12 +278,11 @@ impl ControlProvider for SessionControlProvider {
     ) -> Result<ParameterStatePage, ParameterProviderError> {
         let mut records = Vec::with_capacity(request.handles.len());
         for handle in &request.handles {
-            let record = self
+            let index = self
                 .parameter_state
-                .iter()
-                .find(|record| record.handle == *handle)
-                .ok_or(ParameterProviderError::NotFound)?;
-            records.push(*record);
+                .binary_search_by_key(handle, |record| record.handle)
+                .map_err(|_| ParameterProviderError::NotFound)?;
+            records.push(self.parameter_state[index]);
         }
         Ok(ParameterStatePage {
             observed_sample: self.sample_source.next_absolute_sample(),
@@ -295,10 +294,11 @@ impl ControlProvider for SessionControlProvider {
         &mut self,
         handle: ParameterHandle,
     ) -> Result<&ParameterDescriptor, ParameterProviderError> {
-        self.parameter_metadata
-            .iter()
-            .find(|descriptor| descriptor.handle == handle.0)
-            .ok_or(ParameterProviderError::NotFound)
+        let index = self
+            .parameter_metadata
+            .binary_search_by_key(&handle.0, |descriptor| descriptor.handle)
+            .map_err(|_| ParameterProviderError::NotFound)?;
+        Ok(&self.parameter_metadata[index])
     }
 
     fn counters(
