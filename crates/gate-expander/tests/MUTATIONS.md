@@ -280,3 +280,11 @@ lookahead/ring-specific rows above without deleting their historical transcripts
 
 No CPU timing or listening claim belongs to this record. Causal-gate CPU is tracked by #746 and
 listening remains pending #26.
+
+## Housekeeping survivor note (#1125)
+
+Historical transcripts above are preserved. The removed bypass-only kernel check is covered by
+the public causal and signed-zero/advancing-state gates. The weak finite-sidechain check is covered
+by the current/delayed-detector and NaN-policy gates; the W4 binding smoke is covered by the padded
+public-native/internal-other-width PCM, report and state differential. Renamed native-bank oracle
+and identity tests retain their arithmetic, inputs and comparisons.

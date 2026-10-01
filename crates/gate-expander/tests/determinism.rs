@@ -18,12 +18,14 @@ fn no_case_is_vacuous() {
     for (case, name) in CASE_NAMES.iter().enumerate() {
         let mut words = vec![0_u32; POINTS];
         run_case::<f32>(case, &mut words);
-        let values: Vec<f32> = words.iter().map(|word| f32::from_bits(*word)).collect();
         assert!(
-            values.iter().all(|value| value.is_finite()),
+            words.iter().all(|word| f32::from_bits(*word).is_finite()),
             "{name}: a non-finite value reached the digest"
         );
-        let distinct = values.iter().filter(|value| **value != 0.0).count();
+        let distinct = words
+            .iter()
+            .filter(|word| f32::from_bits(**word) != 0.0)
+            .count();
         assert!(
             distinct > POINTS / 4,
             "{name}: only {distinct} of {POINTS} results are non-zero"
