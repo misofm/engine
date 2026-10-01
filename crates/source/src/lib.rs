@@ -1995,61 +1995,41 @@ mod tests {
         assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
     }
 
-    /// The pre-audit `copy_channel` body, kept verbatim as the oracle for the tail-only fill:
-    /// zero the whole plane, then overwrite the played prefix.
-    fn copy_channel_oracle(consumer: &PcmSourceConsumer, channel: u32, destination: &mut [f32]) {
-        let quantum = usize::try_from(consumer.quantum_frames).expect("u32 fits usize");
-        assert_eq!(destination.len(), quantum, "oracle plane length");
-        destination.fill(0.0);
-        if let Some(block) = consumer.played.as_ref() {
-            let frames = usize::try_from(consumer.played_frames).expect("u32 fits usize");
-            let offset = usize::try_from(channel)
-                .expect("u32 fits usize")
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
-        }
-    }
-
     /// Values a skipped write would leave standing. `-0.0` is in the list because the fill writes
     /// `+0.0` and `-0.0 == 0.0`, so only a bit comparison can tell a fill that ran from one that
     /// did not; `NAN` is there because it is not equal to itself.
     const COPY_CHANNEL_POISON: [f32; 4] = [-0.0, f32::NAN, 1.0e30, -7.5];
 
-    /// Every poison start must leave `copy_channel` bit-identical to the old algorithm.
-    fn assert_copy_channel_matches_oracle(consumer: &PcmSourceConsumer, channel: u32, what: &str) {
-        let quantum = usize::try_from(consumer.quantum_frames).expect("u32 fits usize");
+    /// Compare every copied word with caller-supplied PCM and explicit positive-zero tails.
+    fn assert_copy_channel(
+        consumer: &PcmSourceConsumer,
+        channel: u32,
+        expected: &[f32],
+        what: &str,
+    ) {
         for poison in COPY_CHANNEL_POISON {
-            let mut actual = vec![poison; quantum];
-            let mut expected = vec![poison; quantum];
+            let mut actual = vec![poison; expected.len()];
             consumer
                 .copy_channel(channel, &mut actual)
                 .expect("copy_channel");
-            copy_channel_oracle(consumer, channel, &mut expected);
-            let actual_bits: Vec<u32> = actual.iter().map(|sample| sample.to_bits()).collect();
-            let expected_bits: Vec<u32> = expected.iter().map(|sample| sample.to_bits()).collect();
-            assert_eq!(
-                actual_bits, expected_bits,
-                "{what}: poison {poison} left a difference"
-            );
+            for (frame, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "{what}: poison {poison}, frame {frame}"
+                );
+            }
         }
     }
 
-    /// `copy_channel` zeroes exactly the region the copy does not reach, and nothing else.
-    ///
-    /// Red mutation: drop the `destination[frames..].fill(0.0)`. The short-block and underrun legs
-    /// then keep the poison in the tail and fail against the oracle. Red mutation the other way:
-    /// restore the leading `destination.fill(0.0)`; nothing fails, which is the point -- the write
-    /// it removes is dead, so only the disassembly and the bench can see it, and this test is here
-    /// to hold the *semantics* still while that write goes away.
+    /// Full PCM, short PCM with a zero tail, and silence overwrite every poisoned destination.
     #[test]
-    fn copy_channel_zeroes_only_the_tail_the_full_fill_used_to_reach() {
+    fn copy_channel_preserves_pcm_and_zeroes_missing_frames() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 8)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
 
         // No retained quantum at all: the whole plane is the underrun.
-        assert!(consumer.played.is_none());
-        assert_copy_channel_matches_oracle(&consumer, 0, "before any block");
+        assert_copy_channel(&consumer, 0, &[0.0; 4], "before any block");
 
         // `-0.0` and a subnormal-adjacent value in the payload, so a copy that was quietly
         // replaced by a zero fill could not pass by comparing equal.
@@ -2062,36 +2042,22 @@ mod tests {
         host.submit(chunk(1, 4, &[&left_short, &right_short], 2, true))
             .expect("short EOF block");
 
-        // Whole quantum: the fill is skipped entirely and every sample is the copy.
+        // Whole quantum: every sample is the supplied PCM.
         let full = consumer.begin_block();
         assert_eq!(full.copied_frames, 4);
-        assert_eq!(consumer.played_frames, 4);
-        assert_copy_channel_matches_oracle(&consumer, 0, "whole quantum, left");
-        assert_copy_channel_matches_oracle(&consumer, 1, "whole quantum, right");
-        let mut plane = [f32::NAN; 4];
-        consumer.copy_channel(0, &mut plane).expect("whole copy");
-        assert_eq!(plane.map(f32::to_bits), left_full.map(f32::to_bits));
+        assert_copy_channel(&consumer, 0, &left_full, "whole quantum, left");
+        assert_copy_channel(&consumer, 1, &right_full, "whole quantum, right");
 
         // Short submission: the copied prefix, then a tail that must still come out `+0.0`.
         let short = consumer.begin_block();
         assert_eq!(short.copied_frames, 2);
-        assert_eq!(consumer.played_frames, 2);
-        assert_copy_channel_matches_oracle(&consumer, 0, "short quantum, left");
-        assert_copy_channel_matches_oracle(&consumer, 1, "short quantum, right");
-        let mut plane = [f32::NAN; 4];
-        consumer.copy_channel(1, &mut plane).expect("short copy");
-        let plane_bits = plane.map(f32::to_bits);
-        assert_eq!(plane_bits[..2], right_short.map(f32::to_bits));
-        assert_eq!(plane_bits[2..], [0_u32; 2]);
+        assert_copy_channel(&consumer, 0, &[5.0, -6.0, 0.0, 0.0], "short quantum, left");
+        assert_copy_channel(&consumer, 1, &[-5.0, 6.0, 0.0, 0.0], "short quantum, right");
 
         // Past the end of the region: nothing is retained, so the whole plane is zeroed.
         let after = consumer.begin_block();
         assert!(after.end_of_region);
-        assert!(consumer.played.is_none());
-        assert_copy_channel_matches_oracle(&consumer, 0, "past the end of the region");
-        let mut plane = [f32::NAN; 4];
-        consumer.copy_channel(0, &mut plane).expect("underrun copy");
-        assert_eq!(plane.map(f32::to_bits), [0_u32; 4]);
+        assert_copy_channel(&consumer, 0, &[0.0; 4], "past the end of the region");
     }
 
     fn test_mapping(index: u32) -> SourceGraphTrackMapping {
@@ -2623,448 +2589,48 @@ mod tests {
         assert_eq!(sequential_pcm, [10.0, 10.0, 10.0, 10.0]);
     }
 
-    /// Gate 1's fixed producer/consumer script (#917). Between renders the producer submits
-    /// consecutive blocks until backpressure; a render is one scripted quantum on the consumer
-    /// side. Every admission (`SubmitReport` or `Full`), seek, seek preparation and render report,
-    /// and the planes each render read, are appended as `u64` words, four per record plus a
-    /// render's eight plane words, so two runs compare word for word.
-    ///
-    /// Record tags: 0 accepted `[accepted_frames, cumulative_written_frames, generation]`,
-    /// 1 `Full { full_count }`, 2 seek `[generation, frame]`, 3/4 render report, 5 prepared seek
-    /// result, 6 producer telemetry, 7 consumer telemetry.
-    struct AdmissionScript {
-        host: HostChunkProvider,
-        generation: u64,
-        next_start: u64,
-        region_end: u64,
-        end_submitted: bool,
-        events: Vec<u64>,
-    }
-
-    /// One side of the render thread driven by [`AdmissionScript`].
-    trait ScriptedRender {
-        /// Render one quantum and return its report and the two planes it read.
-        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]);
-        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool;
-        fn telemetry(&self) -> SourceConsumerTelemetry;
-    }
-
-    impl AdmissionScript {
-        const QUANTUM: u32 = 4;
-
-        fn sample(frame: u64, channel: u32) -> f32 {
-            // Distinct per frame and channel, so a stale or repeated block cannot pass.
-            (frame as f32) * 0.5 + (channel as f32) * 1000.0 + 0.25
-        }
-
-        fn fill_until_full(&mut self) {
-            for _ in 0..16 {
-                if self.end_submitted {
-                    return;
-                }
-                let start = self.next_start;
-                let remaining = self.region_end - start;
-                let frames = u32::try_from(remaining.min(u64::from(Self::QUANTUM))).unwrap();
-                let end_of_region = remaining <= u64::from(Self::QUANTUM);
-                let left: Vec<f32> = (0..u64::from(frames))
-                    .map(|index| Self::sample(start + index, 0))
-                    .collect();
-                let right: Vec<f32> = (0..u64::from(frames))
-                    .map(|index| Self::sample(start + index, 1))
-                    .collect();
-                let planes = [&left[..], &right[..]];
-                match self.host.submit(chunk(
-                    self.generation,
-                    start,
-                    &planes,
-                    frames,
-                    end_of_region,
-                )) {
-                    Ok(report) => {
-                        self.events.extend([
-                            0,
-                            u64::from(report.accepted_frames),
-                            report.cumulative_written_frames,
-                            report.active_generation.0,
-                        ]);
-                        self.next_start += u64::from(frames);
-                        self.end_submitted = end_of_region;
-                    }
-                    Err(HostChunkError::Full { full_count }) => {
-                        self.events.extend([1, full_count, 0, 0]);
-                        return;
-                    }
-                    Err(other) => panic!("scripted submit rejected: {other:?}"),
-                }
-            }
-            panic!("the ring must saturate within sixteen submissions");
-        }
-
-        fn seek(&mut self, generation: u64, frame: u64, region_end: u64) {
-            self.host
-                .try_seek(SourceCommand::Seek {
-                    generation: SourceGeneration(generation),
-                    frame: SourceFrame(frame),
-                })
-                .expect("scripted seek");
-            self.generation = generation;
-            self.next_start = frame;
-            self.region_end = region_end;
-            self.end_submitted = false;
-            self.events.extend([2, generation, frame, 0]);
-        }
-
-        fn render(&mut self, side: &mut impl ScriptedRender) {
-            let (report, planes) = side.render();
-            self.events.extend([
-                3,
-                u64::from(report.copied_frames),
-                u64::from(report.underrun_frames),
-                u64::from(report.underrun_event)
-                    | u64::from(report.end_of_region) << 1
-                    | u64::from(report.generation_changed) << 2,
-            ]);
-            self.events.extend([
-                4,
-                report.active_generation.0,
-                report.cumulative_read_frames,
-                report.cumulative_underrun_frames,
-            ]);
-            for plane in planes {
-                self.events
-                    .extend(plane.map(|sample| u64::from(sample.to_bits())));
-            }
-        }
-
-        fn prepare_seek(&mut self, side: &mut impl ScriptedRender, generation: u64, frame: u64) {
-            let prepared = side.prepare_seek(generation, frame);
-            self.events.extend([5, u64::from(prepared), 0, 0]);
-        }
-
-        /// Run the fixed script against a fresh `config(2, 4, 12)` ring (three blocks).
-        fn run(host: HostChunkProvider, side: &mut impl ScriptedRender) -> Vec<u64> {
-            let mut script = Self {
-                host,
-                generation: 1,
-                next_start: 0,
-                region_end: 64,
-                end_submitted: false,
-                events: Vec::new(),
-            };
-            // Prefill from a fresh ring, then steady state: one admission per render.
-            script.fill_until_full();
-            for _ in 0..3 {
-                script.render(side);
-                script.fill_until_full();
-            }
-            // Two renders without refilling, then refill.
-            script.render(side);
-            script.render(side);
-            script.fill_until_full();
-            // Drain the ring into an underrun, then refill after the underrun.
-            for _ in 0..4 {
-                script.render(side);
-            }
-            script.fill_until_full();
-            for _ in 0..2 {
-                script.render(side);
-                script.fill_until_full();
-            }
-            // A mid-stream seek with stale blocks still queued.
-            script.seek(2, 1000, 1022);
-            script.fill_until_full();
-            script.render(side);
-            script.fill_until_full();
-            for _ in 0..2 {
-                script.render(side);
-                script.fill_until_full();
-            }
-            // A paused seek prepared between blocks, then prepared again with a current block.
-            script.seek(3, 2000, 2030);
-            script.prepare_seek(side, 3, 2000);
-            script.fill_until_full();
-            script.prepare_seek(side, 3, 2000);
-            script.fill_until_full();
-            // Play through the short end-of-region block and past the end.
-            for _ in 0..11 {
-                script.render(side);
-                script.fill_until_full();
-            }
-            let telemetry = script.host.telemetry();
-            script.events.extend([
-                6,
-                telemetry.cumulative_written_frames,
-                telemetry.data_full_count,
-                telemetry.recycle_empty_count,
-            ]);
-            let consumer = side.telemetry();
-            script.events.extend([
-                7,
-                consumer.stale_generation_discard_count,
-                consumer.underrun_events,
-                consumer.cumulative_read_frames,
-            ]);
-            script.events
-        }
-    }
-
-    /// The script's words recorded on the pre-#917 ring (`12b621f2`), with the render
-    /// `begin_block; copy_channel(0); copy_channel(1); end_block` -- the release point the
-    /// graph driver's last claim had. Three configured blocks, both queues sized three.
-    #[rustfmt::skip]
-    const PRE_RETENTION_ADMISSION_ORACLE: &[u64] = &[
-        0, 4, 4, 1,
-        0, 4, 8, 1,
-        0, 4, 12, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 4, 0,
-        1048576000, 1061158912, 1067450368, 1071644672, 1148850176, 1148858368, 1148866560, 1148874752,
-        0, 4, 16, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 8, 0,
-        1074790400, 1076887552, 1078984704, 1081081856, 1148882944, 1148891136, 1148899328, 1148907520,
-        0, 4, 20, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 12, 0,
-        1082654720, 1083703296, 1084751872, 1085800448, 1148915712, 1148923904, 1148932096, 1148940288,
-        0, 4, 24, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 16, 0,
-        1086849024, 1087897600, 1088946176, 1089994752, 1148948480, 1148956672, 1148964864, 1148973056,
-        3, 4, 0, 0, 4, 1, 20, 0,
-        1090781184, 1091305472, 1091829760, 1092354048, 1148981248, 1148989440, 1148997632, 1149005824,
-        0, 4, 28, 1,
-        0, 4, 32, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 24, 0,
-        1092878336, 1093402624, 1093926912, 1094451200, 1149014016, 1149022208, 1149030400, 1149038592,
-        3, 4, 0, 0, 4, 1, 28, 0,
-        1094975488, 1095499776, 1096024064, 1096548352, 1149046784, 1149054976, 1149063168, 1149071360,
-        3, 4, 0, 0, 4, 1, 32, 0,
-        1097072640, 1097596928, 1098121216, 1098645504, 1149079552, 1149087744, 1149095936, 1149104128,
-        3, 0, 4, 1, 4, 1, 32, 4,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 4, 36, 1,
-        0, 4, 40, 1,
-        0, 4, 44, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 36, 4,
-        1100087296, 1100349440, 1100611584, 1100873728, 1149145088, 1149153280, 1149161472, 1149169664,
-        0, 4, 48, 1,
-        0, 4, 52, 1,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 1, 40, 4,
-        1101135872, 1101398016, 1101660160, 1101922304, 1149177856, 1149186048, 1149194240, 1149202432,
-        0, 4, 56, 1,
-        1, 0, 0, 0,
-        2, 2, 1000, 0,
-        1, 0, 0, 0,
-        3, 0, 4, 5, 4, 2, 40, 8,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 4, 60, 2,
-        0, 4, 64, 2,
-        0, 4, 68, 2,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 2, 44, 8,
-        1140531200, 1140547584, 1140563968, 1140580352, 1153157120, 1153161216, 1153165312, 1153169408,
-        0, 4, 72, 2,
-        0, 4, 76, 2,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 2, 48, 8,
-        1140596736, 1140613120, 1140629504, 1140645888, 1153173504, 1153177600, 1153181696, 1153185792,
-        0, 2, 78, 2,
-        2, 3, 2000, 0,
-        5, 1, 0, 0,
-        0, 4, 82, 3,
-        0, 4, 86, 3,
-        0, 4, 90, 3,
-        1, 0, 0, 0,
-        5, 1, 0, 0,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 3, 52, 8,
-        1148850176, 1148858368, 1148866560, 1148874752, 1157236736, 1157240832, 1157244928, 1157249024,
-        0, 4, 94, 3,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 3, 56, 8,
-        1148882944, 1148891136, 1148899328, 1148907520, 1157253120, 1157257216, 1157261312, 1157265408,
-        0, 4, 98, 3,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 3, 60, 8,
-        1148915712, 1148923904, 1148932096, 1148940288, 1157269504, 1157273600, 1157277696, 1157281792,
-        0, 4, 102, 3,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 3, 64, 8,
-        1148948480, 1148956672, 1148964864, 1148973056, 1157285888, 1157289984, 1157294080, 1157298176,
-        0, 4, 106, 3,
-        1, 0, 0, 0,
-        3, 4, 0, 0, 4, 3, 68, 8,
-        1148981248, 1148989440, 1148997632, 1149005824, 1157302272, 1157306368, 1157310464, 1157314560,
-        0, 2, 108, 3,
-        3, 4, 0, 0, 4, 3, 72, 8,
-        1149014016, 1149022208, 1149030400, 1149038592, 1157318656, 1157322752, 1157326848, 1157330944,
-        3, 4, 0, 0, 4, 3, 76, 8,
-        1149046784, 1149054976, 1149063168, 1149071360, 1157335040, 1157339136, 1157343232, 1157347328,
-        3, 2, 0, 2, 4, 3, 78, 8,
-        1149079552, 1149087744, 0, 0, 1157351424, 1157355520, 0, 0,
-        3, 0, 0, 2, 4, 3, 78, 8,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        3, 0, 0, 2, 4, 3, 78, 8,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        3, 0, 0, 2, 4, 3, 78, 8,
-        0, 0, 0, 0, 0, 0, 0, 0,
-        6, 108, 0, 17,
-        7, 8, 2, 78,
-    ];
-
-    /// Consumer-level render with the #917 hold rule: `begin_block`, read the planes in place,
-    /// and leave the played block to the next `begin_block`.
-    struct HoldingConsumer(PcmSourceConsumer);
-
-    impl ScriptedRender for HoldingConsumer {
-        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
-            let report = self.0.begin_block();
-            let mut planes = [[0.0_f32; 4]; 2];
-            for (channel, plane) in (0_u32..).zip(planes.iter_mut()) {
-                self.0.copy_channel(channel, plane).expect("copy");
-                // The borrowed plane is exactly what the copy wrote, word for word.
-                match self.0.played_plane(channel) {
-                    Some(borrowed) => {
-                        assert_ne!(report.copied_frames, 0, "a plane without a played block");
-                        assert_eq!(plane_bits(borrowed), plane.map(f32::to_bits));
-                    }
-                    None => assert_eq!(report.copied_frames, 0, "a played block without a plane"),
-                }
-            }
-            (report, planes)
-        }
-
-        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
-            self.0
-                .prepare_seek(SourceGeneration(generation), SourceFrame(frame))
-        }
-
-        fn telemetry(&self) -> SourceConsumerTelemetry {
-            self.0.telemetry()
-        }
-    }
-
-    /// The oracle's own render (copy, then `end_block`) on the #917 ring: a caller that ends the
-    /// block itself, like `read_block`, keeps the same admission depth too.
-    struct EndingConsumer(PcmSourceConsumer);
-
-    impl ScriptedRender for EndingConsumer {
-        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
-            let report = self.0.begin_block();
-            let mut planes = [[0.0_f32; 4]; 2];
-            for (channel, plane) in (0_u32..).zip(planes.iter_mut()) {
-                self.0.copy_channel(channel, plane).expect("copy");
-            }
-            self.0.end_block();
-            assert!(self.0.played_plane(0).is_none());
-            (report, planes)
-        }
-
-        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
-            self.0
-                .prepare_seek(SourceGeneration(generation), SourceFrame(frame))
-        }
-
-        fn telemetry(&self) -> SourceConsumerTelemetry {
-            self.0.telemetry()
-        }
-    }
-
-    /// The graph driver path: `begin_block`, borrow the claim's planes, copy the claim, and hold.
-    /// The report is rebuilt from the driver's consumer exactly as `begin_block` computes it.
-    struct HoldingDriver(SourceGraphSourceSetDriver);
-
-    impl ScriptedRender for HoldingDriver {
-        fn render(&mut self) -> (SourceReadReport, [[f32; 4]; 2]) {
-            let before = self.0.sources[0].consumer.telemetry();
-            self.0.begin_block(0, 4).expect("driver begin");
-            let consumer = &self.0.sources[0].consumer;
-            let after = consumer.telemetry();
-            let underrun_frames = after.underrun_frames - before.underrun_frames;
-            let report = SourceReadReport {
-                copied_frames: u32::try_from(
-                    after.cumulative_read_frames - before.cumulative_read_frames,
-                )
-                .expect("one quantum"),
-                underrun_frames: u32::try_from(underrun_frames).expect("one quantum"),
-                underrun_event: underrun_frames != 0,
-                end_of_region: after.end_of_region,
-                active_generation: after.active_generation,
-                generation_changed: consumer.generation_changed,
-                cumulative_read_frames: after.cumulative_read_frames,
-                cumulative_underrun_frames: after.underrun_frames,
-                cumulative_underrun_events: after.underrun_events,
-            };
-            let borrowed = self
-                .0
-                .played_planes(0)
-                .map(|(left, right)| (plane_bits(left), plane_bits(right)));
-            let (mut left, mut right) = ([0.0_f32; 4], [0.0_f32; 4]);
-            self.0
-                .copy_track_input(0, &mut left, &mut right)
-                .expect("claim copy");
-            match borrowed {
-                Some((borrowed_left, borrowed_right)) => {
-                    assert_ne!(report.copied_frames, 0);
-                    assert_eq!(borrowed_left, left.map(f32::to_bits));
-                    assert_eq!(borrowed_right, right.map(f32::to_bits));
-                    // Still held after the last (only) claim copied.
-                    assert!(self.0.played_planes(0).is_some());
-                }
-                None => assert_eq!(report.copied_frames, 0),
-            }
-            (report, [left, right])
-        }
-
-        fn prepare_seek(&mut self, generation: u64, frame: u64) -> bool {
-            let prepared = self.0.prepare_source_seek(0, generation, frame);
-            assert!(
-                self.0.played_planes(0).is_none(),
-                "seek preparation releases"
-            );
-            prepared
-        }
-
-        fn telemetry(&self) -> SourceConsumerTelemetry {
-            self.0.sources[0].consumer.telemetry()
-        }
-    }
-
     fn plane_bits(plane: &[f32]) -> Vec<u32> {
         plane.iter().map(|sample| sample.to_bits()).collect()
     }
 
-    /// Gate 1 (#917): with the played block retained through the render and one block more
-    /// allocated, the producer's admission sequence -- every `SubmitReport` and every `Full` --
-    /// and every render report and plane are word for word those of the pre-change ring, on the
-    /// consumer path, on a caller that still ends its blocks, and on the graph driver path.
-    ///
-    /// Red mutations: allocate without the retained block (the producer loses one admission at
-    /// every boundary); start the retained block in the recycle queue (one extra admission on the
-    /// fresh ring and after the underrun); keep the idle block when a new block plays (the
-    /// producer loses one admission after the first render).
     #[test]
-    fn played_block_retention_keeps_the_pre_change_admission_sequence() {
-        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
-        let mut holding = HoldingConsumer(consumer);
-        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut holding);
-        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "consumer hold path");
-
-        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
-        let mut ending = EndingConsumer(consumer);
-        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut ending);
-        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "copy-then-end path");
-
-        let (producer, consumer, _) = PcmSourceRing::prepare(config(2, 4, 12)).expect("ring");
-        let mut mapping = test_mapping(0);
-        mapping.right_channel = 1;
-        let mut driver = HoldingDriver(test_driver(consumer, vec![mapping]));
-        let events = AdmissionScript::run(producer.into_host_chunk_provider(RATE), &mut driver);
-        assert_eq!(events, PRE_RETENTION_ADMISSION_ORACLE, "graph driver path");
+    fn seek_preparation_preserves_configured_depth_and_prefetches_without_consuming() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 12)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(SourceCommand::Seek {
+            generation: SourceGeneration(2),
+            frame: SourceFrame(100),
+        })
+        .expect("seek");
+        assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
+        let blocks = [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+        ];
+        for (index, samples) in blocks.iter().enumerate() {
+            host.submit(chunk(2, 100 + index as u64 * 4, &[samples], 4, false))
+                .expect("configured admission");
+        }
+        assert!(matches!(
+            host.submit(chunk(2, 112, &[&blocks[0]], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
+        // Prefetching the first queued block retains its storage without opening an admission.
+        assert!(consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
+        assert_eq!(consumer.telemetry().cumulative_read_frames, 0);
+        assert!(matches!(
+            host.submit(chunk(2, 112, &[&blocks[0]], 4, false)),
+            Err(HostChunkError::Full { .. })
+        ));
+        let mut output = [f32::NAN; 4];
+        let report = consumer
+            .read_block(&mut [&mut output])
+            .expect("first target block");
+        assert_eq!(output, blocks[0]);
+        assert_eq!(report.copied_frames, 4);
+        assert_eq!(report.cumulative_read_frames, 4);
+        assert_eq!(report.active_generation, SourceGeneration(2));
     }
 
     /// Gate 1, "at every point" (#917): while the render borrows the played planes, the producer
@@ -3128,7 +2694,7 @@ mod tests {
     /// Gate 2 (#917): `played_plane` on a short block is the played frames followed by exact
     /// `+0.0` words to the quantum, written in place over storage that held poison; it is `None`
     /// before any block, on an out-of-range channel, past the end of the region and after
-    /// `end_block`; and `copy_channel` stays bit-identical to the pre-change oracle throughout.
+    /// `end_block`; and `copy_channel` emits the same supplied PCM and positive-zero tail.
     ///
     /// Red mutation: drop the in-place tail fill in `play` -- the borrowed tail keeps the poison.
     #[test]
@@ -3136,7 +2702,7 @@ mod tests {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 4)).expect("ring");
         let mut host = producer.into_host_chunk_provider(RATE);
         assert!(consumer.played_plane(0).is_none(), "nothing played yet");
-        assert_copy_channel_matches_oracle(&consumer, 0, "before any block");
+        assert_copy_channel(&consumer, 0, &[0.0; 4], "before any block");
 
         // Rotate every allocated block (one configured, one retained) through a poisoned full
         // quantum, so the short block below lands in storage whose tail is not zero.
@@ -3170,14 +2736,19 @@ mod tests {
                 plane_bits(consumer.played_plane(channel).expect("repeat plane")),
                 bits
             );
-            assert_copy_channel_matches_oracle(&consumer, channel, "short block");
+            assert_copy_channel(
+                &consumer,
+                channel,
+                &[played[0], played[1], 0.0, 0.0],
+                "short block",
+            );
         }
         assert!(consumer.played_plane(2).is_none(), "out-of-range channel");
 
         // `end_block` ends the quantum: no plane, and the copy writes the whole-plane silence.
         consumer.end_block();
         assert!(consumer.played_plane(0).is_none());
-        assert_copy_channel_matches_oracle(&consumer, 0, "after end_block");
+        assert_copy_channel(&consumer, 0, &[0.0; 4], "after end_block");
 
         // Past the end of the region nothing is played.
         let after = consumer.begin_block();
@@ -3185,7 +2756,7 @@ mod tests {
         assert_eq!(after.copied_frames, 0);
         assert!(consumer.played_plane(0).is_none());
         assert!(consumer.played_plane(1).is_none());
-        assert_copy_channel_matches_oracle(&consumer, 1, "past the end of the region");
+        assert_copy_channel(&consumer, 1, &[0.0; 4], "past the end of the region");
 
         // An underrun (in-region, nothing queued) plays nothing either.
         let (_producer, mut starved, _) = PcmSourceRing::prepare(config(1, 4, 8)).expect("ring");
