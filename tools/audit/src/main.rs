@@ -66,6 +66,19 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
+fn parse_blocks(default: u64) -> u64 {
+    let mut arguments = std::env::args().skip(1);
+    match arguments.next().as_deref() {
+        None => default,
+        Some("--blocks") => arguments
+            .next()
+            .expect("--blocks value")
+            .parse()
+            .expect("integer block count"),
+        Some(_) => panic!("unknown audit argument"),
+    }
+}
+
 fn launch(mut command: Command) -> ! {
     #[cfg(unix)]
     {
