@@ -27,4 +27,109 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 — implementation and complete review
+
+Implementer: GPT-6.1 Sol xhigh, worker A, on `bfdb4cc0`. Read all 10 package files: manifest,
+`src/lib.rs`, `src/mixing_automation.rs`, all six integration files and the example (9,835 Rust
+lines before this pass). Read current #881/#938, retired #885/#1004 and applicable R9/floor
+evidence. #938's live producer, the meter delivery distinction, route association, paired-span
+admission and outstanding DSP optimizations remain separate. No dependency/lock/API change.
+Product checkpoints: `8794232e` (five paths) and `e6b3ad96` (known-size template destination).
+
+**Five axes.** Repetition: reuse the already computed structural witness; consolidate the EQ
+width twins; retire historical assertions and the strict placement subset. Copying: borrow kept
+slot IDs and injected PCM; move the synthetic track template into its owner while preallocating
+the known destination size; consume the scalar differential's owned PCM and the strip digest
+vector. Track/route clones that create repeated independent tracks, bank/dual PCM, captured state
+and aligned final source storage retain their ownership purpose. Data structures: the at-most-three
+slot-ID membership scan stays ordered and linear; preparation's structural `BTreeSet`, normalized
+claim sorting and test models' `BTreeMap` keep their deterministic join/replay purposes. Per-write
+test tuple-key copies and small example/report buffers were left alone to avoid redesigning rigs.
+Micro SIMD: this package delegates numeric render kernels to lane/builtins/effects. Its own source
+callback is copying; the current release artifact emits two length guards and two 512-byte
+`memcpy` calls. Played planes remain borrowed into the bank gather. No packed arithmetic is added
+here, and no instruction-count/timing saving is claimed. Offline sine generation is unchanged.
+Test value and deletion survivors are below; public workload identities, authored PCM words,
+LCGs/seeds, control values, all retained schedules and arithmetic expressions stay fixed. Docs now
+describe current collapse/pooling/padding/app placement, R9 and hash-based comparisons accurately.
+
+**Retained behavioral families (64 active native tests).**
+
+- `lib.rs` (14): driver facts/feed uniqueness, bound-versus-played output and in-place counts,
+  omitted input dispatch, actual executor-table accounting; direct claim/copy/lend/quantum and
+  short-buffer refusal with independent track-position/channel expectations; source/output
+  alignment; meter facts/emission and real snapshots, sample-peak mask, cadence, spans, drop and
+  discontinuity counts, unchanged memberships but 48 versus 40 delivery stages; strip facts/order,
+  first-N track bodies/routes, app slots and every-third bypass, malformed/partial bypass censuses,
+  exact odd-track zeros and mixed activity, and all five strip rows' audible/distinct/RT scopes.
+- `automation.rs` (10): threshold restatement versus movement on every block, stable channel
+  selection and absence refusal; eight resolved controls/held bases, alternating values and
+  restatement admissions, no-control refusal, all preflight nonvacuity arms, and EQ `Both` target
+  lowering versus two one-channel transactions and their collapse consequences.
+- `chain_shape.rs` (22): intended/legacy/ragged chains and transposes, facility equivalence and
+  armed observations, per-row fold counts/order, half-mono pooling plus structural/runtime join,
+  vacuous seam classification, mono/dual pairing and unit census, identity-pair activity, folded
+  versus forcibly declined reduction; engagement, stop/start/repeated transitions, live asymmetric
+  retarget, bypass lift/engage and re-equalized targets, and right-channel taps against forced dual.
+  Each transition owner checks the particular history transfer or refusal its schedule reaches.
+- `eq_ramping_scenario.rs` (2): EQ-only Left/Right targets and mono `Both` targets, every supported
+  vector width, 64-block pre-roll and 128-block settled/eight-of-64/all-64 rides; activity contrasts,
+  current width equality and mono engagement. Independent current LIST/full-section differentials
+  in parametric-EQ still own numeric section elision and ramp/state behavior.
+- `paired_spans.rs` (13): real EQ/compressor/limiter/chained banks against forced dual by every PCM
+  word, report and full lane state; three seeded rides, hostile words, last-wins/near/split/lone
+  pairs, target FIFO interleavings, resets/restores, exact queue refusal and missing halves; every
+  mixed-drain permutation against a final-value model; collapse-capability census; all registered
+  effects/link modes' symmetric validity over domain edges/NaNs/infinities/signed zero; exact
+  staging-window capacity refusal; per-block console engagement/restatement/asymmetric retirement;
+  128-block mixed ride, all isolated-effect activity controls and supported-width equality.
+- `placement.rs` (2): limiter activity and current merged/split equality for each of 64 blocks.
+  `gain_pan_profile.rs` (1 active, 2 unchanged ignored helpers): real probe phase/entry counters,
+  nesting, routes and output parity over 16 blocks. Ignored descriptive timing/digest-print helpers
+  were neither run nor rewritten. The example still emits eight controls and two document facts.
+
+**Retirements/recasts.** The whole-run placement comparison is a strict subset of the surviving
+per-block comparison and `the_two_placements_realise_the_same_chain_shape`. The old select-free
+four-row SHA pin adds historical outputs; current owners are lane's
+`select_free_matrix_matches_the_select_form_when_no_lane_is_identity` (all widths, hostile
+families, frame counts and guards), builtins' `settled_matrix_takes_the_select_free_arm_only_without_an_identity_lane`
+(full/partial/identity banks and ramp tails), `settled_identity_matrix_preserves_signed_zero`,
+the D11/f64 matrix references and the folded/declined console reduction. Wrong matrix coefficients,
+identity selection or tail dispatch remain observable there. Driver/meter/strip old pins retire
+while their current parity, exact model/input, activity, RT and snapshot assertions stay. Four EQ
+historical width functions become two workload families with all six scenarios per x86 workload;
+the mixed-ride historical pin becomes a current width comparison with every isolated-effect run.
+No fixture digest or G5 owner changes. Rust: 112 added, 294 removed, **−182**; four net active
+functions removed, distinct from unchanged input/scenario counts.
+
+**Rewritten-owner defects.** Injected driver: a borrowed table taking the wrong track prefix or
+channel mapping now fails the independent expected words; Local is still exercised elsewhere.
+EQ width families: a width-specific preparation/render or track-lookup divergence, ignored ride or
+indistinguishable ride arms fails current equality/activity for the existing EQ-only and mono schedules. Mixed ride:
+width divergence or an inactive effect ride fails current equality or that effect's isolated control.
+Strip activity: an inaudible row, forbidden render operation, or sparse/strip row collapsed to one
+of its current controls fails; exact derivation remains owned by the adjacent model/source tests.
+
+**Allocator correction.** The initial inference that these binaries lacked an allocator was wrong
+and is retracted. Actual executable symbols show bench-support's `GLOBAL_ALLOCATOR` and all four
+`AuditedAllocator` methods; their provider reports alloc/zeroed/realloc/free into engine's thread
+audit before System. Digest use links that provider. Scoped zero snapshots therefore include real
+allocator events; explicit forbidden-operation controls prove hook nonvacuity, not a real allocator
+positive probe by themselves. Other operation categories are explicit hooks plus policy coverage.
+
+**Actual gates and limits.** Baseline debug: 68 active PASS, two ignored. Changed debug: 53 PASS
+(14 lib + 22 shape + 2 EQ + 13 paired + 2 placement); destination completion: first-N and ragged
+owners each PASS. Complete final release/all-features: **64 active PASS, two existing ignored,
+zero doctests**. The unchanged automation/probe debug binaries were not rerun; final release covers
+them and the final preallocation. Final all-targets/all-features strict clippy, fmt/diff: PASS,
+no warnings. All-targets/all-features Wasm `+simd128`, iOS and Android AArch64 checks: PASS without
+warnings; compile evidence only, no device/Wasm execution. Workspace/bench/realtime/lane/boundary
+policies PASS (54 marked realtime regions). Canonical fixture regeneration/witness gate PASS;
+the initial explicit call refused a missing validator, then the existing validator was built and
+the gate resumed successfully. The untimed example emits valid JSON, eight controls, two documents,
+bypass counts 0/21 and unchanged 64/64/64 pre-roll/preflight/smoothing. No timed CLI, new harness,
+benchmark, fixture corpus, listening claim or additional sweep. No owner question is required.
+
+Raw logs: `/tmp/housekeeping-a-console-workload-{baseline,focused,focused-shape,focused-clippy,template-lib,template-shape,release,final-clippy,wasm,ios,android,policies,validator-build,fixtures,controls,allocator-symbols,codegen}.log`;
+example JSON: `/tmp/housekeeping-a-console-workload-controls.json`. Codegen uses the release
+unit executable `console_workload-7596d3576611b83a` produced by the complete gate.
