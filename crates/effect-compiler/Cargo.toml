@@ -28,7 +28,6 @@ lane.workspace = true
 # The catalog lattice sweep checks the builtin strip rows alongside the effect rows: they are
 # one shipped controllable surface even though they are two descriptor tables.
 builtins.workspace = true
-sha2.workspace = true
 
 [features]
 default = []
