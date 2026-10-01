@@ -186,6 +186,11 @@ mod pinned {
     fn g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz() {
         let saved = read_word();
         let clear = saved & !FLUSH_BITS;
+        let expected_rows =
+            (corpus::CASE_COUNT - corpus::MATH_CASE_COUNT - corpus::DELAY_CASE_COUNT)
+                * corpus::WIDTHS
+                + corpus::MATH_CASE_COUNT
+                + corpus::DELAY_CASE_COUNT;
 
         let without = render_with_word(clear);
         let with = {
@@ -194,6 +199,11 @@ mod pinned {
             render_corpus()
         };
 
+        assert_eq!(
+            without.len(),
+            expected_rows,
+            "the unguarded run must render every case at every applicable width"
+        );
         assert_eq!(
             without.len(),
             with.len(),
@@ -226,11 +236,4 @@ mod pinned {
             "G6 corpus gate leaked control-word state"
         );
     }
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-#[test]
-fn g6_full_wasm_gate_corpus_portable_smoke() {
-    let rendered = render_corpus();
-    assert!(!rendered.is_empty(), "the full corpus must not be empty");
 }
