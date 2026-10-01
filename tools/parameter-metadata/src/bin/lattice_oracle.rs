@@ -110,7 +110,7 @@ fn main() {
             // minimum downward, from the maximum upward, and one large jump from the middle.
             let last_index = u32::try_from(points.len().saturating_sub(1)).unwrap_or(0);
             let middle = last_index / 2;
-            let resolutions: Vec<String> = [
+            let resolutions = [
                 (0_u32, StepSize::Xs, 1_i32),
                 (0, StepSize::Xl, -1),
                 (last_index, StepSize::Xs, 1),
@@ -118,27 +118,22 @@ fn main() {
                 (middle, StepSize::Lg, 3),
                 (middle, StepSize::Xl, -3),
             ]
-            .iter()
             .map(|(current, size, count)| {
-                resolve_parameter_step(&points, *current, *size, *count, parameter.lattice.ladder)
+                resolve_parameter_step(&points, current, size, count, parameter.lattice.ladder)
                     .map_or_else(|| "none".to_owned(), |index| index.to_string())
-            })
-            .collect();
+            });
 
             // A round trip through the decimal lookup, at both endpoints and the middle: the rank
             // a canonical rendering maps back to must be the rank it came from.
-            let lookups: Vec<String> = [0, middle, last_index]
-                .iter()
-                .map(|index| {
-                    points.get(*index as usize).map_or_else(
-                        || "none".to_owned(),
-                        |point| {
-                            lattice_index_for_decimal(&points, &point.canonical)
-                                .map_or_else(|_| "miss".to_owned(), |found| found.to_string())
-                        },
-                    )
-                })
-                .collect();
+            let lookups = [0, middle, last_index].map(|index| {
+                points.get(index as usize).map_or_else(
+                    || "none".to_owned(),
+                    |point| {
+                        lattice_index_for_decimal(&points, &point.canonical)
+                            .map_or_else(|_| "miss".to_owned(), |found| found.to_string())
+                    },
+                )
+            });
 
             rows.push(format!(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",

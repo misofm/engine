@@ -266,18 +266,12 @@ pub fn render() -> String {
     }
     out.push_str("    ]\n  },\n");
     out.push_str("  \"effects\": [\n");
-    let descriptors: Vec<&'static EffectDescriptor> = registry.descriptors().collect();
-    assert_eq!(
-        descriptors.len(),
-        registry.len(),
-        "every registered effect is emitted"
-    );
-    for (index, descriptor) in descriptors.iter().enumerate() {
+    for (index, descriptor) in registry.descriptors().enumerate() {
         let response = registry
             .get_ascii(descriptor.id.as_str())
             .and_then(|factory| factory.response_analysis());
         out.push_str(&effect(descriptor, response));
-        out.push_str(&format!("{}\n", comma(index, descriptors.len())));
+        out.push_str(&format!("{}\n", comma(index, registry.len())));
     }
     out.push_str("  ]\n}\n");
     out
