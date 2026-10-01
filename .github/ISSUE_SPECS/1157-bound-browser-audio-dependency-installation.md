@@ -21,4 +21,10 @@ Root Sol approves this necessary delivery repair as a separate issue before impl
 
 ## Attempt evidence
 
-Pending implementation; no success or performance result claimed.
+### Attempt 1 — worker B, 2026-10-01
+
+- Changed only the approved apt command to `sudo apt-get install -y --no-install-recommends pulseaudio pulseaudio-utils` (+1/−1 workflow line). Pinned Playwright/install-deps, the private native socket/null sink, pactl preflight, all actual browser/mutation gates, routes/expectations and ten-minute browser budget remain identical. No host package installation or new test.
+- Inspected the workflow consumer and Ubuntu 24.04 package metadata (`1:16.1+dfsg1-2ubuntu10.1`). `dpkg-query -S` confirms `pulseaudio-utils` owns `/usr/bin/pactl`; `pulseaudio` owns `module-native-protocol-unix.so` and `module-null-sink.so`. Required libraries remain apt dependencies. The job's explicit `-n` module loading does not rely on the omitted desktop/session recommendations.
+- Read-only `apt-get --simulate install -y --no-install-recommends pulseaudio pulseaudio-utils`: pass; both packages are already installed on this host, so this does not establish a clean-runner dependency/download count or timing result. Local log: `/tmp/issue1157-apt-simulation.log`.
+- `python3 -B scripts/check-ci-path-routing.py`, `python3 -B scripts/test-ci-path-routing.py`, `python3 -B scripts/check-test-support-ci.py`, and `python3 -B scripts/check-script-reachability.py`: pass. PyYAML parsing and a temporary exact before/after comparison confirm the sole workflow change is that command; `git diff --check` passes. `actionlint` was not installed; existing workflow-contract/mutation checks and YAML parsing supplied local validation.
+- Paused the locally valid tranche for root's exact-path checkpoint. Root adversarial review and actual Chromium/Firefox/WebKit plus required qualification verdict remain pending. Earlier installation timeouts are preserved above; no browser success, measured speedup or resolved-CI claim is made. If this candidate fails its frozen budget, the brief's two-attempt limit and separate mirror/download successor remain binding.
