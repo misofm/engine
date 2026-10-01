@@ -107,6 +107,15 @@ aarch64_row aarch64-linux-android
 # row for a crate outside the product closure each fail here. The defect reads fixed only when every
 # row is gone. A fresh `--emit` path per run keeps cargo from treating a crate as fresh and
 # skipping its assembly.
+#
+# The same assembly also proves that no eight-lane code is back in the AArch64 library (#1112).
+# The phones run the 4-lane (NEON) width only, and the eight-lane items (`lane::Simd8`,
+# `BankWidth::Eight` and everything instantiated at them) exist only where `avx2` is enabled. Any
+# line that spells an eight-lane instantiation -- a function label, a call, or the name of a
+# function inlined into a four-lane caller, which the release profile's line tables keep -- fails
+# the row. `EIGHT_LANE` is the browser module's rule (scripts/check-web-audioworklet-callgraph.py).
+# On 089ef456, before #1112, eight crates matched (builtins 451 lines, multiband-compressor 255).
+eight_lane='(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8'
 known_defects=(python3 -B "$root/scripts/lib/aarch64-known-defects.py")
 "${known_defects[@]}" --self-test >/dev/null || fail 'the known-defect judges failed their self-test'
 asm_out="$(mktemp -d)"
@@ -118,10 +127,21 @@ while read -r crate; do
     [[ -s "$asm_out/$crate.s" ]] || fail "no iOS release assembly for $crate"
     count="$(rg -c '^\tbl\t_memset_pattern16$' "$asm_out/$crate.s" || true)"
     printf '%s %s\n' "$crate" "${count:-0}" >>"$asm_out/counts"
+    eight="$(rg -c "$eight_lane" "$asm_out/$crate.s")" || {
+        status=$?
+        ((status == 1)) || fail "the eight-lane scan could not read $crate's assembly (rg exit $status)"
+        eight=0
+    }
+    ((eight == 0)) || printf '%s %s\n' "$crate" "$eight" >>"$asm_out/eight"
 done <<<"$product_list"
 printf '%s\n' "$product_list" >"$asm_out/products"
 "${known_defects[@]}" judge-memset "$asm_out/counts" "$asm_out/products" ||
     fail 'ios-asm-memset-pattern16 moved; see above'
+if [[ -s "$asm_out/eight" ]]; then
+    printf 'eight-lane lines in iOS release assembly, by crate:\n' >&2
+    cat "$asm_out/eight" >&2
+    fail 'eight-lane code is back in the AArch64 product crates (#1112): the phones run four lanes only, so it can never execute; gate it with target_feature = "avx2"'
+fi
 
 # --- wasm32 without simd128 is refused (#1062) ----------------------------------------------------
 # Owner ruling 2026-09-28, decision 7: the scalar (non-`simd128`) wasm builds and CI legs are

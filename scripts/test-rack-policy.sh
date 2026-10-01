@@ -38,6 +38,9 @@ expect_failure() {
 
 valid="$scratch/valid"
 make_fixture "$valid"
+# Issue #1112: the 8-lane (AVX2) width predicate, alone on its line, is the one exempt spelling.
+printf 'enum Views {\n    Four,\n    #[cfg(target_feature = "avx2")]\n    Eight,\n}\n' \
+    >>"$valid/crates/rack/src/lib.rs"
 bash "$policy" "$valid" >/dev/null
 expect_failure unsafe 'printf "unsafe fn bad() {}\n" >>"$fixture/crates/rack/src/lib.rs"'
 # The MAX_TRACKS ban itself moved to scripts/check-workspace-policy.sh (P12, one copy instead of
@@ -47,6 +50,12 @@ expect_failure dependency 'printf "session.workspace = true\n" >>"$fixture/crate
 expect_failure control-io 'printf "fn bad() { std::fs::read(\"x\"); }\n" >>"$fixture/crates/rack/src/lib.rs"' \
     'control-plane, I/O, threading, synchronization, or logging leaked into rack render code'
 expect_failure feature-detection 'printf "is_x86_feature_detected!(\"avx2\");\n" >>"$fixture/crates/rack-compiler/src/lib.rs"' \
+    'feature detection or target-feature specialization leaked out of core dispatch'
+expect_failure target-feature 'printf "#[cfg(target_feature = \"neon\")]\nfn bad() {}\n" >>"$fixture/crates/rack/src/lib.rs"' \
+    'feature detection or target-feature specialization leaked out of core dispatch'
+expect_failure target-feature-expression 'printf "fn bad() -> bool { cfg!(target_feature = \"avx2\") }\n" >>"$fixture/crates/rack-compiler/src/lib.rs"' \
+    'feature detection or target-feature specialization leaked out of core dispatch'
+expect_failure target-feature-complement 'printf "#[cfg(not(target_feature = \"avx2\"))]\nfn bad() {}\n" >>"$fixture/crates/rack/src/lib.rs"' \
     'feature detection or target-feature specialization leaked out of core dispatch'
 expect_failure missing-rack-src 'rm -rf -- "$fixture/crates/rack/src"' \
     'missing search path(s): crates/rack/src'

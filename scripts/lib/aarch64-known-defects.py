@@ -56,17 +56,19 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # #1017 attempt 2 on Rust 1.97.1. A stored `f32x4` splat constant lowers to a libc call on Apple
 # targets: `lane::FLUSH_EPS` and also `1.0`, `0.5`, `2.0`, `1e-8`, `f32::MIN_POSITIVE` and others.
 # Nearly every call sits inside a render function; the register in `docs/TARGET_MATRIX.md` names
-# them.
+# them. #1112 lowered six rows (builtins 376, gate-expander 181, graph 20, multiband-compressor 1132,
+# parametric-eq 146, transient-shaper 534): it removed the eight-lane instantiations from the
+# AArch64 builds, and their two-half `f32x8` splats made the same calls.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 376),
+    "builtins": ("1018", 194),
     "compressor": ("1018", 970),
-    "gate-expander": ("1018", 181),
-    "graph": ("1018", 20),
+    "gate-expander": ("1018", 91),
+    "graph": ("1018", 10),
     "host-core": ("1018", 4),
-    "multiband-compressor": ("1018", 1132),
-    "parametric-eq": ("1018", 146),
+    "multiband-compressor": ("1018", 566),
+    "parametric-eq": ("1018", 132),
     "soft-clip": ("1018", 22),
-    "transient-shaper": ("1018", 534),
+    "transient-shaper": ("1018", 268),
     "true-peak-limiter": ("1018", 104),
 }
 
