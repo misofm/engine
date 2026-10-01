@@ -1061,8 +1061,8 @@ pub fn width_name(width: usize) -> &'static str {
     }
 }
 
-/// The lane count width index `width` runs at: the `Lane::WIDTH` of the type [`at_width!`] binds
-/// there, so `1`, `4` and, off `wasm32`, `8`.
+/// The lane count width index `width` runs at: the `Lane::WIDTH` of the type this crate's one
+/// width dispatch (`at_width!`) binds there, so `1`, `4` and, off `wasm32`, `8`.
 ///
 /// Read from that type, not from a table, so it reports what a digest at that index actually ran.
 /// The wasm gate host holds a `simd128` guest's indices to exactly `[1, 4]`: a guest whose index 1
