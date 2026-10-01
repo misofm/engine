@@ -25,6 +25,10 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+After the full seven-file read, root approves the smallest attempt-1 slice: merge adjacent implementation blocks without changing expressions; replace a same-run hash and duplicate corpus storage with ordered word equality and in-place word deduplication; avoid unused PCM/state-plane copies in existing tests; correct stale arithmetic/update documentation. Preserve all 17 active test functions, independent references, generators, point schedules and G5 inputs/identities. Related tap-window, tap-unswitch, ring-arithmetic and other performance issues remain separate. No algorithm or speedup claim.
+
+Dependency boundary amendment: remove delay's unused direct `engine` dev dependency and the `sha2` dev dependency made unused by the ordered-word comparison, with only those two rows removed from delay's `Cargo.lock` entry. Existing conformance/bench-support dependencies retain their engine realtime-audit feature path; no other lock package, version or feature changes are authorized.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
