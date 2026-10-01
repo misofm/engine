@@ -223,3 +223,185 @@ This is checked by building the base and this branch from the same path.
    - The new host check, `ExpectedBackend::widths()`, turns red on a guest that stopped digesting
      its own width. No existing gate caught that before, because the old check compared the
      guest's width count with the host's own.
+
+## Sol verdict, attempt 1
+
+**PASS**, with one M and four L findings for follow-up. Sol, 2026-10-01, on `bbf55bd7` (`006cbfa9`
+and `a0647084` are the change) and on the combined batch `codex/batch-wasm-size-1` at `6725f0e0`
+(#1109 plus this issue plus root's roster-row deletion). The batch's Rust, JS and SDK sources equal
+this branch's (`git diff bbf55bd7 6725f0e0 -- crates tools hosts sdk Cargo.* .cargo` is empty), so
+every code-level result below holds for both. Every claim was re-run; none was taken from the
+attempt's evidence.
+
+**The owner's condition holds.**
+- `Backend::current()` is `Simd4` on `wasm32` with `simd128` and is a compile-time constant; `lane`
+  refuses `wasm32` without `simd128`. `Backend::Simd8`, `lane::Simd8` and `BankWidth::Eight` do not
+  exist on `wasm32`, so no shipped path can select or name eight lanes: re-enabling them in `lane`
+  and `effect-contract` alone does not compile for the browser (mutation M1 below).
+- Every production `host-core` caller passes `Backend::current()`; the explicit-backend seams are
+  `#[cfg(test)]` or are called only with it. The SDK and the worklet name a backend only as
+  `"scalar" | "simd128"` and never a width.
+- No test-support path ships: `cargo tree -p host-web --target wasm32-unknown-unknown -e features`
+  enables no `test-support` feature anywhere, and `check-scalar-oracle-absent.py --wasm` passes on the
+  named twin.
+
+**Gate 1, the browser module.** I rebuilt base `7d030945` and demangled both name sections.
+
+| | `7d030945` | batch named twin |
+|---|---|---|
+| Module bytes | 3,289,705 (`ac3a9353…`) | 3,044,007 (`369d858a…`) |
+| Code section bytes | 2,801,606 | 2,563,514 |
+| Functions | 2,502 | 2,456 |
+| Eight-lane names | 29 | 0 |
+
+- The eight-lane names were `f32x8`, `f64x8`, `u32x8`, `i32x8`, `Simd8`, `transpose_tile_8`, any
+  `x8`, or a const-generic `8`.
+- The shipped (stripped) batch module is 2,670,821 B (`cd49dc1c…`), and the closure digest is
+  `02ca569e…`.
+
+**Mechanism: one kernel shape, with the width set as the only target difference.**
+- The change adds 35 code `cfg` sites, all on the same architecture predicate. 29 are product code:
+  - `lane` (7) and `effect-contract` (9) define the width and its one dispatch, `match_bank_width!`;
+  - `builtins` (7), `rack` (4), `graph` (1) and `gate-expander` (1).
+
+  Each of the last group is forced by a per-width enum variant, a per-type trait impl or a
+  lane-count arm. A width-to-type macro cannot express any of them.
+- The other 6 are test and corpus code: `conformance` (1), the shaper corpus (3) and the gate corpus
+  (2).
+- Every kernel body stays one generic body, so no target-specific shape crept in.
+
+**Native code did not move.** Base `381202ec` and `bbf55bd7` were built from one path.
+- **x86 `libcapi.so`.** `.text` (3,386,963 B, `96c86fd6…`), `.rodata`, `.eh_frame` and
+  `.eh_frame_hdr` are identical. In `.data.rel.ro`, 239 `u32` words differ, all panic line numbers.
+- **iOS staticlib.** I built `capi` as a staticlib with `cargo rustc --crate-type staticlib`, fat
+  LTO. `__text` (2,469,368 B) is identical, as are every other `__TEXT` section, `__compact_unwind`,
+  `__data`, the relocations and the 373 other archive members. `__DATA,__const` differs in 236
+  line-number words.
+- **Android staticlib.** All 2,445 `.text.*` sections (2,377,700 B) are identical. The 236 differing
+  sections are 24-byte panic `Location`s that differ only in line and column.
+- **The arm64 test legs** cannot run on this x86 host. Their code is the base's.
+
+**Gates on the batch `6725f0e0`.** All green.
+- **Lint job, 32 of 32 steps.** This includes fmt, clippy `--workspace --all-targets
+  --all-features -D warnings` and rustdoc `-D warnings`.
+- **Debug splits.** Split a: 1,150 passed. Split b: 834 passed, plus the conformance fixture check.
+- **Release** (`-p lane -p math -p wasm-gates`). 109 passed, including
+  `g5_native_digests_match_pins` with every `Simd8` pin. The M3 FMA cfg and loom pass.
+- **Every `audit-native` step.**
+  - Console-workload: 114 passed.
+  - C ABI audit: 0 violations, `pcm_digest` `ff6cdcb96cdcdad5`.
+  - The delay, compressor, EQ, gate, builtins, graph, protocol and realtime audits, and the probe
+    mutation tests.
+  - The one-million-call effect audit.
+  - C ABI linkage and self-test.
+  - The native scalar-oracle check.
+  - Graph determinism, the fixtures and the effect contract.
+- **Wasm.** The `simd128` probe, the evidence crates, `host-web` for wasm and the protocol parity
+  pass.
+- **`run-wasm-gates.sh`, full.**
+  - Native: 358 comparisons at three widths. Wasm: 250 at Scalar and `Simd4`. 0 mismatches.
+  - The `max`/`min`, `f64` and meter counts are 0.
+  - The residency pin, the `f64` censuses and the V8 EQ loops pass.
+- **`check-cross-targets.sh`.**
+- **Artifact gates.**
+  - The #1109 named/shipped equivalence (`strip-wasm-names.py` self-test and `check`).
+  - `check-web-audioworklet.sh`: 12 kernels against `--kernel-min 11`, and all ten roster rows ok.
+  - `check-browser-expected-resources.py --artifacts`.
+  - `check-scalar-oracle-absent --wasm`.
+  - `test-web-audioworklet.sh`.
+  - The V8 spill gate.
+  - The call-graph self-test.
+- **SDK.** generated, deletions and its self-test, types, headless, package.
+- **Browsers.** Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5, with `--check-matrix
+  --self-test-mutations` and the SDK from source.
+- **Routing.** `test-ci-path-routing.py` and `check-ci-path-routing.py`.
+
+**Class A.** No pinned digest changed between `7d030945` and `6725f0e0`; the only hex edits are in
+specs and `docs/`. So every digest gate above passing means its digests equal `7d030945`'s:
+- the console-workload digests;
+- the wasm gates at Scalar against `Simd4`;
+- the V8 harness's `expected.json`;
+- the three browsers' native-digest gate.
+
+**The roster deletion is the correct consequence.**
+- `6725f0e0` removes exactly the `multiband-compressor f32x8` row and its derivation line. The
+  other nine rows and the limiter forwarding rule are intact, and the self-test passes.
+- The branch's own roster fails this module on that row, as the attempt disclosed.
+- The 12 ratchet kernels are the ten roster kernels plus `compressor::settled_sidechain<f32x4>` and
+  `FaderRampStage<f32x4>::process_plane`. Neither of those two was in the roster before this change.
+
+**Lost coverage.**
+- **The wasm `Simd8` leg.** It digested `wide::f32x8` lowered to two `v128` halves, which no
+  browser executes. Generic eight-lane bugs stay caught natively at `Simd8`, on x86 AVX2 and on
+  arm64 as two NEON halves.
+- **What it also was.** It was the wasm leg's second vector instantiation. Since this change,
+  nothing checks that the guest's width index 1 really runs `Simd4` (finding M1).
+- **The detector-residency pin.**
+  - **What it defended.** The limiter's twelve-tap history stays in wasm locals and is not
+    block-moved through linear memory every frame. That move is a per-tap store-to-load round trip
+    on a latency-bound kernel, and `History<L>`'s twelve named fields are the structural fix.
+  - **Native coverage.** No test defends the property on x86 `Simd8`, or on any native target.
+    That is consistent with its nature: native SROA promotes the array, and x86 is not a live
+    shipped target (ruling R2).
+  - **The shipped module.** The named twin's 55 in-scope limiter functions carry no 44-, 48-, 176-
+    or 192-byte copy.
+  - **What is needed** is finding L1.
+
+**Test value.**
+- No test function is new. The new host pin, `ExpectedBackend::widths()`, is the only new check.
+  The plausible defect only it turns red: a wasm guest that digests fewer widths than Scalar plus
+  its own. Mutation M3 shows it. With the host's old equality check relaxed, nothing else would
+  catch that.
+- I planted five mutations in a scratch worktree at `6725f0e0`, then reverted all of them:
+
+| Mutation | Result |
+|---|---|
+| M1: remove the predicate in `lane` and `effect-contract` | Red. `host-web` does not compile for wasm32: three non-exhaustive `BankWidth::Eight` matches in `builtins`, and a missing `gate-expander` bank impl. |
+| M2: `match_bank_width!`'s four-lane arm binds an identity instead of `transpose_tile_4` | Red natively: 8 `graph` runtime tests fail. The V8 harness stays green, because its sessions never reach the full four-lane tiled gather, scatter or fold. That gap predates this issue; the arm64 legs run this path at `Simd4`. |
+| M3: wasm `WIDTHS = 1` | Red: "guest digests at 1 widths but a simd4 guest has 2". |
+| M4: `at_width!` index 1 maps to `f32` | Green: 250 comparisons, 0 mismatches. See M1. |
+| M5: the residency pin also forbids 92 B | Red: 6 hits in `true_peak_limiter::corpus::run_case`. The scanner is wired to real limiter functions. |
+
+**Findings.**
+- **M1** (`tools/wasm-gate-corpus/src/lib.rs:83`, `tools/wasm-gates/src/lib.rs:81` and `:398`).
+  - **The problem.** The wasm leg's only vector witness has no witness of its own. The new host
+    check pins the count of widths, not which lane type each one runs. M4 shows that a guest whose
+    index 1 silently runs `f32` passes with 0 mismatches.
+  - **What changed.** Before this issue, the `Simd8` leg was a second vector run on wasm. The
+    attempt's claim that "a guest that stopped digesting Simd4 fails the leg" holds only when the
+    count drops.
+  - **Fix.** Have the guest export each width index's `L::WIDTH`, and have the host require
+    `[1, 4]`.
+  - Non-blocking follow-up.
+- **L1** (`scripts/run-wasm-gates.sh:102`).
+  - **The problem.** The residency pin has no proof that it scans anything. A guest without a
+    `name` section, or a renamed crate, would pass vacuously.
+  - **Fix.** Assert that at least one in-scope `true_peak_limiter` function was scanned. Add a
+    hermetic self-test that feeds a synthetic disassembly with a 192-byte `memory.copy` in a limiter
+    function and expects red.
+- **L2** (`scripts/check-web-audioworklet.sh:463` on the batch).
+  - **The problem.** The owner's condition has no committed guard. The batch's
+    `--callgraph`/`--kernel-shape` gate passes the base module, which has 29 eight-lane functions
+    and 15 kernels, with exit 0. So eight lanes returning to wasm32, by a full revert of the
+    predicate, turns nothing red. Only the predicate itself guards it, and M1 shows that a partial
+    revert fails to compile.
+  - **Fix.** Turn the deleted presence row into an absence rule: no `f32x8` name in the named twin.
+    Also narrow the ratchet pattern `4wide6f32x[48]` to `4wide6f32x4`, so that eight-lane kernels
+    cannot pad the count.
+- **L3** (`6725f0e0` left stale prose in `scripts/check-web-audioworklet.sh`; line numbers are
+  the batch's).
+  - `:443` still lists `multiband f32x8 2560/20`.
+  - `:454` says "The artifact carries thirteen … two-kernel slack". It now carries 12, which leaves
+    a slack of 1.
+  - `scripts/check-web-audioworklet-callgraph.py:35` and `:116` say "eight" roster kernels. That
+    was already stale before this change.
+- **L4.** Out of scope here (a non-goal), recorded for the owner.
+  - **The fact.** arm64 also never selects eight lanes, because `Backend::current()` is `Simd4`
+    there. The iOS library still carries 27 eight-lane functions: about 114,520 B of its
+    2,469,368 B `__text`, or 4.6%.
+  - **What it means.** This is the same question this issue answered for the browser. It would be
+    a successor issue if wanted.
+  - **Related cosmetic point.** The shaper corpus's local `cfg`s
+    (`crates/transient-shaper/src/corpus.rs:65` and `:178`) could use `for_lanes` with
+    `match_bank_width!`, as the EQ corpus does. The per-crate rlib identity they preserve is not
+    product code, because fat LTO drops the corpus from the linked library.
