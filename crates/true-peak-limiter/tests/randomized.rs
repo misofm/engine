@@ -4,7 +4,7 @@
 //! and measured under #1051 and then dropped: every mutant it caught that the limiter's own suite
 //! misses is caught by another crate's CI suite (effect-compiler, graph-compiler, host-core), and
 //! it found no defect, so per pull request it was cost without a new catch. Its nightly share went
-//! with it; the in-crate `randomized_scenarios_render_exactly_the_unmodified_kernel` still runs.
+//! with it; the in-crate `randomized_scenarios_match_the_current_frame_law` still runs.
 
 /// The D7 recovery's report against the contract, on fixed input (no seed): red until #1073
 /// lands. This effect zeroes a failing block and resets, but its report never counts the block.

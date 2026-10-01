@@ -59,18 +59,10 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 /// message (master plan §8). A wasm mismatch is never fixed by re-pinning: it means a target
 /// stopped agreeing with the scalar law, which is the whole reason the gate exists.
 ///
-/// # These pins have no independent oracle behind them
-///
-/// Master plan §8.3 lists an independent `f64` oracle for every other digest family in this
-/// workspace; it lists none for the true-peak limiter. So unlike, say, the compressor — whose
-/// digests are backed by `tests/static_curve.rs` against equation 4 — these constants rest on the
-/// scalar `Lane` instantiation *alone*. They say the answer does not move and that every width
-/// agrees on it. They do not say the answer is right: if the limiter's arithmetic were wrong in a
-/// width-independent way, these pins would happily freeze the wrong bits.
-///
-/// That gap is real and is owned by issue #90. It is recorded here rather than papered over,
-/// because a re-pin of this family is a weaker event than a re-pin of the others and the next
-/// person to move these bytes deserves to know that before they do it.
+/// G5 owns these scalar-rendered pins and cross-target bit identity. Independent numerical
+/// validation lives in `tests/gain_law.rs`: the `f64` reference checks the gain law and Annex-2
+/// output ceiling. Those tolerance-based checks complement the digest and do not establish its
+/// exact words.
 pub const D90_DIGESTS: [[u8; 32]; CASE_COUNT] = [
     // dual_mono/noise
     [
