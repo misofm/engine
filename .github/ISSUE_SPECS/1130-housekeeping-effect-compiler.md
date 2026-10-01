@@ -28,3 +28,7 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
+
+## Scope amendment — unused dependency
+
+Root Sol authorizes removal of effect-compiler's unused sha2 dev dependency. Cargo.lock may change only the sha2 dependency line in the effect-compiler package entry; preserve every package version, checksum and other dependency list. The dependency remains available to its actual workspace consumers. Approved before implementation on 2026-10-01.
