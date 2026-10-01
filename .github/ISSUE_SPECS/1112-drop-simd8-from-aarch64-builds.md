@@ -557,3 +557,167 @@ M2, M3, L1 and L2. L3 is reduced; L4 is untouched, as accepted.
   - All 32 lint-job steps and the three sub-v3 probes.
   - The routing check and its tests.
   - The silent-skip scan (rg exit 1) and the known-defect self-test.
+
+## Sol re-check, post-verdict fixes
+
+**CONFIRMED.** M1, M2, M3, L1 and L2 are fixed. There are no H or M findings; L5 and L6 below are
+notes.
+
+Sol, 2026-10-01, on `8f326700` (fixes `0b2f0662`, `7c8971b4` and `e2eb2469`), base `089ef456`. One
+`target/`, built with `CARGO_INCREMENTAL=0` and deleted afterwards. Mutations were made on a scratch
+copy and reverted; the worktree was never edited.
+
+### M1: confirmed
+
+- **The count.** `git diff 2d8c710b HEAD` adds 72 `target_feature` lines. Less the spec (8),
+  scripts (9), audit (14) and the helpers (6), that is 35. The same measure gave 451 at `fa890f13`.
+- **The 35 are needed.** Each is one of these:
+  - a `_simd8`/`_w8` twin, which cannot be folded into a loop without renaming a test;
+  - a probe that needs a second width;
+  - an eight-lane pin;
+  - `graph_fixture`'s corpus (L4);
+  - a pre-existing `target_arch` key, now keyed on the feature.
+
+  No `target_arch` was added for a width; every `target_arch` change since `2d8c710b` is a removal.
+- **One predicate, held together.**
+  - `lane::Native` and `Backend::current()` are tied by the const assertion. Mutation 2 below turns
+    it red at compile time.
+  - `Backend::VECTOR`, `BankWidth::ALL` and `for_backend` are tied by
+    `bank_width_for_backend_is_total`, which checks both lengths and every pair.
+  - `BankWidth::backend()` is tied in through its callers: mutation 1 turns 43 tests red.
+  - The macros are keyed on the same `avx2` predicate as `match_bank_width!`, but only one test ties
+    them to `VECTOR` (L5).
+- **No code in any shipped artifact.** Base and head were built from one path.
+  - **x86 `libcapi.so`, against `089ef456`.** Every allocated section is byte-identical: `.text`
+    `96c86fd6…`, `.rodata` `f4e6ad9c…` and `.data.rel.ro` `38c90f95…`. So are the NOBITS headers,
+    `.symtab` and `.strtab`. Only the build-id, `.debug_info` and `.debug_line` differ (L6).
+  - **Wasm, built at base and at head.** Both builds are identical: the shipped module is
+    `cd49dc1c…d408` (2,670,821 B), the named twin `369d858a…` and the closure `02ca569e…`. The
+    function names are unchanged.
+  - **iOS and Android `capi` staticlibs, against `fa890f13`.** The whole archives are byte-identical
+    (373 and 404 members). iOS `__text` is 2,276,340 B and Android `.text` 2,225,188 B. `llvm-nm`
+    finds 0 eight-lane symbols, raw or demangled.
+- **Public API is acceptable.**
+  - `Native`, `VECTOR`, `ALL` and `backend()` are facts of the build, and graph already uses
+    `Native`.
+  - The macros follow `match_bank_width!`, which is exported the same way.
+  - Gating them behind `test-support` would put `lane/test-support`, and with it `Backend::Scalar`,
+    into the release leg's G-gate program. `cfg(test)` cannot reach `lane`'s integration tests.
+  - `#[doc(hidden)]` on the two macros would be cosmetic only. No change is asked.
+- **x86 lost no width (an extra check).** In all 246 test binaries of both debug splits, I compared
+  each binary's demangled `f32x8` and `f32x4` instantiations, hashes stripped, between base and
+  head.
+  - `f32x8`: 4 lost and 14 gained. Every loss is a refactor: m2's three functions are now reached
+    through `LaneFn::at`, and e1's `to_array` is gone.
+  - `f32x4`: 40 lost, all gate-expander's `injected_nonfinite_gain_parity::<Simd4>`. Base built
+    that instantiation, but its runtime `match` on the native width never ran it on x86.
+
+### M2: confirmed
+
+- **Listings.** The base listing is x86 at `089ef456`. The 4-lane listing is the emulation: a
+  scratch copy with `avx2` and `fma` off, lane's x86 guard disabled, `neon` read as `sse2` and
+  `-D warnings`.
+
+  | Leg | base x86 | head x86 | head 4-lane |
+  |---|---|---|---|
+  | debug | 1,817 | 1,817 | 1,807 |
+  | release (lane, math) | 114 | 114 | 113 |
+  | console-workload | 70 | 70 | 68 |
+
+  The x86 listings are identical as sorted lists.
+- **Every removed entry checks out.** Each twin's four-lane twin is in the 4-lane listing, and the
+  twin calls the same generic body at the other width.
+  - The twins: `randomized_differential_simd8`,
+    `the_hot_console_renders_the_pre_990_words_at_simd8`, `mixed_elision_matches_frozen_bodies_w8`
+    (in both legs), the EQ's three `ramping_elision::…_simd8`,
+    `detector_chunk_active_window_matches_old_shape_w8`,
+    `the_composition_is_partition_invariant_at_width_eight`, and console-workload's two `_at_simd8`.
+  - Two need a second width: the shaper's
+    `bank_resources_and_validation_precede_legal_unavailable_fallback` and rack's
+    `wrong_width_provider_is_dropped_before_complete_staged_fallback`.
+- **The 28 tests I flagged now run at `Simd4`.** All 28 are in the 4-lane listing, and each reports
+  `ok`, not ignored, in the emulated run. They are the limiter 4, the EQ 9, G4, the allocation 2,
+  gate-expander 4, rack 6 and builtins 2.
+- **The emulated legs.**
+  - debug: 1,769 passed, 0 failed, 39 ignored;
+  - release lane and math: 99 passed;
+  - console-workload: 65 passed;
+  - G5: 9 passed;
+  - `audit capi`: 0 violations, `pcm_digest` `ff6cdcb96cdcdad5`;
+  - the delay, compressor, EQ and gate audits: 0 violations; the gate's `bank_available` is true.
+- **Resolution.**
+  - `judge-skips` passes on both 4-lane listings, and each m2 row names one test.
+  - The silent-skip scan finds nothing (rg exit 1).
+  - The new other-width loops, such as `BankWidth::ALL.get(1)`, are empty on a 4-lane build and do
+    not return early.
+  - Each new ignore carries its reason: compressor `bank_fallback…`, `a_seam_side_only_chain…` and
+    `graph_fixture`'s two.
+
+### M3: confirmed
+
+I flipped one digit in builtins' settled-matrix `FOUR_DIGEST` (`matrix.rs:420`) and one in
+compressor's `SCENARIO_1006_FOUR` (`kernel.rs:3448`). On x86 both are red: at `matrix.rs:392`
+("moved a bit at four lanes") and at `kernel.rs:3478`. Both are reverted.
+
+### L1 and L2: confirmed
+
+- **L1.**
+  - On `089ef456` the script's Android block matches 832 lines and 28 function labels, so it is red.
+  - On head, `check-cross-targets.sh` passes: "no eight-lane code in the iOS or Android library".
+  - CI runs the script in `cross-target` (`qualification.yml:911`).
+- **L2.** Audit's probes are keyed on `avx2` and `neon`.
+  - On every build `lane` admits, `avx2` holds exactly when the architecture is `x86_64`, and `neon`
+    exactly when it is `aarch64`. So the x86 and arm64 programs are unchanged.
+  - The 4-lane emulation builds `audit` and runs `audit capi`.
+
+### Gates on head (all pass)
+
+- **Debug splits.** debug-a: 96 binaries, 1,150 passed. debug-b: 834 passed, and the conformance
+  fixtures pass `--check`.
+- **Release.** The test-release job: 109 passed, including `g5_native_digests_match_pins`, plus the
+  FMA cfg, loom, M1 and F1.
+- **Lint.** All 32 lint-job steps: fmt, workspace clippy, rustdoc `-D warnings`, every policy and
+  mutation suite, and the three sub-v3 probes.
+- **Cross-target.** `check-cross-targets.sh` passes, including both eight-lane rows and the memset
+  ceilings.
+- **Clippy `-D warnings` on iOS and Android.**
+  - the debug leg's package set with its features;
+  - lane, math, console-workload, audit, wasm-gate-corpus and bench with `math/lane`;
+  - the same set plus dsp-reference, conformance and target-smoke with default features.
+- **Wasm.** `run-wasm-gates.sh` in full: native 358 comparisons and wasm 250, with 0 mismatches.
+  The residency pin scanned 7 limiter functions, and the V8 spill gate passes. The artifact
+  build is as above.
+
+### My mutations (scratch copy, reverted)
+
+1. **`BankWidth::backend()` maps `Eight` to `Simd4`.** 43 tests go red across 13 binaries in
+   effect-contract (`bank_mask`), builtins (`stage`, `input_liveness`, `mono_collapse`,
+   `randomized`, `matrix` and the unit tests) and soft-clip.
+2. **`lane::Native = Simd4` under `avx2`.** `lane` fails to compile at the const assertion (E0080).
+3. **`each_vector_lane!`'s `Simd8` arm never compiles on x86.** One test goes red, compressor
+   `scenario_1006_ramping_prefix_is_pinned`, through its every-width fold. Every other test in
+   debug-a (with console-workload), debug-b and the release leg passes (L5).
+
+### Test value
+
+- **The four-lane sinks of M3.** They turn red when a bit change at `Simd4`, the width the phones
+  and the browser run, is re-pinned on x86 only. Before this fix, only the arm64 leg could see it.
+- **The tests moved to the native width (M2).** They turn red when a width-agnostic mechanism
+  regresses at `Simd4` on NEON. These are the limiter's silence gate, the EQ's elision refusals,
+  G4 and the banked allocation audits. Before this fix, no AArch64 leg ran those claims.
+
+### Findings
+
+**L5. Only one test ties `each_lane!`/`each_vector_lane!` to the build's widths.**
+- **The risk.** The two macros serve 132 call sites in 39 files.
+  - If the `Simd8` arm is dropped or mis-keyed, x86 silently stops checking eight lanes at every
+    one of those sites.
+  - Mutation 3 is caught only incidentally, by one compressor digest.
+- **The fix.** It is optional, about five lines: a `lane` test asserting that `each_lane!(|L, N| …)`
+  visits `1` and then exactly `Backend::VECTOR`'s widths, in order.
+
+**L6. Prose.** "No product line moved" is not quite right.
+- `Backend::VECTOR` sits in the middle of `lane/src/backend.rs`. In x86's `.debug_line`, 5 rows of
+  `HostAttestation::fmt` move by +10; they are in a sequence at address 0, a discarded section. A
+  further 21 rows, `backend.rs:67`, move by −1, from attempt 1's comment change.
+- It is debug information only: every allocated section is identical. No action is needed.
