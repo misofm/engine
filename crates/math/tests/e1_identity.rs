@@ -7,7 +7,7 @@
 
 use std::thread;
 
-use lane::{Lane, Simd4, Simd8};
+use lane::Lane;
 
 /// Pre-E1 `exp2_lane`, retained here as an independent operation-order reference.
 #[inline(always)]
@@ -45,7 +45,8 @@ fn pre_e1_exp2_lane<L: Lane>(x: L) -> L {
 #[ignore = "all 2^32 f32 bit patterns; run in release mode with --ignored"]
 fn e1_exp2_lane_is_bit_identical_over_all_patterns_and_widths() {
     const TOTAL: u64 = 1_u64 << 32;
-    const WIDTH: u64 = Simd8::WIDTH as u64;
+    // Patterns per batch: eight, so every vector width covers a batch in whole vectors.
+    const WIDTH: u64 = 8;
     let workers = thread::available_parallelism()
         .map_or(1, |count| count.get())
         .min(4);
@@ -58,10 +59,10 @@ fn e1_exp2_lane_is_bit_identical_over_all_patterns_and_widths() {
             let first_batch = worker as u64 * batches_per_worker;
             let end_batch = ((worker as u64 + 1) * batches_per_worker).min(batches);
             handles.push(scope.spawn(move || {
-                let mut inputs = [0.0_f32; Simd8::WIDTH];
-                let mut got8 = [0.0_f32; Simd8::WIDTH];
-                let mut got4_first = [0.0_f32; Simd4::WIDTH];
-                let mut got4_second = [0.0_f32; Simd4::WIDTH];
+                let mut inputs = [0.0_f32; WIDTH as usize];
+                // `(lane count, result bits)` per vector width this build has, narrowest first:
+                // Simd4, and Simd8 where `avx2` is enabled (issue #1112).
+                let mut results = [(0_usize, [0_u32; WIDTH as usize]); 2];
 
                 for batch in first_batch..end_batch {
                     let first_pattern = batch * WIDTH;
@@ -69,11 +70,15 @@ fn e1_exp2_lane_is_bit_identical_over_all_patterns_and_widths() {
                         *input = f32::from_bits((first_pattern + index as u64) as u32);
                     }
 
-                    math::exp2_lane::<Simd8>(Simd8::load(&inputs)).store(&mut got8);
-                    math::exp2_lane::<Simd4>(Simd4::load(&inputs[..Simd4::WIDTH]))
-                        .store(&mut got4_first);
-                    math::exp2_lane::<Simd4>(Simd4::load(&inputs[Simd4::WIDTH..]))
-                        .store(&mut got4_second);
+                    let mut widths = 0;
+                    lane::each_vector_lane!(|L, N| {
+                        results[widths].0 = N;
+                        for offset in (0..inputs.len()).step_by(N) {
+                            math::exp2_lane::<L>(L::load(&inputs[offset..]))
+                                .store_bits(&mut results[widths].1[offset..]);
+                        }
+                        widths += 1;
+                    });
 
                     for index in 0..inputs.len() {
                         let input = inputs[index];
@@ -86,25 +91,14 @@ fn e1_exp2_lane_is_bit_identical_over_all_patterns_and_widths() {
                             input.to_bits()
                         );
 
-                        let got8 = got8[index].to_bits();
-                        assert_eq!(
-                            got8,
-                            expected,
-                            "Simd8 differs from scalar at {:#010x}",
-                            input.to_bits()
-                        );
-
-                        let got4 = if index < Simd4::WIDTH {
-                            got4_first[index].to_bits()
-                        } else {
-                            got4_second[index - Simd4::WIDTH].to_bits()
-                        };
-                        assert_eq!(
-                            got4,
-                            expected,
-                            "Simd4 differs from scalar at {:#010x}",
-                            input.to_bits()
-                        );
+                        for (width, got) in &results[..widths] {
+                            assert_eq!(
+                                got[index],
+                                expected,
+                                "Simd{width} differs from scalar at {:#010x}",
+                                input.to_bits()
+                            );
+                        }
                     }
                 }
             }));
@@ -115,5 +109,5 @@ fn e1_exp2_lane_is_bit_identical_over_all_patterns_and_widths() {
         }
     });
 
-    println!("E1 identity: 4,294,967,296 patterns; Scalar, Simd4 and Simd8: 0 mismatches");
+    println!("E1 identity: 4,294,967,296 patterns; Scalar and every vector width: 0 mismatches");
 }

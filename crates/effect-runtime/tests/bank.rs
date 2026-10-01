@@ -4,15 +4,13 @@ use effect_runtime::bank::{
     BLOCK_LIMIT, BankKernel, HomogeneousBank, NonFiniteReport, check_block, finish_block,
     finish_channel, nonfinite_lane_mask,
 };
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 /// A finite block is accepted and left alone.
 #[test]
 fn a_finite_block_is_accepted() {
     let block: Vec<f32> = (0..512).map(|i| (i as f32) * 0.001 - 0.25).collect();
-    assert!(check_block::<f32>(&block));
-    assert!(check_block::<Simd4>(&block));
-    assert!(check_block::<Simd8>(&block));
+    lane::each_lane!(|L| assert!(check_block::<L>(&block)));
     assert_eq!(nonfinite_lane_mask::<Simd4>(&block), 0);
 }
 
@@ -53,8 +51,12 @@ fn the_check_rejects_at_the_threshold() {
             "scalar: {value} ({:#010x})",
             value.to_bits()
         );
-        assert_eq!(check_block::<Simd4>(&block), accepted, "Simd4: {value}");
-        assert_eq!(check_block::<Simd8>(&block), accepted, "Simd8: {value}");
+        lane::each_vector_lane!(|L| assert_eq!(
+            check_block::<L>(&block),
+            accepted,
+            "{}: {value}",
+            core::any::type_name::<L>()
+        ));
     }
 }
 
@@ -71,9 +73,12 @@ fn the_lane_mask_names_the_failing_lanes() {
         "at W = 1 there is one lane"
     );
 
-    let mut wide = vec![0.0f32; 8 * 8];
-    wide[7] = f32::INFINITY;
-    assert_eq!(nonfinite_lane_mask::<Simd8>(&wide), 0b1000_0000);
+    // The top lane at the build's own width: lane 7 of eight where `avx2` is enabled, lane 3 of
+    // four in a 4-lane (NEON/simd128) build (issue #1112).
+    let width = <lane::Native as Lane>::WIDTH;
+    let mut wide = vec![0.0f32; 8 * width];
+    wide[width - 1] = f32::INFINITY;
+    assert_eq!(nonfinite_lane_mask::<lane::Native>(&wide), 1 << (width - 1));
 }
 
 /// A rejected block is zeroed on both channels, the reset runs, and the counter advances.

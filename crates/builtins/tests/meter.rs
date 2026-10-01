@@ -11,7 +11,7 @@ use core::hint::black_box;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use builtins::*;
-use lane::{LaneF64, Simd4, Simd8, Widen};
+use lane::{Lane, LaneF64, Widen};
 
 #[test]
 fn meter_windows_are_exact() {
@@ -616,6 +616,13 @@ fn resident_meter_shape_and_time_errors_precede_mutation_and_empty_input_matches
 
 // Issue #943, gate G2: the block-peak merge publishes the scalar meter's snapshots.
 
+/// The lane type G2 runs its meters through: the build's own width (`lane::Native`), so an 8-lane
+/// (AVX2) build runs eight meters and a 4-lane (NEON/simd128) build four (issue #1112).
+type PeakLane = lane::Native;
+
+/// Lanes of [`PeakLane`].
+const PEAK_LANES: usize = <PeakLane as Lane>::WIDTH;
+
 /// One event of a G2 stream, applied to every lane's meter in both arms.
 #[derive(Clone, Copy)]
 enum PeakEvent {
@@ -685,7 +692,7 @@ const PEAK_INVALID: [u32; 8] = [
     0x807F_FFFF,
 ];
 
-/// Fills one strided 8-lane plane: hostile words from the pool, or a triangle tone whose
+/// Fills one strided [`PEAK_LANES`]-lane plane: hostile words from the pool, or a triangle tone whose
 /// amplitude differs per lane.
 ///
 /// On hostile input, lanes 1 and 5 carry only [`PEAK_INVALID`] words, so their windows' scalar
@@ -694,13 +701,13 @@ const PEAK_INVALID: [u32; 8] = [
 /// larger peak.
 fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, phase: usize) {
     for (index, word) in plane.iter_mut().enumerate() {
-        *word = if hostile && matches!(index % 8, 1 | 5) {
+        *word = if hostile && matches!(index % PEAK_LANES, 1 | 5) {
             f32::from_bits(PEAK_INVALID[rng.below(PEAK_INVALID.len())])
         } else if hostile {
             pool[rng.below(pool.len())]
         } else {
-            let lane = index % 8;
-            let step = ((index / 8 + phase) * (3 + lane)) % 256;
+            let lane = index % PEAK_LANES;
+            let step = ((index / PEAK_LANES + phase) * (3 + lane)) % 256;
             let triangle = (step as f32 / 64.0 - 2.0).abs() - 1.0;
             (0.25 + 0.0625 * lane as f32) * triangle
         };
@@ -708,7 +715,7 @@ fn peak_fill(rng: &mut PeakRng, pool: &[f32], plane: &mut [f32], hostile: bool, 
 }
 
 fn peak_meters(metrics: MeterMetricSet, period: u32) -> Vec<PreparedMeter> {
-    (0..8_u64)
+    (0..PEAK_LANES as u64)
         .map(|lane| {
             MeterAccumulator::prepare_selected(
                 MeterHandle(NonZeroU64::new(lane + 1).expect("constant")),
@@ -727,7 +734,7 @@ fn peak_meters(metrics: MeterMetricSet, period: u32) -> Vec<PreparedMeter> {
         .collect()
 }
 
-/// Runs one stream through two arms of eight meters -- arm A through `observe_input`, arm B
+/// Runs one stream through two arms of [`PEAK_LANES`] meters -- arm A through `observe_input`, arm B
 /// through `observe_input_with_block_peak` with the lane kernel's seeded-zero block peaks -- and
 /// asserts every published snapshot is the same on every field. Returns the snapshots compared.
 fn peak_differential(
@@ -738,7 +745,6 @@ fn peak_differential(
     seed: u64,
 ) -> usize {
     use lane::kernels::builtins::meter_sample_peak_block;
-    use lane::{Lane, Simd8};
     let pool = peak_hostile_pool();
     let mut rng = PeakRng(seed);
     let mut scalar = peak_meters(metrics, period);
@@ -748,16 +754,18 @@ fn peak_differential(
     for (index, event) in events.iter().enumerate() {
         match *event {
             PeakEvent::Block(frames) => {
-                let mut left = vec![0.0_f32; frames * 8];
-                let mut right = vec![0.0_f32; frames * 8];
+                let mut left = vec![0.0_f32; frames * PEAK_LANES];
+                let mut right = vec![0.0_f32; frames * PEAK_LANES];
                 peak_fill(&mut rng, &pool, &mut left, hostile, index * 5);
                 peak_fill(&mut rng, &pool, &mut right, hostile, index * 11 + 3);
-                let mut peaks = [[0.0_f32; 8]; 2];
-                meter_sample_peak_block::<Simd8>(&left, frames, Simd8::zero()).store(&mut peaks[0]);
-                meter_sample_peak_block::<Simd8>(&right, frames, Simd8::zero())
+                let mut peaks = [[0.0_f32; PEAK_LANES]; 2];
+                meter_sample_peak_block::<PeakLane>(&left, frames, PeakLane::zero())
+                    .store(&mut peaks[0]);
+                meter_sample_peak_block::<PeakLane>(&right, frames, PeakLane::zero())
                     .store(&mut peaks[1]);
-                for lane in 0..8 {
-                    let input = MeterInput::strided(&left, &right, frames, 8, lane).expect("view");
+                for lane in 0..PEAK_LANES {
+                    let input =
+                        MeterInput::strided(&left, &right, frames, PEAK_LANES, lane).expect("view");
                     let a = scalar[lane].accumulator.observe_input(input, time);
                     let b = banked[lane].accumulator.observe_input_with_block_peak(
                         input,
@@ -770,7 +778,7 @@ fn peak_differential(
             }
             PeakEvent::Skip(samples) => time += samples,
         }
-        for lane in 0..8 {
+        for lane in 0..PEAK_LANES {
             loop {
                 match (
                     scalar[lane].consumer.try_pop(),
@@ -867,14 +875,15 @@ fn a_block_peak_merge_publishes_the_scalar_meters_snapshots() {
                     eprintln!(
                         "G2 period {period} hostile {hostile}: {compared} snapshots, merges {merges:?}"
                     );
-                    let expected_windows = 64 * 128 / period as usize * 8;
+                    let expected_windows = 64 * 128 / period as usize * PEAK_LANES;
                     assert_eq!(compared, expected_windows, "period {period}");
                     if let Some(merges) = merges {
+                        let every = PEAK_LANES as u64 * 64;
                         match period {
-                            512 | 128 => assert_eq!(merges, 8 * 64, "period {period}"),
+                            512 | 128 => assert_eq!(merges, every, "period {period}"),
                             64 => assert_eq!(merges, 0, "period {period}"),
                             _ => assert!(
-                                merges > 0 && merges < 8 * 64,
+                                merges > 0 && merges < every,
                                 "period {period}: {merges} merges"
                             ),
                         }
@@ -1270,16 +1279,23 @@ fn banked_sweep(period: u32) -> (usize, u64) {
                     mode: BankedMode::Seeded,
                 };
                 for (fixed_stream, stream) in [(true, &fixed), (false, &random)] {
-                    let eight = banked_differential::<Simd8>(&run, stream, seed);
-                    let four = banked_differential::<Simd4>(&run, stream, seed ^ 0x4);
+                    // Every vector width this build has, each from its own seed as before.
+                    let mut outcomes = Vec::new();
+                    lane::each_vector_lane!(|L, N| {
+                        let lane_seed = if N == 4 { seed ^ 0x4 } else { seed };
+                        outcomes.push(banked_differential::<L>(&run, stream, lane_seed));
+                    });
                     // 48 blocks of 128 frames outlast every period; a random stream's resets and
                     // gaps may leave a long window unfinished.
                     assert!(
-                        !fixed_stream || (eight.compared > 0 && four.compared > 0),
+                        !fixed_stream || outcomes.iter().all(|outcome| outcome.compared > 0),
                         "{run:?}: windows were published"
                     );
-                    total += eight.compared + four.compared;
-                    for outcome in [eight, four] {
+                    total += outcomes
+                        .iter()
+                        .map(|outcome| outcome.compared)
+                        .sum::<usize>();
+                    for outcome in outcomes {
                         let Some(commits) = outcome.commits else {
                             continue;
                         };
@@ -1340,7 +1356,10 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
     );
     assert!(total > 0);
 
-    // The commit counter on a plain stream of 64 blocks of 128 frames, eight ALL meters.
+    // The commit counter on a plain stream of 64 blocks of 128 frames, one ALL meter per lane of
+    // the build's own width (eight on an 8-lane (AVX2) build, four on a 4-lane one; issue #1112).
+    type Native = lane::Native;
+    let every = <Native as Lane>::WIDTH as u64 * 64;
     let plain = banked_plain_stream(64);
     let all = |period, hold, decay, mode| BankedRun {
         metrics: vec![M::ALL],
@@ -1351,8 +1370,8 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
         mode,
     };
     let last = |outcome: BankedOutcome| outcome.commits.map(|commits| commits[commits.len() - 1]);
-    for (period, expected) in [(512_u32, Some(8 * 64)), (64, Some(0)), (1536, Some(8 * 64))] {
-        let commits = last(banked_differential::<Simd8>(
+    for (period, expected) in [(512_u32, Some(every)), (64, Some(0)), (1536, Some(every))] {
+        let commits = last(banked_differential::<Native>(
             &all(period, 0, 0.0, BankedMode::Seeded),
             &plain,
             7,
@@ -1361,18 +1380,18 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
             assert_eq!(commits, expected, "ALL at period {period}");
         }
     }
-    if let Some(commits) = last(banked_differential::<Simd8>(
+    if let Some(commits) = last(banked_differential::<Native>(
         &all(300, 0, 0.0, BankedMode::Seeded),
         &plain,
         7,
     )) {
         assert!(
-            commits > 0 && commits < 8 * 64,
+            commits > 0 && commits < every,
             "ALL at period 300: {commits}"
         );
     }
     for (hold, decay) in [(7, 0.0), (0, 12.0), (100, 60.0)] {
-        if let Some(commits) = last(banked_differential::<Simd8>(
+        if let Some(commits) = last(banked_differential::<Native>(
             &all(512, hold, decay, BankedMode::Seeded),
             &plain,
             7,
@@ -1388,20 +1407,21 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
         BankedMode::MovedLeftSeed,
         BankedMode::MovedRightSeed,
     ] {
-        let outcome = banked_differential::<Simd8>(&all(512, 0, 0.0, mode), &plain, 7);
-        assert_eq!(outcome.compared, 8 * 64 * 128 / 512, "{mode:?}");
-        if let Some(commits) = outcome.commits {
-            assert_eq!(commits[commits.len() - 1], 0, "{mode:?} commits nothing");
-        }
-        let outcome = banked_differential::<Simd4>(&all(512, 0, 0.0, mode), &plain, 7);
-        assert_eq!(outcome.compared, 4 * 64 * 128 / 512, "{mode:?} at Simd4");
-        if let Some(commits) = outcome.commits {
+        lane::each_vector_lane!(|L, N| {
+            let outcome = banked_differential::<L>(&all(512, 0, 0.0, mode), &plain, 7);
             assert_eq!(
-                commits[commits.len() - 1],
-                0,
-                "{mode:?} commits nothing at Simd4"
+                outcome.compared,
+                N * 64 * 128 / 512,
+                "{mode:?} at {N} lanes"
             );
-        }
+            if let Some(commits) = outcome.commits {
+                assert_eq!(
+                    commits[commits.len() - 1],
+                    0,
+                    "{mode:?} commits nothing at {N} lanes"
+                );
+            }
+        });
     }
 
     // A discontinuity: the block after the gap commits too.
@@ -1411,9 +1431,14 @@ fn a_banked_block_commit_publishes_the_scalar_meters_snapshots() {
         BankedEvent::Block(128),
     ];
     if let Some(commits) =
-        banked_differential::<Simd8>(&all(512, 0, 0.0, BankedMode::Seeded), &gap, 7).commits
+        banked_differential::<Native>(&all(512, 0, 0.0, BankedMode::Seeded), &gap, 7).commits
     {
-        assert_eq!(commits, [8, 8, 16], "the block after the skip commits");
+        let lanes = <Native as Lane>::WIDTH as u64;
+        assert_eq!(
+            commits,
+            [lanes, lanes, 2 * lanes],
+            "the block after the skip commits"
+        );
     }
 }
 
@@ -1435,18 +1460,16 @@ fn a_peak_meter_bound_first_leaves_the_seed_to_the_all_meter_behind_it() {
             hostile,
             mode: BankedMode::Seeded,
         };
-        let outcome = banked_differential::<Simd8>(&pair, &plain, seed);
-        assert_eq!(outcome.compared, 2 * 8 * 64 * 128 / 512);
-        if let Some(commits) = outcome.commits {
-            assert_eq!(
-                commits[commits.len() - 1],
-                8 * 64,
-                "the ALL meter commits every block"
-            );
-        }
-        let outcome = banked_differential::<Simd4>(&pair, &plain, seed);
-        if let Some(commits) = outcome.commits {
-            assert_eq!(commits[commits.len() - 1], 4 * 64);
-        }
+        lane::each_vector_lane!(|L, N| {
+            let outcome = banked_differential::<L>(&pair, &plain, seed);
+            assert_eq!(outcome.compared, 2 * N * 64 * 128 / 512);
+            if let Some(commits) = outcome.commits {
+                assert_eq!(
+                    commits[commits.len() - 1],
+                    N as u64 * 64,
+                    "the ALL meter commits every block"
+                );
+            }
+        });
     }
 }

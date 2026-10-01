@@ -108,21 +108,14 @@ fn block_driving_matches_the_scalar_sequence() {
         ramp.set_target(target, samples);
         let expected = scalar_sequence(ramp, 512);
         for frames in [1usize, 7, 64, 128, 512] {
-            assert_bit_equal(
-                &block_sequence::<f32>(ramp, 512, frames),
+            lane::each_lane!(|L| assert_bit_equal(
+                &block_sequence::<L>(ramp, 512, frames),
                 &expected,
-                &format!("scalar, target {target}, {samples} samples, blocks of {frames}"),
-            );
-            assert_bit_equal(
-                &block_sequence::<lane::Simd4>(ramp, 512, frames),
-                &expected,
-                &format!("Simd4, target {target}, {samples} samples, blocks of {frames}"),
-            );
-            assert_bit_equal(
-                &block_sequence::<lane::Simd8>(ramp, 512, frames),
-                &expected,
-                &format!("Simd8, target {target}, {samples} samples, blocks of {frames}"),
-            );
+                &format!(
+                    "{}, target {target}, {samples} samples, blocks of {frames}",
+                    core::any::type_name::<L>()
+                ),
+            ));
         }
     }
 }

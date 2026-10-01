@@ -212,47 +212,56 @@ fn identity_and_bypass_emit_the_delayed_dry_signal_bit_for_bit() {
 }
 
 /// Bank binding validates before it declines, and declines rather than failing where the width is
-/// not this artifact's.
+/// not this artifact's. Run at the build's own width: eight lanes in the 8-lane (AVX2) build, four
+/// in a 4-lane (NEON/simd128) build (#1112).
 #[test]
 fn bank_binding_validates_before_declining_an_unavailable_width() {
+    let width = BankWidth::for_backend(lane::Backend::current()).expect("a vector build");
+    let lanes = width.lanes() as usize;
     let values = initial_values();
-    let requests = [request(&values); 8];
+    let requests = vec![request(&values); lanes];
     // Wrong request count for the width.
     assert!(matches!(
         SoftClipFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: support::backend(BankWidth::Eight),
-            width: BankWidth::Eight,
-            requests: &requests[..7],
-            active_mask: BankWidth::Eight.full_mask(),
+            backend: support::backend(width),
+            width,
+            requests: &requests[..lanes - 1],
+            active_mask: width.full_mask(),
         }),
         Err(EffectPrepareError {
             code: "effect.bank.requests"
         })
     ));
-    // Backend and width disagree.
-    assert!(matches!(
-        SoftClipFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: support::backend(BankWidth::Four),
-            width: BankWidth::Eight,
-            requests: &requests,
-            active_mask: BankWidth::Eight.full_mask(),
-        }),
-        Err(EffectPrepareError {
-            code: "effect.bank.requests"
-        })
-    ));
+    // Backend and width disagree: every other vector backend this build has, so none in a 4-lane
+    // build.
+    for &other in lane::Backend::VECTOR {
+        if other == support::backend(width) {
+            continue;
+        }
+        assert!(matches!(
+            SoftClipFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend: other,
+                width,
+                requests: &requests,
+                active_mask: width.full_mask(),
+            }),
+            Err(EffectPrepareError {
+                code: "effect.bank.requests"
+            })
+        ));
+    }
     // A mixed cohort is declined, not rejected.
     let other = values_from([(6.0, 6.0), (0.0, 0.0), (1.0, 1.0)]);
-    let mut mixed = [request(&values); 8];
-    mixed[4] = request(&other);
-    mixed[4].quantum = 64;
+    let mut mixed = vec![request(&values); lanes];
+    mixed[lanes / 2] = request(&other);
+    mixed[lanes / 2].quantum = 64;
     assert!(
         SoftClipFactory
             .bind_homogeneous_bank(PrepareEffectBankRequest {
-                backend: support::backend(BankWidth::Eight),
-                width: BankWidth::Eight,
+                backend: support::backend(width),
+                width,
                 requests: &mixed,
-                active_mask: BankWidth::Eight.full_mask(),
+                active_mask: width.full_mask(),
             })
             .expect("mixed cohort declines")
             .is_none()
@@ -260,13 +269,13 @@ fn bank_binding_validates_before_declining_an_unavailable_width() {
     // The host's own width binds.
     let bound = SoftClipFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: support::backend(BankWidth::Eight),
-            width: BankWidth::Eight,
+            backend: support::backend(width),
+            width,
             requests: &requests,
-            active_mask: BankWidth::Eight.full_mask(),
+            active_mask: width.full_mask(),
         })
         .expect("bind");
-    assert_eq!(bound.is_some(), bank_available(BankWidth::Eight));
+    assert_eq!(bound.is_some(), bank_available(width));
 }
 
 /// Automation validation is unchanged: canonical ordered points only.

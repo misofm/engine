@@ -22,7 +22,7 @@
 
 use core::hint::black_box;
 use lane::kernels::builtins::{meter_block, meter_sample_peak_block};
-use lane::{Lane, LaneF64, Simd4, Simd8, Widen};
+use lane::{Lane, LaneF64, Widen};
 
 /// Xorshift64\*: seeded and portable, so every host sees the same inputs.
 struct Rng(u64);
@@ -280,15 +280,15 @@ fn identity_at<L: Widen>(seed: u64, input: Input) -> usize {
 #[test]
 fn m1_banked_meter_block_is_the_scalar_meters_loop_at_every_width() {
     for input in [Input::Hostile, Input::Tone] {
-        assert_eq!(
-            identity_at::<Simd8>(0x0950_9E37_79B9_7F4A, input),
-            6 * 64 * 8
-        );
-        assert_eq!(
-            identity_at::<Simd4>(0x0950_1234_5678_9ABC, input),
-            6 * 64 * 4
-        );
-        assert_eq!(identity_at::<f32>(0x0950_DEAD_BEEF_CAFE, input), 6 * 64);
+        // Every width this build has, each with its own seed.
+        lane::each_lane!(|L, N| {
+            let seed = match N {
+                1 => 0x0950_DEAD_BEEF_CAFE,
+                4 => 0x0950_1234_5678_9ABC,
+                _ => 0x0950_9E37_79B9_7F4A,
+            };
+            assert_eq!(identity_at::<L>(seed, input), 6 * 64 * N);
+        });
     }
 }
 
@@ -336,9 +336,7 @@ fn boundary_sweep_at<L: Widen>() {
 
 #[test]
 fn m1_count_boundaries_match_the_meters_classification() {
-    boundary_sweep_at::<Simd8>();
-    boundary_sweep_at::<Simd4>();
-    boundary_sweep_at::<f32>();
+    lane::each_lane!(|L| boundary_sweep_at::<L>());
 }
 
 /// The reassociation hazard the kernel refuses (issue #950, R3), witnessed on its own inputs: a
@@ -347,30 +345,33 @@ fn m1_count_boundaries_match_the_meters_classification() {
 /// would be the weaker for it, so it is asserted to fail at least once.
 #[test]
 fn m1_a_zero_seeded_partial_plus_the_seed_is_not_the_seeded_sum() {
+    // At the build's own width: eight lanes where `avx2` is enabled, four otherwise (#1112).
+    type L = lane::Native;
+    const WIDTH: usize = <L as Lane>::WIDTH;
     let mut rng = Rng(0x0950_0000_0000_0001);
     let pool = hostile_pool();
     let mut differ = 0;
     for block in 0..64 {
-        let mut words = vec![0.0_f32; 128 * 8];
-        fill(&mut rng, &pool, &mut words, 8, block, Input::Tone);
-        let seeds: Vec<f64> = (0..8).map(|_| rng.positive_seed().min(64.0)).collect();
+        let mut words = vec![0.0_f32; 128 * WIDTH];
+        fill(&mut rng, &pool, &mut words, WIDTH, block, Input::Tone);
+        let seeds: Vec<f64> = (0..WIDTH).map(|_| rng.positive_seed().min(64.0)).collect();
         let seeded = store_f64(
-            black_box(meter_block::<Simd8>(
+            black_box(meter_block::<L>(
                 &words,
                 128,
-                <Simd8 as Widen>::F64::load(&seeds),
+                <L as Widen>::F64::load(&seeds),
             ))
             .energy,
         );
         let partial = store_f64(
-            black_box(meter_block::<Simd8>(
+            black_box(meter_block::<L>(
                 &words,
                 128,
-                <Simd8 as Widen>::F64::load(&[0.0; 8]),
+                <L as Widen>::F64::load(&[0.0; WIDTH]),
             ))
             .energy,
         );
-        for lane in 0..8 {
+        for lane in 0..WIDTH {
             differ +=
                 usize::from((seeds[lane] + partial[lane]).to_bits() != seeded[lane].to_bits());
         }

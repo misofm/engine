@@ -162,7 +162,7 @@ fn the_scalar_render_path_allocates_nothing() {
 
 #[test]
 fn the_bank_render_path_allocates_nothing() {
-    for width in [BankWidth::Four, BankWidth::Eight] {
+    for &width in BankWidth::ALL {
         let lanes = width.lanes() as usize;
         {
             let sets = (0..lanes).map(varied_values).collect::<Vec<_>>();

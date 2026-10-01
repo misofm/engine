@@ -15,7 +15,7 @@ use effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use effect_runtime::corpus::{CASE_NAMES, POINTS, run_case};
 use effect_runtime::ramp::LinearRamp;
 use lane::kernels::RampSegment;
-use lane::{Lane, Simd4, Simd8};
+use lane::{Lane, Simd4};
 
 fn lane_words<L: Lane>(value: L) -> Vec<u32> {
     let mut words = vec![0u32; L::WIDTH];
@@ -28,24 +28,19 @@ fn lane_words<L: Lane>(value: L) -> Vec<u32> {
 #[test]
 fn the_corpus_is_width_independent() {
     let mut scalar = vec![0u32; POINTS];
-    let mut four = vec![0u32; POINTS];
-    let mut eight = vec![0u32; POINTS];
+    let mut vector = vec![0u32; POINTS];
     for (case, name) in CASE_NAMES.iter().enumerate() {
         run_case::<f32>(case, &mut scalar);
-        run_case::<Simd4>(case, &mut four);
-        run_case::<Simd8>(case, &mut eight);
-        for point in 0..POINTS {
-            assert_eq!(
-                scalar[point], four[point],
-                "{name} point {point}: W=1 {:#010x} vs W=4 {:#010x}",
-                scalar[point], four[point]
-            );
-            assert_eq!(
-                scalar[point], eight[point],
-                "{name} point {point}: W=1 {:#010x} vs W=8 {:#010x}",
-                scalar[point], eight[point]
-            );
-        }
+        lane::each_vector_lane!(|L, N| {
+            run_case::<L>(case, &mut vector);
+            for point in 0..POINTS {
+                assert_eq!(
+                    scalar[point], vector[point],
+                    "{name} point {point}: W=1 {:#010x} vs W={N} {:#010x}",
+                    scalar[point], vector[point]
+                );
+            }
+        });
     }
 }
 
@@ -60,19 +55,20 @@ fn ramp_segments_are_width_independent() {
             let (mut a, mut b, mut c) = (base, base, base);
             let scalar: RampSegment<f32> = a.advance_block::<f32>(frames);
             let four: RampSegment<Simd4> = b.advance_block::<Simd4>(frames);
-            let eight: RampSegment<Simd8> = c.advance_block::<Simd8>(frames);
+            // The build's own width: eight lanes where `avx2` is enabled, four otherwise (#1112).
+            let native: RampSegment<lane::Native> = c.advance_block::<lane::Native>(frames);
 
             assert_eq!(a, b);
             assert_eq!(a, c);
             assert_eq!(scalar.ramp_frames, four.ramp_frames);
-            assert_eq!(scalar.ramp_frames, eight.ramp_frames);
+            assert_eq!(scalar.ramp_frames, native.ramp_frames);
             for word in lane_words(four.start) {
                 assert_eq!(word, scalar.start.to_bits());
             }
-            for word in lane_words(eight.step) {
+            for word in lane_words(native.step) {
                 assert_eq!(word, scalar.step.to_bits());
             }
-            for word in lane_words(eight.target) {
+            for word in lane_words(native.target) {
                 assert_eq!(word, scalar.target.to_bits());
             }
         }
@@ -88,14 +84,10 @@ fn the_boundary_check_is_width_independent() {
         for value in dirty {
             let mut block = vec![0.25f32; 64];
             block[position] = value;
-            assert!(!check_block::<f32>(&block), "W=1 at {position}");
-            assert!(!check_block::<Simd4>(&block), "W=4 at {position}");
-            assert!(!check_block::<Simd8>(&block), "W=8 at {position}");
+            lane::each_lane!(|L, N| assert!(!check_block::<L>(&block), "W={N} at {position}"));
         }
         let clean = vec![0.25f32; 64];
-        assert!(check_block::<f32>(&clean));
-        assert!(check_block::<Simd4>(&clean));
-        assert!(check_block::<Simd8>(&clean));
+        lane::each_lane!(|L| assert!(check_block::<L>(&clean)));
     }
 }
 
@@ -103,9 +95,10 @@ fn the_boundary_check_is_width_independent() {
 #[test]
 fn the_lane_mask_agrees_across_widths() {
     let mut block = vec![0.0f32; 8 * 8];
-    block[8 * 2 + 5] = f32::NAN;
-    assert_eq!(nonfinite_lane_mask::<Simd8>(&block), 1 << 5);
-    // The same buffer read as four-lane frames: index 21 is lane 1 of frame 5.
-    assert_eq!(nonfinite_lane_mask::<Simd4>(&block), 1 << 1);
+    let index = 8 * 2 + 5;
+    block[index] = f32::NAN;
+    // The same buffer read as `N`-lane frames: index 21 is lane `21 % N` of its frame (lane 5 of
+    // frame 2 at eight lanes, lane 1 of frame 5 at four).
+    lane::each_vector_lane!(|L, N| assert_eq!(nonfinite_lane_mask::<L>(&block), 1 << (index % N)));
     assert_eq!(nonfinite_lane_mask::<f32>(&block), 1);
 }

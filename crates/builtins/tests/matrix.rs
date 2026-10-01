@@ -356,6 +356,46 @@ fn hostile_pair(frame: usize, state: &mut u64) -> (f32, f32) {
     }
 }
 
+/// Two digests of one width-folding scenario (issue #1112): `every` over every bank width this
+/// build has, in [`effect_contract::BankWidth::ALL`]'s order, and `four` over the four-lane width
+/// alone.
+///
+/// An 8-lane (AVX2) build checks both pins and a 4-lane (NEON/simd128) build the four-lane one, so
+/// a wrong four-lane pin fails on x86 too, not only on an arm64 leg.
+struct WidthDigests {
+    every: bench_support::digest::Sha256Sink,
+    four: bench_support::digest::Sha256Sink,
+}
+
+impl WidthDigests {
+    fn new() -> Self {
+        Self {
+            every: bench_support::digest::Sha256Sink::new(),
+            four: bench_support::digest::Sha256Sink::new(),
+        }
+    }
+
+    fn update(&mut self, width: effect_contract::BankWidth, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref();
+        self.every.update(bytes);
+        if width == effect_contract::BankWidth::Four {
+            self.four.update(bytes);
+        }
+    }
+
+    /// Asserts the four-lane pin on every build, and `every_pin` -- taken over both widths --
+    /// where the build has both.
+    fn assert_pins(self, name: &str, every_pin: &str, four_pin: &str, message: &str) {
+        let every = self.every.finish_hex();
+        let four = self.four.finish_hex();
+        println!("{name} digest: {every} four-lane: {four}");
+        assert_eq!(four, four_pin, "{message} at four lanes");
+        if cfg!(target_feature = "avx2") {
+            assert_eq!(every, every_pin, "{message}");
+        }
+    }
+}
+
 /// Issue #944 gate 3: every settled-matrix shape renders the bits the base commit rendered.
 ///
 /// One deterministic scenario, 24 blocks of 128 frames, through [`BuiltinMatrixBank`] at both bank
@@ -363,7 +403,8 @@ fn hostile_pair(frame: usize, state: &mut u64) -> (f32, f32) {
 /// every block's per-lane retained words (padding lanes included) are folded into one SHA-256,
 /// pinned at the value the unmodified base (`21a0dfcf`, #936 and #945 on `14f2917b`) printed, in
 /// both dev and release, before the select-free arm existed. Only a full non-identity bank takes that arm; partial banks carry
-/// identity padding lanes and keep the select, and so do shapes (b) and (d).
+/// identity padding lanes and keep the select, and so do shapes (b) and (d). The four-lane width's
+/// words alone are pinned too, so a 4-lane (NEON/simd128) build checks its own bits (#1112).
 ///
 /// It also pins the post-ramp settle directly: after the block in which member 0's ramp ends, its
 /// current words equal its target words bitwise and its `u32` countdown is `0`, so the settled tail
@@ -375,6 +416,8 @@ fn hostile_pair(frame: usize, state: &mut u64) -> (f32, f32) {
 #[test]
 fn settled_matrix_shapes_render_the_base_bits() {
     const BASE_DIGEST: &str = "0e1c5af8e3aa66b66b2bb127149a8eaf10529fed838d69a4912c73bf345640c3";
+    /// The same scenario's four-lane words alone (issue #1112).
+    const FOUR_DIGEST: &str = "1c6d3055ea57737e00dce442398ddf208ba449e3bb9a3f783ff2a70ad43d15e8";
     const BLOCKS: usize = 24;
     const FRAMES: usize = 128;
     const RETARGET_BLOCK: usize = 3;
@@ -382,11 +425,9 @@ fn settled_matrix_shapes_render_the_base_bits() {
     /// The block in which a `WINDOW`-sample ramp that starts at `RETARGET_BLOCK` ends.
     const RAMP_END_BLOCK: usize = RETARGET_BLOCK + (WINDOW as usize - 1) / FRAMES;
     let _canonical = lane::CanonicalFpEnv::enter();
-    let mut sink = bench_support::digest::Sha256Sink::new();
-    for (backend, width) in [
-        (lane::Backend::Simd4, effect_contract::BankWidth::Four),
-        (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
-    ] {
+    let mut sink = WidthDigests::new();
+    for &width in effect_contract::BankWidth::ALL {
+        let backend = width.backend();
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             for shape in [
@@ -432,11 +473,11 @@ fn settled_matrix_shapes_render_the_base_bits() {
                     }
                     bank.process(&mut left, &mut right, FRAMES as u32);
                     for word in left.iter().chain(&right) {
-                        sink.update(word.to_bits().to_le_bytes());
+                        sink.update(width, word.to_bits().to_le_bytes());
                     }
                     for lane in 0..lanes {
                         for word in test_support::matrix_bank_lane_words(&bank, lane) {
-                            sink.update(word.to_le_bytes());
+                            sink.update(width, word.to_le_bytes());
                         }
                     }
                     let retargeted = matches!(
@@ -460,9 +501,12 @@ fn settled_matrix_shapes_render_the_base_bits() {
             }
         }
     }
-    let digest = sink.finish_hex();
-    println!("settled_matrix_shapes_render_the_base_bits digest: {digest}");
-    assert_eq!(digest, BASE_DIGEST, "a settled matrix shape moved a bit");
+    sink.assert_pins(
+        "settled_matrix_shapes_render_the_base_bits",
+        BASE_DIGEST,
+        FOUR_DIGEST,
+        "a settled matrix shape moved a bit",
+    );
 }
 
 /// One fused fader/matrix shape of issue #954's scenario gate.
@@ -519,7 +563,9 @@ fn fused_fader(lane: usize) -> BuiltinParameters {
 /// the split stages, exactly as the product's bank processor does. Every output word, whether the
 /// block was fused, and every block's per-lane retained fader and matrix words (padding lanes
 /// included) are folded into one SHA-256, pinned at the value the unmodified base (`e0f25bb6`)
-/// printed in both dev and release before the select-free fused arm existed.
+/// printed in both dev and release before the select-free fused arm existed. The four-lane width's
+/// words and fused-block count alone are pinned too, so a 4-lane (NEON/simd128) build checks its
+/// own (#1112).
 ///
 /// The input is [`hostile_pair`]'s, so every lane meets `l = -0.0, r = +0.0` at unity gain,
 /// unmuted, on lanes `0 mod 4`: an identity lane passes that `-0.0` through, and
@@ -533,18 +579,21 @@ fn fused_fader(lane: usize) -> BuiltinParameters {
 #[test]
 fn fused_fader_matrix_shapes_render_the_base_bits() {
     const BASE_DIGEST: &str = "46cc00962fac4916a0d5dfed9b197fb12c85082acd0cae806774876c3744abce";
+    /// The same scenario's four-lane words alone (issue #1112).
+    const FOUR_DIGEST: &str = "2703b0f2653aca3d1d617e8d94deea260549c0df9475392e9d3c3f1b0d380b6e";
     /// 384 blocks, less the 16 a matrix or fader ramp holds on the split stages.
     const FUSED_BLOCKS: usize = 368;
+    /// The four-lane width's half of them: 192 blocks, less 8.
+    const FOUR_FUSED_BLOCKS: usize = 184;
     const BLOCKS: usize = 16;
     const FRAMES: usize = 128;
     const WINDOW: u32 = 200;
     let _canonical = lane::CanonicalFpEnv::enter();
-    let mut sink = bench_support::digest::Sha256Sink::new();
+    let mut sink = WidthDigests::new();
     let mut fused_blocks = 0_usize;
-    for (backend, width) in [
-        (lane::Backend::Simd4, effect_contract::BankWidth::Four),
-        (lane::Backend::Simd8, effect_contract::BankWidth::Eight),
-    ] {
+    let mut four_fused_blocks = 0_usize;
+    for &width in effect_contract::BankWidth::ALL {
+        let backend = width.backend();
         let lanes = width.lanes() as usize;
         for members in [1, lanes - 1, lanes] {
             for shape in [
@@ -606,37 +655,43 @@ fn fused_fader_matrix_shapes_render_the_base_bits() {
                     );
                     if fused {
                         fused_blocks += 1;
+                        four_fused_blocks += usize::from(width == effect_contract::BankWidth::Four);
                     } else {
                         fader.process(&mut left, &mut right, FRAMES as u32);
                         matrix.process(&mut left, &mut right, FRAMES as u32);
                     }
-                    sink.update([u8::from(fused)]);
+                    sink.update(width, [u8::from(fused)]);
                     for word in left.iter().chain(&right) {
-                        sink.update(word.to_bits().to_le_bytes());
+                        sink.update(width, word.to_bits().to_le_bytes());
                     }
                     for lane in 0..lanes {
                         for word in test_support::fader_bank_lane_words(&fader, lane) {
-                            sink.update(word.to_le_bytes());
+                            sink.update(width, word.to_le_bytes());
                         }
                         for word in test_support::matrix_bank_lane_words(&matrix, lane) {
-                            sink.update(word.to_le_bytes());
+                            sink.update(width, word.to_le_bytes());
                         }
                     }
                 }
             }
         }
     }
-    let digest = sink.finish_hex();
-    println!(
-        "fused_fader_matrix_shapes_render_the_base_bits digest: {digest} fused={fused_blocks}"
-    );
+    println!("fused={fused_blocks} four-lane fused={four_fused_blocks}");
     assert_eq!(
-        fused_blocks, FUSED_BLOCKS,
-        "the fused path's coverage moved"
+        four_fused_blocks, FOUR_FUSED_BLOCKS,
+        "the fused path's coverage moved at four lanes"
     );
-    assert_eq!(
-        digest, BASE_DIGEST,
-        "a fused fader/matrix shape moved a bit"
+    if cfg!(target_feature = "avx2") {
+        assert_eq!(
+            fused_blocks, FUSED_BLOCKS,
+            "the fused path's coverage moved"
+        );
+    }
+    sink.assert_pins(
+        "fused_fader_matrix_shapes_render_the_base_bits",
+        BASE_DIGEST,
+        FOUR_DIGEST,
+        "a fused fader/matrix shape moved a bit",
     );
 }
 

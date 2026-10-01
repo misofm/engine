@@ -10,7 +10,7 @@
 
 mod support;
 
-use lane::{Lane, Simd4, Simd8};
+use lane::Lane;
 use support::{ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
 
 /// Frames per case: enough to cross every partition boundary and leave both ramp windows.
@@ -61,7 +61,5 @@ fn check<L: Lane>(width_name: &str) {
 #[test]
 fn p1_every_kernel_is_partition_invariant() {
     assert_eq!(MAX_WIDTH, 8, "the corpus is built for eight lanes");
-    check::<f32>("f32");
-    check::<Simd4>("Simd4");
-    check::<Simd8>("Simd8");
+    lane::each_lane!(|L| check::<L>(core::any::type_name::<L>()));
 }

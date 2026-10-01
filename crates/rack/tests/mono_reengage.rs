@@ -70,11 +70,7 @@ impl BankStage for Matrix {
 
 fn mono_chain(lanes: usize, frames: u32, slots: Vec<Box<dyn BankStage>>) -> BankChain {
     let active: Vec<bool> = vec![true; lanes];
-    let width = if lanes == 4 {
-        BankWidth::Four
-    } else {
-        BankWidth::Eight
-    };
+    let width = BankWidth::for_lanes(lanes).expect("a bank width");
     let slots = slots
         .into_iter()
         .map(|stage| slot(active.clone(), stage))

@@ -3356,12 +3356,12 @@ impl InputBuiltins {
 
 /// This crate's one dispatch over its per-width bank kernels ([`InputStageKernel`],
 /// [`FaderStageKernel`], [`MatrixStageKernel`]), and the one place outside those enums where their
-/// eight-lane variant is written (issue #1110).
+/// eight-lane variant is written (issues #1110 and #1112).
 ///
-/// The `Simd8` variants, like `lane::Simd8` and `effect_contract::BankWidth::Eight`, do not exist
-/// on `wasm32`, where the browser runs four lanes only. So each rule's eight-lane arm carries
-/// `#[cfg(not(target_arch = "wasm32"))]`, and every other line of the crate is written once for
-/// both widths:
+/// The `Simd8` variants, like `lane::Simd8` and `effect_contract::BankWidth::Eight`, exist only
+/// where `avx2` is enabled: a 4-lane (NEON/simd128) build runs four lanes only. So each rule's
+/// eight-lane arm carries `#[cfg(target_feature = "avx2")]`, and every other line of the crate is
+/// written once for both widths:
 ///
 /// * `per_width!(Kernel at width, |L| stage)` builds the `Kernel` variant of `width` around
 ///   `stage`, with `L` naming that width's lane type in it;
@@ -3379,7 +3379,7 @@ macro_rules! per_width {
                 type $lane = Simd4;
                 $kernel::Simd4($stage)
             }
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             BankWidth::Eight => {
                 type $lane = lane::Simd8;
                 $kernel::Simd8($stage)
@@ -3389,7 +3389,7 @@ macro_rules! per_width {
     ($kernel:ident($binding:ident) in $value:expr => $body:expr) => {
         match $value {
             $kernel::Simd4($binding) => $body,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             $kernel::Simd8($binding) => $body,
         }
     };
@@ -3399,9 +3399,9 @@ macro_rules! per_width {
     ) => {
         match $value {
             ($a::Simd4($x), $b::Simd4($y)) => $body,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             ($a::Simd8($x), $b::Simd8($y)) => $body,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             _ => $mismatch,
         }
     };
@@ -3416,10 +3416,10 @@ macro_rules! per_width {
 /// allocated once at preparation. The space is not worth the indirection.
 #[allow(clippy::large_enum_variant)]
 enum InputStageKernel {
-    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    /// Four lanes: the 4-lane (NEON/simd128) width.
     Simd4(InputStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Eight lanes: the 8-lane (AVX2) width, absent elsewhere ([`per_width!`]).
+    #[cfg(target_feature = "avx2")]
     Simd8(InputStage<lane::Simd8>),
 }
 
@@ -3647,10 +3647,10 @@ impl BuiltinInputBank {
 /// worth the indirection.
 #[allow(clippy::large_enum_variant)]
 enum FaderStageKernel {
-    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    /// Four lanes: the 4-lane (NEON/simd128) width.
     Simd4(FaderRampStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Eight lanes: the 8-lane (AVX2) width, absent elsewhere ([`per_width!`]).
+    #[cfg(target_feature = "avx2")]
     Simd8(FaderRampStage<lane::Simd8>),
 }
 
@@ -3847,10 +3847,10 @@ impl BuiltinFaderBank {
 /// worth the indirection.
 #[allow(clippy::large_enum_variant)]
 enum MatrixStageKernel {
-    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    /// Four lanes: the 4-lane (NEON/simd128) width.
     Simd4(MatrixStage<Simd4>),
-    /// Eight lanes: `x86-64-v3`. Absent on `wasm32` ([`per_width!`]).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Eight lanes: the 8-lane (AVX2) width, absent elsewhere ([`per_width!`]).
+    #[cfg(target_feature = "avx2")]
     Simd8(MatrixStage<lane::Simd8>),
 }
 

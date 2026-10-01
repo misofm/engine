@@ -20,7 +20,6 @@
 
 use super::*;
 use dsp_reference::randomized::{Draw, Profile, run_seeds};
-use lane::{Simd4, Simd8};
 
 const TEST: &str =
     "randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores";
@@ -491,12 +490,8 @@ fn the_stationary_cascade_renders_the_full_cascade_after_random_restores() {
     let mut reach = Reach::default();
     run_seeds(TEST, REPLAY, 8, |seed| {
         for mono in [false, true] {
-            scenario::<f32, 1>(seed, mono, &mut reach);
-            scenario::<Simd4, 4>(seed, mono, &mut reach);
-            scenario::<Simd8, 8>(seed, mono, &mut reach);
-            tiny_state_cases::<f32, 1>(seed, mono, &mut reach);
-            tiny_state_cases::<Simd4, 4>(seed, mono, &mut reach);
-            tiny_state_cases::<Simd8, 8>(seed, mono, &mut reach);
+            lane::each_lane!(|L, W| scenario::<L, W>(seed, mono, &mut reach));
+            lane::each_lane!(|L, W| tiny_state_cases::<L, W>(seed, mono, &mut reach));
         }
     });
     if dsp_reference::randomized::replaying() {

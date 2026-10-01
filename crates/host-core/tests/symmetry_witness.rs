@@ -508,19 +508,19 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 /// binds and every EQ is a per-node `LiveControlEffect`. The assertion on `effect_bank_scratch_bytes` is what makes that a fact
 /// rather than an intention.
 ///
-/// A four-lane build (AArch64 NEON, #1017) does bank a cohort of two, so there this fixture never
+/// A 4-lane (NEON/simd128) build (#1017) does bank a cohort of two, so there this fixture never
 /// reaches the per-node arm and the test is ignored, by name and with its reason, rather than run
 /// against banked EQs it does not describe. The arm itself is width-independent scalar code, and
-/// the x86-64-v3 legs run it.
+/// the 8-lane (AVX2) legs run it.
 ///
 /// Red mutation: drop `.and(live.control.symmetry())` from `NodeKind::channel_symmetry`'s
 /// `LiveControlEffect` arm -> the parameter half of this test fails and every banked test stays
 /// green.
 #[test]
 #[cfg_attr(
-    not(target_arch = "x86_64"),
+    not(target_feature = "avx2"),
     ignore = "a four-lane bank takes a cohort of two, so this fixture reaches the per-node arm only \
-              at the eight-lane launch width (#1017)"
+              at the 8-lane (AVX2) width (#1017)"
 )]
 fn the_scalar_live_control_effect_arm_maintains_its_own_live_terms() {
     let document = edited_apart(&[4, 5, 6, 7], &[2, 3, 6, 7]);

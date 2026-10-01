@@ -1810,7 +1810,7 @@ mod settled_body_tests {
     use core::cell::Cell;
     use dsp_reference::class_a;
     use effect_contract::LinkMode;
-    use lane::{Lane, Simd4, Simd8};
+    use lane::{Lane, Simd4};
     use sha2::{Digest, Sha256};
 
     type Defaults = [[f32; PARAMETER_COUNT]; MAX_WIDTH];
@@ -2862,8 +2862,7 @@ mod settled_body_tests {
 
     fn grid_all(table: &[[f32; PARAMETER_COUNT]; 8], wet: bool) -> Coverage {
         let mut coverage = grid::<f32>("f32", table, wet);
-        coverage.add(&grid::<Simd4>("Simd4", table, wet));
-        coverage.add(&grid::<Simd8>("Simd8", table, wet));
+        lane::each_vector_lane!(|L, N| coverage.add(&grid::<L>(&format!("Simd{N}"), table, wet)));
         println!("grid coverage {coverage:?}");
         assert!(
             coverage.settled_mid_block > 0,
@@ -3000,9 +2999,7 @@ mod settled_body_tests {
 
     #[test]
     fn the_all_wet_arm_is_taken_exactly_when_every_lane_is_wet() {
-        wet_arm_witness::<f32>();
-        wet_arm_witness::<Simd4>();
-        wet_arm_witness::<Simd8>();
+        lane::each_lane!(|L| wet_arm_witness::<L>());
     }
 
     /// Randomized dual and collapsed blocks at width `L`, one seed.
@@ -3189,9 +3186,11 @@ mod settled_body_tests {
         randomized_width::<Simd4>();
     }
 
+    /// The 8-lane (AVX2) twin of `randomized_differential_simd4` (#1112).
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn randomized_differential_simd8() {
-        randomized_width::<Simd8>();
+        randomized_width::<lane::Simd8>();
     }
 
     /// Folds a plane into a digest by its class-A words: every NaN as one word (#1065).
@@ -3439,17 +3438,26 @@ mod settled_body_tests {
     /// folded, and only NaN words moved: the same render hashed the old way still gives
     /// `162979dd…`, and its other 16,280 NaN words (input payloads, quieted signalling NaNs and
     /// x86's `0xFFC0_0000`, none of them `0x7FC0_0000`) are the only words the fold changes.
+    ///
+    /// That is the fold of every width the 8-lane (AVX2) build has. A 4-lane (NEON/simd128) build
+    /// has no `Simd8`, so its fold of every width is [`SCENARIO_1006_FOUR`] (#1112).
     const SCENARIO_1006: &str = "bd3d711f86bbd00f015a0ead7e04116daabd154b2b8e9d8ef17dc6e616b7382c";
+    /// The same rides at `f32` and `Simd4` alone, folded in the same order (#1112). Every build
+    /// checks it, so the 8-lane build proves the pin a 4-lane build is held to.
+    const SCENARIO_1006_FOUR: &str =
+        "5d99e861d79206ba012b7cce5a6dee119a0be9b0d7b2e54622a34f8240b6a1cc";
 
     #[test]
     fn scenario_1006_ramping_prefix_is_pinned() {
         let mut hasher = Sha256::new();
+        let mut four = Sha256::new();
         let mut coverage = RideCoverage::default();
         for link in [LinkMode::DualMono, LinkMode::Maximum] {
             for (table, wet) in [(&CORPUS_TRACKS, false), (&FIXTURE_TRACKS, true)] {
-                ride_width::<f32>(&mut hasher, table, wet, link, &mut coverage);
-                ride_width::<Simd4>(&mut hasher, table, wet, link, &mut coverage);
-                ride_width::<Simd8>(&mut hasher, table, wet, link, &mut coverage);
+                lane::each_lane!(|L| ride_width::<L>(&mut hasher, table, wet, link, &mut coverage));
+                let mut rides = RideCoverage::default();
+                ride_width::<f32>(&mut four, table, wet, link, &mut rides);
+                ride_width::<Simd4>(&mut four, table, wet, link, &mut rides);
             }
         }
         assert!(coverage.ramping > 0 && coverage.closed_mid_block > 0);
@@ -3465,8 +3473,16 @@ mod settled_body_tests {
             coverage.nan_words > 0,
             "the hostile NaNs must still reach the kernel words"
         );
+        let four = hex(four);
+        println!("scenario 1006 four-lane digest {four}");
+        assert_eq!(four, SCENARIO_1006_FOUR);
         let digest = hex(hasher);
         println!("scenario 1006 digest {digest}");
-        assert_eq!(digest, SCENARIO_1006);
+        let every_width = if cfg!(target_feature = "avx2") {
+            SCENARIO_1006
+        } else {
+            SCENARIO_1006_FOUR
+        };
+        assert_eq!(digest, every_width);
     }
 }

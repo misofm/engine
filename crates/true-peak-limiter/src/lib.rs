@@ -4880,7 +4880,7 @@ mod tests {
     use effect_contract::{
         PrepareEffectLimits, PreparedPorts, PreparedSidechainPort, validate_descriptor,
     };
-    use lane::{Simd4, Simd8};
+    use lane::Simd4;
 
     /// Deterministic SplitMix64 noise, so a corpus is a seed and never a file.
     struct Noise(u64);
@@ -5370,11 +5370,9 @@ mod tests {
             .iter()
             .map(|(_, stream)| stream.len())
             .sum();
-        for counts in [
-            seedless_peaks_match_the_seeded_order::<f32>(),
-            seedless_peaks_match_the_seeded_order::<Simd4>(),
-            seedless_peaks_match_the_seeded_order::<Simd8>(),
-        ] {
+        let mut every_width = Vec::new();
+        lane::each_lane!(|L| every_width.push(seedless_peaks_match_the_seeded_order::<L>()));
+        for counts in every_width {
             assert!(
                 counts.frames >= samples,
                 "{} of {samples} frames",
@@ -5636,9 +5634,11 @@ mod tests {
         detector_chunk_active_window_matches_old_shape::<Simd4>();
     }
 
+    /// The 8-lane (AVX2) twin of `detector_chunk_active_window_matches_old_shape_w4`.
+    #[cfg(target_feature = "avx2")]
     #[test]
     fn detector_chunk_active_window_matches_old_shape_w8() {
-        detector_chunk_active_window_matches_old_shape::<Simd8>();
+        detector_chunk_active_window_matches_old_shape::<lane::Simd8>();
     }
 
     /// E3: the declared latency, the guarded ceiling and the bypass bits (contract, unchanged).
@@ -5853,9 +5853,7 @@ mod tests {
                 }
             }
         }
-        check::<f32>();
-        check::<lane::Simd4>();
-        check::<lane::Simd8>();
+        lane::each_lane!(|L| check::<L>());
     }
 
     /// A ramp with a window open is never stationary, however small the move.
@@ -5919,9 +5917,7 @@ mod tests {
                 assert_eq!(scattered[lane].remaining, expected[lane].remaining);
             }
         }
-        check::<f32>();
-        check::<Simd4>();
-        check::<Simd8>();
+        lane::each_lane!(|L| check::<L>());
     }
 
     /// E8: one body, three widths; PCM, per-track payload bytes and reports agree by `to_bits`.
@@ -5957,14 +5953,12 @@ mod tests {
                 scalar_out.push((left, right));
             }
 
-            // Every width this build binds: a bank wider than the backend declines, so a four-lane
-            // AArch64 build (#1017) checks W4 and an x86-64-v3 build checks W4 and W8.
-            for (width, backend, lanes) in [
-                (BankWidth::Four, Backend::Simd4, 4_usize),
-                (BankWidth::Eight, Backend::Simd8, 8),
-            ]
-            .into_iter()
-            .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
+            // Every width this build binds: a bank wider than the backend declines, so a 4-lane
+            // (NEON/simd128) build checks W4 and the 8-lane (AVX2) build checks W4 and W8.
+            for (width, backend, lanes) in BankWidth::ALL
+                .iter()
+                .map(|&width| (width, width.backend(), width.lanes() as usize))
+                .filter(|&(_, _, lanes)| lanes <= Backend::current().width())
             {
                 for group in 0..8 / lanes {
                     let members: Vec<_> = (0..lanes)
@@ -6755,29 +6749,31 @@ mod tests {
     }
 
     /// The candidate and the shared runtime oracle agree on populated PCM and complete state while
-    /// the actual selected body proves all four W8 routes and scalar dual/uniform specialization.
+    /// the actual selected body proves all four vector routes, at the build's own width (W8 in the
+    /// 8-lane (AVX2) build, W4 in a 4-lane (NEON/simd128) one; #1112), and scalar dual/uniform
+    /// specialization.
     #[test]
     fn stationary_dispatch_matches_runtime_oracle_and_observes_selected_body() {
-        compare_dispatch_witness_case::<Simd8>(
-            "W8 dual per-lane",
+        compare_dispatch_witness_case::<lane::Native>(
+            "native dual per-lane",
             false,
             false,
             DispatchRoute::DualPerLane,
         );
-        compare_dispatch_witness_case::<Simd8>(
-            "W8 dual uniform",
+        compare_dispatch_witness_case::<lane::Native>(
+            "native dual uniform",
             true,
             false,
             DispatchRoute::DualUniform,
         );
-        compare_dispatch_witness_case::<Simd8>(
-            "W8 mono per-lane",
+        compare_dispatch_witness_case::<lane::Native>(
+            "native mono per-lane",
             false,
             true,
             DispatchRoute::MonoPerLane,
         );
-        compare_dispatch_witness_case::<Simd8>(
-            "W8 mono uniform",
+        compare_dispatch_witness_case::<lane::Native>(
+            "native mono uniform",
             true,
             true,
             DispatchRoute::MonoUniform,
@@ -6876,7 +6872,7 @@ mod tests {
 
     /// **A settled silent limiter renders exactly the limiter that is never allowed to skip.**
     ///
-    /// Issue #182 S2, the headline gate, at all three widths. The tone is well under the guarded
+    /// Issue #182 S2, the headline gate, at every width the build has. The tone is well under the guarded
     /// ceiling (`limit = 10^(-7/20) = 0.447` against an amplitude of `0.05`), so `r = 1` at every
     /// frame and the recursive word never leaves `+0.0`. That is deliberate, and it is the same
     /// choice this limiter's tests make explicit: they isolate the retained windows as the state
@@ -6898,29 +6894,37 @@ mod tests {
     fn a_settled_silent_limiter_renders_exactly_the_never_fast_path() {
         const SILENT_BLOCKS: usize = 40;
         let plan = silence_plan(1, SILENT_BLOCKS, 8);
-        let scalar = compare_silence_arms::<f32>("scalar", &plan, -6.0, 100.0, 0.05);
-        let four = compare_silence_arms::<Simd4>("W4", &plan, -6.0, 100.0, 0.05);
-        let eight = compare_silence_arms::<Simd8>("W8", &plan, -6.0, 100.0, 0.05);
+        let mut arms = Vec::new();
+        lane::each_lane!(|L, W| arms.push((
+            W,
+            compare_silence_arms::<L>(&width_label(W), &plan, -6.0, 100.0, 0.05)
+        )));
+        // The widest arm is the reference: W8 in the 8-lane (AVX2) build, W4 in a 4-lane
+        // (NEON/simd128) one (issue #1112).
+        let (lanes, widest) = arms.last().expect("every build has a vector width");
 
         // Engagement is a property of the signal and the shape, not of the width.
+        for (width, arm) in &arms {
+            assert_eq!(
+                arm.engagements,
+                widest.engagements,
+                "engagement rate depends on the lane width ({})",
+                width_label(*width)
+            );
+        }
         assert_eq!(
-            (scalar.engagements, four.engagements),
-            (eight.engagements, eight.engagements),
-            "engagement rate depends on the lane width"
-        );
-        assert_eq!(
-            eight.engagements, 35,
+            widest.engagements, 35,
             "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 35 the 486-sample \
              delay line allows",
-            eight.engagements
+            widest.engagements
         );
 
         // Anti-vacuity: the trailing tone is really rendered, so the comparison above had
         // something other than silence to compare. Without it the test would pass on a fast path
         // that simply stopped rendering.
-        let per_block = 128 * 8 * 2;
+        let per_block = 128 * lanes * 2;
         assert!(
-            eight.rendered[eight.rendered.len() - per_block..]
+            widest.rendered[widest.rendered.len() - per_block..]
                 .iter()
                 .any(|word| *word != 0),
             "the block after the silence rendered nothing at all"
@@ -6949,20 +6953,13 @@ mod tests {
     fn a_limiter_still_releasing_through_the_silence_is_never_frozen() {
         const SILENT_BLOCKS: usize = 24;
         let plan = silence_plan(1, SILENT_BLOCKS, 8);
-        for (label, arm) in [
-            (
-                "scalar",
-                compare_silence_arms::<f32>("scalar", &plan, -6.0, 2_000.0, 3.0),
-            ),
-            (
-                "W4",
-                compare_silence_arms::<Simd4>("W4", &plan, -6.0, 2_000.0, 3.0),
-            ),
-            (
-                "W8",
-                compare_silence_arms::<Simd8>("W8", &plan, -6.0, 2_000.0, 3.0),
-            ),
-        ] {
+        let mut arms = Vec::new();
+        lane::each_lane!(|L, W| {
+            let label = width_label(W);
+            let arm = compare_silence_arms::<L>(&label, &plan, -6.0, 2_000.0, 3.0);
+            arms.push((label, arm));
+        });
+        for (label, arm) in arms {
             assert_eq!(
                 arm.engagements, 0,
                 "{label}: the fast path engaged during a release that had not finished"
@@ -6995,7 +6992,8 @@ mod tests {
         plan.push(Some(-0.0_f32));
         plan.extend(vec![Some(0.0_f32); 16]);
 
-        let arm = compare_silence_arms::<Simd8>("W8", &plan, -6.0, 100.0, 0.05);
+        // The anti-vacuity at the build's own width (issue #1112).
+        let arm = compare_silence_arms::<lane::Native>("native", &plan, -6.0, 100.0, 0.05);
         assert!(
             arm.rendered.contains(&0x8000_0000),
             "no -0.0 ever reached the output, so the comparison had nothing to catch"
@@ -7140,8 +7138,9 @@ mod tests {
             run_silence_arm(&mut core, &plan, 8, 3.0, force_slow)
         }
 
-        let free = arm::<Simd8>(false);
-        let forced = arm::<Simd8>(true);
+        // At the build's own width (issue #1112).
+        let free = arm::<lane::Native>(false);
+        let forced = arm::<lane::Native>(true);
         assert_eq!(
             forced.engagements, 0,
             "the control arm took the fast path, so it is not a control"
@@ -7384,15 +7383,18 @@ mod tests {
         preparation.link_mode = LinkMode::DualMono;
         let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
-        let mut bank = PreparedTruePeakLimiterBank::<Simd8> {
+        // At the build's own bank width (issue #1112).
+        type L = lane::Native;
+        let width = BankWidth::for_lanes(L::WIDTH).expect("a bank width");
+        let mut bank = PreparedTruePeakLimiterBank::<L> {
             metadata: PreparedBankMetadata {
-                width: BankWidth::Eight,
+                width,
                 program_key: metadata.program_key(),
             },
-            core: silent_core::<Simd8>(-6.0, 100.0, 5.0),
+            core: silent_core::<L>(-6.0, 100.0, 5.0),
         };
 
-        let lanes = 8_usize;
+        let lanes = L::WIDTH;
         let empty = vec![0_u32; lanes + 1];
         for block in 0..16_usize {
             let quiet = (block > 0).then_some(0.0_f32);
@@ -7404,7 +7406,7 @@ mod tests {
                     &mut right,
                     None,
                     128,
-                    BankWidth::Eight,
+                    width,
                     (block * 128) as u64,
                     &[],
                     &empty,
@@ -7441,7 +7443,7 @@ mod tests {
                 &mut right,
                 None,
                 128,
-                BankWidth::Eight,
+                width,
                 first_sample,
                 &restated,
                 &offsets,
@@ -7691,18 +7693,23 @@ mod tests {
         assert_eq!(key.state_sizes.total(), Some(11_808));
         assert_eq!(bank.metadata().width, width);
 
-        // Mismatched backend and width are rejected before anything is prepared.
+        // Mismatched backend and width are rejected before anything is prepared: the native width
+        // with every other width's backend, `Simd4` at `Eight` in the 8-lane (AVX2) build. A 4-lane
+        // (NEON/simd128) build has no second width (issue #1112).
         let requests: Vec<_> = members.iter().map(|values| request(values)).collect();
-        let mismatched = TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: Backend::Simd4,
-            width: BankWidth::Eight,
-            requests: &requests,
-            active_mask: BankWidth::Eight.full_mask(),
-        });
-        assert_eq!(
-            mismatched.err().map(|error| error.code),
-            Some("effect.bank.requests")
-        );
+        for &other in BankWidth::ALL.iter().filter(|&&other| other != width) {
+            let mismatched =
+                TruePeakLimiterFactory.bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend: other.backend(),
+                    width,
+                    requests: &requests,
+                    active_mask: width.full_mask(),
+                });
+            assert_eq!(
+                mismatched.err().map(|error| error.code),
+                Some("effect.bank.requests")
+            );
+        }
 
         // Issue #95 unification: a heterogeneous cohort is a cohort this artifact cannot bank,
         // not a malformed request. Every member is still validated first — the `Ok` proves the
@@ -7742,17 +7749,15 @@ mod tests {
         );
     }
 
-    /// The bank widths this build binds: `Four` and `Eight` on x86-64-v3, `Four` on AArch64
-    /// (#1017). A bank wider than the backend declines, so a padded bank is tested at every width
-    /// that binds rather than returning early on the other one.
+    /// The bank widths this build binds: `Four` and `Eight` in the 8-lane (AVX2) build, `Four` in
+    /// a 4-lane (NEON/simd128) one (#1017, #1112). A bank wider than the backend declines, so a
+    /// padded bank is tested at every width that binds rather than returning early on the other.
     fn bank_widths() -> Vec<(BankWidth, Backend)> {
-        let widths: Vec<(BankWidth, Backend)> = [
-            (BankWidth::Four, Backend::Simd4),
-            (BankWidth::Eight, Backend::Simd8),
-        ]
-        .into_iter()
-        .filter(|(width, _)| width.lanes() as usize <= Backend::current().width())
-        .collect();
+        let widths: Vec<(BankWidth, Backend)> = BankWidth::ALL
+            .iter()
+            .map(|&width| (width, width.backend()))
+            .filter(|(width, _)| width.lanes() as usize <= Backend::current().width())
+            .collect();
         assert!(
             widths.contains(&(native_bank().0, native_bank().1)),
             "the native width binds"
@@ -8250,8 +8255,7 @@ mod tests {
                 }
             }
         }
-        at::<Simd4>();
-        at::<Simd8>();
+        lane::each_vector_lane!(|L| at::<L>());
     }
 
     /// Issue #1091 gate 4 at one width: a non-finite state planted in one active lane is
@@ -8385,8 +8389,7 @@ mod tests {
     /// a partial recovery moves every bank-mate's ring reads.
     #[test]
     fn a_failed_lane_is_recovered_and_reported_alone() {
-        a_failed_lane_is_recovered_and_reported_alone_at::<Simd4>();
-        a_failed_lane_is_recovered_and_reported_alone_at::<Simd8>();
+        lane::each_vector_lane!(|L| a_failed_lane_is_recovered_and_reported_alone_at::<L>());
     }
 
     /// Every word lane `lane` of `state` holds, designed and running, by bit pattern.
@@ -8512,9 +8515,7 @@ mod tests {
                 }
             }
         }
-        at::<f32>();
-        at::<Simd4>();
-        at::<Simd8>();
+        lane::each_lane!(|L| at::<L>());
     }
 
     #[test]
@@ -9353,9 +9354,7 @@ mod tests {
     /// backward pass (M1), skip the mirrored box store (M2), engage under `DualMono` (M3).
     #[test]
     fn the_linked_body_renders_exactly_the_unmodified_kernel() {
-        linked_identity_matrix::<f32>("scalar");
-        linked_identity_matrix::<Simd4>("W4");
-        linked_identity_matrix::<Simd8>("W8");
+        lane::each_lane!(|L, W| linked_identity_matrix::<L>(&width_label(W)));
     }
 
     /// One randomized scenario: a random bank, then random blocks, signals, automation and control
@@ -9503,14 +9502,10 @@ mod tests {
         } else {
             1000
         };
-        for (label, run) in [
-            (
-                "scalar",
-                linked_scenario::<f32> as fn(u64, &str) -> (u32, u32),
-            ),
-            ("W4", linked_scenario::<Simd4>),
-            ("W8", linked_scenario::<Simd8>),
-        ] {
+        let mut runs: Vec<(String, LinkedScenario)> = Vec::new();
+        lane::each_lane!(|L, W| runs.push((width_label(W), linked_scenario::<L>)));
+        for (label, run) in runs {
+            let label = label.as_str();
             let mut engaged = 0;
             let mut rendered = 0;
             dsp_reference::randomized::run_seeds(
@@ -9773,14 +9768,10 @@ mod tests {
     #[test]
     fn the_stationary_walk_renders_exactly_the_unmodified_kernel() {
         let scenarios = if cfg!(debug_assertions) { 24 } else { 1000 };
-        for (label, run) in [
-            (
-                "scalar",
-                segment_scenario::<f32> as fn(u64, &str, &mut SegmentRun),
-            ),
-            ("W4", segment_scenario::<Simd4>),
-            ("W8", segment_scenario::<Simd8>),
-        ] {
+        let mut runs: Vec<(String, SegmentScenario)> = Vec::new();
+        lane::each_lane!(|L, W| runs.push((width_label(W), segment_scenario::<L>)));
+        for (label, run) in runs {
+            let label = label.as_str();
             let _ = take_census();
             let mut totals = SegmentRun::default();
             for scenario in 0..scenarios {
@@ -9874,9 +9865,7 @@ mod tests {
                 );
             }
         }
-        run::<f32>("scalar");
-        run::<Simd4>("W4");
-        run::<Simd8>("W8");
+        lane::each_lane!(|L, W| run::<L>(&width_label(W)));
     }
 
     /// Renders `blocks` hot dual blocks of 128 frames with no automation and returns the engaged
@@ -10200,8 +10189,21 @@ mod tests {
     /// (M5) -- the one-channel retarget's landing block then links.
     #[test]
     fn the_linked_body_engages_exactly_where_the_record_allows() {
-        linked_engagement_witness::<f32>("scalar");
-        linked_engagement_witness::<Simd4>("W4");
-        linked_engagement_witness::<Simd8>("W8");
+        lane::each_lane!(|L, W| linked_engagement_witness::<L>(&width_label(W)));
+    }
+
+    /// One width's `linked_scenario`.
+    type LinkedScenario = fn(u64, &str) -> (u32, u32);
+
+    /// One width's `segment_scenario`.
+    type SegmentScenario = fn(u64, &str, &mut SegmentRun);
+
+    /// The label this module gives a lane width: `scalar`, `W4` or `W8`.
+    fn width_label(lanes: usize) -> String {
+        if lanes == 1 {
+            "scalar".to_owned()
+        } else {
+            format!("W{lanes}")
+        }
     }
 }

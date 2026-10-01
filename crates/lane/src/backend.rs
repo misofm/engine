@@ -27,37 +27,36 @@ pub enum Backend {
     /// `f32`, one lane, whole plan: the unbanked test oracle (see the type's documentation).
     #[cfg(feature = "test-support")]
     Scalar,
-    /// [`wide::f32x4`], four lanes: AArch64 NEON and wasm `simd128`.
+    /// [`wide::f32x4`], four lanes: the 4-lane (NEON/simd128) width.
     Simd4,
-    /// [`wide::f32x8`], eight lanes: one `__m256` on `x86-64-v3`.
+    /// [`wide::f32x8`], eight lanes: the 8-lane (AVX2) width, one `__m256`.
     ///
-    /// Absent on `wasm32` (issue #1110): the browser can never select it, so the browser build
-    /// cannot name it either (see [`Simd8`](crate::Simd8)).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Exists only where `avx2` is enabled (issues #1110 and #1112): no other build can select it,
+    /// so no other build can name it either (see `lane::Simd8`).
+    #[cfg(target_feature = "avx2")]
     Simd8,
 }
 
 impl Backend {
     /// The backend this build uses, decided entirely at compile time.
+    ///
+    /// The lane width follows the target features the build is compiled for, never the
+    /// architecture's name (owner, issue #1112): each width has one predicate, the same one that
+    /// gates its items. `avx2` selects the 8-lane (AVX2) width, and `neon` or `simd128` the 4-lane
+    /// (NEON/simd128) width. `wide` would lower `f32x8` to two `v128` values on `simd128`, and
+    /// issue #183 measured eight lanes there as a null (`docs/rulings/wasm-simd8-null.md`).
     #[must_use]
     pub const fn current() -> Self {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(target_feature = "avx2")]
         {
             Self::Simd8
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(target_feature = "neon", target_feature = "simd128"))]
         {
             Self::Simd4
         }
-        // The one wasm width. `wide` lowers `f32x8` to two `v128` values there, and issue #183
-        // measured eight lanes as a null (`docs/rulings/wasm-simd8-null.md`); #1038 removed the
-        // cfg that selected them. A re-measurement re-adds one in its own issue.
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        {
-            Self::Simd4
-        }
-        // No arm for any other target: `lib.rs` refuses to compile for every one of them, 32-bit
-        // targets (issue #1041) and wasm32 without `simd128` (issue #1062) alike, so no target
+        // No arm for any other build: `lib.rs` refuses to compile x86-64 without AVX2 and FMA,
+        // 32-bit targets (issue #1041) and wasm32 without `simd128` (issue #1062), so no build
         // selects `Scalar` and the variant exists only in `test-support` builds.
     }
 
@@ -68,10 +67,21 @@ impl Backend {
             #[cfg(feature = "test-support")]
             Self::Scalar => 1,
             Self::Simd4 => 4,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_feature = "avx2")]
             Self::Simd8 => 8,
         }
     }
+
+    /// Every vector backend this build has, narrowest first: `Simd4`, and `Simd8` where `avx2` is
+    /// enabled (issue #1112).
+    ///
+    /// The one list of them: tests and gates that run a claim at every vector width iterate this
+    /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four lanes.
+    pub const VECTOR: &'static [Self] = &[
+        Self::Simd4,
+        #[cfg(target_feature = "avx2")]
+        Self::Simd8,
+    ];
 }
 
 /// Why a host may not run this build (see [`attest_host`]).

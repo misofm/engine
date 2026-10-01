@@ -1,10 +1,10 @@
 //! Assignment 1 gates for the additive masked SVF kernel entrypoints.
 
+use lane::Lane;
 use lane::kernels::{
     SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_block_ramped_with_dry_mask,
     svf_cascade_interleaved, svf_cascade_interleaved_with_dry_masks, svf_step,
 };
-use lane::{Lane, Simd4, Simd8};
 
 const DEPTH: usize = 2;
 const FRAMES: usize = 9;
@@ -528,7 +528,5 @@ fn run_width<L: Lane>() {
 
 #[test]
 fn masked_svf_assignment1_gates_all_widths() {
-    run_width::<f32>();
-    run_width::<Simd4>();
-    run_width::<Simd8>();
+    lane::each_lane!(|L| run_width::<L>());
 }

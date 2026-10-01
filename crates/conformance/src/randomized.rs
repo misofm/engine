@@ -275,14 +275,6 @@ fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
     result
 }
 
-/// Every bank width this target has, with the backend that executes it. No eight on `wasm32`,
-/// which has no eight-lane type (issue #1110, `effect_contract::BankWidth`).
-const WIDTHS: &[(BankWidth, Backend)] = &[
-    (BankWidth::Four, Backend::Simd4),
-    #[cfg(not(target_arch = "wasm32"))]
-    (BankWidth::Eight, Backend::Simd8),
-];
-
 /// Everything one seed shares across its widths: a bank's program key is one per cohort.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
@@ -323,7 +315,8 @@ fn scenario(
         hostile: !mono && draw.chance(1, 2),
     };
     let bound = coverage.banks.iter().sum::<u64>();
-    for &(width, backend) in WIDTHS {
+    for &width in BankWidth::ALL {
+        let backend = width.backend();
         run_width(spec, &mut draw, shape, width, backend, audited, coverage);
     }
     if coverage.banks.iter().sum::<u64>() == bound {
@@ -1713,10 +1706,10 @@ fn bind_eligibility(
     let short = &base[..lanes - 1];
     let mut long = base.clone();
     long.push(base[0]);
-    // Absent where the target has one bank width, as `wasm32` does (issue #1110).
-    let other_backend = WIDTHS
+    // Absent where the build has one bank width, as every 4-lane build does (#1110, #1112).
+    let other_backend = Backend::VECTOR
         .iter()
-        .map(|&(_, other)| other)
+        .copied()
         .find(|&other| other != backend);
     for (label, requests, backend) in [
         ("one member short", short, Some(backend)),
@@ -1988,7 +1981,8 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         check("scalar", block, 0, block >= POISONED, report, zeroed);
     }
 
-    for &(width, backend) in WIDTHS {
+    for &width in BankWidth::ALL {
+        let backend = width.backend();
         let lanes = width.lanes() as usize;
         let requests: Vec<PrepareEffectRequest<'_>> =
             (0..lanes).map(|_| request(shape, &values)).collect();

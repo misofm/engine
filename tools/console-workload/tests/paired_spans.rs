@@ -213,13 +213,6 @@ fn prepare_request<'a>(
     })
 }
 
-const fn backend_of(width: BankWidth) -> Backend {
-    match width {
-        BankWidth::Four => Backend::Simd4,
-        BankWidth::Eight => Backend::Simd8,
-    }
-}
-
 /// Binds `fx` as a homogeneous bank at `width`, or `None` where this build cannot (decision D4:
 /// an x86-64-v3 build binds no four-lane EQ or compressor bank).
 fn bind(fx: Fx, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
@@ -230,7 +223,7 @@ fn bind(fx: Fx, width: BankWidth) -> Option<Box<dyn PreparedNativeEffectBank>> {
     let requests = vec![request; width.lanes() as usize];
     factory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
-            backend: backend_of(width),
+            backend: width.backend(),
             width,
             requests: &requests,
             active_mask: width.full_mask(),
@@ -1398,7 +1391,7 @@ fn check(fxs: &[Fx], width: BankWidth, scenario: &Scenario) -> bool {
 fn run_all(fxs: &[Fx]) {
     let native = BankWidth::for_backend(Backend::current()).expect("a SIMD backend");
     let mut ran = Vec::new();
-    for width in [BankWidth::Eight, BankWidth::Four] {
+    for &width in BankWidth::ALL.iter().rev() {
         let lanes = width.lanes() as usize;
         let mut count = 0;
         for scenario in scenarios(fxs, lanes) {
@@ -2387,9 +2380,12 @@ fn the_pinned_mixed_ride_renders_the_base_bits() {
     // first block renders) and `[2048, 16]` at `Simd4`, where this x86-64-v3 build binds no
     // four-lane EQ or compressor bank (decision D4), so no collapsed chain holds one.
     const BASE: &str = "9242f149101f3bcd2e48268096169f1670a4ec368fe11071408f6b44a49c45a4";
-    const PINS: [(Backend, &str); 2] = [(Backend::Simd8, BASE), (Backend::Simd4, BASE)];
+    let pins = Backend::VECTOR
+        .iter()
+        .rev()
+        .map(|&dispatch| (dispatch, BASE));
     let native = Backend::current();
-    for (dispatch, pin) in PINS {
+    for (dispatch, pin) in pins {
         if dispatch.width() > native.width() {
             continue;
         }

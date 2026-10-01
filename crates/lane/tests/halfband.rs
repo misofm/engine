@@ -11,7 +11,6 @@ use lane::kernels::halfband::{
     HALFBAND63_LIVE_ROWS, HALFBAND63_ROWS, halfband2x_decim_even, halfband2x_interp_even,
     history_advance, history_push, history_row,
 };
-use lane::{Simd4, Simd8};
 
 /// A deterministic, target-independent sample source.
 fn sample(index: usize) -> f32 {
@@ -102,7 +101,8 @@ fn interpolation_and_decimation_are_width_independent() {
     let scalar = run::<f32>();
     // The scalar run advances a one-lane ring; comparing widths means comparing the same lane
     // stream, so each width is compared against a scalar run of the same signal.
-    for (width, values) in [(4_usize, run::<Simd4>()), (8, run::<Simd8>())] {
+    lane::each_vector_lane!(|L, N| {
+        let (width, values) = (N, run::<L>());
         assert_eq!(values.len(), FRAMES * width);
         for index in 0..FRAMES {
             for lane in 0..width {
@@ -127,6 +127,6 @@ fn interpolation_and_decimation_are_width_independent() {
                 assert_eq!(actual[1].to_bits(), decim.to_bits(), "decim {index}/{lane}");
             }
         }
-    }
+    });
     assert_eq!(scalar.len(), FRAMES);
 }

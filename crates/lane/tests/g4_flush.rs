@@ -11,7 +11,6 @@
 mod support;
 
 use lane::{FLUSH_EPS, Lane, flush};
-use lane::{Simd4, Simd8};
 use support::Xorshift64Star;
 
 /// Step through the subnormal range. The `--release` run is exhaustive (every one of the 2^23
@@ -103,9 +102,7 @@ fn sweep<L: Lane>(width_name: &str) {
 
 #[test]
 fn g4_flush_law_holds_at_every_width() {
-    sweep::<f32>("f32");
-    sweep::<Simd4>("Simd4");
-    sweep::<Simd8>("Simd8");
+    lane::each_lane!(|L| sweep::<L>(core::any::type_name::<L>()));
 }
 
 #[test]
@@ -122,7 +119,12 @@ fn g4_flush_is_lane_wise() {
         0.5,
     ];
     let mut bits = [0u32; 8];
-    flush(Simd8::load(&lanes)).store_bits(&mut bits);
+    // At the build's own width, one vector per `WIDTH` lanes: eight lanes in one where `avx2` is
+    // enabled, two of four in a 4-lane (NEON/simd128) build (issue #1112).
+    let width = <lane::Native as Lane>::WIDTH;
+    for (input, output) in lanes.chunks(width).zip(bits.chunks_mut(width)) {
+        flush(lane::Native::load(input)).store_bits(output);
+    }
     let expected = [
         1.0f32.to_bits(),
         0,
