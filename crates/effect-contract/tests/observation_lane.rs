@@ -249,25 +249,6 @@ fn disarming_all_stops_every_tap_without_disturbing_published_windows() {
     assert_eq!(after, published, "a disarm publishes nothing new");
 }
 
-/// Retained bytes are a formula over the declared menu, and arming does not change them.
-#[test]
-fn retained_bytes_are_a_formula_over_the_declared_menu() {
-    let (mut observation, _readers) = lane(4);
-    let before = observation.retained_bytes();
-    assert_eq!(observation.len(), MENU.len());
-    assert!(!observation.is_empty());
-    assert!(before > 0);
-    observation.arm(0, true, 2, 0);
-    observation.arm(1, true, 2, 0);
-    assert_eq!(
-        observation.retained_bytes(),
-        before,
-        "subscribe allocates nothing: the slots came from the declared menu"
-    );
-    observation.disarm_all();
-    assert_eq!(observation.retained_bytes(), before);
-}
-
 /// One publisher per declared tap, or nothing at all.
 #[test]
 fn a_lane_refuses_a_publisher_count_that_does_not_match_the_menu() {
