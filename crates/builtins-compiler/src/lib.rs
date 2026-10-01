@@ -4874,11 +4874,16 @@ fn meter_diagnostic(request: &MeterRequest, error: MeterConfigError) -> BuiltinD
     )
 }
 
+/// The track count of [`test_only_prepared_pair_graph`]'s own-width graph: one full bank and a tail.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = Backend::current().width() + 1;
+
 #[cfg(feature = "test-support")]
 pub use tests::test_only_observed_scalar_pair_binding;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use tests::{TEST_ONLY_PAIR_GRAPH_TRACKS, test_only_prepared_unpaired_graph};
+pub use tests::test_only_prepared_unpaired_graph;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub use tests::{
@@ -6390,9 +6395,6 @@ mod tests {
     /// `Simd4` and five on a 4-lane (NEON/simd128) one.
     const PAIR_GRAPH_BACKEND: Backend = Backend::current();
 
-    /// The track count of [`test_only_prepared_pair_graph`]'s graph (see `PAIR_GRAPH_BACKEND`).
-    pub const TEST_ONLY_PAIR_GRAPH_TRACKS: usize = PAIR_GRAPH_BACKEND.width() + 1;
-
     /// [`TEST_ONLY_PAIR_GRAPH_TRACKS`] as a witness member count.
     const PAIR_GRAPH_MEMBERS: u64 = TEST_ONLY_PAIR_GRAPH_TRACKS as u64;
 
@@ -7019,7 +7021,6 @@ mod tests {
         (error, graph::test_only_failed_buffer_capture())
     }
 
-    #[cfg(feature = "test-support")]
     fn first_fader_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 14] {
         trace.fader_owners[..trace.fader_len]
             .iter()
@@ -7028,7 +7029,6 @@ mod tests {
             .expect("owner fader state trace")
     }
 
-    #[cfg(feature = "test-support")]
     fn last_fader_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 14] {
         trace.fader_owners[..trace.fader_len]
             .iter()
@@ -7037,7 +7037,6 @@ mod tests {
             .expect("owner fader state trace")
     }
 
-    #[cfg(feature = "test-support")]
     fn first_matrix_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 15] {
         trace.matrix_owners[..trace.matrix_len]
             .iter()
@@ -7046,7 +7045,6 @@ mod tests {
             .expect("owner matrix state trace")
     }
 
-    #[cfg(feature = "test-support")]
     fn last_matrix_state(trace: TestOnlyScalarStateTrace, owner: u16) -> [u32; 15] {
         trace.matrix_owners[..trace.matrix_len]
             .iter()
