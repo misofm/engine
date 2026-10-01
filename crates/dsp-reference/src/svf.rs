@@ -331,6 +331,10 @@ impl ReferenceSvfStateSpace {
     /// state-space words, never the Simper intermediates. Cascades filter twice.
     #[must_use]
     pub fn filter(self, input: &[f64]) -> Vec<f64> {
+        self.filter_samples(input.iter().copied())
+    }
+
+    fn filter_samples(self, input: impl ExactSizeIterator<Item = f64>) -> Vec<f64> {
         let mut output = Vec::with_capacity(input.len());
         let (mut x0, mut x1) = (0.0_f64, 0.0_f64);
         for sample in input {
@@ -346,11 +350,7 @@ impl ReferenceSvfStateSpace {
     /// Iterates the state space over a unit impulse of `frames` samples.
     #[must_use]
     pub fn impulse_response(self, frames: usize) -> Vec<f64> {
-        let mut impulse = vec![0.0_f64; frames];
-        if let Some(first) = impulse.first_mut() {
-            *first = 1.0;
-        }
-        self.filter(&impulse)
+        self.filter_samples((0..frames).map(|frame| if frame == 0 { 1.0 } else { 0.0 }))
     }
 }
 
@@ -424,7 +424,7 @@ mod tests {
     use crate::{
         ReferenceParametricEqCoefficients, ReferenceParametricEqError, ReferenceParametricEqKind,
     };
-    use core::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
+    use core::f64::consts::{FRAC_1_SQRT_2, TAU};
 
     // The frozen Issue-042/045 design grid, taken verbatim from the constants that used to sit at
     // `parametric_eq_recurrence_proof.rs:17-21`. #1029 deleted that uncompiled harness with the
@@ -759,6 +759,5 @@ mod tests {
             assert_eq!(space.magnitude_db(48_000.0, 1_000.0), Some(0.0));
             assert_eq!(space.magnitude_db(48_000.0, 20.0), Some(0.0));
         }
-        let _ = PI;
     }
 }
