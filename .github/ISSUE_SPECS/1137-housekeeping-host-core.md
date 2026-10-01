@@ -25,6 +25,12 @@ Prefer deleting or consolidating repetition to adding abstractions that increase
 
 Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping request. Attempt 1 is authorized with the frozen scope/gates above. Owner questions are collected for the final report; routine reversible cleanup proceeds autonomously. Scope is this package's housekeeping, not completion of pre-existing feature/bug issues.
 
+After the full source/test read, root approves a bounded pass: retain only latency/tail instead of cloning the full graph report; borrow temporary meter IDs; resolve response override indexes once; use the private catalog's builder-proven strictly increasing handles for binary lookup and pagination. Preserve diagnostic/admission ordering, arbitrary request order, zero-limit/exhausted pagination, replacement ownership and every feature configuration.
+
+Approved test retirements: same-run source digest after full output-word equality; duplicate armed-observation rendering used only for nonvacuity; the 48/104/832 resource-layout restriction with existing current resource/admission/no-capacity owners retained; a zero-delay document-string-only test; and a classification partition subset covered by independent per-row classifications. Keep the distinct shared-code classifier owner. No new test, generator, harness or dependency change.
+
+The existing linked-limiter session is the sole owner of this particular current corpus across x86 W8/W4/Scalar and AArch64 W4/Scalar debug qualification. Its shared pin uniquely detects common scalar/vector gain-ring mirroring and premature relinking defects that width equality cannot detect. Retain this exception with its historical origin and actual execution limits explicit: it is absent from the Wasm guest and from AArch64 release's subset. Do not claim whole-target coverage. The spectrum selection/cadence finding is deferred to a dedicated correctness issue; do not change it in this pass.
+
 ## Attempt evidence
 
 Pending two-agent queue. No implementation or performance result is claimed.
