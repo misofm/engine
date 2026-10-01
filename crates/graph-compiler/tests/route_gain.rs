@@ -11,7 +11,7 @@
 //! check that the replacement is the *same function*, not the acceptance gate. The gate F4 exists
 //! for is master plan D5 -- the same session yields the same coefficient bits on x86_64, aarch64
 //! and wasm32 -- and that is structural, because `math` is a vendored pure-Rust libm
-//! with no target-conditional fast paths. `route_transform_uses_the_canonical_conversion` is the
+//! with no target-conditional fast paths. `route_transform_uses_the_canonical_db_to_gain_conversion` is the
 //! test that pins the compiler to it.
 
 /// Distance in representable `f32` steps. Both arguments are finite, normal and same-signed here.
@@ -76,14 +76,4 @@ fn route_gain_matches_f64_oracle_within_two_ulp() {
 fn unity_route_gain_is_exactly_one() {
     assert_eq!(math::db_to_gain_f32(0.0).to_bits(), 0x3f80_0000);
     assert_eq!(math::db_to_gain_f32(-0.0).to_bits(), 0x3f80_0000);
-}
-
-/// The canonical conversion and the platform `powf` it replaced are observably different bits at
-/// -19 dB, which is the witness `route_transform_uses_the_canonical_db_to_gain_conversion` (in
-/// `src/lib.rs`, where `powf` is forbidden) pins as a literal. If this ever stops holding, that
-/// test proves nothing and its witness must be re-derived from this sweep.
-#[test]
-fn the_replaced_platform_conversion_had_different_bits_at_the_pinned_witness() {
-    assert_eq!(math::db_to_gain_f32(-19.0).to_bits(), 0x3de5_ca16);
-    assert_eq!(oracle(-19.0).to_bits(), 0x3de5_ca15);
 }

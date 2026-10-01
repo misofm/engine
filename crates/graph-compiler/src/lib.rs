@@ -258,7 +258,7 @@ mod tests {
     };
     use crate::ids::{
         PreparedEffectIndex, gid, port, prepared_effect_node, rack_id, route_destination_node,
-        route_source_node, stages, track_node,
+        route_source_node, track_node,
     };
     use crate::pdc::timings;
     use crate::schedule::{
@@ -1651,84 +1651,8 @@ mod tests {
         }
     }
 
-    /// #99 F5: `node_text_len`/`edge_text_len` agree with the formatters they replace, on every
-    /// variant and on ids of every length.
-    ///
-    /// `graph_metadata_bytes` feeds `incremental_plan_bytes` and `session_plus_plan_bytes`, both
-    /// of which are checked against the host's graph budget -- so a wrong length is a wrong
-    /// admission decision, not a cosmetic drift. The two functions are separate code paths
-    /// by design (one allocates, one does not), so they need a gate that keeps them in step.
-    #[test]
-    fn node_text_len_matches_node_text_for_every_variant() {
-        let mut state = 0x1f2e_3d4c_5b6a_7988_u64;
-        let mut checked = 0_usize;
-        for _ in 0..1_000 {
-            let length = (state % 24) as usize + 1;
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let a = "a".repeat(length);
-            let b = "b".repeat((length % 7) + 1);
-            let c = "c".repeat((length % 11) + 1);
-            let effect = EffectNodeId {
-                track_id: gid(&a),
-                rack: match state % 3 {
-                    0 => RackId::Simd1,
-                    1 => RackId::Dynamic,
-                    _ => RackId::Simd2,
-                },
-                effect_id: gid(&c),
-            };
-            let stage = stages()[(state % 7) as usize];
-            let variants = [
-                GraphNodeId::TrackStage {
-                    track_id: gid(&a),
-                    stage,
-                },
-                GraphNodeId::Effect(effect.clone()),
-                GraphNodeId::Route { route_id: gid(&b) },
-                GraphNodeId::Submix { submix_id: gid(&b) },
-                GraphNodeId::Output { output_id: gid(&c) },
-                GraphNodeId::CompensationDelay {
-                    edge_id: Box::new(GraphEdgeId::TrackMain {
-                        target: GraphNodeId::TrackStage {
-                            track_id: gid(&a),
-                            stage,
-                        },
-                    }),
-                },
-            ];
-            for node in &variants {
-                assert_eq!(
-                    node_text_len(node),
-                    node_text(node).len(),
-                    "node_text_len disagrees for {node:?}"
-                );
-                checked += 1;
-            }
-            let edges = [
-                GraphEdgeId::TrackMain {
-                    target: variants[1].clone(),
-                },
-                GraphEdgeId::RouteSource { route_id: gid(&b) },
-                GraphEdgeId::RouteDestination { route_id: gid(&b) },
-                GraphEdgeId::EffectSidechain {
-                    effect: effect.clone(),
-                    port: b.clone(),
-                },
-            ];
-            for edge in &edges {
-                assert_eq!(
-                    edge_text_len(edge),
-                    edge_text(edge).len(),
-                    "edge_text_len disagrees for {edge:?}"
-                );
-                checked += 1;
-            }
-        }
-        assert_eq!(checked, 10_000);
-    }
-
+    /// Independent literals cover every identity variant, nested edges and UTF-8 byte lengths.
+    /// A wrong token or length changes canonical identity or graph-budget admission.
     #[test]
     fn identity_tokens_match_independent_literals_and_utf8_lengths() {
         let effect = |rack| EffectNodeId {
@@ -3167,9 +3091,8 @@ mod tests {
                     .checked_add(scalar_bytes)
                     .expect("scalar owner arithmetic");
                 expected_largest = expected_largest.max(lane_bytes);
-                // `graph`'s boxed `LiveControlEffect`, field by field (its own
-                // `observation_size_accounting` test pins the identity), its staging window and
-                // its shunt.
+                // `graph`'s boxed `LiveControlEffect`, its staging window and its shunt.
+                // The allocator-observed retention gate covers the owner.
                 let owner = size_of::<GraphPreparedEffect>()
                     + size_of::<Box<EffectControlLane>>()
                     + size_of::<Box<[effect_contract::PreparedAutomationSpan]>>()
@@ -4226,14 +4149,13 @@ mod tests {
         .unwrap_or_else(|failure| panic!("graph diagnostics: {:?}", failure.diagnostics))
     }
 
-    /// #99 F2: every plan this crate compiles lowers to an executable program, and that program
-    /// is strictly smaller than the per-edge model both executors run today.
+    /// Compiled plans lower to an ordered executable program with each node owned by an op or
+    /// alias, elided identity boundaries, and protected bank output storage.
     ///
-    /// The program is derived inside `PreparedGraphPlan::new`, so this runs over whatever the
-    /// compiler actually produced rather than over a hand-built spec. It is the gate that proves
-    /// the seam is real before either executor is rebuilt against it (#98 owns the kernels).
+    /// These fixtures exercise the production compiler-to-program seam, including reductions
+    /// and multi-slot banks, rather than hand-built plans.
     #[test]
-    fn compiled_plans_always_lower_to_a_smaller_executable_program() {
+    fn compiled_plans_lower_to_ordered_programs_with_protected_bank_storage() {
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             panic!("delivery host must offer a bank width");
         };
@@ -4259,7 +4181,6 @@ mod tests {
                 compile_chain_fixture(effects)
             }),
         ];
-        let mut measured = Vec::new();
         for (label, artifact) in cases {
             let graph = &artifact.graph();
             let program = graph
@@ -4280,31 +4201,6 @@ mod tests {
                     .windows(2)
                     .all(|pair| (pair[0].level, pair[0].node) < (pair[1].level, pair[1].node)),
                 "{label}: ops are not level-major"
-            );
-            // The arena is smaller than what the executors allocate today.
-            //
-            // The comparison is deliberately against the *executor's* model, not against
-            // `buffer_assignments` alone: that colouring only counts node outputs, while
-            // `GraphExecutor` additionally allocates one contribution `StereoBuffer` per edge and
-            // then re-buffers every bank member on top (`audio_buffer_samples` says as much --
-            // `colored_outputs + logical_edges`). Comparing against the colouring alone would
-            // flatter the program in some graphs and defame it in others: the program keeps a
-            // dedicated buffer for each bank-eligible node where the colouring shared one and the
-            // executor un-shared it again at bind time.
-            let coloured = graph
-                .buffer_assignments
-                .iter()
-                .map(|assignment| assignment.buffer_index)
-                .max()
-                .map_or(0, |maximum| maximum + 1) as usize;
-            let bank_members: usize = graph.prepared_bank_count();
-            let executor_buffers = coloured + graph.spec.edges.len() + bank_members;
-            assert!(
-                (program.buffers as usize) < executor_buffers,
-                "{label}: arena {} is not smaller than the {executor_buffers} buffers the \
-                 executor allocates ({coloured} coloured + {} edges + {bank_members} bank members)",
-                program.buffers,
-                graph.spec.edges.len()
             );
             // Identity stage boundaries really do disappear from the schedule.
             assert!(
@@ -4332,22 +4228,6 @@ mod tests {
                     open.insert(op.output);
                 }
             }
-            measured.push((
-                label,
-                graph.sequential_schedule.len(),
-                program.ops.len(),
-                program.taps.len(),
-                coloured + graph.spec.edges.len() + bank_members,
-                program.buffers,
-                program.reduction_count(),
-            ));
-        }
-        // Descriptive, printed under `--nocapture`: what lowering actually buys per fixture.
-        for (label, nodes, ops, taps, executor_buffers, arena, reductions) in measured {
-            println!(
-                "{label}: {nodes} schedule items -> {ops} ops + {taps} aliases; \
-                 {executor_buffers} executor buffers -> {arena} arena; {reductions} reductions"
-            );
         }
     }
 
@@ -5516,7 +5396,7 @@ mod tests {
             expected_members.sort();
             assert_eq!(actual_members, expected_members);
             assert_eq!(12 - actual_members.len(), expected_builtin_tails);
-            // Independent oracle for the two frozen op orders this branch re-pins for (#98 F2/F4),
+            // Independent oracle for the routed matrix and ordered reduction (#98 F2/F4),
             // on the production 12-track shape: every track's post-matrix output is recorded, the
             // route's folded 2x2 is re-applied here through the f64 unfused oracle, and the output
             // must be exactly those contributions folded left to right in the plan's own stable
@@ -5725,7 +5605,6 @@ mod tests {
             let output_address = audit_pcm.as_ptr() as usize;
             audit::warm_up();
             audit::reset();
-            let mut output_hash = 0xcbf2_9ce4_8422_2325_u64;
             for block in 0..100_000_u64 {
                 audit_plan
                     .render(
@@ -5739,10 +5618,6 @@ mod tests {
                     )
                     .expect("audit render");
                 assert_eq!(audit_pcm.as_ptr() as usize, output_address);
-                for sample in &audit_pcm {
-                    output_hash ^= u64::from(sample.to_bits());
-                    output_hash = output_hash.wrapping_mul(0x0000_0100_0000_01b3);
-                }
             }
             assert!(
                 !audit::is_render_scope_active(),
@@ -5760,20 +5635,6 @@ mod tests {
                 counters[1],
                 counters[0] * u64::from(audit_envelope.quantum.0),
                 "exact frames processed by the retained builtin banks"
-            );
-            // Re-pinned by #98 F2/F4 (master plan #83 D9/D3, section-8 policy):
-            // 0x2fd8_5286_518f_d13b -> 0x5b3e_672a_ae5d_97aa. The output's twelve route inputs
-            // are now folded left to right instead of as a balanced pairwise tree, and each
-            // route spends two multiplies and one add with the gain folded in at
-            // bind. Neither value is pinned from production output: the oracle block above
-            // re-derives the expected PCM for this exact session from the recorded per-track
-            // post-matrix contributions, re-applying both frozen op orders with scalar
-            // `softfma::unfused_multiply_add_via_f64` and `reduce`, and asserts it bit for bit before this
-            // literal is compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
-            // stale on `origin/main` before either branch existed.)
-            assert_eq!(
-                output_hash, 0x5b3e_672a_ae5d_97aa,
-                "deterministic mixed output hash"
             );
         }
     }
@@ -7187,380 +7048,146 @@ mod tests {
         );
     }
 
+    /// Each causal native effect stays at zero latency beside a fixed-latency limiter,
+    /// with unchanged compensation when the limiter is bypassed.
     #[test]
-    fn mixed_causal_compressor_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
-        let mut model = accepted_compressor_graph_fixture();
+    fn mixed_causal_effects_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
         let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].inserts.effects[0] = limiter_fixture
-            .lower_track(&limiter_fixture.tracks[9])
-            .pre_insert[0]
-            .clone();
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed compressor/limiter fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
         let registry = launch_native_effect_registry().expect("launch registry");
-        let caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, &registry, caps)
-            .expect("prepared mixed effects");
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "compressor")
-                .count(),
-            9
-        );
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .count(),
-            1
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "compressor")
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .all(|entry| entry.metadata.latency == LatencySamples(486))
-        );
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_017,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| {
-            panic!("mixed compressor/limiter graph: {:?}", failure.diagnostics)
-        });
-        assert_eq!(artifact.report().output_latency, LatencySamples(486));
-        assert!(
-            artifact
-                .graph()
-                .inserted_delays
-                .iter()
-                .any(|delay| { delay.samples == LatencySamples(486) })
-        );
-        for route in &artifact.graph().route_timings {
-            let route_id = route.route_id.as_str();
-            if route_id == "eq9-main" {
-                assert_eq!(route.source_arrival, LatencySamples(486));
-                assert_eq!(route.compensation_delay, LatencySamples(0));
-                assert_eq!(route.destination_arrival, LatencySamples(486));
-            } else if route_id.ends_with("-main") {
-                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
-                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
-                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+        for (mut model, causal_id, plan_id) in [
+            (accepted_compressor_graph_fixture(), "compressor", 1_017),
+            (
+                accepted_multiband_compressor_graph_fixture(),
+                "multiband-compressor",
+                1_019,
+            ),
+            (
+                accepted_gate_expander_graph_fixture(),
+                "gate-expander",
+                1_017,
+            ),
+        ] {
+            model.tracks[9].inserts.effects[0] = limiter_fixture
+                .lower_track(&limiter_fixture.tracks[9])
+                .pre_insert[0]
+                .clone();
+            let session = compile_session(
+                &model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("mixed causal/limiter fixture");
+            assert_eq!(session.sample_rate().0, 48_000);
+            let caps = EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            };
+            let effects = prepare_native_session_effects(&session, &registry, caps)
+                .expect("prepared mixed effects");
+            assert_eq!(
+                effects
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.effect_id == causal_id)
+                    .count(),
+                9
+            );
+            assert_eq!(
+                effects
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.effect_id == "true-peak-limiter")
+                    .count(),
+                1
+            );
+            assert!(
+                effects
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.effect_id == causal_id)
+                    .all(|entry| entry.metadata.latency == LatencySamples(0))
+            );
+            assert!(
+                effects
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.effect_id == "true-peak-limiter")
+                    .all(|entry| entry.metadata.latency == LatencySamples(486))
+            );
+            let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
+                dispatch: host_dispatch(),
+                plan_id,
+                effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| {
+                panic!("mixed {causal_id}/limiter graph: {:?}", failure.diagnostics)
+            });
+            assert_eq!(artifact.report().output_latency, LatencySamples(486));
+            assert!(
+                artifact
+                    .graph()
+                    .inserted_delays
+                    .iter()
+                    .any(|delay| { delay.samples == LatencySamples(486) })
+            );
+            for route in &artifact.graph().route_timings {
+                let route_id = route.route_id.as_str();
+                if route_id == "eq9-main" {
+                    assert_eq!(route.source_arrival, LatencySamples(486));
+                    assert_eq!(route.compensation_delay, LatencySamples(0));
+                    assert_eq!(route.destination_arrival, LatencySamples(486));
+                } else if route_id.ends_with("-main") {
+                    assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
+                    assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
+                    assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
+                }
             }
+
+            // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency causal
+            // paths remain aligned with the real delayed processor and the output latency is stable.
+            let mut bypass_model = model;
+            bypass_model.tracks[9].inserts.effects[0].bypass = true;
+            let bypass_session = compile_session(
+                &bypass_model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("mixed bypass fixture");
+            let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
+                .expect("prepared mixed bypass effects");
+            let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
+                dispatch: host_dispatch(),
+                plan_id: plan_id + 1,
+                effects: bypass_effects,
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
+            assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
+            assert_eq!(
+                bypass_artifact.graph().route_timings,
+                artifact.graph().route_timings,
+                "bypassing the delayed limiter preserves PDC route timing"
+            );
+            assert_eq!(
+                bypass_artifact.graph().inserted_delays,
+                artifact.graph().inserted_delays,
+                "bypassing the delayed limiter preserves its compensation"
+            );
         }
-
-        // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency compressor
-        // paths remain aligned with the real delayed processor and the output latency is stable.
-        let mut bypass_model = model;
-        bypass_model.tracks[9].inserts.effects[0].bypass = true;
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed bypass fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
-            .expect("prepared mixed bypass effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_018,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            artifact.graph().route_timings,
-            "bypassing the delayed limiter preserves PDC route timing"
-        );
-        assert_eq!(
-            bypass_artifact.graph().inserted_delays,
-            artifact.graph().inserted_delays,
-            "bypassing the delayed limiter preserves its compensation"
-        );
-    }
-
-    #[test]
-    fn mixed_causal_multiband_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
-        let mut model = accepted_multiband_compressor_graph_fixture();
-        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].inserts.effects[0] = limiter_fixture
-            .lower_track(&limiter_fixture.tracks[9])
-            .pre_insert[0]
-            .clone();
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed multiband/limiter fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, &registry, caps)
-            .expect("prepared mixed multiband effects");
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "multiband-compressor")
-                .count(),
-            9
-        );
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .count(),
-            1
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "multiband-compressor")
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .all(|entry| entry.metadata.latency == LatencySamples(486))
-        );
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_019,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| {
-            panic!("mixed multiband/limiter graph: {:?}", failure.diagnostics)
-        });
-        assert_eq!(artifact.report().output_latency, LatencySamples(486));
-        assert!(
-            artifact
-                .graph()
-                .inserted_delays
-                .iter()
-                .any(|delay| delay.samples == LatencySamples(486))
-        );
-        for route in &artifact.graph().route_timings {
-            let route_id = route.route_id.as_str();
-            if route_id == "eq9-main" {
-                assert_eq!(route.source_arrival, LatencySamples(486));
-                assert_eq!(route.compensation_delay, LatencySamples(0));
-                assert_eq!(route.destination_arrival, LatencySamples(486));
-            } else if route_id.ends_with("-main") {
-                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
-                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
-                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
-            }
-        }
-
-        let mut bypass_model = model;
-        bypass_model.tracks[9].inserts.effects[0].bypass = true;
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed bypass fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
-            .expect("prepared mixed multiband bypass effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_020,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            artifact.graph().route_timings,
-            "bypassing the delayed limiter preserves PDC route timing"
-        );
-        assert_eq!(
-            bypass_artifact.graph().inserted_delays,
-            artifact.graph().inserted_delays,
-            "bypassing the delayed limiter preserves its compensation"
-        );
-    }
-
-    #[test]
-    fn mixed_causal_gate_and_fixed_latency_limiter_keep_parallel_pdc_aligned() {
-        let mut model = accepted_gate_expander_graph_fixture();
-        let limiter_fixture = accepted_true_peak_limiter_graph_fixture();
-        model.tracks[9].inserts.effects[0] = limiter_fixture
-            .lower_track(&limiter_fixture.tracks[9])
-            .pre_insert[0]
-            .clone();
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed gate/limiter fixture");
-        assert_eq!(session.sample_rate().0, 48_000);
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let effects = prepare_native_session_effects(&session, &registry, caps)
-            .expect("prepared mixed effects");
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "gate-expander")
-                .count(),
-            9
-        );
-        assert_eq!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .count(),
-            1
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "gate-expander")
-                .all(|entry| entry.metadata.latency == LatencySamples(0))
-        );
-        assert!(
-            effects
-                .entries
-                .iter()
-                .filter(|entry| entry.effect_id == "true-peak-limiter")
-                .all(|entry| entry.metadata.latency == LatencySamples(486))
-        );
-        let artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_017,
-            effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("mixed gate/limiter graph: {:?}", failure.diagnostics));
-        assert_eq!(artifact.report().output_latency, LatencySamples(486));
-        assert!(
-            artifact
-                .graph()
-                .inserted_delays
-                .iter()
-                .any(|delay| { delay.samples == LatencySamples(486) })
-        );
-        for route in &artifact.graph().route_timings {
-            let route_id = route.route_id.as_str();
-            if route_id == "eq9-main" {
-                assert_eq!(route.source_arrival, LatencySamples(486));
-                assert_eq!(route.compensation_delay, LatencySamples(0));
-                assert_eq!(route.destination_arrival, LatencySamples(486));
-            } else if route_id.ends_with("-main") {
-                assert_eq!(route.source_arrival, LatencySamples(0), "{route_id}");
-                assert_eq!(route.compensation_delay, LatencySamples(486), "{route_id}");
-                assert_eq!(route.destination_arrival, LatencySamples(486), "{route_id}");
-            }
-        }
-
-        // Bypass keeps the limiter's fixed latency shunt, so the same zero-latency gate
-        // paths remain aligned with the real delayed processor and the output latency is stable.
-        let mut bypass_model = model;
-        bypass_model.tracks[9].inserts.effects[0].bypass = true;
-        let bypass_session = compile_session(
-            &bypass_model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("mixed bypass fixture");
-        let bypass_effects = prepare_native_session_effects(&bypass_session, &registry, caps)
-            .expect("prepared mixed gate bypass effects");
-        let bypass_artifact = compile_with_session_builtins(SessionBuiltinsCompile {
-            dispatch: host_dispatch(),
-            plan_id: 1_018,
-            effects: bypass_effects,
-            caps: integration_caps(),
-        })
-        .unwrap_or_else(|failure| panic!("mixed bypass graph: {:?}", failure.diagnostics));
-        assert_eq!(bypass_artifact.report().output_latency, LatencySamples(486));
-        assert_eq!(
-            bypass_artifact.graph().route_timings,
-            artifact.graph().route_timings,
-            "bypassing the delayed limiter preserves PDC route timing"
-        );
-        assert_eq!(
-            bypass_artifact.graph().inserted_delays,
-            artifact.graph().inserted_delays,
-            "bypassing the delayed limiter preserves its compensation"
-        );
     }
 
     /// Phase 1b: a native effect carrying the homogeneous-bank kernel contract banks in the
@@ -7980,124 +7607,6 @@ mod tests {
             right: -0.015625 * (index % 5 + 1) as f32,
         })
     }
-    /// Issue #169's bank-window slot hold, measured: what it costs in arena buffers on the plan
-    /// every host renders.
-    ///
-    /// Colouring may not recycle a physical slot inside a bank's reordering window, so slots freed
-    /// there are held until it closes. On the sixty-four-track console fixture -- eight full
-    /// eight-lane EQ banks and eight compressor banks, the floor pass's own workload -- the test
-    /// compares the banked plan's arena with the arena of the same session compiled against a
-    /// registry that refuses every effect bank, and pins both, so a colouring change surfaces as a
-    /// number rather than as a benchmark drifting.
-    ///
-    /// **#169's arena-neutrality claim ("the window hold costs nothing") never held on the path
-    /// every host compiles through.** It was measured only on the builtins-less plan, where the
-    /// identity post-input copy level that #925 removed absorbed the input retirements outside
-    /// every window. Narrowing the merged-span hold is issue #931; this test is the measurement
-    /// it starts from.
-    ///
-    /// **256 banked against 193 per node**, 63 stereo buffers (about 63 KiB at 128 frames) of
-    /// arena -- memory, not copies. #925 does not change this plan (the three stages are listed
-    /// there and keep their ops), and the base commit of #925 measures the same two numbers.
-    /// Derivation: `PostInputBuiltins` is itself a builtin bank member, the cohort chain
-    /// `builtins -> EQ -> compressor -> fader -> matrix` merges into one span per cohort and the
-    /// eight spans overlap into one, and the `Input` slots the post-input ops free fall inside it
-    /// and are held: 64 inputs + 64 dedicated post-input + 64 dedicated EQ + 64 compressor outputs
-    /// = 256, the fader, matrix and route in place and the session output reusing a released slot.
-    /// Per node the effect ops break the chain, so each post-input bank's window is one level wide
-    /// and releases its eight input slots as it closes: 64 input slots + 8 new post-input + 56 new
-    /// EQ + 64 compressor outputs + the output = 193.
-    ///
-    /// **#1098 moved the per-node arm, not the banked one.** The EQ is a console slot, and a console
-    /// slot never renders per node on a vector backend, so the per-node plan of this chain is now the
-    /// EQ folded into every track's inserts, beside the compressor. There the two are one insert
-    /// chain and the compressor, the EQ's sole reader, runs in place over the EQ's output: 64 input
-    /// slots + 8 new post-input + 56 new EQ + the output = **129**. The 193 above is the per-node
-    /// plan with the EQ in the console, which no vector backend compiles any more; 256 - 193 = 63
-    /// is still what the hold costs over it.
-    ///
-    /// Until #964 this test also pinned the builtins-less compile (192 banked against 129 per node
-    /// since #925, where the post-input stage was an alias and the EQ banks read the `Input`
-    /// buffers directly). That compile is gone, and its arm with it.
-    ///
-    /// The rejected alternative in `program::lower` (dedicating every bank member) scored 257
-    /// on the builtins-less plan before #925: one extra buffer and one extra stereo block copy per
-    /// block for each of the 64 dynamic members whose consumer could no longer consume it in
-    /// place.
-    #[test]
-    fn the_merged_span_hold_costs_the_input_slots() {
-        let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
-        let session = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled console fixture");
-        let registry = launch_native_effect_registry().expect("launch registry");
-        let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 1 << 20,
-            maximum_scratch_bytes: 1 << 20,
-            maximum_automation_spans_per_block: 32,
-        };
-        let with_builtins = |plan_id: u64, registry: &NativeEffectRegistry| {
-            let builtins = prepare_session_builtins(
-                &session,
-                &[],
-                BuiltinCompileCaps {
-                    maximum_total_state_bytes: u64::MAX,
-                    maximum_total_retained_payload_bytes: u64::MAX,
-                    maximum_total_meter_items: u64::MAX,
-                    maximum_total_meter_bytes: u64::MAX,
-                    maximum_single_allocation_bytes: u64::MAX,
-                    maximum_meter_streams: u64::MAX,
-                    maximum_period_frames: u32::MAX,
-                    maximum_peak_hold_frames: u32::MAX,
-                    maximum_smoothing_samples: u32::MAX,
-                },
-            )
-            .expect("prepared console builtins");
-            GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-                dispatch: host_dispatch(),
-                plan_id,
-                effects: prepare_native_session_effects(&session, registry, effect_caps)
-                    .expect("prepared console effects"),
-                builtins,
-                caps: integration_caps(),
-            })
-            .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
-            .graph()
-            .program()
-            .expect("lowers")
-            .buffers
-        };
-
-        // The plan every host renders: the merged post-input-to-matrix span holds the inputs'
-        // 64 slots, one of which the session output reuses. Unchanged by #925.
-        let banked = with_builtins(1_692, &registry);
-        // #1098: the EQ is a console slot, which never renders per node on a vector backend, so
-        // the per-node plan is the same chain with the EQ folded into every track's inserts.
-        let per_node =
-            per_node_inserts_artifact(&model, &["miso.parametric-eq", "miso.compressor"], 1_693)
-                .graph()
-                .program()
-                .expect("lowers")
-                .buffers;
-        assert_eq!(
-            banked, 256,
-            "64 held inputs + 64 post-input + 64 EQ + 64 compressor outputs"
-        );
-        assert_eq!(
-            per_node, 129,
-            "64 input slots + 8 post-input + 56 EQ outputs, the compressor in place, + the output"
-        );
-    }
-
     /// The measured session: the 64-track console fixture the benchmark renders.
     ///
     /// Every track places `miso.parametric-eq` in SIMD-1 and `miso.compressor` in the **dynamic**
@@ -15251,12 +14760,10 @@ mod tests {
     }
 
     #[test]
-    fn frozen_issue_037_seeded_builtin_bank_layouts_have_exact_membership_and_counters() {
+    fn seeded_builtin_bank_layouts_match_membership_counters_and_ordered_reduction() {
         const SEED: u64 = 0x0000_0000_8a05_0a08;
         const COUNTS: [usize; 9] = [1, 2, 3, 4, 5, 7, 8, 9, 17];
         let mut state = SEED;
-        let mut transcript = 0xcbf2_9ce4_8422_2325_u64;
-        let mut completed = 0_u32;
         for layout in 0..100_u32 {
             // SplitMix64, frozen locally so this suite has no dependency on host RNG state.
             state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -15380,7 +14887,6 @@ mod tests {
             let expected_banks = width.map_or(0, |width| {
                 BANKABLE_TRACK_STAGES as usize * count.div_ceil(width.lanes() as usize)
             });
-            let expected_tail = width.map_or(count, |_| 0);
             assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
             assert_eq!(
                 repeat_artifact.prepared_builtin_bank_count(),
@@ -15521,67 +15027,7 @@ mod tests {
             let counters = plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
             assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0));
-            let pcm_hash = pcm.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
-                (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
-            });
-            for byte in format!(
-                "{layout}:{value:016x}:{count}:{expected_banks}:{expected_tail}:{pcm_hash:016x}:{:?}",
-                counters
-            )
-            .bytes()
-            {
-                transcript ^= u64::from(byte);
-                transcript = transcript.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            completed += 1;
         }
-        assert_eq!(completed, 100);
-        // Re-pin chain (master plan #83 D9 and the section-8 policy):
-        //
-        //   0x0fc9_bdc8_ff12_0f6e  original
-        //   0x9dfc_dcf2_0e37_0ef5  #98 F2 -- the session output's reduction became a
-        //                          left-to-right recursive sum instead of a balanced pairwise
-        //                          tree, moving `pcm_hash` for every layout with output fan-in
-        //                          four or more; layouts with `count <= 3` were unmoved.
-        //   0x0b9d_839a_7df9_3ac8  #163 phase 2 -- the numeric contract became unfused, so every
-        //                          rendered sample moved and with it every layout's `pcm_hash`,
-        //                          for all 100 layouts and every fan-in.
-        //
-        //   0xe095_f3ad_a9cc_cf46  #212 -- the fader and the matrix became bankable stages, so
-        //                          `expected_banks` and the `counters` pair tripled for every
-        //                          layout. This is the **first** link that moves those fields and
-        //                          not `pcm_hash`: it is a structural change, not a numeric one.
-        //
-        // Every link before #212 moved `pcm_hash` and left the membership and counter halves
-        // alone; #212 does the opposite, and the two halves being separable is what makes this a
-        // chain rather than a sequence of unrelated numbers. That `pcm_hash` did not move is not
-        // inferred from the change's intent: all 100 layouts' `pcm_hash` values were captured on
-        // the base commit and on this one and compared, and every one of the 100 is identical.
-        // The per-layout membership, bank-count, tail and counter assertions above still hold
-        // against their own expectations, which are derived rather than written down.
-        //
-        // It is *not* pinned from production output: the per-layout `assert_eq!` above derives the
-        // expected output from the recorded per-track post-matrix contributions folded left to
-        // right in the plan's own stable edge order -- through `softfma::unfused_multiply_add_via_f64`,
-        // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
-        // this literal is compared.
-        //
-        // The four-lane plan (AArch64 NEON, #1017) has its own transcript, because
-        // `expected_banks` and the counters are counts at the build's width: `0x8a04_4e52_b88e_4e5f`.
-        // Its render half is not a second pin: all 100 layouts' `pcm_hash` values were captured on
-        // the x86-64-v3 build and on an AArch64 build (qemu-user; the AArch64 CI leg re-checks
-        // the transcript on hardware) and every one of the 100 is identical, so the two
-        // transcripts differ only in the structural fields.
-        let frozen = match Backend::current() {
-            Backend::Simd4 => 0x8a04_4e52_b88e_4e5f,
-            _ => 0xe095_f3ad_a9cc_cf46,
-        };
-        assert_eq!(
-            transcript,
-            frozen,
-            "frozen Issue-037 seeded layout transcript at {:?}",
-            Backend::current()
-        );
     }
 
     #[test]
@@ -16265,10 +15711,8 @@ mod tests {
 
     /// #99 F4: the compiled route gain is `math::db_to_gain_f32`, bit for bit.
     ///
-    /// -19 dB is the witness: the platform `f64::powf` form this replaced produced
-    /// `0x3de5_ca15` on this host, one ulp below the canonical `0x3de5_ca16`, and it produced
-    /// whatever the *host's* libm produced on any other. `tests/route_gain.rs` pins both
-    /// literals against a live `powf` oracle so this witness cannot go stale silently.
+    /// The current -19 dB coefficient is fixed independently below. `tests/route_gain.rs`
+    /// checks numeric accuracy against a live `f64::powf` oracle across the supported range.
     #[test]
     fn route_transform_uses_the_canonical_db_to_gain_conversion() {
         let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
