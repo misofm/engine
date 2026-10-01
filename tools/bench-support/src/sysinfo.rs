@@ -139,7 +139,7 @@ fn count_cores(lscpu_stdout: &str) -> String {
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {
             let mut fields = line.split(',');
-            Some((fields.next()?.to_owned(), fields.next()?.to_owned()))
+            Some((fields.next()?, fields.next()?))
         })
         .collect::<BTreeSet<_>>();
     if cores.is_empty() {
@@ -453,22 +453,14 @@ mod tests {
 
     #[test]
     fn distinct_core_socket_pairs_are_counted_once_each() {
-        assert_eq!(count_cores("0,0\n1,0\n0,0\n"), "2");
-    }
-
-    #[test]
-    fn empty_output_is_unknown() {
-        assert_eq!(count_cores(""), "unknown");
-    }
-
-    #[test]
-    fn whitespace_only_output_is_unknown() {
-        assert_eq!(count_cores("  \n"), "unknown");
-    }
-
-    #[test]
-    fn header_only_output_is_unknown() {
-        assert_eq!(count_cores("# header only\n"), "unknown");
+        for (input, expected) in [
+            ("0,0\n1,0\n0,0\n", "2"),
+            ("", "unknown"),
+            ("  \n", "unknown"),
+            ("# header only\n", "unknown"),
+        ] {
+            assert_eq!(count_cores(input), expected);
+        }
     }
 
     #[cfg(unix)]

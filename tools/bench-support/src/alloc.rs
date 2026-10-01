@@ -8,7 +8,7 @@
 //!   method is not permitted by Rust.
 //! * **Count and continue** ([`Mode::Count`]; the historical `ABORT_ALLOCATOR_VIOLATION = false`
 //!   switch in the builtins audit's probe path, and the protocol audit/bench thread-local counter).
-//!   The violation is still recorded in the core counters; only the abort is suppressed, so a probe
+//!   The violation is still recorded in the engine counters; only the abort is suppressed, so a probe
 //!   can observe its own deliberate violation and report it.
 //! * **Process-wide totals** ([`counters`]; the historical effect-contract bench statics). Always
 //!   on, `Relaxed`, and never read inside a timed interval.
@@ -64,10 +64,10 @@ pub fn mode() -> Mode {
     }
 }
 
-/// Process-wide allocator totals since start.
+/// Allocator event and byte totals.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Counters {
-    /// `alloc` and `alloc_zeroed` calls.
+    /// `alloc`, `alloc_zeroed` and `realloc` calls, including failed attempts.
     pub allocations: u64,
     /// `dealloc` calls.
     pub deallocations: u64,
@@ -75,12 +75,26 @@ pub struct Counters {
     pub reallocations: u64,
     /// Bytes requested by `alloc`, `alloc_zeroed` and `realloc`.
     pub requested_bytes: u64,
-    /// Bytes handed back by `dealloc`, and the old block's bytes of every `realloc`.
+    /// Bytes of every `dealloc` layout and every `realloc` attempt's old layout.
     ///
-    /// Over a window that frees nothing it did not allocate, `requested_bytes - released_bytes`
-    /// is exactly the bytes that window left live (issue #1100): what a prepared plan retains,
-    /// with every transient its preparation freed already subtracted.
+    /// When all allocator operations succeed and the window frees nothing it did not allocate,
+    /// `requested_bytes - released_bytes` is exactly the bytes that window left live (issue
+    /// #1100), with every transient its preparation freed already subtracted. Failed reallocations
+    /// are counted before `System` is called, even though their old allocation remains live.
     pub released_bytes: u64,
+}
+
+impl Counters {
+    #[inline]
+    fn since(self, mark: Self) -> Self {
+        Self {
+            allocations: self.allocations.saturating_sub(mark.allocations),
+            deallocations: self.deallocations.saturating_sub(mark.deallocations),
+            reallocations: self.reallocations.saturating_sub(mark.reallocations),
+            requested_bytes: self.requested_bytes.saturating_sub(mark.requested_bytes),
+            released_bytes: self.released_bytes.saturating_sub(mark.released_bytes),
+        }
+    }
 }
 
 /// Read the process-wide totals.
@@ -98,14 +112,7 @@ pub fn counters() -> Counters {
 /// Totals accumulated since `mark`, field-wise and saturating.
 #[must_use]
 pub fn delta_since(mark: Counters) -> Counters {
-    let now = counters();
-    Counters {
-        allocations: now.allocations.saturating_sub(mark.allocations),
-        deallocations: now.deallocations.saturating_sub(mark.deallocations),
-        reallocations: now.reallocations.saturating_sub(mark.reallocations),
-        requested_bytes: now.requested_bytes.saturating_sub(mark.requested_bytes),
-        released_bytes: now.released_bytes.saturating_sub(mark.released_bytes),
-    }
+    counters().since(mark)
 }
 
 /// Read the audited allocator totals for the calling thread since its thread started.
@@ -121,14 +128,7 @@ pub fn current_thread_counters() -> Counters {
 /// Totals for the calling thread since `mark`, field-wise and saturating.
 #[must_use]
 pub fn current_thread_delta_since(mark: Counters) -> Counters {
-    let now = current_thread_counters();
-    Counters {
-        allocations: now.allocations.saturating_sub(mark.allocations),
-        deallocations: now.deallocations.saturating_sub(mark.deallocations),
-        reallocations: now.reallocations.saturating_sub(mark.reallocations),
-        requested_bytes: now.requested_bytes.saturating_sub(mark.requested_bytes),
-        released_bytes: now.released_bytes.saturating_sub(mark.released_bytes),
-    }
+    current_thread_counters().since(mark)
 }
 
 #[inline]

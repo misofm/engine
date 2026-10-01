@@ -15,6 +15,11 @@ use std::fmt::Write as _;
 #[must_use]
 pub fn escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
+    escape_into(value, &mut escaped);
+    escaped
+}
+
+fn escape_into(value: &str, escaped: &mut String) {
     for character in value.chars() {
         match character {
             '"' => escaped.push_str("\\\""),
@@ -25,24 +30,28 @@ pub fn escape(value: &str) -> String {
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             '\u{00}'..='\u{1f}' => {
-                write!(&mut escaped, "\\u{:04x}", character as u32)
+                write!(escaped, "\\u{:04x}", character as u32)
                     .expect("writing to a String cannot fail");
             }
             _ => escaped.push(character),
         }
     }
-    escaped
 }
 
 /// Serialize string values as a JSON array, preserving order and duplicates.
 #[must_use]
 pub fn json_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", escape(value)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
+    let mut output = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push('"');
+        escape_into(value, &mut output);
+        output.push('"');
+    }
+    output.push(']');
+    output
 }
 
 #[cfg(test)]
