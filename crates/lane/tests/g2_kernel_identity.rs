@@ -18,9 +18,7 @@ use lane::kernels::{
     SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
 };
 use lane::{CanonicalFpEnv, Lane, flush};
-use support::{
-    ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, deinterleave, interleave, run_kernel,
-};
+use support::{ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
 
 /// Frames per case. The `--release` count is the gate; a debug run keeps the workspace suite quick.
 const FRAMES: usize = if cfg!(debug_assertions) {
@@ -47,14 +45,12 @@ fn run_at_width<L: Lane>(kernel: Kernel, signal: Signal, lanes: &[Vec<f32>]) -> 
     let mut outputs = Vec::with_capacity(MAX_WIDTH);
     let mut first_lane = 0;
     while first_lane < MAX_WIDTH {
-        let group: Vec<Vec<f32>> = lanes[first_lane..first_lane + width].to_vec();
-        let mut block = interleave(&group, width, FRAMES);
+        let mut block = interleave(&lanes[first_lane..first_lane + width], width, FRAMES);
         run_kernel::<L>(kernel, &mut block, FRAMES, signal.state_seed(), FRAMES);
         for lane in 0..width {
             outputs.push(
-                deinterleave(&block, width, FRAMES, lane)
-                    .into_iter()
-                    .map(f32::to_bits)
+                (0..FRAMES)
+                    .map(|frame| block[frame * width + lane].to_bits())
                     .collect(),
             );
         }
