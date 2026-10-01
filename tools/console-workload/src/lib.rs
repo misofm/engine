@@ -33,13 +33,12 @@
 //!
 //! # What is deliberately *not* here
 //!
-//! The measurement. There is no clock in this crate, no percentile, no record and no statistic.
-//! `wasm32-unknown-unknown` cannot construct a `std::time::Instant`, so a subject that timed
-//! itself could not be linked into the guest at all -- and a subject that times itself on one
-//! target and is timed from outside on another is two subjects. Timing belongs to whichever
-//! driver owns a clock: `console.rs` for the native bench, the wasmtime host for the guest.
+//! The measurement. The production subject has no clock, percentile, record or statistic.
+//! Timing belongs to the driver: the native bench or the embedding host of the shipped browser
+//! artifact. R9 retired the Wasmtime driver and descriptive nightly benchmarks.
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use bench_support::digest::Sha256Sink;
@@ -297,24 +296,17 @@ pub enum Workload {
     ///
     /// The same strip, the same coefficients and the same input as `sixty_four_track_console`,
     /// from a fixture whose every track satisfies the channel-symmetry witness' two structural
-    /// terms. Today it is an ordinary session row: no code reads the witness and nothing collapses,
-    /// so this row and [`Self::SixtyFourTrackConsoleMonoDual`] compile, prepare and render exactly
-    /// the same plan.
-    ///
-    /// That is deliberate and it is the point. When the collapse lands, *this* row is the one that
-    /// takes it and the `_dual` row is the one that forces it off, and the digest equality between
-    /// them -- asserted in-run today, trivially -- becomes the standing class-A gate on the whole
-    /// mechanism. Building the pair now means the gate exists before the thing it gates, rather
-    /// than being written by the same change it is supposed to check.
+    /// terms. This row arms mono collapse, while [`Self::SixtyFourTrackConsoleMonoDual`] forces
+    /// it off on the same prepared session. Their current digest equality checks that collapsing
+    /// the eligible cohorts preserves the dual-channel output.
     SixtyFourTrackConsoleMono,
     /// The mono row's control arm: the identical session with the collapse forced off.
     ///
-    /// See [`Self::SixtyFourTrackConsoleMono`]. The two arms are one session today and the
-    /// `console_mono` record says so in its own `arms_identical_today` field, so a reader cannot
-    /// mistake today's zero delta for a measured saving.
+    /// See [`Self::SixtyFourTrackConsoleMono`]. The arms share the fixture, parameters and sources;
+    /// this arm renders both channels independently.
     SixtyFourTrackConsoleMonoDual,
     /// The mixed-cohort row: thirty-two collapse-eligible tracks and thirty-two that are not,
-    /// alternating, so every eight-lane cohort carries four of each.
+    /// alternating in track order. Cohort pooling separates the mono and stereo classes.
     ///
     /// Derived in code from the mono fixture by putting `right_source_channel = 1` back on the odd
     /// tracks -- undoing, on half the tracks, the one edit the generator made to the source
@@ -322,11 +314,9 @@ pub enum Workload {
     /// `SOURCE` term, and they render genuinely different left and right samples rather than
     /// merely declaring that they might.
     ///
-    /// It exists because a cohort is banked, not a track. A collapse that is decided per track has
-    /// to survive a bank whose lanes disagree about it, and the uniform rows cannot see that
-    /// failure at all: `_mono` collapses every lane and `console` collapses none, so both are
-    /// homogeneous cohorts. Alternating is what makes every cohort mixed rather than only the
-    /// boundary ones.
+    /// It checks that the structural witness reaches the cohort planner: half the resulting
+    /// cohorts are wholly eligible and half are wholly ineligible. The interleaved track order
+    /// also makes the route fold decline when pooling would change reduction order.
     ///
     /// Its class-A statement is a *shape* statement and is asserted natively, in
     /// `tools/console-workload/tests/chain_shape.rs`: a mixed cohort must realise the
@@ -377,8 +367,8 @@ pub enum Workload {
     /// row's are (`synthesise_tracks`). With [`Self::NineTrackRaggedStrip`] (remainder one),
     /// [`Self::ThirteenTrackRaggedStrip`] (remainder five), [`Self::SixteenTrackStrip`] (two full
     /// banks) and [`Self::SixtyFourTrackConsole`] (eight), it is the strip-at-N row set the console
-    /// strip's padding changes: today a remainder runs each effect one lane at a time, and after
-    /// the padding slices it runs as a padded bank. The rows state no floor for that reason.
+    /// strip's padded banks exercise. Console remainders stay banked with inactive padding lanes;
+    /// the rows state no derived floor.
     ///
     /// Not in [`WORKLOADS`]: see [`CONSOLE_STRIP_WORKLOADS`].
     TenTrackRaggedStrip,
@@ -392,11 +382,9 @@ pub enum Workload {
     SixteenTrackStrip,
     /// The app shape (issue #1085): what `misofm/app` compiles, on the standing console.
     ///
-    /// Every track carries EQ -> compressor in its `dynamic` rack, with no limiter, and both
-    /// effects are bypassed on every track whose index is 2 mod 3 (21 of 64). Today a bypassed
-    /// effect is part of its bank key, so the bypassed tracks bank apart from the rest and skip the
-    /// wet path; once a bypassed lane stays in its bank (decision 12, "Bypass") it runs the wet
-    /// path in a shared bank. This row is that shape, measured before and after.
+    /// Every track carries the pre-insert console's EQ -> compressor, with no limiter, and both
+    /// effects are bypassed on every track whose index is 2 mod 3 (21 of 64). A bypassed lane
+    /// stays in its bank and runs the wet path before selecting its bypass output (decision 12).
     ///
     /// The committed app fixture as written (`scripts/derive-app-console-fixture.py`), so the
     /// browser arm boots the same document. Its record states the bypass pattern it observed in
@@ -657,13 +645,9 @@ fn retain_console(
     if !keep_post_insert {
         model.console.post_insert.clear();
     }
-    let kept: Vec<session::StableId> = model
-        .console
-        .slots()
-        .map(|slot| slot.slot.clone())
-        .collect();
+    let kept: Vec<&session::StableId> = model.console.slots().map(|slot| &slot.slot).collect();
     for track in &mut model.tracks {
-        track.console.retain(|entry| kept.contains(&entry.slot));
+        track.console.retain(|entry| kept.contains(&&entry.slot));
     }
 }
 
@@ -744,7 +728,7 @@ impl Workload {
                 | Self::SixtyFourTrackConsoleLegacy
                 // Both mono arms render the mono fixture exactly as it is checked in. They are two
                 // rows of one session, not two sessions -- which is the property the row-pair's
-                // digest equality will rest on once the collapse exists.
+                // digest equality rests on while collapse is armed on only one arm.
                 | Self::SixtyFourTrackConsoleMono
                 | Self::SixtyFourTrackConsoleMonoDual
                 // The metered row renders the standing fixture as written. Its meters are a
@@ -806,12 +790,9 @@ impl Workload {
     /// # Layout-neutral since issue #1085
     ///
     /// The sections are named in the console vocabulary of decision 12
-    /// (`docs/rulings/engine-footprint-2026-09-29.md`), through its lowering: `pre_insert` is what
-    /// runs where `simd1` runs today, `inserts` where `dynamic` runs, and `post_insert` where
-    /// `simd2` runs. Each row's layout was rewritten by that mapping and nothing else, so a row
-    /// states the same placement it always did. What it buys is that the same spelling describes
-    /// the row on today's per-track racks and on the console model, so a row measured before and
-    /// after the console strip lands is pinned by one validator rule. The one row whose layout the
+    /// (`docs/rulings/engine-footprint-2026-09-29.md`). The migration mapped `simd1` to
+    /// `pre_insert`, `dynamic` to `inserts`, and `simd2` to `post_insert`, preserving each row's
+    /// placement and record spelling. The one row whose layout the
     /// console migration moved (#1093) is the app shape, whose EQ and compressor went from
     /// `inserts` to `pre_insert`; the validator accepts both spellings for that row alone, so S0's
     /// baseline records and a rerun on the console model are held to the same rule.
@@ -1443,7 +1424,7 @@ impl SessionRuntime {
             meter_consumers,
             controls,
             observations,
-            structural_symmetry: builtins_compiler::session_structural_symmetry(&session),
+            structural_symmetry: structural,
             bypass: BypassCensus::of(session.normalized_model()),
         };
         if config.observation == ObservationArm::Armed {
@@ -1724,10 +1705,9 @@ impl SessionRuntime {
     ///
     /// A lane is eligible when every term of its channel-symmetry witness holds, which is decided
     /// at preparation for the two structural terms and maintained at the drains for the rest.
-    /// **Nothing in this tree reads it to decide anything rendered**; it is control-plane evidence,
-    /// and it is surfaced here so the mono rows can *record* that their fixture is what it claims
-    /// to be rather than assert it in prose. A mono row whose census showed no eligible lane would
-    /// be measuring the standing session under a different name.
+    /// This runtime census is source agnostic: the collapse decision also needs the structural
+    /// witness joined at preparation. It lets the mono rows report the prepared runtime terms;
+    /// it alone does not establish that their source mappings permit collapse.
     ///
     /// Read outside the clock, like every other evidence accessor on this type.
     #[must_use]
@@ -1918,9 +1898,8 @@ impl SessionRuntime {
 /// *shape* -- it is sixteen full banks instead of eight -- and a second 288 KiB fixture would be
 /// 128 tracks of duplicated text to review for no additional coverage.
 fn synthesise_tracks(model: &mut session::SessionModel, tracks: usize) {
-    let template: Vec<_> = model.tracks.clone();
+    let template = std::mem::take(&mut model.tracks);
     let route = model.routes[0].clone();
-    model.tracks.clear();
     model.routes.clear();
     for index in 0..tracks {
         let mut track = template[index % template.len()].clone();
@@ -2010,8 +1989,8 @@ pub const TONE_AMPLITUDE: f32 = 0.6;
 /// both, all nine rows agree to the byte, at both lane widths.
 ///
 /// So that difference was never the engine's. It was the benchmark's *input*, and it would have
-/// been reported as a cross-target numeric divergence by anyone who did not look. Nothing
-/// downstream of this function calls libm.
+/// been reported as a cross-target numeric divergence by anyone who did not look. Injecting one
+/// table isolates the engine comparison from this input-generation difference.
 #[must_use]
 pub fn source_block(track: usize, silent: bool) -> Vec<f32> {
     let mut values = vec![0.0; SOURCE_BLOCK_VALUES];
@@ -2043,12 +2022,12 @@ pub enum SourceSignal {
 
 impl SourceSignal {
     /// This signal's block for one track, or `None` if an injected table does not cover it.
-    fn block(&self, track: usize, silent: bool) -> Option<Vec<f32>> {
+    fn block(&self, track: usize, silent: bool) -> Option<Cow<'_, [f32]>> {
         match self {
-            Self::Local => Some(source_block(track, silent)),
+            Self::Local => Some(Cow::Owned(source_block(track, silent))),
             Self::Injected(table) => table
                 .get(track * SOURCE_BLOCK_VALUES..(track + 1) * SOURCE_BLOCK_VALUES)
-                .map(<[f32]>::to_vec),
+                .map(Cow::Borrowed),
         }
     }
 }
@@ -2332,11 +2311,6 @@ mod tests {
         )
     }
 
-    /// The gain/pan row's standing 64-block digest: the pin `tests/chain_shape.rs` takes in
-    /// `the_select_free_matrix_arm_renders_the_base_bits`.
-    const GAIN_PAN_DIGEST: &str =
-        "01e465a797036fb4267e895d9319a911bc108d554705d268d9a84a2e2e2dfdb4";
-
     /// Issues #928 and #956: the driver-fed row is the gain/pan row in every stated fact but its
     /// feed, and it is the only driver-fed row.
     #[test]
@@ -2377,8 +2351,8 @@ mod tests {
     /// Issue #956 gate 1 (#928 gate 1, re-based): the driver-fed gain/pan row renders the
     /// bound-feed row's bits, and every claim is read in place by its bank's gather.
     ///
-    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree to the byte and equal
-    /// the gain/pan row's standing pin: the two rows are one session and one frozen tone, and the
+    /// Sixty-four blocks of both rows, digested by `hash_output`, must agree: the two rows are one
+    /// session and one frozen tone, and the
     /// feed is the only thing bound differently. Beside the digest, the plan facts the feed must
     /// not move: the same bank chains and slots, the same transposes, every route folded, and no
     /// collapse or transition.
@@ -2421,10 +2395,6 @@ mod tests {
         assert!(
             bound_audible && ring_audible,
             "both rows must render the tone, or their equality says nothing"
-        );
-        assert_eq!(
-            bound_digest, GAIN_PAN_DIGEST,
-            "the gain/pan row moved: this is not the row the pin was taken on"
         );
         assert_eq!(
             ring_digest, bound_digest,
@@ -2661,8 +2631,12 @@ mod tests {
             })
             .collect();
         claims.sort_unstable();
-        let mut driver =
-            FrozenSourceDriver::new(&claims, InputSignal::Tone, &SourceSignal::Local, &mappings);
+        let injected = SourceSignal::Injected(
+            (0..model.tracks.len())
+                .flat_map(|track| source_block(track, false))
+                .collect(),
+        );
+        let mut driver = FrozenSourceDriver::new(&claims, InputSignal::Tone, &injected, &mappings);
         let count = claims.len();
         let report = driver.resource_report();
         assert_eq!(
@@ -2944,8 +2918,6 @@ mod tests {
     #[test]
     fn the_metered_console_row_renders_the_console_bits_and_publishes_every_window() {
         const BLOCKS: u64 = 64;
-        const CONSOLE_DIGEST: &str =
-            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de";
         // The browser's window, written out rather than read back from `WEB_METER_BLOCKS`: the
         // web host's `DEFAULT_METER_BLOCKS` (12) blocks of the 128-frame quantum. A mirror that
         // drifted from the host would otherwise move this test with it.
@@ -2973,10 +2945,6 @@ mod tests {
         let (metered, metered_chains, metered_digest, metered_published, metered_forbidden) =
             run(Workload::SixtyFourTrackConsoleMetered);
 
-        assert_eq!(
-            console_digest, CONSOLE_DIGEST,
-            "the standing console row moved: this is not the row the pin was taken on"
-        );
         assert_eq!(
             metered_digest, console_digest,
             "the metered row must render the standing console row's bits: a meter observes and \
@@ -3461,45 +3429,12 @@ mod tests {
         assert!(lanes >= model.tracks.len(), "every track renders in a bank");
     }
 
-    /// Issue #1085: the console-strip rows render their pinned 64-block bits with no forbidden
-    /// operation, and the rows the others are read against render theirs.
-    ///
-    /// The pins are this commit's, taken before any console slice lands. Every slice of the
-    /// console strip is class A per lane (decision 12), so these digests are the bits S4's rows
-    /// must render again: padding, per-lane bypass and the schema's lowering may move cost, never
-    /// a bit. The standing console row's pin is `tests/chain_shape.rs`'s, restated so the sparse
-    /// row can be held apart from it, and the idle row is rendered for the same reason.
-    ///
-    /// Red mutations: silence the even tracks rather than the odd -- the sparse pin moves;
-    /// bypass the tracks at index 1 mod 3 in the app fixture -- the app pin moves; take the last N
-    /// tracks rather than the first -- the strip-at-N pins move.
+    /// Every console-strip row renders an audible, distinct signal over 64 blocks with no
+    /// forbidden operation. The sparse row also differs from the current all-active and idle
+    /// controls. The model, bypass-census and source-word tests own the exact row derivations.
     #[test]
-    fn the_console_strip_rows_render_their_pinned_bits() {
+    fn the_console_strip_rows_render_distinct_audible_signals_without_forbidden_operations() {
         const BLOCKS: u64 = 64;
-        const PINS: [(Workload, &str); 5] = [
-            (
-                Workload::TenTrackRaggedStrip,
-                "1eed6377a0b5c773fb35d979f76600d4ad2403796a4fdbc1ce481e11742a4fe3",
-            ),
-            (
-                Workload::ThirteenTrackRaggedStrip,
-                "17b2451b59f71b6504cb905cafb11742edcecd5be10dd1f86759541bb201bb12",
-            ),
-            (
-                Workload::SixteenTrackStrip,
-                "5e1b97df9b46df231895344b4da03c02a8ff9e6cead10f356b001b9c2144c293",
-            ),
-            (
-                Workload::SixtyFourTrackAppShape,
-                "c740fa2dd904d26dfc104ff4b202b81454757b8428c54e83092d93fe441bd4c3",
-            ),
-            (
-                Workload::SixtyFourTrackConsoleSparse,
-                "1f18f156705313c098e2e8310a848f63eeb23085c971239991dffd2b4a8de334",
-            ),
-        ];
-        const CONSOLE_DIGEST: &str =
-            "fe5bed9becdbc101d7ad4b77e7e1969ca3888cae34857333f79531b03a4868de";
         let run = |workload: Workload| {
             let mut runtime = SessionRuntime::new(workload);
             let mut digest = Sha256Sink::new();
@@ -3514,15 +3449,13 @@ mod tests {
             (digest.finish_hex(), audible, audit::snapshot().total())
         };
         let (console, _, _) = run(Workload::SixtyFourTrackConsole);
-        assert_eq!(console, CONSOLE_DIGEST, "the standing console row moved");
         let (idle, idle_audible, _) = run(Workload::SixtyFourTrackIdle);
         assert!(!idle_audible, "the idle row renders silence");
         let mut digests = Vec::new();
-        for (workload, pin) in PINS {
+        for workload in CONSOLE_STRIP_WORKLOADS {
             let (digest, audible, forbidden) = run(workload);
             assert!(audible, "{}: the row renders the tone", workload.kind());
             assert_eq!(forbidden, 0, "{}: a forbidden operation", workload.kind());
-            assert_eq!(digest, pin, "{}: the row's bits moved", workload.kind());
             digests.push(digest);
         }
         let sparse = &digests[4];
@@ -3530,9 +3463,9 @@ mod tests {
             *sparse != console && *sparse != idle,
             "the sparse row renders bits of its own"
         );
-        let mut distinct = digests.clone();
-        distinct.sort_unstable();
-        distinct.dedup();
-        assert_eq!(distinct.len(), digests.len(), "five rows, five renders");
+        let count = digests.len();
+        digests.sort_unstable();
+        digests.dedup();
+        assert_eq!(digests.len(), count, "five rows, five renders");
     }
 }

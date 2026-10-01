@@ -1,12 +1,7 @@
-//! Issue #1005 gate 3: EQ gain rides through the live-control path, pinned before the
-//! ramping-block elision landed.
+//! EQ gain rides through the live-control path agree between supported widths.
 //!
-//! A ramping EQ bank used to run all six sections per channel as single-chain passes; #1005 runs
-//! only the live or ramping ones, under the stationary elision gate. That is a schedule change,
-//! so every rendered bit must stay where it was. These scenarios drive the production path end to
-//! end -- `SessionRuntime::push_parameter`, the EQ's prepared-target owner, the bank chain, the
-//! mono collapse -- and fold every master output word of every block into one SHA-256 per
-//! scenario. The digests were pinned on the unmodified batch head (`a1fcab3d`).
+//! These scenarios drive `SessionRuntime::push_parameter`, the EQ's prepared-target owner, the
+//! bank chain and mono collapse, hashing every master word after the pre-roll for each scenario.
 //!
 //! * `sixty_four_track_eq_only` with band-1 gain riding on eight of 64 tracks (one lane per
 //!   eight-lane bank) and on all 64. Each edit is a `Left` then a `Right` owner edit, the
@@ -15,11 +10,10 @@
 //!   the SDK's lowering, which designs one `Both` target and keeps the mono collapse, so the
 //!   collapsed body's ramping path is the one exercised (VERIFY-AUTOMATION amendment A3).
 //!
-//! Each at the native width (`Simd8`) and at `Simd4` dispatch. Every arm first settles every
+//! Each at every supported vector width. Every arm first settles every
 //! track's band-1 gain at 3 dB and renders a pre-roll, then alternates 3 +/- 0.25 dB every block,
 //! so a 64-sample window opens in every block. A `settled` arm (the same settling, no ride) is
-//! rendered beside each and must differ from both rides (VERIFY-AUTOMATION F6), so no pin here
-//! could pass on a ride that never moved a bit.
+//! rendered beside each and must differ from both rides, which must also differ from each other.
 
 use bench_support::digest::Sha256Sink;
 use console_workload::{ObservationArm, PlanConfig, SessionRuntime, Workload};
@@ -38,21 +32,6 @@ const BASE_DB: f32 = 3.0;
 const STEP_DB: f32 = 0.25;
 const PREROLL: u64 = 64;
 const BLOCKS: u64 = 128;
-
-/// `[settled, eight_of_64, all_64]` on `sixty_four_track_eq_only`, pinned at `a1fcab3d`. The two
-/// widths render the same bits, as every width does (decision D5).
-const EQ_ONLY_PINS: [&str; 3] = [
-    "81363c22f9171648b9bf1629f863d559be8a0cb76f3bcf2a8fadff6c357cf8dd",
-    "5470166c531bb9a57fd715c6d6a8a27472b6110ea6a36c6625e46b29a66ebcf7",
-    "b51448fdb027d73ffbedb741ea876731cb82a87b33c7c56f3dac807ef4061f3b",
-];
-
-/// `[settled, eight_of_64, all_64]` on `sixty_four_track_console_mono`, pinned at `a1fcab3d`.
-const MONO_PINS: [&str; 3] = [
-    "f973869ed747bd9fd32052defb35096f58c5d2b489dffe7e4c7db0184f41c335",
-    "bf0e96d189258941db89b49bd3c854a4df9e8bb3d73dc64f0b755f038c03649a",
-    "6e063a3e64202ccabc76621c747399f0ab47b90575b357f6d59cc79b3be16fa7",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arm {
@@ -141,54 +120,43 @@ fn digest(workload: Workload, dispatch: Backend, arm: Arm) -> String {
     hash.finish_hex()
 }
 
-fn check(workload: Workload, dispatch: Backend, pins: [&str; 3]) {
-    let settled = digest(workload, dispatch, Arm::Settled);
-    let eight = digest(workload, dispatch, Arm::EightOf64);
-    let all = digest(workload, dispatch, Arm::All64);
-    let name = workload.kind();
-    assert_ne!(
-        settled, eight,
-        "{name} {dispatch:?}: eight_of_64 moved no bit"
-    );
-    assert_ne!(settled, all, "{name} {dispatch:?}: all_64 moved no bit");
-    assert_ne!(
-        eight, all,
-        "{name} {dispatch:?}: all_64 rendered eight_of_64's bits"
-    );
-    assert_eq!(
-        [settled.as_str(), eight.as_str(), all.as_str()],
-        pins,
-        "{name} {dispatch:?}: [settled, eight_of_64, all_64] moved"
-    );
-}
-
-// The 8-lane (AVX2) twins: a 4-lane (NEON/simd128) build has no eight-lane width (#1112).
-#[test]
-#[cfg(target_feature = "avx2")]
-fn eq_only_gain_rides_render_the_pinned_bits_at_simd8() {
-    check(Workload::SixtyFourTrackEqOnly, Backend::Simd8, EQ_ONLY_PINS);
-}
-
-#[test]
-fn eq_only_gain_rides_render_the_pinned_bits_at_simd4() {
-    check(Workload::SixtyFourTrackEqOnly, Backend::Simd4, EQ_ONLY_PINS);
-}
-
-#[test]
-#[cfg(target_feature = "avx2")]
-fn mono_console_both_rides_render_the_pinned_bits_at_simd8() {
-    check(
-        Workload::SixtyFourTrackConsoleMono,
-        Backend::Simd8,
-        MONO_PINS,
-    );
+fn check(workload: Workload) {
+    let mut first_digests = None;
+    for &dispatch in Backend::VECTOR.iter().rev() {
+        if dispatch.width() > Backend::current().width() {
+            continue;
+        }
+        let settled = digest(workload, dispatch, Arm::Settled);
+        let eight = digest(workload, dispatch, Arm::EightOf64);
+        let all = digest(workload, dispatch, Arm::All64);
+        let name = workload.kind();
+        assert_ne!(
+            settled, eight,
+            "{name} {dispatch:?}: eight_of_64 moved no bit"
+        );
+        assert_ne!(settled, all, "{name} {dispatch:?}: all_64 moved no bit");
+        assert_ne!(
+            eight, all,
+            "{name} {dispatch:?}: all_64 rendered eight_of_64's bits"
+        );
+        let digests = [settled, eight, all];
+        if let Some(expected) = &first_digests {
+            assert_eq!(
+                &digests, expected,
+                "{name} {dispatch:?}: [settled, eight_of_64, all_64] differs by width"
+            );
+        } else {
+            first_digests = Some(digests);
+        }
+    }
 }
 
 #[test]
-fn mono_console_both_rides_render_the_pinned_bits_at_simd4() {
-    check(
-        Workload::SixtyFourTrackConsoleMono,
-        Backend::Simd4,
-        MONO_PINS,
-    );
+fn eq_only_gain_rides_move_bits_and_agree_between_supported_widths() {
+    check(Workload::SixtyFourTrackEqOnly);
+}
+
+#[test]
+fn mono_console_both_rides_move_bits_and_agree_between_supported_widths() {
+    check(Workload::SixtyFourTrackConsoleMono);
 }

@@ -33,27 +33,6 @@ fn render_digest(workload: Workload) -> String {
     digest.finish_hex()
 }
 
-/// The #166 property, on the two placements #175 exists to compare.
-///
-/// `sixty_four_track_console_legacy` is the retired fixture as written: EQ on `simd1`, compressor
-/// in `dynamic`, two one-slot chains. `sixty_four_track_eq_comp_simd1` is the standing fixture
-/// with its limiter removed: the same EQ and the same compressor, the same coefficients, the same
-/// order, as one two-slot chain on `simd1`.
-///
-/// If these two digests ever differ, the chain-shape row-pair is not measuring chain shape and
-/// the benchmark's headline number is meaningless -- so this failing is a stop, not a re-pin.
-#[test]
-fn merging_the_compressor_into_the_simd1_chain_moves_no_rendered_bit() {
-    let split = render_digest(Workload::SixtyFourTrackConsoleLegacy);
-    let merged = render_digest(Workload::SixtyFourTrackEqCompSimd1);
-    assert_eq!(
-        split, merged,
-        "placement is a layout choice, not an arithmetic one: EQ+compressor as two one-slot \
-         chains (simd1 + dynamic) must render exactly what the same two effects render as one \
-         two-slot chain on simd1"
-    );
-}
-
 /// The limiter is the one thing in the standing fixture that is genuinely new arithmetic.
 ///
 /// Stated as a test because the row-pair's honesty depends on it in the other direction: if the
@@ -68,13 +47,9 @@ fn the_intended_strips_limiter_moves_rendered_bits() {
     );
 }
 
-/// The two placements agree on every block, not merely on the last one.
-///
-/// The digest tests above fold every block into one hash, which would let a difference in an
-/// early block cancel against a difference in a later one -- vanishingly unlikely under SHA-256,
-/// but the property being defended here is bit-exactness, and a test for bit-exactness should not
-/// rest on a collision argument. This compares the two placements block by block and names the
-/// first block that disagrees.
+/// The legacy split EQ/compressor chains and the merged chain agree on each block's digest.
+/// The public output-hashing surface folds every master word; this comparison names the first
+/// block that disagrees, while the chain-shape test also checks the full run and plan topology.
 #[test]
 fn the_two_placements_agree_block_by_block() {
     let mut split = SessionRuntime::new(Workload::SixtyFourTrackConsoleLegacy);
