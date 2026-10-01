@@ -5,13 +5,9 @@
 //! the realtime plane, so that was a latent violation of the AGENTS.md rule that render performs no
 //! allocation. Everything below now allocates only in `prepare`.
 
-#![allow(unsafe_code)]
-
 mod support;
 
-use core::alloc::Layout;
-use core::cell::Cell;
-use std::alloc::{GlobalAlloc, System};
+use bench_support::alloc::{self, Counters};
 use std::hint::black_box;
 
 use effect_contract::{
@@ -21,104 +17,34 @@ use effect_contract::{
 use multiband_compressor::MultibandCompressorFactory;
 use support::{new_sections, point, process, request_with, varied_values};
 
-struct TrackingAllocator;
-
-#[global_allocator]
-static ALLOCATOR: TrackingAllocator = TrackingAllocator;
-
-thread_local! {
-    static ACTIVE: Cell<bool> = const { Cell::new(false) };
-    static EVENTS: Cell<u64> = const { Cell::new(0) };
-    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-    static DEALLOCATIONS: Cell<u64> = const { Cell::new(0) };
-}
-
-fn record_allocation() {
-    ACTIVE.with(|active| {
-        if active.get() {
-            EVENTS.with(|events| events.set(events.get() + 1));
-            ALLOCATIONS.with(|allocations| allocations.set(allocations.get() + 1));
-        }
-    });
-}
-
-fn record_deallocation() {
-    ACTIVE.with(|active| {
-        if active.get() {
-            EVENTS.with(|events| events.set(events.get() + 1));
-            DEALLOCATIONS.with(|deallocations| deallocations.set(deallocations.get() + 1));
-        }
-    });
-}
-
-// SAFETY: every operation delegates its original pointer and layout unchanged to `System`. The
-// thread-local counter is observational and is active only around one call on one test thread.
-unsafe impl GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: delegates the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() {
-            record_allocation();
-        }
-        pointer
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: delegates the allocator-provided layout unchanged.
-        let pointer = unsafe { System.alloc_zeroed(layout) };
-        if !pointer.is_null() {
-            record_allocation();
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        record_deallocation();
-        // SAFETY: delegates the original pointer and layout unchanged.
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: delegates the original pointer, layout and requested size unchanged.
-        let replacement = unsafe { System.realloc(pointer, layout, new_size) };
-        if !replacement.is_null() {
-            record_allocation();
-        }
-        replacement
-    }
-}
-
-/// Counts allocator events during `operation`.
+/// Counts allocation/free events on the calling thread. The audited allocation count includes
+/// reallocations, so a realloc also makes a zero-event assertion fail.
 fn events(operation: impl FnOnce()) -> u64 {
-    allocator_counts(operation).0
+    let counts = allocator_counts(operation);
+    counts.allocations + counts.deallocations
 }
 
-/// Counts all allocator events and keeps allocation/free counts separate for the liveness control.
-fn allocator_counts(operation: impl FnOnce()) -> (u64, u64, u64) {
-    EVENTS.with(|events| events.set(0));
-    ALLOCATIONS.with(|allocations| allocations.set(0));
-    DEALLOCATIONS.with(|deallocations| deallocations.set(0));
-    ACTIVE.with(|active| active.set(true));
+/// Warms the audited allocator before measuring only this thread's operation.
+fn allocator_counts(operation: impl FnOnce()) -> Counters {
+    alloc::assert_installed();
+    let mark = alloc::current_thread_counters();
     operation();
-    ACTIVE.with(|active| active.set(false));
-    (
-        EVENTS.with(Cell::get),
-        ALLOCATIONS.with(Cell::get),
-        DEALLOCATIONS.with(Cell::get),
-    )
+    alloc::current_thread_delta_since(mark)
 }
 
 #[test]
-fn tracking_allocator_proves_own_thread_allocation_and_free() {
-    let (events, allocations, deallocations) = allocator_counts(|| {
+fn audited_allocator_proves_own_thread_allocation_and_free() {
+    let counts = allocator_counts(|| {
         let value = Box::new([black_box(0x5Au8); 64]);
         black_box(value.as_ptr());
         black_box(&value[..]);
         drop(value);
     });
-    assert!(allocations > 0, "own-thread control saw no allocation");
-    assert!(deallocations > 0, "own-thread control saw no free");
-    assert_eq!(events, allocations + deallocations);
+    assert!(
+        counts.allocations > 0,
+        "own-thread control saw no allocation"
+    );
+    assert!(counts.deallocations > 0, "own-thread control saw no free");
 }
 
 #[test]
@@ -171,11 +97,7 @@ fn the_bank_render_path_allocates_nothing() {
                 .map(|set| request_with(set, LinkMode::Average, 128, false))
                 .collect::<Vec<_>>();
             let mut bank = support::bank(width, &requests);
-            let sizes = MultibandCompressorFactory
-                .prepare(requests[0])
-                .expect("scalar")
-                .metadata()
-                .state_sizes;
+            let sizes = bank.metadata().program_key.state_sizes;
             let mut left = support::signal(128 * lanes, 0x00C0_FFEE);
             let mut right = support::signal(128 * lanes, 0x00DE_CAF0);
             let offsets = vec![0u32; lanes + 1];

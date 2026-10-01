@@ -919,7 +919,7 @@ fn isolated_low_and_high_band_compression_reduce_only_the_selected_band() {
 /// A loud channel beside a quiet one: under `DualMono` the quiet channel renders exactly the bits
 /// it renders beside another quiet channel, while the loud one is compressed; the swap holds too.
 /// `Maximum` is the control that shows the comparison can see a linked detector: there the loud
-/// channel pulls the quiet one down. `identity.rs::lane_identity_across_widths` carries the
+/// channel pulls the quiet one down. `identity.rs::heterogeneous_programs_preserve_public_identity` carries the
 /// scalar result to both bank widths.
 ///
 /// Ported by #1027 from the #748 active benchmark's untimed preflight

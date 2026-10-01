@@ -201,6 +201,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
     let mut bank = support::bank(width, &requests);
     let mut left = support::signal(FRAMES * lanes * BLOCKS, 0x1111_2222);
     let mut right = support::signal(FRAMES * lanes * BLOCKS, 0x3333_4444);
+    let offsets = vec![0u32; lanes + 1];
     left[5 * lanes + 3] = f32::NAN;
     let failing = 5 / FRAMES;
     for block in 0..BLOCKS {
@@ -214,7 +215,7 @@ fn the_boundary_is_the_shared_limit_and_a_bank_shares_its_reset() {
                 width,
                 (block * FRAMES) as u64,
                 &[],
-                &vec![0u32; lanes + 1],
+                &offsets,
                 FRAMES as u32,
             )
             .expect("bank block"),

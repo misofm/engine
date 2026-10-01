@@ -1542,7 +1542,7 @@ fn prepare_bank<L: Lane, const W: usize>(
     let mut same_program = true;
     // Every request is validated before any fallback: a malformed bank request is an error, not a
     // reason to fall back to scalar.
-    for (track, item) in request.requests.iter().copied().enumerate() {
+    for (track, item) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(factory.descriptor(), item)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;
