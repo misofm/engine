@@ -43,3 +43,174 @@ and `scripts/lib/aarch64-known-defects.py` if a count moves), and this spec.
 
 - No change to which width any target runs.
 - No other size work for the mobile library.
+
+## Attempt 1 evidence
+
+Terra, attempt 1, 2026-10-01, on `codex/1112-drop-simd8-aarch64` from `e68e58ba` (`089ef456` plus
+this spec). Commits: `2d8c710b` (product), `cb30338a` and `fa890f13` (tests), `9b45d60f` (gates).
+
+### The owner's design, as built
+
+The owner extended the brief during the attempt. The lane width follows the target features a build
+enables, never the architecture's name.
+- **8-lane (AVX2).** One predicate, `target_feature = "avx2"`, gates every eight-lane item and arm:
+  `lane::Simd8`, `Backend::Simd8`, the `f64x8`/`Widen` companions, `BankWidth::Eight` and its arms,
+  `transpose_tile_8`, `match_bank_width!`'s eight arm, builtins' `per_width!` arms, rack's `Eight`
+  views, graph's eight-lane planes, gate-expander's `Simd8` bank impl, and the corpora's width lists.
+- **4-lane (NEON/simd128).** `Backend::current()` selects `Simd8` under `avx2`, and `Simd4` under
+  `any(target_feature = "neon", target_feature = "simd128")`. Graph's `FrameLane` uses the same two
+  predicates. `Simd4` itself stays on every build, because x86 tests run it.
+- **Where `target_arch` stays.** Only where the architecture matters: the 64-bit guard, the x86 AVX2+FMA
+  guard, `attest_host`, the MXCSR/FPCR code, `wide_impl`'s instruction lowerings, and the audit's
+  x86 disassembly probes.
+- **No new product cfg site.** These are #1110's 35 sites, narrowed in place. Rust has no cross-crate
+  cfg alias without build scripts, so the one predicate is written identically at each site.
+  `current()` went from three arch arms to two feature arms.
+- **The rack policy.** `check-rack-policy.sh` forbade `target_feature` in rack. Its one exempt
+  spelling is now the width predicate, alone on its line. Mutations cover a `neon` cfg, a `cfg!`
+  expression and the complement, and each turns the self-test red. So does widening the exemption
+  or dropping it.
+
+### The owner's condition: no AArch64 path can select eight lanes
+
+- On AArch64 `Backend::Simd8` and `BankWidth::Eight` do not exist, so no code there can name them.
+- The C ABI, host-core and the shipped test-support closure all compile for iOS and Android without
+  them.
+- Every production caller (`host-core`'s `prepare.rs`) passes `Backend::current()`.
+- The one AArch64 code that named `Backend::Simd8` was the dev binary `graph_fixture`, which compiled
+  the corpus's 8-lane plan with eight-lane builtin banks. On a 4-lane build it now refuses every mode,
+  and its two tests are `#[ignore]`d with the reason.
+
+### Gate 1: no eight-lane function in the iOS and Android libraries
+
+`capi` was built as a fat-LTO release staticlib with `cargo rustc --crate-type staticlib`. Base and
+head were built from one path.
+
+| | `089ef456` | head |
+|---|---|---|
+| iOS `capi` object `__text` | 2,469,368 B | 2,276,340 B (−193,028, −7.8%) |
+| iOS archive `__text`, all members | 2,531,428 B | 2,338,400 B |
+| iOS eight-lane function symbols | 27 | 0 |
+| Android `capi` object `.text` | 2,377,700 B (2,447 sections) | 2,225,188 B (2,411; −152,512, −6.4%) |
+| Android eight-lane function symbols | 28 | 0 |
+
+- The size falls by more than the 114,520 B that #1110's L4 counted. Eight-lane bodies inlined into
+  non-eight-lane-named callers went too.
+- **The committed check.** `check-cross-targets.sh` already emits every product crate's iOS release
+  assembly for the memset scan. It now fails on any line matching the browser rule `EIGHT_LANE`
+  (`f32x8|f64x8|u32x8|i32x8|simd8|transpose_tile_8`). That covers labels, calls, and the
+  line-table names of inlined functions.
+  - **Red on `089ef456`.** The same loop over that commit's iOS assembly matches eight crates:
+    builtins 451, multiband-compressor 255, gate-expander 173, transient-shaper 145, graph 110,
+    parametric-eq 96, soft-clip 4, graph-compiler 2.
+  - **Green on head.** All 25 crates have 0 matches.
+- **Known-defect counts that moved (#1018).** Six iOS `memset_pattern16` counts fell, because the
+  removed eight-lane instantiations' two-half splats made the same calls:
+  - builtins 376 → 194, gate-expander 181 → 91, graph 20 → 10;
+  - multiband-compressor 1,132 → 566, parametric-eq 146 → 132, transient-shaper 534 → 268.
+
+  Their ceilings are lowered to those counts. The test rows did not move.
+
+### Gate 2: x86-64 and wasm untouched
+
+- **x86 `libcapi.so`.** Every allocated section is byte-identical to `089ef456`'s:
+  - `.text` 3,386,963 B (`96c86fd6…`), `.rodata` (`f4e6ad9c…`), `.eh_frame`, `.eh_frame_hdr`;
+  - also `.data.rel.ro` (`38c90f95…`), so no panic location moved.
+
+  Only the build-id, `.debug_info` and `.debug_line` differ. Debug line information moved in
+  comment-only regions; for example `lane/src/backend.rs`, which has no panic site, is one line
+  shorter.
+- **Wasm.** The shipped module is `cd49dc1c…d408` (2,670,821 B), the named twin `369d858a…` and the
+  closure `02ca569e…`, all equal to main's.
+- **Line numbers.** Every test edit in a shipped `src/` file sits in test or test-support code that
+  runs to the end of its file. The identical `.data.rel.ro` and wasm module confirm it.
+
+### Gate 3: class A
+
+- `cargo test --release -p audit -p bench -p console-workload`: 114 passed.
+- `run-wasm-gates.sh`, full:
+  - native 358 comparisons at three widths, wasm 250 at Scalar and `Simd4`, 0 mismatches;
+  - the residency pin scanned 7 limiter functions;
+  - the `f64` and meter counts are 0.
+- `g5_native_digests_match_pins` passes, with every `Simd8` pin.
+
+### Gate 4: AArch64
+
+- `check-cross-targets.sh` passes.
+- **Clippy `-D warnings` on iOS and Android** passes for:
+  - the debug leg's package set with its features;
+  - `lane`, `math`, `console-workload`, `audit` and `wasm-gate-corpus` with `math/lane`, and with
+    default features.
+
+  `wasm-gates` does not build for either target here, as at base, because wasmtime's C build needs
+  xcrun or the NDK.
+- **The silent-skip scan** finds nothing (rg exit 1).
+- **No arm64 runner, so a scratch emulation.** The legs' package sets were built on x86 from a
+  scratch copy, not committed, with `avx2` off, lane's x86 guard removed, `neon` read as `sse2` and
+  `RUSTFLAGS=-D warnings`. That is a 4-lane build on `f32x4`.
+  - **What it caught.** Five tests that only an AArch64 leg would have failed: three padded-bank case
+    counts and the EQ's `for lanes in [4, 8]`. `fa890f13` fixes them.
+  - **Results.**
+    - Debug leg: 231 binaries pass.
+    - Release lane and math: 97 passed. Its rows are the arm64-only LANE-3 failures, so here they
+      pass.
+    - `console-workload`: 65 passed.
+    - `wasm-gates` G5: 9 passed at two widths.
+- **Listings.**
+
+  | Leg | 8-lane (x86) | 4-lane |
+  |---|---|---|
+  | debug | 1,817 tests | 1,767 tests |
+  | release | 114 tests | 110 tests |
+
+  Every test in the difference names an eight-lane item. `judge-skips` passes for both modes, and
+  `m2_exp2_lane_identity` and `m2_log2_lane_identity` each name one test.
+- **The release rows still fail as written.** In `m2_lane_identity` the width-4 assertion still
+  precedes width 8 at each input, and the scalar digest still follows the comparison. Neither row's
+  reason depends on `Simd8`, so the counts stay. CI's arm64 legs are the NEON gate.
+
+### Gate 5
+
+- fmt passes.
+- Clippy `--workspace --all-targets --all-features -D warnings` passes.
+- `RUSTDOCFLAGS='-D warnings' cargo doc` passes.
+- All 32 lint-job steps pass, including the three sub-v3 probes, and so do the routing check and its
+  tests.
+- **Debug split a:** 96 binaries, 1,150 passed.
+- **Debug split b:** 151 binaries, 834 passed, plus the conformance fixtures.
+- **Release:** 109 passed, plus the FMA cfg, loom, M1 and F1.
+- **Every audit-native step passes.** `audit capi` has 0 violations and `pcm_digest`
+  `ff6cdcb96cdcdad5`.
+
+### Lost AArch64 coverage, and test choices for review
+
+- **Coverage AArch64 loses** (all of it still runs on x86):
+  - every `Simd8` run (two NEON halves);
+  - the other-width refusal probes (conformance, `bank_mask`, compressor, soft-clip, shaper, EQ,
+    limiter, rack);
+  - eight-lane-only tests of generic mechanics: rack's seams and round trips, the EQ's elision
+    refusals, the limiter's silence path, builtins-compiler's nine-track allocation audits;
+  - the 8-lane graph corpus check.
+- **Running at `Simd4` on AArch64 instead of `Simd8`:** G6 (FTZ inert under FPCR.FZ), the idle-ramped
+  SVF identity, and graph's 64-track console gates (#916 gates 1 and 3).
+- **New 4-lane pins.** These are the same renders as the 8-lane pins, minus the `Simd8` stream. They
+  were taken on x86 and match in the emulation. Only CI's arm64 leg confirms them on NEON.
+  - compressor `scenario_1006` `5d99e861…`;
+  - builtins settled matrix `1c6d3055…`;
+  - fused matrix `2703b0f2…` (184 fused blocks).
+- **Test value.** No test is new. The cross-target scan's plausible defect is eight-lane code returning
+  to the phone builds, through a reverted predicate or a new eight-lane instantiation. No other gate
+  catches it on iOS. The rack-policy mutations turn red if the exemption admits any other
+  target-feature spelling.
+
+### Findings
+
+1. **Rustdoc builds without `avx2`.** Rustdoc gets no `[target]` rustflags, so the x86 documentation
+   pass is a no-`avx2` build. The rendered docs no longer list `Simd8`, `Backend::Simd8` or
+   `BankWidth::Eight`. `-D warnings` passes.
+2. **A second error in the sub-v3 probe.** The x86 build without `avx2` now also reports E0308 from
+   `Backend::current()` having no arm, after the guard's message. The probe still passes.
+3. **Stale prose outside the authorized paths.** `docs/TARGET_MATRIX.md`'s memset register and its
+   wasm-guest width text predate #1110 and this issue.
+4. **Many test cfg sites.** 438 target-feature cfgs were added in test code, one per eight-lane use.
+   Product code gained none.
