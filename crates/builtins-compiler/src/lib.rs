@@ -2082,7 +2082,13 @@ impl PreparedBuiltinsSession {
                 "$.builtins.processors",
             ));
         }
-        let expected_tails = match expected_tails(session, &self.track_controls) {
+        let mut actual_controls: Vec<(&str, usize)> = self
+            .track_controls
+            .iter()
+            .map(|control| (control.track_id.as_ref(), control.producer.capacity()))
+            .collect();
+        actual_controls.sort_unstable();
+        let expected_tails = match expected_tails(session, &actual_controls) {
             Ok(value) => value,
             Err(()) => {
                 diagnostics.push(diag("builtin.prepared.tail_set", "$.builtins.tails"));
@@ -2114,12 +2120,6 @@ impl PreparedBuiltinsSession {
         }
         // Issue #137 D1: the control seal is the producer set, so a lost, duplicated, or
         // retargeted control channel is a prepared-set mismatch exactly like a lost meter.
-        let mut actual_controls: Vec<(&str, usize)> = self
-            .track_controls
-            .iter()
-            .map(|control| (control.track_id.as_ref(), control.producer.capacity()))
-            .collect();
-        actual_controls.sort_unstable();
         if !self
             .seal
             .controls
@@ -3116,16 +3116,16 @@ fn processors_match(
 
 fn expected_tails(
     session: &CompiledSession,
-    controls: &[TrackControlProducer],
+    sorted_controls: &[(&str, usize)],
 ) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
     let mut values: Vec<(Box<str>, BuiltinTail)> =
         Vec::with_capacity(session.normalized_model().tracks.len());
     for track in &session.normalized_model().tracks {
         let parameters = track_parameters(track, u32::MAX).map_err(|_| ())?;
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
-        let tail = if controls
-            .iter()
-            .any(|control| control.track_id.as_ref() == track.id.as_str())
+        let tail = if sorted_controls
+            .binary_search_by(|(control, _)| control.cmp(&track.id.as_str()))
+            .is_ok()
         {
             BuiltinTail::Infinite
         } else {
