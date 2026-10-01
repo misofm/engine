@@ -1,23 +1,12 @@
-//! Two lane-generic pieces that belong in `effect-runtime` and are not there yet.
+//! The multiband compressor's retention smoother and per-band detector link.
 //!
-//! Wave-2 decision **W2-D3** on issue #83 gives ownership of the stereo-coupled dynamics
-//! scaffolding to **#88**: that job adds one shared form, and #89 and #94 consume it after it
-//! merges rather than landing parallel variants. Both functions below are therefore **shims**,
-//! written here so this crate can land, and they are the first thing to delete when #88's version
-//! is on `main`. Both are one expression; adapting the two call sites is a one-line change each.
+//! Both helpers keep their per-lane operation order at every width. The smoother uses retention
+//! coefficients and selects attack for a lower gain-reduction target. The link clears input signs,
+//! then applies D8 Maximum or two separately rounded half-products for Average.
 //!
-//! What they must keep when they move:
-//!
-//! * The **direction** of the smoother's coefficient select. More gain reduction is a *lower* dB
-//!   value, so the attack coefficient belongs to `target < y`. The 83c survey found the gate crate
-//!   using the opposite compare under the opposite sign convention — correct in both, and exactly
-//!   the thing a shared helper must not paper over. It is gated in `tests/dynamics_shims.rs`.
-//! * The **exact identity at `c = 0`**. `fma(c, y - target, target)` returns `target` exactly
-//!   there, unfused as much as fused (`0 * d + target == target` for finite `d`);
-//!   the `c * y + (1 - c) * target` form the audit found copied into two crates rounds three
-//!   times and does not.
-//! * The link's `max` is the **D8 select form**, never `f32::max`. The copies relied on their
-//!   inputs having been sanitised first, and under D7 nothing sanitises per value any more.
+//! The inline tests own the unfused arithmetic, coefficient endpoints, link corners and width
+//! agreement. The caller flushes the smoother's stored recurrence and checks output at the block
+//! boundary.
 
 use lane::Lane;
 
@@ -44,7 +33,7 @@ pub(crate) const LINK_AVERAGE: u8 = 2;
 /// 1. `c = select(target < y, attack, release)` — ordered, so a NaN target takes the release
 ///    coefficient rather than an unspecified one
 /// 2. `d = y - target`
-/// 3. `fma(c, d, target)` — **one** rounding
+/// 3. `fma(c, d, target)` — a separately rounded multiply followed by add (`Lane::fma`)
 ///
 /// The caller applies `flush` to the result: this is a recurrence, so D7 applies to it, but the
 /// flush belongs with the state word the caller stores.
@@ -64,8 +53,8 @@ pub(crate) fn branching_smooth<L: Lane>(y: L, target: L, attack: L, release: L) 
 /// Frozen operation order:
 /// 1. `l = |left|`, `r = |right|` — sign-bit clears
 /// 2. [`LINK_MAXIMUM`]: `l.max(r)`, the D8 select form
-/// 3. [`LINK_AVERAGE`]: `0.5 * l + 0.5 * r` — halving is exact, so this cannot overflow the way
-///    `0.5 * (l + r)` can
+/// 3. [`LINK_AVERAGE`]: `0.5 * l + 0.5 * r` — two separately rounded half-products, which can
+///    round subnormals but avoid the finite-input overflow possible in `0.5 * (l + r)`
 #[inline(always)]
 pub(crate) fn link_levels<L: Lane, const MODE: u8>(left: L, right: L) -> (L, L) {
     let (left, right) = (left.abs(), right.abs());
