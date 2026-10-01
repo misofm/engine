@@ -468,7 +468,7 @@ fn f1_level_db_exhaustive() {
         level.decreasing_steps
     );
     assert_eq!(level.decreasing_steps, 77);
-    assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 250_000_000);
+    assert_sweep("fast_level_db exhaustive", level, LEVEL_MAX_DB, 257_176_458);
 }
 
 // Refitted lower-degree rows recorded by issue #880 F-3. Coefficients are in Horner order:
@@ -926,11 +926,10 @@ fn f1_exhaustive_shaper_x7_x8_pipeline_error_and_oracle() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The eight named crossings, each pinned by an independent restatement.
+// The named crossings, grouped by their distinct domains, with an independent restatement.
 //
-// The sweeps above bound the tier over the union of the domains. These bound it over *each
-// crossing's own* domain, named, so that the container's claim -- "exactly six crossings, and this
-// is what each one costs" -- is checked one site at a time rather than in aggregate.
+// The sweeps above bound the tier over the union of the domains. These check the definition over
+// each distinct crossing domain; identical domains need only one conversion sweep.
 //
 // The restatement is deliberately not the `exp2`/`log2` oracle used above. It is
 // `20 * log10(x)` and `pow(10, db/20)` in `f64`, through the vendored `log10` and `pow`, which are
@@ -1011,128 +1010,31 @@ fn crossing_worst_db(lo: f32, hi: f32, level: bool) -> f64 {
     worst
 }
 
-/// Crossing X1 — the compressor's detector level (`kernel.rs`, step 4).
+/// Independent definition checks over each distinct named-crossing domain.
 ///
-/// Domain: the detector is rectified and floored to `LEVEL_FLOOR = 1e-8`; the result is clamped
-/// into `[-160, 24]` dB, so amplitudes above about `15.85` cannot affect the output.
+/// X1/X3/X5/X7 share the detector domain, and X2/X6 share the applied-gain domain. These tests
+/// qualify the conversions over those domains; effect tests and the fast-dB seal own the callers.
 #[test]
-fn f1_crossing_x1_compressor_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X1: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X1 (compressor detector level): {worst:.6e} dB");
-}
-
-/// Crossing X2 — the compressor's applied gain (`kernel.rs`, step 7).
-///
-/// Domain: `smoothed + makeup`, where the reduction is clamped to `[-100, 0]` and the makeup
-/// parameter's domain is `[-24, 24]`, so the argument lies in `[-124, 24]` dB.
-#[test]
-fn f1_crossing_x2_compressor_applied_gain() {
-    let worst = crossing_worst_db(-124.0, 24.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X2: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X2 (compressor applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X3 — the gate/expander's detector level (`kernel.rs`).
-///
-/// Same floor and clamps as X1; the clamp *order* differs (`min` then `max`) but the conversion's
-/// domain does not.
-#[test]
-fn f1_crossing_x3_gate_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X3: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X3 (gate detector level): {worst:.6e} dB");
-}
-
-/// Crossing X4 — the gate/expander's applied gain (`kernel.rs`).
-///
-/// Domain: the smoothed `gain_db` tracks a target clamped to `[-range, 0]`, and the range
-/// parameter's maximum is 96 dB, so the argument lies in `[-96, 0]`.
-#[test]
-fn f1_crossing_x4_gate_applied_gain() {
-    let worst = crossing_worst_db(-96.0, 0.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X4: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X4 (gate applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X5 — one multiband band's detector level (`lib.rs`, `band_amplitude`).
-///
-/// Domain: `DETECTOR_FLOOR = 1e-8`, clamped into `[-160, 24]` dB. Same as X1, reached four times
-/// per frame rather than twice because there are two bands.
-#[test]
-fn f1_crossing_x5_multiband_detector_level() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X5: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X5 (multiband detector level): {worst:.6e} dB");
-}
-
-/// Crossing X6 — one multiband band's applied gain (`lib.rs`, `band_amplitude`).
-///
-/// Domain: `smoothed + makeup`, reduction clamped to `[-100, 0]`, makeup domain `[-24, 24]`.
-#[test]
-fn f1_crossing_x6_multiband_applied_gain() {
-    let worst = crossing_worst_db(-124.0, 24.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X6: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X6 (multiband applied gain): {worst:.6e} dB");
-}
-
-/// Crossing X7 — the transient shaper's fast/slow detector contrast.
-///
-/// Domain: both envelopes are floored to `1e-8`, their ratio stays within `[1e-8, 16]` whenever
-/// contrast is not already clamped, and the result is clamped to ±24 dB.
-#[test]
-fn f1_crossing_x7_transient_shaper_detector_contrast() {
-    let worst = crossing_worst_db(1.0e-8, 16.0, true);
-    assert!(
-        worst <= LEVEL_MAX_DB,
-        "crossing X7: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X7 (transient-shaper detector contrast): {worst:.6e} dB");
-}
-
-/// Crossing X8 — the transient shaper's applied gain.
-///
-/// Domain: the shape law's output is clamped to `[-18, 18]` dB before conversion.
-#[test]
-fn f1_crossing_x8_transient_shaper_applied_gain() {
-    let worst = crossing_worst_db(-18.0, 18.0, false);
-    assert!(
-        worst <= GAIN_MAX_DB,
-        "crossing X8: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
-    );
-    println!("crossing X8 (transient-shaper applied gain): {worst:.6e} dB");
-}
-
-/// Full-domain site-specific proof for X7, separate from the shared F1 tier sweep.
-#[test]
-#[ignore = "full X7 crossing sweep: run with --release -- --ignored"]
-fn f1_exhaustive_x7_transient_shaper_detector_contrast() {
-    let (lo, hi) = level_domain();
-    let measured = sweep(lo, hi, 1, level_error_db);
-    assert_sweep(
-        "crossing X7 transient-shaper detector contrast",
-        measured,
-        LEVEL_MAX_DB,
-        257_176_458,
-    );
+fn f1_crossing_domains_match_independent_definitions() {
+    for (crossings, lo, hi, level, gate) in [
+        (
+            "X1/X3/X5/X7 detector level",
+            1.0e-8,
+            16.0,
+            true,
+            LEVEL_MAX_DB,
+        ),
+        ("X2/X6 applied gain", -124.0, 24.0, false, GAIN_MAX_DB),
+        ("X4 gate applied gain", -96.0, 0.0, false, GAIN_MAX_DB),
+        ("X8 shaper applied gain", -18.0, 18.0, false, GAIN_MAX_DB),
+    ] {
+        let worst = crossing_worst_db(lo, hi, level);
+        assert!(
+            worst <= gate,
+            "crossings {crossings}: {worst:.6e} dB exceeds the {gate:.1e} dB gate"
+        );
+        println!("crossings {crossings}: {worst:.6e} dB");
+    }
 }
 
 /// Full-domain site-specific proof for X8, split at zero because signed `f32` bit patterns are
