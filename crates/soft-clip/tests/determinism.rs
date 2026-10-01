@@ -6,31 +6,27 @@
 //! every case at every width against `SOFT_CLIP_DIGESTS` in the shipping profile, and the wasm
 //! guests of `scripts/run-wasm-gates.sh` compare the same cases against the same pins.
 
-use soft_clip::corpus::{CASE_NAMES, FRAMES, LANES, POINTS, run_case};
+use soft_clip::corpus::{CASE_NAMES, POINTS, run_case};
 
 /// The corpus has to be able to fail: no NaN, and every case has to move.
 ///
-/// Claim: a corpus change that makes a case emit NaN or an infinity, changes its length, or
+/// Claim: a corpus change that makes a case emit NaN or an infinity, or
 /// collapses it to a handful of outputs turns this red.
 #[test]
 fn the_corpus_is_not_vacuous() {
     for (case, name) in CASE_NAMES.into_iter().enumerate() {
         let mut words = vec![0_u32; POINTS];
         run_case::<f32>(case, &mut words);
-        assert_eq!(words.len(), LANES * FRAMES);
-        let values: Vec<f32> = words.iter().map(|word| f32::from_bits(*word)).collect();
         assert!(
-            values.iter().all(|value| value.is_finite()),
+            words.iter().all(|word| f32::from_bits(*word).is_finite()),
             "{name} produced a non-finite sample"
         );
-        let distinct = values
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<std::collections::BTreeSet<_>>();
+        words.sort_unstable();
+        words.dedup();
         assert!(
-            distinct.len() > 16,
+            words.len() > 16,
             "{name} has only {} distinct outputs; a vacuous case would pass any pin",
-            distinct.len()
+            words.len()
         );
     }
 }

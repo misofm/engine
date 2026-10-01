@@ -3,13 +3,11 @@
 //! The rendered graph is frozen by `.github/ISSUE_SPECS/BRIEFS/019`: per-lane drive, output and
 //! mix; two-times oversampling through a 63-tap Blackman half-band used for both interpolation and
 //! decimation; the cubic `c(u) = u - u^3/3` clamped to `±2/3`; a dry path delayed 31 samples;
-//! latency 31 and a finite tail of 29. None of that changed in the issue-#91 re-landing — the
-//! output is bit-identical to the five hand-written copies it replaces
-//! (`tests/polyphase_identity.rs`). What changed is everything around the arithmetic:
+//! latency 31 and a finite tail of 29. `tests/polyphase_identity.rs` compares the kernel with an
+//! independent realization of the brief's ascending 63-tap graph. The implementation uses:
 //!
-//! * one generic [`kernel::soft_clip_block`] instead of an effect-crate scalar lane plus four
-//!   `core/arch` kernels, so `WIDTH = 1`, 4 and 8 are the same code and lane identity is a property
-//!   of the code (`tests/lane_identity.rs`);
+//! * one generic [`kernel::soft_clip_block`] at widths 1, 4 and 8, with the prepared driver checked
+//!   against scalar instances by the padded-bank and randomized differentials;
 //! * the polyphase half-band form, which does the work of two 31-tap convolutions instead of four;
 //! * one cursor per bank over a double-written power-of-two history, so every tap is a contiguous
 //!   vector load at a constant offset — no per-lane cursor, no modulus, no gather;
@@ -18,15 +16,11 @@
 //! * D11 ramps, D6 decibel conversion and the shared state-payload codec, all from
 //!   `effect-runtime` and `math`.
 //!
-//! Measured on the delivery host, W8 bank, production `process_bank` shape: 246 ns per
-//! track-channel-sample before, 3.0 ns after (`tests/descriptive_bench.rs`).
-//!
 //! # State layout version 1
 //!
-//! The shared cursor (D10) removed the per-lane cursor word and the D11 ramp added a `step` word,
-//! so the payload changed shape during prelaunch development. Stale payloads are rejected with
-//! `effect.state.version`; a converting edge, if one is ever wanted, is
-//! the migration registry of issue #080, not this crate.
+//! In-memory handoff carries each ramp's current, target, step and remaining samples, followed by
+//! newest-first history ages. The cursor belongs to the cohort and is not serialized. A mismatched
+//! layout version is rejected with `effect.state.version`.
 
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
@@ -268,11 +262,8 @@ fn converted_value_valid(index: usize, value: f32) -> bool {
 
 /// Converts the six validated initial values into the two per-channel coefficient sets.
 ///
-/// The `-0.0` rule is **not** re-implemented here. `expected_prepared_metadata` has already run
-/// the contract's `validate_initial_values`, which rejects a negative zero, and every caller of
-/// this function goes through it first; the effect-runtime's rule is the lenient one (normalise,
-/// do not reject) and #95 owns reconciling the two. One law, one home: whichever way that lands,
-/// this crate follows it without an edit.
+/// `expected_prepared_metadata` has already rejected negative zero in the initial values; every
+/// caller goes through that validation first. Accepted runtime points normalize zero instead.
 fn initial_defaults(
     values: &[InitialParameterValue],
 ) -> Result<([f32; PARAMETER_COUNT], [f32; PARAMETER_COUNT]), EffectPrepareError> {
@@ -522,9 +513,8 @@ impl<L: Lane> SoftClipState<L> {
 ///
 /// The validation rules are the frozen ones: block-rate points only, at `first_sample`, in
 /// ascending `(parameter, channel)` order, at most one per parameter and channel, inside the
-/// prepared automation capacity. What changed is the tail: a target is now handed to
-/// [`LinearRamp::set_target`], which divides **once** (D11), instead of being re-divided by the
-/// remaining count on every sample.
+/// prepared automation capacity. Accepted targets go to [`LinearRamp::set_target`], which divides
+/// once per event (D11).
 fn apply_automation<L: Lane>(
     spans: &[PreparedAutomationSpan],
     metadata: PreparedEffectMetadata,
@@ -638,12 +628,12 @@ struct LaneRestore {
     dry: [f32; DRY_HISTORY_AGES],
 }
 
-/// Validates the 104 payload words of layout 2.
+/// Validates the 104 payload words of layout 1.
 ///
 /// Ramp currents and targets must be inside the *converted* domain (a linear gain, not decibels),
 /// must not be `-0.0` and must not be subnormal; `step` must be finite and normal-or-zero;
 /// `remaining` must not exceed the smoothing window; every history word must be finite and either
-/// zero or normal. There is no cursor word to validate any more — the cursor belongs to the bank.
+/// zero or normal. The cursor belongs to the bank and is not carried in the payload.
 fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
     let mut ramps = [LinearRamp::fixed(0.0); PARAMETER_COUNT];
@@ -971,8 +961,7 @@ where
 ///
 /// D4 replaced runtime SIMD dispatch with a compile-time ISA pin plus a boot attestation, so this
 /// is a compile-time constant and not a CPUID question. A width the artifact was not built for is
-/// declined with `Ok(None)`, exactly as the deleted `PreparedSoftClipBankKernel::try_new` declined
-/// an unavailable backend, and the caller falls back to scalar instances.
+/// declined with `Ok(None)`, and the caller falls back to scalar instances.
 const fn executes(lanes: usize) -> bool {
     lanes == Backend::current().width()
 }
@@ -1005,7 +994,7 @@ fn prepare_bank<L: Lane, const NATIVE_ONLY: bool>(
     let mut left_defaults = vec![first_left; L::WIDTH];
     let mut right_defaults = vec![first_right; L::WIDTH];
     let mut same_program = true;
-    for (track, member) in request.requests.iter().copied().enumerate() {
+    for (track, member) in request.requests.iter().copied().enumerate().skip(1) {
         let candidate = expected_prepared_metadata(factory.descriptor(), member)?;
         if candidate.program_key() != metadata.program_key() {
             same_program = false;

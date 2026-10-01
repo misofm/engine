@@ -5,9 +5,8 @@
 //! `next_value` — it adds a splatted increment inside the block — so the driver has to reproduce
 //! the law rather than share the code, and this test is the join between the two.
 //!
-//! The observable is the drive gain, made visible by putting the effect in its identity-free path
-//! and reading the state payload back after each block, plus a direct comparison of the first 64
-//! rendered ramp values against an independently iterated `LinearRamp`.
+//! The observable is the drive gain in the state payload after each block, including every frame
+//! of the ramp in the one-frame schedule, compared against an independently iterated `LinearRamp`.
 
 mod support;
 
@@ -16,7 +15,7 @@ use effect_runtime::ramp::LinearRamp;
 use math::db_to_gain_f32;
 use support::{prepare, process, values_from, word, word_f32};
 
-/// Payload words of the drive ramp under state layout 2.
+/// Payload words of the drive ramp under state layout 1.
 const DRIVE_CURRENT: usize = 0;
 const DRIVE_TARGET: usize = 1;
 const DRIVE_STEP: usize = 2;

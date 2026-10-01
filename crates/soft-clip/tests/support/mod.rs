@@ -21,7 +21,7 @@ pub const PARAMETERS: usize = 3;
 /// Quantum every fixture prepares at.
 pub const QUANTUM: u32 = 128;
 
-/// Total payload bytes of one prepared instance under state layout 2.
+/// Total payload bytes of one prepared instance under state layout 1.
 pub fn total_state_bytes() -> u64 {
     SOFT_CLIP_DESCRIPTOR.qualities[1]
         .maximum_state

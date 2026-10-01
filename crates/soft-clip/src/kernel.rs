@@ -6,15 +6,11 @@
 //! [`Lane`] (D10). The scalar tail is the same function at `L = f32`,
 //! because a planar slice is already a `WIDTH = 1` AoSoA block.
 //!
-//! # What changed against the five hand-written copies, and what did not
+//! # Polyphase realization
 //!
-//! The audit of issue #91 found this graph implemented five times (an effect-crate scalar lane and
-//! four `core/arch` kernels) and running at 296 ns per track-channel-sample: 258 per-operation
-//! store/`is_finite`/reload wrappers, 992 scalar gathers with a `% 63`, two 63-word coefficient
-//! scans per frame, and four full 31-tap convolutions where the half-band structure needs the work
-//! of two. All four are gone. **The arithmetic is not changed**: the surviving products are the
-//! same products in the same ascending tap order, so the output is bit-identical to the 63-tap
-//! form (`tests/polyphase_identity.rs`, one million samples, zero mismatches).
+//! The half-band structure retains the work of two 31-tap convolutions per base-rate frame.
+//! Products accumulate in the brief's ascending tap order, checked against its independent
+//! zero-stuffed 63-tap realization by `tests/polyphase_identity.rs`.
 //!
 //! # Frozen operation order, per frame
 //!
@@ -31,17 +27,17 @@
 //! 8. `d = dry[n-31]`; `a = 1 - mix`; `b = a * d`; `c = mix * wet`; `s = b + c`; `y = output * s`.
 //! 9. `store(frame, select(bypass or (mix == 0 and output == 1), d, y))`.
 //!
-//! There is no `fma` anywhere: the frozen graph has none, and adding one would change every pinned
-//! bit (D3 permits fusion only where `Lane::fma` is written).
+//! The frozen graph uses separate multiply and add rounding points. No fused operation is used.
 //!
 //! # Denormals and finiteness (D7)
 //!
 //! `flush` is applied to the two values that enter a history and are then multiplied by a filter
 //! tap — `X` and `e`. The dry history is deliberately **not** flushed: it is selected or multiplied
 //! once and never accumulated, and the identity path has to reproduce a `-0.0` input exactly.
-//! Flushing `X` cannot change a rendered bit even when it fires on `-0.0`, because every product a
-//! `±0.0` makes is added to an accumulator that is never `-0.0`, and `cubic(±0.0)` is `+0.0` for
-//! either sign. Output finiteness is checked once per block by `effect_runtime::bank::check_block`
+//! Normalizing `X`'s signed zero preserves the rendered bits: its zero products enter an ascending
+//! sum starting at `+0.0`, and `cubic(±0.0)` is `+0.0` for either sign. Flushing subnormal `X` or `e`
+//! deliberately changes their bits. Output finiteness is checked once per block by
+//! `effect_runtime::bank::check_block`
 //! in `SoftClip::process`, and `SoftClip::recover_lanes` recovers a failing lane alone (#1092);
 //! there is no per-value check anywhere.
 
@@ -57,7 +53,7 @@ pub const DRY_DELAY: usize = 31;
 /// Per-block, per-lane coefficients: the D11 ramp increments and the bypass mask.
 ///
 /// Every field is block-constant. A ramp that ends inside a block is handled by splitting the
-/// block, not by branching per sample (see `Segments` in `lib.rs`), so a step never changes while
+/// block, not by branching per sample (the prepared channel's driver), so a step never changes while
 /// the kernel is running.
 #[derive(Clone, Copy)]
 pub struct SoftClipCoef<L: Lane> {

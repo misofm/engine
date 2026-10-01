@@ -1,5 +1,10 @@
 # Red-mutation record for the soft-clip gates (issue #91)
 
+This is the historical mutation record. Housekeeping #1127 retired the narrower `lane_identity`
+test and bank-only `boundary_check` case: the current padded-bank/randomized differentials own
+segmentation and scalar PCM/report/state parity, and the planted-nonfinite/tripping padded-bank
+tests own lane-local recovery at every width. No new mutation run is claimed here.
+
 Master plan for issue #83, §1.6: *every gate is proven red*. A test that has never failed is not a
 gate. Each row below was applied to the working tree, the named test binary was run in release, the
 failure was recorded, and the mutation was reverted in the same session. Rows 11 and 13-14 of
@@ -75,7 +80,7 @@ lanes, starting in different blocks, for this reason.
 
 ### 7 — no boundary check (E7)
 
-All three `boundary_check` tests fail: the NaN block is not zeroed, the counter does not advance,
+The then-three `boundary_check` tests failed: the NaN block is not zeroed, the counter does not advance,
 and the state is not reset, so the block after it does not match a fresh instance.
 
 ### 10 — the snap after the segment (E10/ramp law)
