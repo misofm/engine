@@ -6,7 +6,10 @@
 # Two legs, one corpus (tools/wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.
 #   wasm+simd128 -- the same crate built for wasm32-unknown-unknown with simd128 (backend simd4),
-#                   the one wasm build that ships (W4-D1), at every width too.
+#                   the one wasm build that ships (W4-D1), at every width it has: Scalar and
+#                   Simd4. The browser runs four lanes only, and since #1110 the wasm build has no
+#                   eight-lane type, so the host holds the guest's widths to exactly those two
+#                   lane counts, [1, 4].
 #
 # There is no scalar (non-`simd128`) wasm leg: owner ruling 2026-09-28, decision 7, retired it
 # with #1062 once #1017's AArch64 legs ran G5 natively on arm64, and `lane` now refuses that
@@ -83,36 +86,89 @@ run_guest() {
 # or the eleven words a shift actually moves, inside a function the limiter owns. Those two sizes
 # are the signature of the regression and of nothing else: the other copies a limiter block makes
 # -- the `BankProcessReport` at `process_bank`'s exit, a state payload buffer -- are other sizes.
-# The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32`, 16 at `Simd4` and 32 at
-# the wasm `Simd8` (two v128 halves), and `HISTORY_WORDS` is 12. The guest digests every case at
-# all three widths, so its one build holds the limiter at each of those lane types.
+# The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32` and 16 at `Simd4`, and
+# `HISTORY_WORDS` is 12. The guest digests every case at both of its widths, so its one build holds
+# the limiter at each of those lane types. (The wasm `Simd8`'s 352 and 384 left with it, #1110.)
 #
 # `HotChannel::load` and `History::load`/`store` are excluded by name, and only they. Those are
 # the once-per-block gather and scatter of the whole hot state; moving twelve words as a unit
 # there is the intended shape, and whether the backend emits it as a block move is a decision
-# about one copy per block rather than one per frame. Deleting the exclusion is how you check the
-# pin is still wired to something: with it gone, the `simd128` guest goes red on its `Simd8`
-# `HotChannel::load` (a 384-byte copy; measured at #1062, where the retired scalar guest went red on
-# its `f32` one as well).
-readonly HISTORY_SHIFT_SIZES="44 48 176 192 352 384"
+# about one copy per block rather than one per frame. Deleting the exclusion used to show the pin
+# still wired to something: the `simd128` guest went red on its `Simd8` `HotChannel::load`, a
+# 384-byte copy (measured at #1062, where the retired scalar guest went red on its `f32` one as
+# well, and again on #1110's base). Since #1110 the guest has no `Simd8`, and neither its `f32` nor
+# its `Simd4` `HotChannel::load` is a block move, so no function here needs the exclusion and
+# deleting it turns nothing red on this guest. The rule's witness is the hermetic self-test below,
+# which holds a history-sized copy red.
+readonly HISTORY_SHIFT_SIZES="44 48 176 192"
+#
+# The pin also has to prove it read something (#1110 verdict L1). It finds the limiter's functions
+# by name, so a guest without its `name` section, or a limiter crate renamed out of the pattern,
+# would scan nothing and pass. It therefore counts the in-scope limiter functions it scanned and
+# fails on zero, and `self_test_detector_residency` holds both reds to synthetic disassembly.
 
-check_detector_residency() {
-    local module="$1" name="$2" found
-    found="$(wasm-objdump -d "$module" | awk -v sizes="$HISTORY_SHIFT_SIZES" '
+# The verdict over one `wasm-objdump -d` disassembly on stdin. Prints the number of in-scope
+# limiter functions scanned on success; fails on a history-sized copy in one of them, or on none.
+detector_residency_verdict() {
+    local name="$1" result scanned found
+    result="$(awk -v sizes="$HISTORY_SHIFT_SIZES" '
         BEGIN { split(sizes, list, " "); for (i in list) forbidden[list[i]] = 1 }
         /^[0-9a-f]+ func\[[0-9]+\] </ {
             subject = /true_peak_limiter/ && !/10HotChannel/ && !/7History/
+            if (subject) scanned++
             fn = $0
             size = ""
         }
         subject && /i32\.const/ { size = $NF }
         subject && /memory\.copy/ && (size in forbidden) { print size, fn }
+        END { print "scanned", scanned + 0 }
     ')"
+    scanned="${result##*scanned }"
+    found="$(sed '$d' <<<"$result")"
+    ((scanned > 0)) || {
+        printf 'wasm gates: the detector-residency pin scanned no limiter function (%s leg): %s\n' \
+            "$name" "a module without names, or a renamed limiter, would pass it unread" >&2
+        return 1
+    }
     [[ -z "$found" ]] || {
         printf 'wasm gates: the detector history is shifted through linear memory (%s leg)\n%s\n' \
             "$name" "$found" >&2
         return 1
     }
+    printf '%s\n' "$scanned"
+}
+
+check_detector_residency() {
+    local module="$1" name="$2"
+    wasm-objdump -d "$module" | detector_residency_verdict "$name"
+}
+
+# The pin's hermetic self-test (#1110 verdict L1): synthetic disassembly, no build. A 192-byte
+# `memory.copy` (a whole `Simd4` history) in a limiter function is red, and so is a disassembly with
+# no limiter function at all; the same limiter function copying a size no history has is green, so
+# each red is the rule firing and not a broken scanner.
+self_test_detector_residency() {
+    local limiter other clean shifted unnamed
+    limiter='000100 func[7] <_RNvMNtCs0_17true_peak_limiter11LimiterCore13process_block>:'
+    other='000100 func[7] <_RNvNtCs0_13parametric_eq4bank12process_bank>:'
+    clean="$limiter"$'\n 000101: 41 c0 00                   | i32.const 64'
+    clean+=$'\n 000104: fc 0a 00 00                | memory.copy 0 0'
+    clean+=$'\n 000108: 0b                         | end'
+    shifted="${clean/i32.const 64/i32.const 192}"
+    unnamed="${clean/"$limiter"/"$other"}"
+    detector_residency_verdict self-test <<<"$clean" >/dev/null || {
+        printf 'wasm gates: residency self-test: a limiter with no history-sized copy failed\n' >&2
+        return 1
+    }
+    if detector_residency_verdict self-test <<<"$shifted" >/dev/null 2>&1; then
+        printf 'wasm gates: residency self-test: a 192-byte copy in a limiter function passed\n' >&2
+        return 1
+    fi
+    if detector_residency_verdict self-test <<<"$unnamed" >/dev/null 2>&1; then
+        printf 'wasm gates: residency self-test: a disassembly with no limiter passed\n' >&2
+        return 1
+    fi
+    printf 'wasm gates: detector-residency self-test passed\n'
 }
 
 # Issue #949 gate 5: the `f64` lane vocabulary must lower to `f64x2` vector opcodes under simd128.
@@ -194,20 +250,22 @@ check_f64_lane_lowering() {
 # Issues #1000 and #1009: V8's register allocation of the parametric EQ's stationary cascade loops
 # in the shipped AudioWorklet module. `check-web-audioworklet-v8-spill.py` has the rule and what it
 # does and does not prove; it times nothing. The module comes from `build-web-audioworklet.sh
-# --module-only`, so the cargo line has one home and these are the bytes that ship at this commit.
-# It does not hold the module to the release pin (#1061): the loops are a property of the source,
-# not of a release. The toolchain pins are checked first, so a Node other than the pinned one fails
-# before the build.
+# --module-only`, so the cargo line has one home and this is the code that ships at this commit.
+# The gate finds its functions by name, so it reads the named twin the same build writes: the
+# shipped module plus its `name` section (#1109). It does not hold the module to the release pin
+# (#1061): the loops are a property of the source, not of a release. The toolchain pins are checked
+# first, so a Node other than the pinned one fails before the build.
 check_v8_spill() {
     local module_dir="target/ci/wasm-gates-web" started finished
     python3 -B scripts/check-web-audioworklet-v8-spill.py --check-toolchain
     python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
     rm -rf -- "$module_dir"
-    mkdir -p "$module_dir"
-    bash scripts/build-web-audioworklet.sh --module-only "$module_dir"
+    mkdir -p "$module_dir/shipped" "$module_dir/named"
+    bash scripts/build-web-audioworklet.sh --module-only --named-twin "$module_dir/named" \
+        "$module_dir/shipped"
     started="$EPOCHREALTIME"
     python3 -B scripts/check-web-audioworklet-v8-spill.py \
-        "$module_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+        "$module_dir/named/miso-engine-v1-audio-worklet.simd128.named.wasm"
     finished="$EPOCHREALTIME"
     awk -v a="$started" -v b="$finished" \
         'BEGIN { printf "wasm gates: V8 spill gate ran in %.1f s (build excluded)\n", b - a }'
@@ -218,10 +276,12 @@ command -v wasm-objdump >/dev/null 2>&1 || {
     exit 1
 }
 
+self_test_detector_residency
 run_guest simd128 +simd128 simd4
 
-check_detector_residency "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST" simd128
-printf 'wasm gates: detector history resident in locals on the simd128 guest\n'
+scanned="$(check_detector_residency "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST" simd128)"
+printf 'wasm gates: detector history resident in locals on the simd128 guest (%s %s)\n' \
+    "$scanned" "limiter functions scanned"
 check_f64_lane_lowering "target/ci/wasm-gates-simd128/$TARGET/release/$GUEST"
 if ((native)); then
     legs="native + wasm simd128"

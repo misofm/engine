@@ -30,6 +30,10 @@ pub enum Backend {
     /// [`wide::f32x4`], four lanes: AArch64 NEON and wasm `simd128`.
     Simd4,
     /// [`wide::f32x8`], eight lanes: one `__m256` on `x86-64-v3`.
+    ///
+    /// Absent on `wasm32` (issue #1110): the browser can never select it, so the browser build
+    /// cannot name it either (see [`Simd8`](crate::Simd8)).
+    #[cfg(not(target_arch = "wasm32"))]
     Simd8,
 }
 
@@ -64,6 +68,7 @@ impl Backend {
             #[cfg(feature = "test-support")]
             Self::Scalar => 1,
             Self::Simd4 => 4,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Simd8 => 8,
         }
     }

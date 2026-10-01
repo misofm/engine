@@ -20,6 +20,7 @@
 
 use super::*;
 use dsp_reference::randomized::{Draw, Profile, run_seeds};
+use lane::{Simd4, Simd8};
 
 const TEST: &str =
     "randomized_restores::the_stationary_cascade_renders_the_full_cascade_after_random_restores";

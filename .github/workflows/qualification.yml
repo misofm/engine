@@ -101,6 +101,7 @@ jobs:
       sha256: ${{ steps.build.outputs.sha256 }}
       rustc: ${{ steps.build.outputs.rustc }}
       closure_sha256: ${{ steps.build.outputs.closure_sha256 }}
+      named_sha256: ${{ steps.build.outputs.named_sha256 }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -118,17 +119,21 @@ jobs:
       # the whole directory against, so none of them runs the generator again. Issue #1061
       # (owner decision 5): no comparison with the committed pin here. The pin is the release
       # fingerprint; `artifact-identity` reports whether these bytes changed and holds a release
-      # change to the pin (docs/RELEASE.md).
+      # change to the pin (docs/RELEASE.md). Issue #1109: the same build writes the named twin, the
+      # shipped module plus its `name` section, outside the delivery closure; `named_sha256` is what
+      # artifact-gates checks its download against.
       - name: Build the exact shipped artifact
         id: build
         run: |
           # The build script refuses a non-empty output directory; never rely on the cache
           # action having pruned a previous run's loose files.
-          rm -rf target/ci/qualification-artifacts
-          mkdir -p target/ci/qualification-artifacts
-          bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
+          rm -rf target/ci/qualification-artifacts target/ci/qualification-named-twin
+          mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin
+          bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts
           sha256="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          named_sha256="$(sha256sum target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm | awk '{print $1}')"
+          echo "named_sha256=$named_sha256" >> "$GITHUB_OUTPUT"
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           echo "closure_sha256=$closure" >> "$GITHUB_OUTPUT"
@@ -138,6 +143,15 @@ jobs:
         with:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts/
+          if-no-files-found: error
+          overwrite: true
+      # Issue #1109: the named twin is not shipped. It is kept for the gates that find functions by
+      # name (artifact-gates) and to symbolicate a production stack trace (docs/RELEASE.md).
+      - name: Upload the named twin (not shipped)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audioworklet-named-${{ github.sha }}
+          path: target/ci/qualification-named-twin/
           if-no-files-found: error
           overwrite: true
 
@@ -296,6 +310,24 @@ jobs:
           [[ "$BUILT" =~ ^[0-9a-f]{64}$ && "$actual" == "$BUILT" ]] || { echo "downloaded artifact sha256 mismatch: the artifact job built $BUILT, got $actual" >&2; exit 1; }
           closure="$(set -o pipefail; cd target/ci/qualification-artifacts && find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0 sha256sum -- | sha256sum | awk '{print $1}')"
           [[ "$CLOSURE" =~ ^[0-9a-f]{64}$ && "$closure" == "$CLOSURE" ]] || { echo "downloaded artifact closure mismatch: the artifact job built $CLOSURE, got $closure" >&2; exit 1; }
+      # Issue #1109: the shipped module carries no `name` section, so the three gates below that find
+      # functions by name -- the call graph (inside check-web-audioworklet.sh), scalar-oracle-absent
+      # and the V8 spill gate -- read the named twin. Its download is checked against the artifact
+      # job's digest, and then against the shipped module: the same sections, byte for byte, but
+      # its `name` section, so what the gates prove of its code holds for the code that ships.
+      - name: Download the named twin
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audioworklet-named-${{ github.sha }}
+          path: target/ci/qualification-named-twin
+      - name: Verify the named twin against the artifact job's digest and the shipped module
+        env:
+          NAMED: ${{ needs.artifact.outputs.named_sha256 }}
+        run: |
+          actual="$(sha256sum target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm | awk '{print $1}')"
+          [[ "$NAMED" =~ ^[0-9a-f]{64}$ && "$actual" == "$NAMED" ]] || { echo "downloaded named twin sha256 mismatch: the artifact job built $NAMED, got $actual" >&2; exit 1; }
+          python3 -B scripts/strip-wasm-names.py --self-test
+          python3 -B scripts/strip-wasm-names.py check target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # check-web-audioworklet.sh asserts the frozen export set, no imports, no shared memory, no
       # atomics or relaxed SIMD, the render export's allocation-free/trap-free closure, and the
@@ -307,17 +339,17 @@ jobs:
       # job generated these documents at this commit, and the closure digest was verified above.
       - name: Browser AudioWorklet artifact gates and native parity
         run: |
-          bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts
+          bash scripts/check-web-audioworklet.sh --without-metadata-regeneration target/ci/qualification-artifacts target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
           python3 -B scripts/check-browser-expected-resources.py --artifacts target/ci/qualification-artifacts
       # #1059: the whole-plan scalar renderer is a test-only oracle; the shipped module must not
-      # contain it (owner ruling 2026-09-28, decision 3).
+      # contain it (owner ruling 2026-09-28, decision 3). Read from the named twin (#1109).
       - name: Shipped AudioWorklet module contains no whole-plan scalar path
-        run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
+        run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
-      # the downloaded, digest-verified artifact itself (run-wasm-gates.sh --without-v8-spill leaves it
-      # to this job). Register allocation belongs to one V8, so the Node version is exact and the
+      # the downloaded, digest-verified named twin of the artifact (#1109; run-wasm-gates.sh
+      # --without-v8-spill leaves it to this job). Register allocation belongs to one V8, so the Node version is exact and the
       # gate refuses any other. Last, so the steps above keep the runner's own Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -325,7 +357,7 @@ jobs:
       - name: V8 spill gate over the shipped module's EQ cascade loops
         run: |
           python3 -B scripts/check-web-audioworklet-v8-spill.py --self-test
-          python3 -B scripts/check-web-audioworklet-v8-spill.py target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm
+          python3 -B scripts/check-web-audioworklet-v8-spill.py target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
 
   browser:
     name: ${{ matrix.browser }} — browser qualification gates

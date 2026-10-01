@@ -47,7 +47,7 @@ use core::cell::Cell;
 pub mod corpus;
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
     ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
@@ -70,7 +70,7 @@ use effect_runtime::state_payload::{
     HEADER_WORDS, StateLayout, read_f32, read_header, read_u32, validate_lengths, write_f32,
     write_header, write_u32,
 };
-use lane::{Backend, Lane, Simd4, Simd8, flush};
+use lane::{Backend, Lane, flush};
 
 /// Parameters in the frozen descriptor.
 const PARAMETER_COUNT: usize = 3;
@@ -4345,24 +4345,17 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
         // `validate_shape` admits members-first masks only (#1088, verdict L3), so the members
         // are lanes `0..members`.
         let active = every_lane(request.active_lanes());
-        let bank: Box<dyn PreparedNativeEffectBank> = match request.width {
-            BankWidth::Four => Box::new(PreparedTruePeakLimiterBank::<Simd4> {
-                metadata: bank_metadata,
-                core: LimiterCore::<Simd4>::new(metadata, left_defaults, right_defaults)
-                    .ok_or(EffectPrepareError {
-                        code: "effect.parameter.initial",
-                    })?
-                    .with_active_lanes(active),
-            }),
-            BankWidth::Eight => Box::new(PreparedTruePeakLimiterBank::<Simd8> {
-                metadata: bank_metadata,
-                core: LimiterCore::<Simd8>::new(metadata, left_defaults, right_defaults)
-                    .ok_or(EffectPrepareError {
-                        code: "effect.parameter.initial",
-                    })?
-                    .with_active_lanes(active),
-            }),
-        };
+        let bank: Box<dyn PreparedNativeEffectBank> =
+            effect_contract::match_bank_width!(request.width, |L| {
+                Box::new(PreparedTruePeakLimiterBank::<L> {
+                    metadata: bank_metadata,
+                    core: LimiterCore::<L>::new(metadata, left_defaults, right_defaults)
+                        .ok_or(EffectPrepareError {
+                            code: "effect.parameter.initial",
+                        })?
+                        .with_active_lanes(active),
+                })
+            });
         Ok(Some(bank))
     }
 }
@@ -4883,9 +4876,11 @@ fn limiter_block_uniform_mono<const DISPATCH: u8, L: Lane>(
 mod tests {
     use super::*;
     use dsp_reference::reference_annex2_phases;
+    use effect_contract::BankWidth;
     use effect_contract::{
         PrepareEffectLimits, PreparedPorts, PreparedSidechainPort, validate_descriptor,
     };
+    use lane::{Simd4, Simd8};
 
     /// Deterministic SplitMix64 noise, so a corpus is a seed and never a file.
     struct Noise(u64);

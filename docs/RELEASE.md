@@ -8,7 +8,7 @@ kind of change must do from now on.
 
 | change | what CI does with the shipped module |
 | --- | --- |
-| any PR on the `sdk` or `full` route, and every `main` push on them | `artifact` builds the module once (`scripts/build-web-audioworklet.sh`); `sdk`, `artifact-gates` and the three browser legs download it and check it against that job's digest, so every artifact gate reads exactly those bytes. `artifact-identity` builds the same commit again from another checkout path and `CARGO_HOME` and fails if the bytes differ, then compares the module with **the digest the base commit's own CI run recorded**, and prints `ARTIFACT CHANGED`, `ARTIFACT UNCHANGED` or `ARTIFACT CANNOT TELL` (with the reason) in its job summary. Nothing is compared with the committed pin and nothing is re-pinned. |
+| any PR on the `sdk` or `full` route, and every `main` push on them | `artifact` builds the module once (`scripts/build-web-audioworklet.sh`), with its named twin (below); `sdk`, `artifact-gates` and the three browser legs download it and check it against that job's digest, so every artifact gate reads exactly those bytes. `artifact-identity` builds the same commit again from another checkout path and `CARGO_HOME` and fails if the bytes differ, then compares the module with **the digest the base commit's own CI run recorded**, and prints `ARTIFACT CHANGED`, `ARTIFACT UNCHANGED` or `ARTIFACT CANNOT TELL` (with the reason) in its job summary. Nothing is compared with the committed pin and nothing is re-pinned. |
 | a `main` push on those routes | also records the module it built: `artifact-record`, a job that runs only on a push to `main`, checks out nothing, and is the workflow's only job with a write permission (so no pull request can forge a record), posts the commit status `audioworklet-sha256` (`<sha256> rustc <release>`, linking the run) on the pushed commit. That record is what later changes compare against. |
 | a PR on the `evidence` route (documentation only) | no module is built; the verdict's summary says `ARTIFACT UNCHANGED`, because no build reads those paths. |
 | a **release change**: a PR, or the `main` push that merges it, that edits the pin file or `npm-publish.yml`'s `PACKAGE_VERSION` or `EXPECTED_WORKLET_SHA256` | all of the above, and `artifact-identity` also requires the pin to be the built digest, `EXPECTED_WORKLET_SHA256` to be the pin, `npm-publish.yml`'s `RUSTUP_TOOLCHAIN` to be the rustc release the `artifact` job built with, and `hosts/host-web/qualification/results.json` to record a three-browser qualification of the built digest (`wasmSha256`) with a canonical `candidateCommit`. |
@@ -36,6 +36,36 @@ The comparison is with the digest the base's own run built and recorded.
 
 A status lookup the API refuses fails the job instead, since that is a misconfiguration, not a
 missing record. `scripts/web-audioworklet-identity.py` has the rules and their self-test.
+
+## The named twin: symbolicating a production stack trace
+
+Issue #1109: the shipped module carries no wasm `name` section, so a browser prints its frames as
+`wasm-function[N]` rather than `host_web::...`. Every digest, pin and record above is the shipped
+module's. The same build also produces the **named twin**,
+`miso-engine-v1-audio-worklet.simd128.named.wasm`: rustc's output, which is the shipped module plus
+that one section and nothing else. It is never published. Keep it for debugging:
+
+- **In CI.** Every `artifact` job uploads it as the workflow artifact `audioworklet-named-<commit>`,
+  beside `audioworklet-<commit>`. `artifact-gates` checks it against the job's digest and against
+  the shipped module, and the gates that find functions by name read it. A release's merge push to
+  `main` uploads the twin of the released bytes. Workflow artifacts expire (90 days by default).
+- **At any later time.** The build is reproducible (`artifact-identity` proves it on every change),
+  so rebuild the twin from the release commit with the toolchain its `qualification.yml` pins:
+
+  ```sh
+  shipped=$(mktemp -d) named=$(mktemp -d)
+  bash scripts/build-web-audioworklet.sh --module-only --named-twin "$named" "$shipped"
+  # prints the shipped module's digest: it must be the release's pin
+  python3 -B scripts/strip-wasm-names.py check \
+    "$named/miso-engine-v1-audio-worklet.simd128.named.wasm" \
+    "$shipped/miso-engine-v1-audio-worklet.simd128.wasm"
+  ```
+
+The check passes only when the shipped module is the twin minus its `name` section, every other
+section byte-identical. So function indices are the same in both, and so is every code offset,
+because rustc writes the `name` section after the code and data. Frame `wasm-function[N]` is the
+twin's function `N`: `wasm-objdump -x -j name <twin> | grep 'func\[N\]'` names it, and a
+devtools session that loads the twin instead of the shipped module prints the names itself.
 
 ## Between releases
 

@@ -72,6 +72,19 @@ pub extern "C" fn miso_gate_widths() -> u32 {
     corpus::WIDTHS as u32
 }
 
+/// The lane count width index `width` runs at, `Lane::WIDTH` of the type it digests at: `1` for
+/// the scalar oracle and `4` for `Simd4`, the only two indices a `simd128` module has.
+///
+/// The host requires exactly `[1, 4]` over every index [`miso_gate_widths`] reports, so a guest
+/// whose index 1 silently ran `f32` fails the leg rather than matching every pin with the scalar
+/// oracle twice (issue #1110, finding M1).
+///
+/// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_gate_lane_width(width: u32) -> u32 {
+    corpus::lane_width(width as usize) as u32
+}
+
 /// The production backend this module was compiled for: `1` `Simd4`, the one wasm width (`2` is
 /// `Simd8` and `0` the scalar backend, which no wasm build selects since #1038 and #1062).
 ///

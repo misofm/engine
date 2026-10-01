@@ -53,7 +53,7 @@ use effect_contract::{
 };
 use effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
-use lane::{Backend, Lane, Simd4, Simd8};
+use lane::{Backend, Lane};
 
 use crate::design::{COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT};
 use crate::kernel::{Channel, Detector};
@@ -945,12 +945,9 @@ impl NativeEffectFactory for CompressorFactory {
         // by `Backend` variant, because `Backend::Scalar` is test-only (#1059).
         const NATIVE: Option<BankWidth> = BankWidth::for_backend(Backend::current());
         Ok(Some(match NATIVE {
-            Some(BankWidth::Four) => {
-                Box::new(parts.bank::<Simd4>()) as Box<dyn PreparedNativeEffectBank>
-            }
-            Some(BankWidth::Eight) => {
-                Box::new(parts.bank::<Simd8>()) as Box<dyn PreparedNativeEffectBank>
-            }
+            Some(width) => effect_contract::match_bank_width!(width, |L| {
+                Box::new(parts.bank::<L>()) as Box<dyn PreparedNativeEffectBank>
+            }),
             None => return Ok(None),
         }))
     }
@@ -1302,9 +1299,10 @@ fn offsets_are_ordered(offsets: &[u32], spans: usize) -> bool {
 
 #[cfg(test)]
 mod width_state_tests {
-    use super::{Channel, Detector, Lane, Simd4, Simd8, kernel, state};
+    use super::{Channel, Detector, Lane, kernel, state};
     use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS};
     use effect_contract::LinkMode;
+    use lane::{Simd4, Simd8};
 
     const FRAMES: usize = 128;
     const SAMPLE_RATE: u32 = 48_000;
@@ -1401,7 +1399,6 @@ mod width_state_tests {
 #[cfg(test)]
 mod witness_tests {
     use super::{COEF_COUNT, COMPRESSOR_DESCRIPTOR, Instance, Lane, MAX_WIDTH, RAMP_COUNT};
-    use super::{Simd4, Simd8};
     use crate::design::{PARAMETER_COUNT, PARAMETER_SPECS};
     use dsp_reference::randomized::Draw;
     use effect_contract::{
@@ -1409,6 +1406,7 @@ mod witness_tests {
         PreparedSidechainPort, default_initial_values, expected_prepared_metadata,
     };
     use effect_runtime::ramp::LinearRamp;
+    use lane::{Simd4, Simd8};
 
     fn instance<L: Lane>() -> Instance<L> {
         let values: Vec<_> = default_initial_values(&COMPRESSOR_DESCRIPTOR).collect();

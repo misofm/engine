@@ -12,7 +12,9 @@
 //!    signals of [`FRAMES`] frames. At width `W` the corpus is processed in `LANES / W` groups of
 //!    an AoSoA block and read back *lane-major* before hashing, so the digest describes the
 //!    arithmetic and not the layout. `W = 1`, `W = 4` and `W = 8` must produce the same 32 bytes,
-//!    on every target — which is why every case is digested at all three widths on both legs.
+//!    on every target — which is why every case is digested at every width a target has: all
+//!    three natively, and `W = 1` and `W = 4` on `wasm32`, which has no eight-lane type (issue
+//!    #1110; see [`WIDTHS`]).
 //! 2. **No NaN reaches a digest.** D5 excludes NaN payloads because wasm canonicalises them. Every
 //!    case is built so its outputs are finite, and the host crate asserts that rather than assuming
 //!    it.
@@ -66,10 +68,38 @@ pub const LANES: usize = 8;
 /// finish and snap, short enough that the wasm leg costs well under a second.
 pub const FRAMES: usize = 1024;
 
-/// The lane widths every case is digested at. `Simd4` and `Simd8` are implemented on every target
-/// (`wide` lowers `f32x8` to two four-lane values where AVX2 is absent), so all three run on both
-/// legs and a width difference cannot hide behind a target difference.
-pub const WIDTHS: usize = 3;
+/// The lane widths every case is digested at, numbered as [`digest_case`] numbers them: `f32` (0),
+/// `Simd4` (1) and `Simd8` (2).
+///
+/// Three natively, where `Simd4` and `Simd8` are both implemented (on AArch64 `wide` lowers `f32x8`
+/// to two four-lane values), so a width difference cannot hide behind a target difference. Two on
+/// `wasm32`, which has no eight-lane type (issue #1110): the browser runs four lanes only, so the
+/// wasm leg checks `Simd4` against the scalar oracle and the native legs check all three.
+pub const WIDTHS: usize = if cfg!(target_arch = "wasm32") { 2 } else { 3 };
+
+/// Evaluates `$body` with `$lane` naming the lane type of width index `$width` (see [`WIDTHS`]):
+/// this corpus's one dispatch from a width index to a lane type, and the one place it names the
+/// eight-lane type, which does not exist on `wasm32`.
+macro_rules! at_width {
+    ($width:expr, |$lane:ident| $body:expr) => {
+        match $width {
+            0 => {
+                type $lane = f32;
+                $body
+            }
+            1 => {
+                type $lane = lane::Simd4;
+                $body
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            2 => {
+                type $lane = lane::Simd8;
+                $body
+            }
+            _ => panic!("width index out of range"),
+        }
+    };
+}
 
 /// Cases built from the `Lane` trait and the block kernels.
 pub const LANE_CASE_COUNT: usize =
@@ -588,11 +618,7 @@ const MINMAX_LOWERING_POOL: [u32; 10] = [
 #[must_use]
 pub fn minmax_lowering_mismatches(width: usize) -> u32 {
     assert!(width < WIDTHS, "width index out of range");
-    match width {
-        0 => minmax_lowering_mismatches_at::<f32>(),
-        1 => minmax_lowering_mismatches_at::<lane::Simd4>(),
-        _ => minmax_lowering_mismatches_at::<lane::Simd8>(),
-    }
+    at_width!(width, |L| minmax_lowering_mismatches_at::<L>())
 }
 
 /// [`minmax_lowering_mismatches`] at one width.
@@ -726,11 +752,7 @@ const F64_LANE_STEPS: usize = 256;
 #[must_use]
 pub fn f64_lane_mismatches(width: usize) -> u32 {
     assert!(width < WIDTHS, "width index out of range");
-    match width {
-        0 => f64_lane_mismatches_at::<f32>(),
-        1 => f64_lane_mismatches_at::<lane::Simd4>(),
-        _ => f64_lane_mismatches_at::<lane::Simd8>(),
-    }
+    at_width!(width, |L| f64_lane_mismatches_at::<L>())
 }
 
 /// [`f64_lane_mismatches`] at one width.
@@ -943,11 +965,7 @@ const METER_BLOCK_FRAMES: [usize; 5] = [1, 3, 64, 128, 129];
 #[must_use]
 pub fn meter_block_mismatches(width: usize) -> u32 {
     assert!(width < WIDTHS, "width index out of range");
-    match width {
-        0 => meter_block_mismatches_at::<f32>(),
-        1 => meter_block_mismatches_at::<lane::Simd4>(),
-        _ => meter_block_mismatches_at::<lane::Simd8>(),
-    }
+    at_width!(width, |L| meter_block_mismatches_at::<L>())
 }
 
 /// [`meter_block_mismatches`] at one width.
@@ -1043,6 +1061,23 @@ pub fn width_name(width: usize) -> &'static str {
     }
 }
 
+/// The lane count width index `width` runs at: the `Lane::WIDTH` of the type this crate's one
+/// width dispatch (`at_width!`) binds there, so `1`, `4` and, off `wasm32`, `8`.
+///
+/// Read from that type, not from a table, so it reports what a digest at that index actually ran.
+/// The wasm gate host holds a `simd128` guest's indices to exactly `[1, 4]`: a guest whose index 1
+/// silently ran `f32` would digest the scalar oracle twice and match every pin, and this is what
+/// turns it red (issue #1110, finding M1).
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn lane_width(width: usize) -> usize {
+    assert!(width < WIDTHS, "width index out of range");
+    at_width!(width, |L| <L as Lane>::WIDTH)
+}
+
 /// The pinned digest of a case.
 ///
 /// This crate's own cases are pinned in [`LANE_DIGESTS`]; the delegated cases return the pins gates
@@ -1073,7 +1108,7 @@ pub fn expected_digest(index: usize) -> [u8; 32] {
 
 /// Digests one case at one width.
 ///
-/// `width` selects `f32` (0), `Simd4` (1) or `Simd8` (2). A math case ignores it.
+/// `width` selects `f32` (0), `Simd4` (1) or, off `wasm32`, `Simd8` (2). A math case ignores it.
 ///
 /// # Panics
 ///
@@ -1086,48 +1121,16 @@ pub fn digest_case(index: usize, width: usize) -> [u8; 32] {
             digest_lanes(&lane_values(index, width, true))
         }
         Case::Math(case) => digest_math(case),
-        Case::Runtime(case) => match width {
-            0 => digest_runtime::<f32>(case),
-            1 => digest_runtime::<lane::Simd4>(case),
-            _ => digest_runtime::<lane::Simd8>(case),
-        },
+        Case::Runtime(case) => at_width!(width, |L| digest_runtime::<L>(case)),
         Case::TransientShaper(case) => digest_transient_shaper(case, width),
         Case::Delay(case) => digest_delay(case),
-        Case::Multiband(case) => match width {
-            0 => digest_multiband::<f32>(case),
-            1 => digest_multiband::<lane::Simd4>(case),
-            _ => digest_multiband::<lane::Simd8>(case),
-        },
-        Case::SoftClip(case) => match width {
-            0 => digest_soft_clip::<f32>(case),
-            1 => digest_soft_clip::<lane::Simd4>(case),
-            _ => digest_soft_clip::<lane::Simd8>(case),
-        },
-        Case::ParametricEq(case) => match width {
-            0 => digest_parametric_eq::<f32>(case),
-            1 => digest_parametric_eq::<lane::Simd4>(case),
-            _ => digest_parametric_eq::<lane::Simd8>(case),
-        },
-        Case::GateExpander(case) => match width {
-            0 => digest_gate_expander::<f32>(case),
-            1 => digest_gate_expander::<lane::Simd4>(case),
-            _ => digest_gate_expander::<lane::Simd8>(case),
-        },
-        Case::Builtins(case) => match width {
-            0 => digest_builtins::<f32>(case),
-            1 => digest_builtins::<lane::Simd4>(case),
-            _ => digest_builtins::<lane::Simd8>(case),
-        },
-        Case::Limiter(case) => match width {
-            0 => digest_limiter::<f32>(case),
-            1 => digest_limiter::<lane::Simd4>(case),
-            _ => digest_limiter::<lane::Simd8>(case),
-        },
-        Case::Compressor(case) => match width {
-            0 => digest_compressor::<f32>(case),
-            1 => digest_compressor::<lane::Simd4>(case),
-            _ => digest_compressor::<lane::Simd8>(case),
-        },
+        Case::Multiband(case) => at_width!(width, |L| digest_multiband::<L>(case)),
+        Case::SoftClip(case) => at_width!(width, |L| digest_soft_clip::<L>(case)),
+        Case::ParametricEq(case) => at_width!(width, |L| digest_parametric_eq::<L>(case)),
+        Case::GateExpander(case) => at_width!(width, |L| digest_gate_expander::<L>(case)),
+        Case::Builtins(case) => at_width!(width, |L| digest_builtins::<L>(case)),
+        Case::Limiter(case) => at_width!(width, |L| digest_limiter::<L>(case)),
+        Case::Compressor(case) => at_width!(width, |L| digest_compressor::<L>(case)),
     }
 }
 
@@ -1158,11 +1161,7 @@ pub fn lane_case_values(index: usize, width: usize) -> Vec<f32> {
 #[must_use]
 pub fn unfused_fma_digest(width: usize) -> [u8; 32] {
     assert!(width < WIDTHS, "width index out of range");
-    let lanes = match width {
-        0 => elementwise_values::<f32>(Elementwise::Fma, false),
-        1 => elementwise_values::<lane::Simd4>(Elementwise::Fma, false),
-        _ => elementwise_values::<lane::Simd8>(Elementwise::Fma, false),
-    };
+    let lanes = at_width!(width, |L| elementwise_values::<L>(Elementwise::Fma, false));
     digest_lanes(&lanes)
 }
 
@@ -1200,21 +1199,11 @@ pub const fn fma_case() -> usize {
 /// Runs one lane case at one width.
 fn lane_values(index: usize, width: usize, fused: bool) -> [[f32; FRAMES]; LANES] {
     match case_of(index) {
-        Case::Kernel(kernel, signal) => match width {
-            0 => kernel_values::<f32>(kernel, signal),
-            1 => kernel_values::<lane::Simd4>(kernel, signal),
-            _ => kernel_values::<lane::Simd8>(kernel, signal),
-        },
-        Case::Elementwise(operation) => match width {
-            0 => elementwise_values::<f32>(operation, fused),
-            1 => elementwise_values::<lane::Simd4>(operation, fused),
-            _ => elementwise_values::<lane::Simd8>(operation, fused),
-        },
-        Case::MeterPeak => match width {
-            0 => meter_peak_values::<f32>(),
-            1 => meter_peak_values::<lane::Simd4>(),
-            _ => meter_peak_values::<lane::Simd8>(),
-        },
+        Case::Kernel(kernel, signal) => at_width!(width, |L| kernel_values::<L>(kernel, signal)),
+        Case::Elementwise(operation) => {
+            at_width!(width, |L| elementwise_values::<L>(operation, fused))
+        }
+        Case::MeterPeak => at_width!(width, |L| meter_peak_values::<L>()),
         Case::Math(_)
         | Case::Runtime(_)
         | Case::TransientShaper(_)

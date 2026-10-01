@@ -8,8 +8,10 @@ compiled only for tests and the `test-support` features. This gate reads a *buil
 fails if any of the scalar path's own functions is in it:
 
 `--wasm MODULE`
-    The AudioWorklet module (`miso-engine-v1-audio-worklet.simd128.wasm`). Function names are read
-    from the module's `name` custom section, parsed here, so no external tool is needed.
+    The AudioWorklet module's named twin (`miso-engine-v1-audio-worklet.simd128.named.wasm`).
+    Function names are read from its `name` custom section, parsed here, so no external tool is
+    needed. The shipped module carries no `name` section (issue #1109) and is refused;
+    `strip-wasm-names.py check` proves the twin is the shipped module plus that section.
 `--native LIBRARY`
     A release `capi` library (`libcapi.so`, `.a` or `.dylib`), read with `nm --no-demangle`.
 `--self-test`
@@ -139,7 +141,8 @@ def wasm_function_names(data: bytes) -> list[str]:
                     cursor = sub_end
         offset = end
     if not found_section:
-        raise Invalid("the module has no `name` section, so its functions cannot be checked")
+        raise Invalid("the module has no `name` section, so its functions cannot be checked; the "
+                      "shipped module carries none (#1109), so give the gate the build's named twin")
     return names
 
 
@@ -336,7 +339,7 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--wasm", type=pathlib.Path, help="the AudioWorklet module")
+    mode.add_argument("--wasm", type=pathlib.Path, help="the AudioWorklet module's named twin")
     mode.add_argument("--native", type=pathlib.Path, help="a release capi library")
     mode.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()

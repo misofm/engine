@@ -28,7 +28,8 @@
 use crate::{
     BandTarget, Channel, EQ_BAND_COUNT, EQ_SECTION_COUNT, EqBandKind, RAMP_SAMPLES, SampleRateHz,
 };
-use lane::{Lane, Simd4, Simd8};
+use effect_contract::BankWidth;
+use lane::Lane;
 
 /// Independent single-track configurations in every case; a multiple of the widest backend.
 pub const LANES: usize = 8;
@@ -142,10 +143,9 @@ pub(crate) fn fill(case: usize, track: usize, lane: &mut [f32; FRAMES]) {
 pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
     assert!(case < CASE_COUNT, "corpus case index out of range");
     assert_eq!(out.len(), POINTS, "corpus output length");
-    match L::WIDTH {
-        1 => run::<f32, 1>(case, out),
-        4 => run::<Simd4, 4>(case, out),
-        _ => run::<Simd8, 8>(case, out),
+    match BankWidth::for_lanes(L::WIDTH) {
+        None => run::<f32, 1>(case, out),
+        Some(width) => effect_contract::match_bank_width!(width, |V, W| run::<V, W>(case, out)),
     }
 }
 

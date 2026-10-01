@@ -8,10 +8,12 @@
 //! Two legs, one corpus:
 //!
 //! * **native** — [`wasm_gate_corpus`] linked as an `rlib` and run in-process at
-//!   every width, compared against the pins.
+//!   every width (`Scalar`, `Simd4` and `Simd8`), compared against the pins.
 //! * **wasm** — the same crate compiled to `wasm32-unknown-unknown` with `simd128`, the one wasm
-//!   build that ships, and executed under wasmtime, compared against the same pins. The scalar
-//!   (non-`simd128`) wasm leg retired with #1062: `lane` refuses that build.
+//!   build that ships, and executed under wasmtime, compared against the same pins at the widths
+//!   that build has: `Scalar` and `Simd4`. The browser runs four lanes only, and since #1110 the
+//!   wasm build has no eight-lane type to digest. The scalar (non-`simd128`) wasm leg retired with
+//!   #1062: `lane` refuses that build.
 //!
 //! The runtime is configured to *reject* relaxed SIMD (`Config::wasm_relaxed_simd(false)`), so a
 //! guest built with `-C target-feature=+relaxed-simd` that actually emits a relaxed instruction
@@ -65,6 +67,22 @@ impl ExpectedBackend {
     pub const fn code(self) -> u32 {
         match self {
             Self::Simd4 => 1,
+        }
+    }
+
+    /// The lane count of each width index a guest of this backend digests every lane case at, as
+    /// the guest's `miso_gate_lane_width` export reports it over its `miso_gate_widths` indices:
+    /// the scalar oracle and the backend's own width.
+    ///
+    /// Pinned per index rather than read from the guest, so the leg fails on a guest that stopped
+    /// digesting its own width (it reports `[1]`) and on one whose index 1 silently runs `f32`
+    /// (it reports `[1, 1]`, digests the scalar oracle twice and would match every pin; issue
+    /// #1110, finding M1). It is not the host's own widths: the host also has `Simd8`, which the
+    /// wasm build does not (issue #1110).
+    #[must_use]
+    pub const fn lane_widths(self) -> &'static [usize] {
+        match self {
+            Self::Simd4 => &[1, 4],
         }
     }
 
@@ -181,11 +199,11 @@ pub fn hex(bytes: &[u8; 32]) -> String {
     bench_support::digest::hex(bytes)
 }
 
-/// The widths a case is compared at: every width for a case with a lane instantiation, the scalar
-/// run alone for a math case, whose functions have none.
-fn widths_of(case: usize) -> std::ops::Range<usize> {
+/// The widths a case is compared at on a leg that has `widths` of them: every width for a case with
+/// a lane instantiation, the scalar run alone for a math case, whose functions have none.
+fn widths_of(case: usize, widths: usize) -> std::ops::Range<usize> {
     if corpus::is_width_dependent(case) {
-        0..corpus::WIDTHS
+        0..widths
     } else {
         0..1
     }
@@ -212,7 +230,7 @@ pub fn native_report() -> Report {
     let mut comparisons = 0;
     for case in 0..corpus::CASE_COUNT {
         let expected = corpus::expected_digest(case);
-        for width in widths_of(case) {
+        for width in widths_of(case, corpus::WIDTHS) {
             let actual = corpus::digest_case(case, width);
             comparisons += 1;
             if actual != expected {
@@ -258,6 +276,10 @@ struct Guest {
     backend: u32,
     /// What `miso_gate_case_count()` reported.
     cases: usize,
+    /// What `miso_gate_widths()` reported: the widths this guest digests at.
+    widths: usize,
+    /// What `miso_gate_lane_width(index)` reported for each of those widths: its lane count.
+    lane_widths: Vec<usize>,
 }
 
 impl Guest {
@@ -279,6 +301,8 @@ impl Guest {
         let case_count: TypedFunc<(), u32> =
             instance.get_typed_func(&mut store, "miso_gate_case_count")?;
         let widths: TypedFunc<(), u32> = instance.get_typed_func(&mut store, "miso_gate_widths")?;
+        let lane_width: TypedFunc<u32, u32> =
+            instance.get_typed_func(&mut store, "miso_gate_lane_width")?;
         let digest_word: TypedFunc<(u32, u32, u32), u32> =
             instance.get_typed_func(&mut store, "miso_gate_digest_word")?;
         let minmax_lowering_mismatches: TypedFunc<u32, u32> =
@@ -291,13 +315,20 @@ impl Guest {
         let backend = backend.call(&mut store, ())?;
         let cases = case_count.call(&mut store, ())? as usize;
         let guest_widths = widths.call(&mut store, ())? as usize;
-        if cases != corpus::CASE_COUNT || guest_widths != corpus::WIDTHS {
+        // The width count is the guest's own (no `Simd8` on wasm32, issue #1110), so only the
+        // case list is compared here; `wasm_report` holds the widths to the expected backend's.
+        if cases != corpus::CASE_COUNT || guest_widths > corpus::WIDTHS {
             wasmtime::bail!(
                 "guest corpus shape ({cases} cases, {guest_widths} widths) differs from this \
-                 host's ({} cases, {} widths): the two were built from different sources",
+                 host's ({} cases, at most {} widths): the two were built from different sources",
                 corpus::CASE_COUNT,
                 corpus::WIDTHS
             );
+        }
+
+        let mut lane_widths = Vec::with_capacity(guest_widths);
+        for width in 0..guest_widths {
+            lane_widths.push(lane_width.call(&mut store, width as u32)? as usize);
         }
 
         Ok(Self {
@@ -308,13 +339,15 @@ impl Guest {
             meter_block_mismatches,
             backend,
             cases,
+            widths: guest_widths,
+            lane_widths,
         })
     }
 
-    /// Runs the `max`/`min` lowering truth table inside the guest, at every width.
+    /// Runs the `max`/`min` lowering truth table inside the guest, at every width it has.
     fn minmax_lowering_mismatches(&mut self) -> wasmtime::Result<u32> {
         let mut total = 0;
-        for width in 0..corpus::WIDTHS {
+        for width in 0..self.widths {
             total += self
                 .minmax_lowering_mismatches
                 .call(&mut self.store, width as u32)?;
@@ -322,10 +355,10 @@ impl Guest {
         Ok(total)
     }
 
-    /// Runs the `f64` lane exactness differential inside the guest, at every width.
+    /// Runs the `f64` lane exactness differential inside the guest, at every width it has.
     fn f64_lane_mismatches(&mut self) -> wasmtime::Result<u32> {
         let mut total = 0;
-        for width in 0..corpus::WIDTHS {
+        for width in 0..self.widths {
             total += self
                 .f64_lane_mismatches
                 .call(&mut self.store, width as u32)?;
@@ -333,10 +366,10 @@ impl Guest {
         Ok(total)
     }
 
-    /// Runs the full meter block pass differential inside the guest, at every width.
+    /// Runs the full meter block pass differential inside the guest, at every width it has.
     fn meter_block_mismatches(&mut self) -> wasmtime::Result<u32> {
         let mut total = 0;
-        for width in 0..corpus::WIDTHS {
+        for width in 0..self.widths {
             total += self
                 .meter_block_mismatches
                 .call(&mut self.store, width as u32)?;
@@ -363,7 +396,7 @@ impl Guest {
 ///
 /// Returns an error if the module fails to compile, validate or instantiate (which is what a guest
 /// that emits a relaxed-SIMD instruction does), if an export is missing, if the guest traps, or if
-/// the backend it reports is not `expected`.
+/// the backend it reports, or the lane count of each width it digests at, is not `expected`'s.
 pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<Report> {
     let mut guest = Guest::load(path)?;
     if guest.backend != expected.code() {
@@ -374,12 +407,21 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
             expected.name()
         );
     }
+    if guest.lane_widths != expected.lane_widths() {
+        wasmtime::bail!(
+            "guest digests at lane widths {:?} but a {} guest has {:?}: the scalar oracle and its \
+             own",
+            guest.lane_widths,
+            expected.name(),
+            expected.lane_widths()
+        );
+    }
 
     let mut mismatches = Vec::new();
     let mut comparisons = 0;
     for case in 0..guest.cases {
         let expected_digest = corpus::expected_digest(case);
-        for width in widths_of(case) {
+        for width in widths_of(case, guest.widths) {
             let actual = guest.digest(case, width)?;
             comparisons += 1;
             if actual != expected_digest {
@@ -414,7 +456,7 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
 ///
 /// Master plan §8: a pin comes from the oracle, never from copying whatever the production path
 /// currently prints. Only width 0 — the scalar implementation — is read here, and the gate then
-/// requires `Simd4` and `Simd8`, on every target, to reproduce it.
+/// requires `Simd4` on every target, and `Simd8` on every native one, to reproduce it.
 #[must_use]
 pub fn print_lane_pins() -> String {
     use fmt::Write as _;

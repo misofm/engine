@@ -37,7 +37,7 @@
 //! is caught once per block by `effect_runtime::bank` (D7).
 
 use effect_contract::{
-    AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
+    AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
     EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
     ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
@@ -58,7 +58,7 @@ use effect_runtime::state_payload::{
     STATE_LENGTH_CODE, STATE_VERSION_CODE, read_f32, read_u32, write_f32, write_u32,
 };
 use lane::kernels::{SvfState, svf_step};
-use lane::{Lane, Simd4, Simd8, flush};
+use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
@@ -1591,10 +1591,9 @@ impl NativeEffectFactory for MultibandCompressorFactory {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
         request.validate_shape()?;
-        match request.width {
-            BankWidth::Four => prepare_bank::<Simd4, 4>(self, request),
-            BankWidth::Eight => prepare_bank::<Simd8, 8>(self, request),
-        }
+        effect_contract::match_bank_width!(request.width, |L, N| prepare_bank::<L, N>(
+            self, request
+        ))
     }
 }
 
@@ -1876,6 +1875,7 @@ mod knee_tests {
 
     use super::*;
     use effect_runtime::dynamics::MIN_SOFT_KNEE_DB;
+    use lane::{Simd4, Simd8};
 
     /// The compile-time knee words are the ones this crate wrote inline before #994, bit for bit.
     ///
