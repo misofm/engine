@@ -1,17 +1,16 @@
 //! Guest half of gate G5: the cross-target digest harness.
 //!
-//! Built two ways from one source. As an `rlib` it is linked by `wasm-gates` and run
-//! natively; as a `cdylib` for `wasm32-unknown-unknown` it is instantiated by wasmtime and driven
-//! through the `extern "C"` exports below. Because both legs execute the same
-//! [`corpus`] module, a digest difference between them is a difference in the *target*, which is
-//! exactly what master plan #83 D5 claims cannot happen.
+//! The shared [`corpus`] module is linked natively by `wasm-gates` and built into this
+//! `cdylib`-only guest for `wasm32-unknown-unknown`. Wasmtime instantiates the guest and drives
+//! the `extern "C"` exports below. Because both legs execute the same corpus, a digest difference
+//! between them is a difference in the *target*, which master plan #83 D5 claims cannot happen.
 //!
 //! The exports are deliberately primitive: `u32` in, `u32` out, no pointers, no memory contract to
 //! get wrong, and no imports at all, so the module instantiates with an empty import object and
 //! cannot reach anything outside itself.
 //!
-//! This crate is dev/tooling. Nothing in the engine depends on it, and it is the only place in the
-//! workspace that may pull a WebAssembly runtime (its host counterpart does).
+//! This crate is dev/tooling. No engine crate depends on it; its host counterpart, `wasm-gates`,
+//! owns the WebAssembly runtime dependency.
 
 #![allow(unsafe_code)]
 
@@ -60,7 +59,7 @@ pub extern "C" fn miso_gate_case_count() -> u32 {
     corpus::CASE_COUNT as u32
 }
 
-/// Number of leading cases that are lane cases; the rest replay the `math` M3 corpus.
+/// Number of leading local lane cases; later cases replay the math, effect and builtin corpora.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_gate_lane_case_count() -> u32 {
     corpus::LANE_CASE_COUNT as u32
@@ -119,8 +118,8 @@ pub extern "C" fn miso_gate_minmax_lowering_mismatches(width: u32) -> u32 {
 /// fails the leg on anything else.
 ///
 /// Like [`miso_gate_minmax_lowering_mismatches`], this is the only wasm execution of that
-/// differential: `crates/lane/tests/f64_lane.rs` runs gates 1 to 3 natively, and neither wasm
-/// lowering (`f64x2` under `simd128`, a per-lane array without it) has a native leg.
+/// differential: `crates/lane/tests/f64_lane.rs` runs gates 1 to 3 natively, while wasm's `f64x2`
+/// lowering under `simd128` has no native execution.
 ///
 /// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
 #[unsafe(no_mangle)]
