@@ -135,7 +135,7 @@ pub const TRANSIENT_SHAPER_CASE_COUNT: usize = transient_shaper_corpus::CASE_COU
 ///
 /// The delay is a `W = 1` effect -- a gathered two-second ring has no `W4`/`W8` kernel -- so like
 /// the math cases these are run once rather than at every width. What they carry across the target
-/// boundary is the six `Lane::fma` sites of its kernel, which on wasm are the software FMA.
+/// boundary is the six `Lane::fma` sites of its kernel, which use multiply then add on every target.
 pub const DELAY_CASE_COUNT: usize = delay_corpus::CASE_COUNT;
 
 /// Cases delegated to [`multiband_compressor::corpus`] (audit #94 E5), replayed under
@@ -196,7 +196,7 @@ pub const BUILTINS_ORIGINAL_CASE_COUNT: usize = 8;
 /// the tap-major Annex-2 detector, the streaming van Herk window minimum — the only per-lane
 /// control flow in this corpus that is data independent but *window-length* dependent, so a lane
 /// whose lookahead differs runs a different schedule inside the same vector body — the exactly
-/// summed box ramp on its `2^-14` grid, and the single-rounding `fma` one-pole on the reduction
+/// summed box ramp on its `2^-14` grid, and the two-rounding multiply/add one-pole on the reduction
 /// word with its D7 `flush`. One case per link mode, one at the `W_MIN` window with near-Nyquist
 /// input, one at the longest lookahead, and one of subnormal input between bursts, which is where
 /// the flush has to remove the same bits on every target. Lane generic, and their pins live in that
@@ -209,7 +209,7 @@ pub const LIMITER_CASE_COUNT: usize = limiter_corpus::CASE_COUNT;
 /// different thresholds, ratios, knees, ballistics, makeup and mixes, rendered through the
 /// production `process_block` in a frozen block partition and read back lane major: the per-lane
 /// current-sample detector, the branchless Giannoulis, Massberg and Reiss equation 4, the
-/// `log2`/`exp2` dB chain, the single-rounding switched one-pole on the gain-reduction word with
+/// `log2`/`exp2` dB chain, the two-rounding switched one-pole on the gain-reduction word with
 /// its D7 `flush`, and the three identity selects. One case per link mode plus one that drives the
 /// D11 ramping body through a mid-block automation point. The recurrence is per lane and never
 /// crosses lanes, which is why the digests stay width independent. Lane generic, and their pins
@@ -257,10 +257,9 @@ const SIGNALS: [Signal; 4] = [
 
 /// The element-wise `Lane` cases, in pin order.
 ///
-/// [`Elementwise::Fma`] is the one that carries this gate: on wasm `Lane::fma` is the exact
-/// software FMA of master plan §3.5, whose `v128` body is the only part of the lane crate no
-/// native gate can execute. Its inputs are built so a fused and an unfused evaluation disagree, so
-/// a wasm build that quietly stopped fusing moves this digest.
+/// [`Elementwise::Fma`] separates the unfused `Lane::fma` contract from single-rounding FMA.
+/// Its inputs make those evaluations disagree, so a wasm build that quietly starts fusing moves
+/// this digest. The native gate also evaluates a genuinely fused reference to prove nonvacuity.
 const ELEMENTWISE: [Elementwise; 3] = [Elementwise::Fma, Elementwise::Exp2, Elementwise::Log2];
 
 /// One block kernel of `lane::kernels`.
@@ -1150,10 +1149,9 @@ pub fn lane_case_values(index: usize, width: usize) -> Vec<f32> {
 
 /// The `lane_fma` case evaluated with a multiply and an add instead of `Lane::fma`.
 ///
-/// Gate G5 asserts this digest differs from the pinned one at every width. Without that assertion
-/// the `lane_fma` case would only prove that both legs computed *something* identically; with it,
-/// the case is known to separate a fused evaluation from an unfused one, which is the difference a
-/// wasm build that stopped using the software FMA would show.
+/// Gate G5 requires this digest to equal the pinned one at every available width: `Lane::fma`
+/// must use two roundings (#163 phase 2). Its separate native fused reference must disagree, so
+/// agreement cannot pass merely because the operands no longer separate the two contracts.
 ///
 /// # Panics
 ///
@@ -1266,11 +1264,14 @@ fn lane_seed(lane: usize) -> u64 {
 /// This is the step that makes the digest width independent: whatever AoSoA grouping produced the
 /// values, they are hashed in the same order.
 fn digest_lanes(lanes: &[[f32; FRAMES]; LANES]) -> [u8; 32] {
+    digest_words(lanes.iter().flatten().map(|sample| sample.to_bits()))
+}
+
+/// Hashes ordered little-endian `u32` words without collecting or copying their storage.
+fn digest_words(words: impl IntoIterator<Item = u32>) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    for lane in lanes {
-        for sample in lane {
-            hasher.update(sample.to_bits().to_le_bytes());
-        }
+    for word in words {
+        hasher.update(word.to_le_bytes());
     }
     hasher.finalize().into()
 }
@@ -1425,18 +1426,12 @@ fn elementwise_operands(operation: Elementwise, lane: usize) -> [[f32; FRAMES]; 
                     (a, a, c)
                 }
                 1 => {
-                    // The midpoint family, which is the only thing that exercises the *direction*
-                    // of the software FMA's round-to-odd step (master plan hazard H1: an
-                    // unconditional `bits | 1` is wrong whenever the rounded `f64` sum lies above
-                    // the exact value).
-                    //
-                    // `a` is an odd mantissa in `[1, 4/3)` and `b` is exactly `1.5`, so the `f64`
-                    // product `a * b` is exact and lands precisely halfway between two `f32`
-                    // values. `c = ±2^-60` is far below half an `f64` ulp there, so the `f64` sum
-                    // rounds back to the product, is flagged inexact, and the round-to-odd
-                    // adjustment alone decides which of the two neighbouring `f32` values the
-                    // demote produces. Getting its direction wrong changes the result for exactly
-                    // the negative half of the family.
+                    // The frozen midpoint family originally exercised the software FMA's
+                    // round-to-odd direction (master plan hazard H1), before #163 phase 2 changed
+                    // the contract to unfused. `a` has an odd mantissa in `[1, 4/3)` and `b` is
+                    // exactly `1.5`, so their exact product is halfway between two `f32` values;
+                    // `c = ±2^-60` is below half an `f64` ulp there. These same operands remain in
+                    // the corpus, now evaluated with the two-rounding multiply/add contract.
                     let mantissa = (random.next_u32() % ODD_MANTISSA_LIMIT) | 1;
                     let a = f32::from_bits(0x3F80_0000 | mantissa);
                     let c = if random.next_u32() & 1 == 0 {
@@ -1526,10 +1521,10 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
     }
 
     let width = L::WIDTH;
-    let mut a = vec![0.0_f32; width];
-    let mut b = vec![0.0_f32; width];
-    let mut c = vec![0.0_f32; width];
-    let mut out = vec![0.0_f32; width];
+    let mut a = [0.0_f32; LANES];
+    let mut b = [0.0_f32; LANES];
+    let mut c = [0.0_f32; LANES];
+    let mut out = [0.0_f32; LANES];
     let mut lanes = [[0.0_f32; FRAMES]; LANES];
 
     for group in 0..LANES / width {
@@ -1540,14 +1535,14 @@ fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FR
                 b[offset] = source[1][frame];
                 c[offset] = source[2][frame];
             }
-            let x = L::load(&a);
+            let x = L::load(&a[..width]);
             let value = match operation {
-                Elementwise::Fma if fused => x.fma(L::load(&b), L::load(&c)),
-                Elementwise::Fma => x.mul(L::load(&b)).add(L::load(&c)),
+                Elementwise::Fma if fused => x.fma(L::load(&b[..width]), L::load(&c[..width])),
+                Elementwise::Fma => x.mul(L::load(&b[..width])).add(L::load(&c[..width])),
                 Elementwise::Exp2 => exp2_lane::<L>(x),
                 Elementwise::Log2 => log2_lane::<L>(x),
             };
-            value.store(&mut out);
+            value.store(&mut out[..width]);
             for offset in 0..width {
                 lanes[group * width + offset][frame] = out[offset];
             }
@@ -1637,7 +1632,7 @@ fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
     let width = L::WIDTH;
     let blocks = meter_peak_blocks();
     let mut block = vec![0.0_f32; METER_PEAK_BLOCKS.iter().max().copied().unwrap_or(0) * width];
-    let mut out = vec![0.0_f32; width];
+    let mut out = [0.0_f32; LANES];
     let mut lanes = [[0.0_f32; FRAMES]; LANES];
     for group in 0..LANES / width {
         let mut peak = L::zero();
@@ -1654,7 +1649,7 @@ fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
             }
             for prefix in 1..=frames {
                 meter_sample_peak_block::<L>(&block[..prefix * width], prefix, peak)
-                    .store(&mut out);
+                    .store(&mut out[..width]);
                 for offset in 0..width {
                     lanes[group * width + offset][start + prefix - 1] = out[offset];
                 }
@@ -1670,11 +1665,7 @@ fn meter_peak_values<L: Lane>() -> [[f32; FRAMES]; LANES] {
 fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; runtime_corpus::POINTS];
     runtime_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `multiband-compressor` case: SHA-256 over the little-endian result words of that
@@ -1682,11 +1673,7 @@ fn digest_runtime<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_multiband<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; multiband_corpus::POINTS];
     multiband_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `transient-shaper` case: SHA-256 over the little-endian result words of that
@@ -1694,11 +1681,7 @@ fn digest_multiband<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
     let mut out = vec![0_u32; transient_shaper_corpus::WORDS];
     transient_shaper_corpus::run_case(case, transient_shaper_corpus::WIDTHS[width], &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `delay` G5 case: SHA-256 over the little-endian result words of that crate's
@@ -1706,11 +1689,7 @@ fn digest_transient_shaper(case: usize, width: usize) -> [u8; 32] {
 fn digest_delay(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; delay_corpus::POINTS];
     delay_corpus::run_case(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `soft-clip` case: SHA-256 over the little-endian result words of that crate's
@@ -1718,11 +1697,7 @@ fn digest_delay(case: usize) -> [u8; 32] {
 fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; soft_clip_corpus::POINTS];
     soft_clip_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `gate-expander` case at width `L::WIDTH`: SHA-256 over the little-endian result
@@ -1730,11 +1705,7 @@ fn digest_soft_clip<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_gate_expander<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; gate_expander_corpus::POINTS];
     gate_expander_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `parametric-eq` E9 case: SHA-256 over the little-endian result words of that crate's
@@ -1742,21 +1713,17 @@ fn digest_gate_expander<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_parametric_eq<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; parametric_eq_corpus::POINTS];
     parametric_eq_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `builtins` case: SHA-256 over the little-endian bits of that crate's
 /// `corpus::case_values`, the form its `BUILTINS_DIGESTS` pins take.
 fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for value in builtins_corpus::case_values::<L>(case) {
-        hasher.update(value.to_bits().to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(
+        builtins_corpus::case_values::<L>(case)
+            .into_iter()
+            .map(f32::to_bits),
+    )
 }
 
 /// Digests one `true-peak-limiter` E12 case at width `L::WIDTH`: SHA-256 over the little-endian
@@ -1764,11 +1731,7 @@ fn digest_builtins<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; limiter_corpus::POINTS];
     limiter_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `compressor` E4 case: SHA-256 over the little-endian result words of that crate's
@@ -1776,11 +1739,7 @@ fn digest_limiter<L: Lane>(case: usize) -> [u8; 32] {
 fn digest_compressor<L: Lane>(case: usize) -> [u8; 32] {
     let mut out = vec![0_u32; compressor_corpus::POINTS];
     compressor_corpus::run_case::<L>(case, &mut out);
-    let mut hasher = Sha256::new();
-    for word in &out {
-        hasher.update(word.to_le_bytes());
-    }
-    hasher.finalize().into()
+    digest_words(out.iter().copied())
 }
 
 /// Digests one `math` M3 case, exactly as `tests/m3_determinism.rs` does natively.
