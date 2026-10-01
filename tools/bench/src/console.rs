@@ -1377,8 +1377,7 @@ impl PlacementMeasurement {
             .iter()
             .map(|workload| SessionRuntime::new(*workload))
             .collect();
-        let mut hashes: Vec<Sha256Sink> =
-            PLACEMENT_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        let mut hashes = PLACEMENT_ARMS.map(|_| Sha256Sink::new());
         for arm in &mut arms {
             for observation in 0..64 {
                 let _ = arm.render(observation);
@@ -1388,10 +1387,7 @@ impl PlacementMeasurement {
         // it. Read before and after, outside the clock.
         let before: Vec<u64> = arms.iter().map(SessionRuntime::bank_transposes).collect();
 
-        let mut samples: Vec<Vec<u64>> = PLACEMENT_ARMS
-            .iter()
-            .map(|_| Vec::with_capacity(OBSERVATIONS))
-            .collect();
+        let mut samples = PLACEMENT_ARMS.map(|_| Vec::with_capacity(OBSERVATIONS));
         let mut render_errors = 0_u64;
         audit::warm_up();
         audit::reset();
@@ -1408,7 +1404,7 @@ impl PlacementMeasurement {
             }
         }
         let snapshot = audit::snapshot();
-        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+        let digests = hashes.map(Sha256Sink::finish_hex);
 
         // The class-A statement, asserted in-run. Rack placement regroups lanes; it never changes
         // per-lane arithmetic (AGENTS.md, #166). If the two arms ever disagree, this run says so
@@ -1426,8 +1422,8 @@ impl PlacementMeasurement {
             .collect();
 
         Self {
-            ns_per_block: [samples[0].clone(), samples[1].clone()],
-            digests: [digests[0].clone(), digests[1].clone()],
+            ns_per_block: samples,
+            digests,
             transposes_per_block: [transposes[0], transposes[1]],
             audit: snapshot,
             render_errors,
@@ -1568,7 +1564,7 @@ impl MonoMeasurement {
     fn run() -> Self {
         let mut arms: Vec<SessionRuntime> =
             MONO_ARMS.iter().map(|w| SessionRuntime::new(*w)).collect();
-        let mut hashes: Vec<Sha256Sink> = MONO_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        let mut hashes = MONO_ARMS.map(|_| Sha256Sink::new());
         // The evidence that the fixture is what the row claims, read before anything is timed. A
         // pair measured on a session with no mono-source track would be a pair measuring the
         // standing console twice under another name, and the record carries both numbers so a
@@ -1598,10 +1594,7 @@ impl MonoMeasurement {
         }
         let before: Vec<u64> = arms.iter().map(SessionRuntime::bank_transposes).collect();
 
-        let mut samples: Vec<Vec<u64>> = MONO_ARMS
-            .iter()
-            .map(|_| Vec::with_capacity(OBSERVATIONS))
-            .collect();
+        let mut samples = MONO_ARMS.map(|_| Vec::with_capacity(OBSERVATIONS));
         let mut render_errors = 0_u64;
         audit::warm_up();
         audit::reset();
@@ -1618,7 +1611,7 @@ impl MonoMeasurement {
             }
         }
         let snapshot = audit::snapshot();
-        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+        let digests = hashes.map(Sha256Sink::finish_hex);
 
         // The class-A statement, asserted in-run. Trivially true today and load-bearing the day
         // the collapse exists: a track whose two channels are doing identical work must render,
@@ -1657,8 +1650,8 @@ impl MonoMeasurement {
             .collect();
 
         Self {
-            ns_per_block: [samples[0].clone(), samples[1].clone()],
-            digests: [digests[0].clone(), digests[1].clone()],
+            ns_per_block: samples,
+            digests,
             transposes_per_block: [transposes[0], transposes[1]],
             mono_source_tracks: [mono_source_tracks[0], mono_source_tracks[1]],
             bank_symmetry: [bank_symmetry[0], bank_symmetry[1]],
@@ -1896,12 +1889,8 @@ impl AutomationMeasurement {
             }
         }
 
-        let mut hashes: Vec<Sha256Sink> =
-            AUTOMATION_ARMS.iter().map(|_| Sha256Sink::new()).collect();
-        let mut samples: Vec<Vec<u64>> = AUTOMATION_ARMS
-            .iter()
-            .map(|_| Vec::with_capacity(OBSERVATIONS))
-            .collect();
+        let mut hashes = AUTOMATION_ARMS.map(|_| Sha256Sink::new());
+        let mut samples = AUTOMATION_ARMS.map(|_| Vec::with_capacity(OBSERVATIONS));
         let mut accepted = [0_u64; 3];
         let mut render_errors = 0_u64;
         audit::warm_up();
@@ -1932,7 +1921,7 @@ impl AutomationMeasurement {
             }
         }
         let snapshot = audit::snapshot();
-        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+        let digests = hashes.map(Sha256Sink::finish_hex);
 
         // The class-A statement, asserted in-run. Restating a parameter at the value it already
         // holds is by construction a no-op, and the #144 hoist is what makes it free; if it ever
@@ -1960,8 +1949,8 @@ impl AutomationMeasurement {
         }
 
         Self {
-            ns_per_block: [samples[0].clone(), samples[1].clone(), samples[2].clone()],
-            digests: [digests[0].clone(), digests[1].clone(), digests[2].clone()],
+            ns_per_block: samples,
+            digests,
             accepted,
             track_id,
             effect_id,
@@ -2125,11 +2114,8 @@ impl MixingAutomationMeasurement {
             .iter()
             .map(|arm| MixingArm::prepare(*arm, None, backend))
             .collect();
-        let mut hashes: Vec<Sha256Sink> = arms.iter().map(|_| Sha256Sink::new()).collect();
-        let mut samples: Vec<Vec<u64>> = arms
-            .iter()
-            .map(|_| Vec::with_capacity(observations))
-            .collect();
+        let mut hashes = mixing_automation::ARMS.map(|_| Sha256Sink::new());
+        let mut samples = mixing_automation::ARMS.map(|_| Vec::with_capacity(observations));
         let mut render_errors = 0_u64;
         audit::warm_up();
         audit::reset();
@@ -2150,7 +2136,7 @@ impl MixingAutomationMeasurement {
             }
         }
         let snapshot = audit::snapshot();
-        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+        let digests = hashes.map(Sha256Sink::finish_hex);
 
         // The class-A statement, asserted in-run: every base is the held value, so restating it
         // is a no-op, and a collapse that a restating record retires renders the bits it rendered
@@ -2186,8 +2172,8 @@ impl MixingAutomationMeasurement {
         ];
         Self {
             observations,
-            ns_per_block: [samples[0].clone(), samples[1].clone(), samples[2].clone()],
-            digests: [digests[0].clone(), digests[1].clone(), digests[2].clone()],
+            ns_per_block: samples,
+            digests,
             tallies,
             collapse,
             controls: arms[0].automation.controls().to_vec(),

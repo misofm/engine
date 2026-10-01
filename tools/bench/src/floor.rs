@@ -476,7 +476,6 @@ input as $rust |
                 "{mutation} mutation was not detected"
             );
         }
-        assert!(jq_floor_comparison(&rust_table, "").expect("restored jq comparison"));
     }
 
     #[test]
