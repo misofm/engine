@@ -137,11 +137,11 @@ impl PreparedNativeEffect for Processor {
     }
 }
 
-fn compiled() -> session::CompiledSession {
-    let model =
-        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json")).unwrap();
+fn compile_model(
+    model: &session::SessionModel,
+) -> Result<session::CompiledSession, session::DiagnosticSet> {
     compile_session(
-        &model,
+        model,
         CompileCaps {
             max_compiled_model_bytes: u64::MAX,
             max_requested_runtime_bytes: u64::MAX,
@@ -151,7 +151,12 @@ fn compiled() -> session::CompiledSession {
             max_source_ring_bytes: u64::MAX,
         },
     )
-    .unwrap()
+}
+
+fn compiled() -> session::CompiledSession {
+    let model =
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json")).unwrap();
+    compile_model(&model).unwrap()
 }
 fn caps() -> EffectCompileCaps {
     EffectCompileCaps {
@@ -168,18 +173,7 @@ fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
     ))
     .expect("accepted fixture");
     assert_eq!(model.tracks.len(), 9);
-    let session = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("compiled fixture");
+    let session = compile_model(&model).expect("compiled fixture");
     let registry = launch_native_effect_registry().expect("launch registry");
     assert_eq!(registry.len(), 8);
     assert!(registry.get_ascii("miso.parametric-eq").is_some());
@@ -232,25 +226,14 @@ fn unavailable_factory_and_resource_caps_return_no_partial_session() {
 }
 
 #[test]
-fn ten_thousand_session_parameter_mutations_reject_transactionally_without_panic() {
+fn out_of_domain_session_parameters_reject_transactionally_without_panic() {
     let registry =
         NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
     let source = include_str!("../../../fixtures/session/v1/canonical.json");
-    for seed in 0..10_000_u32 {
+    for value in [f32::from_bits(24.0_f32.to_bits() + 1), 25.0, f32::MAX] {
         let mut model = parse_session_json(source).unwrap();
-        model.tracks[0].inserts.effects[0].params[0].value = 25.0 + seed as f32;
-        let compiled = compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .unwrap();
+        model.tracks[0].inserts.effects[0].params[0].value = value;
+        let compiled = compile_model(&model).unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             prepare_native_session_effects(&compiled, &registry, caps())
         }));
@@ -280,18 +263,7 @@ fn retired_gate_parameter_id_eight_rejects_before_native_publication() {
         unit: SessionParameterUnit::Milliseconds,
         value: 2.0,
     });
-    let compiled = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("session model remains structurally compilable");
+    let compiled = compile_model(&model).expect("session model remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
     let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
         Ok(_) => panic!("retired gate parameter must prevent prepared publication"),
@@ -314,18 +286,7 @@ fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
         unit: SessionParameterUnit::Milliseconds,
         value: 5.0,
     });
-    let compiled = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("session model remains structurally compilable");
+    let compiled = compile_model(&model).expect("session model remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
     let diagnostics = match prepare_native_session_effects(&compiled, &registry, caps()) {
         Ok(_) => panic!("retired parameter must prevent prepared publication"),
@@ -353,18 +314,8 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
             value: 1_000.0,
         }];
     }
-    let valid_session = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("multiband session remains structurally compilable");
+    let valid_session =
+        compile_model(&model).expect("multiband session remains structurally compilable");
     let registry = launch_native_effect_registry().expect("launch registry");
     let prepared = prepare_native_session_effects(&valid_session, &registry, caps())
         .expect("current multiband parameter set prepares");
@@ -376,18 +327,8 @@ fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
         unit: SessionParameterUnit::Hz,
         value: 1_000.0,
     });
-    let rejected_session = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("retired ID does not change session structure");
+    let rejected_session =
+        compile_model(&model).expect("retired ID does not change session structure");
     let diagnostics = match prepare_native_session_effects(&rejected_session, &registry, caps()) {
         Ok(_) => panic!("retired multiband parameter must prevent prepared publication"),
         Err(diagnostics) => diagnostics,
@@ -435,18 +376,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
             bypass: false,
             params: Vec::new(),
         });
-        compile_session(
-            &model,
-            CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("the console session compiles")
+        compile_model(&model).expect("the console session compiles")
     };
     for (index, effect_id) in effect_compiler::CONSOLE_ELIGIBLE_EFFECTS.iter().enumerate() {
         let session = compiled(effect_id, index % 2 == 1);
@@ -482,18 +412,7 @@ fn console_slots_accept_exactly_the_eligible_native_effects() {
         effect_id: session::StableId::parse("miso.delay").expect("delay ID"),
     };
     model.tracks[0].inserts.effects[0].params.clear();
-    let session = compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("the insert session compiles");
+    let session = compile_model(&model).expect("the insert session compiles");
     prepare_native_session_effects(&session, &registry, generous)
         .unwrap_or_else(|diagnostics| panic!("a delay insert prepares: {:?}", diagnostics.0));
 }
@@ -538,18 +457,7 @@ fn bypassed_console() -> session::CompiledSession {
             entry.bypass = true;
         }
     }
-    compile_session(
-        &model,
-        CompileCaps {
-            max_compiled_model_bytes: u64::MAX,
-            max_requested_runtime_bytes: u64::MAX,
-            max_single_allocation_bytes: u64::MAX,
-            max_queue_items: u64::MAX,
-            max_source_ring_frames: u64::MAX,
-            max_source_ring_bytes: u64::MAX,
-        },
-    )
-    .expect("compiled console")
+    compile_model(&model).expect("compiled console")
 }
 
 fn entry<'a>(

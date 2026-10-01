@@ -384,15 +384,23 @@ fn prepare_with_console_eligibility(
                 let mut initial = Vec::new();
                 let mut invalid = false;
                 for (index, parameter) in descriptor.parameters.iter().enumerate() {
-                    let matching: Vec<_> = effect
+                    let mut values = [None; 3];
+                    let mut duplicate = false;
+                    let mut unit_mismatch = false;
+                    for item in effect
                         .params
                         .iter()
                         .filter(|item| item.parameter_id == parameter.id.0)
-                        .collect();
-                    if matching
-                        .iter()
-                        .any(|item| !same_unit(item.unit, parameter.unit))
                     {
+                        unit_mismatch |= !same_unit(item.unit, parameter.unit);
+                        let channel = match item.channel {
+                            SessionChannel::Left => 0,
+                            SessionChannel::Right => 1,
+                            SessionChannel::Both => 2,
+                        };
+                        duplicate |= values[channel].replace(item.value).is_some();
+                    }
+                    if unit_mismatch {
                         diagnostics.push(EffectDiagnostic {
                             code: "effect.parameter.unit_mismatch",
                             path: path.clone(),
@@ -400,13 +408,10 @@ fn prepare_with_console_eligibility(
                         invalid = true;
                         break;
                     }
+                    let [left, right, both] = values;
                     match parameter.channel_policy {
                         ParameterChannelPolicy::Shared => {
-                            let values: Vec<_> = matching
-                                .iter()
-                                .filter(|item| item.channel == SessionChannel::Both)
-                                .collect();
-                            if matching.len() != values.len() || values.len() > 1 {
+                            if duplicate || left.is_some() || right.is_some() {
                                 diagnostics.push(EffectDiagnostic {
                                     code: "effect.parameter.channel",
                                     path: path.clone(),
@@ -418,29 +423,12 @@ fn prepare_with_console_eligibility(
                                 parameter_index: index as u32,
                                 channel: ParameterChannel::Both,
                                 value: effect_contract::normalize_zero(
-                                    values
-                                        .first()
-                                        .map_or(parameter.default_value, |item| item.value),
+                                    both.unwrap_or(parameter.default_value),
                                 ),
                             });
                         }
                         ParameterChannelPolicy::PerLane => {
-                            let both_count = matching
-                                .iter()
-                                .filter(|item| item.channel == SessionChannel::Both)
-                                .count();
-                            let left_count = matching
-                                .iter()
-                                .filter(|item| item.channel == SessionChannel::Left)
-                                .count();
-                            let right_count = matching
-                                .iter()
-                                .filter(|item| item.channel == SessionChannel::Right)
-                                .count();
-                            if both_count > 1
-                                || left_count > 1
-                                || right_count > 1
-                                || (both_count == 1 && (left_count != 0 || right_count != 0))
+                            if duplicate || (both.is_some() && (left.is_some() || right.is_some()))
                             {
                                 diagnostics.push(EffectDiagnostic {
                                     code: "effect.parameter.duplicate_channel",
@@ -449,25 +437,9 @@ fn prepare_with_console_eligibility(
                                 invalid = true;
                                 break;
                             }
-                            let both = matching
-                                .iter()
-                                .find(|item| item.channel == SessionChannel::Both)
-                                .map(|item| item.value);
                             for (channel, requested) in [
-                                (
-                                    ParameterChannel::Left,
-                                    matching
-                                        .iter()
-                                        .find(|item| item.channel == SessionChannel::Left)
-                                        .map(|item| item.value),
-                                ),
-                                (
-                                    ParameterChannel::Right,
-                                    matching
-                                        .iter()
-                                        .find(|item| item.channel == SessionChannel::Right)
-                                        .map(|item| item.value),
-                                ),
+                                (ParameterChannel::Left, left),
+                                (ParameterChannel::Right, right),
                             ] {
                                 initial.push(InitialParameterValue {
                                     parameter_index: index as u32,
@@ -483,13 +455,12 @@ fn prepare_with_console_eligibility(
                 if invalid {
                     continue;
                 }
-                if let Some(item) = initial.iter().find(|item| {
+                if initial.iter().any(|item| {
                     !effect_contract::parameter_value_valid(
                         &descriptor.parameters[item.parameter_index as usize],
                         item.value,
                     )
                 }) {
-                    let _ = item;
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.parameter.domain",
                         path,
@@ -1094,43 +1065,12 @@ mod owner_tests {
     use core::num::NonZeroUsize;
     use core::sync::atomic::AtomicUsize;
     use effect_contract::{
-        EffectControlRecord, EffectPrepareError, NativeEffectFactory, ParameterChannel,
-        PrepareEffectBankRequest, PreparedEffectTarget, PreparedNativeEffect,
-        PreparedNativeEffectBank, default_initial_values,
+        EffectControlRecord, NativeEffectFactory, ParameterChannel, PreparedEffectTarget,
+        default_initial_values,
     };
     use engine::realtime::{QueueGeneration, bounded_spsc};
     use parametric_eq::{PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory};
     use std::sync::Arc;
-
-    /// Test-only wrapper for retained factory ownership and attachment accounting.
-    /// Production ParametricEqFactory now exposes the same prepared-target capability.
-    struct OptInEqFactory;
-
-    impl NativeEffectFactory for OptInEqFactory {
-        fn descriptor(&self) -> &'static EffectDescriptor {
-            &PARAMETRIC_EQ_DESCRIPTOR
-        }
-
-        fn prepare(
-            &self,
-            request: PrepareEffectRequest<'_>,
-        ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
-            ParametricEqFactory.prepare(request)
-        }
-
-        fn target_preparation(
-            &self,
-        ) -> Option<&dyn effect_contract::NativeEffectTargetPreparation> {
-            Some(&ParametricEqFactory)
-        }
-
-        fn bind_homogeneous_bank(
-            &self,
-            request: PrepareEffectBankRequest<'_>,
-        ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError> {
-            ParametricEqFactory.bind_homogeneous_bank(request)
-        }
-    }
 
     fn preparation() -> EffectBankPreparation {
         EffectBankPreparation {
@@ -1157,7 +1097,7 @@ mod owner_tests {
         engine::realtime::Consumer<EffectControlRecord>,
     ) {
         let preparation = preparation();
-        let factory: Arc<dyn NativeEffectFactory> = Arc::new(OptInEqFactory);
+        let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
         let owner = EffectControlOwner::new(factory, &preparation).expect("valid EQ owner");
         let (producer, consumer) = bounded_spsc(
             NonZeroUsize::new(12).expect("capacity"),
@@ -1196,7 +1136,7 @@ mod owner_tests {
 
     #[test]
     fn effect_control_resources_charge_actual_tables_and_shared_owner_once() {
-        let factory: Arc<dyn NativeEffectFactory> = Arc::new(OptInEqFactory);
+        let factory: Arc<dyn NativeEffectFactory> = Arc::new(ParametricEqFactory);
         let mut opted = Vec::with_capacity(5);
         opted.push(resource_producer(
             "track-a",
@@ -1402,7 +1342,7 @@ mod owner_tests {
             let mut preparation = preparation();
             preparation.sample_rate = sample_rate;
             EffectControlOwner::new(
-                Arc::new(OptInEqFactory) as Arc<dyn NativeEffectFactory>,
+                Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>,
                 &preparation,
             )
             .expect("launch rate owner");
@@ -1411,7 +1351,7 @@ mod owner_tests {
         unsupported.sample_rate = 176_400;
         assert!(matches!(
             EffectControlOwner::new(
-                Arc::new(OptInEqFactory) as Arc<dyn NativeEffectFactory>,
+                Arc::new(ParametricEqFactory) as Arc<dyn NativeEffectFactory>,
                 &unsupported,
             ),
             Err(EffectControlOwnerError::Rate)
@@ -1533,9 +1473,11 @@ pub fn attach_effect_live_controls(
             });
             continue;
         };
-        let Some(&address) =
-            declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
-        else {
+        let Some(&address) = declared.get(&(
+            entry.track_id.as_str(),
+            entry.rack,
+            entry.effect_id.as_str(),
+        )) else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.prepare",
                 path,
@@ -1558,10 +1500,7 @@ pub fn attach_effect_live_controls(
                 Err(_) => {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.control.owner",
-                        path: format!(
-                            "$.tracks[id={}].effects[id={}]",
-                            entry.track_id, entry.effect_id
-                        ),
+                        path,
                     });
                     continue;
                 }
@@ -1659,9 +1598,11 @@ pub fn attach_effect_observation(
             });
             continue;
         }
-        let Some(&address) =
-            declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
-        else {
+        let Some(&address) = declared.get(&(
+            entry.track_id.as_str(),
+            entry.rack,
+            entry.effect_id.as_str(),
+        )) else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.observation.prepare",
                 path,
@@ -1708,32 +1649,26 @@ pub fn attach_effect_observation(
 /// attach cannot disagree about what "console slot 2" means.
 fn declared_live_addresses(
     session: &CompiledSession,
-) -> BTreeMap<(String, EffectRack, String), LiveEffectAddress> {
+) -> BTreeMap<(&str, EffectRack, &str), LiveEffectAddress> {
     let mut declared = BTreeMap::new();
     let model = session.normalized_model();
     for track in &model.tracks {
-        let lowered = model.lower_track(track);
-        let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
-        // `(internal rack, its instances, the live rack, the live index of its first instance)`.
-        for (rack, effects, live_rack, base) in [
-            (EffectRack::Simd1, pre_insert, LiveEffectRack::Console, 0),
-            (EffectRack::Dynamic, inserts, LiveEffectRack::Inserts, 0),
-            (
-                EffectRack::Simd2,
-                post_insert,
-                LiveEffectRack::Console,
-                pre_insert.len(),
-            ),
-        ] {
-            for (index, effect) in effects.iter().enumerate() {
-                declared.insert(
-                    (track.id.to_string(), rack, effect.id.to_string()),
-                    LiveEffectAddress {
-                        rack: live_rack,
-                        index: (base + index) as u32,
-                    },
-                );
-            }
+        for (index, slot) in model.console.slots().take(track.console.len()).enumerate() {
+            let rack = if index < model.console.pre_insert.len() {
+                EffectRack::Simd1
+            } else {
+                EffectRack::Simd2
+            };
+            declared.insert(
+                (track.id.as_str(), rack, slot.slot.as_str()),
+                LiveEffectAddress::console(index as u32),
+            );
+        }
+        for (index, effect) in track.inserts.effects.iter().enumerate() {
+            declared.insert(
+                (track.id.as_str(), EffectRack::Dynamic, effect.id.as_str()),
+                LiveEffectAddress::insert(index as u32),
+            );
         }
     }
     declared
