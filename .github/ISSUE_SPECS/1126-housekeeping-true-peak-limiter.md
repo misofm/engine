@@ -27,4 +27,8 @@ Approved 2026-10-01 by root Sol within the user's crate-by-crate housekeeping re
 
 ## Attempt evidence
 
-Pending two-agent queue. No implementation or performance result is claimed.
+### Attempt 1 scope decision
+
+Worker A read the full package and related open #988/#989/#991/#992/#1102/#559 effect scopes; those remain separate. Root approves replacing the verbatim pre-#990 block oracle with a current per-frame driver using ordered detector/link/ramp/channel primitives, preserving all current LinkedPair generators, payload/report/state comparisons and engagement censuses. Independent f64 DSP law and public scalar/bank/padding/mono/automation gates remain. Retire linked/segments historical digest-only scenarios only with their retarget/reset/body cases mapped to stronger current owners; seedless keeps every delayed lane-local fault, line-fill, signed-zero/subnormal/limiting witness, schedule and body while removing SHA/pin work. G5 stays the sole cross-target digest owner. Reuse the existing warmed thread-scoped audited allocator, preserving zero scopes and positive allocate/free control; no new allocator test. Borrow small test PCM/offsets and replace a corpus membership tree with sort/dedup where order is immaterial. Correct stale current-layout/persistence/FMA/mono-ramp documentation without altering product arithmetic or APIs.
+
+Scope amendment: remove the now-unused sha2 dev dependency and only the true-peak-limiter package dependency row in Cargo.lock; no other dependency/lock changes. No new generator, timing, harness, kernel consolidation or algorithm. Stop focused-green for root's exact checkpoint before more product edits. Baseline log-derived tests: 62 active PASS, one existing ignore. Final five-axis and test-purpose evidence follows the checkpoint.
