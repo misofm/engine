@@ -71,6 +71,17 @@ impl Backend {
             Self::Simd8 => 8,
         }
     }
+
+    /// Every vector backend this build has, narrowest first: `Simd4`, and `Simd8` where `avx2` is
+    /// enabled (issue #1112).
+    ///
+    /// The one list of them: tests and gates that run a claim at every vector width iterate this
+    /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four lanes.
+    pub const VECTOR: &'static [Self] = &[
+        Self::Simd4,
+        #[cfg(target_feature = "avx2")]
+        Self::Simd8,
+    ];
 }
 
 /// Why a host may not run this build (see [`attest_host`]).

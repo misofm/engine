@@ -393,3 +393,55 @@ pub trait Lane: Copy + Send + Sync + 'static {
     /// Panics if `dst` is shorter than [`Lane::WIDTH`].
     fn store_bits(self, dst: &mut [u32]);
 }
+
+/// The lane type this build runs its banks and frame loops at: `Simd8`, the 8-lane (AVX2) width,
+/// where `avx2` is enabled, and [`Simd4`], the 4-lane (NEON/simd128) width, where `neon` or
+/// `simd128` is (issue #1112).
+///
+/// Its two definitions carry the width predicates [`Backend::current`] selects by, and the
+/// assertion after them holds the two to one width. Code that runs at the build's own width names
+/// this alias rather than restating the predicates, and so does a test whose claim holds at any one
+/// vector width: every build then runs it at the width it ships.
+#[cfg(target_feature = "avx2")]
+pub type Native = Simd8;
+/// The 4-lane (NEON/simd128) `Native`; see the 8-lane definition.
+#[cfg(any(target_feature = "neon", target_feature = "simd128"))]
+pub type Native = Simd4;
+
+// `Native` and `Backend::current()` are chosen by the same two predicates; they must agree. (Not
+// under `cfg(doc)`: rustdoc gets no `avx2` on x86-64, so neither `Native` exists there.)
+#[cfg(not(doc))]
+const _: () = assert!(Backend::current().width() == <Native as Lane>::WIDTH);
+
+/// Evaluates `$body` once for each lane type this build has, narrowest first: `f32`, [`Simd4`],
+/// and `Simd8` where `avx2` is enabled (issue #1112).
+///
+/// `each_lane!(|L| body)` binds `L` to each lane type in turn; `each_lane!(|L, N| body)` also binds
+/// `N`, its lane count, as a `usize` constant. The one source tests and gates take their widths
+/// from: an 8-lane (AVX2) build runs `body` three times, a 4-lane (NEON/simd128) build twice, and no
+/// caller restates which widths a build has. Each run is a block in the caller, so `?` and
+/// `return` act on the caller. The `cfg` is a target feature, which one build sets for every crate
+/// it compiles, so it means the same thing wherever the macro expands, as `match_bank_width!`'s
+/// does. [`each_vector_lane!`] is the same without `f32`.
+#[macro_export]
+macro_rules! each_lane {
+    (|$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        $crate::each_lane!(@at f32, 1, |$lane $(, $lanes)?| $body);
+        $crate::each_vector_lane!(|$lane $(, $lanes)?| $body);
+    }};
+    (@at $type:ty, $count:literal, |$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        type $lane = $type;
+        $(const $lanes: usize = $count;)?
+        $body;
+    }};
+}
+
+/// [`each_lane!`] over the vector lane types only: [`Simd4`], and `Simd8` where `avx2` is enabled.
+#[macro_export]
+macro_rules! each_vector_lane {
+    (|$lane:ident $(, $lanes:ident)?| $body:expr) => {{
+        $crate::each_lane!(@at $crate::Simd4, 4, |$lane $(, $lanes)?| $body);
+        #[cfg(target_feature = "avx2")]
+        $crate::each_lane!(@at $crate::Simd8, 8, |$lane $(, $lanes)?| $body);
+    }};
+}

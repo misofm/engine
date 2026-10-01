@@ -2880,3 +2880,26 @@ mod continuous_mapping_validity_tests {
         }
     }
 }
+
+impl BankWidth {
+    /// Every bank width this build has, narrowest first: `Four`, and `Eight` where `avx2` is
+    /// enabled (issue #1112).
+    ///
+    /// The one list of them: tests and gates that run a claim at every bank width iterate this
+    /// rather than restating it, so a 4-lane (NEON/simd128) build runs the same loop at four lanes.
+    pub const ALL: &'static [Self] = &[
+        Self::Four,
+        #[cfg(target_feature = "avx2")]
+        Self::Eight,
+    ];
+
+    /// The vector backend that executes this width: the inverse of [`BankWidth::for_backend`].
+    #[must_use]
+    pub const fn backend(self) -> Backend {
+        match self {
+            Self::Four => Backend::Simd4,
+            #[cfg(target_feature = "avx2")]
+            Self::Eight => Backend::Simd8,
+        }
+    }
+}
