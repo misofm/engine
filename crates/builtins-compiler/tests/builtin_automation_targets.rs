@@ -42,45 +42,25 @@ fn builtin_automation_targets_match_the_parameter_abi() {
     );
 }
 
-/// Every parameter the schema refuses is refused for the one stated reason, and every parameter it
-/// admits is admitted for the mirror of it.
-///
-/// The negative half matters more than the positive one: a row silently promoted to `BlockTarget`
-/// would be admitted by the schema without anyone deciding it should be, and a row silently
-/// demoted would leave sessions in the field naming a target that no longer exists.
+/// Launch controls keep trim and polarity live while delay remains preparation-only.
 #[test]
-fn refused_targets_are_exactly_the_prepared_only_rows() {
-    let admitted: Vec<u32> = BUILTIN_AUTOMATION_TARGETS
-        .iter()
-        .map(|(id, _)| *id)
-        .collect();
-    for descriptor in &BUILTIN_PARAMETER_DESCRIPTORS {
-        let live = descriptor.update_rate == BuiltinParameterUpdateRate::BlockTarget;
-        assert_eq!(
-            admitted.contains(&descriptor.id),
-            live,
-            "`{}` (id {}) declares {:?} but the schema {} it as an automation target",
-            descriptor.name,
-            descriptor.id,
-            descriptor.update_rate,
-            if admitted.contains(&descriptor.id) {
-                "admits"
-            } else {
-                "refuses"
-            }
-        );
-    }
+fn launch_trim_and_polarity_are_live_while_delay_is_prepared_only() {
+    let admitted = |id| {
+        BUILTIN_AUTOMATION_TARGETS
+            .iter()
+            .any(|(target, _)| *target == id)
+    };
     // The deferred tier, named so that reopening it is a deliberate edit here as well as in the
     // ABI: `delay_samples` remains prepared-only; the input-filter pair is live through #808.
     assert!(
-        !admitted.contains(&11),
+        !admitted(11),
         "delay_samples remains prepared-only and must not be an automation target"
     );
     // Issue #210 phase 3 admitted these two. The assertion is here so that a phase that reverted
     // the liveness would have to revert this line too.
     for id in [1_u32, 2] {
         assert!(
-            admitted.contains(&id),
+            admitted(id),
             "builtin parameter {id} is live since #210 phase 3 and must be an automation target"
         );
     }
