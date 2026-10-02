@@ -145,8 +145,8 @@ pub(crate) fn bind_rack_banks_indexed(
     // One chain per (track, bankable rack), in session slot order.
     let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
     let mut programs: BTreeMap<RackChainId, RackProgram> = BTreeMap::new();
-    for track in &model.tracks {
-        let lowered = model.lower_track(track);
+    for strip in model.strips() {
+        let lowered = model.lower_strip(&strip);
         let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
         for (rack, declared) in [
             (RackId::Simd1, pre_insert),
@@ -168,13 +168,13 @@ pub(crate) fn bind_rack_banks_indexed(
                 continue;
             }
             let chain = RackChainId {
-                track_id: track.id.as_str().to_owned(),
+                track_id: strip.id.as_str().to_owned(),
                 rack,
             };
             let mut nodes = Vec::with_capacity(declared.len());
             let mut slots = Vec::with_capacity(declared.len());
             for effect in declared {
-                let key = (track.id.as_str(), rack, effect.id.as_str());
+                let key = (strip.id.as_str(), rack, effect.id.as_str());
                 let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                     return Err(diag("graph.internal.invariant", "$.effects"));
                 };

@@ -325,20 +325,100 @@ impl LoweredRacks<'_> {
     }
 }
 
+/// One strip: the chain after a source, borrowed from the session.
+///
+/// A strip is the input section, the console slots, the inserts, the fader and mute, and the pan
+/// or matrix. Today only tracks are strips; the compilers iterate [`SessionModel::strips`] wherever
+/// strip semantics apply, so a later strip kind is one new [`StripKind`] variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StripRef<'a> {
+    /// Stable strip identity (the track ID for a track).
+    pub id: &'a StableId,
+    /// What owns this strip.
+    pub kind: StripKind<'a>,
+    /// Independent left/right fixed input processors.
+    pub builtins: &'a DualMonoBuiltins,
+    /// This strip's knobs for every session console slot, in slot order.
+    pub console: &'a [ConsoleEntry],
+    /// Ordered inserts, between the two console sections.
+    pub inserts: &'a Rack,
+    /// Independent left/right fader and mute declaration.
+    pub fader: &'a DualMonoFader,
+    /// Explicit pan or cross-channel matrix.
+    pub matrix_or_pan: &'a MatrixOrPan,
+}
+
+/// The owner of a [`StripRef`].
+///
+/// Deliberately exhaustive: *Render a submix strip on its summed input* adds `Submix`, and every
+/// match on this enum must then fail to compile until it handles the new variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StripKind<'a> {
+    /// A track's strip, whose input is the track's source.
+    Track(&'a Track),
+}
+
+impl<'a> StripRef<'a> {
+    /// The strip of one track.
+    fn track(track: &'a Track) -> Self {
+        Self {
+            id: &track.id,
+            kind: StripKind::Track(track),
+            builtins: &track.builtins,
+            console: &track.console,
+            inserts: &track.inserts,
+            fader: &track.fader,
+            matrix_or_pan: &track.matrix_or_pan,
+        }
+    }
+}
+
+impl StripRef<'_> {
+    /// The compilers' path prefix: `$.tracks[id=<id>]` for a track (later `$.submixes[id=<id>]`).
+    /// Session validation's index paths never use it.
+    #[must_use]
+    pub fn path_prefix(&self) -> String {
+        format!("{}[id={}]", self.collection_path(), self.id.as_str())
+    }
+
+    /// The sealed collection path of the strip's chain edges: `"$.tracks"` for a track (later
+    /// `"$.submixes"`), exactly the literal the four chain-edge sites write today.
+    #[must_use]
+    pub fn collection_path(&self) -> &'static str {
+        match self.kind {
+            StripKind::Track(_) => "$.tracks",
+        }
+    }
+}
+
 impl SessionModel {
+    /// Every strip, in model order: `tracks`, then (later) `submixes`. On a normalized model that
+    /// is canonical ID order within each segment.
+    pub fn strips(&self) -> impl Iterator<Item = StripRef<'_>> {
+        self.tracks.iter().map(StripRef::track)
+    }
+
     /// Lower one track's console entries and inserts to the three internal racks.
     ///
-    /// The console entries are matched to the session slots by position, which validation makes
-    /// exact: a validated track carries one entry per slot, in slot order. On an unvalidated model
-    /// a surplus entry or slot is dropped rather than guessed at.
+    /// Delegates to [`Self::lower_strip`].
     #[must_use]
     pub fn lower_track<'a>(&self, track: &'a Track) -> LoweredRacks<'a> {
-        let (pre_entries, post_entries) = track
+        self.lower_strip(&StripRef::track(track))
+    }
+
+    /// `lower_track`'s body, taking a strip; `lower_track` delegates to it.
+    ///
+    /// The console entries are matched to the session slots by position, which validation makes
+    /// exact: a validated strip carries one entry per slot, in slot order. On an unvalidated model
+    /// a surplus entry or slot is dropped rather than guessed at.
+    #[must_use]
+    pub fn lower_strip<'a>(&self, strip: &StripRef<'a>) -> LoweredRacks<'a> {
+        let (pre_entries, post_entries) = strip
             .console
-            .split_at(self.console.pre_insert.len().min(track.console.len()));
+            .split_at(self.console.pre_insert.len().min(strip.console.len()));
         LoweredRacks {
             pre_insert: lower_section(&self.console.pre_insert, pre_entries),
-            inserts: &track.inserts.effects,
+            inserts: &strip.inserts.effects,
             post_insert: lower_section(&self.console.post_insert, post_entries),
         }
     }

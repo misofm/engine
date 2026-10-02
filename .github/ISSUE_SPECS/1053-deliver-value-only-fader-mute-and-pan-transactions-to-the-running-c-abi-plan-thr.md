@@ -145,6 +145,31 @@ See `VERIFY.md` in this folder. These amendments supersede the text above where 
 - **D1.** Add: a `Pan` ↔ `Matrix` switch and a smoothing-only change are live. A transaction that
   rewrites identical values is live with zero records; it still advances the revision and emits
   `SESSION_COMMITTED`.
+  - Coordination with *Submix strips and live aux sends* (#1196, decision 13). Until the named
+    slice lands, these committed-model deltas are **structural**:
+    - any change to a field of a **submix** strip, until *Deliver value-only send and submix-strip
+      edits to the running C ABI plan* (#1225);
+    - a change to `left_mute` or `right_mute` of a strip that, in the post-commit model, is the
+      source of a route with `follows_mute: true`, until *Let C ABI sends follow their source
+      strip's mute live* (#1226);
+    - once the VCA umbrella lands, any fader field of a VCA member, until that umbrella's C ABI
+      slice.
+
+    Whichever of #1053 and the slice that creates the dependency lands second implements the rule
+    in `live_builtin_delta`: *Declare the submix strip in the session grammar and wire* (#1199) for
+    submix-strip fields, *Let a route into a submix follow its source strip's mute in the session*
+    (#1218) for follow sources, and the VCA preparation slice for VCA members.
+
+    That umbrella renames two host-core fields #1053's capi code reads:
+    `HostLiveControlHandles.tracks` becomes `strips` (*List every strip in the live-control handles
+    and file bus effects in the browser*, #1207), and `track_controls` becomes `strip_controls`
+    (*Give every strip one mute owner and live-control producers in host-core*, #1211). Whichever of
+    #1053 and a renaming slice lands second updates the other's uses.
+
+    If #1053's C ABI preparation requests live controls with a queue depth after *Produce live send
+    records from host-core* (#1221) lands, every C ABI plan gets route lanes. Either keep that
+    request builtins-only until *Deliver value-only send and submix-strip edits to the running C ABI
+    plan* (#1225), or re-pin the capi resource oracles and `audit capi` with a reason.
 - **D2 (reworded).** An edit is admitted all or nothing.
   - It is applied no later than the first block whose render call begins after the submit returns.
   - A stage or track that has not drained yet may apply it one block earlier.

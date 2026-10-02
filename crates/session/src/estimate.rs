@@ -61,17 +61,17 @@ pub fn estimate_session_resources(
     let output_count = count(session.outputs.len(), "$.outputs", &mut errors);
     let route_count = count(session.routes.len(), "$.routes", &mut errors);
     let automation_count = count(session.automation.len(), "$.automation", &mut errors);
-    // A console entry is an effect instance on its track once lowered, so it counts as one.
+    // A console entry is an effect instance on its strip once lowered, so it counts as one.
     let effect_count = checked_add(
         sum_counts(
-            session.tracks.iter(),
-            |track| track.console.len(),
+            session.strips(),
+            |strip| strip.console.len(),
             "$.tracks",
             &mut errors,
         ),
         sum_counts(
-            session.tracks.iter(),
-            |track| track.inserts.effects.len(),
+            session.strips(),
+            |strip| strip.inserts.effects.len(),
             "$.tracks",
             &mut errors,
         ),
@@ -80,16 +80,13 @@ pub fn estimate_session_resources(
     );
     let parameter_count = checked_add(
         sum_counts(
-            session.tracks.iter().flat_map(|track| &track.console),
+            session.strips().flat_map(|strip| strip.console),
             |entry| entry.params.len(),
             "$.tracks",
             &mut errors,
         ),
         sum_counts(
-            session
-                .tracks
-                .iter()
-                .flat_map(|track| &track.inserts.effects),
+            session.strips().flat_map(|strip| &strip.inserts.effects),
             |effect| effect.params.len(),
             "$.tracks",
             &mut errors,
@@ -133,15 +130,15 @@ pub fn estimate_session_resources(
     vector!(session.outputs, crate::Output, "$.outputs");
     vector!(session.routes, crate::Route, "$.routes");
     vector!(session.automation, crate::Automation, "$.automation");
-    for track in &session.tracks {
-        vector!(track.console, crate::ConsoleEntry, "$.tracks.console");
+    for strip in session.strips() {
+        vector!(strip.console, crate::ConsoleEntry, "$.tracks.console");
         vector!(
-            track.inserts.effects,
+            strip.inserts.effects,
             crate::Effect,
             "$.tracks.inserts.effects"
         );
-        let params = track.console.iter().map(|entry| entry.params.len()).chain(
-            track
+        let params = strip.console.iter().map(|entry| entry.params.len()).chain(
+            strip
                 .inserts
                 .effects
                 .iter()

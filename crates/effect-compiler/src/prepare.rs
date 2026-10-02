@@ -27,6 +27,9 @@ pub struct EffectCompileCaps {
 }
 pub struct EffectPreparedEntry {
     pub track_id: String,
+    /// The owning strip's compiler path prefix (`StripRef::path_prefix`): `$.tracks[id=<id>]` for
+    /// a track. Diagnostics about this instance are `"{strip_path}.effects[id={effect}]"`.
+    pub strip_path: Box<str>,
     pub rack: EffectRack,
     pub effect_id: String,
     pub processor: Box<dyn PreparedNativeEffect>,
@@ -328,10 +331,11 @@ fn prepare_with_console_eligibility(
             }
         }
     }
-    for track in &model.tracks {
-        // Decision 12, class A by lowering: `pre_insert` is the first internal rack, the track's
+    for strip in model.strips() {
+        // Decision 12, class A by lowering: `pre_insert` is the first internal rack, the strip's
         // inserts the second and `post_insert` the third, each console entry an ordinary effect.
-        let lowered = model.lower_track(track);
+        let lowered = model.lower_strip(&strip);
+        let strip_path = strip.path_prefix();
         let [pre_insert, inserts, post_insert] = lowered.in_chain_order();
         for (rack, effects) in [
             (EffectRack::Simd1, pre_insert),
@@ -339,7 +343,7 @@ fn prepare_with_console_eligibility(
             (EffectRack::Simd2, post_insert),
         ] {
             for effect in effects {
-                let path = format!("$.tracks[id={}].effects[id={}]", track.id, effect.id);
+                let path = format!("{strip_path}.effects[id={}]", effect.id);
                 let EffectIdentity::Native { effect_id } = &effect.identity else {
                     diagnostics.push(EffectDiagnostic {
                         code: "effect.third_party.unavailable_at_launch",
@@ -594,7 +598,8 @@ fn prepare_with_console_eligibility(
                     continue;
                 }
                 entries.push(EffectPreparedEntry {
-                    track_id: track.id.as_str().to_owned(),
+                    track_id: strip.id.as_str().to_owned(),
+                    strip_path: strip_path.as_str().into(),
                     rack,
                     effect_id: effect.id.as_str().to_owned(),
                     processor,
@@ -1462,10 +1467,7 @@ pub fn attach_effect_live_controls(
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
-        let path = format!(
-            "$.tracks[id={}].effects[id={}]",
-            entry.track_id, entry.effect_id
-        );
+        let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
         let Some(capacity) = NonZeroUsize::new(entry.metadata.automation_capacity as usize) else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.capacity",
@@ -1587,10 +1589,7 @@ pub fn attach_effect_observation(
         if descriptor.observations.is_empty() {
             continue;
         }
-        let path = format!(
-            "$.tracks[id={}].effects[id={}]",
-            entry.track_id, entry.effect_id
-        );
+        let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
         if descriptor.observations.len() > maximum_taps as usize {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.observation.taps",
@@ -1652,21 +1651,21 @@ fn declared_live_addresses(
 ) -> BTreeMap<(&str, EffectRack, &str), LiveEffectAddress> {
     let mut declared = BTreeMap::new();
     let model = session.normalized_model();
-    for track in &model.tracks {
-        for (index, slot) in model.console.slots().take(track.console.len()).enumerate() {
+    for strip in model.strips() {
+        for (index, slot) in model.console.slots().take(strip.console.len()).enumerate() {
             let rack = if index < model.console.pre_insert.len() {
                 EffectRack::Simd1
             } else {
                 EffectRack::Simd2
             };
             declared.insert(
-                (track.id.as_str(), rack, slot.slot.as_str()),
+                (strip.id.as_str(), rack, slot.slot.as_str()),
                 LiveEffectAddress::console(index as u32),
             );
         }
-        for (index, effect) in track.inserts.effects.iter().enumerate() {
+        for (index, effect) in strip.inserts.effects.iter().enumerate() {
             declared.insert(
-                (track.id.as_str(), EffectRack::Dynamic, effect.id.as_str()),
+                (strip.id.as_str(), EffectRack::Dynamic, effect.id.as_str()),
                 LiveEffectAddress::insert(index as u32),
             );
         }

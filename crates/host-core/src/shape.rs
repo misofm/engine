@@ -76,6 +76,7 @@ pub fn compiled_session_shape(
                 .unwrap_or(0),
         )?,
         source_count: count(model.sources.len())?,
+        // Source semantics: tracks only.
         track_count: count(model.tracks.len())?,
         route_count: count(model.routes.len())?,
         effect_count: count_effects(model)?,

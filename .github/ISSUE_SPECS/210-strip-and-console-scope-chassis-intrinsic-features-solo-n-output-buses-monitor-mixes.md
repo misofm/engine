@@ -15,6 +15,9 @@ Owner-ruled product direction (2026-08-27/28 discussion), consolidated for prior
 Build the ABI for **N output buses**; the app uses replace mode day one (monitor bus as the only active bus = the degenerate case, so nothing is throwaway). This is the foundation for: PFL monitoring, **monitor/cue mixes**, simultaneous stem printing, hardware output paths — the multi-output capability both Logic and Pro Tools have independent of solo. The session graph is already shaped for it (`outputs` is a plural root key; submixes + routes exist and work today — a drum submix is expressible in current Session V1). The gaps:
 - Host ABI: the web render surface produces exactly one stereo pair; grows an output-count dimension (C-ABI, worklet outputs, offline/PCM-runner record format, SDK — coordinate with #207's Phase 2+).
 - **Live send levels**: route gains are folded at bind (prepared-only); cue mixes need send level/pan on the live command surface like fader/pan. Command-vocabulary extension (`miso.command.v1` + metadata + the seven-spelling gate), not an architecture change.
+  - Owned by *Submix strips and live aux sends* (#1196, decision 13): live send levels are delivered
+    in the browser by slices 22-25 (#1220-#1223) and on the C ABI by slice 27 (#1225). The N-output
+    part of this issue is unchanged.
 - Dormant-bus cost must be ~zero (earned-silence gating pattern).
 
 ## Sequencing constraints

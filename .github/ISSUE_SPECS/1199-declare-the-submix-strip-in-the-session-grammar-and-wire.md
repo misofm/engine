@@ -1,0 +1,258 @@
+# Declare the submix strip in the session grammar and wire
+
+Slice 02 of *Submix strips and live aux sends* (#1196, the umbrella filed by *Record the submix, send and
+VCA ruling*, #1197). Batch K1, which is pushed once with slices 02-08. The SDK is out of step until *Build
+submix strips and bus taps in the SDK and teach agents to author them* (#1205, the #1084 C3 precedent).
+
+The design record cited below (`DESIGN`, `VERIFY-1` to `VERIFY-3`, `REVISION-1`, `REVISION-2` and
+`APPLIED-3`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
+
+## Product outcome
+
+A session can declare a submix as a strip. Like a track, it carries the input section
+(`polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz`, `delay_samples` per lane), ordered inserts, a
+per-lane fader and mute, and `pan` or `matrix`. The strip is:
+
+- parsed and validated with the track's rules;
+- written in canonical JSON;
+- carried losslessly over BTLV.
+
+Rendering the strip is the next slice; console entries follow three slices later. This slice is the
+grammar and the codec only.
+
+## Context (verified on `fe8ac679`; *Iterate session strips, not tracks, wherever strip semantics apply* (#1198) moved no anchor below)
+
+- **Today a submix is `Submix { id }`.**
+  - Model: `crates/session/src/model.rs:575-580`.
+  - Parsed with exactly `["id"]` by `parse_submix` (`crates/session/src/parse.rs:1283-1288`).
+  - Session field registry: `crates/session/src/visit.rs:104` (`id` 1); canonical walk record
+    `visit.rs:224` (`Submix=>submix |..| [1]`).
+  - Wire spec: `crates/protocol/src/schema.rs:1011-1018` (field 1 only).
+  - Codec: `tx_submix` (`crates/protocol/src/session_wire.rs:991-994`) and `parse_submix`
+    (`:1658-1663`).
+- **The track's strip grammar is what a submix reuses.**
+  - Track keys: `parse_track`'s key list (`parse.rs:977-998`).
+  - Pan or matrix: `parse_matrix_or_pan` (`parse.rs:1222-1281`) requires exactly one of the JSON
+    keys `pan` or `matrix`; both is `WrongType`, neither is `MissingField`. The Rust field is
+    `matrix_or_pan: MatrixOrPan` (`model.rs:240`, `:550-574`).
+  - On the wire it is track field 10 (`schema.rs:983-984`), one tagged message (module
+    `schema::session::matrix_or_pan`, `schema.rs:950-970`), pan 1 and matrix 2 (tag values at
+    `crates/protocol/src/session_wire.rs:1628-1629` and `visit.rs:252-253`). The track field registry is `visit.rs:94`; the tagged walk is `visit.rs:251-255`.
+  - Canonical track walk and key order: `id, source_id, left_source_channel, right_source_channel,
+    builtins, console, inserts, fader, pan|matrix` (`visit.rs:209-212`).
+- **Validation** (`crates/session/src/validate.rs`) reports **index** paths.
+  - `validate_tracks` (`:289-379`) checks, per track:
+    - the builtins (finite trim, non-negative finite filters, delay maximum `:342-348`);
+    - fader finiteness (`:351-356`; the session never range-checks `fader_db`, builtins does at
+      preparation);
+    - pan range `[-1, 1]` (`:358-362`) and matrix finiteness (`:364-368`);
+    - console entries (`validate_console_entries`, `:236`) and inserts (`validate_rack`, `:381`).
+  - Submix IDs join the graph namespace at `:85-91` (`$.submixes[<i>].id`).
+  - Tests pin index paths: `crates/session/tests/invalid_matrix.rs:376` (`$.submixes[0].id`).
+  - An automation target must be a declared **track** today (`:674-684`).
+- **The estimate** sizes `session.submixes` as `Submix` records only (`crates/session/src/estimate.rs:132`).
+  `compile_session` (`crates/session/src/compile.rs:123`) sorts submixes (`:140-142`) and
+  canonicalizes **track** console and insert parameters (`:152-170`).
+- **Slice 01** added `StripRef`, `StripKind::Track`, `strips()`, `lower_strip`, `path_prefix()` and
+  `collection_path()`.
+- **Wire pins.**
+  - `COMPLETE_SCHEMA_HASH` (`0xebf2_8262_1550_d44a`) is spelled at
+    `crates/conformance/src/protocol_corpus.rs:666`, `scripts/check-protocol-wasm-parity.sh:172-173`,
+    `docs/CONTROL_PROTOCOL_CONFORMANCE.md:3` and `fuzz/corpus/complete-schema-manifest.md:10`.
+  - The all-opcode corpus encodes `UpsertSubmix { drums }` (`protocol_corpus.rs:181-183`). It is
+    codec data only (`:23-24`), so any submix wire change re-pins the hash and the corpus need not
+    be a valid session.
+- **Who constructs `Submix {`** (exactly these, from `git grep`):
+  - `crates/conformance/src/protocol_corpus.rs:182`;
+  - `crates/graph-compiler/src/lib.rs:2183`, `:2186`;
+  - `crates/graph-compiler/tests/bank_levels.rs:727`, `compile_shapes.rs:389`;
+  - `crates/host-core/tests/collapse_arming.rs:199`, `randomized.rs:374`;
+  - `crates/protocol/src/session_wire/tests.rs:254`, `:1257`;
+  - `crates/session/src/canonical.rs:249`;
+  - `crates/session/tests/canonical_schema.rs:162`;
+  - the decoders `crates/protocol/src/session_wire.rs:1660` and `parse.rs:1285`.
+- **JSON documents that declare a submix:**
+  - `fixtures/session-canonical/v1/canonical-writer-corpus.json`. It is generated by
+    `crates/session/src/canonical.rs` (submix at `:249`; test
+    `canonical_writer_corpus_is_rust_generated_and_current` at `:337`) and regenerated with
+    `MISO_ENGINE_UPDATE_CANONICAL_WRITER_CORPUS=1 cargo test --locked -p session canonical_writer_corpus_is_rust_generated_and_current`
+    (`:406-412`). It also carries a track `matrix.ll = 1.25`, which session validation accepts
+    because it checks finiteness only.
+  - `.claude/skills/author-session/worked-session.json:275-279` (submix `band`).
+  - `docs/session-v1.schema.json:19` declares `submixes` as `id_record`. It is checked structurally
+    by `crates/session/tests/json_contract_artifacts.rs:35-48`.
+
+  No other tracked JSON has a non-empty `submixes`.
+- **The SDK asserts two of these documents:** `sdk/test/builder-evals.mjs:818-830` (the writer
+  corpus) and `sdk/test/console-evals.mjs:665-676` (the worked session). The SDK moves in *Build
+  submix strips and bus taps in the SDK and teach agents to author them*.
+
+## Decisions frozen for this slice
+
+- **D1. Fields.** The submix message gets `builtins` 2, `inserts` 4, `fader` 5 and pan-or-matrix 6.
+  - Field 6 is tagged exactly as the track's field 10: pan 1, matrix 2, with the same inner fields.
+  - Field 3 is reserved for `console`, which *Carry every console slot on every submix strip* (#1202) adds.
+  - All of them are required. V1 has no optional fields.
+- **D2. JSON.**
+  - Keys `id`, `builtins`, `inserts`, `fader`, and exactly one of `pan` or `matrix`.
+  - Canonical order: `id, builtins, inserts, fader, pan|matrix`. `console` will be inserted after
+    `builtins` (three slices later).
+  - Each value's grammar, validation and canonical spelling are the track's, verbatim.
+- **D3. Validation.**
+  - The strip half of `validate_tracks` (builtins, fader, pan or matrix, inserts) is split into one
+    function that runs for every strip; the source half stays in `validate_tracks`.
+  - It reports at index paths, `$.submixes[<i>].fader.left_db` for example, with the track's codes.
+  - Uniqueness and the namespace are unchanged.
+- **D4. `strips()` stays track-only in this slice.** Slice 01 routed every compiler's strip work
+  through `strips()`. If it yielded submixes now, the graph, builtins and effect compilers would
+  start walking bus strips before *Render a submix strip on its summed input* (#1200) can lower them. That
+  slice adds `StripKind::Submix`, makes `strips()` yield submixes, and charges them in the estimate,
+  all together with the lowering. Validation here walks `model.submixes` directly.
+- **D5. A transparent constructor**, `Submix::unity(id)`: identity input section (no polarity,
+  0 dB trim, both filters off, delay 0), no inserts, a 0 dB unmuted fader, and the identity matrix
+  (`ll = rr = 1`, `lr = rl = 0`) with smoothing 0. *Carry every console slot on every submix strip*
+  extends it with `bypass: true` console entries (DESIGN P15).
+- **D6. An automation target's `entity_id` may name a submix.** It is still inert until #1058.
+- **D7. Interim rendering.** Until *Render a submix strip on its summed input*, the graph compiler
+  still lowers a submix as today's bare summing node, ignoring the strip. This holds inside batch K1
+  only, which is never pushed before slice 08.
+- **D8. #1053 coordination (DESIGN P13), only if #1053 is on `main` when this slice starts.**
+  #1053 classifies a committed-model delta as live when `fader` and `matrix_or_pan` are the only
+  fields that differ, and pushes only track lanes. Once a submix carries a fader and a pan, a delta
+  in any submix field must be **structural** on the C ABI until *Deliver value-only send and
+  submix-strip edits to the running C ABI plan* (#1225) lands. Add that rule to #1053's classifier
+  (`live_builtin_delta`, host-core, `control-provider` feature) and one capi test: a `0300` that
+  changes only an existing submix's `fader` produces a new epoch, and after the boundary the output
+  equals a plan compiled from the committed model. If #1053 has not landed, change nothing in
+  capi or host-core: #1053's spec carries the rule (annotated by *Record the submix, send and VCA
+  ruling*), and whichever lands second implements it.
+
+## Deliverables
+
+1. **Session.**
+   - Model fields per D1 and D2 (`Submix` gains `builtins`, `inserts`, `fader`, `matrix_or_pan`).
+     `Submix` loses `#[derive(Eq)]` (`model.rs:576`): its new `f32` fields are not `Eq`.
+   - `parse_submix` reuses the track's sub-parsers, including `parse_matrix_or_pan`.
+   - Validation per D3.
+   - The canonical walk record (`visit.rs:224`) and field keys (`visit.rs:104`).
+   - `compile_session` canonicalizes submix insert parameters as it does a track's (`compile.rs:152-170`).
+   - D5 and D6.
+2. **Protocol codec.**
+   - `schema::session::submix` gains fields 2, 4, 5 and 6, built from the track's field specs.
+   - `tx_submix` and `parse_submix` use the track's field codecs.
+   - Re-pin `COMPLETE_SCHEMA_HASH` at its four sites, with the doc paragraph above it at
+     `protocol_corpus.rs:654-665` extended by one sentence of reason.
+   - The corpus's `UpsertSubmix` row carries a non-trivial strip (non-default trim, an insert, a
+     muted lane and a matrix).
+3. **Migration.**
+   - Every `Submix {` construction in the Context becomes `Submix::unity(id)`, or an explicit strip
+     where a test needs one.
+   - Regenerate the writer corpus, after giving `canonical.rs:249`'s submix a non-trivial strip so
+     that the corpus covers the new fields.
+   - Give `worked-session.json`'s submix transparent strip keys.
+4. **Docs.**
+   - `docs/SESSION_SCHEMA_V1.md`: the submix strip, its keys and their order (`:37`, `:43`, and the
+     routes paragraph at `:213`).
+   - `docs/session-v1.schema.json`: the `submixes` definition (`:19`), which is no longer `id_record`.
+   - `docs/CONTROL_PROTOCOL_REGISTRY.md`: the nested model registry line (`:76`) gains
+     `submix 1:id,2:builtins,4:inserts,5:fader,6:matrix/pan`, with field 3 reserved.
+
+## Authorized paths
+
+- `crates/session/**`
+- `crates/protocol/src/{schema.rs,session_wire.rs,session_wire/tests.rs}`
+- `crates/conformance/src/protocol_corpus.rs`
+- `scripts/check-protocol-wasm-parity.sh` (the hash literal only)
+- `fuzz/corpus/complete-schema-manifest.md` (the hash only)
+- `docs/CONTROL_PROTOCOL_CONFORMANCE.md` (the hash only)
+- `crates/graph-compiler/src/lib.rs` and `crates/graph-compiler/tests/{bank_levels,compile_shapes}.rs`
+  (construction sites only)
+- `crates/host-core/tests/{collapse_arming,randomized}.rs` (construction sites only)
+- `fixtures/session-canonical/v1/canonical-writer-corpus.json` (regenerated)
+- `.claude/skills/author-session/worked-session.json`
+- `docs/SESSION_SCHEMA_V1.md`, `docs/session-v1.schema.json`, `docs/CONTROL_PROTOCOL_REGISTRY.md`
+- only for D8, and only if #1053 has landed: its classifier in `crates/host-core/src/` and one new
+  test file in `crates/capi/tests/`
+- this spec
+
+## Non-goals
+
+- No rendering of the strip (next slice), no console entries on submixes, and no submix tap.
+- No SDK change. `sdk/test/builder-evals.mjs`, `console-evals.mjs` and `enginectl-cli.mjs` go red against these
+  documents until *Build submix strips and bus taps in the SDK and teach agents to author them*,
+  inside the batch. They are not this slice's gates.
+- No route field.
+
+## Hazards
+
+- **The tagged field.** Pan-or-matrix is one tagged message, not two keys. Encoding pan and matrix
+  as separate optional fields would accept a submix carrying both. The codec must reuse the track's
+  tag.
+- **Index paths.** Session diagnostics are index-based. A `[id=..]` path in a session diagnostic
+  breaks the diagnostic-parity tests.
+- **Order.** `compile_session` must sort submixes by ID, as it does today; the next slice's
+  `strips()` order, and every later lane assignment and digest, depend on it.
+
+## Objective gates
+
+1. **Strict parse.** New tests in `crates/session/tests/` refuse each of the following at the index
+   path with the code a track gets:
+   - a submix missing `builtins`, `inserts` or `fader`;
+   - a submix with neither `pan` nor `matrix`, or with both;
+   - an unknown key;
+   - a non-finite `fader.left_db`;
+   - a pan value of 1.5;
+   - a `delay_samples` above `CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM` (48 000,
+     `crates/session/src/model.rs:376`).
+
+   *Test value: it turns red if a submix field is not validated, is validated by a different rule
+   than a track's, or is reported at a track or `[id=..]` path.*
+2. **Canonical round trip.** A submix strip with non-default values in every field writes canonical
+   text that parses back to the same model, byte for byte. Key order is `id, builtins, inserts,
+   fader, pan|matrix`.
+   *Test value: it turns red if the writer orders submix keys differently from D2, or drops a field.*
+3. **BTLV round trip.** In `crates/protocol/src/session_wire/tests.rs`, a random submix strip (pan
+   in some draws, matrix in others) encodes and decodes losslessly.
+   *Test value: it turns red if the codec drops a field, swaps pan and matrix, or misreads the tag.*
+4. **Wire pins.**
+   - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
+     passes with the re-pinned hash.
+   - `bash scripts/check-protocol-wasm-parity.sh` passes.
+5. **Unchanged where no submix exists.**
+   - `cargo build --locked --release -p audit -p bench -p capi -p session-validator`
+   - `bash scripts/check-graph-determinism.sh`
+   - `cargo run --locked -p graph-compiler --bin graph_fixture -- --check`
+   - `bash scripts/check-console-fixtures.sh target/release/session_validator`
+   - `bash scripts/check-builtins-fixtures.sh . target/release/audit`
+
+   No digest of a session without submixes moves.
+6. **Workspace and policy.**
+   - the test-debug-a workspace command (DESIGN section 7);
+   - `cargo fmt --all -- --check`;
+   - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+   - `bash scripts/check-session-policy.sh`, `bash scripts/check-protocol-control-policy.sh` and
+     `bash scripts/check-workspace-policy.sh`, with their `test-*` twins.
+7. **Only if #1053 has landed (D8).** The capi test passes, with `bash scripts/check-capi-abi.sh`,
+   `bash scripts/check-capi-abi.sh --self-test` and `./target/release/audit capi`.
+   *Test value: it turns red if #1053's value-only path pushes a submix fader change it has no
+   lane for, so the running plan diverges from its committed model.*
+
+## Evidence
+
+- The re-pinned hash, with its reason: "submix fields 2, 4, 5, 6".
+- The regenerated writer-corpus diff.
+- The list of migrated construction sites.
+- Whether #1053 had landed, and so whether D8 was implemented here.
+
+## Dependencies
+
+- *Iterate session strips, not tracks, wherever strip semantics apply* (#1198)
+
+## Standing rules for the implementer
+
+- Work only from this body. Read the cited functions first; do not survey the workspace.
+- "Unchanged" gates are hard stops. NaNs are folded to one value (decision 10).
+- In-place V1 wire amendment: append field IDs, never renumber; no `ABI_VERSION` bump.
+- A test that greps source or prose is refused. A superseded test is deleted in the same PR.
+- Commit on the K1 batch branch; do not push until the root closes the batch.
+- Attempt budget: five attempts, one adversarial verdict each.
