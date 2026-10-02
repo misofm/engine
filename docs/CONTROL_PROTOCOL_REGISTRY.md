@@ -61,15 +61,22 @@ An automation record is exactly 32 bytes: `kind:u8, flags:u8=0, reserved:u16=0, 
 | `0200` | upsert track | track |
 | `0201` | remove track | track ID |
 | `0202` | set source assignment | track ID, source ID, left/right source channel |
-| `0203`–`0204` | set builtins; set rack | track ID plus builtins; track ID, rack name, rack |
-| `0205` | put effect | track ID, rack name, final position, effect |
-| `0206`–`020c` | remove/order effect; set identity/quality/bypass/link/sidechain | track ID, rack name, effect ID plus the respective replacement; order repeats effect ID |
-| `020d`–`0210` | upsert/remove effect parameter; set fader/matrix | track ID, rack name, effect ID plus parameter or parameter ID/channel; track ID plus fader/matrix |
-| `0211` | set track console | track ID, then the complete ordered console entries (repeated) |
+| `0203`–`0204` | set builtins; set rack | strip ID plus builtins; strip ID, rack name, rack |
+| `0205` | put effect | strip ID, rack name, final position, effect |
+| `0206`–`020c` | remove/order effect; set identity/quality/bypass/link/sidechain | strip ID, rack name, effect ID plus the respective replacement; order repeats effect ID |
+| `020d`–`0210` | upsert/remove effect parameter; set fader/matrix | strip ID, rack name, effect ID plus parameter or parameter ID/channel; strip ID plus fader/matrix |
+| `0211` | set strip console | strip ID, then the complete ordered console entries (repeated) |
 | `0300`–`0301` | upsert/remove submix | submix; submix ID |
 | `0400`–`0401` | upsert/remove output | output; output ID |
 | `0500`–`0505` | upsert/remove route; set source/destination/matrix/gain | route or route ID plus the respective replacement |
 | `0600`–`0603` | upsert/remove automation; set target/segments | automation or automation ID plus target; ordered repeated segment |
+
+Strip addressing (#1204). Opcodes `0203`–`0211` address a **strip ID**, and nothing else about them changed: no opcode, field, code or wire position moved, and the field once named "track ID" is the same first field with the same type.
+
+- **D1.** A track ID names the track's strip and a submix ID the submix's. The Rust variant and field names (`SetTrackFader { track_id, .. }`) are unchanged internal names; each field's doc says it names a strip.
+- **D2.** `0202` (source assignment) stays track-only: a submix ID is `session.edit.not_found`. An output ID is `session.edit.not_found` for every strip opcode.
+- **D3.** Rack and knob semantics are unchanged; only the resolution widens. The structural and declaration edits refuse a submix's `console` rack as `session.edit.console_slot_fixed` before any lookup, exactly as for a track (so an unknown ID with rack `console` still answers `console_slot_fixed`); `020a`, `020d` and `020e` with rack `console` edit the submix's entry for the slot; rack `builtins` stays `session.edit.not_found`; and the slot-set rule below (#1202) stands.
+- **D4.** A strip ID resolves **tracks first, then submixes**. A validated model has one match at most, because IDs are unique across tracks, submixes and outputs; inside a transaction, before final validation, a track and a submix may briefly share an ID (`0300` is a plain upsert), and then the track wins.
 
 There are exactly 41 allocated opcodes. Issue #241 retired three: `0006` (set limits), `0102` (set source sample rate) and `0104` (set source mapping), whose subjects left the schema with the `limits` table and the nested source mapping/region. Retired codes are **never reallocated** -- a v1 peer that spells one must be refused, not reinterpreted, which is why `SessionEditOpcode::from_raw` returns `None` for them and a conformance row pins that. A successful atomic transaction replaces the typed `SessionModel`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed canonical JSON, never a compiled/render-plan serialization.
 
@@ -86,8 +93,8 @@ Owner decision 12 (`docs/rulings/engine-footprint-2026-09-29.md`, "Wire identity
 Console addressing. A console slot's `slot` ID is session-level and unique across both sections; every strip, track or submix (#1202), carries one entry per slot, in slot order.
 
 - `0007` replaces the whole declaration: both sections and each slot's identity, quality and link mode. It is the only edit that changes the slot set.
-- `0211` replaces one track's whole entry array. It edits that track's knobs and cannot change the slot set: an entry array that adds, drops or reorders a slot refuses at final validation.
-- `020a` (bypass), `020d` (upsert parameter) and `020e` (remove parameter) with rack `console` edit one track's entry, with the slot ID as the effect ID; a slot the track does not carry is `session.edit.not_found`.
-- `0204`–`0209`, `020b` and `020c` (set rack, put, remove, order, identity, quality, link mode, sidechain) with rack `console` are refused as `VALIDATION_FAILED` with diagnostic `session.edit.console_slot_fixed`, whatever the model holds. A track cannot add, remove or reorder a slot, a slot's declaration is the session's, and a slot has no sidechain. With rack `builtins`, every rack-addressed edit is `session.edit.not_found` (#178).
+- `0211` replaces one strip's whole entry array (a track's or, #1204, a submix's). It edits that strip's knobs and cannot change the slot set: an entry array that adds, drops or reorders a slot refuses at final validation.
+- `020a` (bypass), `020d` (upsert parameter) and `020e` (remove parameter) with rack `console` edit one strip's entry, a track's or a submix's (#1204), with the slot ID as the effect ID; a slot the strip does not carry is `session.edit.not_found`.
+- `0204`–`0209`, `020b` and `020c` (set rack, put, remove, order, identity, quality, link mode, sidechain) with rack `console` are refused as `VALIDATION_FAILED` with diagnostic `session.edit.console_slot_fixed`, whatever the model holds. A strip, track or submix, cannot add, remove or reorder a slot, a slot's declaration is the session's, and a slot has no sidechain. With rack `builtins`, every rack-addressed edit is `session.edit.not_found` (#178).
 
-A transaction that changes the slot set (adds, removes, renames or reorders a slot) must rewrite every strip's entries in the same transaction: every track's with `0211` or `0200`, and every submix's with `0300` (#1202). The store validates only the final candidate, so the rewrite may follow the declaration in any order; a transaction that skips a strip fails final validation with that strip's `console.entry_missing`, `console.entry_order` or `reference.missing_entity` (at `$.tracks[<i>].console` or `$.submixes[<i>].console`), and is refused whole. Nothing is committed and nothing is acknowledged: the refusal is decided before the response is written, as for every transaction. A declaration change that keeps the slot sequence (a quality, link mode or identity change, or moving a slot across the section boundary without reordering it) leaves every entry valid and needs no rewrite; effect preparation judges the parameters against a changed identity, as it does for `0208` on an insert.
+A transaction that changes the slot set (adds, removes, renames or reorders a slot) must rewrite every strip's entries in the same transaction: every track's with `0211` or `0200`, and every submix's with `0300` (#1202) or, since #1204, `0211`. The store validates only the final candidate, so the rewrite may follow the declaration in any order; a transaction that skips a strip fails final validation with that strip's `console.entry_missing`, `console.entry_order` or `reference.missing_entity` (at `$.tracks[<i>].console` or `$.submixes[<i>].console`), and is refused whole. Nothing is committed and nothing is acknowledged: the refusal is decided before the response is written, as for every transaction. A declaration change that keeps the slot sequence (a quality, link mode or identity change, or moving a slot across the section boundary without reordering it) leaves every entry valid and needs no rewrite; effect preparation judges the parameters against a changed identity, as it does for `0208` on an insert.

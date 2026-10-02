@@ -180,10 +180,11 @@ pub enum SessionEdit {
     /// Replace the session's whole console declaration: both sections, every slot's identity,
     /// quality and link mode (decision 12).
     ///
-    /// This is the only edit that changes the slot set. Every track carries one entry per slot in
-    /// slot order, so a transaction that adds, removes, renames or reorders a slot must rewrite
-    /// every track's entries in the same transaction (`SetTrackConsole` or `UpsertTrack`), or the
-    /// final validation refuses the whole transaction and nothing is committed.
+    /// This is the only edit that changes the slot set. Every strip, track or submix, carries one
+    /// entry per slot in slot order, so a transaction that adds, removes, renames or reorders a
+    /// slot must rewrite every strip's entries in the same transaction (`SetTrackConsole`,
+    /// `UpsertTrack` or `UpsertSubmix`), or the final validation refuses the whole transaction and
+    /// nothing is committed.
     SetConsole { console: Console },
     /// Insert or replace one source by stable ID.
     UpsertSource { source: Source },
@@ -212,20 +213,22 @@ pub enum SessionEdit {
         /// Right source channel.
         right_source_channel: u8,
     },
-    /// Set both dual-mono builtin declarations.
+    /// Set both dual-mono builtin declarations of one strip.
     SetTrackBuiltins {
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         builtins: DualMonoBuiltins,
     },
     /// Replace a complete named effect rack.
     SetTrackRack {
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         rack_name: RackName,
         rack: Rack,
     },
     /// Insert/reposition one effect after removing a same-ID effect.
     PutTrackEffect {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack to change.
         rack_name: RackName,
@@ -236,13 +239,14 @@ pub enum SessionEdit {
     },
     /// Remove a named effect from one rack.
     RemoveTrackEffect {
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         rack_name: RackName,
         effect_id: StableId,
     },
     /// Replace effect order with an exact permutation of current IDs.
     SetTrackEffectOrder {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack to reorder.
         rack_name: RackName,
@@ -251,7 +255,7 @@ pub enum SessionEdit {
     },
     /// Set a named effect's identity declaration.
     SetEffectIdentity {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -262,7 +266,7 @@ pub enum SessionEdit {
     },
     /// Set a named effect's quality.
     SetEffectQuality {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -273,7 +277,7 @@ pub enum SessionEdit {
     },
     /// Set a named effect's latency-preserving bypass declaration.
     SetEffectBypass {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -284,7 +288,7 @@ pub enum SessionEdit {
     },
     /// Set a named effect's detector link mode.
     SetEffectLinkMode {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -295,7 +299,7 @@ pub enum SessionEdit {
     },
     /// Set a named effect's sidechain declaration.
     SetEffectSidechain {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -306,7 +310,7 @@ pub enum SessionEdit {
     },
     /// Insert or replace an effect parameter keyed by `(parameter_id, channel)`.
     UpsertEffectParam {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -317,7 +321,7 @@ pub enum SessionEdit {
     },
     /// Remove an existing parameter by its compound key.
     RemoveEffectParam {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// Rack containing the effect.
         rack_name: RackName,
@@ -328,23 +332,25 @@ pub enum SessionEdit {
         /// Explicit parameter channel.
         channel: session::ParameterChannel,
     },
-    /// Set a track fader declaration.
+    /// Set a strip's fader declaration.
     SetTrackFader {
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         fader: DualMonoFader,
     },
-    /// Set a track matrix or pan declaration.
+    /// Set a strip's matrix or pan declaration.
     SetTrackMatrixOrPan {
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         matrix_or_pan: MatrixOrPan,
     },
-    /// Replace one track's whole console entry array (decision 12).
+    /// Replace one strip's whole console entry array (decision 12).
     ///
-    /// It carries only that track's knobs, `bypass` and `params`, one entry per session slot in
+    /// It carries only that strip's knobs, `bypass` and `params`, one entry per session slot in
     /// slot order. It cannot change the slot set: an entry array that adds, drops or reorders a
     /// slot refuses at the transaction's final validation.
     SetTrackConsole {
-        /// Existing track.
+        /// Existing strip: a track ID or a submix ID, tracks first (#1204).
         track_id: StableId,
         /// The complete ordered entries, one per session console slot.
         console: Vec<ConsoleEntry>,
@@ -529,7 +535,7 @@ pub fn apply_session_edit(
             track.right_source_channel = *right_source_channel;
         }
         SessionEdit::SetTrackBuiltins { track_id, builtins } => {
-            track_mut(session, track_id)?.builtins = builtins.clone();
+            *strip_mut(session, track_id)?.builtins = builtins.clone();
         }
         SessionEdit::SetTrackRack {
             track_id,
@@ -661,16 +667,16 @@ pub fn apply_session_edit(
             params.remove(index);
         }
         SessionEdit::SetTrackFader { track_id, fader } => {
-            track_mut(session, track_id)?.fader = fader.clone()
+            *strip_mut(session, track_id)?.fader = fader.clone()
         }
         SessionEdit::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
         } => {
-            track_mut(session, track_id)?.matrix_or_pan = matrix_or_pan.clone();
+            *strip_mut(session, track_id)?.matrix_or_pan = matrix_or_pan.clone();
         }
         SessionEdit::SetTrackConsole { track_id, console } => {
-            track_mut(session, track_id)?.console = console.clone();
+            *strip_mut(session, track_id)?.console = console.clone();
         }
         SessionEdit::UpsertSubmix { submix } => {
             upsert(&mut session.submixes, submix, |item| &item.id)
@@ -950,6 +956,51 @@ fn track_mut<'a>(
         .ok_or(SessionEditError::NotFound)
 }
 
+/// The five strip fields a strip edit (`0203`-`0211`) writes, borrowed from a track or a submix.
+struct StripMut<'a> {
+    builtins: &'a mut DualMonoBuiltins,
+    console: &'a mut Vec<ConsoleEntry>,
+    inserts: &'a mut Rack,
+    fader: &'a mut DualMonoFader,
+    matrix_or_pan: &'a mut MatrixOrPan,
+}
+
+/// Resolve the strip a strip edit names (#1204 D1, D4): a track ID names the track's strip and a
+/// submix ID the submix's. Tracks are searched first, then submixes; an output ID, like any other
+/// unknown ID, is [`SessionEditError::NotFound`].
+///
+/// IDs are unique across tracks, submixes and outputs only in a validated model. Inside a
+/// transaction, before final validation, a track and a submix may briefly share an ID (an
+/// `UpsertSubmix` is a plain upsert), and then the track wins.
+fn strip_mut<'a>(
+    session: &'a mut SessionModel,
+    id: &StableId,
+) -> Result<StripMut<'a>, SessionEditError> {
+    let SessionModel {
+        tracks, submixes, ..
+    } = session;
+    if let Some(track) = tracks.iter_mut().find(|item| &item.id == id) {
+        return Ok(StripMut {
+            builtins: &mut track.builtins,
+            console: &mut track.console,
+            inserts: &mut track.inserts,
+            fader: &mut track.fader,
+            matrix_or_pan: &mut track.matrix_or_pan,
+        });
+    }
+    let submix = submixes
+        .iter_mut()
+        .find(|item| &item.id == id)
+        .ok_or(SessionEditError::NotFound)?;
+    Ok(StripMut {
+        builtins: &mut submix.builtins,
+        console: &mut submix.console,
+        inserts: &mut submix.inserts,
+        fader: &mut submix.fader,
+        matrix_or_pan: &mut submix.matrix_or_pan,
+    })
+}
+
 fn route_mut<'a>(
     session: &'a mut SessionModel,
     id: &StableId,
@@ -974,7 +1025,8 @@ fn automation_mut<'a>(
 
 /// The `Rack` a `SessionEdit` structural rack-addressed edit names.
 ///
-/// Only a track's `inserts` is a rack of per-track effect instances.
+/// Only a strip's `inserts` -- a track's or a submix's, resolved by [`strip_mut`] -- is a rack of
+/// per-strip effect instances.
 ///
 /// - `RackName::Builtins` (#178, ruled by #210's D2) is the strip's own builtin section, a
 ///   `DualMonoBuiltins` with no `effects` vector, so every edit that reaches here is addressing
@@ -982,17 +1034,17 @@ fn automation_mut<'a>(
 ///   named-but-absent effect gets, rather than given a panicking arm or a silent no-op. The strip
 ///   is edited through `SetTrackBuiltins`, which owns it; the token exists for the
 ///   automation-target vocabulary.
-/// - `RackName::Console` (decision 12) names session-level slots. A track cannot add, remove or
-///   reorder one, and a slot's declaration is not per-track, so a structural or declaration edit
-///   naming it is refused with [`SessionEditError::ConsoleSlotFixed`] before the track is even
-///   looked up: the refusal is a property of the edit, not of the model it meets.
+/// - `RackName::Console` (decision 12) names session-level slots. A strip, track or submix, cannot
+///   add, remove or reorder one, and a slot's declaration is not per-strip, so a structural or
+///   declaration edit naming it is refused with [`SessionEditError::ConsoleSlotFixed`] before the
+///   strip is even looked up: the refusal is a property of the edit, not of the model it meets.
 fn rack_mut<'a>(
     session: &'a mut SessionModel,
-    track_id: &StableId,
+    strip_id: &StableId,
     rack_name: RackName,
 ) -> Result<&'a mut Rack, SessionEditError> {
     match rack_name {
-        RackName::Inserts => Ok(&mut track_mut(session, track_id)?.inserts),
+        RackName::Inserts => Ok(strip_mut(session, strip_id)?.inserts),
         RackName::Builtins => Err(SessionEditError::NotFound),
         RackName::Console => Err(SessionEditError::ConsoleSlotFixed),
     }
@@ -1003,18 +1055,18 @@ fn rack_mut<'a>(
 /// refused by [`rack_mut`].
 fn effect_mut<'a>(
     session: &'a mut SessionModel,
-    track_id: &StableId,
+    strip_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
 ) -> Result<&'a mut Effect, SessionEditError> {
-    rack_mut(session, track_id, rack_name)?
+    rack_mut(session, strip_id, rack_name)?
         .effects
         .iter_mut()
         .find(|effect| &effect.id == effect_id)
         .ok_or(SessionEditError::NotFound)
 }
 
-/// One track's knobs for one effect: what `SetEffectBypass`, `UpsertEffectParam` and
+/// One strip's knobs for one effect: what `SetEffectBypass`, `UpsertEffectParam` and
 /// `RemoveEffectParam` edit.
 struct KnobsMut<'a> {
     bypass: &'a mut bool,
@@ -1023,17 +1075,18 @@ struct KnobsMut<'a> {
 
 /// Resolve the knobs a bypass or parameter edit names.
 ///
-/// An insert's knobs live on its effect. A console slot's live on the track's entry for that slot
-/// (decision 12): `effect_id` carries the slot ID, and only that track's entry changes. A track
-/// without an entry for the slot answers [`SessionEditError::NotFound`], as an absent insert does.
+/// An insert's knobs live on its effect. A console slot's live on the strip's entry for that slot
+/// (decision 12; a submix's since #1202): `effect_id` carries the slot ID, and only that strip's
+/// entry changes. A strip without an entry for the slot answers [`SessionEditError::NotFound`], as
+/// an absent insert does.
 fn knobs_mut<'a>(
     session: &'a mut SessionModel,
-    track_id: &StableId,
+    strip_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
 ) -> Result<KnobsMut<'a>, SessionEditError> {
     if rack_name == RackName::Console {
-        let entry = track_mut(session, track_id)?
+        let entry = strip_mut(session, strip_id)?
             .console
             .iter_mut()
             .find(|entry| &entry.slot == effect_id)
@@ -1043,7 +1096,7 @@ fn knobs_mut<'a>(
             params: &mut entry.params,
         });
     }
-    let effect = effect_mut(session, track_id, rack_name, effect_id)?;
+    let effect = effect_mut(session, strip_id, rack_name, effect_id)?;
     Ok(KnobsMut {
         bypass: &mut effect.bypass,
         params: &mut effect.params,
