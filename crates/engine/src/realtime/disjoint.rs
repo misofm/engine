@@ -1,91 +1,31 @@
-//! Plan-owned disjoint audio arena for the sequential render executor.
+//! Plan-owned planar audio storage for the sequential render executor.
 //!
-//! The render executor consumes one prepared lease sequentially. Before issue #100, plans used
-//! separate arenas and copied edges between them. The pull model instead gives the whole plan
-//! **one** arena and lets consumers read producer buffers in place.
-//!
-//! That requires one allocation to be reachable through several leases, which is why this module
-//! owns the only `unsafe` on the render path. [`ArenaLeaseSetBuilder::finish`] proves the two
-//! structural invariants:
-//!
-//! * **I1 — writes are globally unique.** Every buffer is writable by at most one lease, for the
-//!   whole life of the plan. Buffers are never recycled, so no two leases (in the same wave or in
-//!   different waves) can ever address the same words mutably.
-//! * **I2 — reads are strictly earlier.** A lease may read a buffer only if that buffer is
-//!   written by a lease of a strictly smaller wave, or by the reading lease itself. Wave order is
-//!   a dependency relation; it is not by itself synchronization.
-//!
-//! All execution must also satisfy **E1 — ordered access**: a foreign writer's exclusive access
-//! ends and happens-before a consuming lease reads that buffer. The production executor
-//! discharges E1 by using its single prepared lease exclusively and sequentially. Any retained
-//! multi-lease use must provide the same happens-before edge and must not overlap a foreign write
-//! with a read. Concurrent leases may write their I1-disjoint sets and join before inspection.
-//!
-//! Buffer `0` is the silence buffer. No lease may write it, so it stays zero for the life of the
-//! arena.
+//! One non-cloneable owner holds every buffer. Shared access borrows that owner; all mutable
+//! access requires its exclusive borrow, so no foreign writer can overlap a read. Buffer `0` is
+//! the immutable silence buffer. Other reserved buffers remain writable for the life of the plan.
+//! Combined borrows validate bounds and spatial disjointness before forming any references.
 
 #![allow(unsafe_code)]
 
-use core::{cell::UnsafeCell, num::NonZeroUsize};
-use std::sync::Arc;
+use core::num::NonZeroUsize;
 
 /// The silence buffer every arena reserves: always zero, writable by nobody.
 pub const ARENA_SILENCE_BUFFER: u32 = 0;
 
-/// A bind-time rejection of an unsound or oversized lease set.
+/// A bind-time rejection of an oversized arena.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisjointArenaError {
-    /// Two leases declared a write to the same buffer, breaking I1.
-    Overlap {
-        /// The buffer both leases claimed.
-        buffer: u32,
-        /// The lease that claimed it first.
-        first: usize,
-        /// The lease that claimed it again.
-        second: usize,
-    },
-    /// A lease reads a buffer that is not produced by a strictly earlier wave, breaking I2.
-    ReadNotEarlier {
-        /// The reading lease.
-        lease: usize,
-        /// The buffer it tried to read.
-        buffer: u32,
-    },
-    /// A lease declared a write to the reserved silence buffer.
-    SilenceWrite {
-        /// The offending lease.
-        lease: usize,
-    },
-    /// A declared buffer was never reserved.
-    UnknownBuffer {
-        /// The offending lease.
-        lease: usize,
-        /// The buffer it named.
-        buffer: u32,
-    },
-    /// Exact byte accounting overflowed `usize`.
+    /// Buffer count, word count, or slice allocation bytes exceed the platform capacity.
     CapacityOverflow,
 }
 
-/// Flat planar `f32` storage shared by every lease of one prepared plan.
-///
-/// See the module documentation for the invariants that make the shared mutable access sound.
-/// Instances are produced only by [`ArenaLeaseSetBuilder::finish`].
+/// Flat planar `f32` storage exclusively owned by one prepared plan.
 pub struct DisjointArena {
-    cells: Box<[UnsafeCell<f32>]>,
+    cells: Box<[f32]>,
     planes: usize,
     buffers: usize,
     frames: usize,
 }
-
-// SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
-// only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I1
-// prevents write/write aliasing. E1 is the separate execution obligation that prevents a foreign
-// write from overlapping a read; the production executor meets it through exclusive sequential
-// lease use, and any retained multi-lease executor must establish the documented happens-before.
-unsafe impl Sync for DisjointArena {}
-// SAFETY: `f32` is `Send`, and a lease carries no thread-affine state.
-unsafe impl Send for DisjointArena {}
 
 impl core::fmt::Debug for DisjointArena {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -98,11 +38,57 @@ impl core::fmt::Debug for DisjointArena {
     }
 }
 
+/// Both planes of one written buffer plus both planes of one read buffer.
+pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a [f32]));
+/// Both writable planes of one arena buffer.
+pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
+
 impl DisjointArena {
+    /// Allocate zeroed planar storage on the control thread.
+    ///
+    /// Buffer `0` is reserved for silence; writable buffers have IDs `1..=writable_buffers`.
+    ///
+    /// # Errors
+    /// Returns [`DisjointArenaError::CapacityOverflow`] before allocation when the silence slot,
+    /// word/byte products, or the platform's maximum slice allocation cannot be represented.
+    pub fn try_new(
+        planes: NonZeroUsize,
+        frames: NonZeroUsize,
+        writable_buffers: u32,
+    ) -> Result<Self, DisjointArenaError> {
+        let buffers = usize::try_from(writable_buffers)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .ok_or(DisjointArenaError::CapacityOverflow)?;
+        let words = planes
+            .get()
+            .checked_mul(buffers)
+            .and_then(|value| value.checked_mul(frames.get()))
+            .ok_or(DisjointArenaError::CapacityOverflow)?;
+        let bytes = words
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or(DisjointArenaError::CapacityOverflow)?;
+        if bytes > isize::MAX as usize {
+            return Err(DisjointArenaError::CapacityOverflow);
+        }
+        Ok(Self {
+            cells: vec![0.0; words].into_boxed_slice(),
+            planes: planes.get(),
+            buffers,
+            frames: frames.get(),
+        })
+    }
+
     /// Number of reserved buffers, including the silence buffer.
     #[must_use]
     pub const fn buffers(&self) -> usize {
         self.buffers
+    }
+
+    /// Frames in one buffer.
+    #[must_use]
+    pub const fn frames(&self) -> usize {
+        self.frames
     }
 
     /// Exact retained payload bytes, excluding allocator headers.
@@ -111,215 +97,135 @@ impl DisjointArena {
         self.cells.len() * core::mem::size_of::<f32>()
     }
 
-    #[inline]
-    const fn offset(&self, plane: usize, buffer: usize) -> usize {
-        (plane * self.buffers + buffer) * self.frames
-    }
-}
-
-/// Both planes of one written buffer plus both planes of one read buffer.
-pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a [f32]));
-/// Both writable planes of one arena buffer.
-pub type ArenaStereoPlanes<'a> = (&'a mut [f32], &'a mut [f32]);
-
-/// One executor step's checked view of the shared arena.
-///
-/// The lease is the only way to reach arena storage. It is `Send` and deliberately not `Sync`.
-pub struct ArenaLease {
-    arena: Arc<DisjointArena>,
-    /// Per buffer: bit 0 writable by this lease.
-    access: Box<[u8]>,
-}
-
-const ACCESS_WRITE: u8 = 0b01;
-
-impl core::fmt::Debug for ArenaLease {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter
-            .debug_struct("ArenaLease")
-            .field("buffers", &self.arena.buffers)
-            .finish()
-    }
-}
-
-impl ArenaLease {
-    /// Frames in one buffer.
-    #[must_use]
-    pub fn frames(&self) -> usize {
-        self.arena.frames
-    }
-
-    /// Whether this lease may write `buffer`.
+    /// Whether `buffer` is a reserved writable buffer.
     #[must_use]
     pub fn writes(&self, buffer: u32) -> bool {
-        self.access
-            .get(buffer as usize)
-            .is_some_and(|access| access & ACCESS_WRITE != 0)
+        buffer != ARENA_SILENCE_BUFFER && (buffer as usize) < self.buffers
     }
 
     // REALTIME_POLICY_BEGIN
 
     #[inline]
-    fn effective(&self, buffer: u32) -> usize {
+    fn checked_buffer(&self, buffer: u32) -> usize {
         let index = buffer as usize;
-        // This checked access is a release-mode read-ID guard. Keep it before forming the
-        // unchecked arena slice below; debug_assert alone would remove the safety boundary.
-        let _ = self.access[index];
+        assert!(index < self.buffers, "unreserved arena buffer");
         index
     }
 
     #[inline]
     fn checked_write(&self, buffer: u32) -> usize {
-        let index = buffer as usize;
-        debug_assert!(
-            self.access
-                .get(index)
-                .is_some_and(|access| access & ACCESS_WRITE != 0),
-            "write outside this lease's unique write set"
-        );
-        index
+        assert!(self.writes(buffer), "arena buffer is not writable");
+        buffer as usize
+    }
+
+    #[inline]
+    fn offset(&self, plane: usize, buffer: usize) -> usize {
+        assert!(plane < self.planes, "invalid arena plane");
+        assert!(buffer < self.buffers, "unreserved arena buffer");
+        // Checked construction bounds the full product. Valid indices keep every intermediate
+        // and the complete frames-long range within that product, before references are formed.
+        (plane * self.buffers + buffer) * self.frames
     }
 
     /// One buffer's frames in `plane`, shared.
+    ///
+    /// Panics on an invalid plane or unreserved buffer, before borrowing storage.
     #[inline]
     #[must_use]
     pub fn read(&self, plane: usize, buffer: u32) -> &[f32] {
-        let start = self.arena.offset(plane, self.effective(buffer));
-        // SAFETY: I1/I2/E1. `start..start + frames` is in bounds by construction (the builder
-        // reserved every buffer and sized the allocation `planes * buffers * frames`), and no
-        // other lease may write those words while this shared reference lives: either the buffer
-        // is this lease's own, E1 has ended and ordered its foreign writer's access, or it is the
-        // never-written silence buffer.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.arena.cells[start].get().cast_const().cast::<f32>(),
-                self.arena.frames,
-            )
-        }
+        let start = self.offset(plane, self.checked_buffer(buffer));
+        &self.cells[start..start + self.frames]
     }
 
     /// Both planes of one buffer, shared.
+    ///
+    /// Panics unless the arena has two planes and the buffer is reserved.
     #[inline]
     #[must_use]
     pub fn read_stereo(&self, buffer: u32) -> (&[f32], &[f32]) {
-        (self.read(0, buffer), self.read(1, buffer))
+        assert!(self.planes >= 2, "stereo access requires two arena planes");
+        let index = self.checked_buffer(buffer);
+        let left = self.offset(0, index);
+        let right = self.offset(1, index);
+        (
+            &self.cells[left..left + self.frames],
+            &self.cells[right..right + self.frames],
+        )
     }
 
-    /// One buffer's frames in `plane`, exclusively. `buffer` must be in this lease's write set.
+    /// One buffer's frames in `plane`, exclusively.
+    ///
+    /// Panics on an invalid plane, unreserved buffer, or silence write before borrowing storage.
     #[inline]
     pub fn write(&mut self, plane: usize, buffer: u32) -> &mut [f32] {
-        let start = self.arena.offset(plane, self.checked_write(buffer));
-        // SAFETY: I1 gives this lease the only mutable ownership of `buffer`; E1 prevents a
-        // foreign lease's shared read from overlapping this write. `&mut self` excludes any live
-        // reference produced by this lease.
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.arena.cells[start].get().cast::<f32>(),
-                self.arena.frames,
-            )
-        }
+        let start = self.offset(plane, self.checked_write(buffer));
+        &mut self.cells[start..start + self.frames]
     }
 
-    /// Both planes of one buffer, exclusively.
+    /// Both planes of one writable buffer, exclusively.
+    ///
+    /// Panics unless the arena has two planes and the buffer is writable.
     #[inline]
     pub fn write_stereo(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
+        assert!(self.planes >= 2, "stereo access requires two arena planes");
         let index = self.checked_write(buffer);
-        let (left, right) = (self.arena.offset(0, index), self.arena.offset(1, index));
-        // SAFETY: I1 excludes a foreign mutable owner, E1 excludes overlapping foreign shared
-        // reads, and `&mut self` excludes references from this lease, as in `write`. The two
-        // planes are disjoint ranges because `offset` is plane-major and `index` is the same
-        // buffer in both.
-        unsafe {
-            (
-                core::slice::from_raw_parts_mut(
-                    self.arena.cells[left].get().cast::<f32>(),
-                    self.arena.frames,
-                ),
-                core::slice::from_raw_parts_mut(
-                    self.arena.cells[right].get().cast::<f32>(),
-                    self.arena.frames,
-                ),
-            )
-        }
+        let start = self.offset(0, index);
+        let stride = self.buffers * self.frames;
+        let (left, right) = self.cells.split_at_mut(stride);
+        (
+            &mut left[start..start + self.frames],
+            &mut right[start..start + self.frames],
+        )
     }
 
-    /// Borrow the complete set of pairwise-disjoint stereo outputs for a full bank.
+    /// Borrow pairwise-disjoint stereo outputs for a full four- or eight-lane bank.
     ///
-    /// All access and shape checks happen before any reference is formed. This is the sole
-    /// mutable multi-plane seam used by the direct bank scatter path.
+    /// Invalid shape, non-writable or repeated outputs return `None` before any reference forms.
     pub fn write_stereo_many<const W: usize>(
         &mut self,
         buffers: &[u32; W],
         frames: usize,
     ) -> Option<[ArenaStereoPlanes<'_>; W]> {
-        // Stereo access is part of this safe API's shape, not a convention imposed on callers.
-        // Reject it before computing either plane offset or forming any reference.
-        if self.arena.planes < 2 || (W != 4 && W != 8) || frames > self.arena.frames {
+        if self.planes < 2 || (W != 4 && W != 8) || frames > self.frames {
             return None;
         }
-        for (i, buffer) in buffers.iter().copied().enumerate() {
-            let index = buffer as usize;
-            if index == 0 || index >= self.arena.buffers || !self.writes(buffer) {
-                return None;
-            }
-            if buffers[..i].contains(&buffer) {
+        for (index, buffer) in buffers.iter().copied().enumerate() {
+            if !self.writes(buffer) || buffers[..index].contains(&buffer) {
                 return None;
             }
         }
-        let cells = self.arena.cells.as_ptr();
-        let buffer_count = self.arena.buffers;
-        let arena_frames = self.arena.frames;
-        let pairs = core::array::from_fn(|lane| {
-            let buffer = buffers[lane] as usize;
-            let left = buffer * arena_frames;
-            let right = buffer_count * arena_frames + left;
-            // SAFETY: all buffers were checked writable, in bounds, and pairwise distinct above;
-            // W <= 8 bounds this fixed construction. `finish` allocated
-            // `planes * buffer_count * arena_frames` cells, `planes >= 2`, buffer is strictly
-            // below buffer_count, and frames <= arena_frames, so both [offset, offset + frames)
-            // ranges lie inside that allocation. Distinct buffer IDs make every lane range
-            // spatially disjoint (I1); different planes are disjoint too. `&mut self` ties every
-            // returned lifetime to this exclusive lease borrow, while the lease's checked write
-            // set retains I1, while exclusive borrowing prevents references from this lease from
-            // overlapping these writes; E1 governs any foreign reads and writes.
+        let stride = self.buffers * self.frames;
+        let starts = buffers.map(|buffer| buffer as usize * self.frames);
+        let cells = self.cells.as_mut_ptr();
+        Some(core::array::from_fn(|lane| {
+            let left = starts[lane];
+            let right = stride + left;
+            // SAFETY: checked construction and the preceding bounds/shape checks keep every
+            // requested range within the allocation. Distinct nonzero buffer IDs separate all
+            // lane ranges; the two planes are separated by stride. Every pointer derives from
+            // the complete Box allocation, and every returned borrow is tied to this exclusive
+            // owner borrow, which excludes other reads/writes for its lifetime.
             unsafe {
                 (
-                    core::slice::from_raw_parts_mut((*cells.add(left)).get(), frames),
-                    core::slice::from_raw_parts_mut((*cells.add(right)).get(), frames),
+                    core::slice::from_raw_parts_mut(cells.add(left), frames),
+                    core::slice::from_raw_parts_mut(cells.add(right), frames),
                 )
             }
-        });
-        Some(pairs)
+        }))
     }
 
-    /// One written buffer and one read buffer in `plane`. The two must be distinct.
+    /// One writable output and one shared input in `plane`.
+    ///
+    /// Panics on invalid bounds, a silence output or an output/input alias before borrowing.
     #[inline]
     pub fn write_read(&mut self, plane: usize, out: u32, input: u32) -> (&mut [f32], &[f32]) {
-        let out_index = self.checked_write(out);
-        let in_index = self.effective(input);
-        debug_assert_ne!(out_index, in_index, "a read may not alias its own output");
-        let (out_start, in_start) = (
-            self.arena.offset(plane, out_index),
-            self.arena.offset(plane, in_index),
-        );
-        // SAFETY: I1 for the mutable range and I2/E1 for the shared range, as in `write` and
-        // `read`; the `debug_assert` above plus distinct buffer indices make the two ranges
-        // disjoint (buffers never overlap within a plane).
-        unsafe {
-            (
-                core::slice::from_raw_parts_mut(
-                    self.arena.cells[out_start].get().cast::<f32>(),
-                    self.arena.frames,
-                ),
-                core::slice::from_raw_parts(
-                    self.arena.cells[in_start].get().cast_const().cast::<f32>(),
-                    self.arena.frames,
-                ),
-            )
-        }
+        let (output, [input]) = self.write_read_checked(plane, out, &[input]);
+        (output, input)
     }
 
-    /// One written buffer and two read buffers in `plane`. All three must be distinct.
+    /// One writable output and two shared inputs in `plane`. Shared inputs may repeat.
+    ///
+    /// Panics on invalid bounds, a silence output or an output/input alias before borrowing.
     #[inline]
     pub fn write_read2(
         &mut self,
@@ -328,49 +234,47 @@ impl ArenaLease {
         first: u32,
         second: u32,
     ) -> (&mut [f32], &[f32], &[f32]) {
-        let out_index = self.checked_write(out);
-        let (first_index, second_index) = (self.effective(first), self.effective(second));
-        debug_assert!(out_index != first_index && out_index != second_index);
-        let (out_start, first_start, second_start) = (
-            self.arena.offset(plane, out_index),
-            self.arena.offset(plane, first_index),
-            self.arena.offset(plane, second_index),
-        );
-        // SAFETY: I1 for the mutable range, I2/E1 for the two shared ranges. The two shared
-        // ranges may be the same buffer, which is sound: they are shared references. Neither
-        // can be the output buffer.
-        unsafe {
-            (
-                core::slice::from_raw_parts_mut(
-                    self.arena.cells[out_start].get().cast::<f32>(),
-                    self.arena.frames,
-                ),
-                core::slice::from_raw_parts(
-                    self.arena.cells[first_start]
-                        .get()
-                        .cast_const()
-                        .cast::<f32>(),
-                    self.arena.frames,
-                ),
-                core::slice::from_raw_parts(
-                    self.arena.cells[second_start]
-                        .get()
-                        .cast_const()
-                        .cast::<f32>(),
-                    self.arena.frames,
-                ),
-            )
-        }
+        let (output, [first, second]) = self.write_read_checked(plane, out, &[first, second]);
+        (output, first, second)
     }
 
-    /// One written buffer and `N` read buffers in `plane`, every slice formed once (issue #898).
+    /// Split around the output after checking every request. The prefix and suffix are shared,
+    /// allowing repeated inputs while the complete output buffer remains exclusively borrowed.
+    #[inline]
+    fn write_read_checked<const N: usize>(
+        &mut self,
+        plane: usize,
+        out: u32,
+        inputs: &[u32; N],
+    ) -> (&mut [f32], [&[f32]; N]) {
+        let out_start = self.offset(plane, self.checked_write(out));
+        let in_starts = inputs.map(|input| {
+            assert_ne!(input, out, "a read may not alias its own output");
+            self.offset(plane, self.checked_buffer(input))
+        });
+        let frames = self.frames;
+        let out_end = out_start + frames;
+        let (before, remainder) = self.cells.split_at_mut(out_start);
+        let (output, after) = remainder.split_at_mut(frames);
+        let before: &[f32] = before;
+        let after: &[f32] = after;
+        let reads = in_starts.map(|start| {
+            if start < out_start {
+                &before[start..start + frames]
+            } else {
+                // Every buffer has the same frame extent and inputs differ from the output,
+                // so a later input starts at or beyond out_end.
+                let relative = start - out_end;
+                &after[relative..relative + frames]
+            }
+        });
+        (output, reads)
+    }
+
+    /// One writable output and one to eight shared inputs in `plane`, acquired once per call.
     ///
-    /// `N` is one to eight, fixed at compile time. The reads may repeat one another and may name
-    /// the silence buffer -- they are shared -- but none may be `out`. The disjointness argument is
-    /// `write_read`'s, with its premises checked in release rather than by `debug_assert`: once per
-    /// call and before any reference is formed, `plane` must be in range, `out` must be in this
-    /// lease's write set, every read must be a reserved buffer, and no read may be `out`. A failed
-    /// premise returns `None` having formed nothing.
+    /// Shared inputs may repeat or name silence; none may be the output. Invalid planes, IDs or
+    /// output/input aliases return `None` before any reference is formed.
     #[inline]
     pub fn write_read_many<const N: usize>(
         &mut self,
@@ -379,87 +283,63 @@ impl ArenaLease {
         inputs: &[u32; N],
     ) -> Option<(&mut [f32], [&[f32]; N])> {
         const { assert!(N >= 1 && N <= 8, "write_read_many forms one to eight reads") };
-        // `writes` is false past the end of the write-set table, which has exactly one entry per
-        // reserved buffer, and for the silence buffer, which `finish` never makes writable.
-        if plane >= self.arena.planes || !self.writes(out) {
+        if plane >= self.planes || !self.writes(out) {
             return None;
         }
         if inputs
             .iter()
-            .any(|&input| input == out || input as usize >= self.arena.buffers)
+            .any(|&input| input == out || input as usize >= self.buffers)
         {
             return None;
         }
-        let arena: &DisjointArena = &self.arena;
-        let frames = arena.frames;
-        let cells = arena.cells.as_ptr();
-        let out_start = arena.offset(plane, out as usize);
-        let in_starts = inputs.map(|input| arena.offset(plane, input as usize));
-        // SAFETY: bounds -- `finish` allocated exactly `planes * buffers * frames` cells under
-        // checked multiplication, and the checks above give `plane < planes` and every buffer
-        // index `< buffers`, so each `[start, start + frames)` lies inside that allocation and no
-        // offset product overflows. Every pointer derives from `cells.as_ptr()`, the whole
-        // allocation, through `UnsafeCell::raw_get`; `UnsafeCell<f32>` has the layout of `f32`.
-        // Aliasing, as in `write_read`: I1 gives this lease the only mutable ownership of `out`,
-        // E1 keeps a foreign shared read off it, and `&mut self` excludes every other reference
-        // from this lease for the returned lifetime. The reads are I2/E1-ordered, as in `read`,
-        // and may overlap one another because they are shared. None overlaps the written range:
-        // each read index differs from `out`, and distinct buffers of one plane occupy disjoint
-        // `frames`-word ranges.
+        let frames = self.frames;
+        let out_start = self.offset(plane, out as usize);
+        let in_starts = inputs.map(|input| self.offset(plane, input as usize));
+        let cells = self.cells.as_mut_ptr();
+        // SAFETY: constructor products and validated plane/IDs bound every frames-long range.
+        // Each input ID differs from the output, so none of the shared ranges overlaps the
+        // mutable one. Shared ranges may overlap one another. Whole-allocation pointers derive
+        // from the single exclusive Box owner, and the returned lifetimes retain that borrow.
         unsafe {
             Some((
-                core::slice::from_raw_parts_mut(UnsafeCell::raw_get(cells.add(out_start)), frames),
+                core::slice::from_raw_parts_mut(cells.add(out_start), frames),
                 in_starts.map(|start| {
-                    core::slice::from_raw_parts(
-                        UnsafeCell::raw_get(cells.add(start)).cast_const(),
-                        frames,
-                    )
+                    core::slice::from_raw_parts(cells.add(start).cast_const(), frames)
                 }),
             ))
         }
     }
 
-    /// Both planes of one written buffer plus both planes of one read buffer.
+    /// Both planes of one writable output plus both planes of one shared input.
+    ///
+    /// Panics on invalid stereo shape/IDs, silence output or output/input alias before borrowing.
     #[inline]
     pub fn write_read_stereo(&mut self, out: u32, input: u32) -> ArenaStereoPair<'_> {
+        assert!(self.planes >= 2, "stereo access requires two arena planes");
         let out_index = self.checked_write(out);
-        let in_index = self.effective(input);
-        debug_assert_ne!(out_index, in_index, "a read may not alias its own output");
+        let in_index = self.checked_buffer(input);
+        assert_ne!(out_index, in_index, "a read may not alias its own output");
         let offsets = [
-            self.arena.offset(0, out_index),
-            self.arena.offset(1, out_index),
-            self.arena.offset(0, in_index),
-            self.arena.offset(1, in_index),
+            self.offset(0, out_index),
+            self.offset(1, out_index),
+            self.offset(0, in_index),
+            self.offset(1, in_index),
         ];
-        // SAFETY: I1 for the two mutable ranges (same buffer, two planes: disjoint), I2/E1 for
-        // the two shared ranges, and `out_index != in_index` keeps the two pairs apart.
+        let frames = self.frames;
+        let cells = self.cells.as_mut_ptr();
+        // SAFETY: validated stereo shape/IDs and checked construction bound all four ranges.
+        // Distinct buffers separate output from input, while plane-major layout separates each
+        // pair. The raw pointers derive from the complete Box allocation; exclusive borrowing
+        // of the single owner prevents any other access during these returned lifetimes.
         unsafe {
             (
                 (
-                    core::slice::from_raw_parts_mut(
-                        self.arena.cells[offsets[0]].get().cast::<f32>(),
-                        self.arena.frames,
-                    ),
-                    core::slice::from_raw_parts_mut(
-                        self.arena.cells[offsets[1]].get().cast::<f32>(),
-                        self.arena.frames,
-                    ),
+                    core::slice::from_raw_parts_mut(cells.add(offsets[0]), frames),
+                    core::slice::from_raw_parts_mut(cells.add(offsets[1]), frames),
                 ),
                 (
-                    core::slice::from_raw_parts(
-                        self.arena.cells[offsets[2]]
-                            .get()
-                            .cast_const()
-                            .cast::<f32>(),
-                        self.arena.frames,
-                    ),
-                    core::slice::from_raw_parts(
-                        self.arena.cells[offsets[3]]
-                            .get()
-                            .cast_const()
-                            .cast::<f32>(),
-                        self.arena.frames,
-                    ),
+                    core::slice::from_raw_parts(cells.add(offsets[2]).cast_const(), frames),
+                    core::slice::from_raw_parts(cells.add(offsets[3]).cast_const(), frames),
                 ),
             )
         }
@@ -467,262 +347,200 @@ impl ArenaLease {
     // REALTIME_POLICY_END
 }
 
-struct PendingLease {
-    wave: usize,
-    writes: Vec<u32>,
-    reads: Vec<u32>,
-}
-
-/// Builds one plan's arena and its execution leases, proving I1 and I2 before publication.
-pub struct ArenaLeaseSetBuilder {
-    planes: usize,
-    frames: usize,
-    reserved: usize,
-    leases: Vec<PendingLease>,
-}
-
-impl ArenaLeaseSetBuilder {
-    /// Start an arena of `planes` planes and `frames` frames per buffer.
-    ///
-    /// Buffer [`ARENA_SILENCE_BUFFER`] is reserved immediately and is never writable.
-    #[must_use]
-    pub fn new(planes: NonZeroUsize, frames: NonZeroUsize) -> Self {
-        Self {
-            planes: planes.get(),
-            frames: frames.get(),
-            reserved: 1,
-            leases: Vec::new(),
-        }
-    }
-
-    /// Reserve one fresh buffer. Buffers are never recycled, which is what makes I1 structural.
-    pub fn reserve(&mut self) -> u32 {
-        let buffer = u32::try_from(self.reserved).expect("arena buffer index fits in u32");
-        self.reserved += 1;
-        buffer
-    }
-
-    /// Declare one execution lease and return its index in the finished set.
-    pub fn lease(&mut self, wave: usize, writes: Vec<u32>, reads: Vec<u32>) -> usize {
-        self.leases.push(PendingLease {
-            wave,
-            writes,
-            reads,
-        });
-        self.leases.len() - 1
-    }
-
-    /// Check I1 and I2 and allocate the arena.
-    ///
-    /// # Errors
-    /// Returns the first violated invariant; nothing is allocated on failure.
-    pub fn finish(self) -> Result<(Arc<DisjointArena>, Vec<ArenaLease>), DisjointArenaError> {
-        let buffers = self.reserved;
-        // I1: at most one writer per buffer, and never the silence buffer.
-        let mut owner: Vec<Option<usize>> = vec![None; buffers];
-        for (index, lease) in self.leases.iter().enumerate() {
-            for buffer in &lease.writes {
-                if *buffer == ARENA_SILENCE_BUFFER {
-                    return Err(DisjointArenaError::SilenceWrite { lease: index });
-                }
-                let slot =
-                    owner
-                        .get_mut(*buffer as usize)
-                        .ok_or(DisjointArenaError::UnknownBuffer {
-                            lease: index,
-                            buffer: *buffer,
-                        })?;
-                match slot {
-                    Some(first) => {
-                        return Err(DisjointArenaError::Overlap {
-                            buffer: *buffer,
-                            first: *first,
-                            second: index,
-                        });
-                    }
-                    None => *slot = Some(index),
-                }
-            }
-        }
-        // I2: a read resolves to the reader's own lease, or to a strictly earlier wave.
-        for (index, lease) in self.leases.iter().enumerate() {
-            for buffer in &lease.reads {
-                if *buffer == ARENA_SILENCE_BUFFER {
-                    continue;
-                }
-                let producer =
-                    *owner
-                        .get(*buffer as usize)
-                        .ok_or(DisjointArenaError::UnknownBuffer {
-                            lease: index,
-                            buffer: *buffer,
-                        })?;
-                let ok = match producer {
-                    Some(producer) if producer == index => true,
-                    Some(producer) => self.leases[producer].wave < lease.wave,
-                    None => false,
-                };
-                if !ok {
-                    return Err(DisjointArenaError::ReadNotEarlier {
-                        lease: index,
-                        buffer: *buffer,
-                    });
-                }
-            }
-        }
-        let words = self
-            .planes
-            .checked_mul(buffers)
-            .and_then(|value| value.checked_mul(self.frames))
-            .ok_or(DisjointArenaError::CapacityOverflow)?;
-        words
-            .checked_mul(core::mem::size_of::<f32>())
-            .ok_or(DisjointArenaError::CapacityOverflow)?;
-        let mut cells = Vec::new();
-        cells.reserve_exact(words);
-        cells.resize_with(words, || UnsafeCell::new(0.0));
-        let arena = Arc::new(DisjointArena {
-            cells: cells.into_boxed_slice(),
-            planes: self.planes,
-            buffers,
-            frames: self.frames,
-        });
-        let leases = self
-            .leases
-            .into_iter()
-            .map(|lease| {
-                let mut access = vec![0_u8; buffers].into_boxed_slice();
-                for buffer in lease.writes {
-                    access[buffer as usize] |= ACCESS_WRITE;
-                }
-                ArenaLease {
-                    arena: Arc::clone(&arena),
-                    access,
-                }
-            })
-            .collect();
-        Ok((arena, leases))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn builder() -> ArenaLeaseSetBuilder {
-        ArenaLeaseSetBuilder::new(
+    fn arena() -> DisjointArena {
+        DisjointArena::try_new(
             NonZeroUsize::new(2).expect("planes"),
             NonZeroUsize::new(4).expect("frames"),
+            2,
         )
+        .expect("test arena")
     }
 
     #[test]
-    fn overlapping_writes_are_rejected() {
-        let mut build = builder();
-        let shared = build.reserve();
-        build.lease(0, vec![shared], Vec::new());
-        build.lease(0, vec![shared], Vec::new());
-        assert_eq!(
-            build.finish().err(),
-            Some(DisjointArenaError::Overlap {
-                buffer: shared,
-                first: 0,
-                second: 1
-            })
-        );
-    }
-
-    #[test]
-    fn a_read_from_the_same_wave_is_rejected() {
-        let mut build = builder();
-        let produced = build.reserve();
-        let consumed = build.reserve();
-        build.lease(1, vec![produced], Vec::new());
-        build.lease(1, vec![consumed], vec![produced]);
-        assert_eq!(
-            build.finish().err(),
-            Some(DisjointArenaError::ReadNotEarlier {
-                lease: 1,
-                buffer: produced
-            })
-        );
-    }
-
-    #[test]
-    fn a_write_to_the_silence_buffer_is_rejected() {
-        let mut build = builder();
-        build.lease(0, vec![ARENA_SILENCE_BUFFER], Vec::new());
-        assert_eq!(
-            build.finish().err(),
-            Some(DisjointArenaError::SilenceWrite { lease: 0 })
-        );
-    }
-
-    #[test]
-    fn an_unproduced_read_is_rejected() {
-        let mut build = builder();
-        let own = build.reserve();
-        let ghost = build.reserve();
-        build.lease(1, vec![own], vec![ghost]);
-        assert_eq!(
-            build.finish().err(),
-            Some(DisjointArenaError::ReadNotEarlier {
-                lease: 0,
-                buffer: ghost
-            })
-        );
-    }
-
-    #[test]
-    fn a_write_then_a_later_wave_read_carries_the_audio() {
-        let mut build = builder();
-        let produced = build.reserve();
-        let consumed = build.reserve();
-        build.lease(0, vec![produced], Vec::new());
-        build.lease(1, vec![consumed], vec![produced]);
-        let (arena, mut leases) = build.finish().expect("valid lease set");
+    fn a_write_then_a_read_carries_the_audio() {
+        let mut arena = arena();
         assert_eq!(arena.buffers(), 3);
-        assert_eq!(arena.total_bytes(), 2 * 3 * 4 * 4);
-        let mut consumer = leases.pop().expect("consumer lease");
-        let mut producer = leases.pop().expect("producer lease");
-        producer
-            .write(0, produced)
-            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
-        producer
-            .write(1, produced)
-            .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0]);
-        assert_eq!(consumer.read(0, produced), &[1.0, 2.0, 3.0, 4.0]);
-        let (out, input) = consumer.write_read(1, consumed, produced);
+        assert!(arena.writes(1) && arena.writes(2));
+        assert!(!arena.writes(0) && !arena.writes(3));
+        assert!(
+            arena.total_bytes() <= 128,
+            "payload fits the configured ceiling"
+        );
+        arena.write(0, 1).copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        arena.write(1, 1).copy_from_slice(&[-1.0, -2.0, -3.0, -4.0]);
+        assert_eq!(arena.read(0, 1), &[1.0, 2.0, 3.0, 4.0]);
+        let (out, input) = arena.write_read(1, 2, 1);
         out.copy_from_slice(input);
-        assert_eq!(consumer.read(1, consumed), &[-1.0, -2.0, -3.0, -4.0]);
+        assert_eq!(arena.read(1, 2), &[-1.0, -2.0, -3.0, -4.0]);
+        let (out, first, second) = arena.write_read2(0, 2, 1, 1);
+        assert_eq!(first, &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        out.copy_from_slice(first);
+        assert_eq!(arena.read(0, 2), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
-    fn release_read_id_bounds_check_rejects_unreserved_buffer() {
-        let mut build = builder();
-        let owned = build.reserve();
-        build.lease(0, vec![owned], vec![owned]);
-        let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let lease = leases.pop().expect("the lease");
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = lease.read(0, 2);
-        }));
-        assert!(result.is_err(), "unreserved read ID must be rejected");
+    fn direct_borrows_reject_invalid_ids_planes_and_aliases_in_release() {
+        let mut arena = arena();
+        for plane in 0..2 {
+            for buffer in 1..=2 {
+                arena
+                    .write(plane, buffer)
+                    .fill(f32::from_bits(0x7fc0_1154 + buffer));
+            }
+        }
+        for plane in [2, usize::MAX, usize::MAX / 4 + 1] {
+            refused(&mut arena, |a| {
+                let _ = a.read(plane, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write(plane, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read(plane, 2, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read2(plane, 2, 1, 1);
+            });
+        }
+        for buffer in [3, u32::MAX] {
+            refused(&mut arena, |a| {
+                let _ = a.read(0, buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write(0, buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.read_stereo(buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_stereo(buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read(0, buffer, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read(0, 1, buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read2(0, buffer, 1, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read2(0, 1, buffer, 2);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read2(0, 1, 2, buffer);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read_stereo(buffer, 1);
+            });
+            refused(&mut arena, |a| {
+                let _ = a.write_read_stereo(1, buffer);
+            });
+        }
+        refused(&mut arena, |a| {
+            let _ = a.write(0, 0);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_stereo(0);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read(0, 0, 1);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read2(0, 0, 1, 2);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read_stereo(0, 1);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read(0, 1, 1);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read2(0, 1, 1, 2);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read2(0, 1, 2, 1);
+        });
+        refused(&mut arena, |a| {
+            let _ = a.write_read_stereo(1, 1);
+        });
+
+        let mut mono = DisjointArena::try_new(
+            NonZeroUsize::new(1).expect("one plane"),
+            NonZeroUsize::new(4).expect("frames"),
+            2,
+        )
+        .expect("mono arena");
+        mono.write(0, 1).fill(f32::from_bits(0x7fc0_1154));
+        refused(&mut mono, |a| {
+            let _ = a.read_stereo(1);
+        });
+        refused(&mut mono, |a| {
+            let _ = a.write_stereo(1);
+        });
+        refused(&mut mono, |a| {
+            let _ = a.write_read_stereo(1, 2);
+        });
+    }
+
+    fn refused(arena: &mut DisjointArena, request: impl FnOnce(&mut DisjointArena)) {
+        let before: Vec<_> = (0..arena.planes)
+            .flat_map(|plane| (0..arena.buffers as u32).map(move |buffer| (plane, buffer)))
+            .map(|(plane, buffer)| (plane, buffer, bits(arena.read(plane, buffer))))
+            .collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| request(arena)));
+        assert!(result.is_err(), "invalid direct borrow must be rejected");
+        for (plane, buffer, words) in before {
+            assert_eq!(
+                bits(arena.read(plane, buffer)),
+                words,
+                "refusal kept plane {plane}, buffer {buffer}"
+            );
+        }
     }
 
     #[test]
-    fn a_lease_may_read_the_buffers_it_writes_itself() {
-        let mut build = builder();
-        let own = build.reserve();
-        let other = build.reserve();
-        build.lease(3, vec![own, other], vec![own, other]);
-        let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let lease = &mut leases[0];
-        assert!(lease.writes(own) && lease.writes(other));
-        lease.write(0, own).fill(0.5);
-        let (out, input) = lease.write_read(0, other, own);
-        out.copy_from_slice(input);
-        assert_eq!(lease.read(0, other), &[0.5; 4]);
+    fn oversized_arenas_are_rejected_before_allocation() {
+        for (planes, frames, buffers) in [
+            (usize::MAX, 1, u32::MAX),
+            (usize::MAX, 2, 0),
+            (1, usize::MAX, 0),
+            (1, isize::MAX as usize / core::mem::size_of::<f32>() + 1, 0),
+        ] {
+            assert_eq!(
+                DisjointArena::try_new(
+                    NonZeroUsize::new(planes).expect("nonzero planes"),
+                    NonZeroUsize::new(frames).expect("nonzero frames"),
+                    buffers,
+                )
+                .err(),
+                Some(DisjointArenaError::CapacityOverflow),
+            );
+        }
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            DisjointArena::try_new(
+                NonZeroUsize::new(1).expect("one plane"),
+                NonZeroUsize::new(1).expect("one frame"),
+                u32::MAX,
+            )
+            .err(),
+            Some(DisjointArenaError::CapacityOverflow),
+        );
+        let silence = DisjointArena::try_new(
+            NonZeroUsize::new(1).expect("one plane"),
+            NonZeroUsize::new(1).expect("one frame"),
+            0,
+        )
+        .expect("silence-only arena");
+        assert_eq!(silence.buffers(), 1);
+        assert!(!silence.writes(0));
+        assert_eq!(silence.read(0, 0), &[0.0]);
     }
 
     fn bits(values: &[f32]) -> Vec<u32> {
@@ -734,7 +552,7 @@ mod tests {
     /// words. It then writes a marker through the output and checks that it landed in `out`'s
     /// `plane` and nowhere else.
     fn assert_many_is_the_single_borrows<const N: usize>(
-        lease: &mut ArenaLease,
+        arena: &mut DisjointArena,
         frames: usize,
         plane: usize,
         out: u32,
@@ -744,14 +562,14 @@ mod tests {
         let expected: Vec<(usize, Vec<u32>)> = inputs
             .iter()
             .map(|&input| {
-                let words = lease.read(plane, input);
+                let words = arena.read(plane, input);
                 (words.as_ptr() as usize, bits(words))
             })
             .collect();
-        let out_address = lease.write(plane, out).as_ptr() as usize;
-        let other_plane = bits(lease.read(1 - plane, out));
+        let out_address = arena.write(plane, out).as_ptr() as usize;
+        let other_plane = bits(arena.read(1 - plane, out));
         {
-            let (output, reads) = lease
+            let (output, reads) = arena
                 .write_read_many(plane, out, &inputs)
                 .expect("a sound borrow set");
             assert_eq!(output.as_ptr() as usize, out_address, "output address");
@@ -764,13 +582,13 @@ mod tests {
             output.fill(f32::from_bits(MARKER));
         }
         assert!(
-            bits(lease.read(plane, out))
+            bits(arena.read(plane, out))
                 .iter()
                 .all(|&word| word == MARKER)
         );
-        assert_eq!(bits(lease.read(1 - plane, out)), other_plane);
+        assert_eq!(bits(arena.read(1 - plane, out)), other_plane);
         for (input, (_, words)) in inputs.iter().zip(&expected) {
-            assert_eq!(&bits(lease.read(plane, *input)), words, "read {input} kept");
+            assert_eq!(&bits(arena.read(plane, *input)), words, "read {input} kept");
         }
     }
 
@@ -783,34 +601,34 @@ mod tests {
     #[test]
     fn write_read_many_forms_the_slices_the_single_borrows_form() {
         const FRAMES: usize = 5;
-        let mut build = ArenaLeaseSetBuilder::new(
+        let mut storage = DisjointArena::try_new(
             NonZeroUsize::new(2).expect("planes"),
             NonZeroUsize::new(FRAMES).expect("frames"),
-        );
-        let owned: Vec<u32> = (0..10).map(|_| build.reserve()).collect();
-        build.lease(0, owned.clone(), owned.clone());
-        let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let lease = &mut leases[0];
+            10,
+        )
+        .expect("test arena");
+        let owned: Vec<u32> = (1..=10).collect();
+        let arena = &mut storage;
         for plane in 0..2_u32 {
             for &buffer in &owned {
-                for (frame, word) in lease.write(plane as usize, buffer).iter_mut().enumerate() {
+                for (frame, word) in arena.write(plane as usize, buffer).iter_mut().enumerate() {
                     *word = f32::from_bits(0x4000_0000 | plane << 12 | buffer << 4 | frame as u32);
                 }
             }
         }
         let out = owned[9];
         for plane in 0..2 {
-            assert_many_is_the_single_borrows(lease, FRAMES, plane, out, [owned[2]]);
-            assert_many_is_the_single_borrows(lease, FRAMES, plane, out, [owned[1], owned[1]]);
+            assert_many_is_the_single_borrows(arena, FRAMES, plane, out, [owned[2]]);
+            assert_many_is_the_single_borrows(arena, FRAMES, plane, out, [owned[1], owned[1]]);
             assert_many_is_the_single_borrows(
-                lease,
+                arena,
                 FRAMES,
                 plane,
                 out,
                 [ARENA_SILENCE_BUFFER, owned[3], ARENA_SILENCE_BUFFER],
             );
             assert_many_is_the_single_borrows(
-                lease,
+                arena,
                 FRAMES,
                 plane,
                 out,
@@ -819,7 +637,7 @@ mod tests {
                 ],
             );
             assert_many_is_the_single_borrows(
-                lease,
+                arena,
                 FRAMES,
                 plane,
                 out,
@@ -840,82 +658,77 @@ mod tests {
     /// Issue #898: `write_read_many` checks every premise of its disjointness argument in
     /// release and refuses, forming nothing, when one fails.
     ///
-    /// Red mutations: drop the read-is-output check, the reserved-read check, the write-set check
+    /// Red mutations: drop the read-is-output check, the reserved-read check, the writable-output check
     /// or the plane check -- the matching `is_none` assertion fails.
     #[test]
     fn write_read_many_refuses_every_unsound_borrow() {
-        let mut build = builder();
-        let owned = build.reserve();
-        let first = build.reserve();
-        let foreign = build.reserve();
-        let unreserved = foreign + 1;
-        build.lease(0, vec![foreign], Vec::new());
-        build.lease(1, vec![owned, first], vec![foreign]);
-        let (_arena, mut leases) = build.finish().expect("valid lease set");
-        let lease = &mut leases[1];
+        let mut storage = DisjointArena::try_new(
+            NonZeroUsize::new(2).expect("planes"),
+            NonZeroUsize::new(4).expect("frames"),
+            3,
+        )
+        .expect("test arena");
+        let (owned, first, other, unreserved) = (1, 2, 3, 4);
+        let arena = &mut storage;
         assert!(
-            lease
-                .write_read_many(0, owned, &[first, foreign, ARENA_SILENCE_BUFFER])
+            arena
+                .write_read_many(0, owned, &[first, other, ARENA_SILENCE_BUFFER])
                 .is_some()
         );
-        assert!(lease.write_read_many(1, owned, &[first]).is_some());
+        assert!(arena.write_read_many(1, owned, &[first]).is_some());
         // A read that is the output would alias the one mutable slice.
-        assert!(lease.write_read_many(0, owned, &[first, owned]).is_none());
-        assert!(lease.write_read_many(1, owned, &[owned]).is_none());
-        // An output outside this lease's write set: another lease's, the silence buffer, and
-        // buffers that were never reserved.
-        assert!(lease.write_read_many(0, foreign, &[first]).is_none());
+        assert!(arena.write_read_many(0, owned, &[first, owned]).is_none());
+        assert!(arena.write_read_many(1, owned, &[owned]).is_none());
+        // The silence buffer and buffers that were never reserved are not writable.
         assert!(
-            lease
+            arena
                 .write_read_many(0, ARENA_SILENCE_BUFFER, &[first])
                 .is_none()
         );
-        assert!(lease.write_read_many(0, unreserved, &[first]).is_none());
-        assert!(lease.write_read_many(0, u32::MAX, &[first]).is_none());
+        assert!(arena.write_read_many(0, unreserved, &[first]).is_none());
+        assert!(arena.write_read_many(0, u32::MAX, &[first]).is_none());
         // A read that was never reserved.
         assert!(
-            lease
+            arena
                 .write_read_many(0, owned, &[first, unreserved])
                 .is_none()
         );
-        assert!(lease.write_read_many(0, owned, &[u32::MAX]).is_none());
+        assert!(arena.write_read_many(0, owned, &[u32::MAX]).is_none());
         // A plane the arena does not have.
-        assert!(lease.write_read_many(2, owned, &[first]).is_none());
-        assert!(lease.write_read_many(usize::MAX, owned, &[first]).is_none());
+        assert!(arena.write_read_many(2, owned, &[first]).is_none());
+        assert!(arena.write_read_many(usize::MAX, owned, &[first]).is_none());
     }
 
-    fn many_lease(planes: usize, frames: usize) -> (Vec<u32>, u32, ArenaLease) {
-        let mut build = ArenaLeaseSetBuilder::new(
+    fn many_arena(planes: usize, frames: usize) -> (Vec<u32>, DisjointArena) {
+        let arena = DisjointArena::try_new(
             NonZeroUsize::new(planes).expect("nonzero test planes"),
             NonZeroUsize::new(frames).expect("nonzero test frames"),
-        );
-        let writable: Vec<u32> = (0..8).map(|_| build.reserve()).collect();
-        let reserved_unwritable = build.reserve();
-        build.lease(0, writable.clone(), Vec::new());
-        let (_arena, mut leases) = build.finish().expect("test arena");
-        (writable, reserved_unwritable, leases.remove(0))
+            8,
+        )
+        .expect("test arena");
+        ((1..=8).collect(), arena)
     }
 
     fn assert_many_rejection_keeps_plane_zero(
-        lease: &mut ArenaLease,
+        arena: &mut DisjointArena,
         observed: &[u32],
         attempted: &[u32; 4],
         frames: usize,
     ) {
         for buffer in observed {
-            lease.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
-            lease.write(1, *buffer).fill(f32::from_bits(0xffc0_3990));
+            arena.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
+            arena.write(1, *buffer).fill(f32::from_bits(0xffc0_3990));
         }
-        assert!(lease.write_stereo_many(attempted, frames).is_none());
+        assert!(arena.write_stereo_many(attempted, frames).is_none());
         for buffer in observed {
             assert!(
-                lease
+                arena
                     .read(0, *buffer)
                     .iter()
                     .all(|word| word.to_bits() == 0x7fc0_3990)
             );
             assert!(
-                lease
+                arena
                     .read(1, *buffer)
                     .iter()
                     .all(|word| word.to_bits() == 0xffc0_3990)
@@ -926,7 +739,7 @@ mod tests {
     /// RT-1: every safe multi-borrow rejection happens before a reference or write is produced.
     #[test]
     fn stereo_many_rejects_every_invalid_shape_without_partial_writes() {
-        let (ids, _, mut mono) = many_lease(1, 8);
+        let (ids, mut mono) = many_arena(1, 8);
         let four: [u32; 4] = ids[..4].try_into().expect("four ids");
         for buffer in &four {
             mono.write(0, *buffer).fill(f32::from_bits(0x7fc0_3990));
@@ -940,118 +753,31 @@ mod tests {
             );
         }
 
-        let (ids, unwritable, mut lease) = many_lease(2, 8);
+        let (ids, mut arena) = many_arena(2, 8);
         let four: [u32; 4] = ids[..4].try_into().expect("four ids");
         assert_many_rejection_keeps_plane_zero(
-            &mut lease,
+            &mut arena,
             &ids,
             &[four[0], four[0], four[2], four[3]],
             8,
         );
         assert_many_rejection_keeps_plane_zero(
-            &mut lease,
+            &mut arena,
             &ids,
             &[0, four[1], four[2], four[3]],
             8,
         );
         assert_many_rejection_keeps_plane_zero(
-            &mut lease,
-            &ids,
-            &[unwritable, four[1], four[2], four[3]],
-            8,
-        );
-        assert_many_rejection_keeps_plane_zero(
-            &mut lease,
+            &mut arena,
             &ids,
             &[u32::MAX, four[1], four[2], four[3]],
             8,
         );
-        assert_many_rejection_keeps_plane_zero(&mut lease, &ids, &four, 9);
+        assert_many_rejection_keeps_plane_zero(&mut arena, &ids, &four, 9);
 
         let unsupported = [ids[0], ids[1], ids[2]];
-        assert!(lease.write_stereo_many(&unsupported, 8).is_none());
+        assert!(arena.write_stereo_many(&unsupported, 8).is_none());
         let eight: [u32; 8] = ids[..8].try_into().expect("eight ids");
-        assert!(lease.write_stereo_many(&eight, 8).is_some());
-    }
-
-    /// E8. Concurrent leases never touch each other's words.
-    ///
-    /// Every lease fills every word it owns with its own tag, on its own thread, with staggered
-    /// spins so the writes genuinely overlap. Once all writers join, the test checks the
-    /// whole arena word by word: each buffer must carry exactly its owner's tag, and the silence
-    /// buffer must still be zero. Under Miri or a thread sanitiser this is also the data-race
-    /// probe for `unsafe impl Sync`.
-    ///
-    /// Red mutation (`MUTATIONS.md`): give two leases the same reserved buffer -- the builder
-    /// rejects it (`overlapping_writes_are_rejected`); bypass the builder by widening one lease's
-    /// write set -- this stress reports the foreign tag.
-    #[test]
-    fn concurrent_leases_never_write_a_foreign_word() {
-        const LEASES: usize = 6;
-        const BUFFERS_PER_LEASE: usize = 5;
-        const ROUNDS: usize = 200;
-        let mut build = ArenaLeaseSetBuilder::new(
-            NonZeroUsize::new(2).expect("planes"),
-            NonZeroUsize::new(17).expect("frames"),
-        );
-        let owned: Vec<Vec<u32>> = (0..LEASES)
-            .map(|_| (0..BUFFERS_PER_LEASE).map(|_| build.reserve()).collect())
-            .collect();
-        for buffers in &owned {
-            build.lease(0, buffers.clone(), Vec::new());
-        }
-        let (arena, leases) = build.finish().expect("valid lease set");
-        let mut leases = leases;
-        for round in 0..ROUNDS {
-            leases = std::thread::scope(|scope| {
-                let handles: Vec<_> = leases
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, mut lease)| {
-                        let buffers = &owned[index];
-                        scope.spawn(move || {
-                            let tag = (round * LEASES + index) as f32;
-                            for (position, buffer) in buffers.iter().enumerate() {
-                                // Stagger the writes so they overlap rather than serialise.
-                                for _ in 0..(index * 32 + position * 8) {
-                                    core::hint::spin_loop();
-                                }
-                                for plane in 0..2 {
-                                    lease.write(plane, *buffer).fill(tag);
-                                }
-                            }
-                            lease
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| handle.join().expect("lease writer"))
-                    .collect()
-            });
-            for (index, buffers) in owned.iter().enumerate() {
-                let tag = (round * LEASES + index) as f32;
-                for buffer in buffers {
-                    for plane in 0..2 {
-                        assert!(
-                            leases[0]
-                                .read(plane, *buffer)
-                                .iter()
-                                .all(|word| *word == tag),
-                            "round {round}: buffer {buffer} carries a foreign write"
-                        );
-                    }
-                }
-            }
-            assert!(
-                leases[0]
-                    .read(0, ARENA_SILENCE_BUFFER)
-                    .iter()
-                    .chain(leases[0].read(1, ARENA_SILENCE_BUFFER))
-                    .all(|word| *word == 0.0),
-                "the silence buffer is never written"
-            );
-        }
-        assert_eq!(arena.buffers(), LEASES * BUFFERS_PER_LEASE + 1);
+        assert!(arena.write_stereo_many(&eight, 8).is_some());
     }
 }
