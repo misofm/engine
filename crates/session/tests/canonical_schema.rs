@@ -196,8 +196,9 @@ fn full_tagged_surface_round_trips_without_field_loss() {
     };
     model.routes.push(Route {
         id: id("mix-to-main"),
-        source: RouteSource::SubmixOutput {
+        source: RouteSource::Submix {
             submix_id: id("mix"),
+            tap: SendTap::PostPan,
         },
         destination: RouteDestination::OutputInput {
             output_id: id("main-out"),
@@ -252,7 +253,7 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         reparsed
             .routes
             .iter()
-            .any(|route| matches!(route.source, RouteSource::SubmixOutput { .. }))
+            .any(|route| matches!(route.source, RouteSource::Submix { .. }))
     );
     assert_eq!(
         canonical_session_json(&reparsed).expect("stable"),

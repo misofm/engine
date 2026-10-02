@@ -761,8 +761,9 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         LinkMode::Average,
         Vec::new(),
         SidechainDeclaration::Routed(Sidechain {
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: id("drums"),
+                tap: SendTap::PostPan,
             },
             port_id: id("key"),
         }),
@@ -1197,21 +1198,126 @@ fn every_send_tap_tag_is_typed_and_canonical() {
         SendTap::PostFader,
         SendTap::PostPan,
     ] {
-        let source = RouteSource::Track {
-            track_id: id("vocal"),
-            tap,
-        };
-        let limits = ProtocolCodec::default().limits();
-        let mut count = CountSink::new(limits);
-        tx_route_source(&mut count, &source).expect("size route source");
-        let mut encoded = vec![0; count.written()];
-        let mut writer = SliceSink::new(&mut encoded, limits);
-        tx_route_source(&mut writer, &source).expect("encode route source");
-        assert_eq!(
-            parse_route_source(Message::nested(&encoded).expect("nested route source")),
-            Ok(source)
-        );
+        // #1203 D2: a submix source carries the same seven tap codes as a track source.
+        for source in [
+            RouteSource::Track {
+                track_id: id("vocal"),
+                tap,
+            },
+            RouteSource::Submix {
+                submix_id: id("drums"),
+                tap,
+            },
+        ] {
+            let encoded = nested_bytes(&|sink| tx_route_source(sink, &source));
+            assert_eq!(
+                parse_route_source(Message::nested(&encoded).expect("nested route source")),
+                Ok(source)
+            );
+        }
     }
+}
+
+/// #1203 D2: tag 2 (a submix source) requires `TAP` (field 3), in each of the three shapes that
+/// share the route-source spec: a route's source, a routed sidechain's source and a
+/// `SetRouteSource` value. Each container decodes with the tapped source and refuses the same
+/// container with the tap left out, so the refusal is the missing tap and nothing else.
+///
+/// Red if any of the three decoders reads a tapless submix source (for example, defaulting it to
+/// the strip's end, as `submix_output` meant), or if only the route's shape enforces the tap.
+#[test]
+fn a_tapless_submix_source_is_refused_in_every_shape_that_carries_one() {
+    let session = parse_session_json(include_str!(
+        "../../../../fixtures/session/v1/canonical.json"
+    ))
+    .expect("fixture");
+    let route = session.routes[0].clone();
+    let source = RouteSource::Submix {
+        submix_id: id("drums"),
+        tap: SendTap::PreFader,
+    };
+    let tapped = nested_bytes(&|sink| tx_route_source(sink, &source));
+    let tapless = raw_message(vec![
+        (1, WIRE_U8, true, vec![2]),
+        (2, WIRE_UTF8, true, b"drums".to_vec()),
+    ]);
+    let destination = nested_bytes(&|sink| tx_route_destination(sink, &route.destination));
+    let matrix = nested_bytes(&|sink| tx_channel_matrix(sink, &route.channel_matrix));
+    let route_message = |source: &[u8]| {
+        raw_message(vec![
+            (1, WIRE_UTF8, true, route.id.as_str().as_bytes().to_vec()),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+            (3, WIRE_MESSAGE, true, destination.clone()),
+            (4, WIRE_MESSAGE, true, matrix.clone()),
+            (5, WIRE_F32, true, route.gain_db.to_le_bytes().to_vec()),
+        ])
+    };
+    let sidechain_message = |source: &[u8]| {
+        raw_message(vec![
+            (1, WIRE_U8, true, vec![2]),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+            (3, WIRE_UTF8, true, b"key".to_vec()),
+        ])
+    };
+    let edit_message = |source: &[u8]| {
+        let payload = raw_message(vec![
+            (1, WIRE_UTF8, true, route.id.as_str().as_bytes().to_vec()),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+        ]);
+        raw_message(vec![
+            (
+                1,
+                schema::Wire::U16.raw(),
+                true,
+                crate::SessionEditOpcode::SetRouteSource
+                    .raw()
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+            (2, WIRE_MESSAGE, true, payload),
+        ])
+    };
+
+    let parse_route_bytes = |bytes: Vec<u8>| parse_route(Message::nested(&bytes).expect("route"));
+    let parse_sidechain_bytes =
+        |bytes: Vec<u8>| parse_sidechain(Message::nested(&bytes).expect("sidechain"));
+    let parse_edit_bytes = |bytes: Vec<u8>| parse_edit(Message::nested(&bytes).expect("edit"));
+    assert_eq!(
+        parse_route_bytes(route_message(&tapped)),
+        Ok(Route {
+            source: source.clone(),
+            ..route.clone()
+        })
+    );
+    assert_eq!(
+        parse_sidechain_bytes(sidechain_message(&tapped)),
+        Ok(SidechainDeclaration::Routed(Sidechain {
+            source: source.clone(),
+            port_id: id("key"),
+        }))
+    );
+    assert_eq!(
+        parse_edit_bytes(edit_message(&tapped)),
+        Ok(SessionEdit::SetRouteSource {
+            route_id: route.id.clone(),
+            source: source.clone(),
+        })
+    );
+    assert_eq!(
+        parse_route_bytes(route_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless route source"
+    );
+    assert_eq!(
+        parse_sidechain_bytes(sidechain_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless sidechain source"
+    );
+    assert_eq!(
+        parse_edit_bytes(edit_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless SetRouteSource value"
+    );
 }
 
 #[test]
@@ -1280,8 +1386,9 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
         },
         SessionEdit::SetRouteSource {
             route_id: route.id.clone(),
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: id("drums"),
+                tap: SendTap::PostPan,
             },
         },
         SessionEdit::SetRouteDestination {

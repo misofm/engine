@@ -759,13 +759,14 @@ fn tx_route_source(sink: &mut dyn Sink, value: &RouteSource) -> Result<(), Encod
             tx_id(sink, schema::session::route_source::ID, track_id)?;
             tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
-        RouteSource::SubmixOutput { submix_id } => {
+        RouteSource::Submix { submix_id, tap } => {
             tx_start_message(
                 sink,
                 schema::session::route_source::SUBMIX.field_count(&[])?,
             )?;
             tx_u8(sink, schema::session::route_source::TAG, 2)?;
-            tx_id(sink, schema::session::route_source::ID, submix_id)
+            tx_id(sink, schema::session::route_source::ID, submix_id)?;
+            tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
     }
 }
@@ -1556,8 +1557,12 @@ fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> 
                 schema::session::route_source::TAP
             )?)?)?,
         }),
-        2 => Ok(RouteSource::SubmixOutput {
+        2 => Ok(RouteSource::Submix {
             submix_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
+            tap: parse_tap(read_u8_exact(one_spec!(
+                message,
+                schema::session::route_source::TAP
+            )?)?)?,
         }),
         _ => Err(DecodeError::InvalidTlv),
     }

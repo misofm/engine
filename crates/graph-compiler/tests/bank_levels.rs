@@ -784,8 +784,9 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
     for submix in 0..submixes {
         model.routes.push(route(
             &format!("bus{submix}-main"),
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: sid(&format!("bus{submix}")),
+                tap: SendTap::PostPan,
             },
             main_out(),
             0.0,
@@ -1363,8 +1364,9 @@ fn bus_console_session(buses: usize, levels: usize, seed: u64) -> SessionModel {
         model.submixes.push(strip);
         model.routes.push(route(
             &format!("bus{bus}-main"),
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: sid(&format!("bus{bus}")),
+                tap: SendTap::PostPan,
             },
             RouteDestination::OutputInput {
                 output_id: sid("main-out"),
@@ -1380,8 +1382,9 @@ fn bus_console_session(buses: usize, levels: usize, seed: u64) -> SessionModel {
                 })
                 .collect::<Vec<_>>()
         } else {
-            vec![RouteSource::SubmixOutput {
+            vec![RouteSource::Submix {
                 submix_id: sid(&format!("bus{}", bus - 1)),
+                tap: SendTap::PostPan,
             }]
         };
         for (index, source) in from.into_iter().enumerate() {

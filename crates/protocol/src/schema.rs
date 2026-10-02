@@ -834,7 +834,7 @@ pub(crate) mod session {
         };
         pub(crate) static SUBMIX: MessageSpec = MessageSpec {
             name: "RouteSourceSubmix",
-            fields: &[TAG, ID],
+            fields: &[TAG, ID, TAP],
         };
         pub(crate) static KNOWN: MessageSpec = MessageSpec {
             name: "RouteSourceKnownFields",

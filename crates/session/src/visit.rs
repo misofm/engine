@@ -260,7 +260,7 @@ mod walk {
       }
       RouteSource=>route_source |v,f,_o| {
         [Self::Track { track_id, tap }]=>3 {v.token(f::KIND,token("track",1)),v.id(f::TRACK_ID,track_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
-        [Self::SubmixOutput { submix_id }]=>2 {v.token(f::KIND,token("submix_output",2)),v.id(f::SUBMIX_ID,submix_id)}
+        [Self::Submix { submix_id, tap }]=>3 {v.token(f::KIND,token("submix",2)),v.id(f::SUBMIX_ID,submix_id),v.token(f::TAP,token(tap.token(),tap.wire()))}
       }
       RouteDestination=>route_destination |v,f,_o| {
         [Self::SubmixInput { submix_id }]=>2 {v.token(f::KIND,token("submix_input",1)),v.id(f::SUBMIX_ID,submix_id)}

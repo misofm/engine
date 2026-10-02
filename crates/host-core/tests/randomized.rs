@@ -373,8 +373,9 @@ fn generate(seed: u64, draw: &mut Draw, registry: &NativeEffectRegistry) -> (Ses
     for submix in 0..submixes {
         model.routes.push(route(
             &format!("bus{submix}-main"),
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: sid(&format!("bus{submix}")),
+                tap: SendTap::PostPan,
             },
             main_out(),
             0.0,

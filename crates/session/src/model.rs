@@ -781,10 +781,12 @@ pub enum RouteSource {
         /// Explicit point in the track chain.
         tap: SendTap,
     },
-    /// The output of a declared submix.
-    SubmixOutput {
+    /// A named submix strip boundary; a bus offers the same seven taps a track does.
+    Submix {
         /// Declared submix identity.
         submix_id: StableId,
+        /// Explicit point in the submix strip.
+        tap: SendTap,
     },
 }
 

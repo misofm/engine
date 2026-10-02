@@ -26,6 +26,15 @@
 //! * **Gate 1, the bus delay runs after the sum**, and PDC never sees it.
 //! * **Gate 3, a folded bus still delays its sum.**
 //! * **Gate 4, render allocates nothing** for gate 1's delayed bus.
+//!
+//! Issue #1203: a route or a sidechain leaves a submix strip at any of the seven taps.
+//!
+//! * **Gate 1, a bus tap equals the same tap on a track fed the bus's sum**, for every tap, on a
+//!   strip where every tap differs.
+//! * **Gate 2, a sidechain keyed by a bus's `pre_fader`** reads that tap.
+//! * **Gate 3, PDC by tap**: a tap before a bus's `post_insert` limiter is compensated by its
+//!   latency.
+//! * **Gate 6, render allocates nothing** for gate 1's tapped buses.
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -126,8 +135,9 @@ fn post_pan(track: &str) -> RouteSource {
 }
 
 fn bus_output(bus: &str) -> RouteSource {
-    RouteSource::SubmixOutput {
+    RouteSource::Submix {
         submix_id: sid(bus),
+        tap: SendTap::PostPan,
     }
 }
 
@@ -434,22 +444,16 @@ const fn limiter_latency(rate: u32) -> usize {
     (rate / 100 + 6) as usize
 }
 
-/// Gate 1's two sessions, both declaring [`gate_one_console`]: A, three tracks that bypass every
-/// console slot and are otherwise transparent, routed into a submix with strip `S`; B, one track
-/// with strip `S` whose source is the test's own sum of A's routed contributions. A contributor
-/// passes its source delayed by the bypassed limiter's `L`, so B's source is the D3 sum of the
-/// delayed contributions: `L` leading zeros (signed as the sum makes them), then the sum. Returns
-/// the two documents and each one's `(source id, planes)` feed.
-#[allow(clippy::type_complexity)]
-fn gate_one_sessions(
+/// Three contributors `t0`..`t2` routed `post_pan` into `bus` with drawn gains, matrices and
+/// noise planes of `frames` samples, sorted by route ID, and the D9 sum, by the D3 expression, of
+/// each contributor delayed by `latency`: each route folds its gain into its matrix once, then
+/// `l' = (lr * r) + (ll * l)` with two roundings, and the contributions are added left to right in
+/// route-ID order.
+fn drawn_contributors(
     draw: &mut Draw,
-    registry: &NativeEffectRegistry,
-) -> (String, Vec<(String, [Vec<f32>; 2])>, String, [Vec<f32>; 2]) {
-    let rate = draw.pick(&LAUNCH_RATES);
-    let console = gate_one_console();
-    let strip = drawn_strip(draw, registry, &console);
-    let frames = QUANTUM * GATE_ONE_BLOCKS;
-    let latency = limiter_latency(rate);
+    frames: usize,
+    latency: usize,
+) -> (Vec<Contributor>, [Vec<f32>; 2]) {
     // Route IDs are a random permutation of the tracks, so route-ID order is not track order.
     let mut names = vec!["route-a", "route-b", "route-c"];
     let mut contributors: Vec<Contributor> = (0..3)
@@ -480,18 +484,6 @@ fn gate_one_sessions(
             }
         })
         .collect();
-
-    let (mut a, source, track) = empty_session_with(rate, console.clone(), GATE_ONE_BLOCKS);
-    for contributor in &contributors {
-        add_track(&mut a, &source, &track, &contributor.track);
-        a.routes.push(contributor.route.clone());
-    }
-    a.submixes = vec![strip.clone().submix("bus")];
-    a.routes.push(to_output("bus-main", bus_output("bus")));
-
-    // The D9 sum, by the D3 expression, of each contributor delayed by `L`: each route folds its
-    // gain into its matrix once, then `l' = (lr * r) + (ll * l)` with two roundings, and the
-    // contributions are added left to right in route-ID order.
     contributors.sort_by(|x, y| x.route.id.cmp(&y.route.id));
     let mut sum = [vec![0.0_f32; frames], vec![0.0_f32; frames]];
     for (rank, contributor) in contributors.iter().enumerate() {
@@ -519,6 +511,33 @@ fn gate_one_sessions(
             }
         }
     }
+    (contributors, sum)
+}
+
+/// Gate 1's two sessions, both declaring [`gate_one_console`]: A, three tracks that bypass every
+/// console slot and are otherwise transparent, routed into a submix with strip `S`; B, one track
+/// with strip `S` whose source is the test's own sum of A's routed contributions. A contributor
+/// passes its source delayed by the bypassed limiter's `L`, so B's source is the D3 sum of the
+/// delayed contributions: `L` leading zeros (signed as the sum makes them), then the sum. Returns
+/// the two documents and each one's `(source id, planes)` feed.
+#[allow(clippy::type_complexity)]
+fn gate_one_sessions(
+    draw: &mut Draw,
+    registry: &NativeEffectRegistry,
+) -> (String, Vec<(String, [Vec<f32>; 2])>, String, [Vec<f32>; 2]) {
+    let rate = draw.pick(&LAUNCH_RATES);
+    let console = gate_one_console();
+    let strip = drawn_strip(draw, registry, &console);
+    let latency = limiter_latency(rate);
+    let (contributors, sum) = drawn_contributors(draw, QUANTUM * GATE_ONE_BLOCKS, latency);
+
+    let (mut a, source, track) = empty_session_with(rate, console.clone(), GATE_ONE_BLOCKS);
+    for contributor in &contributors {
+        add_track(&mut a, &source, &track, &contributor.track);
+        a.routes.push(contributor.route.clone());
+    }
+    a.submixes = vec![strip.clone().submix("bus")];
+    a.routes.push(to_output("bus-main", bus_output("bus")));
 
     let (mut b, source, mut track) = empty_session_with(rate, console, GATE_ONE_BLOCKS);
     strip.onto(&mut track);
@@ -1316,4 +1335,334 @@ fn a_folded_bus_still_delays_its_sum() {
 #[test]
 fn a_delayed_bus_renders_without_allocating() {
     assert_renders_without_allocating(&delayed_bus_session([37, 0]), &impulse_feeds());
+}
+
+// ---- #1203 --------------------------------------------------------------------------------
+
+const TAP_TEST: &str = "a_bus_tap_renders_the_bits_of_the_same_tap_on_a_track_fed_its_sum";
+const TAP_REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test \
+                          submix_strip -- --exact \
+                          a_bus_tap_renders_the_bits_of_the_same_tap_on_a_track_fed_its_sum";
+const TAP_SEEDS: u64 = 8;
+
+/// The seven taps in chain order.
+const TAPS: [SendTap; 7] = [
+    SendTap::Input,
+    SendTap::PostInput,
+    SendTap::InsertSend,
+    SendTap::InsertReturn,
+    SendTap::PreFader,
+    SendTap::PostFader,
+    SendTap::PostPan,
+];
+
+fn eq_param(parameter_id: u32, unit: ParameterUnit, value: f32) -> EffectParam {
+    EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    }
+}
+
+/// Band 1 of the parametric EQ enabled as a bell at `hz` with `gain_db`.
+fn bell(hz: f32, gain_db: f32) -> Vec<EffectParam> {
+    vec![
+        eq_param(1, ParameterUnit::Linear, 1.0),
+        eq_param(3, ParameterUnit::Hz, hz),
+        eq_param(4, ParameterUnit::Db, gain_db),
+    ]
+}
+
+/// The tap gates' console: one latency-free EQ slot in each section, so that a live entry changes
+/// the signal between `post_input` and `insert_send`, and again between `insert_return` and
+/// `pre_fader`.
+fn tap_console() -> Console {
+    let slot = |id: &str| ConsoleSlot {
+        slot: sid(id),
+        identity: EffectIdentity::Native {
+            effect_id: sid("miso.parametric-eq"),
+        },
+        quality: EffectQuality::Normal,
+        link_mode: LinkMode::DualMono,
+    };
+    Console {
+        pre_insert: vec![slot("desk-eq")],
+        post_insert: vec![slot("desk-tone")],
+    }
+}
+
+/// A strip on which every tap differs from the one before it: a trim, a live console EQ in each
+/// section, an insert compressor (defaults: threshold -18 dB), a -6 dB fader and a swap matrix.
+fn tap_strip() -> Strip {
+    let mut strip = Strip::transparent(&tap_console());
+    strip.builtins.left.trim_db = 3.0;
+    strip.builtins.right.trim_db = -2.0;
+    strip.console = vec![
+        ConsoleEntry {
+            slot: sid("desk-eq"),
+            bypass: false,
+            params: bell(1_000.0, 6.0),
+        },
+        ConsoleEntry {
+            slot: sid("desk-tone"),
+            bypass: false,
+            params: bell(3_000.0, -4.0),
+        },
+    ];
+    strip.inserts.effects = vec![Effect {
+        id: sid("glue"),
+        identity: EffectIdentity::Native {
+            effect_id: sid("miso.compressor"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: SidechainDeclaration::None,
+    }];
+    strip.fader.left_db = -6.0;
+    strip.fader.right_db = -6.0;
+    strip.matrix_or_pan = MatrixOrPan::Matrix {
+        ll: 0.0,
+        lr: 1.0,
+        rl: 1.0,
+        rr: 0.0,
+        smoothing_samples: 0,
+    };
+    strip
+}
+
+/// The bus session of the tap gates: three contributors that bypass every console slot, routed
+/// into `bus` with [`tap_strip`], and nothing else. Returns it with its feeds and the sum the
+/// contributors deliver to the bus (no shift: every slot is latency-free).
+#[allow(clippy::type_complexity)]
+fn tap_bus_session(draw: &mut Draw) -> (SessionModel, Vec<(String, [Vec<f32>; 2])>, [Vec<f32>; 2]) {
+    let rate = draw.pick(&LAUNCH_RATES);
+    let (contributors, sum) = drawn_contributors(draw, QUANTUM * BLOCKS, 0);
+    let (mut model, source, track) = empty_session_with(rate, tap_console(), BLOCKS);
+    for contributor in &contributors {
+        add_track(&mut model, &source, &track, &contributor.track);
+        model.routes.push(contributor.route.clone());
+    }
+    model.submixes = vec![tap_strip().submix("bus")];
+    let feeds = contributors
+        .into_iter()
+        .map(|contributor| (contributor.track, contributor.planes))
+        .collect();
+    (model, feeds, sum)
+}
+
+/// The oracle of the tap gates: `model` with the bus and its contributors replaced by one track
+/// `bus` that has the bus's strip and reads the test's own sum.
+fn bus_as_track(model: &SessionModel) -> SessionModel {
+    let (mut oracle, source, mut track) =
+        empty_session_with(model.sample_rate_hz, tap_console(), BLOCKS);
+    tap_strip().onto(&mut track);
+    add_track(&mut oracle, &source, &track, "bus");
+    oracle
+}
+
+fn bus_tap(tap: SendTap) -> RouteSource {
+    RouteSource::Submix {
+        submix_id: sid("bus"),
+        tap,
+    }
+}
+
+fn track_tap(track: &str, tap: SendTap) -> RouteSource {
+    RouteSource::Track {
+        track_id: sid(track),
+        tap,
+    }
+}
+
+/// Gate 1: for each tap `T`, a bus routed to the output from `T` renders the bits of the same
+/// route from `T` of a track that has the bus's strip and is fed the bus's sum. The oracle's seven
+/// renders are pairwise different, so a tap mapped to any other stage changes the bits.
+#[test]
+fn a_bus_tap_renders_the_bits_of_the_same_tap_on_a_track_fed_its_sum() {
+    let ran = run_seeds(TAP_TEST, TAP_REPLAY, TAP_SEEDS, |seed| {
+        let mut draw = Draw::new(seed);
+        let (bus, feeds, sum) = tap_bus_session(&mut draw);
+        let oracle = bus_as_track(&bus);
+        let mut renders: Vec<[Vec<f32>; 2]> = Vec::new();
+        for tap in TAPS {
+            let mut a = bus.clone();
+            a.routes.push(to_output("bus-tap", bus_tap(tap)));
+            let mut b = oracle.clone();
+            b.routes.push(to_output("bus-tap", track_tap("bus", tap)));
+            let actual = render(&document(&a), &borrowed(&feeds), BLOCKS);
+            let expected = render(&document(&b), &[("bus", &sum)], BLOCKS);
+            for plane in 0..2 {
+                assert_bits_equal(
+                    &actual[plane],
+                    &expected[plane],
+                    &format!("seed {seed}: tap {tap:?} plane {plane}"),
+                );
+            }
+            renders.push(expected);
+        }
+        for (x, first) in renders.iter().enumerate() {
+            for (y, second) in renders.iter().enumerate().skip(x + 1) {
+                assert!(
+                    first != second,
+                    "seed {seed}: taps {:?} and {:?} render the same bits",
+                    TAPS[x],
+                    TAPS[y]
+                );
+            }
+        }
+    });
+    if !dsp_reference::randomized::replaying() {
+        assert_eq!(ran, TAP_SEEDS);
+    }
+}
+
+/// Gate 2: a compressor insert on track `x`, keyed from the bus's `pre_fader`, renders the bits of
+/// the same session in which the bus is a track fed its sum. `x` is quiet (below the threshold), so
+/// its gain reduction is the key's; keying the oracle from `post_pan` instead changes the bits, so
+/// a sidechain that reads the bus's end, or any stage other than `pre_fader`, turns this red.
+#[test]
+fn a_sidechain_keyed_by_a_bus_tap_reads_that_tap() {
+    let mut draw = Draw::new(1_203);
+    let (mut bus, mut feeds, sum) = tap_bus_session(&mut draw);
+    let mut quiet = || {
+        (0..QUANTUM * BLOCKS)
+            .map(|_| draw.noise(0.05))
+            .collect::<Vec<f32>>()
+    };
+    let x_planes = [quiet(), quiet()];
+    let ducked = |model: &mut SessionModel, key: RouteSource| {
+        let source = model.sources[0].clone();
+        let mut track = model.tracks[0].clone();
+        Strip::transparent(&model.console).onto(&mut track);
+        track.inserts.effects = vec![Effect {
+            id: sid("duck"),
+            identity: EffectIdentity::Native {
+                effect_id: sid("miso.compressor"),
+            },
+            quality: EffectQuality::Normal,
+            bypass: false,
+            link_mode: LinkMode::Maximum,
+            params: Vec::new(),
+            sidechain: SidechainDeclaration::Routed(session::Sidechain {
+                source: key,
+                port_id: sid("sidechain-in"),
+            }),
+        }];
+        add_track(model, &source, &track, "x");
+        model.routes.push(to_output("x-main", post_pan("x")));
+    };
+    let mut oracle = bus_as_track(&bus);
+    ducked(&mut bus, bus_tap(SendTap::PreFader));
+    bus.routes
+        .push(to_output("bus-main", bus_tap(SendTap::PostPan)));
+    let mut wrong_key = oracle.clone();
+    ducked(&mut oracle, track_tap("bus", SendTap::PreFader));
+    oracle
+        .routes
+        .push(to_output("bus-main", track_tap("bus", SendTap::PostPan)));
+    ducked(&mut wrong_key, track_tap("bus", SendTap::PostPan));
+    wrong_key
+        .routes
+        .push(to_output("bus-main", track_tap("bus", SendTap::PostPan)));
+
+    feeds.push(("x".to_owned(), x_planes.clone()));
+    let actual = render(&document(&bus), &borrowed(&feeds), BLOCKS);
+    let oracle_feeds = [("bus", &sum), ("x", &x_planes)];
+    let expected = render(&document(&oracle), &oracle_feeds, BLOCKS);
+    for plane in 0..2 {
+        assert_bits_equal(&actual[plane], &expected[plane], &format!("plane {plane}"));
+    }
+    let end_keyed = render(&document(&wrong_key), &oracle_feeds, BLOCKS);
+    assert!(
+        end_keyed != expected,
+        "keying from the bus's end must change the bits, or this gate cannot see the tap"
+    );
+}
+
+/// Gate 3: the bus's `post_insert` limiter (486 samples at 48 kHz) sits between its
+/// `insert_return` and `post_pan` taps. Every strip carries the slot (the contributors bypassed,
+/// keeping its latency), so the bus input arrives at 486; the `post_pan` route leaves at 972 and
+/// the `insert_return` route at 486, and PDC delays exactly that route's edge by 486. An impulse
+/// on `t0` arrives once, summed over both routes, at sample 972 on both planes.
+#[test]
+fn a_tap_before_a_bus_limiter_is_compensated_by_the_limiters_latency() {
+    let console = Console {
+        pre_insert: Vec::new(),
+        post_insert: vec![ConsoleSlot {
+            slot: sid("desk-limit"),
+            identity: EffectIdentity::Native {
+                effect_id: sid("miso.true-peak-limiter"),
+            },
+            quality: EffectQuality::Normal,
+            link_mode: LinkMode::Maximum,
+        }],
+    };
+    let (mut model, source, track) = empty_session_with(48_000, console, BLOCKS);
+    for id in ["t0", "t1"] {
+        add_track(&mut model, &source, &track, id);
+        model
+            .routes
+            .push(route(&format!("{id}-bus"), post_pan(id), into_bus("bus")));
+    }
+    model
+        .routes
+        .push(to_output("bus-return", bus_tap(SendTap::InsertReturn)));
+    model.routes.push(to_output("bus-main", bus_output("bus")));
+    let mut bus = Strip::transparent(&model.console);
+    bus.console[0].bypass = false;
+    model.submixes = vec![bus.submix("bus")];
+    let document = document(&model);
+
+    let artifact = graph_artifact(&document, 1_203);
+    assert_eq!(artifact.report().output_latency, LatencySamples(972));
+    let delays = &artifact.graph().inserted_delays;
+    assert_eq!(
+        delays.len(),
+        1,
+        "exactly the insert-return edge is delayed: {delays:?}"
+    );
+    let early = graph::StableGraphId::parse("bus-return").expect("graph id");
+    assert!(
+        matches!(
+            &delays[0].edge_id,
+            GraphEdgeId::RouteSource { route_id } | GraphEdgeId::RouteDestination { route_id }
+                if *route_id == early
+        ),
+        "the delay sits on the insert-return route: {delays:?}"
+    );
+    assert_eq!(delays[0].samples, LatencySamples(486));
+
+    let mut impulse = [
+        vec![0.0_f32; QUANTUM * BLOCKS],
+        vec![0.0_f32; QUANTUM * BLOCKS],
+    ];
+    impulse[0][0] = 0.25;
+    impulse[1][0] = 0.25;
+    let silence = [
+        vec![0.0_f32; QUANTUM * BLOCKS],
+        vec![0.0_f32; QUANTUM * BLOCKS],
+    ];
+    let out = render(&document, &[("t0", &impulse), ("t1", &silence)], BLOCKS);
+    for (plane, samples) in out.iter().enumerate() {
+        assert_eq!(peak(samples), 972, "plane {plane} peaks at sample 972");
+        assert!(
+            samples[972].abs() > 0.25,
+            "plane {plane}: both routes arrive together"
+        );
+    }
+}
+
+/// Gate 6: gate 1's bus sessions, one per tap, render without allocating.
+#[test]
+fn a_tapped_bus_renders_without_allocating() {
+    let mut draw = Draw::new(6);
+    let (bus, feeds, _) = tap_bus_session(&mut draw);
+    for tap in TAPS {
+        let mut model = bus.clone();
+        model.routes.push(to_output("bus-tap", bus_tap(tap)));
+        assert_renders_without_allocating(&document(&model), &feeds);
+    }
 }

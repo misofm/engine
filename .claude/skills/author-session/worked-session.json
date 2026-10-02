@@ -335,8 +335,9 @@
     {
       "id": "band-main",
       "source": {
-        "kind": "submix_output",
-        "submix_id": "band"
+        "kind": "submix",
+        "submix_id": "band",
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",

@@ -588,7 +588,7 @@ fn validate_route_source(
             ),
             "track_id",
         ),
-        RouteSource::SubmixOutput { submix_id } => (
+        RouteSource::Submix { submix_id, .. } => (
             matches!(
                 index.graph.get(submix_id.as_str()),
                 Some(GraphEntity::Submix(_))

@@ -400,8 +400,9 @@ mod tests {
         };
         model.routes.push(Route {
             id: id("mix-to-main"),
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: id("mix"),
+                tap: SendTap::PostPan,
             },
             destination: RouteDestination::OutputInput {
                 output_id: id("main-out"),

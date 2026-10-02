@@ -18,6 +18,8 @@
 //! And one claim of #1200's (gate 4): a bus sum stays in the sealed canonical text once a submix
 //! lowers to a strip.
 //!
+//! And one of #1203's (gate 5): a loop closed through a bus tap is a `graph.cycle`.
+//!
 //! The mixed session is compiled at both SIMD widths explicitly, so its expectations do not
 //! depend on the development host.
 
@@ -443,8 +445,9 @@ fn representative_console() -> SessionModel {
     for index in 0..32 {
         model.routes.push(Route {
             id: stable(&format!("submix-route-{index:02}")),
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: stable(&format!("submix-{index:02}")),
+                tap: SendTap::PostPan,
             },
             destination: RouteDestination::OutputInput {
                 output_id: model.outputs[0].id.clone(),
@@ -533,8 +536,9 @@ fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
     .collect();
     routes.push(Route {
         id: stable("out"),
-        source: RouteSource::SubmixOutput {
+        source: RouteSource::Submix {
             submix_id: stable("bus"),
+            tap: SendTap::PostPan,
         },
         destination: RouteDestination::OutputInput { output_id: output },
         ..template
@@ -689,4 +693,83 @@ fn seven_meter_taps_bind_in_tap_order_and_a_full_queue_drops_one_window() {
         assert_eq!(window.reset_generation, 7);
         assert_eq!(window.cumulative_dropped_snapshots, 0);
     }
+}
+
+/// #1203 gate 5: bus `a`'s `pre_fader` feeds bus `b`, and `b`'s `post_pan` feeds `a`. No route
+/// leaves `a`'s end, yet the two routes close a loop through `a`'s tap: the compile refuses with
+/// one `graph.cycle` whose witness names both routes and runs through `a`'s pre-fader stage, not
+/// through `a`'s end.
+#[test]
+fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    model.tracks[0].inserts.effects.clear();
+    model.submixes = vec![
+        Submix::unity(stable("a"), &model.console),
+        Submix::unity(stable("b"), &model.console),
+    ];
+    let template = model.routes[0].clone();
+    let bus_route = |id: &str, from: &str, tap: SendTap, to: &str| Route {
+        id: stable(id),
+        source: RouteSource::Submix {
+            submix_id: stable(from),
+            tap,
+        },
+        destination: RouteDestination::SubmixInput {
+            submix_id: stable(to),
+        },
+        ..template.clone()
+    };
+    model
+        .routes
+        .push(bus_route("ab", "a", SendTap::PreFader, "b"));
+    model
+        .routes
+        .push(bus_route("ba", "b", SendTap::PostPan, "a"));
+    let session =
+        compile_session(&model, compile_caps()).expect("the session layer has no cycle check");
+    let effects = prepared_effects(&session);
+    let builtins =
+        prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
+    let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 1203,
+        effects,
+        builtins,
+        caps: graph_caps(),
+    })
+    .err()
+    .expect("a loop through a tap refuses");
+    let diagnostics = failure.diagnostics.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let cycle = &diagnostics[0];
+    assert_eq!(cycle.code, "graph.cycle");
+    // The witness's own path is its first edge, a strip edge; the routes are named in its edges.
+    let routes: Vec<&str> = cycle
+        .cycle_edge_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| path.starts_with("$.routes"))
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            "$.routes[id=ab].source",
+            "$.routes[id=ab].destination",
+            "$.routes[id=ba].source",
+            "$.routes[id=ba].destination",
+        ],
+        "the witness names both routes: {:?}",
+        cycle.cycle_edge_paths
+    );
+    let stage = |bus: &str, stage| GraphNodeId::TrackStage {
+        track_id: StableGraphId::parse(bus).expect("graph id"),
+        stage,
+    };
+    assert!(
+        cycle
+            .cycle
+            .contains(&stage("a", TrackStage::PostSimd2PreFader))
+    );
+    assert!(!cycle.cycle.contains(&stage("a", TrackStage::PostMatrix)));
 }

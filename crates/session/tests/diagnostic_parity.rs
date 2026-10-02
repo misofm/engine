@@ -394,8 +394,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             "route-submix-a",
             MissingEntityReference,
             "$.routes[0].source.submix_id",
-            |s| s.routes[0].source = RouteSource::SubmixOutput {
-                submix_id: id("missing-mix-a")
+            |s| s.routes[0].source = RouteSource::Submix {
+                submix_id: id("missing-mix-a"),
+                tap: SendTap::PostPan,
             }
         ),
         case!(
@@ -405,8 +406,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             |s| {
                 let mut r = s.routes[0].clone();
                 r.id = id("route-b");
-                r.source = RouteSource::SubmixOutput {
+                r.source = RouteSource::Submix {
                     submix_id: id("missing-mix-b"),
+                    tap: SendTap::PostPan,
                 };
                 s.routes.push(r)
             }
@@ -486,8 +488,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             |s| set_sidechain(
                 s,
                 0,
-                RouteSource::SubmixOutput {
-                    submix_id: id("missing-d")
+                RouteSource::Submix {
+                    submix_id: id("missing-d"),
+                    tap: SendTap::PostPan,
                 }
             )
         ),
@@ -498,8 +501,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             |s| set_sidechain(
                 s,
                 1,
-                RouteSource::SubmixOutput {
-                    submix_id: id("missing-e")
+                RouteSource::Submix {
+                    submix_id: id("missing-e"),
+                    tap: SendTap::PostPan,
                 }
             )
         ),

@@ -187,11 +187,8 @@ pub(crate) fn track_node(track: &str, stage: TrackStage) -> GraphNodeId {
 pub(crate) fn route_source_node(source: &RouteSource) -> GraphNodeId {
     match source {
         RouteSource::Track { track_id, tap } => track_node(track_id.as_str(), stage(*tap)),
-        // #1200 D1: the end of the submix strip. *Tap a submix strip at any of the seven send
-        // points* (#1203) adds the other taps.
-        RouteSource::SubmixOutput { submix_id } => {
-            track_node(submix_id.as_str(), TrackStage::PostMatrix)
-        }
+        // #1203 D3: a submix strip offers the seven taps a track does, at the same stages.
+        RouteSource::Submix { submix_id, tap } => track_node(submix_id.as_str(), stage(*tap)),
     }
 }
 pub(crate) fn route_destination_node(destination: &RouteDestination) -> GraphNodeId {

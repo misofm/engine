@@ -243,12 +243,16 @@ sessions from the metadata's registry ids -- `miso.parametric-eq` and the rest -
 this fixture's `effect_id`.
 
 Routes use a tagged source and destination port shape. A source is either
-`{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
+`{ kind = "track", track_id, tap }` or `{ kind = "submix", submix_id, tap }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
 makes output sources and track destinations unrepresentable. A submix's input is the sum of the
-routes that target it, summed in route-ID order, and `submix_output` leaves the submix strip
-after its pan or matrix. Routed sidechains reuse the tagged
-source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
+routes that target it, summed in route-ID order. Every strip, track or submix, offers the same
+seven taps at the same points of its chain (`input`, `post_input`, `insert_send`,
+`insert_return`, `pre_fader`, `post_fader`, `post_pan`; #1203), and `tap` is required on both
+kinds; a pre-fader tap is not gated by the fader mute. The retired `submix_output` (which left the
+strip after its pan or matrix, now `{ kind = "submix", submix_id, tap = "post_pan" }`) is an unknown
+`kind` and refuses with `schema.invalid_enum`. Routed sidechains reuse the tagged source shape,
+taps included, and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with
 `effect.sidechain.unknown_port` (`crates/effect-compiler/src/prepare.rs:1113`), beside

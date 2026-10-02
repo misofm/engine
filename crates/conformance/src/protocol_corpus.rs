@@ -4,7 +4,7 @@ use protocol::*;
 
 use session::{
     Console, ConsoleEntry, ConsoleSlot, EffectIdentity, EffectQuality, LinkMode, Output, RackName,
-    SessionModel, StableId, Submix,
+    RouteSource, SendTap, SessionModel, StableId, Submix,
 };
 
 /// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
@@ -211,9 +211,14 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::RemoveRoute {
             route_id: route.id.clone(),
         },
+        // #1203 D5: a tapped submix source, so the hash covers tag 2's required tap. A codec
+        // value; the corpus is not a session a store applies.
         SessionEdit::SetRouteSource {
             route_id: route.id.clone(),
-            source: route.source.clone(),
+            source: RouteSource::Submix {
+                submix_id: id("drums"),
+                tap: SendTap::PreFader,
+            },
         },
         SessionEdit::SetRouteDestination {
             route_id: route.id.clone(),
@@ -683,7 +688,9 @@ pub enum ConformanceDecoder {
 /// non-trivial one.
 /// Issue #1202 repinned it from `ca48855fd3a756b7`: the submix message carries its console entries
 /// in submix field 3, and `UpsertSubmix` encodes two (one live, one bypassed).
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xc0f6_eced_bf50_920a;
+/// Issue #1203 repinned it from `c0f6ecedbf50920a`: a tag-2 route source carries a required tap,
+/// and the corpus's `SetRouteSource` value is a tapped submix source.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xa1dc_c56f_2e4a_48f9;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

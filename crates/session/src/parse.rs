@@ -1352,17 +1352,16 @@ fn parse_route_source(
                 tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
-        "submix_output" => {
-            for key in ["track_id", "tap"] {
-                parser.reject_key(
-                    table,
-                    key,
-                    path.key(key),
-                    "submix_output source cannot contain track fields",
-                );
-            }
-            Some(RouteSource::SubmixOutput {
+        "submix" => {
+            parser.reject_key(
+                table,
+                "track_id",
+                path.key("track_id"),
+                "submix source cannot contain track_id",
+            );
+            Some(RouteSource::Submix {
                 submix_id: parser.id(table, "submix_id", &path)?,
+                tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
         _ => {
@@ -1371,7 +1370,7 @@ fn parse_route_source(
                 "kind",
                 &path,
                 DiagnosticCode::InvalidEnum,
-                "expected track or submix_output",
+                "expected track or submix",
             );
             None
         }

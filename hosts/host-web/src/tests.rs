@@ -5474,7 +5474,10 @@ fn live_controlled_boot_of_a_bus_with_an_effect_renders() {
         submix_id: bus_id.clone(),
     };
     bus_main.id = session::StableId::parse("bus-main").expect("route id");
-    bus_main.source = session::RouteSource::SubmixOutput { submix_id: bus_id };
+    bus_main.source = session::RouteSource::Submix {
+        submix_id: bus_id,
+        tap: session::SendTap::PostPan,
+    };
     model.routes.push(bus_main);
     let document = canonical_session_json(&model).expect("canonical bus session");
     let options = WebBootOptions {

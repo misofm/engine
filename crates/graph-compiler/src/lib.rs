@@ -428,17 +428,20 @@ mod tests {
 
         let submix_id = StableId::parse("submix").expect("stable ID");
         let output_id = StableId::parse("output").expect("stable ID");
-        // #1200 D1: a submix is a strip. Its output is the end of the strip and its input the
-        // strip's summing `Input` stage.
-        assert_eq!(
-            route_source_node(&RouteSource::SubmixOutput {
-                submix_id: submix_id.clone(),
-            }),
-            GraphNodeId::TrackStage {
-                track_id: gid(submix_id.as_str()),
-                stage: TrackStage::PostMatrix,
-            }
-        );
+        // #1200 D1 and #1203 D3: a submix is a strip. Each of its taps is the track tap's stage
+        // and its input the strip's summing `Input` stage.
+        for (tap, expected_stage) in expected_stages {
+            assert_eq!(
+                route_source_node(&RouteSource::Submix {
+                    submix_id: submix_id.clone(),
+                    tap,
+                }),
+                GraphNodeId::TrackStage {
+                    track_id: gid(submix_id.as_str()),
+                    stage: expected_stage,
+                }
+            );
+        }
         assert_eq!(
             route_destination_node(&RouteDestination::SubmixInput {
                 submix_id: submix_id.clone(),
@@ -2206,13 +2209,15 @@ mod tests {
         };
         let mut z_downstream = base_route.clone();
         z_downstream.id = StableId::parse("z-downstream").expect("route id");
-        z_downstream.source = RouteSource::SubmixOutput {
+        z_downstream.source = RouteSource::Submix {
             submix_id: StableId::parse("a-submix").expect("submix id"),
+            tap: SendTap::PostPan,
         };
         let mut a_downstream = base_route;
         a_downstream.id = StableId::parse("a-downstream").expect("route id");
-        a_downstream.source = RouteSource::SubmixOutput {
+        a_downstream.source = RouteSource::Submix {
             submix_id: StableId::parse("z-submix").expect("submix id"),
+            tap: SendTap::PostPan,
         };
         model.routes = vec![to_a, to_z, z_downstream, a_downstream];
         let session = compile_session(

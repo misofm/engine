@@ -94,7 +94,7 @@
     "route_source": {
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["kind", "track_id", "tap"], "properties": { "kind": { "const": "track" }, "track_id": { "$ref": "#/$defs/id" }, "tap": { "enum": ["input", "post_input", "insert_send", "insert_return", "pre_fader", "post_fader", "post_pan"] } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "submix_id"], "properties": { "kind": { "const": "submix_output" }, "submix_id": { "$ref": "#/$defs/id" } } }
+        { "type": "object", "additionalProperties": false, "required": ["kind", "submix_id", "tap"], "properties": { "kind": { "const": "submix" }, "submix_id": { "$ref": "#/$defs/id" }, "tap": { "enum": ["input", "post_input", "insert_send", "insert_return", "pre_fader", "post_fader", "post_pan"] } } }
       ]
     },
     "sidechain": {

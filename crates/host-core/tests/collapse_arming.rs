@@ -217,7 +217,10 @@ fn with_send(mut model: SessionModel, tap: SendTap) -> SessionModel {
     }
     model.routes.push(Route {
         id: id("bus-main"),
-        source: RouteSource::SubmixOutput { submix_id: bus },
+        source: RouteSource::Submix {
+            submix_id: bus,
+            tap: SendTap::PostPan,
+        },
         destination: RouteDestination::OutputInput { output_id: output },
         channel_matrix: identity,
         gain_db: 0.0,
