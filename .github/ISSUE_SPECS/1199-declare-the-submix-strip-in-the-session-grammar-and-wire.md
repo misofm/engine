@@ -292,8 +292,10 @@ grammar and the codec only.
     strip (a muted lane or a zero `rr` would silently gate every migrated submix once #1200
     renders it).
   - `protocol/src/session_wire/tests.rs::random_submix_strips_round_trip_losslessly` (gate 3, 64
-    draws, both variants asserted drawn): red if the submix codec drops or misnumbers a field,
-    swaps pan and matrix, or misreads the tag.
+    draws, both variants asserted drawn): red if the submix codec drops or mis-encodes a field
+    asymmetrically, swaps pan and matrix, or misreads the tag. A renumbering made on both sides
+    round-trips and stays green here; field numbers are pinned by `COMPLETE_SCHEMA_HASH` (verdict
+    NIT-1, mutation M5).
 - **Deviations.**
   - The automation-target diagnostic message changed from "must be a declared track" to "must be
     a declared track or submix" (code and path unchanged). A console target on a submix finds no
@@ -304,6 +306,24 @@ grammar and the codec only.
     `capacity.arithmetic_overflow` at `$.canonical`) was closed by #1200's D0, which charges submix
     inserts through `strips()`; `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are`
     pins it.
+
+## Decision record
+
+- **Heavy bus inserts were refused until #1200** (verdict MINOR-1). The record's estimate
+  deviation says so: #1200's D0 charges submix inserts through `strips()`, and
+  `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are` pins it.
+- **The submix console automation arm** (verdict MINOR-2) was delegated to #1202, which reads
+  `submix.console` and flips the assertion.
+- **Test-value wording** (verdict NIT-1): the round-trip test's doc comment and the record's line
+  now say "mis-encodes asymmetrically"; the hash owns field numbers. K1 follow-up commit.
+- **The fuzz manifest's hash history** (verdict NIT-2) gained one sentence tracing
+  `ebf282621550d44a` through #1199, #1202 and #1203 to the current value. K1 follow-up commit.
+- **Track diagnostic order at the 64 cap** (verdict NIT-3): `DiagnosticSet` sorts, so only which
+  diagnostics survive the cap of a pathological track can differ. No change.
+
+## Verdict
+
+- **Attempt 1** (`27892bcc`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1199-attempt1.md`.
 
 ## Dependencies
 

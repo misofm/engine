@@ -217,6 +217,28 @@ that plugin-delay compensation never compensates.
     instead of being dropped. Only a harness reaches such a track input; the workspace and fixture
     gates are green.
 
+## Decision record
+
+- **Delay lines compose** (verdict MINOR-1). The K1 follow-up commit adopts the verifier's test
+  as `delayed_tracks_into_two_delayed_buses_each_keep_their_own_line` (`submix_strip.rs`): `t0`
+  delayed 11/0 into a bus delayed 37/5, beside `t1` into a second bus delayed 13/0. Test value: red
+  if delay lines alias across the `TrackDelay` and `SumDelay` arms or across two buses, or if a
+  track's delay and its bus's delay fail to add. Mutation C (`SumDelay` always processes line 0)
+  turns it, and only it, red across graph, graph-compiler and host-core (`--all-targets`).
+- **The D5 witness arm stays untested** (verdict MINOR-2), as the recorded deviation says: it feeds
+  only the evidence counters, and a bus is never collapsed, so no product bit depends on it.
+- **Schema prose** (verdict NIT-1): `SESSION_SCHEMA_V1.md` now says only the next paragraph's
+  `delay_samples` rules apply to a submix, and that the live trim, polarity and HPF/LPF commands
+  address tracks only until #1213.
+- **`graph-compiler/src/estimate.rs`** (verdict NIT-2) says "every delayed strip".
+- **#1203's tap gate** now gives its strip delays of 37/5, so the bus delay is covered at the
+  `input` tap and every tap after it (#1203 verdict NIT-1).
+
+## Verdict
+
+- **Attempt 1** (`84d26a1d`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1201-attempt1.md`; the
+  verifier's scratch test is `docs/handoffs/submix-sends-2026-10-02/verdicts/1201-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Render a submix strip on its summed input* (#1200)

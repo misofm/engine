@@ -18,7 +18,8 @@
 //! And one claim of #1200's (gate 4): a bus sum stays in the sealed canonical text once a submix
 //! lowers to a strip.
 //!
-//! And one of #1203's (gate 5): a loop closed through a bus tap is a `graph.cycle`.
+//! And one of #1203's (gate 5): a loop closed through a bus tap is a `graph.cycle`, reported at its
+//! first route; a loop closed by a bus insert's own sidechain is reported at that sidechain.
 //!
 //! The mixed session is compiled at both SIMD widths explicitly, so its expectations do not
 //! depend on the development host.
@@ -697,8 +698,8 @@ fn seven_meter_taps_bind_in_tap_order_and_a_full_queue_drops_one_window() {
 
 /// #1203 gate 5: bus `a`'s `pre_fader` feeds bus `b`, and `b`'s `post_pan` feeds `a`. No route
 /// leaves `a`'s end, yet the two routes close a loop through `a`'s tap: the compile refuses with
-/// one `graph.cycle` whose witness names both routes and runs through `a`'s pre-fader stage, not
-/// through `a`'s end.
+/// one `graph.cycle` whose primary path is a route, whose witness names both routes and runs
+/// through `a`'s pre-fader stage, not through `a`'s end.
 #[test]
 fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
     let mut model = parse_session_json(SESSION).expect("canonical session");
@@ -744,7 +745,9 @@ fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     let cycle = &diagnostics[0];
     assert_eq!(cycle.code, "graph.cycle");
-    // The witness's own path is its first edge, a strip edge; the routes are named in its edges.
+    // The witness starts on a strip chain edge, whose sealed path is the bare `$.submixes`; the
+    // primary path, the only one a host shows, is the witness's first route edge.
+    assert_eq!(cycle.path, "$.routes[id=ab].source", "{cycle:?}");
     let routes: Vec<&str> = cycle
         .cycle_edge_paths
         .iter()
@@ -772,4 +775,60 @@ fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
             .contains(&stage("a", TrackStage::PostSimd2PreFader))
     );
     assert!(!cycle.cycle.contains(&stage("a", TrackStage::PostMatrix)));
+}
+
+/// A bus insert keyed from its own `post_fader` closes a loop with no route in it. The cycle's
+/// primary path, the only one a host shows, names the keyed insert's sidechain at its session
+/// position, not a strip chain edge (`$.submixes`) or the internal rack spelling (`simd2`).
+///
+/// Red if the primary path stops preferring an author-wired edge, or spells a sidechain edge by
+/// its sealed strip-level path, which does not say which insert is keyed (#1205 verdict NIT-5).
+#[test]
+fn a_bus_insert_keyed_from_its_own_fader_names_its_sidechain() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    let mut keyed = model.tracks[0].inserts.effects[0].clone();
+    model.tracks[0].inserts.effects.clear();
+    keyed.id = stable("k");
+    keyed.identity = EffectIdentity::Native {
+        effect_id: stable("conformance.delay"),
+    };
+    keyed.params = vec![EffectParam {
+        parameter_id: 1,
+        channel: ParameterChannel::Both,
+        unit: ParameterUnit::Linear,
+        value: 0.5,
+    }];
+    keyed.sidechain = SidechainDeclaration::Routed(Sidechain {
+        source: RouteSource::Submix {
+            submix_id: stable("a"),
+            tap: SendTap::PostFader,
+        },
+        port_id: stable("sidechain-in"),
+    });
+    let mut bus = Submix::unity(stable("a"), &model.console);
+    bus.inserts.effects = vec![keyed];
+    model.submixes = vec![bus];
+    let session =
+        compile_session(&model, compile_caps()).expect("the session layer has no cycle check");
+    let effects = prepared_effects(&session);
+    let builtins =
+        prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
+    let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 1205,
+        effects,
+        builtins,
+        caps: graph_caps(),
+    })
+    .err()
+    .expect("a self-keyed loop refuses");
+    let diagnostics = failure.diagnostics.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code, "graph.cycle");
+    assert_eq!(
+        diagnostics[0].path, "$.submixes[id=a].inserts.effects[id=k].sidechain",
+        "{:?}",
+        diagnostics[0]
+    );
 }

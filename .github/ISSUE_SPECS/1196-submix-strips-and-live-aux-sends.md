@@ -217,3 +217,11 @@ designed yet: `follows_pan`, bus solo and implied upstream solo, and VCA trim of
 Optional successor, not designed (the #1198 verdict, MINOR-2): a routed-sidechain case in the graph
 fixture corpus, which owns the sealed text, so a change to the `.sidechain` edge-path suffix turns a
 gate red. No test pins that suffix today.
+
+Known gap, not filed (found by #1205's implementer; the #1205 verdict, MINOR-2): the engine
+accepts an automation target whose `entity_id` names a submix (#1199 D6; a `console` target
+addresses the submix's entry, #1202), but the SDK's `.automation()` builder still resolves
+`trackId` against tracks only, and `enginectl`'s target is `trackId` only, so neither can author
+it. Stored automation renders nothing yet (#1058), so the impact is nil today. The
+author-session skill says so and points agents at the JSON. A successor adds `{ submixId }` beside
+`trackId` in the builder and in `enginectl`.

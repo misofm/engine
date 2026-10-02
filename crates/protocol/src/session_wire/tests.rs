@@ -1659,9 +1659,10 @@ fn random_submix(draw: &mut Draw, index: usize) -> Submix {
 /// `UpsertSubmix` encode and decode with every field intact, and re-encodes to the same bytes.
 /// #1202: the strip carries zero to three console entries (field 3).
 ///
-/// Red if `tx_submix`/`parse_submix` drops or misnumbers a strip field, swaps pan and matrix,
-/// misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the submix codec),
-/// or drops, reorders or truncates the repeated console entries.
+/// Red if `tx_submix`/`parse_submix` drops or mis-encodes a strip field asymmetrically, swaps pan
+/// and matrix, misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the
+/// submix codec), or drops, reorders or truncates the repeated console entries. A renumbering made
+/// on both sides round-trips; field numbers are pinned by `COMPLETE_SCHEMA_HASH`.
 #[test]
 fn random_submix_strips_round_trip_losslessly() {
     let mut draw = Draw(0x1199_0000_05ab_0001);

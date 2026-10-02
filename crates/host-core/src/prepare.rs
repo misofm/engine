@@ -347,15 +347,16 @@ pub struct HostLiveControlHandles {
     /// Each carries all three of a track's builtin channels: the matrix/pan queue (#137 D1), the
     /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3).
     pub track_controls: Vec<TrackControlProducer>,
-    /// One control producer per prepared effect instance (#140 A); empty when no channel was
-    /// requested. Addressed by `(track_id, address)` in the session's own terms (decision 12,
+    /// One control producer per prepared track effect instance (#140 A); empty when no channel was
+    /// requested. Until #1207 a submix strip's effects get none (the K1 interim, #1200 D6). Addressed by `(track_id, address)` in the session's own terms (decision 12,
     /// issue #1096): a console slot by its index in the session's slot order (`pre_insert`, then
     /// `post_insert`), an insert by its index in the track's `inserts`
     /// ([`Self::effect_control_mut`]).
     pub effect_controls: Vec<EffectControlProducer>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
-    /// One reader set per prepared effect instance that declares an observation tap (issue #143).
+    /// One reader set per prepared track effect instance that declares an observation tap (issue
+    /// #143); until #1207 a submix strip's effects get none (#1200 D6).
     ///
     /// Empty when the request named no observation capacity, and empty for every effect whose
     /// descriptor declares no tap. Addressed by `(track_id, address)`, exactly as
@@ -882,10 +883,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let control_catalog = crate::SessionControlProvider::prepare_session(&effects.entries)
         .map_err(|_| resource("host.control_provider.allocation"))?;
 
-    // Issue #140 A: one bounded live-control channel per prepared effect instance, at the same
-    // depth the builtin channels use and capped at each effect's own automation capacity. This is
-    // the only thing that creates one; a host that asks for no live controls attaches nothing and
-    // the plan renders the byte-identical live-control-free path.
+    // Issue #140 A: one bounded live-control channel per prepared track effect instance (a submix
+    // strip's get none until #1207, #1200 D6), at the same depth the builtin channels use and
+    // capped at each effect's own automation capacity. This is the only thing that creates one; a
+    // host that asks for no live controls attaches nothing and the plan renders the byte-identical
+    // live-control-free path.
     let effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
         None => Vec::new(),
         Some(depth) => {

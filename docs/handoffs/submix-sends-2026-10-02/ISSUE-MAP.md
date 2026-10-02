@@ -7,12 +7,19 @@ plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder 
 except for the unfiled VCA drafts; each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
 GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) were renamed in
 #1197's attempt 2 to the slug of their GitHub titles; their plan files keep the plan's names.
+A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes; the rows of
+#1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, where it last stood.
+
+The umbrella's app-facing documents -- `APP-SDK.md`, the session migration script and, later,
+`APP-LIVE.md` -- live in [`docs/handoffs/submix-strips-and-sends/`](../submix-strips-and-sends/),
+the name decision D6 of #1205 froze; this folder keeps the design record, the plan, the drafts and
+the verdicts (`verdicts/`).
 
 | Slice | Issue | Title | Spec | Plan file |
 |---|---|---|---|---|
 | umbrella | #1196 | Submix strips and live aux sends | `.github/ISSUE_SPECS/1196-submix-strips-and-live-aux-sends.md` | (written from `DESIGN.md`; no plan file) |
-| 00 | #1197 | Record the submix, send and VCA ruling | `.github/ISSUE_SPECS/1197-record-the-submix-send-and-vca-ruling.md` | `00-record-the-submix-send-and-vca-ruling.md` |
-| 01 | #1198 | Iterate session strips, not tracks, wherever strip semantics apply | `.github/ISSUE_SPECS/1198-iterate-session-strips-not-tracks.md` | `01-iterate-session-strips-not-tracks.md` |
+| 00 | #1197 | Record the submix, send and VCA ruling | [`1197-record-the-submix-send-and-vca-ruling.md`](https://github.com/misofm/engine/blob/5abde3840f1af276760584b84cfb40fde64554a4/.github/ISSUE_SPECS/1197-record-the-submix-send-and-vca-ruling.md) (retired, closed) | `00-record-the-submix-send-and-vca-ruling.md` |
+| 01 | #1198 | Iterate session strips, not tracks, wherever strip semantics apply | [`1198-iterate-session-strips-not-tracks.md`](https://github.com/misofm/engine/blob/5abde3840f1af276760584b84cfb40fde64554a4/.github/ISSUE_SPECS/1198-iterate-session-strips-not-tracks.md) (retired, closed) | `01-iterate-session-strips-not-tracks.md` |
 | 02 | #1199 | Declare the submix strip in the session grammar and wire | `.github/ISSUE_SPECS/1199-declare-the-submix-strip-in-the-session-grammar-and-wire.md` | `02-declare-the-submix-strip-in-the-session-grammar-and-wire.md` |
 | 03 | #1200 | Render a submix strip on its summed input | `.github/ISSUE_SPECS/1200-render-a-submix-strip-on-its-summed-input.md` | `03-render-a-submix-strip-on-its-summed-input.md` |
 | 04 | #1201 | Delay a submix strip's summed input | `.github/ISSUE_SPECS/1201-delay-a-submix-strips-summed-input.md` | `04-delay-a-submix-strips-summed-input.md` |

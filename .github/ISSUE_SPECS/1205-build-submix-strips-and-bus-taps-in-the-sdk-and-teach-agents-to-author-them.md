@@ -319,7 +319,9 @@ with bus depth, and how to migrate a saved document K1 now refuses.
     spec-less submix runs its console slots, takes the default pan, or moves off unity.
   - `console-evals.mjs` "the builder rebuilds an engine-written submix strip and bus tap byte for
     byte" (`rebuild()` now passes a `SubmixSpec` and `{ kind: "submix", submixId, tap }`): red if a
-    spec'd submix is written other than as authored. No SDK test wrote a submix strip before.
+    non-default submix fader mute (`right_mute: true`), or an `insert_send`/`insert_return` bus tap,
+    is lost between the engine's text and the builder; gate 1 and the rich session leave the mute
+    at its default and carry neither tap (verdict MINOR-4). Its M8 catch is shared with gate 1.
   - `enginectl-cli.mjs` "submix strips and bus taps build the engine's canonical JSON;
     submix_output is refused by name" (gate 5; bare `bus`, object `low` with a fader, a
     `submix`/`post_fader` route; output compared with `session-validator validate --canonical`):
@@ -359,6 +361,41 @@ with bus depth, and how to migrate a saved document K1 now refuses.
   `6aec3733e17dacf415f5199b740d91d01f2930845e9163f23985b419058a5ecc` (named twin `4c0e960a...`),
   equal to the build of `7f767ae0c` made before this slice's edits.
 - **Not done here:** the K1 push and its CI run (root).
+
+## Decision record
+
+- **Three builder refusals and one CLI refusal are pinned** (verdict MINOR-1). The K1 follow-up
+  commit adds, in gate 2 (`builder-evals.mjs`): `submix("bus", { source: "stem", ... })` refused
+  with `schema.unknown_field` at `submix("bus").source`, paired with the engine's
+  `schema.unknown_field` for a hand-written `source_id` on a submix; and a `{ kind: "submix" }`
+  route source with tap `post_matrix` or no tap refused with `schema.invalid_enum` at
+  `route("r").source.tap`. In gate 5 (`enginectl-cli.mjs`): a submix object carrying `source`
+  fails with `request.shape` and `schema.unknown_field`. Test value: red if the builder or the
+  CLI drops or passes a submix key or tap that the engine refuses. Mutations, each alone: A
+  (`"source"` in `SUBMIX_KEYS`) and D (the tap checked for `kind: "track"` only) turn gate 2 red,
+  and nothing else among the 333 headless evals; J (`source` allowed in the CLI submix object's
+  keys) turns gate 5 red, and nothing else among the 15 `enginectl-cli` tests.
+- **Automation on a submix** (verdict MINOR-2). The skill now says an automation target's
+  `entity_id` names a strip, that its parameter/channel pair is declared on that strip's (the
+  track's or the submix's) entry or insert, and that the SDK's `.automation()` and `enginectl`'s
+  target still take a `trackId` only. The gap is recorded in #1196's deferred list.
+- **The app-facing folder** (verdict MINOR-3) keeps its name; `ISSUE-MAP.md` in the dated folder
+  now points to `docs/handoffs/submix-strips-and-sends/`.
+- **The rebuild row's test value** (verdict MINOR-4) is corrected in the record above.
+- **NITs.** NIT-1: the shared console-entry refusal says "every strip carries every slot".
+  NIT-2: `AGENTS.md` is left for its next amendment, as the spec said. NIT-3: the migration script
+  writes LF and `--check` reports without failing; accepted under D7. NIT-4: gate 5 compares the
+  CLI's output with `cargo run -p session-validator -- validate --canonical` rather than a
+  node-only check, because the engine's own canonical writer is the byte authority and the test
+  already runs in a job that has cargo. NIT-5: the cycle path's retired `simd2` spelling is fixed
+  with #1200's and #1203's MINOR-1 (#1203's decision record).
+- **The shipped module hash moved** in the K1 follow-up commit, because its Rust changes (the
+  cycle diagnostic path and the console no-fallback guard in graph-compiler) compile into the
+  worklet; this slice's own SDK edits change no Rust.
+
+## Verdict
+
+- **Attempt 1** (`7926e48f`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1205-attempt1.md`.
 
 ## Dependencies
 

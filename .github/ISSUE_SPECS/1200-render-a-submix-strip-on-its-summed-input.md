@@ -369,7 +369,10 @@ New test file `crates/host-core/tests/submix_strip.rs`. host-core is in the
   - `a_bus_limiters_latency_is_compensated_on_the_direct_edge`: red if bus-strip effect latency is
     left out of arrival times (one 486-sample delay on `t0-direct`, both planes peak at 486).
   - `a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent`: red if a bus enters the
-    collapse eligibility set and copies its left lane over its right.
+    collapse eligibility set and copies its left lane over its right. Not unique (verdict MINOR-2):
+    the same mutation also turns `collapse_arming`'s two submix-send tests and `randomized` red,
+    because they route mono tracks into a unity submix, which this slice made a banked strip. It
+    stays as the named pin for a *processed* bus, which the spec mandates.
   - `no_bus_effect_gets_a_live_channel_or_an_observation_handle`: red if the attach functions give a
     bus effect a producer or an observation handle.
   - `a_processed_bus_renders_without_allocating`: red if a bus strip's lowering leaves an allocating
@@ -388,7 +391,39 @@ New test file `crates/host-core/tests/submix_strip.rs`. host-core is in the
     (effects, builtins, `compile_with_builtins`), because `PreparedHost` exposes no inserted delays;
     the impulse render goes through host-core.
   - The session estimate's diagnostic paths for insert counts still read `$.tracks` (overflow
-    paths only; unchanged text).
+    paths only; unchanged text). The K1 follow-up commit renamed them (verdict NIT-1).
+
+## Decision record
+
+- **A bus cycle's primary path names a route** (verdict MINOR-1, shared with #1203's MINOR-1).
+  `compile.rs` took the witness's first edge as `path`; the witness now often starts on a strip
+  chain edge whose sealed path is the bare `$.submixes`, and a host shows only `code` and `path`.
+  The K1 follow-up commit adds `schedule::cycle_primary_path`: the first route or sidechain edge
+  in witness order, a sidechain re-spelled at its insert's session position
+  (`<strip>.inserts.effects[id=<k>].sidechain`), else the first edge. Only the diagnostic moves; the
+  sealed edge paths, the graph fixtures and their digests do not (the SCC fixture is a graph-level
+  literal). #1203's gate 5 now asserts `$.routes[id=ab].source`, and
+  `a_bus_insert_keyed_from_its_own_fader_names_its_sidechain` pins the sidechain spelling.
+- **Gate 3's test value** (verdict MINOR-2) is corrected in the record above: option (a).
+- **A nested bus is rendered** (verdict MINOR-3). The K1 follow-up commit adopts the verifier's
+  oracle as `a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums` (16 seeds). Test
+  value: red if a bus whose input is another bus's output reads that bus at a stage other than
+  its end, is scheduled or banked before its source bus finishes, or sums its inputs out of
+  route-ID order. Mutation: a submix-to-submix route reads its source bus's `PostFader` stage
+  (other routes unchanged); this test is the only red one across host-core and graph-compiler
+  (`--all-targets`, test-support features).
+- **Overflow paths** (verdict NIT-1): `estimate_session_resources` reports the all-strip sums at
+  the aggregate `$.strips` (as the entity sum is at `$.entities`) and each strip's vectors at its
+  own collection (`$.tracks.*` or `$.submixes.*`). No test or consumer pins those paths.
+- **Stale doc comments** (verdict NIT-2) on `effect_controls`, `effect_observations`, the
+  `prepare.rs` attach comment, `upstream_of_seam` and `PlanUnitEligibility::lane_tracks` now say
+  what K1 does. The K1 follow-up commit changes comments only there.
+- **The estimate hand count** (verdict NIT-3) stays as the spec asked.
+
+## Verdict
+
+- **Attempt 1** (`ea951253`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1200-attempt1.md`; the
+  verifier's scratch tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1200-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

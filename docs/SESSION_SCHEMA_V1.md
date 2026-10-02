@@ -173,11 +173,9 @@ tokens. `console` addresses a slot by `effect_id: <slot>` in either section; `in
 strip's insert by its ID. An automation target's `entity_id` names a track or a submix (#1199),
 and a `console` target may name a submix: it addresses that submix's entry for the slot (#1202).
 A submix's target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is
-the strip's own
-fixed section.
-The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
-key is required all the same (V1 has no optional fields) and carries the fixed validated literal
-`"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
+the strip's own fixed section. The strip is a chassis rather than a rack of instances, so it has
+no `effect_id` to identify; the key is required all the same (V1 has no optional fields) and
+carries the fixed validated literal `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
 `blockTarget`: `polarity_invert` (1), `trim_db` (2), `hpf_hz` (3), `lpf_hz` (4),
 `fader_db` (5), `mute` (6), the four `matrix_*` coefficients (7-10), and `pan` (12).
 That is **eleven** rows; `BUILTIN_AUTOMATION_TARGETS` in
@@ -205,8 +203,11 @@ part of the key. A host converts from milliseconds; the session never does. The 
 independent under the dual-mono law, and a track whose lanes declare different delays is genuinely
 asymmetric upstream of the mono-collapse seam, so it declines that track's collapse.
 
-On a submix, `delay_samples` delays the summed input instead (#1201); everything below applies to
-it unchanged.
+On a submix, `delay_samples` delays the summed input instead (#1201). The next paragraph's
+`delay_samples` rules apply to it unchanged: it is not latency, its rings are charged to
+`graph_delay_bytes`, and it is prepared-only. The live trim, polarity and HPF/LPF commands that
+paragraph also describes address tracks only, in canonical track order; a submix strip's input
+section is not live-addressable until #1213.
 
 `delay_samples` is deliberately **not** plugin latency and PDC never compensates it: it is a time
 shift the session asked for, so it contributes zero to any node's declared latency and does not

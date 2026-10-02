@@ -211,6 +211,15 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         },
         gain_db: 0.0,
     });
+    // A submix tap other than `post_pan` (#1203 verdict NIT-4): a writer that flattens every
+    // submix tap to the strip's end loses it here.
+    let mut pre_fader = model.routes.last().expect("the bus route").clone();
+    pre_fader.id = id("mix-pre-fader");
+    pre_fader.source = RouteSource::Submix {
+        submix_id: id("mix"),
+        tap: SendTap::PreFader,
+    };
+    model.routes.push(pre_fader);
     model.automation[0].target.channel = ParameterChannel::Both;
     let mut console_automation = model.automation[0].clone();
     console_automation.id = id("desk-eq-gain");
@@ -254,6 +263,18 @@ fn full_tagged_surface_round_trips_without_field_loss() {
             .routes
             .iter()
             .any(|route| matches!(route.source, RouteSource::Submix { .. }))
+    );
+    assert_eq!(
+        reparsed
+            .routes
+            .iter()
+            .find(|route| route.id == id("mix-pre-fader"))
+            .map(|route| &route.source),
+        Some(&RouteSource::Submix {
+            submix_id: id("mix"),
+            tap: SendTap::PreFader,
+        }),
+        "a submix's `pre_fader` tap survives"
     );
     assert_eq!(
         canonical_session_json(&reparsed).expect("stable"),

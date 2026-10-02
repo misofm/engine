@@ -544,7 +544,9 @@ fn source_identity_and_shape_category_has_21_distinct_cases() {
 /// refused only for its undeclared submix, so each refusal is the spelling and nothing else.
 ///
 /// Red if the retired spelling is silently read as `post_pan`, if a tapless submix source is
-/// given a default tap, or if a sidechain source parses submix sources differently from a route.
+/// given a default tap, if a sidechain source parses submix sources differently from a route, or
+/// if either source arm silently drops the other arm's ID key (`track_id` on a submix source,
+/// `submix_id` on a track source; #1203 verdict NIT-3).
 #[test]
 fn submix_source_spellings_refuse_at_their_index_paths() {
     const ROUTE: &str = "source = { kind = \"track\", track_id = \"vocal\", tap = \"post_pan\" }";
@@ -585,6 +587,25 @@ fn submix_source_spellings_refuse_at_their_index_paths() {
             DiagnosticCode::InvalidEnum,
             &format!("{path}.tap"),
         );
+        // Each arm refuses the other arm's ID key, so a stray key is never dropped.
+        parse_case(
+            &mut count,
+            &document(
+                "{ kind = \"submix\", submix_id = \"bus\", tap = \"pre_fader\", \
+                 track_id = \"vocal\" }",
+            ),
+            DiagnosticCode::UnknownField,
+            &format!("{path}.track_id"),
+        );
+        parse_case(
+            &mut count,
+            &document(
+                "{ kind = \"track\", track_id = \"vocal\", tap = \"pre_fader\", \
+                 submix_id = \"bus\" }",
+            ),
+            DiagnosticCode::UnknownField,
+            &format!("{path}.submix_id"),
+        );
         let control = parse_session_json(&document(
             "{ kind = \"submix\", submix_id = \"bus\", tap = \"pre_fader\" }",
         ))
@@ -602,7 +623,7 @@ fn submix_source_spellings_refuse_at_their_index_paths() {
             "a well-formed submix source parses"
         );
     }
-    assert_eq!(count, 8);
+    assert_eq!(count, 12);
 }
 
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {

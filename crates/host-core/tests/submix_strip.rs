@@ -10,8 +10,16 @@
 //! * **Gate 5, the K1 live-control interim.** No bus effect gets a live channel or an
 //!   observation handle until #1207.
 //! * **Gate 8, render allocates nothing** for gate 1's bus session.
+//! * **A bus into a bus** (verdict MINOR-3): a nested bus renders the bits of two tracks, each fed
+//!   its sum.
 //!
 //! Issue #1201: a submix's `delay_samples` delays its summed input, uncompensated.
+//!
+//! * **Gate 1, the bus delay runs after the sum**, and PDC never sees it.
+//! * **Gate 3, a folded bus still delays its sum.**
+//! * **Gate 4, render allocates nothing** for gate 1's delayed bus.
+//! * **Two delayed buses** (verdict MINOR-1): a delayed track into a delayed bus, beside a second
+//!   delayed bus; every line is its own and delays add.
 //!
 //! Issue #1202: every submix carries every session console slot.
 //!
@@ -23,10 +31,6 @@
 //!   channel or an observation handle.
 //! * **Gate 8, render allocates nothing** for gate 1's console session.
 //!
-//! * **Gate 1, the bus delay runs after the sum**, and PDC never sees it.
-//! * **Gate 3, a folded bus still delays its sum.**
-//! * **Gate 4, render allocates nothing** for gate 1's delayed bus.
-//!
 //! Issue #1203: a route or a sidechain leaves a submix strip at any of the seven taps.
 //!
 //! * **Gate 1, a bus tap equals the same tap on a track fed the bus's sum**, for every tap, on a
@@ -35,6 +39,7 @@
 //! * **Gate 3, PDC by tap**: a tap before a bus's `post_insert` limiter is compensated by its
 //!   latency.
 //! * **Gate 6, render allocates nothing** for gate 1's tapped buses.
+//! * **D4, a muted bus still feeds its `pre_fader` tap** (verdict MINOR-2).
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -647,6 +652,161 @@ fn a_bus_renders_the_bits_of_a_track_fed_its_sum() {
             audible > ran / 2,
             "too few seeds rendered audio: {audible}/{ran}"
         );
+    }
+}
+
+const NESTED_TEST: &str = "a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums";
+const NESTED_REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test \
+                             submix_strip -- --exact \
+                             a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums";
+
+/// A route `id` from `source` into `destination` with a drawn gain and a drawn nonzero matrix.
+fn drawn_route(
+    draw: &mut Draw,
+    id: &str,
+    source: RouteSource,
+    destination: RouteDestination,
+) -> Route {
+    let mut drawn = route(id, source, destination);
+    drawn.gain_db = draw.in_domain(-12.0, 6.0);
+    drawn.channel_matrix = ChannelMatrix {
+        ll: coefficient(draw),
+        lr: coefficient(draw),
+        rl: coefficient(draw),
+        rr: coefficient(draw),
+    };
+    drawn
+}
+
+fn noise_planes(draw: &mut Draw, frames: usize) -> [Vec<f32>; 2] {
+    let mut plane = || {
+        (0..frames)
+            .map(|_| {
+                let sample = draw.noise(0.9);
+                if sample == 0.0 { 0.5 } else { sample }
+            })
+            .collect::<Vec<f32>>()
+    };
+    [plane(), plane()]
+}
+
+/// The D9 sum of `routes`, each over its own planes, by the D3 expression, added left to right in
+/// route-ID order.
+fn routed_sum(routes: &mut [(&Route, &[Vec<f32>; 2])], frames: usize) -> [Vec<f32>; 2] {
+    routes.sort_by(|x, y| x.0.id.cmp(&y.0.id));
+    let mut sum = [vec![0.0_f32; frames], vec![0.0_f32; frames]];
+    for (rank, (route, planes)) in routes.iter().enumerate() {
+        let gain = math::db_to_gain_f32(route.gain_db);
+        let m = &route.channel_matrix;
+        let (ll, lr, rl, rr) = (gain * m.ll, gain * m.lr, gain * m.rl, gain * m.rr);
+        let [sum_left, sum_right] = &mut sum;
+        let frames = sum_left
+            .iter_mut()
+            .zip(sum_right.iter_mut())
+            .zip(planes[0].iter().zip(&planes[1]));
+        for ((out_left, out_right), (&l, &r)) in frames {
+            let left = (lr * r) + (ll * l);
+            let right = (rr * r) + (rl * l);
+            if rank == 0 {
+                *out_left = left;
+                *out_right = right;
+            } else {
+                *out_left += left;
+                *out_right += right;
+            }
+        }
+    }
+    sum
+}
+
+/// `strip` on one track `summed` that reads `sum` and feeds the output: a render with no submix.
+fn track_fed(rate: u32, strip: Strip, sum: &[Vec<f32>; 2]) -> [Vec<f32>; 2] {
+    let (mut model, source, mut track) = empty_session(rate);
+    strip.onto(&mut track);
+    add_track(&mut model, &source, &track, "summed");
+    model
+        .routes
+        .push(to_output("summed-main", post_pan("summed")));
+    render(&document(&model), &[("summed", sum)], BLOCKS)
+}
+
+/// #1200 verdict MINOR-3: a nested bus. `t0`..`t2` route into `bus1` (drawn strip `S1`), `bus1`'s
+/// `post_pan` and `t3` route into `bus2` (drawn strip `S2`), and `bus2` feeds the output; the two
+/// route IDs into `bus2` are drawn in either order. The oracle never renders a submix: `S1` on a
+/// track fed the first sum, then `S2` on a track fed the D9 sum of that render and `t3`.
+///
+/// Red if a bus whose input is another bus's output reads that bus at a stage other than its end,
+/// is scheduled or banked before its source bus finishes, or sums its two inputs out of route-ID
+/// order. Gate 1 and the tap gates route a bus only to the output, so none of them sees a defect
+/// that depends on the destination being a bus.
+#[test]
+fn a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums() {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let frames = QUANTUM * BLOCKS;
+    let ran = run_seeds(NESTED_TEST, NESTED_REPLAY, 16, |seed| {
+        let mut draw = Draw::new(seed);
+        let rate = draw.pick(&LAUNCH_RATES);
+        let s1 = drawn_strip(&mut draw, &registry, &no_console());
+        let s2 = drawn_strip(&mut draw, &registry, &no_console());
+        let mut names = vec!["route-a", "route-b", "route-c"];
+        let first: Vec<(String, Route, [Vec<f32>; 2])> = (0..3)
+            .map(|index| {
+                let route_id = names.remove(draw.below(names.len()));
+                let track = format!("t{index}");
+                let drawn = drawn_route(&mut draw, route_id, post_pan(&track), into_bus("bus1"));
+                (track, drawn, noise_planes(&mut draw, frames))
+            })
+            .collect();
+        let (bus_route, t3_route) = if draw.chance(1, 2) {
+            ("x-bus", "y-t3")
+        } else {
+            ("y-bus", "x-t3")
+        };
+        let bus_into_bus = drawn_route(&mut draw, bus_route, bus_output("bus1"), into_bus("bus2"));
+        let t3_into_bus = drawn_route(&mut draw, t3_route, post_pan("t3"), into_bus("bus2"));
+        let t3_planes = noise_planes(&mut draw, frames);
+
+        let (mut nested, source, track) = empty_session(rate);
+        for (id, route, _) in &first {
+            add_track(&mut nested, &source, &track, id);
+            nested.routes.push(route.clone());
+        }
+        add_track(&mut nested, &source, &track, "t3");
+        nested.routes.push(bus_into_bus.clone());
+        nested.routes.push(t3_into_bus.clone());
+        nested.submixes = vec![s1.clone().submix("bus1"), s2.clone().submix("bus2")];
+        nested
+            .routes
+            .push(to_output("bus-main", bus_output("bus2")));
+
+        let mut into_first: Vec<(&Route, &[Vec<f32>; 2])> = first
+            .iter()
+            .map(|(_, route, planes)| (route, planes))
+            .collect();
+        let bus1 = track_fed(rate, s1, &routed_sum(&mut into_first, frames));
+        let mut into_second = vec![(&bus_into_bus, &bus1), (&t3_into_bus, &t3_planes)];
+        let expected = track_fed(rate, s2, &routed_sum(&mut into_second, frames));
+
+        let mut feeds: Vec<(&str, &[Vec<f32>; 2])> = first
+            .iter()
+            .map(|(id, _, planes)| (id.as_str(), planes))
+            .collect();
+        feeds.push(("t3", &t3_planes));
+        let actual = render(&document(&nested), &feeds, BLOCKS);
+        for plane in 0..2 {
+            assert_bits_equal(
+                &actual[plane],
+                &expected[plane],
+                &format!("seed {seed}: plane {plane}: nested bus against two tracks"),
+            );
+        }
+        assert!(
+            actual.iter().flatten().any(|sample| *sample != 0.0),
+            "seed {seed}: the nested bus rendered audio"
+        );
+    });
+    if !dsp_reference::randomized::replaying() {
+        assert_eq!(ran, 16);
     }
 }
 
@@ -1337,6 +1497,67 @@ fn a_delayed_bus_renders_without_allocating() {
     assert_renders_without_allocating(&delayed_bus_session([37, 0]), &impulse_feeds());
 }
 
+/// `(sample, bits)` of every nonzero sample of `plane`.
+fn nonzero(plane: &[f32]) -> Vec<(usize, u32)> {
+    plane
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| **sample != 0.0)
+        .map(|(index, sample)| (index, sample.to_bits()))
+        .collect()
+}
+
+/// #1201 verdict MINOR-1: a delayed track into a delayed bus, beside a second delayed bus fed by
+/// an undelayed track. Every line is its own, and a track's delay and its bus's delay add.
+///
+/// Red if delay lines alias across the `TrackDelay` and `SumDelay` arms or across two buses (two
+/// arms now allocate from one line vector), or if a track's delay and its bus's delay fail to add.
+/// No other test composes two delays or delays two buses.
+#[test]
+fn delayed_tracks_into_two_delayed_buses_each_keep_their_own_line() {
+    let build = |t0: [u32; 2], bus: [u32; 2], bus2: [u32; 2]| {
+        let (mut model, source, track) = empty_session(48_000);
+        add_track(&mut model, &source, &track, "t0");
+        add_track(&mut model, &source, &track, "t1");
+        model.tracks[0].builtins.left.delay_samples = t0[0];
+        model.tracks[0].builtins.right.delay_samples = t0[1];
+        model
+            .routes
+            .push(route("t0-bus", post_pan("t0"), into_bus("bus")));
+        model
+            .routes
+            .push(route("t1-bus2", post_pan("t1"), into_bus("bus2")));
+        model.routes.push(to_output("bus-main", bus_output("bus")));
+        model
+            .routes
+            .push(to_output("bus2-main", bus_output("bus2")));
+        let mut first = Strip::transparent(&model.console);
+        first.builtins.left.delay_samples = bus[0];
+        first.builtins.right.delay_samples = bus[1];
+        let mut second = Strip::transparent(&model.console);
+        second.builtins.left.delay_samples = bus2[0];
+        second.builtins.right.delay_samples = bus2[1];
+        model.submixes = vec![first.submix("bus"), second.submix("bus2")];
+        document(&model)
+    };
+    // t0: 0.25 at sample 3; t1: 0.5 at sample 10; both planes.
+    let feeds = impulse_feeds();
+    let feeds = borrowed(&feeds);
+    let reference = render(&build([0, 0], [0, 0], [0, 0]), &feeds, BLOCKS);
+    let out = render(&build([11, 0], [37, 5], [13, 0]), &feeds, BLOCKS);
+    let word = |plane: &[f32], at: usize| plane[at].to_bits();
+    // Left: t1 through bus2 at 10 + 13; t0 through its own 11 and the bus's 37 at 3 + 48.
+    assert_eq!(
+        nonzero(&out[0]),
+        vec![(23, word(&reference[0], 10)), (51, word(&reference[0], 3))]
+    );
+    // Right: t0 at 3 + 0 + 5; t1 at 10 + 0.
+    assert_eq!(
+        nonzero(&out[1]),
+        vec![(8, word(&reference[1], 3)), (10, word(&reference[1], 10))]
+    );
+}
+
 // ---- #1203 --------------------------------------------------------------------------------
 
 const TAP_TEST: &str = "a_bus_tap_renders_the_bits_of_the_same_tap_on_a_track_fed_its_sum";
@@ -1392,10 +1613,14 @@ fn tap_console() -> Console {
     }
 }
 
-/// A strip on which every tap differs from the one before it: a trim, a live console EQ in each
-/// section, an insert compressor (defaults: threshold -18 dB), a -6 dB fader and a swap matrix.
+/// A strip on which every tap differs from the one before it: a delay of 37 samples left and 5
+/// right (#1201: a bus delays its summed input, so it shows at every tap from `input` on), a trim,
+/// a live console EQ in each section, an insert compressor (defaults: threshold -18 dB), a -6 dB
+/// fader and a swap matrix.
 fn tap_strip() -> Strip {
     let mut strip = Strip::transparent(&tap_console());
+    strip.builtins.left.delay_samples = 37;
+    strip.builtins.right.delay_samples = 5;
     strip.builtins.left.trim_db = 3.0;
     strip.builtins.right.trim_db = -2.0;
     strip.console = vec![
@@ -1652,6 +1877,47 @@ fn a_tap_before_a_bus_limiter_is_compensated_by_the_limiters_latency() {
             samples[972].abs() > 0.25,
             "plane {plane}: both routes arrive together"
         );
+    }
+}
+
+/// #1203 D4 (verdict MINOR-2): a muted bus still feeds its `pre_fader` tap, as a muted track does,
+/// and its `post_fader` and `post_pan` taps are silent. Each tap of the muted bus renders the bits
+/// of the same tap of a muted track fed the bus's sum.
+///
+/// Red if a muted strip's upstream is elided or zeroed, for a bus or a track (a skip-on-silence
+/// optimization that treats a muted fader as a silent strip), or if the mute stops gating the
+/// post-fader taps. No other test mutes a strip that has a pre-fader send.
+#[test]
+fn a_muted_bus_still_feeds_its_pre_fader_tap() {
+    for seed in 0..4 {
+        let mut draw = Draw::new(200 + seed);
+        let (mut bus, feeds, sum) = tap_bus_session(&mut draw);
+        bus.submixes[0].fader.left_mute = true;
+        bus.submixes[0].fader.right_mute = true;
+        let mut oracle = bus_as_track(&bus);
+        oracle.tracks[0].fader.left_mute = true;
+        oracle.tracks[0].fader.right_mute = true;
+        for tap in [SendTap::PreFader, SendTap::PostFader, SendTap::PostPan] {
+            let mut a = bus.clone();
+            a.routes.push(to_output("bus-tap", bus_tap(tap)));
+            let mut b = oracle.clone();
+            b.routes.push(to_output("bus-tap", track_tap("bus", tap)));
+            let actual = render(&document(&a), &borrowed(&feeds), BLOCKS);
+            let expected = render(&document(&b), &[("bus", &sum)], BLOCKS);
+            for plane in 0..2 {
+                assert_bits_equal(
+                    &actual[plane],
+                    &expected[plane],
+                    &format!("seed {seed}: muted tap {tap:?} plane {plane}"),
+                );
+            }
+            let audible = actual.iter().flatten().any(|sample| *sample != 0.0);
+            assert_eq!(
+                audible,
+                tap == SendTap::PreFader,
+                "seed {seed}: only the pre-fader tap of a muted strip is audible ({tap:?})"
+            );
+        }
     }
 }
 

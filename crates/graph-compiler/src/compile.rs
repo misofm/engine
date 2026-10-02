@@ -23,7 +23,7 @@ use crate::ids::{
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
-use crate::schedule::{buffer_assignments, cycle_witnesses, topo};
+use crate::schedule::{buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.
@@ -389,7 +389,7 @@ impl GraphCompiler {
         for cycle in cycle_witnesses(&nodes, &edges) {
             diagnostics.push(GraphDiagnostic {
                 code: "graph.cycle",
-                path: cycle.1.first().cloned().unwrap_or_else(|| "$".to_owned()),
+                path: cycle_primary_path(&cycle.0, &cycle.1),
                 cycle: cycle.0,
                 cycle_edge_paths: cycle.1,
             });

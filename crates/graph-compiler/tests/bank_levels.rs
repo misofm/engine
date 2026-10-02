@@ -1455,6 +1455,68 @@ fn every_console_group_binds_when_buses_carry_the_console() {
     }
 }
 
+/// #1202 D3's mixed group: a bus lane shares a console group with a track lane at the same
+/// (slot, pool class, level). [`bus_console_session`] with one bus, plus a fifth track `chu` routed
+/// only to the output, whose soft-clip inserts lift its `post_insert` limiter level by level until
+/// it meets the bus limiter's. Every mixed group binds `ceil(lanes / W)` banks and renders the
+/// scalar plan's bits.
+///
+/// Red if the planner keeps bus lanes out of track groups at a shared (slot, class, level): a
+/// group key or pool class split by strip kind, or a bus seeded into another pool. Gate 2 cannot
+/// see that, because there no track lane sits at a bus's level, so `ceil(n / W)` still holds per
+/// split key (#1202 verdict MINOR-2).
+#[test]
+fn a_bus_console_lane_shares_a_group_with_a_track_lane_at_its_level() {
+    let mut found = 0;
+    for inserts in 0..16 {
+        let mut model = bus_console_session(1, 1, 99);
+        let templates = Templates::of(&model);
+        let mut late = model.tracks[0].clone();
+        late.id = sid("chu");
+        late.inserts.effects = (0..inserts)
+            .map(|index| templates.effect(Kind::SoftClip, &format!("sc{index}")))
+            .collect();
+        model.tracks.push(late);
+        model.routes.push(route(
+            "chu-main",
+            RouteSource::Track {
+                track_id: sid("chu"),
+                tap: SendTap::PostPan,
+            },
+            RouteDestination::OutputInput {
+                output_id: sid("main-out"),
+            },
+            0.0,
+        ));
+        let native = compile_bind_render(&model, Backend::current(), BLOCKS, Collapse::Unarmed);
+        let mixed = native
+            .console_groups
+            .iter()
+            .any(|((slot, _, level), [lanes, _])| {
+                native.bus_console_levels.contains(&(slot.clone(), *level)) && *lanes >= 2
+            });
+        if !mixed {
+            continue;
+        }
+        found += 1;
+        let name = format!("a mixed console group behind {inserts} inserts");
+        let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(&name, &model);
+        let native = &outcomes[native_index() + 1];
+        for ((slot, class, level), [lanes, banks]) in &native.console_groups {
+            assert_eq!(
+                *banks,
+                lanes.div_ceil(Backend::current().width()),
+                "{name}: ({slot}, {class}, level {level}): {:?}",
+                native.console_groups
+            );
+        }
+    }
+    assert!(
+        found > 0,
+        "no console group held a track lane and a bus lane"
+    );
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()

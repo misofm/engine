@@ -718,9 +718,10 @@ struct Reach {
     refused: u64,
     armed_collapse_blocks: u64,
     live_records: u64,
-    /// Console entries rendered on a bus that at least one route feeds (#1202). A fed bus's
-    /// `Input` stage sums a route from a track chain, so its console slots sit at dependency level
-    /// 1 or more, after every contributor's chain.
+    /// Console entries declared on a bus that at least one route feeds (#1202): the model's
+    /// entries, a proxy for the lanes the compiled plan banks. A fed bus's `Input` stage sums a
+    /// route from a track chain, so its console slots sit at dependency level 1 or more, after
+    /// every contributor's chain.
     bus_console_entries: u64,
 }
 

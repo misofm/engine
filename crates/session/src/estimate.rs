@@ -61,37 +61,39 @@ pub fn estimate_session_resources(
     let output_count = count(session.outputs.len(), "$.outputs", &mut errors);
     let route_count = count(session.routes.len(), "$.routes", &mut errors);
     let automation_count = count(session.automation.len(), "$.automation", &mut errors);
-    // A console entry is an effect instance on its strip once lowered, so it counts as one.
+    // A console entry is an effect instance on its strip once lowered, so it counts as one. These
+    // sums run over every strip, tracks and submixes alike, so an overflow is reported at the
+    // aggregate `$.strips`, as the entity sum is at `$.entities`.
     let effect_count = checked_add(
         sum_counts(
             session.strips(),
             |strip| strip.console.len(),
-            "$.tracks",
+            "$.strips",
             &mut errors,
         ),
         sum_counts(
             session.strips(),
             |strip| strip.inserts.effects.len(),
-            "$.tracks",
+            "$.strips",
             &mut errors,
         ),
-        "$.tracks",
+        "$.strips",
         &mut errors,
     );
     let parameter_count = checked_add(
         sum_counts(
             session.strips().flat_map(|strip| strip.console),
             |entry| entry.params.len(),
-            "$.tracks",
+            "$.strips",
             &mut errors,
         ),
         sum_counts(
             session.strips().flat_map(|strip| &strip.inserts.effects),
             |effect| effect.params.len(),
-            "$.tracks",
+            "$.strips",
             &mut errors,
         ),
-        "$.tracks",
+        "$.strips",
         &mut errors,
     );
     let automation_segment_count = sum_counts(
@@ -111,7 +113,7 @@ pub fn estimate_session_resources(
     let mut model_vector_bytes = 0_u64;
     let mut largest_model_allocation = largest_string_bytes;
     macro_rules! vector {
-        ($values:expr, $type:ty, $path:literal) => {{
+        ($values:expr, $type:ty, $path:expr) => {{
             let bytes = checked_mul(
                 count($values.len(), $path, &mut errors),
                 size::<$type>(),
@@ -131,12 +133,20 @@ pub fn estimate_session_resources(
     vector!(session.routes, crate::Route, "$.routes");
     vector!(session.automation, crate::Automation, "$.automation");
     for strip in session.strips() {
-        vector!(strip.console, crate::ConsoleEntry, "$.tracks.console");
-        vector!(
-            strip.inserts.effects,
-            crate::Effect,
-            "$.tracks.inserts.effects"
-        );
+        let [console_path, inserts_path, params_path] = match strip.kind {
+            crate::StripKind::Track(_) => [
+                "$.tracks.console",
+                "$.tracks.inserts.effects",
+                "$.tracks.effects.params",
+            ],
+            crate::StripKind::Submix(_) => [
+                "$.submixes.console",
+                "$.submixes.inserts.effects",
+                "$.submixes.effects.params",
+            ],
+        };
+        vector!(strip.console, crate::ConsoleEntry, console_path);
+        vector!(strip.inserts.effects, crate::Effect, inserts_path);
         let params = strip.console.iter().map(|entry| entry.params.len()).chain(
             strip
                 .inserts
@@ -145,7 +155,7 @@ pub fn estimate_session_resources(
                 .map(|effect| effect.params.len()),
         );
         for params in params {
-            let path = "$.tracks.effects.params";
+            let path = params_path;
             let bytes = checked_mul(
                 count(params, path, &mut errors),
                 size::<crate::EffectParam>(),

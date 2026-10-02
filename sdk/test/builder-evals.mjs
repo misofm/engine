@@ -511,6 +511,23 @@ describe("validation refusals name the offending path", () => {
       }),
       "schema.invalid_enum",
     );
+
+    // #1205 verdict MINOR-1. A track's `source` key on a submix strip is refused, never dropped
+    // from the document; the engine refuses the hand-written key the same way. Red mutation: add
+    // "source" to `SUBMIX_KEYS`.
+    const stray = code(() => base().console(slots)
+      .submix("bus", { source: "stem", console: [{ slot: "eq" }, { slot: "limit" }] }));
+    assert.equal(stray.code, "schema.unknown_field");
+    assert.match(stray.message, /^submix\("bus"\)\.source/);
+    assert.equal(await engineFirstCode((model) => { model.submixes[0].source_id = "stem"; }), "schema.unknown_field");
+    // A submix route source's tap is checked as a track's is: an unallocated tap and a missing one
+    // are refused. Red mutation: check the tap for `kind: "track"` only in `validateRouteSource`.
+    for (const tap of ["post_matrix", undefined]) {
+      const bad = code(() => base().submix("bus").output("o")
+        .route({ id: "r", source: { kind: "submix", submixId: "bus", tap }, destination: { kind: "output_input", outputId: "o" } }));
+      assert.equal(bad.code, "schema.invalid_enum", `tap ${tap}`);
+      assert.match(bad.message, /^route\("r"\)\.source\.tap/, `tap ${tap}`);
+    }
   });
 
   test("live input filters are accepted while delay remains prepared-only", () => {

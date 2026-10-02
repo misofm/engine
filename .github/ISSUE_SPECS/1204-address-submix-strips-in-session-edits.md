@@ -201,7 +201,12 @@ without re-upserting the whole submix. No opcode is added.
     submix `x` at 0 dB; the mirror order commits it at -6 dB. *Red if `strip_mut` searches submixes
     first, or only tracks.*
 - **Red on revert.** With `model.rs` at `6a4d729d9`, gates 1 and 3 are red; gate 2 is green there
-  by design (it pins refusals the old code also gave) and is defended by M5-M7 below.
+  by design (it pins refusals the old code also gave). Its unique catches are M5, M7 and the
+  verifier's MB (`strip_mut` falls back to a submix for an unmatched ID). M6 is not unique: it also
+  reddens `console_structural_and_declaration_edits_refuse_with_a_typed_status` and
+  `controller::tests::retired_and_console_refused_codes_meet_their_conformance_rows`, so the
+  `0205`-console row duplicates existing coverage and stays because the spec's gate 2 names it
+  (verdict MINOR-1; the M runs above used `--test submix_strip_edits` alone).
 - **Mutations** (scratch driver, one at a time, `cargo test -p protocol --test
   submix_strip_edits`, file restored; all RED):
   - M1 `strip_mut` searches submixes first -> gate 3.
@@ -242,6 +247,24 @@ without re-upserting the whole submix. No opcode is added.
   at the replacement boundary (`ResetAtReplacementBoundary`); the host then seeks generation 2 at
   frame 384 and resubmits, and the directly compiled edited plan (pre-rolled with two silent
   blocks, the same seek and submissions) matches bit for bit.
+
+## Decision record
+
+- **Gate 2's test-value line** (verdict MINOR-1) is corrected in the record above.
+- **Doc comments** (verdict NIT-1): `SessionEditError::NotFound` names a strip (a track or a
+  submix), `ConsoleSlotFixed` says "a strip", and `SetTrackConsole`'s opcode doc says it belongs to
+  the strip family and addresses a submix. Comments only.
+- **The registry's D2 line** (verdict NIT-2) now states its two by-design exceptions: rack
+  `console` structural edits answer `console_slot_fixed` first (D3), and a submix upserted under an
+  output's ID in the same transaction is resolved and then refused at final validation as a
+  duplicate ID.
+- **Output-ID coverage** (verdict NIT-3) stays at the minimum; the verifier's 15-opcode scratch
+  found no unique catch.
+
+## Verdict
+
+- **Attempt 1** (`7f767ae0`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1204-attempt1.md`; the
+  verifier's scratch tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1204-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

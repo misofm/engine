@@ -73,7 +73,8 @@ pub enum SessionEditOpcode {
     SetTrackFader = 0x020f,
     /// `SetTrackMatrixOrPan`.
     SetTrackMatrixOrPan = 0x0210,
-    /// `SetTrackConsole` (decision 12, #1094), appended to the track family.
+    /// `SetTrackConsole` (decision 12, #1094), appended to the strip family (`0x02xx`; #1204 lets
+    /// it address a submix).
     SetTrackConsole = 0x0211,
     /// `UpsertSubmix`.
     UpsertSubmix = 0x0300,
@@ -453,7 +454,7 @@ impl SessionEdit {
 /// An edit-resolution failure before session compilation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEditError {
-    /// A targeted source, track, effect, route, or automation was absent.
+    /// A targeted source, strip (a track or a submix), effect, route, or automation was absent.
     NotFound,
     /// An effect insertion position exceeded the post-removal rack length.
     InvalidFinalPosition,
@@ -463,12 +464,12 @@ pub enum SessionEditError {
     EmptyAutomationSegments,
     /// A rack-addressed structural or declaration edit named the `console` rack (decision 12).
     ///
-    /// A track cannot add, remove or reorder a console slot, and a slot's identity, quality and
+    /// A strip cannot add, remove or reorder a console slot, and a slot's identity, quality and
     /// link mode are session-level; a console slot has no sidechain at all. `SetTrackRack`,
     /// `PutTrackEffect`, `RemoveTrackEffect`, `SetTrackEffectOrder`, `SetEffectIdentity`,
     /// `SetEffectQuality`, `SetEffectLinkMode` and `SetEffectSidechain` therefore refuse
     /// `console` whatever the model holds. The slot set and its declarations change only through
-    /// `SetConsole`; a track's knobs through `SetEffectBypass`, `UpsertEffectParam`,
+    /// `SetConsole`; a strip's knobs through `SetEffectBypass`, `UpsertEffectParam`,
     /// `RemoveEffectParam` or `SetTrackConsole`.
     ConsoleSlotFixed,
 }

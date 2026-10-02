@@ -206,8 +206,9 @@ pub struct PlanUnitEligibility {
     /// collapsed track would have computed once. Zero makes the unit's witness vacuous.
     pub upstream_of_seam_stages: u32,
     /// Lane -> the track this lane renders, in lane order. One entry per **active** lane; a
-    /// single op renders one "lane", its own node. Empty for a stage that names no track (a route,
-    /// a submix, the output, a compensation delay).
+    /// single op renders one "lane", its own node, named by its strip: a track, or since #1200 a
+    /// submix strip, whose stages are track stages named by the bus. Empty for a node that names no
+    /// strip (a route, a graph-level submix node, the output, a compensation delay).
     pub lane_tracks: Box<[Box<str>]>,
     /// Lane -> whether that lane's whole runtime channel-symmetry witness holds. Same length and
     /// same order as [`lane_tracks`](Self::lane_tracks).

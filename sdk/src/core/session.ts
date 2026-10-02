@@ -1267,7 +1267,7 @@ function normalizeConsoleEntries(
   if (missing !== undefined) {
     fail(
       path,
-      `no entry for console slot '${missing.slot}'; every track carries every slot, in the order `
+      `no entry for console slot '${missing.slot}'; every strip carries every slot, in the order `
         + nameList(slots.map((row) => row.slot)),
       CODE.entryMissing,
     );

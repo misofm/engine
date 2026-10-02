@@ -2163,10 +2163,13 @@ pub(crate) struct ResponseOwnerBinding {
 /// the *stage* is what decides it: a fader bank and an EQ bank are the same kind of object and only
 /// their position in the strip separates them.
 ///
-/// A node that is not per-track strip work at all -- a route, a submix, the output, a compensation
-/// delay -- is **not** upstream: it is not a stage a collapse would have computed once, so counting
-/// it as upstream would let a route op's unconditionally-symmetric witness read as collapse
-/// evidence, which is precisely what the seam classification exists to prevent.
+/// A node that is not strip work at all -- a route, a graph-level `Submix` node, the output, a
+/// compensation delay -- is **not** upstream: it is not a stage a collapse would have computed
+/// once, so counting it as upstream would let a route op's unconditionally-symmetric witness read
+/// as collapse evidence, which is precisely what the seam classification exists to prevent. Since
+/// #1200 a session submix lowers to a strip of `TrackStage` nodes named by the bus, so its `Input`
+/// reduction is upstream with a symmetric witness. That is harmless: a bus is never in the
+/// structural (collapse-eligible) half, so the witness is evidence only.
 fn upstream_of_seam(node: &GraphNodeId) -> bool {
     match node {
         GraphNodeId::TrackStage { stage, .. } => !matches!(

@@ -455,6 +455,16 @@ process.stdout.write = function () {
       assert.match(document.error.message, /'submix_output' is retired; read a submix as \{ "kind": "submix", "submixId", "tap" \}/, name);
       assert.deepEqual(document.diagnostics?.map((row) => row.code), ["schema.invalid_enum"], name);
     }
+
+    // #1205 verdict MINOR-1: a track key on a submix object is refused with the engine's code,
+    // never dropped. Red mutation: allow `source` in the submix object's key check.
+    const stray = request();
+    stray.submixes[1].source = { id: "di", left: 0, right: 0 };
+    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(stray));
+    failure(refused, 3, "request.shape");
+    const refusal = JSON.parse(refused.stderr.toString("utf8"));
+    assert.match(refusal.error.message, /submixes\[1\]\.source/);
+    assert.deepEqual(refusal.diagnostics?.map((row) => row.code), ["schema.unknown_field"]);
   });
 
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {

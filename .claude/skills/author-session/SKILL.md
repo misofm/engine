@@ -99,9 +99,12 @@ Closed tokens:
   retired spellings (`post_input_builtins`, `post_simd1`, `post_dynamic`,
   `post_simd2_pre_fader`, `post_matrix`) are `schema.invalid_enum`.
 
-Automation targets contain `entity_id`, `rack`, `effect_id`, `parameter_id`, `channel`. For
-`rack: "console"`, `effect_id` is the slot ID; for `rack: "inserts"`, the insert's ID; either must
-name a parameter/channel pair already declared on that track's entry or insert. For
+Automation targets contain `entity_id`, `rack`, `effect_id`, `parameter_id`, `channel`.
+`entity_id` names a strip: a track or a submix. For `rack: "console"`, `effect_id` is the slot ID;
+for `rack: "inserts"`, the insert's ID; either must name a parameter/channel pair already declared
+on that strip's (the track's or the submix's) entry or insert. The engine accepts a submix target;
+the SDK's `.automation()` builder and `enginectl`'s target still take a `trackId` only, so author
+a submix target in the JSON itself. For
 `rack: "builtins"`, `effect_id` is `"strip"`; IDs 1 polarity, 2 trim, 3 HPF, 4 LPF, 5 fader,
 6 mute and 12 pan accept left/right/both, while matrix IDs 7-10 accept `both` only. Delay (11) is
 prepared-only and cannot be automated. Stored automation is inert today: it authors and
