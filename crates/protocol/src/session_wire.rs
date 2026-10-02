@@ -990,7 +990,19 @@ fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeErr
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
-    tx_id(sink, schema::session::submix::ID, &value.id)
+    tx_id(sink, schema::session::submix::ID, &value.id)?;
+    tx_message(sink, schema::session::submix::BUILTINS, |v| {
+        tx_builtins(v, &value.builtins)
+    })?;
+    tx_message(sink, schema::session::submix::INSERTS, |v| {
+        tx_rack(v, &value.inserts)
+    })?;
+    tx_message(sink, schema::session::submix::FADER, |v| {
+        tx_fader(v, &value.fader)
+    })?;
+    tx_message(sink, schema::session::submix::MATRIX_OR_PAN, |v| {
+        tx_matrix_or_pan(v, &value.matrix_or_pan)
+    })
 }
 fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::output::SPEC.field_count(&[])?)?;
@@ -1659,6 +1671,18 @@ fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
     let message = message.schema_spec(&schema::session::submix::SPEC)?;
     Ok(Submix {
         id: stable_id(one_spec!(message, schema::session::submix::ID)?)?,
+        builtins: parse_builtins(
+            message.nested_value(one_spec!(message, schema::session::submix::BUILTINS)?)?,
+        )?,
+        inserts: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::submix::INSERTS)?)?,
+        )?,
+        fader: parse_fader(
+            message.nested_value(one_spec!(message, schema::session::submix::FADER)?)?,
+        )?,
+        matrix_or_pan: parse_matrix_or_pan(
+            message.nested_value(one_spec!(message, schema::session::submix::MATRIX_OR_PAN)?)?,
+        )?,
     })
 }
 fn parse_output(message: Message<'_>) -> Result<Output, DecodeError> {

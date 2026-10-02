@@ -251,7 +251,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             matrix_or_pan: track.matrix_or_pan.clone(),
         },
         SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
+            submix: Submix::unity(id("drums")),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -1254,7 +1254,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
     };
     let edits = vec![
         SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
+            submix: Submix::unity(id("drums")),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -1415,4 +1415,151 @@ fn every_byte_of_transaction_golden_truncates() {
 
 fn hex(bytes: &[u8]) -> String {
     engine::hex_lower(bytes)
+}
+
+/// A deterministic splitmix64 stream for the submix-strip draw below.
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+    fn bit(&mut self) -> bool {
+        self.next() & 1 == 1
+    }
+    /// Any finite `f32`, signed zeros and subnormals included.
+    fn f32(&mut self) -> f32 {
+        loop {
+            let value = f32::from_bits(self.next() as u32);
+            if value.is_finite() {
+                return value;
+            }
+        }
+    }
+    fn u32(&mut self) -> u32 {
+        self.next() as u32
+    }
+}
+
+fn random_submix(draw: &mut Draw, index: usize) -> Submix {
+    let lane = |draw: &mut Draw| ChannelBuiltins {
+        polarity_invert: draw.bit(),
+        trim_db: draw.f32(),
+        hpf_hz: draw.f32(),
+        lpf_hz: draw.f32(),
+        delay_samples: draw.u32(),
+    };
+    let builtins = DualMonoBuiltins {
+        left: lane(draw),
+        right: lane(draw),
+    };
+    let qualities = [
+        EffectQuality::Draft,
+        EffectQuality::Normal,
+        EffectQuality::High,
+    ];
+    let links = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    let channels = [
+        ParameterChannel::Left,
+        ParameterChannel::Right,
+        ParameterChannel::Both,
+    ];
+    let units = [
+        ParameterUnit::Db,
+        ParameterUnit::Hz,
+        ParameterUnit::Milliseconds,
+        ParameterUnit::Samples,
+        ParameterUnit::Linear,
+        ParameterUnit::Ratio,
+    ];
+    let effects = (0..draw.below(3))
+        .map(|effect| {
+            let params = (0..draw.below(3))
+                .map(|param| EffectParam {
+                    parameter_id: param as u32 * 2 + draw.below(2) as u32,
+                    channel: channels[draw.below(3) as usize],
+                    unit: units[draw.below(6) as usize],
+                    value: draw.f32(),
+                })
+                .collect();
+            Effect {
+                id: id(&format!("fx-{effect}")),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.parametric-eq"),
+                },
+                quality: qualities[draw.below(3) as usize],
+                bypass: draw.bit(),
+                link_mode: links[draw.below(3) as usize],
+                params,
+                sidechain: SidechainDeclaration::None,
+            }
+        })
+        .collect();
+    let fader = DualMonoFader {
+        left_db: draw.f32(),
+        right_db: draw.f32(),
+        left_mute: draw.bit(),
+        right_mute: draw.bit(),
+    };
+    let matrix_or_pan = if draw.bit() {
+        MatrixOrPan::Pan {
+            left: draw.f32(),
+            right: draw.f32(),
+            smoothing_samples: draw.u32(),
+        }
+    } else {
+        MatrixOrPan::Matrix {
+            ll: draw.f32(),
+            lr: draw.f32(),
+            rl: draw.f32(),
+            rr: draw.f32(),
+            smoothing_samples: draw.u32(),
+        }
+    };
+    Submix {
+        id: id(&format!("bus-{index}")),
+        builtins,
+        inserts: Rack { effects },
+        fader,
+        matrix_or_pan,
+    }
+}
+
+/// #1199 gate 3: a random submix strip, pan in some draws and matrix in others, survives
+/// `UpsertSubmix` encode and decode with every field intact, and re-encodes to the same bytes.
+///
+/// Red if `tx_submix`/`parse_submix` drops or misnumbers a strip field, swaps pan and matrix, or
+/// misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the submix codec).
+#[test]
+fn random_submix_strips_round_trip_losslessly() {
+    let mut draw = Draw(0x1199_0000_05ab_0001);
+    let mut pans = 0;
+    let mut matrices = 0;
+    for index in 0..64 {
+        let submix = random_submix(&mut draw, index);
+        match submix.matrix_or_pan {
+            MatrixOrPan::Pan { .. } => pans += 1,
+            MatrixOrPan::Matrix { .. } => matrices += 1,
+        }
+        let edits = vec![SessionEdit::UpsertSubmix {
+            submix: submix.clone(),
+        }];
+        let bytes = encode(&edits);
+        let decoded = ProtocolCodec::default()
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("submix strip decodes");
+        let [SessionEdit::UpsertSubmix { submix: back }] = decoded.edits.as_slice() else {
+            panic!("one upsert submix");
+        };
+        assert_eq!(back, &submix, "draw {index}");
+        assert_eq!(encode(&decoded.edits), bytes, "draw {index} re-encodes");
+    }
+    assert!(pans > 0 && matrices > 0, "both variants drawn");
 }

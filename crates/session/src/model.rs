@@ -652,11 +652,62 @@ pub enum MatrixOrPan {
     },
 }
 
-/// A named mix entity. Its graph behavior is deferred to issue 006.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A submix strip (decision 13, #1199): a strip whose input is the sum of the routes that target
+/// it. Its values carry the track's grammar, validation and canonical spelling verbatim.
+///
+/// Until *Render a submix strip on its summed input* (#1200) the graph compiler still lowers a
+/// submix as a bare summing node and ignores the strip (#1199 D7).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Submix {
     /// Stable submix identity.
     pub id: StableId,
+    /// Independent left/right fixed input processors.
+    pub builtins: DualMonoBuiltins,
+    /// Per-submix ordered inserts.
+    pub inserts: Rack,
+    /// Independent left/right fader and mute declaration.
+    pub fader: DualMonoFader,
+    /// Explicit pan or cross-channel matrix; no implicit stereo operation exists.
+    pub matrix_or_pan: MatrixOrPan,
+}
+
+impl Submix {
+    /// A transparent strip: identity input section (no polarity inversion, 0 dB trim, both
+    /// filters off, no delay), no inserts, an unmuted 0 dB fader and the identity matrix with no
+    /// smoothing (#1199 D5).
+    #[must_use]
+    pub fn unity(id: StableId) -> Self {
+        let lane = ChannelBuiltins {
+            polarity_invert: false,
+            trim_db: 0.0,
+            hpf_hz: 0.0,
+            lpf_hz: 0.0,
+            delay_samples: 0,
+        };
+        Self {
+            id,
+            builtins: DualMonoBuiltins {
+                left: lane.clone(),
+                right: lane,
+            },
+            inserts: Rack {
+                effects: Vec::new(),
+            },
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            matrix_or_pan: MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 0,
+            },
+        }
+    }
 }
 
 /// A named PCM output entity.

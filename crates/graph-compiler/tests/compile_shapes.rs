@@ -386,9 +386,7 @@ fn representative_console() -> SessionModel {
     let route_template = model.routes.pop().expect("seed route");
     model.automation.clear();
     model.submixes = (0..32)
-        .map(|index| Submix {
-            id: stable(&format!("submix-{index:02}")),
-        })
+        .map(|index| Submix::unity(stable(&format!("submix-{index:02}"))))
         .collect();
     model.tracks = (0..256)
         .map(|index| {

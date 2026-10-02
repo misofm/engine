@@ -149,8 +149,10 @@ pub fn compile_session(
     normalized
         .automation
         .sort_by(|left, right| left.id.cmp(&right.id));
-    for track in &mut normalized.tracks {
-        let params = track
+    // Track console and insert parameters, then submix insert parameters (#1199), in canonical
+    // `(parameter_id, channel)` order.
+    let track_params = normalized.tracks.iter_mut().flat_map(|track| {
+        track
             .console
             .iter_mut()
             .map(|entry| &mut entry.params)
@@ -160,14 +162,21 @@ pub fn compile_session(
                     .effects
                     .iter_mut()
                     .map(|effect| &mut effect.params),
-            );
-        for params in params {
-            params.sort_by(|left, right| {
-                left.parameter_id
-                    .cmp(&right.parameter_id)
-                    .then(left.channel.cmp(&right.channel))
-            });
-        }
+            )
+    });
+    let submix_params = normalized.submixes.iter_mut().flat_map(|submix| {
+        submix
+            .inserts
+            .effects
+            .iter_mut()
+            .map(|effect| &mut effect.params)
+    });
+    for params in track_params.chain(submix_params) {
+        params.sort_by(|left, right| {
+            left.parameter_id
+                .cmp(&right.parameter_id)
+                .then(left.channel.cmp(&right.channel))
+        });
     }
     let source_indexes = indexed(
         normalized.sources.iter().map(|item| &item.id),

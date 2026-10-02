@@ -196,7 +196,7 @@ fn with_send(mut model: SessionModel, tap: SendTap) -> SessionModel {
         rl: 0.0,
         rr: 1.0,
     };
-    model.submixes.push(Submix { id: bus.clone() });
+    model.submixes.push(Submix::unity(bus.clone()));
     let output = match &model.routes[0].destination {
         RouteDestination::OutputInput { output_id } => output_id.clone(),
         RouteDestination::SubmixInput { .. } => panic!("the fixture routes tracks to its output"),

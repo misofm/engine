@@ -200,10 +200,10 @@ mod tests {
 
     use super::{write_f32, write_quoted};
     use crate::{
-        ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam,
-        EffectQuality, LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, Route,
-        RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId,
-        canonical_session_json, parse_session_json,
+        ChannelBuiltins, ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins,
+        DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
+        ParameterChannel, ParameterUnit, Rack, Route, RouteDestination, RouteSource, SendTap,
+        Sidechain, SidechainDeclaration, StableId, canonical_session_json, parse_session_json,
     };
     #[test]
     fn canonical_string_escaping_is_frozen() {
@@ -246,7 +246,64 @@ mod tests {
         let source = fs::read_to_string(corpus_path("fixtures/session/v1/canonical.json"))
             .expect("read representative session");
         let mut model = parse_session_json(&source).expect("parse representative session");
-        model.submixes.push(crate::Submix { id: id("mix") });
+        // A non-trivial submix strip (#1199): every input-section field off its identity, one
+        // native insert with parameters out of canonical order, a muted lane and a pan.
+        model.submixes.push(crate::Submix {
+            id: id("mix"),
+            builtins: DualMonoBuiltins {
+                left: ChannelBuiltins {
+                    polarity_invert: true,
+                    trim_db: -3.5,
+                    hpf_hz: 40.0,
+                    lpf_hz: 0.0,
+                    delay_samples: 12,
+                },
+                right: ChannelBuiltins {
+                    polarity_invert: false,
+                    trim_db: 1.25,
+                    hpf_hz: 0.0,
+                    lpf_hz: 16_000.0,
+                    delay_samples: 0,
+                },
+            },
+            inserts: Rack {
+                effects: vec![Effect {
+                    id: id("bus-eq"),
+                    identity: EffectIdentity::Native {
+                        effect_id: id("miso.parametric-eq"),
+                    },
+                    quality: EffectQuality::Normal,
+                    bypass: false,
+                    link_mode: LinkMode::DualMono,
+                    params: vec![
+                        EffectParam {
+                            parameter_id: 3,
+                            channel: ParameterChannel::Right,
+                            unit: ParameterUnit::Db,
+                            value: 2.0,
+                        },
+                        EffectParam {
+                            parameter_id: 2,
+                            channel: ParameterChannel::Both,
+                            unit: ParameterUnit::Hz,
+                            value: 250.0,
+                        },
+                    ],
+                    sidechain: SidechainDeclaration::None,
+                }],
+            },
+            fader: DualMonoFader {
+                left_db: -6.0,
+                right_db: -4.5,
+                left_mute: false,
+                right_mute: true,
+            },
+            matrix_or_pan: MatrixOrPan::Pan {
+                left: -0.5,
+                right: 0.25,
+                smoothing_samples: 64,
+            },
+        });
         model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
             ll: 1.25,
             lr: -0.25,

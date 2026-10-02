@@ -2180,12 +2180,8 @@ mod tests {
         model.automation.clear();
         identity_builtins(&mut model);
         model.submixes = vec![
-            Submix {
-                id: StableId::parse("a-submix").expect("submix id"),
-            },
-            Submix {
-                id: StableId::parse("z-submix").expect("submix id"),
-            },
+            Submix::unity(StableId::parse("a-submix").expect("submix id")),
+            Submix::unity(StableId::parse("z-submix").expect("submix id")),
         ];
         let base_route = model.routes[0].clone();
         let mut to_a = base_route.clone();

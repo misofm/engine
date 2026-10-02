@@ -16,7 +16,7 @@
     "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } },
     "console": { "$ref": "#/$defs/console" },
     "tracks": { "type": "array", "items": { "$ref": "#/$defs/track" } },
-    "submixes": { "type": "array", "items": { "$ref": "#/$defs/id_record" } },
+    "submixes": { "type": "array", "items": { "$ref": "#/$defs/submix" } },
     "outputs": { "type": "array", "items": { "$ref": "#/$defs/id_record" } },
     "routes": { "type": "array", "items": { "$ref": "#/$defs/route" } },
     "automation": { "type": "array", "items": { "$ref": "#/$defs/automation" } }
@@ -133,6 +133,12 @@
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "console", "inserts", "fader", "pan"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "pan": { "$ref": "#/$defs/pan" } } },
         { "type": "object", "additionalProperties": false, "required": ["id", "source_id", "left_source_channel", "right_source_channel", "builtins", "console", "inserts", "fader", "matrix"], "properties": { "id": { "$ref": "#/$defs/id" }, "source_id": { "$ref": "#/$defs/id" }, "left_source_channel": { "$ref": "#/$defs/u8" }, "right_source_channel": { "$ref": "#/$defs/u8" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "matrix": { "$ref": "#/$defs/matrix" } } }
+      ]
+    },
+    "submix": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["id", "builtins", "inserts", "fader", "pan"], "properties": { "id": { "$ref": "#/$defs/id" }, "builtins": { "$ref": "#/$defs/builtins" }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "pan": { "$ref": "#/$defs/pan" } } },
+        { "type": "object", "additionalProperties": false, "required": ["id", "builtins", "inserts", "fader", "matrix"], "properties": { "id": { "$ref": "#/$defs/id" }, "builtins": { "$ref": "#/$defs/builtins" }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "matrix": { "$ref": "#/$defs/matrix" } } }
       ]
     },
     "route_destination": {

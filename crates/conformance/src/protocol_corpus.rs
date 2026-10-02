@@ -32,6 +32,19 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     let track_id = track.id.clone();
     let effect_id = effect.id.clone();
     let id = |value| StableId::parse(value).expect("literal stable ID");
+    // #1199: a non-trivial submix strip -- non-default trim, an insert, a muted lane and a
+    // matrix -- so the corpus encodes every submix field (1, 2, 4, 5 and tagged 6).
+    let mut submix = Submix::unity(id("drums"));
+    submix.builtins.left.trim_db = -3.0;
+    submix.inserts.effects.push(effect.clone());
+    submix.fader.right_mute = true;
+    submix.matrix_or_pan = session::MatrixOrPan::Matrix {
+        ll: 0.75,
+        lr: 0.25,
+        rl: -0.25,
+        rr: 0.5,
+        smoothing_samples: 16,
+    };
     // Decision 12 (#1094): one slot in each console section, so `SetConsole` encodes both repeated
     // section fields, and a track entry for each, so `SetTrackConsole` repeats its entry field.
     let console = Console {
@@ -178,9 +191,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             track_id: track_id.clone(),
             console: track_console,
         },
-        SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
-        },
+        SessionEdit::UpsertSubmix { submix },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
         },
@@ -663,7 +674,10 @@ pub enum ConformanceDecoder {
 /// Issue #1094 repinned it from `af1b9b71a0a31727`: the transaction appends `SetConsole`
 /// (`0x0007`) and `SetTrackConsole` (`0x0211`), 41 edits, one per allocated opcode. The frame count
 /// stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xebf2_8262_1550_d44a;
+/// Issue #1199 repinned it from `ebf282621550d44a`: the submix message carries the strip in submix
+/// fields 2, 4, 5, 6 (builtins, inserts, fader, tagged pan or matrix), and `UpsertSubmix` encodes a
+/// non-trivial one.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xca48_855f_d3a7_56b7;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

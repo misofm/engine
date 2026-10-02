@@ -159,7 +159,7 @@ fn with_console(model: &mut session::SessionModel) {
 #[test]
 fn full_tagged_surface_round_trips_without_field_loss() {
     let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
-    model.submixes.push(session::Submix { id: id("mix") });
+    model.submixes.push(session::Submix::unity(id("mix")));
     model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
         ll: 1.25,
         lr: -0.25,

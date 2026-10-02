@@ -724,9 +724,9 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         output_id: sid("main-out"),
     };
     for submix in 0..submixes {
-        model.submixes.push(Submix {
-            id: sid(&format!("bus{submix}")),
-        });
+        model
+            .submixes
+            .push(Submix::unity(sid(&format!("bus{submix}"))));
         model.routes.push(route(
             &format!("bus{submix}-main"),
             RouteSource::SubmixOutput {

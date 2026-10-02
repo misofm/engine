@@ -1281,9 +1281,23 @@ fn parse_matrix_or_pan(
 }
 
 fn parse_submix(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Submix> {
-    parser.keys(table, &["id"], &path);
+    parser.keys(
+        table,
+        &["id", "builtins", "inserts", "fader", "pan", "matrix"],
+        &path,
+    );
+    // The strip's values reuse the track's sub-parsers verbatim (#1199 D2).
+    let id = parser.id(table, "id", &path);
+    let builtins = parse_record(parser, table, "builtins", &path, parse_builtins);
+    let inserts = parse_record(parser, table, "inserts", &path, parse_rack);
+    let fader = parse_record(parser, table, "fader", &path, parse_fader);
+    let matrix_or_pan = parse_matrix_or_pan(parser, table, &path);
     Some(Submix {
-        id: parser.id(table, "id", &path)?,
+        id: id?,
+        builtins: builtins?,
+        inserts: inserts?,
+        fader: fader?,
+        matrix_or_pan: matrix_or_pan?,
     })
 }
 

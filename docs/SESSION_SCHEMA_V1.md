@@ -39,10 +39,22 @@ object rejects unknown keys and every field is explicit, including empty arrays 
 `"sidechain": { "kind": "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
 and memory budget are host policy and are not session-document fields.
 
+A submix is a strip (decision 13, #1199). Its keys, in canonical order, are `id`, `builtins`,
+`inserts`, `fader`, and exactly one of `pan` or `matrix`; `console` will follow `builtins` once
+#1202 lands. Each value's grammar, validation, diagnostic code and canonical spelling are the
+track's, verbatim: neither `pan` nor `matrix` is `schema.missing_field`, both is
+`schema.wrong_type`, and an unknown key is `schema.unknown_field`. Diagnostics use index paths, for
+example `$.submixes[0].fader.left_db`. `Submix::unity` is the transparent strip: identity input
+section, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing. Until
+*Render a submix strip on its summed input* (#1200) lands, a submix still renders as a bare
+summing node and the strip is grammar only. On the wire the submix message carries `id` 1,
+`builtins` 2, `inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the
+track's field 10); field 3 is reserved for `console`.
+
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
 submixes, and outputs share the graph-entity namespace; routes, automations, console slots (across
-both sections), a track's inserts, and `(parameter_id, channel)` pairs are unique in their
-corresponding scopes. Canonical entity
+both sections), a strip's (track's or submix's) inserts, and `(parameter_id, channel)` pairs are
+unique in their corresponding scopes. Canonical entity
 sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack effects plus
 automation segments preserve declared order. Canonical text uses LF, exactly one final newline,
 canonical string escapes, and finite `f32` spellings that preserve exact bits through both direct
@@ -143,7 +155,8 @@ An automation target's `rack` is one of three tokens, with explicit wire codes: 
 the retired `dynamic` rack's code), `builtins` (4) and `console` (5). Codes 1 (`simd1`) and 3
 (`simd2`) are retired and refused, never reallocated, and the retired spellings are unknown
 tokens. `console` addresses a slot by `effect_id: <slot>` in either section; `inserts` addresses a
-track's insert by its ID. `builtins`, since issue #178 (ruled by #210's D2), is the strip's own
+strip's insert by its ID. An automation target's `entity_id` names a track or a submix (#1199);
+a submix carries no console entries yet, and its target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is the strip's own
 fixed section.
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal
@@ -212,7 +225,9 @@ this fixture's `effect_id`.
 Routes use a tagged source and destination port shape. A source is either
 `{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
-makes output sources and track destinations unrepresentable. Routed sidechains reuse the tagged
+makes output sources and track destinations unrepresentable. A submix's input is the sum of the
+routes that target it, and `submix_output` leaves the submix strip after its pan or matrix; until
+#1200 renders the strip, it leaves the bare sum. Routed sidechains reuse the tagged
 source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with
