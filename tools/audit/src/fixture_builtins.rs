@@ -1767,7 +1767,7 @@ fn render_partition() -> Vec<u8> {
     pack_pcm(&left, &right)
 }
 
-fn manifest(files: &[(String, Vec<u8>)]) -> String {
+fn manifest<'a>(files: impl IntoIterator<Item = (&'a String, &'a Vec<u8>)>) -> String {
     let mut output = String::from(MANIFEST_HEADER);
     for (path, bytes) in files {
         writeln!(output, "{path}\t{}\t{}", bytes.len(), sha256(bytes)).expect("string");
@@ -1785,15 +1785,18 @@ fn write_and_verify(root: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| format!("create fixture directory: {error}"))?;
         fs::write(destination, bytes).map_err(|error| format!("write fixture: {error}"))?;
     }
-    fs::write(root.join("MANIFEST.tsv"), manifest(&files))
-        .map_err(|error| format!("write manifest: {error}"))?;
+    fs::write(
+        root.join("MANIFEST.tsv"),
+        manifest(files.iter().map(|(path, bytes)| (path, bytes))),
+    )
+    .map_err(|error| format!("write manifest: {error}"))?;
     verify_generated_scratch(root, &files)?;
     check_read_only_fixture_root(root)
 }
 
 fn verify_generated_scratch(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
     if fs::read(root.join("MANIFEST.tsv")).map_err(|error| format!("read manifest: {error}"))?
-        != manifest(expected).as_bytes()
+        != manifest(expected.iter().map(|(path, bytes)| (path, bytes))).as_bytes()
     {
         return Err("builtins fixture manifest mismatch".to_owned());
     }
@@ -2927,7 +2930,7 @@ fn parse_canonical_meter_records(root: &Path, path: &str) -> Result<Vec<MeterRec
     let bytes = read_regular_file(&root.join(path), path)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| format!("JSONL is not UTF-8: {path}"))?;
     let mut records = Vec::new();
-    let mut previous = None::<String>;
+    let mut previous = None::<&str>;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         let line = line
             .strip_suffix('\n')
@@ -2940,13 +2943,13 @@ fn parse_canonical_meter_records(root: &Path, path: &str) -> Result<Vec<MeterRec
                 index + 1
             ));
         }
-        if previous.as_deref().is_some_and(|previous| previous >= line) {
+        if previous.is_some_and(|previous| previous >= line) {
             return Err(format!(
                 "meter records are not strictly sorted: {path}:{}",
                 index + 1
             ));
         }
-        previous = Some(line.to_owned());
+        previous = Some(line);
         records.push(parsed);
     }
     if records.is_empty() {
@@ -3055,12 +3058,10 @@ fn canonical_meter_record(record: &MeterRecord) -> String {
     match record {
         MeterRecord::Snapshot(snapshot) => {
             let canonical_snapshot = canonical_meter_snapshot(snapshot);
-            snapshot
-                .tap
-                .as_ref()
-                .map_or(canonical_snapshot.clone(), |tap| {
-                    format!("{{\"tap\":\"{tap}\",\"snapshot\":{canonical_snapshot}}}")
-                })
+            match &snapshot.tap {
+                Some(tap) => format!("{{\"tap\":\"{tap}\",\"snapshot\":{canonical_snapshot}}}"),
+                None => canonical_snapshot,
+            }
         }
         MeterRecord::Partial {
             case,
@@ -3117,7 +3118,7 @@ fn verify_diagnostics(root: &Path) -> Result<(), String> {
 
 fn parse_canonical_diagnostics(text: &str) -> Result<Vec<DiagnosticRecord>, String> {
     let mut records = Vec::new();
-    let mut previous = None::<String>;
+    let mut previous = None::<&str>;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         let line = line
             .strip_suffix('\n')
@@ -3140,13 +3141,13 @@ fn parse_canonical_diagnostics(text: &str) -> Result<Vec<DiagnosticRecord>, Stri
         if line != canonical {
             return Err(format!("diagnostic record is not canonical: {}", index + 1));
         }
-        if previous.as_deref().is_some_and(|previous| previous >= line) {
+        if previous.is_some_and(|previous| previous >= line) {
             return Err(format!(
                 "diagnostic records are not strictly sorted: {}",
                 index + 1
             ));
         }
-        previous = Some(line.to_owned());
+        previous = Some(line);
         records.push(parsed);
     }
     Ok(records)
@@ -3261,7 +3262,7 @@ fn verify_resources(root: &Path) -> Result<(), String> {
     let text =
         std::str::from_utf8(&bytes).map_err(|_| "resources.jsonl is not UTF-8".to_owned())?;
     let mut actual = Vec::new();
-    let mut previous = None::<String>;
+    let mut previous = None::<&str>;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         let line = line
             .strip_suffix('\n')
@@ -3270,13 +3271,13 @@ fn verify_resources(root: &Path) -> Result<(), String> {
         if line != canonical_resource(&parsed) {
             return Err(format!("resource record is not canonical: {}", index + 1));
         }
-        if previous.as_deref().is_some_and(|previous| previous >= line) {
+        if previous.is_some_and(|previous| previous >= line) {
             return Err(format!(
                 "resource records are not strictly sorted: {}",
                 index + 1
             ));
         }
-        previous = Some(line.to_owned());
+        previous = Some(line);
         validate_resource_record(&parsed)?;
         actual.push(parsed);
     }
@@ -5383,7 +5384,7 @@ mod tests {
         });
         reject_manifest_valid_graph_tap_mutation(&files, "dependent-toml-hash", |files| {
             let path = "benchmark/meter_success_full-48000.toml";
-            let input = String::from_utf8(files.get(path).expect("benchmark input").clone())
+            let input = std::str::from_utf8(files.get(path).expect("benchmark input"))
                 .expect("benchmark input UTF-8");
             files.insert(
                 path.to_owned(),
@@ -5488,28 +5489,26 @@ mod tests {
             });
             reject_coverage_hole(&files, class, |mutated| match class {
                 "toml" => {
-                    let cases =
-                        String::from_utf8(mutated.get("cases.toml").expect("cases").clone())
-                            .expect("utf8 cases");
+                    let cases = std::str::from_utf8(mutated.get("cases.toml").expect("cases"))
+                        .expect("utf8 cases");
                     mutated.insert(
                         "cases.toml".to_owned(),
-                        remove_first_response_case(&cases).into_bytes(),
+                        remove_first_response_case(cases).into_bytes(),
                     );
                 }
                 "f32le" => {
                     mutated.remove("pcm/identity-signed-zero.f32le");
                 }
                 "csv" => {
-                    let csv = String::from_utf8(
+                    let csv = std::str::from_utf8(
                         mutated
                             .get("reference/filter-response.csv")
-                            .expect("reference")
-                            .clone(),
+                            .expect("reference"),
                     )
                     .expect("utf8 reference");
                     mutated.insert(
                         "reference/filter-response.csv".to_owned(),
-                        remove_first_data_row(&csv).into_bytes(),
+                        remove_first_data_row(csv).into_bytes(),
                     );
                 }
                 "meter_jsonl" | "diagnostics_jsonl" | "resources_jsonl" => {
@@ -5711,13 +5710,13 @@ mod tests {
     }
 
     fn remove_first_jsonl_record(bytes: &mut Vec<u8>) {
-        let text = String::from_utf8(bytes.clone()).expect("JSONL fixture UTF-8");
+        let text = std::str::from_utf8(bytes).expect("JSONL fixture UTF-8");
         let (_, remaining) = text.split_once('\n').expect("JSONL fixture record");
         *bytes = remaining.as_bytes().to_vec();
     }
 
     fn replace_jsonl_fragment(bytes: &mut Vec<u8>, from: &str, to: &str) {
-        let text = String::from_utf8(bytes.clone()).expect("JSONL fixture UTF-8");
+        let text = std::str::from_utf8(bytes).expect("JSONL fixture UTF-8");
         assert!(text.contains(from), "frozen JSONL fragment");
         *bytes = text.replacen(from, to, 1).into_bytes();
     }
@@ -5739,17 +5738,7 @@ mod tests {
     }
 
     fn complete_files() -> BTreeMap<String, Vec<u8>> {
-        let mut files: BTreeMap<_, _> = generated().into_iter().collect();
-        for kind in BENCHMARK_KINDS {
-            let kind = BenchmarkKind::parse(kind).expect("frozen benchmark kind");
-            for rate_hz in BENCHMARK_RATES {
-                files.insert(
-                    format!("benchmark/{}-{rate_hz}.toml", kind.as_str()),
-                    canonical_benchmark_input(kind, rate_hz).into_bytes(),
-                );
-            }
-        }
-        files
+        generated().into_iter().collect()
     }
 
     fn benchmark_text_mutation(
@@ -5758,7 +5747,7 @@ mod tests {
     ) -> impl FnOnce(&mut BTreeMap<String, Vec<u8>>) {
         move |files| {
             let path = "benchmark/full_chain_filters-48000.toml";
-            let input = String::from_utf8(files.get(path).expect("benchmark input").clone())
+            let input = std::str::from_utf8(files.get(path).expect("benchmark input"))
                 .expect("benchmark input UTF-8");
             assert!(input.contains(from), "frozen benchmark field");
             files.insert(path.to_owned(), input.replacen(from, to, 1).into_bytes());
@@ -5776,11 +5765,7 @@ mod tests {
                 .expect("fixture directory");
             fs::write(destination, bytes).expect("fixture bytes");
         }
-        let manifest_files: Vec<_> = files
-            .iter()
-            .map(|(path, bytes)| (path.clone(), bytes.clone()))
-            .collect();
-        fs::write(root.join("MANIFEST.tsv"), manifest(&manifest_files)).expect("manifest");
+        fs::write(root.join("MANIFEST.tsv"), manifest(files)).expect("manifest");
     }
 
     fn read_fixture_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {

@@ -237,8 +237,12 @@ fn symbol_bodies(disassembly: &str, symbols: &[&str]) -> BTreeMap<String, Vec<St
             && let Some(symbol_bodies) = bodies.get_mut(symbol)
         {
             let body = &mut symbol_bodies[*body_index];
-            let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-            body.push_str(&normalized);
+            for (index, token) in trimmed.split_whitespace().enumerate() {
+                if index != 0 {
+                    body.push(' ');
+                }
+                body.push_str(token);
+            }
             body.push('\n');
         }
     }
@@ -477,13 +481,9 @@ pub(crate) fn main() {
         .iter()
         .filter(|rule| rule.backend == ACTIVE_BACKEND)
         .count();
-    let failure_json = failures
-        .iter()
-        .map(|failure| format!("\"{}\"", bench_support::json::escape(failure)))
-        .collect::<Vec<_>>()
-        .join(",");
+    let failure_json = bench_support::json::json_string_array(&failures);
     println!(
-        "{{\"schema_version\":1,\"kind\":\"native_vectorization\",\"subject\":\"release_probe_instantiations_of_production_kernels\",\"status\":\"{}\",\"backend\":\"{}\",\"artifact_sha256\":\"{}\",\"disassembly_sha256\":\"{}\",\"allowlist_sha256\":\"{}\",\"kernel_rules\":{},\"failures\":[{}]}}",
+        "{{\"schema_version\":1,\"kind\":\"native_vectorization\",\"subject\":\"release_probe_instantiations_of_production_kernels\",\"status\":\"{}\",\"backend\":\"{}\",\"artifact_sha256\":\"{}\",\"disassembly_sha256\":\"{}\",\"allowlist_sha256\":\"{}\",\"kernel_rules\":{},\"failures\":{}}}",
         if failures.is_empty() { "pass" } else { "fail" },
         ACTIVE_BACKEND,
         sha256(&artifact),

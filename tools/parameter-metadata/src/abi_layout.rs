@@ -1771,38 +1771,41 @@ pub fn render() -> String {
 
     let mut out = String::with_capacity(1 << 14);
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
-    out.push_str(&format!("  \"abiVersion\": {ABI_VERSION},\n"));
+    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
+    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
     out.push_str("  \"stagingSequence\": [");
     for (index, export) in STAGING_SEQUENCE.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            &mut out,
             "\"{export}\"{}",
             if index + 1 == STAGING_SEQUENCE.len() {
                 ""
             } else {
                 ", "
             }
-        ));
+        );
     }
     out.push_str("],\n");
     out.push_str("  \"errorPhases\": [");
     for (index, phase) in ERROR_PHASES.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            &mut out,
             "\"{phase}\"{}",
             if index + 1 == ERROR_PHASES.len() {
                 ""
             } else {
                 ", "
             }
-        ));
+        );
     }
     out.push_str("],\n");
     out.push_str("  \"exports\": [\n");
     for (index, export) in EXPORTS.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            &mut out,
             "    \"{export}\"{}\n",
             comma(index, EXPORTS.len())
-        ));
+        );
     }
     out.push_str("  ],\n");
     out.push_str("  \"structures\": {\n");
@@ -1999,7 +2002,7 @@ pub fn render() -> String {
     );
     out.push_str("  },\n");
     out.push_str("  \"commandRecord\": {\n");
-    out.push_str(&format!("    \"bytes\": {COMMAND_RECORD_BYTES},\n"));
+    append!(&mut out, "    \"bytes\": {COMMAND_RECORD_BYTES},\n");
     out.push_str("    \"endianness\": \"little\",\n");
     render_fields(&mut out, &command_record_fields(), "    ");
     out.push_str("  },\n");
@@ -2124,93 +2127,121 @@ pub fn render() -> String {
             (SPECTRUM_STREAM_STATUS_READY, "ready"),
         ],
     );
-    out.push_str(&format!(
+    append!(
+        &mut out,
         "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumDocumentBytes\": {MAXIMUM_DOCUMENT_BYTES},\n"
-    ));
-    out.push_str(&format!("    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n"));
-    out.push_str(&format!(
+    );
+    append!(&mut out, "    \"diagnosticBytes\": {DIAGNOSTIC_BYTES},\n");
+    append!(
+        &mut out,
         "    \"defaultCommandQueueRecords\": {DEFAULT_COMMAND_QUEUE_RECORDS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"defaultMeterBlocks\": {DEFAULT_METER_BLOCKS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumObservationTaps\": {MAXIMUM_OBSERVATION_TAPS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumResponseEffectIdBytes\": {RESPONSE_MAXIMUM_EFFECT_ID_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumResponseParameterOverrides\": {RESPONSE_MAXIMUM_PARAMETER_OVERRIDES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumResponseResultBytes\": {RESPONSE_MAXIMUM_RESULT_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumLiveResponseOwners\": {LIVE_RESPONSE_MAXIMUM_OWNERS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumLiveResponseSections\": {LIVE_RESPONSE_MAXIMUM_SECTIONS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumLiveResponseIdBytes\": {LIVE_RESPONSE_MAXIMUM_ID_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumLiveResponsePoints\": {LIVE_RESPONSE_MAXIMUM_POINTS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"liveResponseCaptureBytes\": {LIVE_RESPONSE_CAPTURE_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumCaptureBytes\": {SPECTRUM_CAPTURE_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumPreparedSpectrumTargets\": {SPECTRUM_MAXIMUM_PREPARED_TARGETS},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumCollectionRequestBytes\": {SPECTRUM_COLLECTION_REQUEST_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumCollectionEntryBytes\": {SPECTRUM_COLLECTION_ENTRY_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumCollectionEntryCapacity\": {SPECTRUM_COLLECTION_ENTRY_CAPACITY},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumCollectionTargetIdsBytes\": {SPECTRUM_COLLECTION_TARGET_IDS_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumRequestBytes\": {SPECTRUM_REQUEST_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumWindowHeaderBytes\": {SPECTRUM_WINDOW_HEADER_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumResultHeaderBytes\": {SPECTRUM_RESULT_HEADER_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumStreamMetadataBytes\": {SPECTRUM_STREAM_METADATA_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumWindowFrames\": {SPECTRUM_WINDOW_FRAMES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"spectrumBinCount\": {SPECTRUM_BIN_COUNT},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"maximumSpectrumIdBytes\": {SPECTRUM_MAXIMUM_ID_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "    \"defaultMaximumMemoryBytes\": {DEFAULT_MAXIMUM_MEMORY_BYTES},\n"
-    ));
+    );
     out.push_str("    \"sourceRing\": { ");
-    out.push_str(&format!(
+    append!(
+        &mut out,
         "\"stallToleranceMs\": {SOURCE_STALL_TOLERANCE_MS}, \
          \"reserveQuanta\": {SOURCE_RING_RESERVE_QUANTA} }}\n"
-    ));
+    );
     out.push_str("  }\n}\n");
     out
 }
@@ -2222,7 +2253,7 @@ fn render_structure(
     fields: &[Field],
     trailing_comma: bool,
 ) {
-    out.push_str(&format!("    \"{name}\": {{\n      \"bytes\": {bytes},\n"));
+    append!(out, "    \"{name}\": {{\n      \"bytes\": {bytes},\n");
     render_fields(out, fields, "      ");
     out.push_str(if trailing_comma {
         "    },\n"
@@ -2232,23 +2263,25 @@ fn render_structure(
 }
 
 fn render_fields(out: &mut String, fields: &[Field], indent: &str) {
-    out.push_str(&format!("{indent}\"fields\": [\n"));
+    append!(out, "{indent}\"fields\": [\n");
     for (index, (name, offset, kind)) in fields.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            out,
             "{indent}  {{ \"name\": \"{name}\", \"offset\": {offset}, \"type\": \"{kind}\" }}{}\n",
             comma(index, fields.len())
-        ));
+        );
     }
-    out.push_str(&format!("{indent}]\n"));
+    append!(out, "{indent}]\n");
 }
 
 fn render_named_constants(out: &mut String, name: &str, values: &[(u32, &str)]) {
-    out.push_str(&format!("    \"{name}\": ["));
+    append!(out, "    \"{name}\": [");
     for (index, (value, label)) in values.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            out,
             "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
             if index + 1 == values.len() { "" } else { ", " }
-        ));
+        );
     }
     out.push_str("],\n");
 }

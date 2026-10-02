@@ -2,7 +2,7 @@
 //!
 //! # What this subject decides
 //!
-//! Every render-path `Lane::fma` site is a candidate for the phase-2 contract change (single
+//! Every render-path `Lane::fma` site was audited for the phase-2 contract change (single
 //! rounding -> two roundings, natively, on every backend). This subject supplies the *numbers*
 //! behind each per-site verdict in `docs/rulings/unfused-multiply-add-audit.md`. It is evidence
 //! code, not render code.
@@ -148,8 +148,8 @@ fn ulp_distance(a: f32, b: f32) -> u64 {
 
 // ---------------------------------------------------------------------------------------------
 // Site models. Each pair is the frozen operation order of the site, written twice: once with the
-// fused operation the contract pins today, once with the `(a*b) + c` the contract change makes
-// universal. Nothing here calls `Lane`, so the audit's numbers do not move when the contract does.
+// retired fused operation, once with the current universal `(a*b) + c`. Nothing here calls
+// `Lane`, so the audit's numbers do not move when the contract does.
 // ---------------------------------------------------------------------------------------------
 
 /// F1: the TPT state update, `svf_step` (`kernels.rs`), both `d1` and `d2`.
@@ -815,10 +815,6 @@ impl Carveout {
             self.other += 1;
         }
     }
-
-    fn total(&self) -> u64 {
-        self.signed_zero + self.non_finite_input + self.non_finite_intermediate + self.other
-    }
 }
 
 /// Sweeps all 2^32 `f32` bit patterns of the free operand of one identity contract.
@@ -873,7 +869,6 @@ fn exhaustive_identities() {
             carveout.non_finite_intermediate,
             carveout.other
         );
-        debug_assert_eq!(carveout.total(), carveout.total());
     }
 
     // F3, c = 0: a stalled smoother must hold its state exactly.
@@ -1438,11 +1433,10 @@ fn model_conformance(frames: usize) {
     let matrix = [0.8f32, 0.6, -0.3, 0.9];
     let mut left = input.clone();
     let mut right: Vec<f32> = input.iter().rev().copied().collect();
-    let (source_left, source_right) = (left.clone(), right.clone());
     mix2x2_block::<f32>(&mut left, &mut right, matrix);
     let (mut fused_bad, mut unfused_bad) = (0usize, 0usize);
     for index in 0..frames {
-        let (l, r) = (source_left[index], source_right[index]);
+        let (l, r) = (input[index], input[frames - 1 - index]);
         if left[index].to_bits() != matrix_fused(matrix[0], matrix[1], l, r).to_bits()
             || right[index].to_bits() != matrix_fused(matrix[3], matrix[2], r, l).to_bits()
         {

@@ -48,7 +48,7 @@ pub(crate) fn main() {
     // silently absent audit reports success for every gate below it.
     bench_alloc::assert_installed();
     assert_eq!(
-        parse_blocks(),
+        crate::parse_blocks(BLOCKS),
         BLOCKS,
         "the #88 allocation audit is frozen at 100,000 blocks"
     );
@@ -67,7 +67,6 @@ pub(crate) fn main() {
     let mut sidechain_right = vec![-0.5_f32; frames];
     let mut bank_left = vec![0.125_f32; frames * lanes];
     let mut bank_right = vec![-0.25_f32; frames * lanes];
-    let offsets = vec![0_u32; lanes + 1];
     let mut bank_offsets = vec![0_u32; lanes + 1];
     let left_address = left.as_ptr() as usize;
     let right_address = right.as_ptr() as usize;
@@ -168,7 +167,6 @@ pub(crate) fn main() {
     assert_eq!(right.as_ptr() as usize, right_address);
     assert_eq!(bank_left.as_ptr() as usize, bank_address);
     assert_eq!(snapshot.total(), 0);
-    assert_eq!(offsets.len(), lanes + 1);
     drop(prepared);
     println!(
         concat!(
@@ -277,17 +275,4 @@ fn bind_bank(backend: Backend, width: BankWidth) -> Option<Box<dyn PreparedNativ
             active_mask: width.full_mask(),
         })
         .expect("bank binding must not fail")
-}
-
-fn parse_blocks() -> u64 {
-    let mut arguments = std::env::args().skip(1);
-    match arguments.next().as_deref() {
-        None => BLOCKS,
-        Some("--blocks") => arguments
-            .next()
-            .expect("--blocks value")
-            .parse()
-            .expect("integer block count"),
-        Some(_) => panic!("unknown audit argument"),
-    }
 }

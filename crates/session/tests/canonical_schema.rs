@@ -70,6 +70,11 @@ fn signed_zero_and_double_rounding_values_survive_session_compilation() {
         canonical_session_json(normalized).expect("normalized recanonicalizes"),
         canonical
     );
+
+    let canonical_ptr = compiled.canonical_json().as_ptr();
+    let owned = compiled.into_canonical_json();
+    assert_eq!(owned, canonical);
+    assert_eq!(owned.as_ptr(), canonical_ptr);
 }
 
 #[test]

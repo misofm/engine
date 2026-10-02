@@ -71,8 +71,8 @@ fn canonical_model(model: &session::SessionModel) -> String {
     canonical_session_json(model).expect("test model canonicalizes")
 }
 
-fn pairs() -> Vec<(String, String)> {
-    vec![(OLD.to_owned(), NEW.to_owned())]
+fn pairs() -> [(String, String); 1] {
+    [(OLD.to_owned(), NEW.to_owned())]
 }
 
 #[test]
@@ -263,17 +263,14 @@ fn render_two_blocks(document: &str, mono: bool) -> Vec<f32> {
         let plane: Vec<f32> = (0..quantum)
             .map(|index| (index + block * quantum) as f32 * 0.013 - 0.5)
             .collect();
-        let planes: Vec<&[f32]> = if mono {
-            vec![&plane]
-        } else {
-            vec![&plane, &plane]
-        };
+        let planes = [&plane[..], &plane[..]];
+        let planes = &planes[..if mono { 1 } else { 2 }];
         let submit = host.submit_source(
             b"fixture-source",
             1,
             (block * quantum) as u64,
             host.status().sample_rate_hz,
-            &planes,
+            planes,
             quantum as u32,
             block == 1,
         );
@@ -297,12 +294,12 @@ fn native_render_is_bit_identical_for_duplicate_stereo_and_prepared_mono() {
             .flat_map(|block| block[..128].iter().zip(&block[128..]))
             .any(|(left, right)| left.to_bits() != right.to_bits())
     );
-    assert_eq!(
+    assert!(
         stereo
             .iter()
             .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        mono.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            .eq(mono.iter().map(|value| value.to_bits())),
+        "duplicate stereo and prepared mono output words differ"
     );
 }
 
@@ -313,12 +310,12 @@ fn native_effect_fixture_is_bit_identical_after_mono_preparation() {
     let stereo = render_two_blocks(&input, false);
     let mono = render_two_blocks(&transformed, true);
     assert!(stereo.iter().any(|sample| *sample != 0.0));
-    assert_eq!(
+    assert!(
         stereo
             .iter()
             .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        mono.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            .eq(mono.iter().map(|value| value.to_bits())),
+        "native effect output words differ after mono preparation"
     );
 }
 

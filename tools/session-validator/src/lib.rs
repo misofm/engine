@@ -55,7 +55,7 @@ use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use session::{
-    CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, SourceBitDepth, StableId,
+    CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, SourceBitDepth,
     canonical_session_json, compile_session, parse_session_json,
 };
 
@@ -67,9 +67,9 @@ pub const FOLD_MONO_MAX_MAP_BYTES: usize = 256 * 1024;
 pub const FOLD_MONO_MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct IdentityReplacement {
-    old: String,
-    new: String,
+struct IdentityReplacement<'a> {
+    old: &'a str,
+    new: &'a str,
 }
 
 /// A failed bounded fold-mono transformation.
@@ -140,25 +140,24 @@ pub struct StageDiagnostic {
 }
 
 impl StageDiagnostic {
-    fn render(&self) -> String {
-        let mut line = format!("{}  {}", self.code, self.path);
+    fn render_into(&self, out: &mut String) {
+        let _ = write!(out, "{}  {}", self.code, self.path);
         if let (Some(row), Some(column)) = (self.line, self.column) {
-            let _ = write!(line, "  (line {row}, column {column})");
+            let _ = write!(out, "  (line {row}, column {column})");
         }
         // A `json.syntax` message carries the parser's multi-line source excerpt. Continuation
         // lines are indented rather than flattened, so one diagnostic still reads as one block.
         if self.message.contains('\n') {
             for part in self.message.lines() {
-                line.push('\n');
+                out.push('\n');
                 let trimmed = part.trim_end();
                 if !trimmed.is_empty() {
-                    let _ = write!(line, "          {trimmed}");
+                    let _ = write!(out, "          {trimmed}");
                 }
             }
         } else if !self.message.is_empty() {
-            let _ = write!(line, "  {}", self.message);
+            let _ = write!(out, "  {}", self.message);
         }
-        line
     }
 }
 
@@ -230,7 +229,9 @@ impl ValidationReport {
                 },
             );
             for diagnostic in &stage.diagnostics {
-                let _ = writeln!(out, "        {}", diagnostic.render());
+                out.push_str("        ");
+                diagnostic.render_into(&mut out);
+                out.push('\n');
             }
         }
         match self.failed_stage() {
@@ -269,6 +270,20 @@ fn session_diagnostics(set: &DiagnosticSet) -> Vec<StageDiagnostic> {
             line: diagnostic.span.map(|span| span.line),
             column: diagnostic.span.map(|span| span.column),
             message: diagnostic.message.clone(),
+        })
+        .collect()
+}
+
+fn preparation_diagnostics(
+    diagnostics: impl Iterator<Item = (&'static str, String)>,
+) -> Vec<StageDiagnostic> {
+    diagnostics
+        .map(|(code, path)| StageDiagnostic {
+            code: code.to_owned(),
+            path,
+            line: None,
+            column: None,
+            message: String::new(),
         })
         .collect()
 }
@@ -349,16 +364,11 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
         stages.push(stage(
             3,
             StageStatus::Fail,
-            diagnostics
-                .into_iter()
-                .map(|diagnostic| StageDiagnostic {
-                    code: diagnostic.code.to_owned(),
-                    path: diagnostic.path,
-                    line: None,
-                    column: None,
-                    message: String::new(),
-                })
-                .collect(),
+            preparation_diagnostics(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| (diagnostic.code, diagnostic.path)),
+            ),
         ));
         return skipped_tail(stages, 4);
     }
@@ -395,22 +405,17 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
         stages.push(stage(
             4,
             StageStatus::Fail,
-            diagnostics
-                .into_iter()
-                .map(|diagnostic| StageDiagnostic {
-                    code: diagnostic.code.to_owned(),
-                    path: diagnostic.path,
-                    line: None,
-                    column: None,
-                    message: String::new(),
-                })
-                .collect(),
+            preparation_diagnostics(
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| (diagnostic.code, diagnostic.path)),
+            ),
         ));
         return skipped_tail(stages, 5);
     }
     stages.push(stage(4, StageStatus::Pass, Vec::new()));
 
-    let canonical = compiled.canonical_json().to_owned();
+    let canonical = compiled.into_canonical_json();
     ValidationReport {
         stages,
         canonical: Some(canonical),
@@ -432,22 +437,17 @@ fn fold_error(message: impl Into<String>) -> FoldMonoError {
 }
 
 fn diagnostic_text(set: &DiagnosticSet) -> String {
-    set.diagnostics()
-        .iter()
-        .map(|diagnostic| {
-            format!(
-                "{} {}{}",
-                diagnostic.code,
-                diagnostic.path,
-                if diagnostic.message.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", diagnostic.message)
-                }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+    let mut out = String::new();
+    for (index, diagnostic) in set.diagnostics().iter().enumerate() {
+        if index != 0 {
+            out.push_str("; ");
+        }
+        let _ = write!(out, "{} {}", diagnostic.code, diagnostic.path);
+        if !diagnostic.message.is_empty() {
+            let _ = write!(out, ": {}", diagnostic.message);
+        }
+    }
+    out
 }
 
 fn bounded_file(path: &str, maximum: usize) -> Result<Vec<u8>, FoldMonoError> {
@@ -487,7 +487,7 @@ fn valid_blake3_identity(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn parse_fold_map(bytes: &[u8]) -> Result<Vec<IdentityReplacement>, FoldMonoError> {
+fn parse_fold_map(bytes: &[u8]) -> Result<Vec<IdentityReplacement<'_>>, FoldMonoError> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
@@ -514,10 +514,7 @@ fn parse_fold_map(bytes: &[u8]) -> Result<Vec<IdentityReplacement>, FoldMonoErro
                 FOLD_MONO_MAX_ENTRIES
             )));
         }
-        replacements.push(IdentityReplacement {
-            old: old.to_owned(),
-            new: new.to_owned(),
-        });
+        replacements.push(IdentityReplacement { old, new });
     }
     Ok(replacements)
 }
@@ -550,7 +547,7 @@ struct SourceShape {
 
 fn fold_mono_document(
     source_text: &str,
-    replacements: &[IdentityReplacement],
+    replacements: &[IdentityReplacement<'_>],
 ) -> Result<String, FoldMonoError> {
     if source_text.len() > FOLD_MONO_MAX_SESSION_BYTES {
         return Err(fold_error(format!(
@@ -566,7 +563,7 @@ fn fold_mono_document(
         return Err(fold_error("session input must be canonical JSON"));
     }
     // Even an empty map must pass the same complete control-plane compile gate. Its accepted
-    // result is returned byte-for-byte below, so no canonical writer can alter a no-op.
+    // canonical result has already proved byte equality with the input above.
     compile_session(&model, compile_caps()).map_err(|set| {
         fold_error(format!(
             "session compilation failed: {}",
@@ -574,12 +571,13 @@ fn fold_mono_document(
         ))
     })?;
     if replacements.is_empty() {
-        return Ok(source_text.to_owned());
+        return Ok(canonical);
     }
+    drop(canonical);
 
     let by_old: HashMap<&str, &IdentityReplacement> = replacements
         .iter()
-        .map(|replacement| (replacement.old.as_str(), replacement))
+        .map(|replacement| (replacement.old, replacement))
         .collect();
     let mut matched = HashSet::new();
     let mut original_shapes: HashMap<&str, SourceShape> = HashMap::new();
@@ -590,7 +588,7 @@ fn fold_mono_document(
             frames: source.frames,
         };
         if let Some(replacement) = by_old.get(source.content.as_str()) {
-            matched.insert(replacement.old.as_str());
+            matched.insert(replacement.old);
             if shape.channels != 2
                 || !matches!(
                     shape.bit_depth,
@@ -615,7 +613,7 @@ fn fold_mono_document(
     if matched.len() != replacements.len() {
         let missing = replacements
             .iter()
-            .find(|replacement| !matched.contains(replacement.old.as_str()))
+            .find(|replacement| !matched.contains(replacement.old))
             .expect("matched count differs only when one replacement is missing");
         return Err(fold_error(format!(
             "mapped identity {} does not occur in the session",
@@ -625,17 +623,13 @@ fn fold_mono_document(
 
     // Mapping is simultaneous: every lookup uses the original content identity, so A->B and
     // B->C never cascade A through B to C.
-    let affected_source_ids: HashSet<StableId> = model
-        .sources
-        .iter()
-        .filter(|source| by_old.contains_key(source.content.as_str()))
-        .map(|source| source.id.clone())
-        .collect();
+    let mut affected_source_ids = HashSet::new();
     let mut final_shapes: HashMap<&str, SourceShape> = HashMap::new();
     for source in &mut model.sources {
         let replacement = by_old.get(source.content.as_str()).copied();
         if let Some(replacement) = replacement {
-            source.content = replacement.new.clone();
+            affected_source_ids.insert(&source.id);
+            source.content = replacement.new.to_owned();
             source.channels = 1;
         }
         let shape = SourceShape {
@@ -668,7 +662,7 @@ fn fold_mono_document(
             diagnostic_text(&set)
         ))
     })?;
-    let output = compiled.canonical_json().to_owned();
+    let output = compiled.into_canonical_json();
     if output.len() > FOLD_MONO_MAX_SESSION_BYTES {
         return Err(fold_error(format!(
             "transformed session exceeds the {}-byte limit",
@@ -697,10 +691,7 @@ pub fn fold_mono_session_document(
         .iter()
         .map(|(old, new)| {
             validate_replacement_identity(old, new, &mut old_identities)?;
-            Ok(IdentityReplacement {
-                old: old.clone(),
-                new: new.clone(),
-            })
+            Ok(IdentityReplacement { old, new })
         })
         .collect::<Result<Vec<_>, FoldMonoError>>()?;
     fold_mono_document(source_text, &parsed)
@@ -733,7 +724,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     let arguments: Vec<String> = arguments.collect();
     let mut rest = arguments.iter().map(String::as_str);
     match rest.next() {
-        Some("fold-mono") => return run_fold_mono(rest.collect()),
+        Some("fold-mono") => return run_fold_mono(rest),
         Some("validate") => {}
         Some("--help" | "-h") => {
             print!("{USAGE}");
@@ -786,8 +777,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-fn run_fold_mono(arguments: Vec<&str>) -> ExitCode {
-    let mut arguments = arguments.into_iter();
+fn run_fold_mono<'a>(mut arguments: impl Iterator<Item = &'a str>) -> ExitCode {
     if arguments.next() != Some("--map") {
         return usage("fold-mono requires `--map <folds.tsv> <canonical-session.json>`");
     }

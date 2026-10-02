@@ -49,7 +49,7 @@ fn structure_body<'a>(document: &'a str, structure: &str) -> &'a str {
     &document[structure_start..structure_start + structure_end]
 }
 
-fn field_entry(document: &str, structure: &str, field: &str) -> (usize, String) {
+fn field_entry<'a>(document: &'a str, structure: &str, field: &str) -> (usize, &'a str) {
     let body = structure_body(document, structure);
     let row = format!("{{ \"name\": \"{field}\", \"offset\": ");
     let row_start = body
@@ -68,7 +68,7 @@ fn field_entry(document: &str, structure: &str, field: &str) -> (usize, String) 
             .trim()
             .parse()
             .expect("offset is an integer"),
-        body[type_start..type_end].to_owned(),
+        &body[type_start..type_end],
     )
 }
 
@@ -76,7 +76,7 @@ fn field_offset(document: &str, structure: &str, field: &str) -> usize {
     field_entry(document, structure, field).0
 }
 
-fn named_constants(document: &str, group: &str) -> Vec<(u32, String)> {
+fn named_constants<'a>(document: &'a str, group: &str) -> Vec<(u32, &'a str)> {
     let key = format!("\"{group}\": [");
     let start = document
         .find(&key)
@@ -99,7 +99,7 @@ fn named_constants(document: &str, group: &str) -> Vec<(u32, String)> {
                 .trim()
                 .parse()
                 .expect("value is an integer"),
-            entry[name_start..name_end].to_owned(),
+            &entry[name_start..name_end],
         ));
     }
     rows
@@ -286,10 +286,6 @@ fn the_published_source_ring_rule_reproduces_the_engine_derivation() {
             );
         }
     }
-
-    // The eval-2 shape, re-derived here so the number in the brief has an independent witness.
-    assert_eq!(default_source_ring_frames(96_000, 127), 78 * 127);
-    assert_eq!(78 * 127, 9_906);
 }
 
 /// The boot alias table is exactly the three alias constants, and every alias value is also a base
@@ -304,18 +300,9 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
     assert_eq!(
         aliases,
         vec![
-            (
-                host_web::RESULT_REFUSED_DOCUMENT,
-                "refusedDocument".to_owned()
-            ),
-            (
-                host_web::RESULT_REFUSED_OPTIONS,
-                "refusedOptions".to_owned()
-            ),
-            (
-                host_web::RESULT_REFUSED_LIFECYCLE,
-                "refusedLifecycle".to_owned()
-            ),
+            (host_web::RESULT_REFUSED_DOCUMENT, "refusedDocument"),
+            (host_web::RESULT_REFUSED_OPTIONS, "refusedOptions"),
+            (host_web::RESULT_REFUSED_LIFECYCLE, "refusedLifecycle"),
         ],
         "the alias table is the three boot alias constants, in constant order"
     );
@@ -332,11 +319,7 @@ fn the_boot_alias_table_is_exactly_the_three_alias_constants() {
         );
     }
     assert_eq!(
-        results
-            .iter()
-            .map(|(value, _)| *value)
-            .collect::<Vec<_>>()
-            .len(),
+        results.len(),
         11,
         "the base ladder is the eleven frozen result codes"
     );

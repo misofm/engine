@@ -70,6 +70,13 @@
 //! the schema tag and `abiVersion` are unmoved, and the new key is *never absent*, so there is no
 //! "document predates ports" state for a reader to have to distinguish.
 
+macro_rules! append {
+    ($out:expr, $($arguments:tt)*) => {
+        std::fmt::Write::write_fmt($out, format_args!($($arguments)*))
+            .expect("writing to a String cannot fail")
+    };
+}
+
 pub mod abi_layout;
 
 use std::io::Write as _;
@@ -133,14 +140,16 @@ pub fn render() -> String {
     let registry = launch_native_effect_registry().expect("launch effect registry");
     let mut out = String::with_capacity(1 << 16);
     out.push_str("{\n");
-    out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
-    out.push_str(&format!("  \"abiVersion\": {ABI_VERSION},\n"));
-    out.push_str(&format!(
+    append!(&mut out, "  \"schema\": \"{SCHEMA}\",\n");
+    append!(&mut out, "  \"abiVersion\": {ABI_VERSION},\n");
+    append!(
+        &mut out,
         "  \"commandRecordBytes\": {COMMAND_RECORD_BYTES},\n"
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        &mut out,
         "  \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
-    ));
+    );
     out.push_str("  \"commandKinds\": [\n");
     let kinds = [
         (COMMAND_PAN, "pan", true, PLANE_RENDER),
@@ -172,11 +181,12 @@ pub fn render() -> String {
         (COMMAND_INPUT_FILTERS, "inputFilters", true, PLANE_RENDER),
     ];
     for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            &mut out,
             "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied}, \
              \"plane\": \"{plane}\" }}{}\n",
             comma(index, kinds.len())
-        ));
+        );
     }
     out.push_str("  ],\n");
     out.push_str("  \"commandReasons\": [\n");
@@ -200,10 +210,11 @@ pub fn render() -> String {
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            &mut out,
             "    {{ \"value\": {value}, \"name\": \"{name}\" }}{}\n",
             comma(index, reasons.len())
-        ));
+        );
     }
     out.push_str("  ],\n");
     // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s the
@@ -244,40 +255,33 @@ pub fn render() -> String {
         ),
     ];
     for (index, (name, rows)) in vocabularies.iter().enumerate() {
-        out.push_str(&format!("    \"{name}\": ["));
+        append!(&mut out, "    \"{name}\": [");
         for (row, (value, label)) in rows.iter().enumerate() {
-            out.push_str(&format!(
+            append!(
+                &mut out,
                 "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
                 if row + 1 == rows.len() { "" } else { ", " }
-            ));
+            );
         }
-        out.push_str(&format!("]{}\n", comma(index, vocabularies.len())));
+        append!(&mut out, "]{}\n", comma(index, vocabularies.len()));
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"response\": ");
-    out.push_str(&response_descriptor(
-        builtins::input_filter_response_descriptor(),
-    ));
+    response_descriptor(&mut out, builtins::input_filter_response_descriptor());
     out.push_str(",\n    \"parameters\": [\n");
     let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {
-        out.push_str(&builtin_parameter(parameter));
-        out.push_str(&format!("{}\n", comma(index, builtins.len())));
+        builtin_parameter(&mut out, parameter);
+        append!(&mut out, "{}\n", comma(index, builtins.len()));
     }
     out.push_str("    ]\n  },\n");
     out.push_str("  \"effects\": [\n");
-    let descriptors: Vec<&'static EffectDescriptor> = registry.descriptors().collect();
-    assert_eq!(
-        descriptors.len(),
-        registry.len(),
-        "every registered effect is emitted"
-    );
-    for (index, descriptor) in descriptors.iter().enumerate() {
+    for (index, descriptor) in registry.descriptors().enumerate() {
         let response = registry
             .get_ascii(descriptor.id.as_str())
             .and_then(|factory| factory.response_analysis());
-        out.push_str(&effect(descriptor, response));
-        out.push_str(&format!("{}\n", comma(index, descriptors.len())));
+        effect(&mut out, descriptor, response);
+        append!(&mut out, "{}\n", comma(index, registry.len()));
     }
     out.push_str("  ]\n}\n");
     out
@@ -304,27 +308,32 @@ fn optional_number(value: Option<f32>) -> String {
 }
 
 fn effect(
+    out: &mut String,
     descriptor: &EffectDescriptor,
     response: Option<&dyn NativeEffectResponseFactory>,
-) -> String {
-    let mut out = String::new();
+) {
     out.push_str("    {\n");
-    out.push_str(&format!(
+    append!(
+        out,
         "      \"id\": \"{}\",\n",
         escape(descriptor.id.as_str())
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "      \"displayName\": \"{}\",\n",
         escape(descriptor.display_name)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "      \"contractMajor\": {}, \"contractMinor\": {}, \"stateLayoutVersion\": {},\n",
-        descriptor.contract_major, descriptor.contract_minor, descriptor.state_layout_version
-    ));
+        descriptor.contract_major,
+        descriptor.contract_minor,
+        descriptor.state_layout_version
+    );
     out.push_str("      \"parameters\": [\n");
     for (index, parameter) in descriptor.parameters.iter().enumerate() {
-        out.push_str(&effect_parameter(parameter));
-        out.push_str(&format!("{}\n", comma(index, descriptor.parameters.len())));
+        effect_parameter(out, parameter);
+        append!(out, "{}\n", comma(index, descriptor.parameters.len()));
     }
     out.push_str("      ],\n");
     // Issue #278: the declared port table, in the descriptor's own order (role ascending), and
@@ -337,7 +346,7 @@ fn effect(
     out.push_str("      \"ports\": [");
     for (index, port) in descriptor.ports.iter().enumerate() {
         out.push('\n');
-        out.push_str(&effect_port(port));
+        effect_port(out, port);
         out.push_str(comma(index, descriptor.ports.len()));
     }
     if descriptor.ports.is_empty() {
@@ -351,7 +360,7 @@ fn effect(
     out.push_str("      \"observations\": [");
     for (index, observation) in descriptor.observations.iter().enumerate() {
         out.push('\n');
-        out.push_str(&effect_observation(observation));
+        effect_observation(out, observation);
         out.push_str(comma(index, descriptor.observations.len()));
     }
     if descriptor.observations.is_empty() {
@@ -361,50 +370,52 @@ fn effect(
     }
     out.push_str("      \"response\": ");
     match response {
-        Some(factory) => out.push_str(&response_descriptor(factory.analysis_descriptor())),
+        Some(factory) => response_descriptor(out, factory.analysis_descriptor()),
         None => out.push_str("null"),
     }
     out.push_str("\n    }");
-    out
 }
 
-fn response_descriptor(descriptor: &ResponseAnalysisDescriptor) -> String {
-    let mut out = String::new();
+fn response_descriptor(out: &mut String, descriptor: &ResponseAnalysisDescriptor) {
     out.push_str("{ ");
-    out.push_str(&format!(
+    append!(
+        out,
         "\"id\": {}, \"name\": \"{}\", \"axisUnit\": \"{}\", \"unit\": \"{}\", ",
         descriptor.id,
         escape(descriptor.name),
         response_axis_unit(descriptor.axis_unit),
         response_axis_unit(descriptor.unit),
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "\"amplitudeReference\": \"{}\", \"channels\": \"{}\", \"mode\": \"{}\", ",
         response_amplitude_reference(descriptor.amplitude_reference),
         response_channels(descriptor.channels),
         response_mode(descriptor.mode),
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "\"cadence\": \"{}\", \"sectionOutput\": \"{}\", \"cost\": \"computed\", ",
         response_cadence(descriptor.cadence),
         response_section_output(descriptor.section_output),
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "\"floorDb\": {}, \"totalScope\": \"{}\", \"bypass\": \"{}\", \"sections\": [",
         number(descriptor.floor_db),
         response_scope(descriptor.total_scope),
         response_bypass(descriptor.bypass),
-    ));
+    );
     for (index, section) in descriptor.sections.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            out,
             "{{ \"id\": {}, \"name\": \"{}\" }}{}",
             section.id,
             escape(section.name),
             comma(index, descriptor.sections.len()),
-        ));
+        );
     }
     out.push_str("] }");
-    out
 }
 
 const fn response_axis_unit(unit: ParameterUnit) -> &'static str {
@@ -464,8 +475,9 @@ const fn response_bypass(bypass: ResponseBypassSemantics) -> &'static str {
 /// Both the raw scalar and its name ride, exactly as they do on a parameter's `unit` and an
 /// observation's `kind`: the descriptor wire and the C inspect record carry the `u32`, and a
 /// consumer that resolves it from this document never keeps a second table of its own.
-fn effect_port(port: &PortDescriptor) -> String {
-    format!(
+fn effect_port(out: &mut String, port: &PortDescriptor) {
+    append!(
+        out,
         "        {{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{}\", \
 \"required\": {}, \"layout\": {}, \"layoutName\": \"{}\" }}",
         escape(port.id.as_str()),
@@ -474,7 +486,7 @@ fn effect_port(port: &PortDescriptor) -> String {
         port.required,
         port.layout as u32,
         port_layout_name(port.layout),
-    )
+    );
 }
 
 const fn port_role_name(role: PortRole) -> &'static str {
@@ -491,7 +503,7 @@ const fn port_layout_name(layout: PortLayout) -> &'static str {
     }
 }
 
-fn effect_observation(observation: &ObservationDescriptor) -> String {
+fn effect_observation(out: &mut String, observation: &ObservationDescriptor) {
     // `subscribable` is derived from the cost class exactly as `liveUpdatable` is derived from
     // `automatable`: a `Resident` tap is a copy out of state the block already wrote and the
     // subscribe path binds it; a `Computed` tap has no implementation in V1 and the subscribe path
@@ -499,7 +511,8 @@ fn effect_observation(observation: &ObservationDescriptor) -> String {
     // derived rather than written down -- and why the schema gate refuses a computed tap that
     // claims to be subscribable.
     let subscribable = matches!(observation.cost, ObservationCost::Resident);
-    format!(
+    append!(
+        out,
         "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
 \"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
 \"cost\": {}, \"costName\": \"{}\", \"cadence\": {}, \"cadenceName\": \"{}\", \
@@ -523,7 +536,7 @@ fn effect_observation(observation: &ObservationDescriptor) -> String {
         number(observation.minimum),
         number(observation.maximum),
         subscribable,
-    )
+    );
 }
 
 const fn observation_kind_name(kind: ObservationKind) -> &'static str {
@@ -566,8 +579,9 @@ const fn observation_channels_name(channels: ObservationChannels) -> &'static st
 /// a float, so a catalog round-trip is lossless. `size` is the shortest spelling that names the
 /// declared `f32` exactly -- a ratio row's authority really is the decimal `1.02`, and rendering
 /// it at the row's own eight-decimal value precision would spell it `1.01999998`.
-fn step_object(lattice: ParameterLattice) -> String {
-    format!(
+fn step_object(out: &mut String, lattice: ParameterLattice) {
+    append!(
+        out,
         "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
 {{ \"xs\": {}, \"sm\": {}, \"md\": {}, \"lg\": {}, \"xl\": {} }} }}",
         step_unit_name(lattice.step_unit),
@@ -578,7 +592,7 @@ fn step_object(lattice: ParameterLattice) -> String {
         lattice.ladder.multiple(StepSize::Md),
         lattice.ladder.multiple(StepSize::Lg),
         lattice.ladder.multiple(StepSize::Xl),
-    )
+    );
 }
 
 const fn step_unit_name(unit: StepUnit) -> &'static str {
@@ -590,71 +604,83 @@ const fn step_unit_name(unit: StepUnit) -> &'static str {
     }
 }
 
-fn effect_parameter(parameter: &ParameterDescriptor) -> String {
-    let mut out = String::new();
+fn effect_parameter(out: &mut String, parameter: &ParameterDescriptor) {
     out.push_str("        {\n");
-    out.push_str(&format!("          \"id\": {},\n", parameter.id.0));
-    out.push_str(&format!(
+    append!(out, "          \"id\": {},\n", parameter.id.0);
+    append!(
+        out,
         "          \"name\": \"{}\",\n",
         escape(parameter.display_name)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"displayUnit\": \"{}\",\n",
         escape(parameter.display_unit)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"unit\": {}, \"unitName\": \"{}\",\n",
         parameter.unit as u32,
         unit_name(parameter.unit)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"domain\": {}, \"domainName\": \"{}\",\n",
         parameter.domain as u32,
         domain_name(parameter.domain)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"minimum\": {}, \"maximum\": {}, \"default\": {},\n",
         optional_number(parameter.minimum),
         optional_number(parameter.maximum),
         number(parameter.default_value)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"mapping\": {}, \"mappingName\": \"{}\",\n",
         parameter.mapping as u32,
         mapping_name(parameter.mapping)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"automationRate\": {}, \"automationRateName\": \"{}\",\n",
         parameter.automation_rate as u32,
         automation_rate_name(parameter.automation_rate)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"channelPolicy\": {}, \"channelPolicyName\": \"{}\",\n",
         parameter.channel_policy as u32,
         channel_policy_name(parameter.channel_policy)
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"smoothing\": {}, \"smoothingName\": \"{}\", \"smoothingSamples\": {},\n",
         parameter.smoothing as u32,
         smoothing_name(parameter.smoothing),
         parameter.smoothing_samples
-    ));
-    out.push_str(&format!(
+    );
+    append!(
+        out,
         "          \"readable\": {}, \"automatable\": {},\n",
-        parameter.readable, parameter.automatable
-    ));
+        parameter.readable,
+        parameter.automatable
+    );
     // Issue #140 A: the live-control command path now feeds an admitted parameter into the
     // running plan as a `PreparedAutomationSpan`, so a parameter is live exactly when its own
     // descriptor says it can be automated. The two statements are the same statement, which is
     // why this is derived from `automatable` rather than written down. A parameter that declares
     // `AutomationRate::None` has no span the effect would accept and stays `false`.
-    out.push_str(&format!(
+    append!(
+        out,
         "          \"liveUpdatable\": {},\n",
         parameter.automatable
-    ));
+    );
     out.push_str("          \"enumChoices\": [");
     for (index, choice) in parameter.enum_choices.iter().enumerate() {
-        out.push_str(&format!(
+        append!(
+            out,
             "{{ \"value\": {}, \"label\": \"{}\" }}{}",
             number(choice.value),
             escape(choice.label),
@@ -663,40 +689,26 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
             } else {
                 ", "
             }
-        ));
+        );
     }
     out.push_str("],\n");
     // Issue #242: the lattice declaration this row's legal persisted values are generated from.
-    out.push_str(&format!(
-        "          \"step\": {}\n        }}",
-        step_object(parameter.lattice)
-    ));
-    out
+    out.push_str("          \"step\": ");
+    step_object(out, parameter.lattice);
+    out.push_str("\n        }");
 }
 
-fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
+fn builtin_parameter(out: &mut String, parameter: &BuiltinParameterDescriptor) {
     let unit = builtin_parameter_unit(parameter);
     // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz` gives one
     // per launch rate, so the row carries the exact `f32` for each rather than a number that would
     // be wrong at three of the four.
-    let mut maximum_by_rate = String::from("null");
     let (minimum, maximum, domain_name) = match parameter.domain {
         BuiltinParameterDomain::BooleanExact => (None, None, "booleanExact"),
         BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => {
             (Some(minimum), Some(maximum), "finiteInclusive")
         }
         BuiltinParameterDomain::DisabledOrRateKeyedHertz { minimum_hz, .. } => {
-            maximum_by_rate = format!(
-                "{{ {} }}",
-                LAUNCH_RATES_HZ
-                    .iter()
-                    .map(|rate| format!(
-                        "\"{rate}\": {}",
-                        optional_number(builtin_filter_cutoff_maximum_hz(*rate))
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
             (Some(minimum_hz), None, "disabledOrRateKeyedHertz")
         }
     };
@@ -707,11 +719,10 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         parameter.update_rate,
         BuiltinParameterUpdateRate::BlockTarget
     );
-    format!(
+    append!(
+        out,
         "      {{ \"id\": {}, \"name\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
-\"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": {}, \"default\": {}, \
-\"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
-\"liveUpdatable\": {}, \"step\": {} }}",
+\"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": ",
         parameter.id,
         escape(parameter.name),
         unit as u32,
@@ -729,7 +740,32 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         domain_name,
         optional_number(minimum),
         optional_number(maximum),
-        maximum_by_rate,
+    );
+    if matches!(
+        parameter.domain,
+        BuiltinParameterDomain::DisabledOrRateKeyedHertz { .. }
+    ) {
+        out.push_str("{ ");
+        for (index, rate) in LAUNCH_RATES_HZ.iter().enumerate() {
+            append!(
+                out,
+                "\"{rate}\": {}{}",
+                optional_number(builtin_filter_cutoff_maximum_hz(*rate)),
+                if index + 1 == LAUNCH_RATES_HZ.len() {
+                    ""
+                } else {
+                    ", "
+                },
+            );
+        }
+        out.push_str(" }");
+    } else {
+        out.push_str("null");
+    }
+    append!(
+        out,
+        ", \"default\": {}, \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
+\"liveUpdatable\": {}, \"step\": ",
         number(parameter.default),
         match parameter.update_rate {
             BuiltinParameterUpdateRate::PreparedOnly => "preparedOnly",
@@ -746,8 +782,9 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         },
         optional_number(parameter.disabled_value),
         live,
-        step_object(parameter.lattice),
-    )
+    );
+    step_object(out, parameter.lattice);
+    out.push_str(" }");
 }
 
 const fn unit_name(unit: ParameterUnit) -> &'static str {

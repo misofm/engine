@@ -208,8 +208,9 @@ Three rows: two red, one argued-equivalent with its premise asserted in code (C-
 
 ## Issue #944 — the settled matrix's select-free arm
 
-Housekeeping #1133 retired the historical gate-3 digest below. Current coverage is the lane
-select/general-kernel comparison, the settled dispatch witness and signed-zero law, plus
+Housekeeping #1133 retired the historical gate-3 digest below, and #1146 retired gate 4's
+standing-row digest pins. Current coverage is the lane select/general-kernel comparison, the
+settled dispatch witness and signed-zero law, plus
 `fused_fader_matrix_shapes_match_the_separate_stages`'s partial/full/padded banks and explicit
 200-sample ramp-to-identity endpoint. The original mutation results below remain historical evidence.
 
