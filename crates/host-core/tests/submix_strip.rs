@@ -13,6 +13,16 @@
 //!
 //! Issue #1201: a submix's `delay_samples` delays its summed input, uncompensated.
 //!
+//! Issue #1202: every submix carries every session console slot.
+//!
+//! * **Gate 1, the bus equals a track, with console slots**: gate 1's sessions declare
+//!   `pre_insert: [eq, compressor]` and `post_insert: [true-peak limiter]`, the bus and the
+//!   reference track carry drawn entries, and the contributors bypass every slot.
+//! * **Gate 3, a bypassed bus slot keeps its latency.**
+//! * **Gate 7, the K1 live-control interim with a console**: no bus console slot gets a live
+//!   channel or an observation handle.
+//! * **Gate 8, render allocates nothing** for gate 1's console session.
+//!
 //! * **Gate 1, the bus delay runs after the sum**, and PDC never sees it.
 //! * **Gate 3, a folded bus still delays its sum.**
 //! * **Gate 4, render allocates nothing** for gate 1's delayed bus.
@@ -37,11 +47,11 @@ use host_core::{
     compile_host_session, prepare_host_runtime, prepare_host_session_with_live_controls,
 };
 use session::{
-    ChannelBuiltins, ChannelMatrix, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity,
-    EffectParam, EffectQuality, LinkMode, MatrixOrPan, ParameterChannel, ParameterUnit, Rack,
-    Route, RouteDestination, RouteSource, SendTap, SessionModel, SidechainDeclaration, Source,
-    StableId, Submix, canonical_session_json, compile_session, estimate_session_resources,
-    parse_session_json,
+    ChannelBuiltins, ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins,
+    DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, MatrixOrPan,
+    ParameterChannel, ParameterUnit, Rack, Route, RouteDestination, RouteSource, SendTap,
+    SessionModel, SidechainDeclaration, Source, StableId, Submix, canonical_session_json,
+    compile_session, estimate_session_resources, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
@@ -131,32 +141,46 @@ fn into_bus(bus: &str) -> RouteDestination {
 #[derive(Clone)]
 struct Strip {
     builtins: DualMonoBuiltins,
+    console: Vec<ConsoleEntry>,
     inserts: Rack,
     fader: DualMonoFader,
     matrix_or_pan: MatrixOrPan,
 }
 
 impl Strip {
-    fn transparent() -> Self {
+    /// The transparent strip under `console`: every slot bypassed (#1202 D4).
+    fn transparent(console: &Console) -> Self {
         let Submix {
             builtins,
+            console,
             inserts,
             fader,
             matrix_or_pan,
             ..
-        } = Submix::unity(sid("unused"));
+        } = Submix::unity(sid("unused"), console);
         Self {
             builtins,
+            console,
             inserts,
             fader,
             matrix_or_pan,
         }
     }
 
+    /// Puts this strip on `track`.
+    fn onto(self, track: &mut session::Track) {
+        track.builtins = self.builtins;
+        track.console = self.console;
+        track.inserts = self.inserts;
+        track.fader = self.fader;
+        track.matrix_or_pan = self.matrix_or_pan;
+    }
+
     fn submix(self, id: &str) -> Submix {
         Submix {
             id: sid(id),
             builtins: self.builtins,
+            console: self.console,
             inserts: self.inserts,
             fader: self.fader,
             matrix_or_pan: self.matrix_or_pan,
@@ -164,24 +188,37 @@ impl Strip {
     }
 }
 
-/// The fixture with its tracks, routes and sources removed, at `rate`.
+/// The fixture with its tracks, routes and sources removed, at `rate`, with no console.
 fn empty_session(rate: u32) -> (SessionModel, Source, session::Track) {
+    empty_session_with(rate, no_console(), BLOCKS)
+}
+
+fn no_console() -> Console {
+    Console {
+        pre_insert: Vec::new(),
+        post_insert: Vec::new(),
+    }
+}
+
+/// [`empty_session`] declaring `console`, with a source long enough for `blocks` quanta. The
+/// returned track is transparent: it carries every slot bypassed.
+fn empty_session_with(
+    rate: u32,
+    console: Console,
+    blocks: usize,
+) -> (SessionModel, Source, session::Track) {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
     model.sample_rate_hz = rate;
     model.quantum_frames = QUANTUM as u32;
     let mut source = model.sources.pop().expect("fixture source");
-    source.frames = (QUANTUM * (BLOCKS + 8)) as u64;
+    source.frames = (QUANTUM * (blocks + 8)) as u64;
     let mut track = model.tracks.swap_remove(0);
-    track.console.clear();
     model.tracks.clear();
     model.routes.clear();
     model.sources.clear();
     model.automation.clear();
-    let strip = Strip::transparent();
-    track.builtins = strip.builtins;
-    track.inserts = strip.inserts;
-    track.fader = strip.fader;
-    track.matrix_or_pan = strip.matrix_or_pan;
+    model.console = console;
+    Strip::transparent(&model.console).onto(&mut track);
     (model, source, track)
 }
 
@@ -293,14 +330,58 @@ fn drawn_lane(draw: &mut Draw) -> ChannelBuiltins {
     }
 }
 
-/// Strip `S`: a drawn input section, a `link_mode: maximum` compressor and an EQ, a fader and a
-/// pan. No delay (#1201) and no console entries (#1202).
-fn drawn_strip(draw: &mut Draw, registry: &NativeEffectRegistry) -> Strip {
+/// Gate 1's console (#1202): `pre_insert: [eq, compressor]`, `post_insert: [true-peak limiter]`.
+fn gate_one_console() -> Console {
+    let slot = |id: &str, kind: &str, link_mode| ConsoleSlot {
+        slot: sid(id),
+        identity: EffectIdentity::Native {
+            effect_id: sid(kind),
+        },
+        quality: EffectQuality::Normal,
+        link_mode,
+    };
+    Console {
+        pre_insert: vec![
+            slot("desk-eq", "miso.parametric-eq", LinkMode::DualMono),
+            slot("desk-comp", "miso.compressor", LinkMode::Maximum),
+        ],
+        post_insert: vec![slot(
+            "desk-limit",
+            "miso.true-peak-limiter",
+            LinkMode::Maximum,
+        )],
+    }
+}
+
+/// Strip `S`: a drawn input section, an entry for every slot of `console` with a drawn bypass and
+/// drawn parameters (#1202), a `link_mode: maximum` compressor and an EQ, a fader and a pan. No
+/// delay (#1201).
+fn drawn_strip(draw: &mut Draw, registry: &NativeEffectRegistry, console: &Console) -> Strip {
     Strip {
         builtins: DualMonoBuiltins {
             left: drawn_lane(draw),
             right: drawn_lane(draw),
         },
+        console: console
+            .slots()
+            .map(|slot| {
+                let EffectIdentity::Native { effect_id } = &slot.identity else {
+                    panic!("a console slot is native");
+                };
+                let drawn = drawn_effect(
+                    draw,
+                    registry,
+                    effect_id.as_str(),
+                    slot.slot.as_str(),
+                    slot.link_mode,
+                );
+                ConsoleEntry {
+                    slot: slot.slot.clone(),
+                    bypass: draw.chance(1, 3),
+                    params: drawn.params,
+                }
+            })
+            .collect(),
         inserts: Rack {
             effects: vec![
                 drawn_effect(draw, registry, "miso.compressor", "glue", LinkMode::Maximum),
@@ -344,17 +425,31 @@ struct Contributor {
     planes: [Vec<f32>; 2],
 }
 
-/// Gate 1's two sessions: A, three transparent tracks into a submix with strip `S`; B, one track
-/// with strip `S` whose source is the test's own sum of A's routed contributions. Returns the two
-/// documents and each one's `(source id, planes)` feed.
+/// Gate 1's rendered blocks: the console's latency is paid twice on the bus path, `2 L` with
+/// `L = rate / 100 + 6` (the bypassed limiter's), so at 96 kHz the output starts at frame 1932.
+const GATE_ONE_BLOCKS: usize = 24;
+
+/// The latency of a bypassed true-peak limiter at `rate` (decision 12: bypass keeps it).
+const fn limiter_latency(rate: u32) -> usize {
+    (rate / 100 + 6) as usize
+}
+
+/// Gate 1's two sessions, both declaring [`gate_one_console`]: A, three tracks that bypass every
+/// console slot and are otherwise transparent, routed into a submix with strip `S`; B, one track
+/// with strip `S` whose source is the test's own sum of A's routed contributions. A contributor
+/// passes its source delayed by the bypassed limiter's `L`, so B's source is the D3 sum of the
+/// delayed contributions: `L` leading zeros (signed as the sum makes them), then the sum. Returns
+/// the two documents and each one's `(source id, planes)` feed.
 #[allow(clippy::type_complexity)]
 fn gate_one_sessions(
     draw: &mut Draw,
     registry: &NativeEffectRegistry,
 ) -> (String, Vec<(String, [Vec<f32>; 2])>, String, [Vec<f32>; 2]) {
     let rate = draw.pick(&LAUNCH_RATES);
-    let strip = drawn_strip(draw, registry);
-    let frames = QUANTUM * BLOCKS;
+    let console = gate_one_console();
+    let strip = drawn_strip(draw, registry, &console);
+    let frames = QUANTUM * GATE_ONE_BLOCKS;
+    let latency = limiter_latency(rate);
     // Route IDs are a random permutation of the tracks, so route-ID order is not track order.
     let mut names = vec!["route-a", "route-b", "route-c"];
     let mut contributors: Vec<Contributor> = (0..3)
@@ -386,7 +481,7 @@ fn gate_one_sessions(
         })
         .collect();
 
-    let (mut a, source, track) = empty_session(rate);
+    let (mut a, source, track) = empty_session_with(rate, console.clone(), GATE_ONE_BLOCKS);
     for contributor in &contributors {
         add_track(&mut a, &source, &track, &contributor.track);
         a.routes.push(contributor.route.clone());
@@ -394,9 +489,9 @@ fn gate_one_sessions(
     a.submixes = vec![strip.clone().submix("bus")];
     a.routes.push(to_output("bus-main", bus_output("bus")));
 
-    // The D9 sum, by the D3 expression: each route folds its gain into its matrix once, then
-    // `l' = (lr * r) + (ll * l)` with two roundings, and the contributions are added left to right
-    // in route-ID order.
+    // The D9 sum, by the D3 expression, of each contributor delayed by `L`: each route folds its
+    // gain into its matrix once, then `l' = (lr * r) + (ll * l)` with two roundings, and the
+    // contributions are added left to right in route-ID order.
     contributors.sort_by(|x, y| x.route.id.cmp(&y.route.id));
     let mut sum = [vec![0.0_f32; frames], vec![0.0_f32; frames]];
     for (rank, contributor) in contributors.iter().enumerate() {
@@ -404,10 +499,14 @@ fn gate_one_sessions(
         let m = &contributor.route.channel_matrix;
         let (ll, lr, rl, rr) = (gain * m.ll, gain * m.lr, gain * m.rl, gain * m.rr);
         let [sum_left, sum_right] = &mut sum;
+        let delayed = [
+            shifted(&contributor.planes[0], latency),
+            shifted(&contributor.planes[1], latency),
+        ];
         let frames = sum_left
             .iter_mut()
             .zip(sum_right.iter_mut())
-            .zip(contributor.planes[0].iter().zip(&contributor.planes[1]));
+            .zip(delayed[0].iter().zip(&delayed[1]));
         for ((out_left, out_right), (&l, &r)) in frames {
             let left = (lr * r) + (ll * l);
             let right = (rr * r) + (rl * l);
@@ -421,11 +520,8 @@ fn gate_one_sessions(
         }
     }
 
-    let (mut b, source, mut track) = empty_session(rate);
-    track.builtins = strip.builtins;
-    track.inserts = strip.inserts;
-    track.fader = strip.fader;
-    track.matrix_or_pan = strip.matrix_or_pan;
+    let (mut b, source, mut track) = empty_session_with(rate, console, GATE_ONE_BLOCKS);
+    strip.onto(&mut track);
     add_track(&mut b, &source, &track, "summed");
     b.routes.push(to_output("summed-main", post_pan("summed")));
 
@@ -512,8 +608,8 @@ fn a_bus_renders_the_bits_of_a_track_fed_its_sum() {
             .iter()
             .map(|(id, planes)| (id.as_str(), planes))
             .collect();
-        let actual = render(&bus, &feeds, BLOCKS);
-        let expected = render(&oracle, &[("summed", &sum)], BLOCKS);
+        let actual = render(&bus, &feeds, GATE_ONE_BLOCKS);
+        let expected = render(&oracle, &[("summed", &sum)], GATE_ONE_BLOCKS);
         for plane in 0..2 {
             if let Some(index) = first_difference(&actual[plane], &expected[plane]) {
                 panic!(
@@ -545,7 +641,7 @@ fn a_bus_insert_is_charged_once_in_the_session_estimate() {
     bare.routes
         .push(route("t0-bus", post_pan("t0"), into_bus("bus")));
     bare.routes.push(to_output("bus-main", bus_output("bus")));
-    bare.submixes = vec![Submix::unity(sid("bus"))];
+    bare.submixes = vec![Submix::unity(sid("bus"), &bare.console)];
     let mut processed = bare.clone();
     let insert = drawn_effect(
         &mut draw,
@@ -613,7 +709,7 @@ fn heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are() {
         .routes
         .push(route("t0-bus", post_pan("t0"), into_bus("bus")));
     on_bus.routes.push(to_output("bus-main", bus_output("bus")));
-    on_bus.submixes = vec![Submix::unity(sid("bus"))];
+    on_bus.submixes = vec![Submix::unity(sid("bus"), &on_bus.console)];
     let mut on_track = on_bus.clone();
     on_bus.submixes[0].inserts.effects = heavy_inserts();
     on_track.tracks[0].inserts.effects = heavy_inserts();
@@ -652,7 +748,7 @@ fn pdc_session() -> SessionModel {
     }
     model.routes.push(to_output("t0-direct", post_pan("t0")));
     model.routes.push(to_output("bus-main", bus_output("bus")));
-    let mut bus = Strip::transparent();
+    let mut bus = Strip::transparent(&model.console);
     bus.inserts.effects.push(Effect {
         id: sid("ceiling"),
         identity: EffectIdentity::Native {
@@ -772,6 +868,87 @@ fn a_bus_limiters_latency_is_compensated_on_the_direct_edge() {
     }
 }
 
+// ---- #1202 gate 3 --------------------------------------------------------------------------
+
+/// A bypassed bus console slot keeps its latency (decision 12, L4). The session declares one
+/// `post_insert` limiter; every strip carries it bypassed. `t0` and `t1` feed the bus and `t0` also
+/// feeds the output directly, so its own path arrives at 486 samples (48 kHz) and the bus path at
+/// 972: PDC delays the direct edge by exactly 486, and an impulse on `t0` arrives once, summed,
+/// at sample 972 on both planes.
+#[test]
+fn a_bypassed_bus_console_slot_keeps_its_latency() {
+    let console = Console {
+        pre_insert: Vec::new(),
+        post_insert: vec![ConsoleSlot {
+            slot: sid("desk-limit"),
+            identity: EffectIdentity::Native {
+                effect_id: sid("miso.true-peak-limiter"),
+            },
+            quality: EffectQuality::Normal,
+            link_mode: LinkMode::Maximum,
+        }],
+    };
+    let (mut model, source, track) = empty_session_with(48_000, console, BLOCKS);
+    for id in ["t0", "t1"] {
+        add_track(&mut model, &source, &track, id);
+        model
+            .routes
+            .push(route(&format!("{id}-bus"), post_pan(id), into_bus("bus")));
+    }
+    model.routes.push(to_output("t0-direct", post_pan("t0")));
+    model.routes.push(to_output("bus-main", bus_output("bus")));
+    model.submixes = vec![Strip::transparent(&model.console).submix("bus")];
+    assert!(
+        model
+            .tracks
+            .iter()
+            .map(|track| &track.console)
+            .chain([&model.submixes[0].console])
+            .all(|entries| entries.len() == 1 && entries[0].bypass),
+        "every strip carries the limiter, bypassed"
+    );
+    let document = document(&model);
+
+    let artifact = graph_artifact(&document, 1_202);
+    assert_eq!(artifact.report().output_latency, LatencySamples(972));
+    let delays = &artifact.graph().inserted_delays;
+    assert_eq!(
+        delays.len(),
+        1,
+        "exactly the direct edge is delayed: {delays:?}"
+    );
+    let direct = graph::StableGraphId::parse("t0-direct").expect("graph id");
+    assert!(
+        matches!(
+            &delays[0].edge_id,
+            GraphEdgeId::RouteSource { route_id } | GraphEdgeId::RouteDestination { route_id }
+                if *route_id == direct
+        ),
+        "the delay sits on the direct route: {delays:?}"
+    );
+    assert_eq!(delays[0].samples, LatencySamples(486));
+
+    let mut impulse = [
+        vec![0.0_f32; QUANTUM * BLOCKS],
+        vec![0.0_f32; QUANTUM * BLOCKS],
+    ];
+    impulse[0][0] = 0.25;
+    impulse[1][0] = 0.25;
+    let silence = [
+        vec![0.0_f32; QUANTUM * BLOCKS],
+        vec![0.0_f32; QUANTUM * BLOCKS],
+    ];
+    let out = render(&document, &[("t0", &impulse), ("t1", &silence)], BLOCKS);
+    for (plane, samples) in out.iter().enumerate() {
+        assert_eq!(peak(samples), 972, "plane {plane} peaks at sample 972");
+        assert_eq!(
+            samples[972].to_bits(),
+            0.5_f32.to_bits(),
+            "plane {plane}: both bypassed paths arrive together, each unchanged"
+        );
+    }
+}
+
 // ---- Gate 3 -------------------------------------------------------------------------------
 
 #[test]
@@ -793,7 +970,7 @@ fn a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent() {
     let mut compressor = fixture.tracks[0].inserts.effects[0].clone();
     assert_eq!(compressor.link_mode, LinkMode::DualMono);
     compressor.id = sid("glue");
-    let mut bus = Strip::transparent();
+    let mut bus = Strip::transparent(&model.console);
     bus.inserts.effects.push(compressor);
     model.submixes = vec![bus.submix("bus")];
     let document = document(&model);
@@ -821,8 +998,12 @@ fn a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent() {
     }
 }
 
-// ---- Gate 5 -------------------------------------------------------------------------------
+// ---- Gate 5 (#1200), extended by #1202 gate 7 -------------------------------------------------
 
+/// Session A declares gate 1's console, so every strip -- the bus included -- carries three console
+/// slots (#1202 gate 7). Every track-owned effect, console slots and the one insert, gets a live
+/// channel, and the observable ones an observation handle; no bus effect, console slot or insert,
+/// gets either.
 #[test]
 fn no_bus_effect_gets_a_live_channel_or_an_observation_handle() {
     let registry = launch_native_effect_registry().expect("launch registry");
@@ -850,16 +1031,42 @@ fn no_bus_effect_gets_a_live_channel_or_an_observation_handle() {
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     let tracks: Vec<&str> = model.tracks.iter().map(|track| track.id.as_str()).collect();
-    let controls: Vec<(&str, &str)> = handles
+    let mut controls: Vec<(&str, &str)> = handles
         .effect_controls
         .iter()
         .map(|control| (&*control.track_id, &*control.effect_id))
         .collect();
-    let observations: Vec<(&str, &str)> = handles
+    let mut observations: Vec<(&str, &str)> = handles
         .effect_observations
         .iter()
         .map(|handle| (&*handle.track_id, &*handle.effect_id))
         .collect();
+    controls.sort_unstable();
+    observations.sort_unstable();
+    assert_eq!(
+        model.submixes[0].console.len(),
+        3,
+        "the bus carries the console"
+    );
+    let mut track_owned: Vec<(&str, &str)> = model
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track
+                .console
+                .iter()
+                .map(|entry| entry.slot.as_str())
+                .chain(
+                    track
+                        .inserts
+                        .effects
+                        .iter()
+                        .map(|effect| effect.id.as_str()),
+                )
+                .map(|effect| (track.id.as_str(), effect))
+        })
+        .collect();
+    track_owned.sort_unstable();
     assert!(
         controls
             .iter()
@@ -867,8 +1074,14 @@ fn no_bus_effect_gets_a_live_channel_or_an_observation_handle() {
             .all(|(owner, _)| tracks.contains(owner)),
         "a bus effect got a live channel: {controls:?} {observations:?}"
     );
-    assert_eq!(controls, [("t0", "comp")]);
-    assert_eq!(observations, [("t0", "comp")]);
+    assert_eq!(controls, track_owned);
+    // An EQ publishes no observation, so the observed set is the track-owned dynamics.
+    assert!(
+        observations.iter().all(|owned| track_owned.contains(owned))
+            && observations.contains(&("t0", "comp"))
+            && observations.contains(&("t2", "desk-limit")),
+        "{observations:?}"
+    );
 }
 
 // ---- Gate 8 -------------------------------------------------------------------------------
@@ -947,7 +1160,7 @@ fn delayed_bus_session(delay: [u32; 2]) -> String {
             .push(route(&format!("{id}-bus"), post_pan(id), into_bus("bus")));
     }
     model.routes.push(to_output("bus-main", bus_output("bus")));
-    let mut bus = Strip::transparent();
+    let mut bus = Strip::transparent(&model.console);
     bus.builtins.left.delay_samples = delay[0];
     bus.builtins.right.delay_samples = delay[1];
     model.submixes = vec![bus.submix("bus")];
@@ -1053,7 +1266,7 @@ fn a_folded_bus_still_delays_its_sum() {
                 .push(route(&format!("{id}-bus"), post_pan(&id), into_bus("bus")));
         }
         model.routes.push(to_output("bus-main", bus_output("bus")));
-        let mut bus = Strip::transparent();
+        let mut bus = Strip::transparent(&model.console);
         bus.builtins.left.delay_samples = delay;
         bus.builtins.right.delay_samples = delay;
         model.submixes = vec![bus.submix("bus")];

@@ -149,8 +149,8 @@ pub fn compile_session(
     normalized
         .automation
         .sort_by(|left, right| left.id.cmp(&right.id));
-    // Track console and insert parameters, then submix insert parameters (#1199), in canonical
-    // `(parameter_id, channel)` order.
+    // Track console and insert parameters, then submix console (#1202) and insert parameters
+    // (#1199), in canonical `(parameter_id, channel)` order.
     let track_params = normalized.tracks.iter_mut().flat_map(|track| {
         track
             .console
@@ -166,10 +166,16 @@ pub fn compile_session(
     });
     let submix_params = normalized.submixes.iter_mut().flat_map(|submix| {
         submix
-            .inserts
-            .effects
+            .console
             .iter_mut()
-            .map(|effect| &mut effect.params)
+            .map(|entry| &mut entry.params)
+            .chain(
+                submix
+                    .inserts
+                    .effects
+                    .iter_mut()
+                    .map(|effect| &mut effect.params),
+            )
     });
     for params in track_params.chain(submix_params) {
         params.sort_by(|left, right| {

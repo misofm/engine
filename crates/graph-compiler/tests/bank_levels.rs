@@ -46,9 +46,9 @@ use graph::{
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
-    ChannelMatrix, CompileCaps, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, Route,
-    RouteDestination, RouteSource, SendTap, SessionModel, Sidechain, SidechainDeclaration,
-    StableId, Submix, compile_session, parse_session_json,
+    ChannelMatrix, CompileCaps, ConsoleEntry, ConsoleSlot, Effect, EffectIdentity, EffectParam,
+    ParameterChannel, ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel,
+    Sidechain, SidechainDeclaration, StableId, Submix, compile_session, parse_session_json,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -233,6 +233,13 @@ pub struct Outcome {
     pub pcm: Option<Vec<u32>>,
     /// `[collapsed blocks, collapsible cohorts]` after the render.
     pub collapse: [u64; 2],
+    /// Per console group key -- (slot, pool class, dependency level) -- the console lanes the plan
+    /// runs there and the banks bound for them (decision 12: `ceil(lanes / W)` at a vector width).
+    pub console_groups: BTreeMap<(String, String, u64), [usize; 2]>,
+    /// Console lanes of submix strips at dependency level 1 or more (#1202).
+    pub bus_console_lanes: usize,
+    /// The (slot, dependency level) of every submix console lane (#1202).
+    pub bus_console_levels: BTreeSet<(String, u64)>,
 }
 
 /// Compile `model` the way every host does at `dispatch`, bind it, arm it as `collapse` says, and
@@ -303,6 +310,57 @@ pub fn compile_bind_render(
         }
     }
     let report = &artifact.report().rack_cohorts;
+    let is_console =
+        |rack: &graph::RackId| matches!(rack, graph::RackId::Simd1 | graph::RackId::Simd2);
+    let class_of: BTreeMap<&graph_compiler::RackChainId, String> = report
+        .plan
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .members
+                .iter()
+                .flatten()
+                .map(move |chain| (chain, format!("{:?}", group.class)))
+        })
+        .collect();
+    let buses: BTreeSet<&str> = model.submixes.iter().map(|bus| bus.id.as_str()).collect();
+    for (chain, nodes) in report
+        .chains
+        .iter()
+        .filter(|(chain, _)| is_console(&chain.rack))
+    {
+        let class = class_of.get(chain).cloned().unwrap_or_default();
+        for node in nodes {
+            let level = effect_level(node);
+            outcome
+                .console_groups
+                .entry((node.effect_id.as_str().to_owned(), class.clone(), level))
+                .or_default()[0] += 1;
+            if buses.contains(node.track_id.as_str()) {
+                outcome
+                    .bus_console_levels
+                    .insert((node.effect_id.as_str().to_owned(), level));
+                if level >= 1 {
+                    outcome.bus_console_lanes += 1;
+                }
+            }
+        }
+    }
+    for bound in &report.bound_slots {
+        let group = &report.plan.groups[bound.group];
+        let node = &bound.members[0];
+        if is_console(&node.rack) {
+            outcome
+                .console_groups
+                .entry((
+                    node.effect_id.as_str().to_owned(),
+                    format!("{:?}", group.class),
+                    effect_level(node),
+                ))
+                .or_default()[1] += 1;
+        }
+    }
     for group in report.plan.groups.iter().filter(|group| group.is_full()) {
         for slot in 0..group.program.len() {
             if !group.active_slots.iter().all(|lane| lane[slot]) {
@@ -724,9 +782,6 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         output_id: sid("main-out"),
     };
     for submix in 0..submixes {
-        model
-            .submixes
-            .push(Submix::unity(sid(&format!("bus{submix}"))));
         model.routes.push(route(
             &format!("bus{submix}-main"),
             RouteSource::SubmixOutput {
@@ -822,7 +877,100 @@ pub fn generate(seed: u64) -> (SessionModel, Shape) {
         }
     }
     place(&mut model, chains);
+    // The bus strips are drawn from their own stream, so every other draw -- the tracks, routes
+    // and console of every seed -- is the one it was before buses carried strips (#1202).
+    let mut bus_rng = Rng::new(seed ^ 0x1202_0000_0000_0000);
+    for submix in 0..submixes {
+        let bus = bus_strip(&mut bus_rng, &model, &templates, &format!("bus{submix}"));
+        model.submixes.push(bus);
+    }
     (model, shape)
+}
+
+/// A bus strip (#1202): every session console slot, each entry with a random bypass and a third
+/// of the effect's parameters drawn, each channel apart; and up to two random inserts. A bus
+/// carries no sidechain.
+fn bus_strip(rng: &mut Rng, model: &SessionModel, templates: &Templates, id: &str) -> Submix {
+    let registry = launch_native_effect_registry().expect("launch registry");
+    let mut bus = Submix::unity(sid(id), &model.console);
+    for (entry, slot) in bus.console.iter_mut().zip(model.console.slots()) {
+        let EffectIdentity::Native { effect_id } = &slot.identity else {
+            panic!("a console slot is native");
+        };
+        let descriptor = registry
+            .get_ascii(effect_id.as_str())
+            .expect("a launch effect")
+            .descriptor();
+        entry.bypass = rng.chance(300);
+        entry.params = drawn_params(rng, descriptor.parameters);
+    }
+    bus.inserts.effects = (0..rng.below(3))
+        .map(|slot| {
+            let kind = KINDS[rng.below(8) as usize];
+            let mut effect = templates.effect(kind, &format!("{}-bus{slot}", kind.slot_name()));
+            effect.bypass = rng.chance(60);
+            effect
+        })
+        .collect();
+    bus
+}
+
+/// A third of `parameters`, each drawn legal per channel (left and right apart where the parameter
+/// is per lane), so a bus lane's parameters differ from its bank neighbours'.
+fn drawn_params(
+    rng: &mut Rng,
+    parameters: &[effect_contract::ParameterDescriptor],
+) -> Vec<EffectParam> {
+    let drawn = |rng: &mut Rng, parameter: &effect_contract::ParameterDescriptor| {
+        let value = match parameter.domain {
+            effect_contract::ParameterDomain::Boolean => rng.below(2) as f32,
+            effect_contract::ParameterDomain::Enumeration => {
+                parameter.enum_choices[rng.below(parameter.enum_choices.len() as u64) as usize]
+                    .value
+            }
+            effect_contract::ParameterDomain::Continuous => {
+                let low = parameter.minimum.unwrap_or(parameter.default_value);
+                let high = parameter.maximum.unwrap_or(parameter.default_value);
+                low + (high - low) * (rng.below(1_001) as f32 / 1_000.0)
+            }
+        };
+        if effect_contract::parameter_value_valid(parameter, value) {
+            value
+        } else {
+            parameter.default_value
+        }
+    };
+    let unit = |unit: effect_contract::ParameterUnit| match unit {
+        effect_contract::ParameterUnit::Db => ParameterUnit::Db,
+        effect_contract::ParameterUnit::Hz => ParameterUnit::Hz,
+        effect_contract::ParameterUnit::Milliseconds => ParameterUnit::Milliseconds,
+        effect_contract::ParameterUnit::Samples => ParameterUnit::Samples,
+        effect_contract::ParameterUnit::Linear => ParameterUnit::Linear,
+        effect_contract::ParameterUnit::Ratio => ParameterUnit::Ratio,
+    };
+    let mut params = Vec::new();
+    for parameter in parameters {
+        if !rng.chance(333) {
+            continue;
+        }
+        let channels: &[ParameterChannel] = if parameter.channel_policy
+            == effect_contract::ParameterChannelPolicy::PerLane
+            && rng.chance(500)
+        {
+            &[ParameterChannel::Left, ParameterChannel::Right]
+        } else {
+            &[ParameterChannel::Both]
+        };
+        for &channel in channels {
+            params.push(EffectParam {
+                parameter_id: parameter.id.0,
+                channel,
+                unit: unit(parameter.unit),
+                value: drawn(rng, parameter),
+            });
+        }
+    }
+    params
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1188,6 +1336,122 @@ fn a_slot_after_a_misaligned_one_realigns_and_still_banks() {
     native_bank_count(name, &outcomes, 18, 9);
 }
 
+/// #1202 gate 2's sessions: four tracks of the intended console (`pre_insert: [eq, comp]`,
+/// `post_insert: [limiter]`), each routed to the output and into a bus. `levels == 1` gives
+/// `buses` first-order buses, each fed by one track, so every bus sits at one level; `levels == 3`
+/// chains three buses, `bus0 <- tracks`, `bus1 <- bus0`, `bus2 <- bus1`, one level apart. Every bus
+/// carries every console slot with a drawn bypass and parameters, and no insert, and feeds the
+/// output. A lone first-order bus is fed by all four tracks, and bus `i` of several by track
+/// `i % 4`.
+fn bus_console_session(buses: usize, levels: usize, seed: u64) -> SessionModel {
+    let mut model = intended_prefix(4);
+    let templates = Templates::of(&model);
+    let mut rng = Rng::new(seed);
+    let to_bus = |from: RouteSource, bus: usize, id: String| {
+        route(
+            &id,
+            from,
+            RouteDestination::SubmixInput {
+                submix_id: sid(&format!("bus{bus}")),
+            },
+            -6.0,
+        )
+    };
+    for bus in 0..buses {
+        let mut strip = bus_strip(&mut rng, &model, &templates, &format!("bus{bus}"));
+        strip.inserts.effects.clear();
+        model.submixes.push(strip);
+        model.routes.push(route(
+            &format!("bus{bus}-main"),
+            RouteSource::SubmixOutput {
+                submix_id: sid(&format!("bus{bus}")),
+            },
+            RouteDestination::OutputInput {
+                output_id: sid("main-out"),
+            },
+            0.0,
+        ));
+        let from = if levels == 1 || bus == 0 {
+            (0..4)
+                .filter(|track| levels > 1 || buses == 1 || *track == bus % 4)
+                .map(|track| RouteSource::Track {
+                    track_id: sid(&format!("ch{track:02}")),
+                    tap: SendTap::PostPan,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![RouteSource::SubmixOutput {
+                submix_id: sid(&format!("bus{}", bus - 1)),
+            }]
+        };
+        for (index, source) in from.into_iter().enumerate() {
+            model
+                .routes
+                .push(to_bus(source, bus, format!("bus{bus}-in{index}")));
+        }
+    }
+    model
+}
+
+/// #1202 gate 2 (VERIFY-2 M9): every console group binds when buses carry console slots.
+///
+/// One, three, five and nine first-order buses at one level, and three buses at three distinct
+/// levels, each carrying the intended console. At `Scalar` and at the build's own width the
+/// compile is accepted; a foreign width is accepted or refused with exactly
+/// [`FOREIGN_CONSOLE_REFUSAL`] ([`compiled_at`]); every width that compiled renders the scalar
+/// plan's bits. At the build's own width `W`, each (slot, pool class, level) group binds exactly
+/// `ceil(n / W)` banks for its `n` console lanes, tracks' and buses' together.
+///
+/// Red if bus console lanes are not banked at the build's width, are grouped across levels, or
+/// are padded wrongly. Until #1202 no console lane lived after level 0's chains.
+#[test]
+fn every_console_group_binds_when_buses_carry_the_console() {
+    let width = Backend::current().width();
+    for (buses, levels) in [(1, 1), (3, 1), (5, 1), (9, 1), (3, 3)] {
+        let name = format!("{buses} buses at {levels} level(s)");
+        let model = bus_console_session(buses, levels, 1_202 + buses as u64);
+        let (outcomes, _) = assert_binds_and_renders_the_scalar_bits(&name, &model);
+        let native = &outcomes[native_index() + 1];
+        eprintln!(
+            "{name}: console groups (slot, class, level) -> [lanes, banks] at {:?}: {:?}; \
+             compiled at {:?}: {:?}",
+            Backend::current(),
+            native.console_groups,
+            widths(),
+            outcomes
+                .iter()
+                .map(|outcome| outcome.compile.is_none())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            native.bus_console_lanes,
+            buses * 3,
+            "{name}: every bus console lane is in the plan, after level 0"
+        );
+        for slot in ["eq", "comp", "limiter"] {
+            let bus_levels = native
+                .bus_console_levels
+                .iter()
+                .filter(|(at, _)| at == slot)
+                .count();
+            assert_eq!(
+                bus_levels, levels,
+                "{name}: {slot}'s bus lanes sit at {levels} level(s)"
+            );
+        }
+        for ((slot, class, level), [lanes, banks]) in &native.console_groups {
+            assert_eq!(
+                *banks,
+                lanes.div_ceil(width),
+                "{name}: console group ({slot}, {class}, level {level}) of {lanes} lanes at \
+                 {:?}: {:?}",
+                Backend::current(),
+                native.console_groups
+            );
+        }
+    }
+}
+
 fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -1212,6 +1476,8 @@ struct SeedReport {
     silent: bool,
     moved: Vec<(Backend, Collapse)>,
     collapsed: bool,
+    /// Submix console lanes at dependency level 1 or more, at the build's own width (#1202).
+    bus_console_lanes: usize,
 }
 
 fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
@@ -1237,11 +1503,18 @@ fn probe_seed(seed: u64, blocks: u64, render_all: bool) -> SeedReport {
         }
         report.misaligned[index] = outcome.misaligned_slots > 0;
         report.latency = report.latency.max(outcome.latency);
+        if dispatch == Backend::current() {
+            report.bus_console_lanes = outcome.bus_console_lanes;
+        }
         if let Some(code) = outcome.bind {
             report.refused.push((dispatch, code));
         }
     }
-    if !(report.misaligned.contains(&true) || render_all) || blocks == 0 {
+    // A seed whose buses run console lanes is rendered too (#1202): no fixed session spans the
+    // topologies that put a bus lane in a bank.
+    if !(report.misaligned.contains(&true) || report.bus_console_lanes > 0 || render_all)
+        || blocks == 0
+    {
         return report;
     }
     report.rendered = true;
@@ -1326,6 +1599,7 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     let mut rendered = 0_u64;
     let mut collapsed = 0_u64;
     let mut latency = 0_u64;
+    let mut bus_console = [0_u64; 2];
     let mut by_shape: BTreeMap<Shape, [u64; 2]> = BTreeMap::new();
     for (seed, report) in reports {
         compile_refused += report.compile_refused;
@@ -1351,6 +1625,10 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
             silent.push(seed);
         }
         rendered += u64::from(report.rendered);
+        if report.rendered && report.bus_console_lanes > 0 {
+            bus_console[0] += 1;
+            bus_console[1] += report.bus_console_lanes as u64;
+        }
         collapsed += u64::from(report.collapsed);
         latency = latency.max(report.latency);
         let tally = by_shape
@@ -1365,7 +1643,8 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
          width {widths:?} {foreign_refused:?}, seeds with a misaligned slot \
          {widths:?} {misaligned:?}, rendered {rendered}, of which the armed collapse \
          fired in {collapsed}, longest output latency {latency} samples, [seeds, seeds with a \
-         misaligned slot] by shape {by_shape:?}",
+         misaligned slot] by shape {by_shape:?}, [rendered seeds, lanes] with a bus console lane \
+         at level 1 or more {bus_console:?}",
         start + count
     );
     assert!(
@@ -1388,5 +1667,9 @@ fn randomized_consoles_compile_bind_and_render_the_scalar_bits() {
     assert!(
         blocks == 0 || collapsed > 0,
         "the armed leg fires the mono collapse on some rendered seed"
+    );
+    assert!(
+        blocks == 0 || bus_console[0] > 0,
+        "the probe renders a bus console lane at level 1 or more against the scalar plan"
     );
 }

@@ -32,19 +32,6 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     let track_id = track.id.clone();
     let effect_id = effect.id.clone();
     let id = |value| StableId::parse(value).expect("literal stable ID");
-    // #1199: a non-trivial submix strip -- non-default trim, an insert, a muted lane and a
-    // matrix -- so the corpus encodes every submix field (1, 2, 4, 5 and tagged 6).
-    let mut submix = Submix::unity(id("drums"));
-    submix.builtins.left.trim_db = -3.0;
-    submix.inserts.effects.push(effect.clone());
-    submix.fader.right_mute = true;
-    submix.matrix_or_pan = session::MatrixOrPan::Matrix {
-        ll: 0.75,
-        lr: 0.25,
-        rl: -0.25,
-        rr: 0.5,
-        smoothing_samples: 16,
-    };
     // Decision 12 (#1094): one slot in each console section, so `SetConsole` encodes both repeated
     // section fields, and a track entry for each, so `SetTrackConsole` repeats its entry field.
     let console = Console {
@@ -62,6 +49,23 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             quality: EffectQuality::High,
             link_mode: LinkMode::Maximum,
         }],
+    };
+    // #1199: a non-trivial submix strip -- non-default trim, an insert, a muted lane and a
+    // matrix -- so the corpus encodes every submix field (1, 2, 4, 5 and tagged 6). #1202: it
+    // carries an entry for both console slots, one live with the effect's parameters and one
+    // bypassed, so the corpus repeats submix field 3.
+    let mut submix = Submix::unity(id("drums"), &console);
+    submix.builtins.left.trim_db = -3.0;
+    submix.console[0].bypass = false;
+    submix.console[0].params = effect.params.clone();
+    submix.inserts.effects.push(effect.clone());
+    submix.fader.right_mute = true;
+    submix.matrix_or_pan = session::MatrixOrPan::Matrix {
+        ll: 0.75,
+        lr: 0.25,
+        rl: -0.25,
+        rr: 0.5,
+        smoothing_samples: 16,
     };
     let mut track_console = track.console.clone();
     track_console.push(ConsoleEntry {
@@ -677,7 +681,9 @@ pub enum ConformanceDecoder {
 /// Issue #1199 repinned it from `ebf282621550d44a`: the submix message carries the strip in submix
 /// fields 2, 4, 5, 6 (builtins, inserts, fader, tagged pan or matrix), and `UpsertSubmix` encodes a
 /// non-trivial one.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xca48_855f_d3a7_56b7;
+/// Issue #1202 repinned it from `ca48855fd3a756b7`: the submix message carries its console entries
+/// in submix field 3, and `UpsertSubmix` encodes two (one live, one bypassed).
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xc0f6_eced_bf50_920a;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

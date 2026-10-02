@@ -101,9 +101,9 @@ pub mod keys {
  key_module!(sidechain,"Sidechain fields.";KIND="kind":1,SOURCE="source":2,PORT_ID="port_id":3);
  key_module!(fader,"Fader fields.";LEFT_DB="left_db":1,RIGHT_DB="right_db":2,LEFT_MUTE="left_mute":3,RIGHT_MUTE="right_mute":4);
  key_module!(matrix_or_pan,"Matrix-or-pan fields.";LEFT="left":2,RIGHT="right":3,PAN_SMOOTHING="smoothing_samples":4,LL="ll":2,LR="lr":3,RL="rl":4,RR="rr":5,MATRIX_SMOOTHING="smoothing_samples":6);
- // Field 3 is reserved for `console`, which #1202 appends; pan and matrix share tagged field 6,
+ // Field 3 is `console`, the reserved field #1202 appends; pan and matrix share tagged field 6,
  // exactly as the track's field 10 (#1199 D1).
- key_module!(submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6);
+ key_module!(submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,CONSOLE="console":3,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6);
  key_module!(output,"Output fields.";ID="id":1);
  key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5);
  key_module!(route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3);
@@ -223,8 +223,8 @@ mod walk {
           v.u32(f::PARAMETER_ID,s.parameter_id),v.token(f::CHANNEL,token(s.channel.token(),s.channel.wire())),v.token(f::UNIT,token(s.unit.token(),s.unit.wire())),v.f32(f::VALUE,s.value)
         }
         DualMonoFader=>fader |s,v,_o,f| [4] {v.f32(f::LEFT_DB,s.left_db),v.f32(f::RIGHT_DB,s.right_db),v.bool(f::LEFT_MUTE,s.left_mute),v.bool(f::RIGHT_MUTE,s.right_mute)}
-        Submix=>submix |s,v,o,f| [5] {
-          v.id(f::ID,&s.id),s.builtins.record(Some(f::BUILTINS),o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),
+        Submix=>submix |s,v,o,f| [5+s.console.len() as u32] {
+          v.id(f::ID,&s.id),s.builtins.record(Some(f::BUILTINS),o,v),array(f::CONSOLE,&s.console,o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),
           {let k=match s.matrix_or_pan {MatrixOrPan::Pan{..}=>f::PAN,MatrixOrPan::Matrix{..}=>f::MATRIX};s.matrix_or_pan.record(Some(k),o,v)}
         }
         Output=>output |s,v,_o,f| [1] {v.id(f::ID,&s.id)}

@@ -5431,6 +5431,10 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
 /// carries an effect boots and renders. Until #1207 files bus effects, preparation attaches live
 /// controls and observation to track-owned effects only (DESIGN P16), so the browser never sees a
 /// producer or an observation handle it cannot file.
+///
+/// #1202 gate 7: the session also declares one console slot, a parametric EQ, and every strip --
+/// the bus included, live -- carries its entry, so a bus console slot must not get a live channel
+/// during K1 either.
 #[test]
 fn live_controlled_boot_of_a_bus_with_an_effect_renders() {
     const QUANTUM: u32 = 128;
@@ -5438,8 +5442,25 @@ fn live_controlled_boot_of_a_bus_with_an_effect_renders() {
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
     .expect("accepted observation fixture");
+    let slot = session::StableId::parse("desk-eq").expect("slot id");
+    model.console.pre_insert = vec![session::ConsoleSlot {
+        slot: slot.clone(),
+        identity: session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.parametric-eq").expect("effect id"),
+        },
+        quality: session::EffectQuality::Normal,
+        link_mode: session::LinkMode::DualMono,
+    }];
+    for track in &mut model.tracks {
+        track.console = vec![session::ConsoleEntry {
+            slot: slot.clone(),
+            bypass: false,
+            params: Vec::new(),
+        }];
+    }
     let bus_id = session::StableId::parse("bus").expect("bus id");
-    let mut bus = session::Submix::unity(bus_id.clone());
+    let mut bus = session::Submix::unity(bus_id.clone(), &model.console);
+    bus.console[0].bypass = false;
     bus.inserts
         .effects
         .push(model.tracks[0].inserts.effects[0].clone());

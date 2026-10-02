@@ -40,20 +40,22 @@ object rejects unknown keys and every field is explicit, including empty arrays 
 and memory budget are host policy and are not session-document fields.
 
 A submix is a strip (decision 13, #1199). Its keys, in canonical order, are `id`, `builtins`,
-`inserts`, `fader`, and exactly one of `pan` or `matrix`; `console` will follow `builtins` once
-#1202 lands. Each value's grammar, validation, diagnostic code and canonical spelling are the
+`console`, `inserts`, `fader`, and exactly one of `pan` or `matrix` (#1202 adds `console`). Each
+value's grammar, validation, diagnostic code and canonical spelling are the
 track's, verbatim: neither `pan` nor `matrix` is `schema.missing_field`, both is
 `schema.wrong_type`, and an unknown key is `schema.unknown_field`. Diagnostics use index paths, for
-example `$.submixes[0].fader.left_db`. `Submix::unity` is the transparent strip: identity input
-section, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing. A submix
-sums the routes that target it, left to right in route-ID order, and then runs its strip on that
-sum exactly as a track runs its strip on its source: input section, inserts, fader and pan or
-matrix (#1200). A bus is never mono-collapsed, and its insert latency joins plugin-delay
+example `$.submixes[0].fader.left_db`. `Submix::unity(id, console)` is the transparent strip:
+identity input section, one `{ slot, bypass: true, params: [] }` entry per declared console slot in
+slot order, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing; a bypassed
+entry is transparent and still pays its slot's latency. A submix sums the routes that target it,
+left to right in route-ID order, and then runs its strip on that sum exactly as a track runs its
+strip on its source: input section, console slots and inserts, fader and pan or matrix (#1200,
+#1202). A bus is never mono-collapsed, and its insert latency joins plugin-delay
 compensation. Its `delay_samples` delays the summed input, per lane, before the input section
 runs (#1201): like a track's delay it is a musical time shift, and plugin-delay compensation never
 compensates it. On the wire the submix message carries `id` 1,
-`builtins` 2, `inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the
-track's field 10); field 3 is reserved for `console`.
+`builtins` 2, the repeated `console` entry 3 (the track's field 11 entry message, #1202),
+`inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the track's field 10).
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
 submixes, and outputs share the graph-entity namespace; routes, automations, console slots (across
@@ -104,19 +106,25 @@ The session declares its console once, at the root, between `sources` and `track
 `"console": { "pre_insert": [...], "post_insert": [...] }`. Each slot is exactly
 `{ slot, identity, quality, link_mode }`: a stable `slot` ID unique across **both** sections
 (a console address names the slot, not its section), a native `identity`, and the quality and
-link mode every track runs it at. A console slot takes no sidechain -- a keyed effect is an insert
+link mode every strip runs it at. A console slot takes no sidechain -- a keyed effect is an insert
 -- and carries no per-track `bypass` or `params`; either key refuses there as
 `schema.unknown_field`. A third-party (`cid`) identity refuses as `console.slot_not_native` at the
 slot's `identity`. Either section may be empty, and an empty section costs nothing.
 
-Every track carries every slot: its `console` array holds exactly one `{ slot, bypass, params }`
-entry per slot, in the session's slot order (`pre_insert`, then `post_insert`). The entry carries
-only that track's knobs; `id`, `identity`, `quality`, `link_mode` and `sidechain` refuse there as
-`schema.unknown_field`. An entry naming an undeclared slot refuses as `reference.missing_entity`,
-a repeated one as `id.duplicate`, one out of slot order as `console.entry_order` (each at the
-entry's `slot`), and a track without an entry for a declared slot as `console.entry_missing` (at
-the track's `console`). Entry `params` follow the effect-parameter rules and canonicalize by
-`(parameter_id, channel)`.
+Every strip carries every slot: every track's and every submix's (#1202) `console` array holds
+exactly one `{ slot, bypass, params }` entry per slot, in the session's slot order (`pre_insert`,
+then `post_insert`), never canonical ID order. The entry carries only that strip's knobs; `id`,
+`identity`, `quality`, `link_mode` and `sidechain` refuse there as `schema.unknown_field`. An entry
+naming an undeclared slot refuses as `reference.missing_entity`, a repeated one as `id.duplicate`,
+one out of slot order as `console.entry_order` (each at the entry's `slot`), and a strip without an
+entry for a declared slot as `console.entry_missing` (at the strip's `console`), at the strip's
+index path (`$.tracks[<i>]` or `$.submixes[<i>]`). Entry `params` follow the effect-parameter
+rules and canonicalize by `(parameter_id, channel)`.
+
+**Latency grows with bus depth.** A console slot's latency is paid on every strip that carries it,
+bypassed or not, so a signal that passes through a track and then `n` nested buses pays a latent
+slot `n + 1` times: one true-peak limiter (486 samples at 48 kHz) on every strip puts a first-order
+bus's output at 972 samples, and plugin-delay compensation aligns every parallel path to that.
 
 A track's `inserts` is `{ "effects": [...] }`, the ordered per-track effects between the two
 console sections, with exactly the retired `dynamic` rack's semantics: full effect declarations,
@@ -132,9 +140,12 @@ compressor is excluded until #1069 closes. The schema checks the identity's synt
 is enforced where native identities resolve, by effect preparation, which refuses any other slot
 with `console.slot.ineligible_effect` at `$.console.<section>[slot=<id>].identity`.
 
-**Banking.** A console slot always banks, on every vector width and for every track count: the
+**Banking.** A console slot always banks, on every vector width and for every strip count: the
 graph compiler forms one bank group per (slot, pool class, dependency level) and pads a partial
-group with inactive lanes (decision 12). A console group that does not bind fails the compile with
+group with inactive lanes (decision 12). A submix's console lanes join the group their slot, pool
+class (a submix is always `Stereo`) and level select, beside other buses and any track lane there;
+a bus sits after every contributor's chain, so a bus at a level no track occupies forms its own
+padded group per slot. A console group that does not bind fails the compile with
 `console.slot.unbanked` at `$.console.<section>[slot=<id>].bank[pool=<class>,level=<level>]`;
 there is no per-node fallback. Inserts bank opportunistically: a full group banks and a remainder
 renders per node.
@@ -142,8 +153,8 @@ renders per node.
 **Class A by lowering.** Internally, `pre_insert` lowers to the graph's first rack
 (`RackId::Simd1`), a track's `inserts` to the second (`Dynamic`) and `post_insert` to the third
 (`Simd2`). Each console entry lowers to an ordinary effect whose ID is the slot, whose identity,
-quality and link mode are the slot's, whose bypass and params are the track's, and whose sidechain
-is `none` (`SessionModel::lower_track`). A session equivalent to a pre-decision-12 one therefore
+quality and link mode are the slot's, whose bypass and params are the strip's, and whose sidechain
+is `none` (`SessionModel::lower_strip`). A session equivalent to a pre-decision-12 one therefore
 compiles to the identical graph, including the sealed `MISO-GRAPH-V1` canonical text, and renders
 the identical bits. The internal names `RackId`, `TrackStage`, `MeterTap` and `RackLocation` are
 unchanged.
@@ -159,8 +170,10 @@ An automation target's `rack` is one of three tokens, with explicit wire codes: 
 the retired `dynamic` rack's code), `builtins` (4) and `console` (5). Codes 1 (`simd1`) and 3
 (`simd2`) are retired and refused, never reallocated, and the retired spellings are unknown
 tokens. `console` addresses a slot by `effect_id: <slot>` in either section; `inserts` addresses a
-strip's insert by its ID. An automation target's `entity_id` names a track or a submix (#1199);
-a submix carries no console entries yet, and its target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is the strip's own
+strip's insert by its ID. An automation target's `entity_id` names a track or a submix (#1199),
+and a `console` target may name a submix: it addresses that submix's entry for the slot (#1202).
+A submix's target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is
+the strip's own
 fixed section.
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal

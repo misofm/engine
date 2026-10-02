@@ -251,7 +251,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             matrix_or_pan: track.matrix_or_pan.clone(),
         },
         SessionEdit::UpsertSubmix {
-            submix: Submix::unity(id("drums")),
+            submix: Submix::unity(id("drums"), &session.console),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -1254,7 +1254,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
     };
     let edits = vec![
         SessionEdit::UpsertSubmix {
-            submix: Submix::unity(id("drums")),
+            submix: Submix::unity(id("drums"), &session.console),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -1508,6 +1508,21 @@ fn random_submix(draw: &mut Draw, index: usize) -> Submix {
         left_mute: draw.bit(),
         right_mute: draw.bit(),
     };
+    // Field 3 (#1202): zero to three console entries, so a draw may repeat the field.
+    let console = (0..draw.below(4))
+        .map(|entry| ConsoleEntry {
+            slot: id(&format!("slot-{entry}")),
+            bypass: draw.bit(),
+            params: (0..draw.below(3))
+                .map(|param| EffectParam {
+                    parameter_id: param as u32 * 2 + draw.below(2) as u32,
+                    channel: channels[draw.below(3) as usize],
+                    unit: units[draw.below(6) as usize],
+                    value: draw.f32(),
+                })
+                .collect(),
+        })
+        .collect();
     let matrix_or_pan = if draw.bit() {
         MatrixOrPan::Pan {
             left: draw.f32(),
@@ -1526,6 +1541,7 @@ fn random_submix(draw: &mut Draw, index: usize) -> Submix {
     Submix {
         id: id(&format!("bus-{index}")),
         builtins,
+        console,
         inserts: Rack { effects },
         fader,
         matrix_or_pan,
@@ -1534,19 +1550,25 @@ fn random_submix(draw: &mut Draw, index: usize) -> Submix {
 
 /// #1199 gate 3: a random submix strip, pan in some draws and matrix in others, survives
 /// `UpsertSubmix` encode and decode with every field intact, and re-encodes to the same bytes.
+/// #1202: the strip carries zero to three console entries (field 3).
 ///
-/// Red if `tx_submix`/`parse_submix` drops or misnumbers a strip field, swaps pan and matrix, or
-/// misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the submix codec).
+/// Red if `tx_submix`/`parse_submix` drops or misnumbers a strip field, swaps pan and matrix,
+/// misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the submix codec),
+/// or drops, reorders or truncates the repeated console entries.
 #[test]
 fn random_submix_strips_round_trip_losslessly() {
     let mut draw = Draw(0x1199_0000_05ab_0001);
     let mut pans = 0;
     let mut matrices = 0;
+    let mut repeated_console = 0;
     for index in 0..64 {
         let submix = random_submix(&mut draw, index);
         match submix.matrix_or_pan {
             MatrixOrPan::Pan { .. } => pans += 1,
             MatrixOrPan::Matrix { .. } => matrices += 1,
+        }
+        if submix.console.len() > 1 {
+            repeated_console += 1;
         }
         let edits = vec![SessionEdit::UpsertSubmix {
             submix: submix.clone(),
@@ -1562,4 +1584,5 @@ fn random_submix_strips_round_trip_losslessly() {
         assert_eq!(encode(&decoded.edits), bytes, "draw {index} re-encodes");
     }
     assert!(pans > 0 && matrices > 0, "both variants drawn");
+    assert!(repeated_console > 0, "a repeated console field drawn");
 }

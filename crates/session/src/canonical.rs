@@ -246,8 +246,10 @@ mod tests {
         let source = fs::read_to_string(corpus_path("fixtures/session/v1/canonical.json"))
             .expect("read representative session");
         let mut model = parse_session_json(&source).expect("parse representative session");
-        // A non-trivial submix strip (#1199): every input-section field off its identity, one
-        // native insert with parameters out of canonical order, a muted lane and a pan.
+        // A non-trivial submix strip (#1199): every input-section field off its identity, its
+        // entries for both console slots declared below (#1202; one live with parameters out of
+        // canonical order, one bypassed), one native insert with parameters out of canonical
+        // order, a muted lane and a pan.
         model.submixes.push(crate::Submix {
             id: id("mix"),
             builtins: DualMonoBuiltins {
@@ -266,6 +268,31 @@ mod tests {
                     delay_samples: 0,
                 },
             },
+            console: vec![
+                ConsoleEntry {
+                    slot: id("desk-eq"),
+                    bypass: false,
+                    params: vec![
+                        EffectParam {
+                            parameter_id: 4,
+                            channel: ParameterChannel::Both,
+                            unit: ParameterUnit::Db,
+                            value: 1.5,
+                        },
+                        EffectParam {
+                            parameter_id: 2,
+                            channel: ParameterChannel::Right,
+                            unit: ParameterUnit::Hz,
+                            value: 180.0,
+                        },
+                    ],
+                },
+                ConsoleEntry {
+                    slot: id("desk-limit"),
+                    bypass: true,
+                    params: Vec::new(),
+                },
+            ],
             inserts: Rack {
                 effects: vec![Effect {
                     id: id("bus-eq"),

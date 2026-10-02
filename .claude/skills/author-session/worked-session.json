@@ -291,6 +291,23 @@
           "delay_samples": 0
         }
       },
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": true,
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "params": []
+        },
+        {
+          "slot": "limiter",
+          "bypass": true,
+          "params": []
+        }
+      ],
       "inserts": {
         "effects": []
       },

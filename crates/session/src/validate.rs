@@ -1,8 +1,9 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
-    AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, DualMonoBuiltins,
-    DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName,
-    RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source, Submix, Track,
+    AutomationShape, AutomationTarget, ConsoleEntry, Diagnostic, DiagnosticCode, DiagnosticSet,
+    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit, Rack,
+    RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source,
+    Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -229,15 +230,16 @@ fn validate_console(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
     }
 }
 
-/// One track's console entries against the session's slots: exactly one entry per slot, in slot
-/// order (`pre_insert`, then `post_insert`), each carrying valid params.
+/// One strip's console entries against the session's slots: exactly one entry per slot, in slot
+/// order (`pre_insert`, then `post_insert`), each carrying valid params. It runs for every strip,
+/// track or submix, at the strip's index path (#1202 D2).
 ///
-/// `declared` is the session's slot IDs, built once for every track, so a track costs one lookup
+/// `declared` is the session's slot IDs, built once for every strip, so a strip costs one lookup
 /// per entry and per slot rather than a scan of the other side (#1093 verdict L3).
 fn validate_console_entries<'a>(
     session: &SessionModel,
     declared: &HashSet<&str>,
-    track: &'a Track,
+    entries: &'a [ConsoleEntry],
     path: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
     local: &mut LocalUniqueness<'a>,
@@ -245,7 +247,7 @@ fn validate_console_entries<'a>(
     let console_path = path.key("console");
     local.effect_ids.clear();
     let mut expected = session.console.slots();
-    for (position, entry) in track.console.iter().enumerate() {
+    for (position, entry) in entries.iter().enumerate() {
         let entry_path = console_path.index(position);
         let slot_path = entry_path.key("slot");
         let expected_slot = expected.next();
@@ -261,7 +263,7 @@ fn validate_console_entries<'a>(
                 diagnostics,
                 DiagnosticCode::DuplicateId,
                 &slot_path,
-                "console entry repeats a slot; a track carries each slot exactly once",
+                "console entry repeats a slot; a strip carries each slot exactly once",
             );
         } else if expected_slot.is_none_or(|slot| slot.slot != entry.slot) {
             error(
@@ -281,7 +283,7 @@ fn validate_console_entries<'a>(
                 diagnostics,
                 DiagnosticCode::ConsoleEntryMissing,
                 &console_path,
-                "track console has no entry for a declared slot; every track carries every slot",
+                "strip console has no entry for a declared slot; every strip carries every slot",
             );
         }
     }
@@ -295,11 +297,7 @@ fn validate_tracks<'a>(
     local: &mut LocalUniqueness<'a>,
 ) {
     let tracks_path = root.key("tracks");
-    let declared: HashSet<&str> = session
-        .console
-        .slots()
-        .map(|slot| slot.slot.as_str())
-        .collect();
+    let declared = declared_slots(session);
     for (position, track) in session.tracks.iter().enumerate() {
         let path = tracks_path.index(position);
         let source = index.sources.get(track.source_id.as_str()).copied();
@@ -339,11 +337,28 @@ fn validate_tracks<'a>(
             },
             local,
         );
-        validate_console_entries(session, &declared, track, &path, diagnostics, local);
+        validate_console_entries(
+            session,
+            &declared,
+            &track.console,
+            &path,
+            diagnostics,
+            local,
+        );
     }
 }
 
-/// Every submix strip, at its index path, with the track's strip rules (#1199 D3).
+/// The session's console slot IDs, for [`validate_console_entries`].
+fn declared_slots(session: &SessionModel) -> HashSet<&str> {
+    session
+        .console
+        .slots()
+        .map(|slot| slot.slot.as_str())
+        .collect()
+}
+
+/// Every submix strip, at its index path, with the track's strip rules (#1199 D3) and the track's
+/// console-entry rules (#1202 D2).
 fn validate_submixes<'a>(
     session: &'a SessionModel,
     index: &Index<'_>,
@@ -352,17 +367,27 @@ fn validate_submixes<'a>(
     local: &mut LocalUniqueness<'a>,
 ) {
     let submixes_path = root.key("submixes");
+    let declared = declared_slots(session);
     for (position, submix) in session.submixes.iter().enumerate() {
+        let path = submixes_path.index(position);
         validate_strip(
             diagnostics,
             index,
-            &submixes_path.index(position),
+            &path,
             StripValues {
                 builtins: &submix.builtins,
                 inserts: &submix.inserts,
                 fader: &submix.fader,
                 matrix_or_pan: &submix.matrix_or_pan,
             },
+            local,
+        );
+        validate_console_entries(
+            session,
+            &declared,
+            &submix.console,
+            &path,
+            diagnostics,
             local,
         );
     }
@@ -377,8 +402,8 @@ struct StripValues<'a> {
 }
 
 /// Validate one strip's values at `path`, the strip's index path (`$.tracks[<i>]` or
-/// `$.submixes[<i>]`). The source half of a track and its console entries are validated by
-/// the caller.
+/// `$.submixes[<i>]`). The source half of a track and every strip's console entries are
+/// validated by the caller.
 fn validate_strip<'a>(
     diagnostics: &mut Vec<Diagnostic>,
     index: &Index<'_>,
@@ -729,11 +754,11 @@ fn validate_automation(
             );
         }
 
-        // A target may name a track or (inert until #1058) a submix strip (#1199 D6). A submix
-        // carries no console entries until #1202, so a console target on one names no effect.
+        // A target may name a track or (inert until #1058) a submix strip (#1199 D6), and a
+        // console target on either names that strip's entry for the slot (#1202).
         let strip = match index.graph.get(automation.target.entity_id.as_str()) {
             Some(GraphEntity::Track(track)) => Some((&track.inserts, track.console.as_slice())),
-            Some(GraphEntity::Submix(submix)) => Some((&submix.inserts, [].as_slice())),
+            Some(GraphEntity::Submix(submix)) => Some((&submix.inserts, submix.console.as_slice())),
             _ => {
                 error(
                     diagnostics,

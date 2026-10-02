@@ -159,7 +159,6 @@ fn with_console(model: &mut session::SessionModel) {
 #[test]
 fn full_tagged_surface_round_trips_without_field_loss() {
     let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
-    model.submixes.push(session::Submix::unity(id("mix")));
     model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
         ll: 1.25,
         lr: -0.25,
@@ -168,6 +167,10 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         smoothing_samples: 32,
     };
     with_console(&mut model);
+    // After the console is declared, so the bus carries an entry for every slot (#1202 D4).
+    model
+        .submixes
+        .push(session::Submix::unity(id("mix"), &model.console));
     model.tracks[0].inserts.effects.insert(
         0,
         Effect {

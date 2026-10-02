@@ -48,9 +48,10 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// Whether a graph rack holds a console section (decision 12, "Class A by lowering").
 ///
 /// After S1a (#1093) the two SIMD racks hold exactly the session's console slots: `pre_insert`
-/// lowers to [`RackLocation::Simd1`], `post_insert` to [`RackLocation::Simd2`], and a track's
+/// lowers to [`RackLocation::Simd1`], `post_insert` to [`RackLocation::Simd2`], and a strip's
 /// inserts to [`RackLocation::Dynamic`]. No session reaches either SIMD rack any other way
-/// (`session::SessionModel::lower_track`), so a chain or a group in one of them is a console one.
+/// (`session::SessionModel::lower_strip`), so a chain or a group in one of them is a console one.
+/// A submix's console chains (#1202) are console chains like a track's.
 pub(crate) const fn is_console_rack(rack: RackLocation) -> bool {
     matches!(rack, RackLocation::Simd1 | RackLocation::Simd2)
 }
@@ -96,8 +97,8 @@ pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
 /// **Console slots always bank** (S2, #1098; decision 12). Every console group is padded, and on a
 /// vector backend a console slot that is not bound fails the compile with `console.slot.unbanked`
 /// ([`unbanked_console_slot`]) rather than rendering per node. There is no silent fallback. For a
-/// valid session that is unreachable: every track carries every slot in one order, so a console
-/// rack's chains share one program, a console slot has no sidechain, and every effect on the
+/// valid session that is unreachable: every strip -- every track and, since #1202, every submix --
+/// carries every slot in one order, so a console rack's chains share one program, a console slot has no sidechain, and every effect on the
 /// console eligibility list binds padded requests. A console group is formed per (rack, pool class,
 /// dependency level of the chain's first slot), so each console slot binds
 /// `sum over (pool class, level) of ceil(n / W)` banks. Differing insert counts put `post_insert`

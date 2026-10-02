@@ -989,11 +989,20 @@ fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeErr
     Ok(())
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
+    tx_start_message(
+        sink,
+        schema::session::submix::SPEC
+            .field_count(&[(schema::session::submix::CONSOLE, value.console.len())])?,
+    )?;
     tx_id(sink, schema::session::submix::ID, &value.id)?;
     tx_message(sink, schema::session::submix::BUILTINS, |v| {
         tx_builtins(v, &value.builtins)
     })?;
+    for entry in &value.console {
+        tx_message(sink, schema::session::submix::CONSOLE, |v| {
+            tx_console_entry(v, entry)
+        })?;
+    }
     tx_message(sink, schema::session::submix::INSERTS, |v| {
         tx_rack(v, &value.inserts)
     })?;
@@ -1674,6 +1683,9 @@ fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
         builtins: parse_builtins(
             message.nested_value(one_spec!(message, schema::session::submix::BUILTINS)?)?,
         )?,
+        console: values_spec!(message, schema::session::submix::CONSOLE)?
+            .map(|value| parse_console_entry(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
         inserts: parse_rack_message(
             message.nested_value(one_spec!(message, schema::session::submix::INSERTS)?)?,
         )?,

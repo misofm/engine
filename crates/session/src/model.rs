@@ -103,7 +103,8 @@ pub struct SessionModel {
     pub output_profile: OutputProfile,
     /// Sources, order-insensitive by stable ID.
     pub sources: Vec<Source>,
-    /// The session-level console: every track carries every slot, in this order (decision 12).
+    /// The session-level console: every strip, track or submix, carries every slot, in this order
+    /// (decision 12, #1202).
     pub console: Console,
     /// Tracks, order-insensitive by stable ID.
     pub tracks: Vec<Track>,
@@ -242,10 +243,10 @@ pub struct Track {
 
 /// The session-level console (owner decision 12).
 ///
-/// Each slot is declared once, and every track carries every slot with only its own `bypass` and
-/// `params`. `pre_insert` runs before a track's inserts and `post_insert` after them. Either list
-/// may be empty. Slot IDs are unique across both lists, because a console address names the slot
-/// and not its section.
+/// Each slot is declared once, and every strip (every track and every submix, #1202) carries every
+/// slot with only its own `bypass` and `params`. `pre_insert` runs before a strip's inserts and
+/// `post_insert` after them. Either list may be empty. Slot IDs are unique across both lists,
+/// because a console address names the slot and not its section.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Console {
     /// Slots between the input section and the inserts, in chain order.
@@ -276,7 +277,7 @@ pub struct ConsoleSlot {
     pub link_mode: LinkMode,
 }
 
-/// One track's knobs for one console slot. It carries no effect fields.
+/// One strip's knobs for one console slot. It carries no effect fields.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConsoleEntry {
     /// The declared slot this entry configures.
@@ -375,15 +376,13 @@ impl<'a> StripRef<'a> {
         }
     }
 
-    /// The strip of one submix. A submix carries no console entries until *Carry every console
-    /// slot on every submix strip* (#1202), so its console section is empty and lowers to no
-    /// effect.
+    /// The strip of one submix, with its console entries (#1202).
     fn submix(submix: &'a Submix) -> Self {
         Self {
             id: &submix.id,
             kind: StripKind::Submix(submix),
             builtins: &submix.builtins,
-            console: &[],
+            console: &submix.console,
             inserts: &submix.inserts,
             fader: &submix.fader,
             matrix_or_pan: &submix.matrix_or_pan,
@@ -679,15 +678,18 @@ pub enum MatrixOrPan {
 /// it. Its values carry the track's grammar, validation and canonical spelling verbatim.
 ///
 /// The graph compiler lowers it through [`SessionModel::strips`] to the same stage chain a track
-/// lowers to (#1200): its `Input` stage sums the routes that name it, in route-ID order, and the
-/// strip then runs on that sum. Its `delay_samples` is not lowered yet (*Delay a submix strip's
-/// summed input*, #1201).
+/// lowers to (#1200): its `Input` stage sums the routes that name it, in route-ID order, its
+/// `delay_samples` delays that sum (#1201), and the strip then runs on it. Like a track, it carries
+/// every session console slot (#1202), and its console lanes bank with the tracks' (decision 12).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Submix {
     /// Stable submix identity.
     pub id: StableId,
     /// Independent left/right fixed input processors.
     pub builtins: DualMonoBuiltins,
+    /// This submix's knobs for every session console slot, in exactly the session's slot order:
+    /// `console.pre_insert`, then `console.post_insert` (decision 12, #1202).
+    pub console: Vec<ConsoleEntry>,
     /// Per-submix ordered inserts.
     pub inserts: Rack,
     /// Independent left/right fader and mute declaration.
@@ -698,10 +700,14 @@ pub struct Submix {
 
 impl Submix {
     /// A transparent strip: identity input section (no polarity inversion, 0 dB trim, both
-    /// filters off, no delay), no inserts, an unmuted 0 dB fader and the identity matrix with no
-    /// smoothing (#1199 D5).
+    /// filters off, no delay), one bypassed entry with no parameters for every slot of `console`,
+    /// in slot order, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing
+    /// (#1199 D5, #1202 D4).
+    ///
+    /// A bypassed console entry is transparent, and its latency is still paid (decision 12): the
+    /// strip is not `bypass: false` with default parameters, which would run every console slot.
     #[must_use]
-    pub fn unity(id: StableId) -> Self {
+    pub fn unity(id: StableId, console: &Console) -> Self {
         let lane = ChannelBuiltins {
             polarity_invert: false,
             trim_db: 0.0,
@@ -715,6 +721,14 @@ impl Submix {
                 left: lane.clone(),
                 right: lane,
             },
+            console: console
+                .slots()
+                .map(|slot| ConsoleEntry {
+                    slot: slot.slot.clone(),
+                    bypass: true,
+                    params: Vec::new(),
+                })
+                .collect(),
             inserts: Rack {
                 effects: Vec::new(),
             },

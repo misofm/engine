@@ -389,7 +389,7 @@ fn representative_console() -> SessionModel {
     let route_template = model.routes.pop().expect("seed route");
     model.automation.clear();
     model.submixes = (0..32)
-        .map(|index| Submix::unity(stable(&format!("submix-{index:02}"))))
+        .map(|index| Submix::unity(stable(&format!("submix-{index:02}")), &model.console))
         .collect();
     model.tracks = (0..256)
         .map(|index| {
@@ -509,7 +509,7 @@ fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
     let mut model = parse_session_json(SESSION).expect("canonical session");
     model.automation.clear();
     model.tracks[0].inserts.effects.clear();
-    model.submixes = vec![Submix::unity(stable("bus"))];
+    model.submixes = vec![Submix::unity(stable("bus"), &model.console)];
     let template = model.routes[0].clone();
     let output = model.outputs[0].id.clone();
     let track = model.tracks[0].id.clone();
