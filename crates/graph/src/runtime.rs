@@ -1,11 +1,7 @@
-//! One runtime model, shared by both executors.
+//! Runtime model for the sequential render executor.
 //!
-//! The sequential executor and the native dependency-wave executor used to carry two copies of
-//! every piece of node semantics: two reductions, two route loops, two effect-block constructions,
-//! two node builders, two bank loops. They now share this module and differ only in *where the
-//! audio lives* -- the sequential executor colours one arena and reads its producers in place,
-//! the native one gives every parcel its own arena and stages every edge across partitions
-//! (#98 F7).
+//! The executor owns one coloured arena and reads its producers in place. Node reductions,
+//! routes, effect blocks and bank operations all use that same exclusively borrowed storage.
 //!
 //! Everything here is derived from the lowered [`ExecutionProgram`](crate::program) (#99 F2), so
 //! the ops, their input order, the identity aliases and the buffer colouring are a pure function
@@ -14,11 +10,8 @@
 //! ## Arena
 //!
 //! Audio lives in one [`DisjointArena`](engine::realtime::DisjointArena) per prepared
-//! plan: two planar `f32` planes of `buffers * frames` words, reached only through a checked
-//! [`ArenaLease`]. The lease API is the one implementation of *where the audio is* as well as
-//! of what happens to it.
-//!
-//! The sequential executor holds a single lease over the whole coloured arena. A delayed edge
+//! plan: two planar `f32` planes of `buffers * frames` words, reached through checked borrows of
+//! that single owner. A delayed edge
 //! copies, and that copy is made by the consuming op through the [`RuntimeOp::staged`] list.
 //!
 //! ## Frozen arithmetic
@@ -39,7 +32,7 @@ use std::collections::BTreeMap;
 use core::num::NonZeroUsize;
 
 use engine::realtime::{
-    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, RenderError,
+    ARENA_SILENCE_BUFFER, ArenaStereoPair, DisjointArena, RenderError,
     ResponseSnapshotAvailability, ResponseSnapshotError, ResponseSnapshotOwnerInfo,
     ResponseSnapshotSection, ResponseSnapshotSink,
 };
@@ -329,7 +322,7 @@ pub(crate) type FrameLane = lane::Native;
 /// Before this issue, the Output op wrote an arena buffer and `GraphExecutor::render` copied that
 /// buffer into the host's planes after the last unit. Now the planes themselves are that storage.
 /// `render` takes them once per block, [`HostMaster::new`] checks that each is exactly
-/// `lease.frames()` words, and the executor threads this one value through every unit of the
+/// `arena.frames()` words, and the executor threads this one value through every unit of the
 /// block:
 ///
 /// * [`Runtime::execute`] takes a reborrow of it. The unit that runs the Output op
@@ -403,20 +396,20 @@ impl HostMaster<'_> {
 /// how the lowering removes a pass-through's copy -- so `-0.0` survives; `a + b` then accumulates
 /// left to right, exactly as the scalar reference `inputs.reduce(|a, b| a + b)` does.
 #[inline]
-fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+fn reduce_plane(arena: &mut DisjointArena, plane: usize, out: u32, inputs: &[u32]) {
     match inputs {
-        [] => lease.write(plane, out).fill(0.0),
+        [] => arena.write(plane, out).fill(0.0),
         [single] => {
             if *single != out {
-                let (output, input) = lease.write_read(plane, out, *single);
+                let (output, input) = arena.write_read(plane, out, *single);
                 output.copy_from_slice(input);
             }
         }
-        [_, _, ..] => reduce_many::<FrameLane>(lease, plane, out, inputs),
+        [_, _, ..] => reduce_many::<FrameLane>(arena, plane, out, inputs),
     }
 }
 
-/// Reads one arena borrow forms at once: [`ArenaLease::write_read_many`] takes one to eight.
+/// Reads one arena borrow forms at once: [`DisjointArena::write_read_many`] takes one to eight.
 const REDUCE_GROUP: usize = 8;
 
 /// Fan-in two or more: `((in0 + in1) + in2) + ...` per frame, in edge order (issue #898).
@@ -430,7 +423,7 @@ const REDUCE_GROUP: usize = 8;
 /// at every fan-in. Starting a later group from a fresh subtotal instead would not be:
 /// `reduction_is_left_to_right_bit_identical_to_scalar_reference` pins the difference.
 #[inline(always)]
-fn reduce_many<L: Lane>(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
+fn reduce_many<L: Lane>(arena: &mut DisjointArena, plane: usize, out: u32, inputs: &[u32]) {
     debug_assert!(
         inputs.len() >= 2,
         "fan-in zero is a fill and fan-in one a copy"
@@ -438,14 +431,14 @@ fn reduce_many<L: Lane>(lease: &mut ArenaLease, plane: usize, out: u32, inputs: 
     for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
         let initial_store = index == 0;
         let reduced = match group.len() {
-            1 => reduce_group::<L, 1>(lease, plane, out, group, initial_store),
-            2 => reduce_group::<L, 2>(lease, plane, out, group, initial_store),
-            3 => reduce_group::<L, 3>(lease, plane, out, group, initial_store),
-            4 => reduce_group::<L, 4>(lease, plane, out, group, initial_store),
-            5 => reduce_group::<L, 5>(lease, plane, out, group, initial_store),
-            6 => reduce_group::<L, 6>(lease, plane, out, group, initial_store),
-            7 => reduce_group::<L, 7>(lease, plane, out, group, initial_store),
-            8 => reduce_group::<L, 8>(lease, plane, out, group, initial_store),
+            1 => reduce_group::<L, 1>(arena, plane, out, group, initial_store),
+            2 => reduce_group::<L, 2>(arena, plane, out, group, initial_store),
+            3 => reduce_group::<L, 3>(arena, plane, out, group, initial_store),
+            4 => reduce_group::<L, 4>(arena, plane, out, group, initial_store),
+            5 => reduce_group::<L, 5>(arena, plane, out, group, initial_store),
+            6 => reduce_group::<L, 6>(arena, plane, out, group, initial_store),
+            7 => reduce_group::<L, 7>(arena, plane, out, group, initial_store),
+            8 => reduce_group::<L, 8>(arena, plane, out, group, initial_store),
             _ => false,
         };
         // Unreachable for a lowered program: a multi-input op's output is a fresh slot, never one
@@ -461,7 +454,7 @@ fn reduce_many<L: Lane>(lease: &mut ArenaLease, plane: usize, out: u32, inputs: 
 /// One group of `N` consecutive inputs: one arena borrow, one pass over the output.
 #[inline]
 fn reduce_group<L: Lane, const N: usize>(
-    lease: &mut ArenaLease,
+    arena: &mut DisjointArena,
     plane: usize,
     out: u32,
     group: &[u32],
@@ -470,7 +463,7 @@ fn reduce_group<L: Lane, const N: usize>(
     let Ok(ids) = <&[u32; N]>::try_from(group) else {
         return false;
     };
-    let Some((output, sources)) = lease.write_read_many(plane, out, ids) else {
+    let Some((output, sources)) = arena.write_read_many(plane, out, ids) else {
         return false;
     };
     accumulate_group::<L, N>(output, sources, initial_store)
@@ -562,12 +555,12 @@ fn add_chunks<L: Lane>(mut acc: L, chunks: &mut [core::slice::ChunksExact<'_, f3
 ///   therefore only ever a folded master's own output (`build_sequential`). Its epilogues have
 ///   already accumulated into `target`, so this arm leaves it alone, as `reduce_plane` does.
 /// * **Fan-in two or more** is [`reduce_many`] with the arena write swapped for `target`. Each
-///   group's inputs come from [`ArenaLease::read`]. It takes `&self`, so a group's `N` shared
+///   group's inputs come from [`DisjointArena::read`]. It takes `&self`, so a group's `N` shared
 ///   slices coexist. [`accumulate_group`] is the loop [`reduce_group`] runs: the first group
 ///   stores and each later group reloads and adds, so every frame is the one left-to-right chain.
 #[inline]
 fn reduce_plane_into(
-    lease: &ArenaLease,
+    arena: &DisjointArena,
     plane: usize,
     out: u32,
     target: &mut [f32],
@@ -577,17 +570,22 @@ fn reduce_plane_into(
         [] => target.fill(0.0),
         [single] => {
             if *single != out {
-                target.copy_from_slice(lease.read(plane, *single));
+                target.copy_from_slice(arena.read(plane, *single));
             }
         }
-        [_, _, ..] => reduce_many_into::<FrameLane>(lease, plane, target, inputs),
+        [_, _, ..] => reduce_many_into::<FrameLane>(arena, plane, target, inputs),
     }
 }
 
 /// [`reduce_many`] into the host's plane: the same [`REDUCE_GROUP`] chunking, the same
 /// `initial_store` for the first group only, and the same refusal rule.
 #[inline(always)]
-fn reduce_many_into<L: Lane>(lease: &ArenaLease, plane: usize, target: &mut [f32], inputs: &[u32]) {
+fn reduce_many_into<L: Lane>(
+    arena: &DisjointArena,
+    plane: usize,
+    target: &mut [f32],
+    inputs: &[u32],
+) {
     debug_assert!(
         inputs.len() >= 2,
         "fan-in zero is a fill and fan-in one a copy"
@@ -595,19 +593,19 @@ fn reduce_many_into<L: Lane>(lease: &ArenaLease, plane: usize, target: &mut [f32
     for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
         let initial_store = index == 0;
         let reduced = match group.len() {
-            1 => reduce_group_into::<L, 1>(lease, plane, target, group, initial_store),
-            2 => reduce_group_into::<L, 2>(lease, plane, target, group, initial_store),
-            3 => reduce_group_into::<L, 3>(lease, plane, target, group, initial_store),
-            4 => reduce_group_into::<L, 4>(lease, plane, target, group, initial_store),
-            5 => reduce_group_into::<L, 5>(lease, plane, target, group, initial_store),
-            6 => reduce_group_into::<L, 6>(lease, plane, target, group, initial_store),
-            7 => reduce_group_into::<L, 7>(lease, plane, target, group, initial_store),
-            8 => reduce_group_into::<L, 8>(lease, plane, target, group, initial_store),
+            1 => reduce_group_into::<L, 1>(arena, plane, target, group, initial_store),
+            2 => reduce_group_into::<L, 2>(arena, plane, target, group, initial_store),
+            3 => reduce_group_into::<L, 3>(arena, plane, target, group, initial_store),
+            4 => reduce_group_into::<L, 4>(arena, plane, target, group, initial_store),
+            5 => reduce_group_into::<L, 5>(arena, plane, target, group, initial_store),
+            6 => reduce_group_into::<L, 6>(arena, plane, target, group, initial_store),
+            7 => reduce_group_into::<L, 7>(arena, plane, target, group, initial_store),
+            8 => reduce_group_into::<L, 8>(arena, plane, target, group, initial_store),
             _ => false,
         };
         // As in `reduce_many`: a refused group ends the reduction rather than let a later group
         // add into a running sum that was never stored. Unreachable: every input of a lowered op
-        // is a reserved buffer, and a host plane is exactly `lease.frames()` words.
+        // is a reserved buffer, and a host plane is exactly `arena.frames()` words.
         debug_assert!(reduced, "a reduction group into the host plane was refused");
         if !reduced {
             return;
@@ -618,7 +616,7 @@ fn reduce_many_into<L: Lane>(lease: &ArenaLease, plane: usize, target: &mut [f32
 /// One group of `N` consecutive inputs into the host's plane: `N` shared reads, one pass.
 #[inline]
 fn reduce_group_into<L: Lane, const N: usize>(
-    lease: &ArenaLease,
+    arena: &DisjointArena,
     plane: usize,
     target: &mut [f32],
     group: &[u32],
@@ -627,7 +625,7 @@ fn reduce_group_into<L: Lane, const N: usize>(
     let Ok(ids) = <&[u32; N]>::try_from(group) else {
         return false;
     };
-    let sources = (*ids).map(|input| lease.read(plane, input));
+    let sources = (*ids).map(|input| arena.read(plane, input));
     accumulate_group::<L, N>(target, sources, initial_store)
 }
 
@@ -1543,7 +1541,7 @@ impl NodeKind {
 /// what the rest of the graph reads. A single-slot chain passes the same list twice, which is the
 /// in-place round-trip it has always done.
 struct ArenaMembers<'a> {
-    lease: &'a mut ArenaLease,
+    arena: &'a mut DisjointArena,
     inputs: &'a [u32],
     outputs: &'a [u32],
     /// One entry per lane when this chain's epilogue folds its routes, empty otherwise.
@@ -1597,7 +1595,7 @@ impl SourceGather<'_> {
 /// [`ArenaMembers::master_planes`] and check it only through [`ArenaMembers::master_writable`].
 /// Each writes the same words with the same kernel whichever variant it gets.
 enum MasterPlanes<'a> {
-    /// An arena buffer, written through the lease.
+    /// An arena buffer, written through the arena.
     Arena(u32),
     /// The host's planes, which are the session Output op's storage for this block.
     Host(HostMaster<'a>),
@@ -1650,21 +1648,21 @@ impl BankMembers for ArenaMembers<'_> {
                 None => {
                     #[cfg(any(test, feature = "test-support"))]
                     test_only_count_source_plane(2);
-                    self.lease.read_stereo(ARENA_SILENCE_BUFFER)
+                    self.arena.read_stereo(ARENA_SILENCE_BUFFER)
                 }
             };
         }
-        self.lease.read_stereo(buffer)
+        self.arena.read_stereo(buffer)
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
-        self.lease.write_stereo(self.outputs[lane])
+        self.arena.write_stereo(self.outputs[lane])
     }
     fn distinct_planes_mut(&mut self, lanes: usize, frames: usize) -> Option<BankPlaneViews<'_>> {
         match lanes {
             4 => {
                 let buffers: [u32; 4] = self.outputs.get(..4)?.try_into().ok()?;
                 Some(BankPlaneViews::from_four(
-                    self.lease.write_stereo_many(&buffers, frames)?,
+                    self.arena.write_stereo_many(&buffers, frames)?,
                     frames,
                 )?)
             }
@@ -1673,7 +1671,7 @@ impl BankMembers for ArenaMembers<'_> {
             8 => {
                 let buffers: [u32; 8] = self.outputs.get(..8)?.try_into().ok()?;
                 Some(BankPlaneViews::from_eight(
-                    self.lease.write_stereo_many(&buffers, frames)?,
+                    self.arena.write_stereo_many(&buffers, frames)?,
                     frames,
                 )?)
             }
@@ -1684,7 +1682,7 @@ impl BankMembers for ArenaMembers<'_> {
     ///
     /// Three frozen facts make this the reduction it replaces rather than a re-derivation of it:
     ///
-    /// * the tile is `frames` words long, exactly as `lease.write_stereo` hands the route op its
+    /// * the tile is `frames` words long, exactly as `arena.write_stereo` hands the route op its
     ///   buffer, so `mix2x2_block::<FrameLane>` takes the same vector/tail split and emits the same
     ///   per-sample op order over the same constants;
     /// * the route stays its own arithmetic step. It is **not** merged into the matrix slot above
@@ -1716,7 +1714,7 @@ impl BankMembers for ArenaMembers<'_> {
         let frames = cohort.frames();
         let stride = cohort.stride();
         // FoldCohort::new validates lane IDs and lane-major capacity; its fields are private.
-        if frames > self.lease.frames() || !self.master_writable() {
+        if frames > self.arena.frames() || !self.master_writable() {
             return;
         }
         let mut coefficients = [[0.0; 4]; 8];
@@ -1805,21 +1803,20 @@ impl BankMembers for ArenaMembers<'_> {
 }
 
 impl ArenaMembers<'_> {
-    /// Whether this block's master may be written: an arena master only when it is in the lease's
-    /// write set, the host's planes always. The premise check `lease.writes(master)` was, per
-    /// variant.
+    /// Whether this block's master may be written: an arena master must be a reserved non-silence
+    /// buffer; the host's planes are always writable.
     fn master_writable(&self) -> bool {
         match &self.master {
-            MasterPlanes::Arena(buffer) => self.lease.writes(*buffer),
+            MasterPlanes::Arena(buffer) => self.arena.writes(*buffer),
             MasterPlanes::Host(_) => true,
         }
     }
 
-    /// Both master planes, exclusively: `lease.write_stereo(master)` for an arena master, the
-    /// host's planes for the Output. Both are exactly `lease.frames()` words.
+    /// Both master planes, exclusively: `arena.write_stereo(master)` for an arena master, the
+    /// host's planes for the Output. Both are exactly `arena.frames()` words.
     fn master_planes(&mut self) -> (&mut [f32], &mut [f32]) {
         match &mut self.master {
-            MasterPlanes::Arena(buffer) => self.lease.write_stereo(*buffer),
+            MasterPlanes::Arena(buffer) => self.arena.write_stereo(*buffer),
             MasterPlanes::Host(host) => host.planes_mut(),
         }
     }
@@ -1846,7 +1843,7 @@ impl ArenaMembers<'_> {
             || cohort.lanes() != W
             || self.fold.len() != W
             || frames == 0
-            || frames > self.lease.frames()
+            || frames > self.arena.frames()
             || resident_left.len() != words
             || resident_right.len() != words
             || !self.master_writable()
@@ -2175,10 +2172,10 @@ fn node_track(node: &GraphNodeId) -> Box<str> {
     }
 }
 
-/// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
+/// Ops, their audio and their delay lines: everything the sequential executor owns.
 pub(crate) struct Runtime {
-    /// This runtime's checked view of the plan's shared arena.
-    pub(crate) lease: ArenaLease,
+    /// This runtime's exclusively owned plan arena.
+    pub(crate) arena: DisjointArena,
     pub(crate) delays: Box<[CompensationDelay]>,
     /// Input-side track alignment lines, one per track that declared a nonzero delay on either
     /// lane. Empty on every session that declared none, which is what keeps an undelayed plan on
@@ -2247,7 +2244,7 @@ pub fn test_only_split_pair_table_witness() -> TestOnlySplitPairTableWitness {
 /// the split table itself remains a separate boxed allocation.
 #[allow(dead_code)]
 pub(crate) struct RuntimeWithoutSplitPairTable {
-    lease: ArenaLease,
+    arena: DisjointArena,
     delays: Box<[CompensationDelay]>,
     track_delays: Box<[TrackDelayLine]>,
     units: Box<[RuntimeUnit]>,
@@ -2359,7 +2356,7 @@ impl Runtime {
         reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
     )]
     pub(crate) fn new(
-        lease: ArenaLease,
+        arena: DisjointArena,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
@@ -2370,7 +2367,7 @@ impl Runtime {
         folds: u64,
     ) -> Self {
         Self::new_with_output_unit(
-            lease,
+            arena,
             delays,
             track_delays,
             units,
@@ -2388,7 +2385,7 @@ impl Runtime {
         reason = "the prepared runtime constructor keeps its fixed ownership partitions explicit"
     )]
     pub(crate) fn new_with_output_unit(
-        lease: ArenaLease,
+        arena: DisjointArena,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
@@ -2436,7 +2433,7 @@ impl Runtime {
             .max()
             .unwrap_or(0);
         Self {
-            lease,
+            arena,
             delays: delays.into_boxed_slice(),
             track_delays: track_delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
@@ -2453,7 +2450,7 @@ impl Runtime {
     }
 
     /// Copy the selected track's response-capable owners in the declared program order. This is
-    /// a boundary-only walk: it borrows prepared state, never touches the audio lease, and leaves
+    /// a boundary-only walk: it borrows prepared state, never touches the audio arena, and leaves
     /// all caller-owned storage behind the opaque engine sink.
     pub(crate) fn copy_response_snapshot(
         &self,
@@ -2519,14 +2516,14 @@ impl Runtime {
     // REALTIME_POLICY_BEGIN
     /// The audio of one buffer, for the source set to fill.
     pub(crate) fn buffer_mut(&mut self, buffer: u32) -> (&mut [f32], &mut [f32]) {
-        self.lease.write_stereo(buffer)
+        self.arena.write_stereo(buffer)
     }
 
     /// The audio of one buffer, shared. Since issue #916 no production path reads a buffer back
     /// out of the arena: the session output is the host's planes, not an arena buffer.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn buffer(&self, buffer: u32) -> (&[f32], &[f32]) {
-        self.lease.read_stereo(buffer)
+        self.arena.read_stereo(buffer)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2599,7 +2596,7 @@ impl Runtime {
         sources: Option<&dyn crate::GraphSourcePlanes>,
     ) -> Result<(), RenderError> {
         let Self {
-            lease,
+            arena,
             delays,
             track_delays,
             units,
@@ -2632,7 +2629,7 @@ impl Runtime {
                 let host = (*output_unit == Some(index)).then_some(host);
                 execute_op(
                     op,
-                    lease,
+                    arena,
                     delays,
                     track_delays,
                     split_pairs,
@@ -2658,7 +2655,7 @@ impl Runtime {
                         // A bank member is never the Output op.
                         execute_op(
                             member,
-                            lease,
+                            arena,
                             delays,
                             track_delays,
                             split_pairs,
@@ -2672,13 +2669,13 @@ impl Runtime {
                 for lane in 0..lanes {
                     bank_outputs[lane] = members[last + lane].output;
                 }
-                let frames = lease.frames();
+                let frames = arena.frames();
                 let master = match *master {
                     FoldTarget::Arena(buffer) => MasterPlanes::Arena(buffer),
                     FoldTarget::Output => MasterPlanes::Host(host),
                 };
                 let mut planes = ArenaMembers {
-                    lease,
+                    arena,
                     inputs: &bank_inputs[..lanes],
                     outputs: &bank_outputs[..lanes],
                     fold,
@@ -2709,7 +2706,7 @@ impl Runtime {
     /// owner-side contract explicit for later disjoint intervals.
     pub(crate) fn complete_pending(&mut self, first_sample: u64) {
         let Self {
-            lease,
+            arena,
             units,
             split_pairs,
             ..
@@ -2724,7 +2721,7 @@ impl Runtime {
             if !matches!(slot.role, SplitPairRole::Fader) {
                 continue;
             }
-            let (left, right) = lease.write_stereo(op.output);
+            let (left, right) = arena.write_stereo(op.output);
             split_pairs[slot.pair].complete_pending(GraphBindingBlock {
                 left,
                 right,
@@ -2763,13 +2760,13 @@ impl Runtime {
         let banked_meter =
             banked_meter && !TEST_ONLY_BANK_METER_DECLINED.with(std::cell::Cell::get);
         let output = self.output_unit == Some(index);
-        let Self { lease, units, .. } = self;
+        let Self { arena, units, .. } = self;
         match &mut units[index] {
             RuntimeUnit::Op(op) if output => {
                 observe_output(op, host.planes(), first_sample, validity)
             }
             RuntimeUnit::Op(op) => {
-                observe(op, lease, first_sample, None, false, validity, None, None)
+                observe(op, arena, first_sample, None, false, validity, None, None)
             }
             RuntimeUnit::Bank {
                 members,
@@ -2797,7 +2794,7 @@ impl Runtime {
                         .enumerate()
                         .all(|(lane, active)| *active == (lane < population))
                     && chain.aux_lanes().is_empty();
-                let frames = u32::try_from(lease.frames()).ok();
+                let frames = u32::try_from(arena.frames()).ok();
                 let final_start = members.len().checked_sub(population);
                 let chain: &BankChain = chain;
                 // Issue #950: the full meter pass, before the first observer runs. First each
@@ -2864,7 +2861,7 @@ impl Runtime {
                         .and_then(|(lane, (meters, seeds))| meters.lane(lane, seeds));
                     observe(
                         member,
-                        lease,
+                        arena,
                         first_sample,
                         resident,
                         folded,
@@ -2962,7 +2959,7 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
     }
 }
 
-/// The one implementation of node semantics, shared by both executors.
+/// Node semantics over the sequential executor's exclusively owned storage.
 ///
 /// `host` is `Some` for the session Output op alone (issue #916). The op's output is then the
 /// host's planes for the whole op: its reduction ([`reduce_plane_into`]) and its processing write
@@ -2972,7 +2969,7 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
 /// op's input, not its output.
 fn execute_op(
     op: &mut RuntimeOp,
-    lease: &mut ArenaLease,
+    arena: &mut DisjointArena,
     delays: &mut [CompensationDelay],
     track_delays: &mut [TrackDelayLine],
     split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
@@ -2987,7 +2984,7 @@ fn execute_op(
         // reach `reduce_plane` with an empty input list, whose `[]` arm fills the buffer with `0.0`
         // -- straight over the source audio. The alignment therefore happens here, in place, and
         // this returns exactly where the undelayed arm returns.
-        let (left, right) = output_planes(lease, &mut host, output);
+        let (left, right) = output_planes(arena, &mut host, output);
         track_delays[line as usize].process(left, right);
         return Ok(());
     }
@@ -2995,17 +2992,17 @@ fn execute_op(
         // The coordinator's source set already wrote this node's output for this block.
         return Ok(());
     }
-    // A delayed edge is the only inter-parcel copy left, and the *consuming* parcel makes it.
+    // A delayed edge stages its producer's words before the consuming op reduces them.
     for staged in &op.staged {
         {
-            let (destination, input) = lease.write_read(0, staged.staging, staged.source);
+            let (destination, input) = arena.write_read(0, staged.staging, staged.source);
             destination.copy_from_slice(input);
         }
         {
-            let (destination, input) = lease.write_read(1, staged.staging, staged.source);
+            let (destination, input) = arena.write_read(1, staged.staging, staged.source);
             destination.copy_from_slice(input);
         }
-        let (staged_left, staged_right) = lease.write_stereo(staged.staging);
+        let (staged_left, staged_right) = arena.write_stereo(staged.staging);
         delays[staged.line as usize].process(staged_left, staged_right);
     }
     // The fan-in-zero fill is dead under a bound source (issue #218). `reduce_plane`'s `[]` arm
@@ -3022,13 +3019,13 @@ fn execute_op(
     if !op.inputs.is_empty() || !matches!(op.kind, NodeKind::Bound(_)) {
         match host.as_mut() {
             None => {
-                reduce_plane(lease, 0, output, &op.inputs);
-                reduce_plane(lease, 1, output, &op.inputs);
+                reduce_plane(arena, 0, output, &op.inputs);
+                reduce_plane(arena, 1, output, &op.inputs);
             }
             Some(host) => {
                 let (left, right) = host.planes_mut();
-                reduce_plane_into(lease, 0, output, left, &op.inputs);
-                reduce_plane_into(lease, 1, output, right, &op.inputs);
+                reduce_plane_into(arena, 0, output, left, &op.inputs);
+                reduce_plane_into(arena, 1, output, right, &op.inputs);
             }
         }
     }
@@ -3038,7 +3035,7 @@ fn execute_op(
         NodeKind::TrackDelay { .. } | NodeKind::SourceInput | NodeKind::BankMember => {}
         NodeKind::Identity => {
             if let Some(slot) = op.split_pair {
-                let (out_left, out_right) = output_planes(lease, &mut host, output);
+                let (out_left, out_right) = output_planes(arena, &mut host, output);
                 let block = GraphBindingBlock {
                     left: out_left,
                     right: out_right,
@@ -3051,11 +3048,11 @@ fn execute_op(
             }
         }
         NodeKind::Route(coefficients) => {
-            let (out_left, out_right) = output_planes(lease, &mut host, output);
+            let (out_left, out_right) = output_planes(arena, &mut host, output);
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
         }
         NodeKind::Bound(processor) => {
-            let (out_left, out_right) = output_planes(lease, &mut host, output);
+            let (out_left, out_right) = output_planes(arena, &mut host, output);
             processor.process(GraphBindingBlock {
                 left: out_left,
                 right: out_right,
@@ -3066,7 +3063,7 @@ fn execute_op(
             let quantum = effect.metadata.quantum;
             match op.sidechain {
                 None => {
-                    let (out_left, out_right) = output_planes(lease, &mut host, output);
+                    let (out_left, out_right) = output_planes(arena, &mut host, output);
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,
@@ -3080,7 +3077,7 @@ fn execute_op(
                 }
                 Some(sidechain) => {
                     let ((out_left, out_right), (side_left, side_right)) =
-                        output_and_sidechain_planes(lease, &mut host, output, sidechain);
+                        output_and_sidechain_planes(arena, &mut host, output, sidechain);
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,
@@ -3132,7 +3129,7 @@ fn execute_op(
             let quantum = effect.metadata.quantum;
             match op.sidechain {
                 None => {
-                    let (out_left, out_right) = output_planes(lease, &mut host, output);
+                    let (out_left, out_right) = output_planes(arena, &mut host, output);
                     if capture_dry {
                         live.shunt.capture(out_left, out_right);
                     }
@@ -3149,7 +3146,7 @@ fn execute_op(
                 }
                 Some(sidechain) => {
                     let ((out_left, out_right), (side_left, side_right)) =
-                        output_and_sidechain_planes(lease, &mut host, output, sidechain);
+                        output_and_sidechain_planes(arena, &mut host, output, sidechain);
                     if capture_dry {
                         live.shunt.capture(out_left, out_right);
                     }
@@ -3166,7 +3163,7 @@ fn execute_op(
                 }
             }
             if bypassed {
-                let (out_left, out_right) = output_planes(lease, &mut host, output);
+                let (out_left, out_right) = output_planes(arena, &mut host, output);
                 live.shunt.apply(out_left, out_right);
             }
             // Issue #143: after `process`, and after the bypass shunt, so an observed value always
@@ -3176,7 +3173,7 @@ fn execute_op(
                     observation,
                     live.effect.processor.as_ref(),
                     first_sample,
-                    lease.frames() as u64,
+                    arena.frames() as u64,
                 );
             }
         }
@@ -3188,28 +3185,28 @@ fn execute_op(
 /// `Some`, which it is for the session Output op alone (issue #916).
 #[inline]
 fn output_planes<'b>(
-    lease: &'b mut ArenaLease,
+    arena: &'b mut DisjointArena,
     host: &'b mut Option<HostMaster<'_>>,
     output: u32,
 ) -> (&'b mut [f32], &'b mut [f32]) {
     match host {
         Some(host) => host.planes_mut(),
-        None => lease.write_stereo(output),
+        None => arena.write_stereo(output),
     }
 }
 
-/// [`output_planes`] beside both planes of a sidechain read: `lease.write_read_stereo` for an arena
-/// output, and the host's planes beside `lease.read_stereo` for the session Output op.
+/// [`output_planes`] beside both planes of a sidechain read: `arena.write_read_stereo` for an arena
+/// output, and the host's planes beside `arena.read_stereo` for the session Output op.
 #[inline]
 fn output_and_sidechain_planes<'b>(
-    lease: &'b mut ArenaLease,
+    arena: &'b mut DisjointArena,
     host: &'b mut Option<HostMaster<'_>>,
     output: u32,
     sidechain: u32,
 ) -> ArenaStereoPair<'b> {
     match host {
-        Some(host) => (host.planes_mut(), lease.read_stereo(sidechain)),
-        None => lease.write_read_stereo(output, sidechain),
+        Some(host) => (host.planes_mut(), arena.read_stereo(sidechain)),
+        None => arena.write_read_stereo(output, sidechain),
     }
 }
 
@@ -3394,7 +3391,7 @@ fn bank_meter_pass(
 /// `folded` says the chain folded this member's route (issue #885), so its scatter never wrote
 /// `op.output`: the first observer that declines the resident view has the resident words written
 /// there before any planar block is formed. `resident` is the only source of those words. The
-/// planar block is re-sliced per declining observer rather than cached, because the lease has to
+/// planar block is re-sliced per declining observer rather than cached, because the arena has to
 /// stay writable until that first acquisition.
 ///
 /// `sample_peak` and `meter` are this member's lane of the bank's meter passes (issues #943 and
@@ -3405,7 +3402,7 @@ fn bank_meter_pass(
 )]
 fn observe(
     op: &mut RuntimeOp,
-    lease: &mut ArenaLease,
+    arena: &mut DisjointArena,
     first_sample: u64,
     resident: Option<rack::ResidentOutputLane<'_>>,
     folded: bool,
@@ -3459,11 +3456,11 @@ fn observe(
                 value.set(counts);
             });
             if folded {
-                write_resident_lane(lease, op.output, words)?;
+                write_resident_lane(arena, op.output, words)?;
             }
             planar = true;
         }
-        let (left, right) = lease.read_stereo(op.output);
+        let (left, right) = arena.read_stereo(op.output);
         observer.observer.observe_with_validity(
             GraphObservationBlock {
                 left,
@@ -3485,7 +3482,7 @@ fn observe(
 /// a bank member, so it has no resident view and no folded buffer to write first. What is left of
 /// `observe` is its planar path, and that is all this is: the same binding order, the same
 /// dispatch counters, and one planar acquisition per block. The block each observer reads is the
-/// planes the op just reduced and processed into, which is the block `lease.read_stereo(output)`
+/// planes the op just reduced and processed into, which is the block `arena.read_stereo(output)`
 /// used to return.
 fn observe_output(
     op: &mut RuntimeOp,
@@ -3547,7 +3544,7 @@ fn observe_output_one(
 /// chain gathers lane `l` from member `l`. The render fails rather than hand an observer last
 /// block's words.
 fn write_resident_lane(
-    lease: &mut ArenaLease,
+    arena: &mut DisjointArena,
     output: u32,
     words: Option<rack::ResidentOutputLane<'_>>,
 ) -> Result<(), RenderError> {
@@ -3555,7 +3552,7 @@ fn write_resident_lane(
         return Err(RenderError::InvalidEnvelope);
     };
     let width = words.width().lanes() as usize;
-    let (left, right) = lease.write_stereo(output);
+    let (left, right) = arena.write_stereo(output);
     for (plane, source) in [(left, words.left()), (right, words.right())] {
         for (word, value) in plane
             .iter_mut()
@@ -3585,7 +3582,7 @@ pub(crate) fn take_observers(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Build (control plane): one node builder, one bank builder, for both executors.
+// Build (control plane): node and bank construction for the sequential executor.
 // ---------------------------------------------------------------------------------------------
 
 use effect_contract::BankWidth;
@@ -4020,7 +4017,7 @@ impl RuntimeParts {
         }
     }
 
-    /// The one node-kind decision, shared by both executors.
+    /// The node-kind decision used by the sequential executor.
     ///
     /// A route's linear gain is folded into its 2x2 coefficients here, once, at bind: render then
     /// spends two multiplies and one add per output word instead of re-applying the
@@ -5306,15 +5303,12 @@ pub(crate) fn build_sequential(
         &parts.response_metadata,
         &retired,
     );
-    let mut builder = ArenaLeaseSetBuilder::new(
+    let arena = DisjointArena::try_new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
-    );
-    let buffers: Vec<u32> = (0..program.buffers).map(|_| builder.reserve()).collect();
-    builder.lease(0, buffers.clone(), buffers);
-    let (_arena, mut leases) = builder
-        .finish()
-        .expect("one lease over one coloured arena is disjoint by construction");
+        program.buffers,
+    )
+    .expect("the prepared arena capacity fits the platform");
     // Issue #916: the unit whose op writes the host's planes, found by node.
     // `validate_fold_installation` proved it a plain unit of its own.
     let output_unit = output_op
@@ -5331,7 +5325,7 @@ pub(crate) fn build_sequential(
         &mut identity,
     );
     let mut runtime = Runtime::new_with_output_unit(
-        leases.pop().expect("the sequential lease"),
+        arena,
         delays,
         // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
         // ops carry and this vector's order are the same walk.
@@ -5388,7 +5382,7 @@ fn gathers_only(member: &RuntimeOp, buffer: u32) -> bool {
 ///   or sidechain read all read the arena buffer itself, so they need the copy. A claim with no
 ///   reader at all is bound in place too: nothing reads the copy.
 /// * **(c) No observer at the input stage.** An observer bound to the input node, or to an elided
-///   alias of its buffer, is dispatched after the input op and reads `lease.read_stereo(op.output)`:
+///   alias of its buffer, is dispatched after the input op and reads `arena.read_stereo(op.output)`:
 ///   the copied words.
 /// * **(d) The driver lends its planes.** `source_claims` is empty unless
 ///   [`crate::GraphPreparedSourceSetDriver::provides_played_planes`] is `true`.
@@ -6966,7 +6960,7 @@ mod tests {
         }
 
         let runtime = Runtime::new(
-            stereo_lease(1, 1),
+            stereo_arena(1, 1),
             Vec::new(),
             Vec::new(),
             vec![RuntimeUnit::Op(RuntimeOp {
@@ -7057,7 +7051,7 @@ mod tests {
         }
 
         let runtime = Runtime::new(
-            stereo_lease(1, 1),
+            stereo_arena(1, 1),
             Vec::new(),
             Vec::new(),
             vec![RuntimeUnit::Op(RuntimeOp {
@@ -7131,9 +7125,9 @@ mod tests {
                 })
             }
         }
-        let mut lease = stereo_lease(3, 1);
-        lease.write(0, 1).fill(7.0);
-        lease.write(1, 1).fill(-9.0);
+        let mut arena = stereo_arena(3, 1);
+        arena.write(0, 1).fill(7.0);
+        arena.write(1, 1).fill(-9.0);
         let mut chain = BankChain::new(
             AoSoaScratch::new(effect_contract::BankWidth::Four, 5).unwrap(),
             Box::new([true, false, false, false]),
@@ -7143,7 +7137,7 @@ mod tests {
         chain
             .run(
                 &mut ArenaMembers {
-                    lease: &mut lease,
+                    arena: &mut arena,
                     inputs: &[1],
                     outputs: &[1],
                     fold: &[],
@@ -7193,7 +7187,7 @@ mod tests {
             test_only_meter_input_reset(false);
             let result = observe(
                 &mut op,
-                &mut lease,
+                &mut arena,
                 71,
                 Some(view),
                 false,
@@ -7458,7 +7452,7 @@ mod tests {
             lane_tracks: Box::new([]),
         };
         let mut runtime = Runtime::new(
-            stereo_lease(2, 1),
+            stereo_arena(2, 1),
             Vec::new(),
             Vec::new(),
             vec![
@@ -7631,27 +7625,27 @@ mod tests {
             split_pair: None,
             observers: Box::new([]),
         };
-        let mut lease = stereo_lease(2, 2);
-        lease
+        let mut arena = stereo_arena(2, 2);
+        arena
             .write_stereo(ARENA_BASE)
             .0
             .copy_from_slice(&[0.25, -0.5]);
-        lease
+        arena
             .write_stereo(ARENA_BASE)
             .1
             .copy_from_slice(&[-0.75, 1.0]);
-        lease.write_stereo(ARENA_BASE + 1).0.fill(91.0);
-        lease.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
-        execute_op(&mut fader, &mut lease, &mut [], &mut [], &mut [], 0, None)
+        arena.write_stereo(ARENA_BASE + 1).0.fill(91.0);
+        arena.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
+        execute_op(&mut fader, &mut arena, &mut [], &mut [], &mut [], 0, None)
             .expect("earlier fader");
         assert_eq!(
-            execute_op(&mut matrix, &mut lease, &mut [], &mut [], &mut [], 0, None),
+            execute_op(&mut matrix, &mut arena, &mut [], &mut [], &mut [], 0, None),
             Err(RenderError::InvalidEnvelope)
         );
-        assert_eq!(lease.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
-        assert_eq!(lease.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
-        assert_eq!(lease.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
-        assert_eq!(lease.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
+        assert_eq!(arena.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
+        assert_eq!(arena.read_stereo(ARENA_BASE).1, &[-1.5, 2.0]);
+        assert_eq!(arena.read_stereo(ARENA_BASE + 1).0, &[0.5, -1.0]);
+        assert_eq!(arena.read_stereo(ARENA_BASE + 1).1, &[-1.5, 2.0]);
         assert_eq!(fader_calls.load(Ordering::Relaxed), 1);
         assert_eq!(matrix_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -7682,7 +7676,7 @@ mod tests {
 
         let completions = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::new(
-            stereo_lease(2, 2),
+            stereo_arena(2, 2),
             Vec::new(),
             Vec::new(),
             vec![RuntimeUnit::Op(RuntimeOp {
@@ -7885,15 +7879,15 @@ mod tests {
                     "both original owners moved once"
                 );
                 const FRAMES: usize = 2;
-                let mut lease = stereo_lease(FRAMES, 3);
-                lease.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
-                lease.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
+                let mut arena = stereo_arena(FRAMES, 3);
+                arena.write_stereo(1).0.copy_from_slice(&[1.0, 2.0]);
+                arena.write_stereo(1).1.copy_from_slice(&[-1.0, -2.0]);
                 let fold = [FoldLane {
                     coefficients: [1.0, 0.0, 0.0, 1.0],
                     store: true,
                 }];
                 let mut members = ArenaMembers {
-                    lease: &mut lease,
+                    arena: &mut arena,
                     inputs: &[1],
                     outputs: &[2],
                     fold: if folded { &fold } else { &[] },
@@ -7913,8 +7907,8 @@ mod tests {
                     1,
                     "second returned owner executes"
                 );
-                assert_eq!(members.lease.read_stereo(2).0, &[4.0, 6.0]);
-                assert_eq!(members.lease.read_stereo(2).1, &[0.0, -2.0]);
+                assert_eq!(members.arena.read_stereo(2).0, &[4.0, 6.0]);
+                assert_eq!(members.arena.read_stereo(2).1, &[0.0, -2.0]);
             }
         }
     }
@@ -7993,29 +7987,29 @@ mod tests {
         f32::from(((*state >> 16) & 0xffff) as i16) / 3_276.8
     }
 
-    /// Lays `inputs` out as one lease over `inputs.len() + 1` buffers and reduces into the first.
+    /// Lays `inputs` out as one arena over `inputs.len() + 1` buffers and reduces into the first.
     fn reduce_case(frames: usize, inputs: &[Vec<f32>]) -> Vec<f32> {
-        let mut lease = single_lease(frames, inputs.len() + 1);
+        let mut arena = single_arena(frames, inputs.len() + 1);
         let refs: Vec<u32> = (2..=inputs.len() as u32 + 1).collect();
         // The output slot starts at a sentinel, never at zero: a reduction that forgets to write
         // it -- the fan-in-zero fill in particular -- must not be able to pass by accident.
-        lease.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
+        arena.write(0, 1).fill(f32::from_bits(0x7f7f_7f7f));
         for (index, input) in inputs.iter().enumerate() {
-            lease.write(0, refs[index]).copy_from_slice(input);
+            arena.write(0, refs[index]).copy_from_slice(input);
         }
-        reduce_plane(&mut lease, 0, 1, &refs);
-        lease.read(0, 1).to_vec()
+        reduce_plane(&mut arena, 0, 1, &refs);
+        arena.read(0, 1).to_vec()
     }
 
     /// Independent D9 definition: one scalar left-to-right chain per frame.
-    fn reference_reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
-        for frame in 0..lease.frames() {
+    fn reference_reduce_plane(arena: &mut DisjointArena, plane: usize, out: u32, inputs: &[u32]) {
+        for frame in 0..arena.frames() {
             let value = inputs
                 .iter()
-                .map(|input| lease.read(plane, *input)[frame])
+                .map(|input| arena.read(plane, *input)[frame])
                 .reduce(|left, right| left + right)
                 .unwrap_or(0.0);
-            lease.write(plane, out)[frame] = value;
+            arena.write(plane, out)[frame] = value;
         }
     }
 
@@ -8093,7 +8087,7 @@ mod tests {
                             .collect()
                     })
                     .collect();
-                let mut actual = single_lease(frames, 11);
+                let mut actual = single_arena(frames, 11);
                 let ids: Vec<u32> = (2..11).collect();
                 for (index, values) in inputs.iter().enumerate() {
                     actual.write(0, ids[index]).copy_from_slice(values);
@@ -8167,38 +8161,38 @@ mod tests {
         }
     }
 
-    /// Both planes of one reduction into buffer 1 of a fresh stereo lease whose buffers `2..` hold
+    /// Both planes of one reduction into buffer 1 of a fresh stereo arena whose buffers `2..` hold
     /// `contents`, as bit patterns. The output starts at a sentinel, and every input buffer must
     /// come out exactly as it went in.
     fn hoisting_reduction_bits(
         frames: usize,
         contents: &[[Vec<f32>; 2]],
-        reduce: impl Fn(&mut ArenaLease, usize),
+        reduce: impl Fn(&mut DisjointArena, usize),
     ) -> [Vec<u32>; 2] {
-        let mut lease = stereo_lease(frames, contents.len() + 1);
+        let mut arena = stereo_arena(frames, contents.len() + 1);
         for plane in 0..2 {
-            lease.write(plane, 1).fill(f32::from_bits(0x7f7f_7f7f));
+            arena.write(plane, 1).fill(f32::from_bits(0x7f7f_7f7f));
             for (index, words) in contents.iter().enumerate() {
-                lease
+                arena
                     .write(plane, index as u32 + 2)
                     .copy_from_slice(&words[plane]);
             }
         }
         for plane in 0..2 {
-            reduce(&mut lease, plane);
+            reduce(&mut arena, plane);
         }
         let bits = |words: &[f32]| words.iter().map(|word| word.to_bits()).collect::<Vec<_>>();
         for (index, words) in contents.iter().enumerate() {
             for (plane, plane_words) in words.iter().enumerate() {
                 assert_eq!(
-                    bits(lease.read(plane, index as u32 + 2)),
+                    bits(arena.read(plane, index as u32 + 2)),
                     bits(plane_words),
                     "input buffer {} plane {plane} was written",
                     index + 2
                 );
             }
         }
-        [bits(lease.read(0, 1)), bits(lease.read(1, 1))]
+        [bits(arena.read(0, 1)), bits(arena.read(1, 1))]
     }
 
     /// One width of the D9 gate against the per-frame scalar reference.
@@ -8208,8 +8202,8 @@ mod tests {
         ids: &[u32],
         reference: &[Vec<u32>; 2],
     ) {
-        let actual = hoisting_reduction_bits(frames, contents, |lease, plane| {
-            reduce_many::<L>(lease, plane, 1, ids);
+        let actual = hoisting_reduction_bits(frames, contents, |arena, plane| {
+            reduce_many::<L>(arena, plane, 1, ids);
         });
         assert_eq!(
             &actual,
@@ -8310,8 +8304,8 @@ mod tests {
             lane::each_lane!(|L| assert_reduction_matches_reference::<L>(
                 frames, &contents, &ids, &reference
             ));
-            let production = hoisting_reduction_bits(frames, &contents, |lease, plane| {
-                reduce_plane(lease, plane, 1, &ids);
+            let production = hoisting_reduction_bits(frames, &contents, |arena, plane| {
+                reduce_plane(arena, plane, 1, &ids);
             });
             assert_eq!(
                 production, reference,
@@ -8339,8 +8333,8 @@ mod tests {
                     .map(|_| [vec![-0.0; frames], vec![-0.0; frames]])
                     .collect();
                 let ids: Vec<u32> = (2..=fan_in as u32 + 1).collect();
-                let reduced = hoisting_reduction_bits(frames, &contents, |lease, plane| {
-                    reduce_plane(lease, plane, 1, &ids);
+                let reduced = hoisting_reduction_bits(frames, &contents, |arena, plane| {
+                    reduce_plane(arena, plane, 1, &ids);
                 });
                 assert_eq!(
                     reduced,
@@ -8357,24 +8351,24 @@ mod tests {
     #[test]
     fn reduction_preserves_repeated_silence_self_and_unrelated_buffers() {
         const FRAMES: usize = 5;
-        let build = || stereo_lease(FRAMES, 6);
+        let build = || stereo_arena(FRAMES, 6);
         let mut actual = build();
         let mut old = build();
-        for lease in [&mut actual, &mut old] {
-            lease
+        for arena in [&mut actual, &mut old] {
+            arena
                 .write(0, 2)
                 .copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-            lease
+            arena
                 .write(1, 2)
                 .copy_from_slice(&[-1.0, -2.0, -3.0, -4.0, -5.0]);
-            lease.write(0, 3).fill(99.0);
-            lease.write(1, 3).fill(-99.0);
-            lease.write(0, 4).fill(0.5);
-            lease.write(1, 4).fill(-0.25);
-            lease.write(0, 1).fill(f32::from_bits(0x7fc0_4202));
-            lease.write(1, 1).fill(f32::from_bits(0xffc0_4202));
-            lease.write(0, 5).fill(f32::from_bits(0x7fc0_4203));
-            lease.write(1, 5).fill(f32::from_bits(0xffc0_4203));
+            arena.write(0, 3).fill(99.0);
+            arena.write(1, 3).fill(-99.0);
+            arena.write(0, 4).fill(0.5);
+            arena.write(1, 4).fill(-0.25);
+            arena.write(0, 1).fill(f32::from_bits(0x7fc0_4202));
+            arena.write(1, 1).fill(f32::from_bits(0xffc0_4202));
+            arena.write(0, 5).fill(f32::from_bits(0x7fc0_4203));
+            arena.write(1, 5).fill(f32::from_bits(0xffc0_4203));
         }
         let ids = [2, 2, 0, 3, 4];
         for plane in 0..2 {
@@ -8400,7 +8394,7 @@ mod tests {
                     .all(|x| x.to_bits() == if plane == 0 { 0x7fc0_4203 } else { 0xffc0_4203 })
             );
         }
-        let mut self_alias = single_lease(2, 2);
+        let mut self_alias = single_arena(2, 2);
         self_alias
             .write(0, 2)
             .copy_from_slice(&[-0.0, f32::from_bits(0x7fc0_4204)]);
@@ -8416,28 +8410,24 @@ mod tests {
         );
     }
 
-    /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
-    fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
-        let mut builder = ArenaLeaseSetBuilder::new(
+    /// One arena that owns `buffers` buffers of one plane.
+    fn single_arena(frames: usize, buffers: usize) -> DisjointArena {
+        DisjointArena::try_new(
             NonZeroUsize::new(1).expect("one plane"),
             NonZeroUsize::new(frames).expect("frames"),
-        );
-        let owned: Vec<u32> = (0..buffers).map(|_| builder.reserve()).collect();
-        builder.lease(0, owned.clone(), owned);
-        let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
-        leases.pop().expect("the lease")
+            u32::try_from(buffers).expect("buffer count fits u32"),
+        )
+        .expect("test arena")
     }
 
-    /// One stereo lease over `buffers` buffers, the shape `build_sequential` builds.
-    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLease {
-        let mut builder = ArenaLeaseSetBuilder::new(
+    /// One stereo arena over `buffers` buffers, the shape `build_sequential` builds.
+    fn stereo_arena(frames: usize, buffers: usize) -> DisjointArena {
+        DisjointArena::try_new(
             NonZeroUsize::new(2).expect("stereo planes"),
             NonZeroUsize::new(frames).expect("frames"),
-        );
-        let owned: Vec<u32> = (0..buffers).map(|_| builder.reserve()).collect();
-        builder.lease(0, owned.clone(), owned);
-        let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
-        leases.pop().expect("the lease")
+            u32::try_from(buffers).expect("buffer count fits u32"),
+        )
+        .expect("test arena")
     }
 
     /// The compatibility callback is deliberately unusable here: a regression to per-lane
@@ -8476,16 +8466,16 @@ mod tests {
             }
         }
         const FRAMES: usize = 2;
-        let mut lease = stereo_lease(FRAMES, 10);
+        let mut arena = stereo_arena(FRAMES, 10);
         let inputs = [2, 3, 4, 5];
         let outputs = [6, 7, 8, 9];
         let coefficients = [1.0, 0.0, 0.0, 1.0];
         for (lane, input) in inputs.iter().copied().enumerate() {
-            let (left, right) = lease.write_stereo(input);
+            let (left, right) = arena.write_stereo(input);
             left.fill(lane as f32 + 1.0);
             right.fill(-(lane as f32 + 1.0));
         }
-        let mut oracle_lease = stereo_lease(FRAMES, 5);
+        let mut oracle_arena = stereo_arena(FRAMES, 5);
         let oracle_routes = [
             ARENA_BASE + 1,
             ARENA_BASE + 2,
@@ -8493,14 +8483,14 @@ mod tests {
             ARENA_BASE + 4,
         ];
         for (lane, route) in oracle_routes.iter().copied().enumerate() {
-            let (left, right) = oracle_lease.write_stereo(route);
+            let (left, right) = oracle_arena.write_stereo(route);
             left.fill(lane as f32 + 1.0);
             right.fill(-(lane as f32 + 1.0));
             mix2x2_block::<FrameLane>(left, right, coefficients);
         }
-        reference_reduce_plane(&mut oracle_lease, 0, ARENA_BASE, &oracle_routes);
-        reference_reduce_plane(&mut oracle_lease, 1, ARENA_BASE, &oracle_routes);
-        let (oracle_left, oracle_right) = oracle_lease.read_stereo(ARENA_BASE);
+        reference_reduce_plane(&mut oracle_arena, 0, ARENA_BASE, &oracle_routes);
+        reference_reduce_plane(&mut oracle_arena, 1, ARENA_BASE, &oracle_routes);
+        let (oracle_left, oracle_right) = oracle_arena.read_stereo(ARENA_BASE);
         let expected_left = oracle_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let expected_right = oracle_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let fold: Vec<FoldLane> = (0..4)
@@ -8522,7 +8512,7 @@ mod tests {
         chain.arm_fold(active).expect("fold mask");
         let mut members = Probe {
             inner: ArenaMembers {
-                lease: &mut lease,
+                arena: &mut arena,
                 inputs: &inputs,
                 outputs: &outputs,
                 fold: &fold,
@@ -8533,7 +8523,7 @@ mod tests {
         };
         chain.run(&mut members, FRAMES as u32, 0).expect("run");
         assert_eq!(members.cohorts, 1);
-        let (left, right) = members.inner.lease.read_stereo(ARENA_BASE);
+        let (left, right) = members.inner.arena.read_stereo(ARENA_BASE);
         assert_eq!(
             left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
             expected_left
@@ -8555,7 +8545,7 @@ mod tests {
         }
 
         const FRAMES: usize = 11;
-        let mut lease = stereo_lease(FRAMES, 8);
+        let mut arena = stereo_arena(FRAMES, 8);
         let inputs = [1, 2, 3, 4];
         let outputs = [5, 6, 7, 8];
         let mut expected = Vec::new();
@@ -8567,13 +8557,13 @@ mod tests {
                 .iter()
                 .map(|word| f32::from_bits(word.to_bits() ^ 0x8000_3990))
                 .collect();
-            lease.write(0, input).copy_from_slice(&left);
-            lease.write(1, input).copy_from_slice(&right);
+            arena.write(0, input).copy_from_slice(&left);
+            arena.write(1, input).copy_from_slice(&right);
             expected.push((left, right));
         }
         for output in outputs {
-            lease.write(0, output).fill(f32::from_bits(0x7f80_3991));
-            lease.write(1, output).fill(f32::from_bits(0x7f80_3992));
+            arena.write(0, output).fill(f32::from_bits(0x7f80_3991));
+            arena.write(1, output).fill(f32::from_bits(0x7f80_3992));
         }
 
         let active = vec![true; 4].into_boxed_slice();
@@ -8587,7 +8577,7 @@ mod tests {
         )
         .expect("chain");
         let mut members = ArenaMembers {
-            lease: &mut lease,
+            arena: &mut arena,
             inputs: &inputs,
             outputs: &outputs,
             fold: &[],
@@ -8599,7 +8589,7 @@ mod tests {
             .expect("direct graph run");
 
         for (lane, output) in outputs.iter().copied().enumerate() {
-            let (left, right) = lease.read_stereo(output);
+            let (left, right) = arena.read_stereo(output);
             assert_eq!(
                 left.iter().map(|word| word.to_bits()).collect::<Vec<_>>(),
                 expected[lane]
@@ -8653,27 +8643,27 @@ mod tests {
                 .collect();
 
             // The oracle: one route buffer per contributor, then the D9 left-to-right reduction.
-            let mut lease = stereo_lease(frames, coefficients.len() + 1);
+            let mut arena = stereo_arena(frames, coefficients.len() + 1);
             // The arena reserves buffer zero as the always-zero silence slot.
             let master = ARENA_BASE;
             let routes: Vec<u32> =
                 (ARENA_BASE + 1..=ARENA_BASE + coefficients.len() as u32).collect();
             for (index, buffer) in routes.iter().enumerate() {
-                let (left, right) = lease.write_stereo(*buffer);
+                let (left, right) = arena.write_stereo(*buffer);
                 left.copy_from_slice(&tiles[index].0);
                 right.copy_from_slice(&tiles[index].1);
                 mix2x2_block::<FrameLane>(left, right, coefficients[index]);
             }
-            reference_reduce_plane(&mut lease, 0, master, &routes);
-            reference_reduce_plane(&mut lease, 1, master, &routes);
-            let (oracle_left, oracle_right) = lease.read_stereo(master);
+            reference_reduce_plane(&mut arena, 0, master, &routes);
+            reference_reduce_plane(&mut arena, 1, master, &routes);
+            let (oracle_left, oracle_right) = arena.read_stereo(master);
             let oracle: (Vec<u32>, Vec<u32>) = (
                 oracle_left.iter().map(|value| value.to_bits()).collect(),
                 oracle_right.iter().map(|value| value.to_bits()).collect(),
             );
 
             // The epilogue: the same tiles, in an opening cohort and a continuation cohort.
-            let mut folded_lease = stereo_lease(frames, 1);
+            let mut folded_arena = stereo_arena(frames, 1);
             let fold: Vec<FoldLane> = coefficients
                 .iter()
                 .enumerate()
@@ -8683,7 +8673,7 @@ mod tests {
                 })
                 .collect();
             let mut members = ArenaMembers {
-                lease: &mut folded_lease,
+                arena: &mut folded_arena,
                 inputs: &[],
                 outputs: &[],
                 fold: &fold,
@@ -8706,7 +8696,7 @@ mod tests {
                 FoldCohort::new(&[2], &mut staged_left, &mut staged_right, frames, frames)
                     .expect("valid continuation cohort"),
             );
-            let (folded_left, folded_right) = folded_lease.read_stereo(master);
+            let (folded_left, folded_right) = folded_arena.read_stereo(master);
             assert_eq!(
                 (
                     folded_left
@@ -8742,7 +8732,7 @@ mod tests {
                     store: false,
                 },
             ];
-            let mut lease = stereo_lease(frames, 1);
+            let mut arena = stereo_arena(frames, 1);
             let mut left = [
                 vec![16_777_216.0; frames],
                 vec![1.0; frames],
@@ -8756,7 +8746,7 @@ mod tests {
             ]
             .concat();
             let mut members = ArenaMembers {
-                lease: &mut lease,
+                arena: &mut arena,
                 inputs: &[],
                 outputs: &[],
                 fold: &fold,
@@ -8771,7 +8761,7 @@ mod tests {
                 FoldCohort::new(&[1, 2], &mut left, &mut right, frames, frames)
                     .expect("continuation cohort"),
             );
-            let (actual_left, actual_right) = lease.read_stereo(master);
+            let (actual_left, actual_right) = arena.read_stereo(master);
             assert!(
                 actual_left
                     .iter()
@@ -8803,8 +8793,8 @@ mod tests {
             },
         ];
         for ids in [&[0, 1][..], &[2][..]] {
-            let mut lease = stereo_lease(FRAMES, 1);
-            let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+            let mut arena = stereo_arena(FRAMES, 1);
+            let (master_left, master_right) = arena.write_stereo(ARENA_BASE);
             master_left.fill(19.0);
             master_right.fill(-23.0);
             let mut left = vec![5.0_f32; FRAMES * 3];
@@ -8812,7 +8802,7 @@ mod tests {
             let before_left: Vec<u32> = left.iter().map(|x| x.to_bits()).collect();
             let before_right: Vec<u32> = right.iter().map(|x| x.to_bits()).collect();
             let mut members = ArenaMembers {
-                lease: &mut lease,
+                arena: &mut arena,
                 inputs: &[],
                 outputs: &[],
                 fold: &fold,
@@ -8831,7 +8821,7 @@ mod tests {
                 right.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
                 before_right
             );
-            let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+            let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
             assert!(
                 master_left
                     .iter()
@@ -8844,14 +8834,14 @@ mod tests {
             );
         }
 
-        let mut lease = stereo_lease(FRAMES, 1);
-        let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+        let mut arena = stereo_arena(FRAMES, 1);
+        let (master_left, master_right) = arena.write_stereo(ARENA_BASE);
         master_left.fill(29.0);
         master_right.fill(-31.0);
         let mut left = vec![11.0_f32; FRAMES + 1];
         let mut right = vec![-13.0_f32; FRAMES + 1];
         let mut members = ArenaMembers {
-            lease: &mut lease,
+            arena: &mut arena,
             inputs: &[],
             outputs: &[],
             fold: &fold,
@@ -8864,7 +8854,7 @@ mod tests {
         );
         assert!(left.iter().all(|x| x.to_bits() == 11.0_f32.to_bits()));
         assert!(right.iter().all(|x| x.to_bits() == (-13.0_f32).to_bits()));
-        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
         assert!(
             master_left
                 .iter()
@@ -9018,19 +9008,19 @@ mod tests {
                             .map(|track| ARENA_BASE + 1 + (tracks + track) as u32)
                             .collect();
                         let render = |fused: bool| {
-                            let mut lease =
-                                stereo_lease(frames, ARENA_BASE as usize + 1 + 2 * tracks);
+                            let mut arena =
+                                stereo_arena(frames, ARENA_BASE as usize + 1 + 2 * tracks);
                             for (buffer, (left, right)) in input_ids.iter().zip(&inputs) {
-                                let (to_left, to_right) = lease.write_stereo(*buffer);
+                                let (to_left, to_right) = arena.write_stereo(*buffer);
                                 to_left.copy_from_slice(left);
                                 to_right.copy_from_slice(right);
                             }
                             for buffer in &output_ids {
-                                let (left, right) = lease.write_stereo(*buffer);
+                                let (left, right) = arena.write_stereo(*buffer);
                                 left.fill(f32::from_bits(OUTPUT_POISON));
                                 right.fill(f32::from_bits(OUTPUT_POISON));
                             }
-                            let (master_left, master_right) = lease.write_stereo(master);
+                            let (master_left, master_right) = arena.write_stereo(master);
                             master_left.copy_from_slice(&prior.0);
                             master_right.copy_from_slice(&prior.1);
                             let mut counts = [0_usize; 3];
@@ -9049,7 +9039,7 @@ mod tests {
                                 chain.arm_fold(active).expect("fold every lane");
                                 let mut arm = Arm {
                                     inner: ArenaMembers {
-                                        lease: &mut lease,
+                                        arena: &mut arena,
                                         inputs: &input_ids[members.clone()],
                                         outputs: &output_ids[members.clone()],
                                         fold: &fold[members],
@@ -9064,11 +9054,11 @@ mod tests {
                                     *total += count;
                                 }
                             }
-                            let (master_left, master_right) = lease.read_stereo(master);
+                            let (master_left, master_right) = arena.read_stereo(master);
                             let outputs: Vec<u32> = output_ids
                                 .iter()
                                 .flat_map(|buffer| {
-                                    let (left, right) = lease.read_stereo(*buffer);
+                                    let (left, right) = arena.read_stereo(*buffer);
                                     bits(left).into_iter().chain(bits(right))
                                 })
                                 .collect();
@@ -9137,20 +9127,20 @@ mod tests {
                 ("an unfolded chain", &[], FRAMES, ARENA_BASE),
                 ("a later lane stores", &later_store, FRAMES, ARENA_BASE),
                 (
-                    "a block longer than the lease",
+                    "a block longer than the arena",
                     &full,
                     FRAMES - 1,
                     ARENA_BASE,
                 ),
                 ("a master outside the write set", &full, FRAMES, 99),
             ];
-            for (case, fold, lease_frames, master) in cases {
-                let mut lease = stereo_lease(lease_frames, 2);
-                let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+            for (case, fold, arena_frames, master) in cases {
+                let mut arena = stereo_arena(arena_frames, 2);
+                let (master_left, master_right) = arena.write_stereo(ARENA_BASE);
                 master_left.fill(f32::from_bits(POISON[0]));
                 master_right.fill(f32::from_bits(POISON[1]));
                 let taken = ArenaMembers {
-                    lease: &mut lease,
+                    arena: &mut arena,
                     inputs: &[],
                     outputs: &[],
                     fold,
@@ -9158,7 +9148,7 @@ mod tests {
                     sources: SourceGather::NONE,
                 }
                 .fold_resident(cohort);
-                let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+                let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
                 let untouched = master_left.iter().all(|word| word.to_bits() == POISON[0])
                     && master_right.iter().all(|word| word.to_bits() == POISON[1]);
                 if case == "control" {
@@ -9201,13 +9191,13 @@ mod tests {
                         store: store && lane == 0,
                     })
                     .collect();
-                let mut lease = stereo_lease(FRAMES, 2);
-                let (master_left, master_right) = lease.write_stereo(ARENA_BASE);
+                let mut arena = stereo_arena(FRAMES, 2);
+                let (master_left, master_right) = arena.write_stereo(ARENA_BASE);
                 master_left.fill(start);
                 master_right.fill(start);
                 assert!(
                     ArenaMembers {
-                        lease: &mut lease,
+                        arena: &mut arena,
                         inputs: &[],
                         outputs: &[],
                         fold: &fold,
@@ -9216,7 +9206,7 @@ mod tests {
                     }
                     .fold_resident(cohort)
                 );
-                let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+                let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
                 for frame in 0..FRAMES {
                     assert_eq!(
                         (master_left[frame].to_bits(), master_right[frame].to_bits()),
@@ -9242,10 +9232,10 @@ mod tests {
     fn the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign() {
         let _canonical = lane::fpenv::CanonicalFpEnv::enter();
         const FRAMES: usize = 9;
-        let mut lease = stereo_lease(FRAMES, 1);
+        let mut arena = stereo_arena(FRAMES, 1);
         // The arena starts at `+0.0`, which is exactly the value a zero-fill would leave.
         assert!(
-            lease
+            arena
                 .read_stereo(ARENA_BASE)
                 .0
                 .iter()
@@ -9258,7 +9248,7 @@ mod tests {
             store: true,
         }];
         let mut members = ArenaMembers {
-            lease: &mut lease,
+            arena: &mut arena,
             inputs: &[],
             outputs: &[],
             fold: &fold,
@@ -9268,7 +9258,7 @@ mod tests {
         let mut left = vec![-0.0_f32; FRAMES];
         let mut right = vec![-0.0_f32; FRAMES];
         members.fold_plane(0, &mut left, &mut right);
-        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
         for frame in 0..FRAMES {
             assert_eq!(
                 master_left[frame].to_bits(),
@@ -9309,7 +9299,7 @@ mod tests {
             .map(|(left, right)| matrix_word(*left, *right, fold[0].coefficients))
             .collect();
         let mut seed_members = ArenaMembers {
-            lease: &mut lease,
+            arena: &mut arena,
             inputs: &[],
             outputs: &[],
             fold: &fold,
@@ -9345,7 +9335,7 @@ mod tests {
             .map(|(old, added)| (old.1 + added.1).to_bits())
             .collect();
         let mut accumulate_members = ArenaMembers {
-            lease: &mut lease,
+            arena: &mut arena,
             inputs: &[],
             outputs: &[],
             fold: &accumulate_fold,
@@ -9353,7 +9343,7 @@ mod tests {
             sources: SourceGather::NONE,
         };
         accumulate_members.fold_plane(0, &mut added_left, &mut added_right);
-        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        let (master_left, master_right) = arena.read_stereo(ARENA_BASE);
         assert_eq!(
             master_left
                 .iter()
@@ -9371,12 +9361,12 @@ mod tests {
             "real fold_plane store=false must ordered-add the right contribution"
         );
 
-        let mut cohort_lease = stereo_lease(FRAMES, 1);
-        let (poison_left, poison_right) = cohort_lease.write_stereo(ARENA_BASE);
+        let mut cohort_arena = stereo_arena(FRAMES, 1);
+        let (poison_left, poison_right) = cohort_arena.write_stereo(ARENA_BASE);
         poison_left.fill(17.0);
         poison_right.fill(-19.0);
         let mut cohort_members = ArenaMembers {
-            lease: &mut cohort_lease,
+            arena: &mut cohort_arena,
             inputs: &[],
             outputs: &[],
             fold: &fold,
@@ -9399,7 +9389,7 @@ mod tests {
                 .iter()
                 .all(|value| value.to_bits() == 0x8000_0000)
         );
-        let (master_left, master_right) = cohort_lease.read_stereo(ARENA_BASE);
+        let (master_left, master_right) = cohort_arena.read_stereo(ARENA_BASE);
         assert!(
             master_left
                 .iter()
@@ -9447,9 +9437,9 @@ mod tests {
                 (0.0, 0.0),
             ),
         ] {
-            let mut lease = stereo_lease(FRAMES, 1);
-            lease.write(0, ARENA_BASE).fill(STALE);
-            lease.write(1, ARENA_BASE).fill(STALE);
+            let mut arena = stereo_arena(FRAMES, 1);
+            arena.write(0, ARENA_BASE).fill(STALE);
+            arena.write(1, ARENA_BASE).fill(STALE);
             let mut op = RuntimeOp {
                 inputs: Box::new([]),
                 staged: Box::new([]),
@@ -9459,8 +9449,8 @@ mod tests {
                 split_pair: None,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut lease, &mut [], &mut [], &mut [], 0, None).expect("op");
-            let (left, right) = lease.read_stereo(ARENA_BASE);
+            execute_op(&mut op, &mut arena, &mut [], &mut [], &mut [], 0, None).expect("op");
+            let (left, right) = arena.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
                     && right.iter().all(|value| *value == expected.1),
@@ -9666,12 +9656,12 @@ mod tests {
     /// E5 continued: an in-place single input is the identity, not a copy through a scratch.
     #[test]
     fn a_single_in_place_input_is_left_untouched() {
-        let mut lease = single_lease(2, 2);
-        lease.write(0, 1).copy_from_slice(&[1.0, 2.0]);
-        lease.write(0, 2).copy_from_slice(&[3.0, 4.0]);
-        reduce_plane(&mut lease, 0, 2, &[2]);
-        assert_eq!(lease.read(0, 1), &[1.0, 2.0]);
-        assert_eq!(lease.read(0, 2), &[3.0, 4.0]);
+        let mut arena = single_arena(2, 2);
+        arena.write(0, 1).copy_from_slice(&[1.0, 2.0]);
+        arena.write(0, 2).copy_from_slice(&[3.0, 4.0]);
+        reduce_plane(&mut arena, 0, 2, &[2]);
+        assert_eq!(arena.read(0, 1), &[1.0, 2.0]);
+        assert_eq!(arena.read(0, 2), &[3.0, 4.0]);
     }
 
     /// E7. The two-segment slice PDC is bit-for-bit a per-sample ring delay, and the result does
@@ -11184,7 +11174,7 @@ mod tests {
             runtime.output_unit, None,
             "the oracle binds with no Output unit"
         );
-        let frames = runtime.lease.frames();
+        let frames = runtime.arena.frames();
         let untouched = f32::from_bits(HOST_PAD);
         let (mut left, mut right) = (vec![untouched; frames], vec![untouched; frames]);
         let mut host = HostMaster::new(&mut left, &mut right, frames).expect("oracle host");
@@ -11928,7 +11918,7 @@ mod tests {
             for fan_in in 0..=19_usize {
                 // Buffer 0 is the silence buffer and buffer 1 the op's own output.
                 let buffers = fan_in + 2;
-                let mut lease = stereo_lease(frames, buffers);
+                let mut arena = stereo_arena(frames, buffers);
                 let mut inputs: Vec<u32> = (0..fan_in).map(|input| 2 + input as u32).collect();
                 if fan_in >= 3 {
                     inputs[1] = 0;
@@ -11936,26 +11926,26 @@ mod tests {
                 }
                 for buffer in 2..buffers as u32 {
                     for plane in 0..2 {
-                        for word in lease.write(plane, buffer) {
+                        for word in arena.write(plane, buffer) {
                             *word = hostile_sample(&mut state);
                         }
                     }
                 }
                 for plane in 0..2 {
-                    lease.write(plane, 1).fill(f32::from_bits(0x7fc0_0001));
+                    arena.write(plane, 1).fill(f32::from_bits(0x7fc0_0001));
                     let mut target = vec![f32::from_bits(HOST_PAD); frames];
-                    reduce_plane_into(&lease, plane, 1, &mut target, &inputs);
-                    reduce_plane(&mut lease, plane, 1, &inputs);
+                    reduce_plane_into(&arena, plane, 1, &mut target, &inputs);
+                    reduce_plane(&mut arena, plane, 1, &inputs);
                     assert_eq!(
                         bits(&target),
-                        bits(lease.read(plane, 1)),
+                        bits(arena.read(plane, 1)),
                         "{frames} frames, fan-in {fan_in}, plane {plane}"
                     );
                 }
             }
-            let lease = stereo_lease(frames, 3);
+            let arena = stereo_arena(frames, 3);
             let mut target = vec![f32::from_bits(HOST_PAD); frames];
-            reduce_plane_into(&lease, 0, 1, &mut target, &[1]);
+            reduce_plane_into(&arena, 0, 1, &mut target, &[1]);
             assert!(
                 target.iter().all(|word| word.to_bits() == HOST_PAD),
                 "a neutralised reduction leaves the host's plane alone"

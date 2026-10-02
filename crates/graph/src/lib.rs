@@ -2475,7 +2475,7 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// * **`Ok`:** each plane's `frames` words are this block's master. Nothing past `frames` is
     ///   written, so a `plane_stride` wider than the block keeps its padding.
     /// * **Envelope rejection: untouched.** A non-stereo `output` is refused with
-    ///   `Buffer(InvalidPlane)`. A plane that is not exactly `lease.frames()` words is refused with
+    ///   `Buffer(InvalidPlane)`. A plane that is not exactly `arena.frames()` words is refused with
     ///   `InvalidEnvelope`. Both refusals come before any observer boundary, source work or unit.
     ///   `PreparedRenderPlan::render_inner` already refuses the same mismatch as `OutputShape`
     ///   before it calls this, so this check is belt and braces.
@@ -2501,7 +2501,7 @@ impl PreparedPlanExecutor for GraphExecutor {
         #[cfg(any(test, feature = "test-support"))]
         let mut probe = test_only_phase_profile::Probe::start();
         let (left, right) = output.stereo_planes_mut()?;
-        let Some(mut host) = runtime::HostMaster::new(left, right, runtime.lease.frames()) else {
+        let Some(mut host) = runtime::HostMaster::new(left, right, runtime.arena.frames()) else {
             return Err(RenderError::InvalidEnvelope);
         };
         #[cfg(any(test, feature = "test-support"))]

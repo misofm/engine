@@ -46,7 +46,7 @@ cargo test --locked -p <package> --lib <test>
   `fifty_random_dag_sessions_render_bit_identically_in_both_executors`, and must not: both
   executors call the same function, so that gate proves *agreement*, while M1/M1c prove the order.
 
-## Issue #100 additions -- the pull-model arena, the persistent pool and bounded recovery
+## Historical issue #100 additions -- the pull-model arena, persistent pool and bounded recovery
 
 Same protocol: each row below was applied to the working tree, the named test was run, the failure
 was recorded, and the mutation was reverted in the same session. Every row was run on this branch
@@ -61,16 +61,20 @@ except where the "result" column says otherwise.
 | N6 | add `unsafe` to a second `realtime/` file | `scripts/check-realtime-policy.sh` fixture | `scripts/test-realtime-policy.sh` (`unsafe-outside-disjoint-arena`) | RED |
 | N17 | forget the silence-slot offset in the sequential executor's output buffer | `graph` `GraphExecutor::new` | builtins-fixture `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected` | RED (observed as a real defect during this work, then fixed) |
 
+These rows preserve the original executed mutations. #1154 retires the multi-lease builder/API and
+N1-N4's former owners: one non-cloneable `DisjointArena` now owns ordinary planar storage, and
+exclusive borrowing prevents foreign access. Current direct refusal, many-borrow address/word,
+transactional bank-shape and graph scatter gates qualify that single-owner API; these historical
+rows are not a claim that the retired lease tests still run.
+
 N7-N16 covered the native dependency-wave scheduler and were retired with it: the scheduler crate,
 the `bind_native` family and the cross-executor 50-DAG oracle no longer exist, so none of those
 mutations can be expressed. N5 (never take the executor hand-over at the block-boundary swap) was
-retired by #1024, which deleted the hand-over itself and the test that guarded it. N1-N4 are
-unaffected -- the disjoint arena and its lease API are what the *sequential* executor renders
-through, so they remain live production code with live gates.
+retired by #1024, which deleted the hand-over itself and the test that guarded it. N6 still defends
+the unsafe-file boundary, and N17 records the historical silence-slot offset correction.
 
-N4 is the one row whose mutation is not the check it guards: I1 makes a foreign write unexpressible
-through the builder, so the stress is mutated at the address arithmetic instead, which is the
-failure I1 exists to make impossible.
+Historically, N4 perturbed address arithmetic rather than the I1 check: the old builder rejected
+overlapping write declarations, while its concurrent stress caught a neighbour's foreign tag.
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 

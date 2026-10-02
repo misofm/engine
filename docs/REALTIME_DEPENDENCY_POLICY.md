@@ -32,19 +32,15 @@ trapped parcels and muted edges, and the strace/`/proc` gate that measured all o
 can be reintroduced by accident; a future multicore render must re-argue this exception from
 scratch, and the burden is the same one #100 carried.
 
-What survives, because the *sequential* executor depends on it: the plan-owned disjoint audio
-arena in `crates/engine/src/realtime/disjoint.rs` and its lease API. Structural invariants I1 and
-I2 are still proved at bind by `ArenaLeaseSetBuilder::finish`, and they are still what makes node
-semantics have exactly one implementation of *where the audio is*. The separate E1 execution
-obligation requires a foreign writer to finish and happen-before its consumer reads. Production
-satisfies E1 through exclusive sequential lease execution; any retained multi-lease use must
-provide the same ordering and prevent shared reads from overlapping foreign writes.
-
-The sequential lease no longer carries scheduler-era wave or mute state: `ArenaLease::wave`,
-`set_muted`, and `is_muted` are retired public Rust methods. The builder's wave remains because
-`finish` still rejects same-wave and later-wave reads. Read IDs continue to perform an explicit
-release-mode access-table bounds check before the arena's raw slice is formed; the access byte's
-WRITE bit and all write/alias proofs remain active.
+The sequential executor retains the plan-owned audio arena in
+`crates/engine/src/realtime/disjoint.rs`. Under #1154, one non-cloneable `DisjointArena` owns its
+ordinary `Box<[f32]>`; the shared multi-lease builder, wave/access tables and `Arc` are retired.
+Shared reads borrow the owner, and every mutable access requires its exclusive borrow, so Rust
+borrowing establishes access order. The constructor validates checked word/byte products and the
+platform allocation limit before allocating. Every access validates planes, buffer IDs, shape,
+silence-write protection and output/input disjointness in release before references are formed.
+These are bounded acquisition checks, not per-sample validation loops. Buffer zero remains the
+immutable `+0.0` silence slot, and valid render paths stay zero-copy.
 
 ## Unsafe-code ownership
 
@@ -93,16 +89,13 @@ exception owns fixed `UnsafeCell<MaybeUninit<T>>` storage and its local `SAFETY`
 require one producer, one consumer, release publication after writes, acquire before reads, and
 shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
 outside push, pop, and render. Issue 100 added `crates/engine/src/realtime/disjoint.rs`, the plan-owned disjoint audio
-arena, which the sequential executor still renders through. Its `unsafe impl Sync` and its raw
-slice construction are justified by the structural and execution invariants stated in the module
-documentation. `ArenaLeaseSetBuilder::finish` proves the structural invariants at bind: **I1**
-every buffer is writable by at most one lease for the life of the plan (buffers are never recycled)
-and **I2** a lease reads only buffers produced strictly earlier or by itself. Wave order expresses
-a dependency but does not synchronize access.
-**E1** therefore requires a foreign writer's exclusive access to end and happen-before a consumer
-reads that buffer. The single-thread executor meets E1 by exclusive sequential execution; retained
-multi-lease uses must establish it independently. Concurrent leases may write I1-disjoint sets and
-join before any inspection. `crates/graph` remains
+arena, which the sequential executor still renders through. #1154 removed its `UnsafeCell`,
+manual `Send`/`Sync` implementations and foreign leases. Single-buffer/stereo access uses safe
+slices; combined fixed-array borrows retain a narrow raw-slice seam. Its pointers derive from the
+complete uniquely owned allocation after release bounds/shape/disjointness checks, and every
+returned lifetime is tied to the exclusive owner borrow. Shared inputs may repeat; mutable outputs
+cannot overlap them or one another. No caller-side unsafe execution obligation remains.
+`crates/graph` remains
 entirely free of unsafe code. A second test-only exception is
 `tools/audit/src/realtime.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.
