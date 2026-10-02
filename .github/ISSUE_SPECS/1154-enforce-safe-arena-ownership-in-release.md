@@ -61,3 +61,32 @@ B may make one bounded attempt to install the existing nightly Miri component ou
 ## Subsequent owner steering
 
 The owner also asks for multicore rendering to be planned afresh across browser and mobile, using a bounded worker pool for bank jobs (12 browser tracks = three W4 banks; 16 = four). Removal under this issue remains authorized. New research issue #1177 owns that design, including deadlines, exclusive state/buffer transfer, dependency ordering, fixed latency/control horizon and late-worker policy. This issue does not retain foreign leases as speculative multicore support or implement a scheduler.
+
+## Attempt 2 final adversarial verdict
+
+Root Sol verdict: PASS for product source f0e644744cb783a4c66e77eb64747724d2ee82f7. B independently reviewed the complete six-path ownership change and the frozen one-file revision; root audited both diffs and the actual logs. Ordinary non-cloneable Box ownership and exclusive mutable lifetimes exclude foreign writes. Positive checked construction bounds every offset and slice; plane/ID/silence/shape/alias validation is unconditional before references. The safe convenience splitter validates every request before dividing storage, and its read portions are explicitly shared. The remaining combined/scatter pointers derive from the complete allocation after disjointness checks. Buffer IDs, planar layout, prepared schedules, source/master boundaries, PDC/sidechain and reduction arithmetic are unchanged. RuntimeWithoutSplitPairTable follows the actual owner type; actual owner caps remain executable, without claiming completion of #1074's separate whole-plan retained accounting.
+
+Six tests replace the former eleven: four impossible lease/wave/concurrency states and two redundant functions are retired, with one constructor-refusal family added. Net product change from main 7345ecb9 is -285 Rust lines (-288 across all six product paths); no PCM copying, benchmark, new harness/corpus or public unsafe execution obligation was introduced.
+
+Test-value verdicts, one sentence per rewritten/new surviving owner:
+
+- `a_write_then_a_read_carries_the_audio` catches independently anchored scalar L/R addressing/transfer and writable-query defects, including false repeated-input refusal or an incorrect duplicate read view in the rewritten direct `write_read2` path.
+- `direct_borrows_reject_invalid_ids_planes_and_aliases_in_release` catches missing unconditional convenience guards for extreme planes/IDs, silence, aliases and mono stereo access before any prior PCM/silence word changes.
+- `oversized_arenas_are_rejected_before_allocation` catches count/word/byte/isize overflow before allocation and preserves the silence-only positive boundary; no other owner exercises constructor refusal.
+- `write_read_many_forms_the_slices_the_single_borrows_form` catches incorrect zero-copy address/length/read order or output marker placement for the generic many-borrow seam with repeated reads/silence and unchanged unrelated words.
+- `write_read_many_refuses_every_unsound_borrow` catches the Option seam returning a view or panicking instead of `None` for invalid premises, which the programmer-error convenience owners do not defend.
+- `stereo_many_rejects_every_invalid_shape_without_partial_writes` catches duplicate mutable bank lanes, invalid width/frame/mono/ID/silence admission or partial mutation in the four/eight-lane scatter seam.
+
+Graph test changes only migrate fixture ownership and preserve their existing distinct behavioral assertions; no new graph test or private byte/layout/digest pin was added. The former silence/self-read scenarios and four writable queries survive in their owning families.
+
+### Actual final gates
+
+A ran all commands from the primary checkout with CARGO_TARGET_DIR=/home/bl/misofm/engine/target/housekeeping-a; logs are /tmp/engine-1154-a/attempt2-*.log. All commands exited zero. `cargo test --locked -p engine -p graph --all-features` passed 131 active tests plus one compile-fail doctest; release runs were separate package invocations and passed engine 37 plus the same compile-fail doctest and graph 94. All runs had zero failed/ignored tests. Both modes include the three named installed-allocator owners in the brief and actual runtime metadata/layout accounting.
+
+The frozen graph-compiler subset passed: `--test bypass_resources` (3), and four `--lib` filters (one each): `runtime_bank_slot_reservation_is_published_and_capped_transactionally`, `live_scalar_owner_bytes_are_published_and_capped_before_binding`, `console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically`, and `launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps`. These qualify actual owner caps, bank/scalar rendering, delay/state/tail/PDC and transactional refusal without a new effect sweep.
+
+`cargo clippy --locked -p engine -p graph --all-targets --all-features -- -D warnings`, package fmt, diff checks and existing workspace/graph/realtime policies passed (realtime: 54 regions/15 files). Clippy emitted only existing unresolved configuration-path warnings for math fast-db functions behind its absent lane feature; no product lint error or configuration/policy change is concealed.
+
+Compile-only all-feature engine/graph library checks passed without warnings for wasm32-unknown-unknown with RUSTFLAGS='-C target-feature=+simd128', aarch64-apple-ios and aarch64-linux-android. These prove compilation, not browser/device execution. B independently ran `CARGO_TARGET_DIR=/tmp/engine-1154-b-review/miri-target MIRIFLAGS='-Zmiri-strict-provenance' cargo +nightly-2026-08-20 miri test --locked -p engine --lib realtime::disjoint::tests -- --test-threads=1`: six passed, zero failed/ignored, 25 filtered, exit zero, log /tmp/engine-1154-b-review/miri-arena-attempt2.log. This native interpreter run does not execute the 32-bit constructor branch or valid raw stereo tuple; those retain source proof and current graph-owner/compile qualification. No old misuse/UB or timing experiment was executed.
+
+Root verified the product checkpoint is upstream and the working tree clean before recording PASS. Publish this evidence upstream and synchronize/close the matching GitHub issue, then retire the closed local spec. Required pull-request qualification and qualified main delivery remain the delivery gate; no multicore worker capability or measured speedup is claimed.
