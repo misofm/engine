@@ -260,6 +260,20 @@ This slice changes no code.
   makes "track-locally" "strip-locally" at K1. The VCA qualifier's removal belongs to V4, whose
   draft carries it. Five spec files were renamed to the slug of their GitHub titles.
 
+## Verdict
+
+- **Attempt 1** (`f622dad1`): Sol FAIL, two MAJORs (recorded above). `docs/handoffs/submix-sends-2026-10-02/verdicts/1197-attempt1.md`.
+- **Attempt 2** (`45c1a342`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1197-attempt2.md`. Its findings
+  were applied in the K0 follow-up commit:
+  - MINOR-A (the banking paragraph stays track-only after K1): *Build submix strips and bus taps in
+    the SDK and teach agents to author them* (#1205) deliverable 6 now changes it to strips.
+  - MINOR-B (O3's reading of "submix inputs"): the ruling quotes the planner's question 4, makes
+    the channel model the directly delegated part and the input section the reading, and records
+    that (b) keeps trim and polarity, which the owner was told a bus would drop, subject to owner
+    review. `AGENTS.md`'s chain qualifier says the same.
+  - NIT-1: W5 is verbatim to its end. NIT-3: the `AGENTS.md` parenthetical lists all four kinds of
+    authority. NIT-4: #1205 deliverable 7 also makes "a track's inserts" "a strip's inserts".
+
 ## Dependencies
 
 None. The owner's words of 2026-10-02 (W5) meet the design dependency: the owner decided O1 and O2,

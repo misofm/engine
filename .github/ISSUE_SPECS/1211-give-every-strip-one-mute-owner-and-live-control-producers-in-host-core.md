@@ -93,6 +93,10 @@ strip set, so a `TrackControlRequest` may name a submix and gets that strip's th
 - The `LiveControlSoloState` doc comment at `crates/host-core/src/solo.rs:86`, which still names
   `HostLiveControlHandles::tracks`: it names `HostLiveControlHandles::strips` (renamed by *List every
   strip in the live-control handles and file bus effects in the browser*) and says strip indices.
+- The source-semantics comment *Iterate session strips, not tracks, wherever strip semantics apply*
+  (#1198) could not add because `solo.rs` was outside its authorized paths: at the solo-safe guard
+  in `crates/host-core/src/solo.rs`, the line `// Source semantics: tracks only.`, then one line
+  saying that only tracks are soloable and submix entries are solo-safe.
 - Every `track_controls` reader in the Context renamed. `randomized.rs` draws over `strip_controls`
   (tracks and submixes), so its differential now also drives bus builtins.
 - host-web D3.

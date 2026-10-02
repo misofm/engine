@@ -3065,7 +3065,7 @@ fn session_identity(session: &CompiledSession) -> [u8; 32] {
     hash.finalize().into()
 }
 
-/// The three sealed builtin stages of every strip, keyed by strip ID (`session.strips()` order).
+/// Each strip's three sealed builtin stages by strip ID: input in `strips()` order, output sorted.
 fn processor_seal<T: Clone + Ord>(strips: &[T]) -> Vec<(T, TrackStage)> {
     let capacity = strips
         .len()

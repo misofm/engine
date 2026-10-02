@@ -213,3 +213,7 @@ O1-O11 are designed but not filed, among them:
 
 Each item names its trigger in DESIGN section 10. Further follow-ups, listed in DESIGN 8.2, are not
 designed yet: `follows_pan`, bus solo and implied upstream solo, and VCA trim of sends.
+
+Optional successor, not designed (the #1198 verdict, MINOR-2): a routed-sidechain case in the graph
+fixture corpus, which owns the sealed text, so a change to the `.sidechain` edge-path suffix turns a
+gate red. No test pins that suffix today.

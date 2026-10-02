@@ -149,11 +149,17 @@ with bus depth, and how to migrate a saved document K1 now refuses.
 6. `AGENTS.md`: remove the decision-13 qualifier from the K1 sentences (*Record the submix, send and
    VCA ruling* D5: the dual-mono strip, chain, console-slot, strip-insert and seven-tap sentences),
    and in "Effects and plugins" change "A native effect may run track-locally as an insert" to
-   "strip-locally", changing nothing else. The parenthetical that cites decision 13 and its
-   authority marks stays.
+   "strip-locally". In the banking paragraph of "Approved audio architecture" ("Audio buffers are
+   planar `f32`, ..."), change "tracks" to "strips" where it describes the bank layout: "banked
+   AoSoA across strips", "the same dual-mono lane from four Wasm/NEON strips or eight AVX2 strips",
+   "parameters/state remain per-strip", "incompatible strips form another cohort" and "Scalar tails
+   support every strip count" (*Carry every console slot on every submix strip* D3 banks a bus's
+   console lane with the tracks'). Change nothing else. The parenthetical that cites decision 13 and
+   its authority marks stays.
 7. `docs/IMPLEMENTATION_PLAN.md`, "Non-negotiable release shape": "Tracks are dual-mono and run"
-   becomes "Strips (tracks and submixes) are dual-mono and run", changing nothing else in that
-   paragraph.
+   becomes "Strips (tracks and submixes) are dual-mono and run", and "a track's inserts to the
+   dynamic rack" in the same sentence becomes "a strip's inserts to the dynamic rack", changing
+   nothing else in that paragraph.
 
 ## Authorized paths
 
@@ -164,7 +170,8 @@ with bus depth, and how to migrate a saved document K1 now refuses.
 - `sdk/test/{builder-evals,console-evals}.mjs`, `sdk/test/enginectl-cli.mjs`
 - `.claude/skills/author-session/SKILL.md`
 - `docs/handoffs/submix-strips-and-sends/` (new folder: `APP-SDK.md`, `migrate-submix-strips.py`)
-- `AGENTS.md` (those qualifiers and the one word "track-locally" only)
+- `AGENTS.md` (those qualifiers, the one word "track-locally" and the banking paragraph's "tracks"
+  only)
 - `docs/IMPLEMENTATION_PLAN.md` (that one sentence only)
 - this spec
 

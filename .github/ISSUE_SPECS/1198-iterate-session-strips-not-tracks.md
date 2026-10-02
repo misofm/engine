@@ -282,6 +282,23 @@ filter; `shape.rs` `track_count`.
 derives `Clone, Copy, Debug, PartialEq`, as does `StripKind`. `solo.rs` carries no comment: it is
 outside the authorized paths, and the slice does not touch it.
 
+## Decision record
+
+- **The `solo.rs` comment was skipped.** Deliverable 3 asks for the source-semantics comment at each
+  source-semantics site, and the Context lists solo (`crates/host-core/src/solo.rs`), but `solo.rs`
+  is not an authorized path. The implementer followed the authorized list, and the verdict
+  (MINOR-1) upheld it. *Give every strip one mute owner and live-control producers in host-core*
+  (#1211), which authorizes `solo.rs`, carries the comment as a deliverable.
+- **The sealed sidechain edge path is pinned by no test** (verdict MINOR-2). The gap predates this
+  slice, which is class A for that path by string identity. A routed-sidechain graph fixture is an
+  optional successor in #1196's deferred list.
+- **The `processor_seal` doc** (verdict NIT-1) now says its input is in `strips()` order and its
+  output is sorted. The K0 follow-up commit changes that doc comment only.
+
+## Verdict
+
+- **Attempt 1** (`0a769a63`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1198-attempt1.md`.
+
 ## Dependencies
 
 - *Record the submix, send and VCA ruling* (#1197)

@@ -47,7 +47,12 @@ as channels, and that each track has its own settings for each console slot:
 > W5. "Ok let's keep the same console effects for buses as well. For VCA groups and submix inputs,
 > I'll defer to your adversarially verified opinions. Reverb-wise, let's hold off on that so we can
 > sepnd more time scoing that. I have to sleep now. Please plan out the items above, adversarially
-> verify, then implement"
+> verify, then implement - use a fresh agent for each step, opus 5.5 please."
+
+W5's "submix inputs" answers the last of the four questions in the planner's first reply, verbatim:
+
+> "**Submix input:** a bus sums panned tracks, so I'd make it a true L/R stereo strip and not
+> dual-mono. Agreed?"
 
 **Authority.** Every point below carries one of four kinds:
 
@@ -80,9 +85,18 @@ Ruling:
   separate scoping. The planner's consequence: `miso.delay` is the send effect in tests. It declares
   zero latency, so PDC fixtures use the true-peak limiter.
 - **O3, owner delegation** (W5: "For VCA groups and submix inputs, I'll defer to your adversarially
-  verified opinions"). The answers are (a) and (b) below. W5 names "submix inputs". The planner reads
-  that as the submix strip's input section and, with it, its channel model, which DESIGN 2.2b
-  answers as one question. The channel-model half rests on that reading.
+  verified opinions"). The answers are (a) and (b) below. W5's "submix inputs" answers the planner's
+  question 4, quoted after W5, so the submix strip's **channel model** is the directly delegated
+  part. The planner also reads "submix inputs" as covering the strip's **input section**, which
+  DESIGN 2.2b answers with the channel model as one question. The input-section half rests on that
+  reading.
+  - **Subject to owner review:** (b) keeps trim and polarity, which the planner had told the owner
+    a bus would drop. The planner's second reply, before W5, said that a submix "drops the
+    source-specific parts of the input section, such as trim and polarity". The owner has not been
+    told of this reversal.
+  - (b)'s dual-mono strip is the verified opinion, and it reverses question 4's own lean toward "a
+    true L/R stereo strip and not dual-mono". The owner deferred to the verified opinion, not to
+    the lean.
 - **O4, owner direction, read by the planner** (W2 and W3). Sends are for agents, so the engine sets
   no human-UX limits. The planner reads that as: arbitrary bus counts, nesting, any tap, a full 2x2
   per send, and fan-out. These are subject to owner review. Two limits are standing `AGENTS.md`
@@ -92,7 +106,7 @@ Ruling:
   applies to buses and sends (DESIGN section 6) is the planner's, subject to owner review.
 - **Owner-delegated answers** (O3). VERIFY-1 upheld both opinions, and its amendments are folded
   in. The two answers below therefore carry the owner's delegated authority, (b) under the reading
-  of "submix inputs" recorded at O3.
+  of "submix inputs" recorded at O3, with (b)'s trim and polarity subject to owner review (O3).
   - **(a) VCA groups are in scope** (DESIGN 2.2a).
     - A VCA is a control-only group. It carries no audio. Its per-lane dB offset adds to each
       member's own fader, and its mute ORs into each member's effective mute.
@@ -194,7 +208,8 @@ The slices, their dependencies, their gates and the batches are in #1196.
   slice removes its qualifiers in its own PR:
   - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205) removes
     them from the dual-mono strip, chain, console-slot, strip-insert and seven-tap sentences, and
-    makes "track-locally" "strip-locally" in the insert sentence of "Effects and plugins";
+    makes "track-locally" "strip-locally" in the insert sentence of "Effects and plugins", and turns
+    the banking paragraph's "tracks" into "strips";
   - *Let a send follow its source strip's mute live in the browser* (#1224) removes them from the
     route-mute and follow-mute sentences;
   - V4, *Enumerate VCA groups and drive them from the SDK*, which closes the VCA batch V1-V4,
