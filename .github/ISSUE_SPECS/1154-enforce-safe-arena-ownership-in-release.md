@@ -30,7 +30,11 @@ Scope is engine's arena implementation/reexports, graph's constructor/test helpe
 
 ## Evidence and delivery state
 
-Original finding confirmed by worker A and root under #1115; owner direction now settled. Current production caller is crates/graph/src/runtime.rs; a repository-wide source search finds no other non-test arena consumer. Root started codex/safe-single-owner-arena-1154 from synchronized main 7345ecb9. Exact API proposal and implementation approval are pending the two independent reads. No implementation or validation improvement is claimed yet.
+Original finding was confirmed by worker A and root under #1115. Current production caller is crates/graph/src/runtime.rs; a repository-wide source search finds no other non-test arena consumer. Root started codex/safe-single-owner-arena-1154 from synchronized main 7345ecb9. Both independent reads supplied the concrete approved brief below. The first implementation checkpoint is pushed as 5ee5b0e4094ec11ed95b1de7de5e799fb5efe481; root verified HEAD equals upstream and the tree was clean before authorizing further frozen qualification.
+
+Worker A recorded the old arena baseline: 11 passed. Corrected arena: 8 passed; four multi-lease/wave owners are retired and one constructor-capacity family is added. Existing graph owners: reduction 9, direct scatter 1, malformed folded cohorts 1, actual runtime metadata/layout accounting 1, all passed. Engine+graph all-targets/all-features compilation, formatting and diff checks passed. Logs are preserved outside the repository under /tmp/engine-1154-a. All six approved product paths changed by +734/-1030 lines (net -296); Rust paths changed by +707/-1000 (net -293). This is focused checkpoint evidence, not the final adversarial verdict. Release, allocator, downstream, target checks and B's corrected-source Miri/safety/test-value review are in progress against the frozen checkpoint.
+
+Root corrected an unintended u32 sentinel-addition cap before the checkpoint: the constructor converts the writable count to usize before checked addition, so representable u32 IDs are not artificially capped on 64-bit targets. Oversized constructor tests never request a representable multi-gigabyte allocation. No old-code invalid access/UB was executed. DSP arithmetic, buffer IDs and prepared schedules remain unchanged; no timing gain is claimed.
 
 ## Concrete Sol brief approval — attempt 1
 
