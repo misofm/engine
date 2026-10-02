@@ -49,8 +49,9 @@ section, no inserts, an unmuted 0 dB fader and the identity matrix with no smoot
 sums the routes that target it, left to right in route-ID order, and then runs its strip on that
 sum exactly as a track runs its strip on its source: input section, inserts, fader and pan or
 matrix (#1200). A bus is never mono-collapsed, and its insert latency joins plugin-delay
-compensation. Its `delay_samples` is not applied until *Delay a submix strip's summed input*
-(#1201) lands. On the wire the submix message carries `id` 1,
+compensation. Its `delay_samples` delays the summed input, per lane, before the input section
+runs (#1201): like a track's delay it is a musical time shift, and plugin-delay compensation never
+compensates it. On the wire the submix message carries `id` 1,
 `builtins` 2, `inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the
 track's field 10); field 3 is reserved for `console`.
 
@@ -190,6 +191,9 @@ sample-exact, the engine is sample-domain throughout, and #147's unit-in-name ru
 part of the key. A host converts from milliseconds; the session never does. The two lanes are
 independent under the dual-mono law, and a track whose lanes declare different delays is genuinely
 asymmetric upstream of the mono-collapse seam, so it declines that track's collapse.
+
+On a submix, `delay_samples` delays the summed input instead (#1201); everything below applies to
+it unchanged.
 
 `delay_samples` is deliberately **not** plugin latency and PDC never compensates it: it is a time
 shift the session asked for, so it contributes zero to any node's declared latency and does not

@@ -10,6 +10,12 @@
 //! * **Gate 5, the K1 live-control interim.** No bus effect gets a live channel or an
 //!   observation handle until #1207.
 //! * **Gate 8, render allocates nothing** for gate 1's bus session.
+//!
+//! Issue #1201: a submix's `delay_samples` delays its summed input, uncompensated.
+//!
+//! * **Gate 1, the bus delay runs after the sum**, and PDC never sees it.
+//! * **Gate 3, a folded bus still delays its sum.**
+//! * **Gate 4, render allocates nothing** for gate 1's delayed bus.
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -23,7 +29,9 @@ use effect_contract::{
 };
 use engine::realtime::audit;
 use graph::{GraphCompileCaps, GraphEdgeId};
-use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
+use graph_compiler::{
+    Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
+};
 use host_core::{
     HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
     compile_host_session, prepare_host_runtime, prepare_host_session_with_live_controls,
@@ -451,6 +459,15 @@ fn submit(prepared: &mut PreparedHost, feeds: &[(&str, &[Vec<f32>; 2])], block: 
 
 /// Renders `blocks` quanta of `document` and returns its two output planes.
 fn render(document: &str, feeds: &[(&str, &[Vec<f32>; 2])], blocks: usize) -> [Vec<f32>; 2] {
+    render_counting_folds(document, feeds, blocks).0
+}
+
+/// [`render`], plus the plan's admitted route-fold lane count after the last block.
+fn render_counting_folds(
+    document: &str,
+    feeds: &[(&str, &[Vec<f32>; 2])],
+    blocks: usize,
+) -> ([Vec<f32>; 2], u64) {
     let compiled = compile_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("compile: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
@@ -481,7 +498,7 @@ fn render(document: &str, feeds: &[(&str, &[Vec<f32>; 2])], blocks: usize) -> [V
         out[0].extend_from_slice(&samples[..QUANTUM]);
         out[1].extend_from_slice(&samples[QUANTUM..]);
     }
-    out
+    (out, prepared.plan.bank_route_folds())
 }
 
 #[test]
@@ -651,11 +668,10 @@ fn pdc_session() -> SessionModel {
     model
 }
 
-#[test]
-fn a_bus_limiters_latency_is_compensated_on_the_direct_edge() {
-    let model = pdc_session();
-    let document = document(&model);
-    let compiled = compile_host_session(&document, &caps()).expect("compile");
+/// The graph artifact of `document`, through the public pipeline host-core uses (effects, builtins,
+/// `compile_with_builtins`): `PreparedHost` exposes no inserted delays.
+fn graph_artifact(document: &str, plan_id: u64) -> PreparedGraphBuiltinsArtifact {
+    let compiled = compile_host_session(document, &caps()).expect("compile");
     let registry = launch_native_effect_registry().expect("launch registry");
     let effects = effect_compiler::prepare_native_session_effects(
         &compiled,
@@ -683,9 +699,9 @@ fn a_bus_limiters_latency_is_compensated_on_the_direct_edge() {
         },
     )
     .expect("builtins");
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch: Backend::current(),
-        plan_id: 1_200,
+        plan_id,
         effects,
         builtins,
         caps: GraphCompileCaps {
@@ -702,7 +718,14 @@ fn a_bus_limiters_latency_is_compensated_on_the_direct_edge() {
             maximum_finite_tail_samples: u64::MAX,
         },
     })
-    .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics));
+    .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics))
+}
+
+#[test]
+fn a_bus_limiters_latency_is_compensated_on_the_direct_edge() {
+    let model = pdc_session();
+    let document = document(&model);
+    let artifact = graph_artifact(&document, 1_200);
     assert_eq!(artifact.report().output_latency, LatencySamples(486));
     let delays = &artifact.graph().inserted_delays;
     assert_eq!(
@@ -855,7 +878,13 @@ fn a_processed_bus_renders_without_allocating() {
     let registry = launch_native_effect_registry().expect("launch registry");
     let mut draw = Draw::new(8);
     let (bus, feeds, _, _) = gate_one_sessions(&mut draw, &registry);
-    let compiled = compile_host_session(&bus, &caps()).expect("compile");
+    assert_renders_without_allocating(&bus, &feeds);
+}
+
+/// After block 0, every render of `document` allocates and frees nothing: the render audit and
+/// `bench_support::alloc`'s thread-scoped counters both read exact zero around each call.
+fn assert_renders_without_allocating(document: &str, feeds: &[(String, [Vec<f32>; 2])]) {
+    let compiled = compile_host_session(document, &caps()).expect("compile");
     let prepared = prepare_host_runtime(&compiled, &caps()).expect("prepare");
     let rate = prepared.report.sample_rate_hz;
     let (mut session, mut sources, _) = prepared
@@ -865,7 +894,7 @@ fn a_processed_bus_renders_without_allocating() {
     bench_alloc::assert_installed();
     for block in 0..BLOCKS {
         let range = block * QUANTUM..(block + 1) * QUANTUM;
-        for (id, planes) in &feeds {
+        for (id, planes) in feeds {
             sources
                 .submit(
                     id.as_bytes(),
@@ -903,4 +932,175 @@ fn a_processed_bus_renders_without_allocating() {
             );
         }
     }
+}
+
+// ---- #1201 --------------------------------------------------------------------------------
+
+/// Two transparent tracks `t0` and `t1` routed `post_pan` into a transparent bus whose lanes
+/// declare `delay` samples, at 48 kHz.
+fn delayed_bus_session(delay: [u32; 2]) -> String {
+    let (mut model, source, track) = empty_session(48_000);
+    for id in ["t0", "t1"] {
+        add_track(&mut model, &source, &track, id);
+        model
+            .routes
+            .push(route(&format!("{id}-bus"), post_pan(id), into_bus("bus")));
+    }
+    model.routes.push(to_output("bus-main", bus_output("bus")));
+    let mut bus = Strip::transparent();
+    bus.builtins.left.delay_samples = delay[0];
+    bus.builtins.right.delay_samples = delay[1];
+    model.submixes = vec![bus.submix("bus")];
+    document(&model)
+}
+
+/// Gate 1's feeds: an impulse into each contributor, at different samples and levels, on both
+/// planes.
+fn impulse_feeds() -> Vec<(String, [Vec<f32>; 2])> {
+    [("t0", 3, 0.25_f32), ("t1", 10, 0.5)]
+        .into_iter()
+        .map(|(id, at, level)| {
+            let mut plane = vec![0.0_f32; QUANTUM * BLOCKS];
+            plane[at] = level;
+            (id.to_owned(), [plane.clone(), plane])
+        })
+        .collect()
+}
+
+fn borrowed(feeds: &[(String, [Vec<f32>; 2])]) -> Vec<(&str, &[Vec<f32>; 2])> {
+    feeds
+        .iter()
+        .map(|(id, planes)| (id.as_str(), planes))
+        .collect()
+}
+
+fn peak(samples: &[f32]) -> usize {
+    samples
+        .iter()
+        .enumerate()
+        .max_by(|x, y| x.1.abs().total_cmp(&y.1.abs()))
+        .map(|(index, _)| index)
+        .expect("rendered samples")
+}
+
+/// `plane` shifted later by `delay` samples, with `+0.0` shifted in.
+fn shifted(plane: &[f32], delay: usize) -> Vec<f32> {
+    core::iter::repeat_n(0.0_f32, delay)
+        .chain(plane.iter().copied())
+        .take(plane.len())
+        .collect()
+}
+
+fn assert_bits_equal(actual: &[f32], expected: &[f32], what: &str) {
+    if let Some(index) = first_difference(actual, expected) {
+        panic!(
+            "{what}: sample {index}: {:?} != {:?}",
+            actual[index], expected[index]
+        );
+    }
+}
+
+#[test]
+fn a_bus_delay_shifts_its_summed_input_and_pdc_never_sees_it() {
+    const DELAY: usize = 37;
+    let delayed = delayed_bus_session([DELAY as u32, 0]);
+    let undelayed = delayed_bus_session([0, 0]);
+    let feeds = impulse_feeds();
+    let feeds = borrowed(&feeds);
+    let out = render(&delayed, &feeds, BLOCKS);
+    let reference = render(&undelayed, &feeds, BLOCKS);
+    assert!(
+        reference[0].iter().filter(|sample| **sample != 0.0).count() == 2,
+        "both contributors reach the undelayed bus: {:?}",
+        reference[0]
+            .iter()
+            .enumerate()
+            .filter(|(_, sample)| **sample != 0.0)
+            .collect::<Vec<_>>()
+    );
+    // The whole sum moves, both contributors together, by exactly the declared samples.
+    assert_bits_equal(
+        &out[0],
+        &shifted(&reference[0], DELAY),
+        "the delayed left plane against the undelayed left, shifted",
+    );
+    assert_bits_equal(&out[1], &reference[1], "the undelayed right plane");
+    assert_eq!(peak(&out[0]), peak(&out[1]) + DELAY);
+
+    // Not latency: PDC inserts nothing for it and the output latency does not move.
+    let delayed = graph_artifact(&delayed, 1_201);
+    let undelayed = graph_artifact(&undelayed, 1_202);
+    assert_eq!(
+        delayed.report().output_latency,
+        undelayed.report().output_latency
+    );
+    assert_eq!(
+        delayed.graph().inserted_delays,
+        undelayed.graph().inserted_delays
+    );
+}
+
+#[test]
+fn a_folded_bus_still_delays_its_sum() {
+    const DELAY: usize = 7;
+    let session = |delay: u32| {
+        let (mut model, source, track) = empty_session(48_000);
+        for index in 0..8 {
+            let id = format!("t{index}");
+            add_track(&mut model, &source, &track, &id);
+            model
+                .routes
+                .push(route(&format!("{id}-bus"), post_pan(&id), into_bus("bus")));
+        }
+        model.routes.push(to_output("bus-main", bus_output("bus")));
+        let mut bus = Strip::transparent();
+        bus.builtins.left.delay_samples = delay;
+        bus.builtins.right.delay_samples = delay;
+        model.submixes = vec![bus.submix("bus")];
+        document(&model)
+    };
+    let mut draw = Draw::new(1_201);
+    let feeds: Vec<(String, [Vec<f32>; 2])> = (0..8)
+        .map(|index| {
+            let mut plane = || {
+                (0..QUANTUM * BLOCKS)
+                    .map(|_| draw.noise(0.9))
+                    .collect::<Vec<f32>>()
+            };
+            (format!("t{index}"), [plane(), plane()])
+        })
+        .collect();
+    let feeds = borrowed(&feeds);
+    let (delayed, folds) = render_counting_folds(&session(DELAY as u32), &feeds, BLOCKS);
+    let (undelayed, undelayed_folds) = render_counting_folds(&session(0), &feeds, BLOCKS);
+    assert_eq!(folds, undelayed_folds, "the delay costs the bus no fold");
+    assert!(
+        folds > 0,
+        "the bus must be a fold master, or this is vacuous"
+    );
+    graph::test_only_set_route_fold_declined(true);
+    let (declined, declined_folds) = render_counting_folds(&session(DELAY as u32), &feeds, BLOCKS);
+    graph::test_only_set_route_fold_declined(false);
+    assert_eq!(declined_folds, 0, "the declined arm must not fold");
+    for plane in 0..2 {
+        assert_bits_equal(
+            &delayed[plane],
+            &declined[plane],
+            &format!("plane {plane}: the folded bus against the reduction"),
+        );
+        assert_bits_equal(
+            &delayed[plane],
+            &shifted(&undelayed[plane], DELAY),
+            &format!("plane {plane}: the delayed bus against the undelayed, shifted"),
+        );
+    }
+    assert!(
+        delayed.iter().flatten().any(|sample| *sample != 0.0),
+        "the folded bus rendered audio"
+    );
+}
+
+#[test]
+fn a_delayed_bus_renders_without_allocating() {
+    assert_renders_without_allocating(&delayed_bus_session([37, 0]), &impulse_feeds());
 }

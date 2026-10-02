@@ -811,6 +811,24 @@ pub(crate) enum NodeKind {
         /// truth lives; `the_node_witness_agrees_with_its_line` keeps the two from drifting.
         channels_agree: bool,
     },
+    /// A submix's summed input, time-shifted in place after its reduction (#1201 D2, D3).
+    ///
+    /// The bus counterpart of [`NodeKind::TrackDelay`], with the same line type and the same
+    /// `process`, at the opposite position: a submix's `Input` has graph inputs and no source, so
+    /// `execute_op` stages and reduces into the node's buffer first and only then delays it, in the
+    /// kind match like any processing node. Running the line before the reduction would delay
+    /// nothing the reduction then reads. As a fold master the node's own reduction is a no-op over
+    /// the folded sum, and this arm still runs after it, so a folded bus keeps its delay.
+    ///
+    /// Not latency, exactly as `TrackDelay` is not: it adds nothing to node latency, total delay or
+    /// inserted delays. A submix that declares zero delay on both lanes never lowers to it.
+    SumDelay {
+        /// Index into the runtime's track-delay lines (one vector serves both delay arms).
+        line: u32,
+        /// Whether the two lanes declared the same delay, cached from the lowering as
+        /// `TrackDelay` caches it.
+        channels_agree: bool,
+    },
     /// A host-supplied processor.
     Bound(Box<dyn GraphRuntimeProcessor>),
     /// A track-local prepared native effect.
@@ -1494,6 +1512,9 @@ impl NodeKind {
             // `session_structural_symmetry` -- which is what actually arms the chain; this arm
             // is the plan's own evidence row agreeing with it.
             Self::TrackDelay { channels_agree, .. } => designed(*channels_agree),
+            // The same fact for a bus (#1201 D5): lanes with different declared delays disagree.
+            // A bus is never collapse-eligible anyway (DESIGN 2.2b), so this is evidence only.
+            Self::SumDelay { channels_agree, .. } => designed(*channels_agree),
             Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
             Self::LiveControlEffect(live) => {
                 designed(live.effect.processor.channel_symmetry()).and(live.control.symmetry())
@@ -3014,8 +3035,8 @@ fn execute_op(
     //
     // The clause is exactly "no graph inputs *and* a host processor". A `NodeKind::Identity` with
     // no inputs is a submix nothing routes into and its fill **is** its audio; a `SourceInput` and
-    // a `TrackDelay` are already skipped above; every other kind reduces first and processes in
-    // place, so its fill is the value it processes.
+    // a `TrackDelay` are already skipped above; every other kind -- `SumDelay` included -- reduces
+    // first and processes in place, so its fill is the value it processes.
     if !op.inputs.is_empty() || !matches!(op.kind, NodeKind::Bound(_)) {
         match host.as_mut() {
             None => {
@@ -3033,6 +3054,11 @@ fn execute_op(
         // `TrackDelay` returned above, before the reduction it must not run; it is named here only
         // because the match is exhaustive.
         NodeKind::TrackDelay { .. } | NodeKind::SourceInput | NodeKind::BankMember => {}
+        // After the reduction above, never before it (#1201 D3): the line delays the sum.
+        NodeKind::SumDelay { line, .. } => {
+            let (out_left, out_right) = output_planes(arena, &mut host, output);
+            track_delays[*line as usize].process(out_left, out_right);
+        }
         NodeKind::Identity => {
             if let Some(slot) = op.split_pair {
                 let (out_left, out_right) = output_planes(arena, &mut host, output);
@@ -3900,9 +3926,10 @@ pub(crate) struct RuntimeParts {
     pub(crate) split_pairs: BTreeMap<GraphNodeId, SplitPairSlot>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
-    /// Issue #210 phase 2: declared per-lane input delay, by track input node. Only tracks that
+    /// Issue #210 phase 2: declared per-lane input delay, by strip input node. Only strips that
     /// declared a nonzero delay on at least one lane are present, so this map is empty -- and
-    /// `node_kind` never leaves the `SourceInput` arm -- for every session that declares none.
+    /// `node_kind` never leaves the `SourceInput` or `Identity` arm -- for every session that
+    /// declares none. A track's entry lowers to `TrackDelay`, a submix's to `SumDelay` (#1201).
     track_delays: BTreeMap<GraphNodeId, [u32; 2]>,
     /// The lines `node_kind` allocated, in the order it allocated them.
     track_delay_lines: Vec<TrackDelayLine>,
@@ -4061,6 +4088,17 @@ impl RuntimeParts {
             }
         } else if let Some(transform) = self.routes.remove(node) {
             NodeKind::Route(folded_route(&transform))
+        } else if let Some([left, right]) = self.track_delays.remove(node) {
+            // A delay entry on a node that is not a source input: a submix's `Input`, which
+            // reduces the routes that target it (#1201 D2). Without this arm the entry would sit
+            // unused and the node would fall to `Identity`, silently undelayed.
+            let line = u32::try_from(self.track_delay_lines.len()).expect("delay line index");
+            self.track_delay_lines
+                .push(TrackDelayLine::new(left as usize, right as usize));
+            NodeKind::SumDelay {
+                line,
+                channels_agree: left == right,
+            }
         } else {
             NodeKind::Identity
         }

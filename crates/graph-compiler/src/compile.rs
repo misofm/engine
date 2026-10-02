@@ -454,23 +454,25 @@ impl GraphCompiler {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
-        // Source semantics: tracks only. The `TrackDelay` arm runs on a source input; a submix's
-        // delay is a separate arm (*Delay a submix strip's summed input*, #1201). Until then a
-        // submix's `delay_samples` is not lowered at all (#1200 D5, a batch-K1 interim).
-        // Issue #210 phase 2. Only tracks that actually declared a delay appear, in normalized
-        // track order: an undelayed session produces an empty vector, and every downstream
-        // consumer -- the estimate term, the lowering, the runtime's line vector -- is then
-        // exactly what it was before this feature existed.
+        // Every strip, in `strips()` order: tracks, then submixes (#1201 D1). The entry is keyed
+        // by the strip's `Input` node either way, and the runtime tells the two apart by what
+        // that node is. A track's `Input` is a source input, so its entry lowers to the
+        // `TrackDelay` arm, which delays the source in place. A submix's `Input` has no source and
+        // reduces the routes that target it, so its entry lowers to the `SumDelay` arm, which
+        // delays that sum after the reduction. Neither is latency, and PDC compensates neither.
+        // Issue #210 phase 2. Only strips that actually declared a delay appear: an undelayed
+        // session produces an empty vector, and every downstream consumer -- the estimate term,
+        // the lowering, the runtime's line vector -- is then exactly what it was before this
+        // feature existed.
         let track_delays: Vec<PreparedTrackDelay> = model
-            .tracks
-            .iter()
-            .filter(|track| {
-                track.builtins.left.delay_samples != 0 || track.builtins.right.delay_samples != 0
+            .strips()
+            .filter(|strip| {
+                strip.builtins.left.delay_samples != 0 || strip.builtins.right.delay_samples != 0
             })
-            .map(|track| PreparedTrackDelay {
-                node: track_node(track.id.as_str(), TrackStage::Input),
-                left_samples: track.builtins.left.delay_samples,
-                right_samples: track.builtins.right.delay_samples,
+            .map(|strip| PreparedTrackDelay {
+                node: track_node(strip.id.as_str(), TrackStage::Input),
+                left_samples: strip.builtins.left.delay_samples,
+                right_samples: strip.builtins.right.delay_samples,
             })
             .collect();
         let Some(track_delay_bytes) = track_delays.iter().try_fold(0_u64, |total, delay| {
