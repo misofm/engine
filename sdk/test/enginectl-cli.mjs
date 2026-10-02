@@ -6,10 +6,11 @@ import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { describe, test } from "node:test";
 
 const executable = resolve(process.env.ENGINECTL ?? "dist/enginectl.js");
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 const CONTENT = `blake3:${"0".repeat(64)}`;
 
 function request(overrides = {}) {
@@ -58,12 +59,17 @@ function request(overrides = {}) {
         },
       },
     ],
-    submixes: ["bus"],
+    // A bare ID is the transparent strip; an object is a submix strip with a track's strip keys.
+    submixes: [
+      "bus",
+      { id: "low", console: [{ slot: "eq" }, { slot: "clip", bypass: true }], fader: { leftDb: -2, rightDb: -2.5 } },
+    ],
     outputs: ["main"],
     routes: [
       { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
-      { id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
-      { id: "to-main", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "output_input", outputId: "main" } },
+      { id: "bass-low", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "low" } },
+      { id: "low-bus", source: { kind: "submix", submixId: "low", tap: "post_fader" }, destination: { kind: "submix_input", submixId: "bus" } },
+      { id: "to-main", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } },
     ],
     automation: [{
       id: "eq-ride",
@@ -239,9 +245,11 @@ describe("enginectl session build", () => {
         pan: { left: -1, right: 1 },
         console: [{ slot: "eq", bypass: true }, { slot: "clip" }],
       })
+      .submix("low", { console: [{ slot: "eq" }, { slot: "clip", bypass: true }], fader: { leftDb: -2, rightDb: -2.5 } })
       .route({ id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } })
-      .route({ id: "bass-bus", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } })
-      .route({ id: "to-main", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "output_input", outputId: "main" } })
+      .route({ id: "bass-low", source: { kind: "track", trackId: "bass", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "low" } })
+      .route({ id: "low-bus", source: { kind: "submix", submixId: "low", tap: "post_fader" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .route({ id: "to-main", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } })
       .automation({
         id: "eq-ride",
         target: { trackId: "vocal", rack: "console", slotId: "eq", parameter: "band-1-gain", channel: "both" },
@@ -411,6 +419,44 @@ process.stdout.write = function () {
     );
   });
 
+  test("submix strips and bus taps build the engine's canonical JSON; submix_output is refused by name", async () => {
+    // Issue #1205 gate 5. Red mutations: pass an object submix's ID alone to the builder (its
+    // fader is dropped), or accept `submix_output` in `routeSource` -> the document or the refusal
+    // differs. The engine's own canonical writer is the authority for the bytes.
+    const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request()));
+    assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    const text = built.stdout.toString("utf8");
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-submix-"));
+    const path = resolve(directory, "session.json");
+    await writeFile(path, text);
+    const canonical = execFileSync(
+      "cargo",
+      ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
+      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    assert.equal(canonical, text);
+    const model = JSON.parse(text);
+    const low = model.submixes.find((row) => row.id === "low");
+    assert.deepEqual([low.fader.left_db, low.fader.right_db], [-2, -2.5]);
+    assert.deepEqual(model.submixes.find((row) => row.id === "bus").console.map((row) => row.bypass), [true, true]);
+    assert.deepEqual(model.routes.find((row) => row.id === "low-bus").source, { kind: "submix", submix_id: "low", tap: "post_fader" });
+
+    for (const [name, edit] of [
+      ["a route source", (body) => { body.routes[3].source = { kind: "submix_output", submixId: "bus" }; }],
+      ["a sidechain source", (body) => {
+        body.tracks[0].spec.inserts[0].options.sidechain.source = { kind: "submix_output", submixId: "bus" };
+      }],
+    ]) {
+      const body = request();
+      edit(body);
+      const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
+      failure(result, 3, "request.shape");
+      const document = JSON.parse(result.stderr.toString("utf8"));
+      assert.match(document.error.message, /'submix_output' is retired; read a submix as \{ "kind": "submix", "submixId", "tap" \}/, name);
+      assert.deepEqual(document.diagnostics?.map((row) => row.code), ["schema.invalid_enum"], name);
+    }
+  });
+
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {
     // #1097 verdict L2. enginectl reads a request before the builder does, so its own key check is
     // the first refusal for a console sidechain or an effect field on an entry, and it must name
@@ -463,9 +509,9 @@ process.stdout.write = function () {
       submixes: ["bus", "loop"],
       routes: [
         { id: "to-bus", source: { kind: "track", trackId: "vocal", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
-        { id: "bus-loop", source: { kind: "submix_output", submixId: "bus" }, destination: { kind: "submix_input", submixId: "loop" } },
-        { id: "loop-bus", source: { kind: "submix_output", submixId: "loop" }, destination: { kind: "submix_input", submixId: "bus" } },
-        { id: "loop-main", source: { kind: "submix_output", submixId: "loop" }, destination: { kind: "output_input", outputId: "main" } },
+        { id: "bus-loop", source: { kind: "submix", submixId: "bus", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "loop" } },
+        { id: "loop-bus", source: { kind: "submix", submixId: "loop", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } },
+        { id: "loop-main", source: { kind: "submix", submixId: "loop", tap: "post_pan" }, destination: { kind: "output_input", outputId: "main" } },
       ],
     });
     const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(cyclic));

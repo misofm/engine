@@ -20,6 +20,7 @@ import type {
   RouteSpec,
   SessionSampleRateHz,
   SourceSpec,
+  SubmixSpec,
   TrackSpec,
 } from "./types.ts";
 
@@ -71,6 +72,14 @@ import type {
  * unknown slot, an ineligible effect, a sidechain or any other key a slot does not have -- and it
  * refuses with the engine's own diagnostic code (`MisoUsageError.diagnosticCode`), so an agent
  * meets one vocabulary whether the builder or the engine answered.
+ *
+ * # Submix strips (owner decision 13)
+ *
+ * A submix carries a track's strip without the source fields -- builtins, console entries, inserts,
+ * fader, and pan or matrix -- under the same rules, so `.submix(id, spec)` follows `.console()` as a
+ * track does. `.submix(id)` with no spec is the transparent strip, whose console entries are all
+ * bypassed and are written for whatever slots the session declares. A route or a routed sidechain
+ * reads any of a track's or a submix's seven taps.
  */
 
 /** A JSON-shaped normalized value. Floats keep `-0`; u64 sample times are decimal strings. */
@@ -157,6 +166,8 @@ export const CONSOLE_ELIGIBLE_EFFECTS: readonly ConsoleEffectId[] = Object.freez
 const TRACK_KEYS: ReadonlySet<string> = new Set([
   "source", "builtins", "console", "inserts", "fader", "pan",
 ]);
+/** A submix strip's keys: a track's without its source. */
+const SUBMIX_KEYS: ReadonlySet<string> = new Set(["builtins", "console", "inserts", "fader", "pan"]);
 const CONSOLE_KEYS: ReadonlySet<string> = new Set(["preInsert", "postInsert"]);
 const CONSOLE_SLOT_KEYS: ReadonlySet<string> = new Set(["slot", "effectId", "quality", "linkMode"]);
 const CONSOLE_ENTRY_KEYS: ReadonlySet<string> = new Set(["slot", "bypass", "parameters", "channel"]);
@@ -553,22 +564,27 @@ export function effect<E extends EffectId>(
 
 function validateRouteSource(value: RouteSource, path: string): void {
   if (value === null || typeof value !== "object") fail(path, "expected a tagged route source");
-  if (value.kind === "track") {
-    stableId(value.trackId, `${path}.trackId`);
-    if (!SEND_TAPS.has(value.tap)) {
-      fail(
-        `${path}.tap`,
-        `unknown track tap '${value.tap}'; the taps are ${nameList([...SEND_TAPS])}`,
-        CODE.invalidEnum,
-      );
-    }
-    return;
+  const kind: string = value.kind;
+  if (kind === "submix_output") {
+    fail(
+      `${path}.kind`,
+      "'submix_output' is retired; read a submix as { kind: \"submix\", submixId, tap }, where "
+        + "tap \"post_pan\" is the old submix output",
+      CODE.invalidEnum,
+    );
   }
-  if (value.kind === "submix_output") {
-    stableId(value.submixId, `${path}.submixId`);
-    return;
+  if (value.kind !== "track" && value.kind !== "submix") {
+    fail(`${path}.kind`, "expected 'track' or 'submix'", CODE.invalidEnum);
   }
-  fail(`${path}.kind`, "expected 'track' or 'submix_output'");
+  if (value.kind === "track") stableId(value.trackId, `${path}.trackId`);
+  else stableId(value.submixId, `${path}.submixId`);
+  if (!SEND_TAPS.has(value.tap)) {
+    fail(
+      `${path}.tap`,
+      `unknown ${value.kind} tap '${String(value.tap)}'; the taps are ${nameList([...SEND_TAPS])}`,
+      CODE.invalidEnum,
+    );
+  }
 }
 
 function validateRouteDestination(value: RouteDestination, path: string): void {
@@ -589,7 +605,7 @@ function validateRouteDestination(value: RouteDestination, path: string): void {
 function normalizeRouteSource(value: RouteSource): ModelRecord {
   return value.kind === "track"
     ? freeze({ kind: "track", track_id: value.trackId, tap: value.tap })
-    : freeze({ kind: "submix_output", submix_id: value.submixId });
+    : freeze({ kind: "submix", submix_id: value.submixId, tap: value.tap });
 }
 
 function normalizeRouteDestination(value: RouteDestination): ModelRecord {
@@ -619,6 +635,12 @@ interface TrackEntry {
   readonly spec: TrackSpec;
 }
 
+/** A declared submix: its strip, or `undefined` for the transparent strip `.submix(id)` declares. */
+interface SubmixEntry {
+  readonly id: string;
+  readonly spec: SubmixSpec | undefined;
+}
+
 /** One validated console slot, in the session's slot order. */
 interface ConsoleSlotEntry {
   readonly slot: string;
@@ -634,7 +656,7 @@ interface BuilderState {
   /** `undefined` until `.console()`; an undeclared console is two empty sections. */
   readonly console: readonly ConsoleSlotEntry[] | undefined;
   readonly tracks: readonly TrackEntry[];
-  readonly submixes: readonly string[];
+  readonly submixes: readonly SubmixEntry[];
   readonly outputs: readonly string[];
   readonly routes: readonly RouteSpec[];
   readonly automation: readonly AutomationSpec[];
@@ -679,19 +701,21 @@ export class SessionBuilder {
    * empty sections. Slot IDs are unique across both sections, because a console address names
    * the slot and not its section.
    *
-   * It must precede every track because each track's `console` entries are checked against it
-   * when the track is declared -- the reference-order rule every other verb follows.
+   * It must precede every track, and every submix declared with a strip, because their `console`
+   * entries are checked against it when they are declared -- the reference-order rule every other
+   * verb follows. A spec-less `.submix(id)` may precede it: its bypassed entries are written for
+   * whatever slots the session ends up declaring.
    */
   console(spec: ConsoleSpec): SessionBuilder {
     const path = "console()";
     if (this.#state.console !== undefined) {
       fail(path, "the session console is declared once");
     }
-    if (this.#state.tracks.length > 0) {
+    if (this.#state.tracks.length > 0 || this.#state.submixes.some((entry) => entry.spec !== undefined)) {
       fail(
         path,
-        "declare the console before the first track: each track's console entries are checked "
-          + "against its slots",
+        "declare the console before the first track or submix strip: each strip's console entries "
+          + "are checked against its slots",
       );
     }
     if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
@@ -723,12 +747,31 @@ export class SessionBuilder {
     return this.#next({ tracks: [...this.#state.tracks, freeze({ id, spec: { ...spec } })] });
   }
 
-  submix(id: string): SessionBuilder {
+  /**
+   * Declare a submix strip. Its ID shares the graph-entity namespace with tracks and outputs.
+   *
+   * With a `spec`, the strip follows a track's rules and defaults field by field, and its console
+   * entries are checked against the declared console now, as a track's are. With no spec it is the
+   * transparent strip (identity input section, no inserts, a 0 dB unmuted fader, the identity
+   * matrix, every console slot bypassed), so a bare bus passes its sum through unchanged apart from
+   * the latency of the session's console slots, which every strip pays.
+   */
+  submix(id: string, spec?: SubmixSpec): SessionBuilder {
     stableId(id, "submix().id");
+    const path = `submix("${id}")`;
     if (this.#graphIds().has(id)) {
-      fail(`submix("${id}").id`, "tracks, submixes and outputs share one ID namespace");
+      fail(`${path}.id`, "tracks, submixes and outputs share one ID namespace");
     }
-    return this.#next({ submixes: [...this.#state.submixes, id] });
+    if (spec !== undefined) {
+      if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+        fail(path, "expected a submix strip specification");
+      }
+      knownKeys(spec, SUBMIX_KEYS, path, "a submix strip");
+      this.#validateStrip(spec, path);
+    }
+    return this.#next({
+      submixes: [...this.#state.submixes, freeze({ id, spec: spec === undefined ? undefined : { ...spec } })],
+    });
   }
 
   output(id: string): SessionBuilder {
@@ -750,7 +793,7 @@ export class SessionBuilder {
     this.#resolveRouteSource(spec.source, `${path}.source`);
     validateRouteDestination(spec.destination, `${path}.destination`);
     if (spec.destination.kind === "submix_input") {
-      if (!this.#state.submixes.includes(spec.destination.submixId)) {
+      if (!this.#hasSubmix(spec.destination.submixId)) {
         fail(`${path}.destination.submixId`, `'${spec.destination.submixId}' is not a declared submix`);
       }
     } else if (!this.#state.outputs.includes(spec.destination.outputId)) {
@@ -809,9 +852,13 @@ export class SessionBuilder {
   #graphIds(): ReadonlySet<string> {
     return new Set([
       ...this.#state.tracks.map((entry) => entry.id),
-      ...this.#state.submixes,
+      ...this.#state.submixes.map((entry) => entry.id),
       ...this.#state.outputs,
     ]);
+  }
+
+  #hasSubmix(id: string): boolean {
+    return this.#state.submixes.some((entry) => entry.id === id);
   }
 
   #source(id: string): SourceEntry | undefined {
@@ -825,7 +872,7 @@ export class SessionBuilder {
       }
       return;
     }
-    if (!this.#state.submixes.includes(source.submixId)) {
+    if (!this.#hasSubmix(source.submixId)) {
       fail(`${path}.submixId`, `'${source.submixId}' is not a declared submix`);
     }
   }
@@ -839,6 +886,11 @@ export class SessionBuilder {
       fail(`${path}.source`, `'${reference.id}' is not a declared source`);
     }
     resolveLanes(reference, source.spec.channels, `${path}.source`);
+    this.#validateStrip(spec, path);
+  }
+
+  /** A strip's fields after its source: shared by tracks and submixes. */
+  #validateStrip(spec: SubmixSpec, path: string): void {
     normalizeBuiltins(spec.builtins, this.#state.options.sampleRateHz, `${path}.builtins`);
     normalizeConsoleEntries(spec.console, this.#state.console ?? [], `${path}.console`);
     normalizeInserts(spec.inserts, `${path}.inserts`);
@@ -1432,6 +1484,32 @@ function normalizeTrack(
   });
 }
 
+/**
+ * A submix strip in the track's key order without the source fields. A spec-less submix is the
+ * transparent strip, the engine's `Submix::unity`: every field at its identity, the identity
+ * matrix, and one bypassed entry per declared console slot.
+ */
+function normalizeSubmix(
+  entry: SubmixEntry,
+  slots: readonly ConsoleSlotEntry[],
+  sampleRateHz: number,
+): ModelRecord {
+  const path = `submix("${entry.id}")`;
+  const spec: SubmixSpec = entry.spec ?? {
+    console: slots.map((slot) => ({ slot: slot.slot, bypass: true })),
+    pan: { matrix: IDENTITY_MATRIX },
+  };
+  const matrixOrPan = normalizeMatrixOrPan(spec.pan, `${path}.pan`);
+  return freeze({
+    id: entry.id,
+    builtins: normalizeBuiltins(spec.builtins, sampleRateHz, `${path}.builtins`),
+    console: normalizeConsoleEntries(spec.console, slots, `${path}.console`),
+    inserts: { effects: normalizeInserts(spec.inserts, `${path}.inserts`) },
+    fader: normalizeFader(spec.fader, `${path}.fader`),
+    [matrixOrPan.key]: matrixOrPan.value,
+  });
+}
+
 function normalize(state: BuilderState): SessionModel {
   const options = state.options;
   const sources = state.sources
@@ -1447,7 +1525,9 @@ function normalize(state: BuilderState): SessionModel {
   const tracks = state.tracks
     .map((entry) => normalizeTrack(entry, state.sources, slots, options.sampleRateHz))
     .sort(byId);
-  const submixes = state.submixes.map((id) => freeze({ id })).sort(byId);
+  const submixes = state.submixes
+    .map((entry) => normalizeSubmix(entry, slots, options.sampleRateHz))
+    .sort(byId);
   const outputs = state.outputs.map((id) => freeze({ id })).sort(byId);
   const routes = state.routes
     .map((spec) => freeze({

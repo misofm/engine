@@ -446,6 +446,73 @@ describe("validation refusals name the offending path", () => {
       base.source("t", { channels: 1, bitDepth: 16, frames: 480, content: CONTENT_B }));
   });
 
+  test("submix strips: the builder refuses what the engine refuses, with the engine's code", async () => {
+    // Issue #1205 gate 2. Each refusal is paired with the engine's answer to the same defect
+    // written by hand, so neither side can drift alone. Red mutations: drop the spec'd-submix
+    // clause from `console()`'s rule; skip `normalizeConsoleEntries` in `submix()`; accept
+    // `submix_output` in `validateRouteSource`.
+    const code = (build) => {
+      try {
+        build();
+      } catch (error) {
+        assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+        return { code: error.diagnosticCode, message: error.message };
+      }
+      return assert.fail("the builder accepted the defect");
+    };
+    const slots = {
+      preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "limit", effectId: "miso.true-peak-limiter" }],
+    };
+    const base = () => session({ id: "bus.refusals", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A });
+    const valid = base().console(slots)
+      .track("t", { source: "stem", console: [{ slot: "eq" }, { slot: "limit" }] })
+      .submix("bus", { console: [{ slot: "eq" }, { slot: "limit" }], fader: { leftDb: -2 } })
+      .output("o")
+      .route({ id: "in", source: { kind: "track", trackId: "t", tap: "post_pan" }, destination: { kind: "submix_input", submixId: "bus" } })
+      .route({ id: "out", source: { kind: "submix", submixId: "bus", tap: "post_fader" }, destination: { kind: "output_input", outputId: "o" } });
+    const engineFirstCode = async (edit) => {
+      const model = mutableModel(valid.toJSON());
+      edit(model);
+      const outcome = await validate(JSON.stringify(model), { asset });
+      assert.equal(outcome.ok, false, "the engine must refuse the hand-written defect");
+      return outcome.diagnostics[0]?.code;
+    };
+    assert.equal((await validate(valid, { asset })).ok, true, "the base every defect edits must boot");
+
+    // console() after a submix strip: the track rule, refused at console().
+    const late = code(() => base().submix("bus", {}).console(slots));
+    assert.match(late.message, /^console\(\): declare the console before the first track or submix strip/);
+    // ...while a spec-less submix may precede it, and takes one bypassed entry per slot.
+    const bare = base().submix("bus").console(slots).toJSON().submixes[0].console;
+    assert.deepEqual(bare.map((entry) => [entry.slot, entry.bypass]), [["eq", true], ["limit", true]]);
+
+    // A submix strip missing a slot's entry.
+    const missing = code(() => base().console(slots).submix("bus", { console: [{ slot: "eq" }] }));
+    assert.equal(missing.code, "console.entry_missing");
+    assert.match(missing.message, /^submix\("bus"\)\.console: no entry for console slot 'limit'/);
+    assert.equal(await engineFirstCode((model) => model.submixes[0].console.pop()), "console.entry_missing");
+
+    // The retired source, as a route source and as a sidechain source, names its replacement.
+    const retired = { kind: "submix_output", submixId: "bus" };
+    const asRoute = code(() => base().submix("bus").output("o")
+      .route({ id: "r", source: retired, destination: { kind: "output_input", outputId: "o" } }));
+    const asSidechain = code(() => effect("miso.compressor", {}, { sidechain: { source: retired, portId: "sidechain-in" } }));
+    for (const refusal of [asRoute, asSidechain]) {
+      assert.equal(refusal.code, "schema.invalid_enum");
+      assert.match(refusal.message, /'submix_output' is retired; read a submix as \{ kind: "submix", submixId, tap \}/);
+    }
+    assert.match(asRoute.message, /^route\("r"\)\.source\.kind/);
+    assert.match(asSidechain.message, /sidechain\.source\.kind/);
+    assert.equal(
+      await engineFirstCode((model) => {
+        model.routes.find((route) => route.id === "out").source = { kind: "submix_output", submix_id: "bus" };
+      }),
+      "schema.invalid_enum",
+    );
+  });
+
   test("live input filters are accepted while delay remains prepared-only", () => {
     const base = session({ id: "auto", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
@@ -946,7 +1013,15 @@ function richSession() {
       pan: { matrix: { ll: 1, lr: 0, rl: 0, rr: 1 }, smoothingSamples: 8 },
       console: [{ slot: "eq" }, { slot: "clip", parameters: { drive: 3 } }],
     })
-    .submix("bus")
+    // A submix strip with every strip key off its default, so the writer's submix key order and
+    // its builtins, console, inserts, fader and pan paths all ride the boot below.
+    .submix("bus", {
+      builtins: { left: { trimDb: -1.5, lpfHz: 12_000 }, right: { polarityInvert: true } },
+      console: [{ slot: "eq", bypass: true }, { slot: "clip", parameters: { drive: 2 } }],
+      inserts: [effect("miso.compressor", { threshold: -12, ratio: 2 }, { slotId: "glue", linkMode: "average" })],
+      fader: { leftDb: -1, rightDb: -1.5, rightMute: false },
+      pan: { left: -0.25, right: 0.25, smoothingSamples: 16 },
+    })
     .output("main-out")
     .route({
       id: "bass-bus",
@@ -956,7 +1031,7 @@ function richSession() {
     })
     .route({
       id: "bus-main",
-      source: { kind: "submix_output", submixId: "bus" },
+      source: { kind: "submix", submixId: "bus", tap: "post_pan" },
       destination: { kind: "output_input", outputId: "main-out" },
     })
     .route({

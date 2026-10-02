@@ -621,36 +621,43 @@ describe("issue #1097 -- what the builder writes is what the engine's canonical 
       postInsert: model.console.post_insert.map(slot),
     });
     for (const id of model.outputs.map((row) => row.id)) built = built.output(id);
-    for (const id of model.submixes.map((row) => row.id)) built = built.submix(id);
     const lane = (row) => ({
       polarityInvert: row.polarity_invert, trimDb: row.trim_db, hpfHz: row.hpf_hz, lpfHz: row.lpf_hz,
       delaySamples: row.delay_samples,
     });
-    for (const track of model.tracks) {
-      assert.deepEqual(track.inserts.effects, [], "the console fixtures carry no inserts");
-      built = built.track(track.id, {
-        source: { id: track.source_id, left: track.left_source_channel, right: track.right_source_channel },
-        builtins: { left: lane(track.builtins.left), right: lane(track.builtins.right) },
-        console: track.console.map((entry) => ({
+    // A track's strip and a submix's are the same keys: a submix is passed as a `SubmixSpec`.
+    const strip = (row) => {
+      assert.deepEqual(row.inserts.effects, [], "the console fixtures carry no inserts");
+      return {
+        builtins: { left: lane(row.builtins.left), right: lane(row.builtins.right) },
+        console: row.console.map((entry) => ({
           slot: entry.slot,
           bypass: entry.bypass,
           parameters: parameters(slotEffects.get(entry.slot), entry.params),
         })),
         fader: {
-          leftDb: track.fader.left_db, rightDb: track.fader.right_db,
-          leftMute: track.fader.left_mute, rightMute: track.fader.right_mute,
+          leftDb: row.fader.left_db, rightDb: row.fader.right_db,
+          leftMute: row.fader.left_mute, rightMute: row.fader.right_mute,
         },
-        pan: track.pan === undefined
-          ? { matrix: track.matrix, smoothingSamples: track.matrix.smoothing_samples }
-          : { left: track.pan.left, right: track.pan.right, smoothingSamples: track.pan.smoothing_samples },
+        pan: row.pan === undefined
+          ? { matrix: row.matrix, smoothingSamples: row.matrix.smoothing_samples }
+          : { left: row.pan.left, right: row.pan.right, smoothingSamples: row.pan.smoothing_samples },
+      };
+    };
+    for (const submix of model.submixes) built = built.submix(submix.id, strip(submix));
+    for (const track of model.tracks) {
+      built = built.track(track.id, {
+        source: { id: track.source_id, left: track.left_source_channel, right: track.right_source_channel },
+        ...strip(track),
       });
     }
+    const source = (row) => row.kind === "track"
+      ? { kind: "track", trackId: row.track_id, tap: row.tap }
+      : { kind: "submix", submixId: row.submix_id, tap: row.tap };
     for (const route of model.routes) {
       built = built.route({
         id: route.id,
-        source: route.source.kind === "track"
-          ? { kind: "track", trackId: route.source.track_id, tap: route.source.tap }
-          : { kind: "submix_output", submixId: route.source.submix_id },
+        source: source(route.source),
         destination: route.destination.kind === "output_input"
           ? { kind: "output_input", outputId: route.destination.output_id }
           : { kind: "submix_input", submixId: route.destination.submix_id },
@@ -676,6 +683,40 @@ describe("issue #1097 -- what the builder writes is what the engine's canonical 
     const model = JSON.parse(text);
     assert.ok(model.console.pre_insert.length > 0 && model.console.post_insert.length > 0);
     assert.ok(model.tracks.some((track) => track.inserts.effects.some((row) => row.sidechain.kind === "routed")));
+  });
+
+  test("the builder rebuilds an engine-written submix strip and bus tap byte for byte", async () => {
+    // Issue #1205: `rebuild()` passes each submix's strip as a `SubmixSpec` and each bus source
+    // with its tap, the way an author would. Red mutation: drop the strip in `normalizeSubmix` for
+    // the spec'd form, or the tap from the submix source -> the rebuilt text differs.
+    const written = stripBase()
+      .track("t", { source: "stem", console: stripEntries() })
+      .submix("bus", {
+        builtins: { left: { trimDb: 1.5 }, right: { lpfHz: 9_000 } },
+        console: [
+          { slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": 2 } },
+          { slot: "comp", bypass: true },
+          { slot: "limiter" },
+        ],
+        fader: { leftDb: -2, rightMute: true },
+        pan: { left: 0.2, right: 0.4 },
+      })
+      .output("out")
+      .route({
+        id: "bus-out",
+        source: { kind: "submix", submixId: "bus", tap: "insert_return" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .route({
+        id: "t-bus",
+        source: { kind: "track", trackId: "t", tap: "insert_send" },
+        destination: { kind: "submix_input", submixId: "bus" },
+      });
+    const expected = await engineCanonical("bus-rebuild", written.toJson());
+    const model = JSON.parse(expected);
+    assert.equal(model.submixes[0].fader.right_mute, true, "the strip must reach the engine's text");
+    assert.deepEqual(model.routes[0].source, { kind: "submix", submix_id: "bus", tap: "insert_return" });
+    assert.equal(rebuild(expected).toJson(), expected);
   });
 
   for (const [fixture, what] of [
@@ -1031,5 +1072,178 @@ describe("issue #1097 -- a live lift the engine would acknowledge and ignore is 
         assert.deepEqual(lifted, enabled, `${id}: the SDK's live lift`);
       }
     }
+  });
+});
+
+/**
+ * Issue #1205: submix strips and bus taps, authored through the SDK and held to the engine.
+ *
+ * `busSession()` is gate 1's session: console slots in both sections, two tracks, a `drums` bus
+ * with every strip key off its default (a matrix, a linked glue compressor insert), a `verb` bus
+ * with a `miso.delay` insert and the default pan, routes from a track's `pre_fader` tap and a bus's
+ * `post_fader` tap, and a compressor on `vox` keyed from the drum bus's `pre_fader` tap.
+ */
+function busSession() {
+  const duck = effect("miso.compressor", { threshold: -24, ratio: 4 }, {
+    slotId: "duck",
+    linkMode: "maximum",
+    sidechain: { source: { kind: "submix", submixId: "drums", tap: "pre_fader" }, portId: "sidechain-in" },
+  });
+  const bypassedEntries = [{ slot: "eq", bypass: true }, { slot: "glue", bypass: true }];
+  return session({ id: "console.buses", sampleRateHz: 48_000, revision: 2 })
+    .source("kit", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+    .source("voice", { channels: 1, bitDepth: 24, frames: 48_000, content: CONTENT })
+    .console({
+      preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }],
+      postInsert: [{ slot: "glue", effectId: "miso.compressor", linkMode: "dual_mono" }],
+    })
+    .output("main")
+    .submix("drums", {
+      builtins: { left: { trimDb: -2, hpfHz: 30 }, right: { trimDb: -2.5, hpfHz: 30, polarityInvert: true } },
+      console: [
+        { slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": 3, "band-1-frequency": 90 } },
+        { slot: "glue", bypass: true },
+      ],
+      inserts: [effect("miso.compressor", { threshold: -14, ratio: 2 }, { slotId: "bus-glue", linkMode: "average" })],
+      fader: { leftDb: -1.5, rightDb: -1.5, rightMute: false },
+      pan: { matrix: { ll: 0.9, lr: 0.1, rl: 0.1, rr: 0.9 }, smoothingSamples: 32 },
+    })
+    .submix("verb", {
+      console: bypassedEntries,
+      inserts: [effect("miso.delay", { "delay time": 80 }, { slotId: "space" })],
+    })
+    .track("kick", { source: "kit", console: [{ slot: "eq" }, { slot: "glue" }] })
+    .track("vox", { source: "voice", console: bypassedEntries, inserts: [duck] })
+    .route({
+      id: "kick-drums",
+      source: { kind: "track", trackId: "kick", tap: "pre_fader" },
+      destination: { kind: "submix_input", submixId: "drums" },
+    })
+    .route({
+      id: "drums-main",
+      source: { kind: "submix", submixId: "drums", tap: "post_fader" },
+      destination: { kind: "output_input", outputId: "main" },
+    })
+    .route({
+      id: "vox-verb",
+      source: { kind: "track", trackId: "vox", tap: "post_fader" },
+      destination: { kind: "submix_input", submixId: "verb" },
+      gainDb: -6,
+    })
+    .route({
+      id: "verb-main",
+      source: { kind: "submix", submixId: "verb", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    })
+    .route({
+      id: "vox-main",
+      source: { kind: "track", trackId: "vox", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "main" },
+    });
+}
+
+/** Render `blocks` blocks of `document` from finite source PCM that holds no `-0.0` sample. */
+async function renderFrom(document, blocks = 8) {
+  const engine = await createOfflineEngine(document, { asset });
+  try {
+    const shape = engine.shape();
+    const output = [];
+    for (let block = 0; block < blocks; block += 1) {
+      shape.sources.forEach((source, sourceIndex) => {
+        const planes = Array.from({ length: source.channels }, (_unused, channel) =>
+          ramp(shape.quantumFrames, 7 + sourceIndex * 16 + channel + block * 1024));
+        for (const plane of planes) {
+          assert.ok(plane.every((sample) => Number.isFinite(sample) && !Object.is(sample, -0)));
+        }
+        assert.equal(engine.submitSource({
+          sourceId: source.id, generation: 1n, startFrame: BigInt(block * shape.quantumFrames), planes,
+          endOfRegion: false,
+        }).ok, true);
+      });
+      const rendered = engine.render();
+      output.push([...rendered.left], [...rendered.right]);
+    }
+    return output;
+  } finally {
+    engine.dispose();
+  }
+}
+
+describe("issue #1205 -- submix strips and bus taps through the SDK", () => {
+  test("a bus session is the engine's canonical JSON, byte for byte, and boots and renders headless", async () => {
+    // Gates 1 and 4. Red mutations: write a submix's `console` after `inserts`, or its `tap`
+    // before `submix_id`, in `session-json.ts` -> the engine's re-serialization differs; drop the
+    // tap from `normalizeRouteSource`'s submix branch -> the engine refuses the document.
+    const built = busSession();
+    const text = built.toJson();
+    assert.equal(await engineCanonical("bus-session", text), text);
+    // The session is the shape it is named for, so the round trip above covers each path.
+    const model = built.toJSON();
+    const drums = model.submixes.find((row) => row.id === "drums");
+    const verb = model.submixes.find((row) => row.id === "verb");
+    assert.deepEqual(Object.keys(drums), ["id", "builtins", "console", "inserts", "fader", "matrix"]);
+    assert.deepEqual(Object.keys(verb), ["id", "builtins", "console", "inserts", "fader", "pan"]);
+    assert.equal(drums.builtins.right.polarity_invert, true);
+    assert.deepEqual(verb.inserts.effects.map((row) => row.identity.effect_id), ["miso.delay"]);
+    assert.deepEqual(
+      model.tracks.find((row) => row.id === "vox").inserts.effects[0].sidechain.source,
+      { kind: "submix", submix_id: "drums", tap: "pre_fader" },
+    );
+    assert.deepEqual(
+      Object.fromEntries(model.routes.map((row) => [row.id, [row.source.kind, row.source.tap]])),
+      {
+        "drums-main": ["submix", "post_fader"],
+        "kick-drums": ["track", "pre_fader"],
+        "verb-main": ["submix", "post_pan"],
+        "vox-main": ["track", "post_pan"],
+        "vox-verb": ["track", "post_fader"],
+      },
+    );
+
+    const output = await renderFrom(text, 1);
+    assert.equal(output[0].length, 128);
+    assert.ok(output.flat().every(Number.isFinite));
+    assert.ok(output.flat().some((sample) => sample !== 0), "the buses must carry signal to the output");
+  });
+
+  test("a spec-less submix is the transparent strip: every slot bypassed, and it renders as no bus", async () => {
+    // Gate 3. Every console slot declares zero latency (one parametric EQ), so a transparent bus
+    // must render bit-identically to the track routed straight to the output. Red mutations: write
+    // a spec-less submix's entries with `bypass: false`, give it the default `pan` instead of the
+    // identity matrix, or a fader or trim off unity -> the document or the render differs.
+    const base = () => session({ id: "console.transparent", sampleRateHz: 48_000, revision: 1 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+      .console({ preInsert: [{ slot: "eq", effectId: "miso.parametric-eq" }] })
+      .track("t", {
+        source: "stem",
+        console: [{ slot: "eq", parameters: { "band-1-enabled": true, "band-1-gain": 6, "band-1-frequency": 900 } }],
+        fader: { leftDb: -3, rightDb: -4.5 },
+        pan: { left: -0.4, right: 0.7 },
+      })
+      .output("out");
+    const viaBus = base()
+      .submix("bus")
+      .route({
+        id: "t-bus",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "submix_input", submixId: "bus" },
+      })
+      .route({
+        id: "bus-out",
+        source: { kind: "submix", submixId: "bus", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    const direct = base().route({
+      id: "t-out",
+      source: { kind: "track", trackId: "t", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+    assert.deepEqual(viaBus.toJSON().submixes[0].console, [{ slot: "eq", bypass: true, params: [] }]);
+    const text = viaBus.toJson();
+    assert.equal(await engineCanonical("transparent-bus", text), text);
+    const bus = await renderFrom(viaBus);
+    const straight = await renderFrom(direct);
+    assert.ok(straight.flat().some((sample) => sample !== 0), "the fixture must carry signal");
+    assert.deepEqual(bus, straight);
   });
 });

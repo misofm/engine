@@ -325,7 +325,11 @@ enginectl session build --request - --output - < request.json
 Requests use `schemaVersion: 1`, a required `session` object, an optional `console` object
 (`preInsert` and `postInsert` slot arrays), and optional `sources`, `tracks`, `submixes`,
 `outputs`, `routes`, and `automation` arrays; each track spec carries its `console` entries and
-`inserts`. The CLI validates with the packaged engine before publishing
+`inserts`. A `submixes` entry is a bare ID, which is a transparent strip, or an object
+`{ id, builtins?, console?, inserts?, fader?, pan? }`, a submix strip with a track's strip keys.
+A route or sidechain source is `{ kind: "track", trackId, tap }` or
+`{ kind: "submix", submixId, tap }`, at any of the seven taps; the retired `submix_output` is
+refused. The CLI validates with the packaged engine before publishing
 canonical Session V1 JSON. File output preserves existing destinations unless `--overwrite` is
 specified; stdout output contains only the document. It does not download or decode stems.
 See the [CLI request shape](https://github.com/misofm/engine/blob/main/sdk/src/cli/session-request.ts) and

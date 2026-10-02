@@ -12,6 +12,7 @@ import type {
   RouteSource,
   RouteSpec,
   SourceSpec,
+  SubmixSpec,
   TrackSpec,
 } from "../core/types.ts";
 
@@ -21,7 +22,10 @@ import type {
  * `console` is the session console (`{ preInsert, postInsert }` of `{ slot, effectId, quality?,
  * linkMode? }`), and each track spec carries its `console` entries (`{ slot, bypass?, parameters?,
  * channel? }`, one per slot in slot order) and its `inserts` (effect declarations). The retired
- * `simd1`, `dynamic` and `simd2` track keys are refused by name.
+ * `simd1`, `dynamic` and `simd2` track keys are refused by name. A `submixes` entry is a bare ID,
+ * the transparent strip, or `{ id, builtins?, console?, inserts?, fader?, pan? }`, a submix strip
+ * with a track's strip keys. A route or sidechain source is `{ kind: "track", trackId, tap }` or
+ * `{ kind: "submix", submixId, tap }`; the retired `submix_output` is refused by name.
  */
 export interface SessionBuildRequestV1 {
   readonly schemaVersion: 1;
@@ -123,11 +127,22 @@ function routeSource(value: unknown, path: string): RouteSource {
       tap: string(raw.tap, `${path}.tap`) as Extract<RouteSource, { kind: "track" }>["tap"],
     };
   }
-  if (kind === "submix_output") {
-    keys(raw, ["kind", "submixId"], ["kind", "submixId"], path);
-    return { kind, submixId: string(raw.submixId, `${path}.submixId`) };
+  if (kind === "submix") {
+    keys(raw, ["kind", "submixId", "tap"], ["kind", "submixId", "tap"], path);
+    return {
+      kind,
+      submixId: string(raw.submixId, `${path}.submixId`),
+      tap: string(raw.tap, `${path}.tap`) as Extract<RouteSource, { kind: "submix" }>["tap"],
+    };
   }
-  fail(`${path}.kind`, "expected 'track' or 'submix_output'");
+  if (kind === "submix_output") {
+    throw new MisoUsageError(
+      `${path}.kind: 'submix_output' is retired; read a submix as { "kind": "submix", "submixId", `
+        + `"tap" }, where tap "post_pan" is the old submix output`,
+      "schema.invalid_enum",
+    );
+  }
+  fail(`${path}.kind`, "expected 'track' or 'submix'");
 }
 
 function routeDestination(value: unknown, path: string): RouteDestination {
@@ -287,7 +302,7 @@ function track(value: unknown, path: string): { id: string; spec: TrackSpec } {
   }
   keys(
     raw,
-    ["source", "builtins", "console", "inserts", "fader", "pan"],
+    ["source", ...STRIP_KEYS],
     ["source"],
     `${path}.spec`,
     UNKNOWN_FIELD,
@@ -304,52 +319,66 @@ function track(value: unknown, path: string): { id: string; spec: TrackSpec } {
       right: number(sourceRaw.right, `${path}.spec.source.right`),
     };
   }
+  return { id: string(wrapper.id, `${path}.id`), spec: { source, ...strip(raw, `${path}.spec`) } };
+}
 
-  let fader: TrackSpec["fader"];
+/** The strip keys a track and a submix share: everything after a track's source. */
+const STRIP_KEYS = ["builtins", "console", "inserts", "fader", "pan"] as const;
+
+/** Decode a strip's fields from a request object whose keys the caller has already checked. */
+function strip(raw: Record<string, unknown>, path: string): SubmixSpec {
+  let fader: SubmixSpec["fader"];
   if (raw.fader !== undefined) {
-    const supplied = record(raw.fader, `${path}.spec.fader`);
-    keys(supplied, ["leftDb", "rightDb", "leftMute", "rightMute"], [], `${path}.spec.fader`);
-    fader = supplied as TrackSpec["fader"];
+    const supplied = record(raw.fader, `${path}.fader`);
+    keys(supplied, ["leftDb", "rightDb", "leftMute", "rightMute"], [], `${path}.fader`);
+    fader = supplied as SubmixSpec["fader"];
   }
 
-  let pan: TrackSpec["pan"];
+  let pan: SubmixSpec["pan"];
   if (raw.pan !== undefined) {
-    const supplied = record(raw.pan, `${path}.spec.pan`);
+    const supplied = record(raw.pan, `${path}.pan`);
     if (Object.hasOwn(supplied, "matrix")) {
-      keys(supplied, ["matrix", "smoothingSamples"], ["matrix"], `${path}.spec.pan`);
+      keys(supplied, ["matrix", "smoothingSamples"], ["matrix"], `${path}.pan`);
       pan = {
-        matrix: matrix(supplied.matrix, `${path}.spec.pan.matrix`),
-        ...(supplied.smoothingSamples === undefined ? {} : { smoothingSamples: number(supplied.smoothingSamples, `${path}.spec.pan.smoothingSamples`) }),
+        matrix: matrix(supplied.matrix, `${path}.pan.matrix`),
+        ...(supplied.smoothingSamples === undefined ? {} : { smoothingSamples: number(supplied.smoothingSamples, `${path}.pan.smoothingSamples`) }),
       };
     } else {
-      keys(supplied, ["left", "right", "smoothingSamples"], ["left", "right"], `${path}.spec.pan`);
+      keys(supplied, ["left", "right", "smoothingSamples"], ["left", "right"], `${path}.pan`);
       pan = {
-        left: number(supplied.left, `${path}.spec.pan.left`),
-        right: number(supplied.right, `${path}.spec.pan.right`),
-        ...(supplied.smoothingSamples === undefined ? {} : { smoothingSamples: number(supplied.smoothingSamples, `${path}.spec.pan.smoothingSamples`) }),
+        left: number(supplied.left, `${path}.pan.left`),
+        right: number(supplied.right, `${path}.pan.right`),
+        ...(supplied.smoothingSamples === undefined ? {} : { smoothingSamples: number(supplied.smoothingSamples, `${path}.pan.smoothingSamples`) }),
       };
     }
   }
 
   const consoleEntries = raw.console === undefined
     ? undefined
-    : array(raw.console, `${path}.spec.console`).map((entry, index) =>
-      consoleEntryRequest(entry, `${path}.spec.console[${index}]`));
+    : array(raw.console, `${path}.console`).map((entry, index) =>
+      consoleEntryRequest(entry, `${path}.console[${index}]`));
   const inserts = raw.inserts === undefined
     ? undefined
-    : array(raw.inserts, `${path}.spec.inserts`).map((entry, index) =>
-      effectDecl(entry, `${path}.spec.inserts[${index}]`));
+    : array(raw.inserts, `${path}.inserts`).map((entry, index) =>
+      effectDecl(entry, `${path}.inserts[${index}]`));
   return {
-    id: string(wrapper.id, `${path}.id`),
-    spec: {
-      source,
-      ...(raw.builtins === undefined ? {} : { builtins: builtins(raw.builtins, `${path}.spec.builtins`) as NonNullable<TrackSpec["builtins"]> }),
-      ...(consoleEntries === undefined ? {} : { console: consoleEntries }),
-      ...(inserts === undefined ? {} : { inserts }),
-      ...(fader === undefined ? {} : { fader }),
-      ...(pan === undefined ? {} : { pan }),
-    },
+    ...(raw.builtins === undefined ? {} : { builtins: builtins(raw.builtins, `${path}.builtins`) as NonNullable<SubmixSpec["builtins"]> }),
+    ...(consoleEntries === undefined ? {} : { console: consoleEntries }),
+    ...(inserts === undefined ? {} : { inserts }),
+    ...(fader === undefined ? {} : { fader }),
+    ...(pan === undefined ? {} : { pan }),
   };
+}
+
+/**
+ * One `submixes` entry: a bare ID is the transparent strip, and `{ id, ...strip }` a submix strip
+ * with a track's strip keys, its console entries checked against `$.console` as a track's are.
+ */
+function submix(value: unknown, path: string): { id: string; spec: SubmixSpec | undefined } {
+  if (typeof value === "string") return { id: value, spec: undefined };
+  const raw = record(value, path);
+  keys(raw, ["id", ...STRIP_KEYS], ["id"], path, UNKNOWN_FIELD);
+  return { id: string(raw.id, `${path}.id`), spec: strip(raw, path) };
 }
 
 function route(value: unknown, path: string): RouteSpec {
@@ -442,7 +471,8 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   // The console precedes every track: each track's console entries are checked against it.
   if (root.console !== undefined) builder = builder.console(consoleRequest(root.console));
   for (const [index, value] of optionalArray(root, "submixes").entries()) {
-    builder = builder.submix(string(value, `$.submixes[${index}]`));
+    const decoded = submix(value, `$.submixes[${index}]`);
+    builder = builder.submix(decoded.id, decoded.spec);
   }
   for (const [index, value] of optionalArray(root, "outputs").entries()) {
     builder = builder.output(string(value, `$.outputs[${index}]`));

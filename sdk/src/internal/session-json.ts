@@ -78,7 +78,6 @@ const OBJECT_KEY_ORDERS = {
   fader: ["left_db", "right_db", "left_mute", "right_mute"],
   pan: ["left", "right", "smoothing_samples"],
   matrix: ["ll", "lr", "rl", "rr", "smoothing_samples"],
-  submixes: ["id"],
   outputs: ["id"],
   routes: ["id", "source", "destination", "channel_matrix", "gain_db"],
   channel_matrix: ["ll", "lr", "rl", "rr"],
@@ -99,7 +98,7 @@ function taggedOrder(record: ModelRecord, key: string): readonly string[] {
   }
   if (key === "source") {
     if (kind === "track") return ["kind", "track_id", "tap"];
-    if (kind === "submix_output") return ["kind", "submix_id"];
+    if (kind === "submix") return ["kind", "submix_id", "tap"];
   }
   if (key === "destination") {
     if (kind === "submix_input") return ["kind", "submix_id"];
@@ -115,6 +114,10 @@ function objectOrder(record: ModelRecord, key: string): readonly string[] {
       "id", "source_id", "left_source_channel", "right_source_channel", "builtins",
       "console", "inserts", "fader", "pan" in record ? "pan" : "matrix",
     ];
+  }
+  // A submix strip is a track's strip without the source fields.
+  if (key === "submixes") {
+    return ["id", "builtins", "console", "inserts", "fader", "pan" in record ? "pan" : "matrix"];
   }
   // `console` names two records: the session's root declaration and each entry of a track's
   // console array. The root one is the only record with sections.
