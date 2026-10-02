@@ -48,7 +48,7 @@ use graph::{
 use lane::Backend;
 use rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
-use session::{CompiledSession, MatrixOrPan, Track};
+use session::{CompiledSession, MatrixOrPan, StripRef, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -2055,9 +2055,8 @@ impl PreparedBuiltinsSession {
         }
         let expected_tracks: Vec<&str> = session
             .normalized_model()
-            .tracks
-            .iter()
-            .map(|track| track.id.as_str())
+            .strips()
+            .map(|strip| strip.id.as_str())
             .collect();
         if !self
             .seal
@@ -3066,19 +3065,20 @@ fn session_identity(session: &CompiledSession) -> [u8; 32] {
     hash.finalize().into()
 }
 
-fn processor_seal<T: Clone + Ord>(tracks: &[T]) -> Vec<(T, TrackStage)> {
-    let capacity = tracks
+/// The three sealed builtin stages of every strip, keyed by strip ID (`session.strips()` order).
+fn processor_seal<T: Clone + Ord>(strips: &[T]) -> Vec<(T, TrackStage)> {
+    let capacity = strips
         .len()
         .checked_mul(3)
         .expect("session preparation preflighted processor count");
     let mut values = Vec::with_capacity(capacity);
-    for track in tracks {
+    for strip in strips {
         for stage in [
             TrackStage::PostInputBuiltins,
             TrackStage::PostFader,
             TrackStage::PostMatrix,
         ] {
-            values.push((track.clone(), stage));
+            values.push((strip.clone(), stage));
         }
     }
     values.sort_unstable();
@@ -3119,19 +3119,19 @@ fn expected_tails(
     sorted_controls: &[(&str, usize)],
 ) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
     let mut values: Vec<(Box<str>, BuiltinTail)> =
-        Vec::with_capacity(session.normalized_model().tracks.len());
-    for track in &session.normalized_model().tracks {
-        let parameters = track_parameters(track, u32::MAX).map_err(|_| ())?;
+        Vec::with_capacity(session.normalized_model().strips().count());
+    for strip in session.normalized_model().strips() {
+        let parameters = strip_parameters(&strip, u32::MAX).map_err(|_| ())?;
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
         let tail = if sorted_controls
-            .binary_search_by(|(control, _)| control.cmp(&track.id.as_str()))
+            .binary_search_by(|(control, _)| control.cmp(&strip.id.as_str()))
             .is_ok()
         {
             BuiltinTail::Infinite
         } else {
             chain.tail()
         };
-        values.push((track.id.as_str().into(), tail));
+        values.push((strip.id.as_str().into(), tail));
     }
     values.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     Ok(values)
@@ -3324,14 +3324,13 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             diagnostics.push(diag("builtin.meter.metrics", &meter_path(request)));
         }
     }
-    let known_tracks: BTreeSet<_> = session
+    let known_strips: BTreeSet<_> = session
         .normalized_model()
-        .tracks
-        .iter()
-        .map(|track| track.id.as_str())
+        .strips()
+        .map(|strip| strip.id.as_str())
         .collect();
     for request in requests {
-        if !known_tracks.contains(request.track_id.as_str()) {
+        if !known_strips.contains(request.track_id.as_str()) {
             diagnostics.push(diag("builtin.meter.unknown_track", &meter_path(request)));
         }
     }
@@ -3340,20 +3339,20 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         if !control_tracks.insert(control.track_id.as_str()) {
             diagnostics.push(diag("builtin.control.duplicate", &control_path(control)));
         }
-        if !known_tracks.contains(control.track_id.as_str()) {
+        if !known_strips.contains(control.track_id.as_str()) {
             diagnostics.push(diag(
                 "builtin.control.unknown_track",
                 &control_path(control),
             ));
         }
     }
-    for track in &session.normalized_model().tracks {
-        match track_parameters(track, caps.maximum_smoothing_samples)
+    for strip in session.normalized_model().strips() {
+        match strip_parameters(&strip, caps.maximum_smoothing_samples)
             .and_then(|parameters| BuiltinChain::new(session.sample_rate().0, parameters))
         {
             Ok(_) => {}
             Err(error) => {
-                diagnostics.push(parameter_diagnostic(track, error, session.sample_rate().0))
+                diagnostics.push(parameter_diagnostic(&strip, error, session.sample_rate().0))
             }
         }
     }
@@ -3382,7 +3381,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let resources = resource_plan.expect("validated resource plan").report;
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
-    let track_count = session.normalized_model().tracks.len();
+    let track_count = session.normalized_model().strips().count();
     // Empty, and it stays empty: every track stage is held as a `StripPreparation` until lowering
     // (#212 for the fader and the matrix, #210 phase 3 for the input). The vector exists so that
     // `into_graph_artifact` has somewhere to put the bindings it builds, and so that
@@ -3398,8 +3397,8 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     }
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, usize)> = Vec::with_capacity(controls.len());
-    for track in &session.normalized_model().tracks {
-        let parameters = track_parameters(track, caps.maximum_smoothing_samples)
+    for strip in session.normalized_model().strips() {
+        let parameters = strip_parameters(&strip, caps.maximum_smoothing_samples)
             .expect("preflighted parameters");
         let chain = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted coefficients");
@@ -3411,21 +3410,21 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted bank coefficients")
             .into_input_builtins();
-        let tail = if control_capacity.contains_key(track.id.as_str()) {
+        let tail = if control_capacity.contains_key(strip.id.as_str()) {
             BuiltinTail::Infinite
         } else {
             tail
         };
-        tails.push((Box::<str>::from(track.id.as_str()), tail));
-        bank_inputs.push((Box::<str>::from(track.id.as_str()), bank_input));
-        let graph_id = StableGraphId::parse(track.id.as_str()).expect("preflighted stable ID");
+        tails.push((Box::<str>::from(strip.id.as_str()), tail));
+        bank_inputs.push((Box::<str>::from(strip.id.as_str()), bank_input));
+        let graph_id = StableGraphId::parse(strip.id.as_str()).expect("preflighted stable ID");
         let control_failure = || {
             BuiltinDiagnosticSet::sorted(vec![diag(
                 "builtin.control.prepare",
-                &format!("$.controls[track_id={}]", track.id.as_str()),
+                &format!("$.controls[track_id={}]", strip.id.as_str()),
             )])
         };
-        let control = match control_capacity.get(track.id.as_str()) {
+        let control = match control_capacity.get(strip.id.as_str()) {
             None => None,
             Some(capacity) => {
                 let (producer, control) =
@@ -3442,18 +3441,18 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                 // carries it -- the same failure, at the same place, as before the strip banked.
                 FaderMuteRampBuiltins::new(parameters).map_err(|_| {
                     BuiltinDiagnosticSet::sorted(vec![parameter_diagnostic(
-                        track,
+                        &strip,
                         BuiltinParameterError::GainDomain,
                         session.sample_rate().0,
                     )])
                 })?;
                 track_controls.push(TrackControlProducer {
-                    track_id: Box::<str>::from(track.id.as_str()),
+                    track_id: Box::<str>::from(strip.id.as_str()),
                     producer,
                     fader: fader_producer,
                     input: input_producer,
                 });
-                control_seal.push((Box::<str>::from(track.id.as_str()), capacity.get()));
+                control_seal.push((Box::<str>::from(strip.id.as_str()), capacity.get()));
                 Some(StripControlConsumers {
                     input: Some(input_control),
                     fader: Some(fader_control),
@@ -3462,7 +3461,7 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             }
         };
         strips.push(StripPreparation {
-            track_id: Box::<str>::from(track.id.as_str()),
+            track_id: Box::<str>::from(strip.id.as_str()),
             graph_id,
             parameters,
             input,
@@ -3517,9 +3516,8 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     request_seals.sort_unstable();
     let tracks: Vec<Box<str>> = session
         .normalized_model()
-        .tracks
-        .iter()
-        .map(|track| track.id.as_str().into())
+        .strips()
+        .map(|strip| strip.id.as_str().into())
         .collect();
     let processor_seal = processor_seal(&tracks);
     let (observer_seal, consumer_seal) = actual_meter_seals(&observers, &meter_consumers);
@@ -3559,7 +3557,7 @@ fn resource_plan(
     requests: &[MeterRequest],
     controls: &[TrackControlRequest],
 ) -> Result<BuiltinResourcePlan, BuiltinDiagnostic> {
-    let track_count = session.normalized_model().tracks.len();
+    let track_count = session.normalized_model().strips().count();
     // The seal still records three stages per track even though preparation binds one and defers
     // two, so the seal vector below is charged at the seal's own count and not at the bindings'.
     let sealed_stage_count = track_count
@@ -3580,8 +3578,8 @@ fn resource_plan(
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, sealed_stage_count)?;
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
-    for track in &session.normalized_model().tracks {
-        let bytes = track.id.as_str().len();
+    for strip in session.normalized_model().strips() {
+        let bytes = strip.id.as_str().len();
         // Nine independently retained copies of the track's ID: the strip's own ID and its graph
         // ID, the retained tail, the compact track seal, the three processor-seal rows, the seal's
         // cloned tail ID, and the independently retained bank-input candidate ID. The tenth was
@@ -3792,6 +3790,7 @@ fn add_vector_layout<T>(
 ///
 /// `session` is taken so this stays the one predicate both bank planners call even after the rule
 /// grows a term the track alone cannot answer.
+// Source semantics: tracks only.
 #[must_use]
 pub fn track_mono_source(session: &CompiledSession, track: &Track) -> bool {
     let _ = session;
@@ -3835,6 +3834,8 @@ pub fn track_input_delay_symmetric(track: &Track) -> bool {
 /// The prepared side is deliberately source-agnostic: the SOURCE term lives only in this
 /// bit into each track's input stage, so the runtime witness carries it too. This function is what
 /// a caller with a `CompiledSession` and no plan asks.
+// Source semantics: tracks only.
+// This set is the mono-collapse guard, and a strip with no source must never enter it.
 #[must_use]
 pub fn session_structural_symmetry(
     session: &CompiledSession,
@@ -3920,6 +3921,7 @@ pub struct SessionPoolClasses {
 
 impl SessionPoolClasses {
     /// Seeds every track's witness with its structural (`SOURCE`) term.
+    // Source semantics: tracks only.
     #[must_use]
     pub fn from_session(session: &CompiledSession) -> Self {
         Self {
@@ -4703,27 +4705,27 @@ fn render_error(error: BuiltinParameterError) -> RenderError {
     }
 }
 
-fn track_parameters(
-    track: &Track,
+fn strip_parameters(
+    strip: &StripRef<'_>,
     maximum_smoothing: u32,
 ) -> Result<BuiltinParameters, BuiltinParameterError> {
     let left = ChannelParameters {
-        polarity_invert: track.builtins.left.polarity_invert,
-        trim_db: track.builtins.left.trim_db,
-        hpf_hz: track.builtins.left.hpf_hz,
-        lpf_hz: track.builtins.left.lpf_hz,
-        fader_db: track.fader.left_db,
-        muted: track.fader.left_mute,
+        polarity_invert: strip.builtins.left.polarity_invert,
+        trim_db: strip.builtins.left.trim_db,
+        hpf_hz: strip.builtins.left.hpf_hz,
+        lpf_hz: strip.builtins.left.lpf_hz,
+        fader_db: strip.fader.left_db,
+        muted: strip.fader.left_mute,
     };
     let right = ChannelParameters {
-        polarity_invert: track.builtins.right.polarity_invert,
-        trim_db: track.builtins.right.trim_db,
-        hpf_hz: track.builtins.right.hpf_hz,
-        lpf_hz: track.builtins.right.lpf_hz,
-        fader_db: track.fader.right_db,
-        muted: track.fader.right_mute,
+        polarity_invert: strip.builtins.right.polarity_invert,
+        trim_db: strip.builtins.right.trim_db,
+        hpf_hz: strip.builtins.right.hpf_hz,
+        lpf_hz: strip.builtins.right.lpf_hz,
+        fader_db: strip.fader.right_db,
+        muted: strip.fader.right_mute,
     };
-    let (matrix, smoothing_samples) = match track.matrix_or_pan {
+    let (matrix, smoothing_samples) = match *strip.matrix_or_pan {
         MatrixOrPan::Pan {
             left,
             right,
@@ -4775,7 +4777,7 @@ fn meter_path(request: &MeterRequest) -> String {
     )
 }
 fn parameter_diagnostic(
-    track: &Track,
+    strip: &StripRef<'_>,
     error: BuiltinParameterError,
     sample_rate: u32,
 ) -> BuiltinDiagnostic {
@@ -4788,12 +4790,12 @@ fn parameter_diagnostic(
         BuiltinParameterError::MatrixSmoothing => "builtin.matrix.smoothing",
         _ => "builtin.resource.arithmetic_overflow",
     };
-    let track_path = format!("$.tracks[id={}]", track.id);
+    let track_path = strip.path_prefix();
     let path = match error {
-        BuiltinParameterError::GainDomain => gain_path(track, &track_path),
-        BuiltinParameterError::FilterCutoff => cutoff_path(track, &track_path, sample_rate),
-        BuiltinParameterError::FilterOrder => filter_order_path(track, &track_path),
-        BuiltinParameterError::MatrixCoefficient => matrix_path(track, &track_path),
+        BuiltinParameterError::GainDomain => gain_path(strip, &track_path),
+        BuiltinParameterError::FilterCutoff => cutoff_path(strip, &track_path, sample_rate),
+        BuiltinParameterError::FilterOrder => filter_order_path(strip, &track_path),
+        BuiltinParameterError::MatrixCoefficient => matrix_path(strip, &track_path),
         BuiltinParameterError::MatrixSmoothing => {
             format!("{track_path}.matrix_or_pan.smoothing_samples")
         }
@@ -4802,10 +4804,10 @@ fn parameter_diagnostic(
     diag(code, &path)
 }
 
-fn gain_path(track: &Track, track_path: &str) -> String {
+fn gain_path(strip: &StripRef<'_>, track_path: &str) -> String {
     for (lane, builtins, fader) in [
-        ("left", &track.builtins.left, track.fader.left_db),
-        ("right", &track.builtins.right, track.fader.right_db),
+        ("left", &strip.builtins.left, strip.fader.left_db),
+        ("right", &strip.builtins.right, strip.fader.right_db),
     ] {
         if !builtins.trim_db.is_finite() || !(-144.0..=24.0).contains(&builtins.trim_db) {
             return format!("{track_path}.builtins.{lane}.trim_db");
@@ -4817,10 +4819,10 @@ fn gain_path(track: &Track, track_path: &str) -> String {
     format!("{track_path}.builtins")
 }
 
-fn cutoff_path(track: &Track, track_path: &str, sample_rate: u32) -> String {
+fn cutoff_path(strip: &StripRef<'_>, track_path: &str, sample_rate: u32) -> String {
     for (lane, builtins) in [
-        ("left", &track.builtins.left),
-        ("right", &track.builtins.right),
+        ("left", &strip.builtins.left),
+        ("right", &strip.builtins.right),
     ] {
         if invalid_cutoff(builtins.hpf_hz, sample_rate) {
             return format!("{track_path}.builtins.{lane}.hpf_hz");
@@ -4832,10 +4834,10 @@ fn cutoff_path(track: &Track, track_path: &str, sample_rate: u32) -> String {
     format!("{track_path}.builtins")
 }
 
-fn filter_order_path(track: &Track, track_path: &str) -> String {
-    if track.builtins.left.hpf_hz > 0.0
-        && track.builtins.left.lpf_hz > 0.0
-        && track.builtins.left.hpf_hz >= track.builtins.left.lpf_hz
+fn filter_order_path(strip: &StripRef<'_>, track_path: &str) -> String {
+    if strip.builtins.left.hpf_hz > 0.0
+        && strip.builtins.left.lpf_hz > 0.0
+        && strip.builtins.left.hpf_hz >= strip.builtins.left.lpf_hz
     {
         format!("{track_path}.builtins.left.lpf_hz")
     } else {
@@ -4847,8 +4849,8 @@ fn invalid_cutoff(value: f32, sample_rate: u32) -> bool {
     validate_builtin_filter_cutoff(value, sample_rate, 0.0, 10.0).is_err()
 }
 
-fn matrix_path(track: &Track, track_path: &str) -> String {
-    match track.matrix_or_pan {
+fn matrix_path(strip: &StripRef<'_>, track_path: &str) -> String {
+    match *strip.matrix_or_pan {
         MatrixOrPan::Pan { left, .. } if !left.is_finite() || !(-1.0..=1.0).contains(&left) => {
             format!("{track_path}.matrix_or_pan.left")
         }
@@ -12182,7 +12184,7 @@ mod tests {
                     Some(accepted_report.engine_owned_retained_payload_bytes)
                 );
 
-                let parameters = track_parameters(&model.tracks[0], u32::MAX)
+                let parameters = strip_parameters(&model.strips().next().unwrap(), u32::MAX)
                     .expect("accepted class parameters");
                 let mut chain = BuiltinChain::new(rate, parameters).expect("accepted chain");
                 let target_result = chain.set_matrix_target(target);

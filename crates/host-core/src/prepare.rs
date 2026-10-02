@@ -763,6 +763,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     PrepareDiagnostics,
 > {
     let model = compiled.normalized_model();
+    // Source semantics: tracks only.
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
@@ -816,6 +817,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     }
     let sources = builder.finish();
 
+    // Source semantics: tracks only.
     let mappings = model
         .tracks
         .iter()
@@ -911,6 +913,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
 
     // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical track
     // order, so `HostLiveControlHandles::tracks` and the requested channels cannot disagree.
+    // Source semantics: tracks only.
     let live_control_tracks: Vec<Box<str>> = model
         .tracks
         .iter()
@@ -931,6 +934,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(shape("host.meter.period"));
     }
+    // Source semantics: tracks only.
     let meter_tracks: Vec<(&str, MeterTap, MeterMetricSet)> = match selected_meters {
         Some(meters) => meters
             .iter()
@@ -1281,6 +1285,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // On a session whose tracks read two source channels, which is every stereo session there is,
     // this arms nothing.
     let mut plan = bound.plan;
+    // Source semantics: tracks only.
     let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
@@ -1308,14 +1313,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ))
 }
 
-/// Total effect instances across every track: one per console entry, since each lowers to one
-/// effect instance on its track (decision 12), plus the track's inserts.
+/// Total effect instances across every strip: one per console entry, since each lowers to one
+/// effect instance on its strip (decision 12), plus the strip's inserts.
 pub fn count_effects(model: &SessionModel) -> Result<u64, PrepareDiagnostics> {
-    model.tracks.iter().try_fold(0_u64, |total, track| {
-        let count = track
+    model.strips().try_fold(0_u64, |total, strip| {
+        let count = strip
             .console
             .len()
-            .checked_add(track.inserts.effects.len())
+            .checked_add(strip.inserts.effects.len())
             .ok_or_else(|| resource("host.resource.arithmetic"))?;
         total
             .checked_add(u64::try_from(count).map_err(|_| platform("host.count"))?)

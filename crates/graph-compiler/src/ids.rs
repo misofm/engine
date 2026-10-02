@@ -229,9 +229,11 @@ pub(crate) fn rack_id(rack: EffectRack) -> RackId {
 /// (`simd1` holds `console.pre_insert`, `dynamic` the inserts and `simd2` `console.post_insert`)
 /// because these paths are part of the sealed `MISO-GRAPH-V1` canonical text, which decision 12's
 /// class-A-by-lowering keeps byte-identical.
-pub(crate) fn effect_path(track: &str, rack: RackId, effect: &str) -> String {
+///
+/// `strip` is the owning strip's `StripRef::path_prefix` (`$.tracks[id=<track>]` for a track).
+pub(crate) fn effect_path(strip: &str, rack: RackId, effect: &str) -> String {
     format!(
-        "$.tracks[id={track}].{}.effects[id={effect}]",
+        "{strip}.{}.effects[id={effect}]",
         match rack {
             RackId::Simd1 => "simd1",
             RackId::Dynamic => "dynamic",

@@ -171,10 +171,10 @@ impl GraphCompiler {
         // Decision 12, class A by lowering: `console.pre_insert` is `RackId::Simd1`, the track's
         // inserts `Dynamic` and `console.post_insert` `Simd2`, each console entry an ordinary
         // effect. Lowered once here and borrowed by every pass below.
-        let lowered: Vec<_> = model
-            .tracks
+        let strips: Vec<_> = model.strips().collect();
+        let lowered: Vec<_> = strips
             .iter()
-            .map(|track| model.lower_track(track))
+            .map(|strip| model.lower_strip(strip))
             .collect();
         let racks = |index: usize| {
             let [pre_insert, inserts, post_insert] = lowered[index].in_chain_order();
@@ -185,22 +185,22 @@ impl GraphCompiler {
             ]
         };
         let mut declared = BTreeSet::<(&str, RackId, &str)>::new();
-        for (index, track) in model.tracks.iter().enumerate() {
+        for (index, strip) in strips.iter().enumerate() {
             for (rack, values, _) in racks(index) {
                 for effect in values {
-                    let key = (track.id.as_str(), rack, effect.id.as_str());
+                    let key = (strip.id.as_str(), rack, effect.id.as_str());
                     declared.insert(key);
                     let Some(slot) = prepared.get(key.0, key.1, key.2) else {
                         diagnostics.push(diag(
                             "graph.effect.missing_prepared",
-                            &effect_path(track.id.as_str(), rack, effect.id.as_str()),
+                            &effect_path(&strip.path_prefix(), rack, effect.id.as_str()),
                         ));
                         continue;
                     };
                     if !sidechain_matches(&effect.sidechain, &effects.entries[slot.index()]) {
                         diagnostics.push(diag(
                             "graph.effect.metadata_mismatch",
-                            &effect_path(track.id.as_str(), rack, effect.id.as_str()),
+                            &effect_path(&strip.path_prefix(), rack, effect.id.as_str()),
                         ));
                     }
                 }
@@ -221,12 +221,12 @@ impl GraphCompiler {
         let mut node_tail = BTreeMap::new();
         let mut effect_ids = vec![None; effects.entries.len()];
         let mut route_transforms = Vec::new();
-        for (index, track) in model.tracks.iter().enumerate() {
+        for (index, strip) in strips.iter().enumerate() {
             for stage in stages() {
-                let id = track_node(track.id.as_str(), stage);
+                let id = track_node(strip.id.as_str(), stage);
                 let tail = if stage == TrackStage::PostInputBuiltins {
                     *builtin_tails
-                        .get(track.id.as_str())
+                        .get(strip.id.as_str())
                         .expect("validated builtins carry one tail per track")
                 } else {
                     TailSamples::Finite(0)
@@ -240,25 +240,25 @@ impl GraphCompiler {
                     tail,
                 );
             }
-            let mut preceding = track_node(track.id.as_str(), TrackStage::Input);
-            let builtins = track_node(track.id.as_str(), TrackStage::PostInputBuiltins);
+            let mut preceding = track_node(strip.id.as_str(), TrackStage::Input);
+            let builtins = track_node(strip.id.as_str(), TrackStage::PostInputBuiltins);
             add_main_edge(
                 &mut edges,
                 preceding.clone(),
                 builtins.clone(),
-                "$.tracks".to_owned(),
+                strip.collection_path().to_owned(),
             );
             preceding = builtins;
             for (rack, values, boundary) in racks(index) {
                 for effect in values {
                     let id = EffectNodeId {
-                        track_id: gid(track.id.as_str()),
+                        track_id: gid(strip.id.as_str()),
                         rack,
                         effect_id: gid(effect.id.as_str()),
                     };
                     let node = GraphNodeId::Effect(id.clone());
                     let slot = prepared
-                        .get(track.id.as_str(), rack, effect.id.as_str())
+                        .get(strip.id.as_str(), rack, effect.id.as_str())
                         .expect("validated prepared effect");
                     let index = slot.index();
                     let metadata = effects.entries[index].metadata;
@@ -274,24 +274,34 @@ impl GraphCompiler {
                         &mut edges,
                         preceding.clone(),
                         node.clone(),
-                        effect_path(track.id.as_str(), rack, effect.id.as_str()),
+                        effect_path(&strip.path_prefix(), rack, effect.id.as_str()),
                     );
                     preceding = node.clone();
                     effect_ids[index] = Some(id);
                 }
-                let end = track_node(track.id.as_str(), boundary);
+                let end = track_node(strip.id.as_str(), boundary);
                 add_main_edge(
                     &mut edges,
                     preceding.clone(),
                     end.clone(),
-                    "$.tracks".to_owned(),
+                    strip.collection_path().to_owned(),
                 );
                 preceding = end;
             }
-            let fader = track_node(track.id.as_str(), TrackStage::PostFader);
-            let matrix = track_node(track.id.as_str(), TrackStage::PostMatrix);
-            add_main_edge(&mut edges, preceding, fader.clone(), "$.tracks".to_owned());
-            add_main_edge(&mut edges, fader, matrix, "$.tracks".to_owned());
+            let fader = track_node(strip.id.as_str(), TrackStage::PostFader);
+            let matrix = track_node(strip.id.as_str(), TrackStage::PostMatrix);
+            add_main_edge(
+                &mut edges,
+                preceding,
+                fader.clone(),
+                strip.collection_path().to_owned(),
+            );
+            add_main_edge(
+                &mut edges,
+                fader,
+                matrix,
+                strip.collection_path().to_owned(),
+            );
         }
         for submix in &model.submixes {
             let id = GraphNodeId::Submix {
@@ -349,7 +359,7 @@ impl GraphCompiler {
                 transform,
             });
         }
-        for (index, track) in model.tracks.iter().enumerate() {
+        for (index, strip) in strips.iter().enumerate() {
             for (rack, values, _) in racks(index) {
                 for effect in values {
                     let SidechainDeclaration::Routed(sidechain) = &effect.sidechain else {
@@ -357,7 +367,7 @@ impl GraphCompiler {
                     };
                     let source = route_source_node(&sidechain.source);
                     let slot = prepared
-                        .get(track.id.as_str(), rack, effect.id.as_str())
+                        .get(strip.id.as_str(), rack, effect.id.as_str())
                         .expect("validated prepared effect");
                     let id = prepared_effect_node(&effect_ids, slot)
                         .expect("prepared effect node assigned")
@@ -374,7 +384,7 @@ impl GraphCompiler {
                             kind: GraphPortKind::SidechainInput,
                             effect_port: Some(sidechain.port_id.as_str().to_owned()),
                         },
-                        path: format!("$.tracks[id={}].sidechain", track.id),
+                        path: format!("{}.sidechain", strip.path_prefix()),
                     });
                 }
             }
@@ -453,6 +463,8 @@ impl GraphCompiler {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
+        // Source semantics: tracks only. The `TrackDelay` arm runs on a source input; a submix's
+        // delay is a separate arm (*Delay a submix strip's summed input*, #1201).
         // Issue #210 phase 2. Only tracks that actually declared a delay appear, in normalized
         // track order: an undelayed session produces an empty vector, and every downstream
         // consumer -- the estimate term, the lowering, the runtime's line vector -- is then
@@ -540,7 +552,7 @@ impl GraphCompiler {
         // and prepared effect. Charge the table and both cloned identity strings here, while the
         // semantic model is still borrowed; the runtime itself is deliberately opaque to this
         // compiler after lowering.
-        let Some(response_binding_count) = u64::try_from(model.tracks.len())
+        let Some(response_binding_count) = u64::try_from(strips.len())
             .ok()
             .and_then(|tracks| tracks.checked_add(u64::try_from(effects.entries.len()).ok()?))
         else {
@@ -552,11 +564,10 @@ impl GraphCompiler {
                 )],
             ));
         };
-        let Some((response_binding_string_bytes, largest_response_binding_string_bytes)) = model
-            .tracks
+        let Some((response_binding_string_bytes, largest_response_binding_string_bytes)) = strips
             .iter()
-            .try_fold((0_u64, 0_u64), |(total, largest), track| {
-                let track_bytes = u64::try_from(track.id.as_str().len()).ok()?;
+            .try_fold((0_u64, 0_u64), |(total, largest), strip| {
+                let track_bytes = u64::try_from(strip.id.as_str().len()).ok()?;
                 let stable_bytes = u64::try_from("input-filters".len()).ok()?;
                 let native_bytes = u64::try_from("miso.builtin.input-filters".len()).ok()?;
                 let total = total

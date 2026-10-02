@@ -232,6 +232,56 @@ These names are fixed by this body. In addition:
 - The list of switched sites.
 - The list of sites deliberately left track-only, each with its comment.
 
+### Attempt 1 record (Terra)
+
+Base: `f622dad1` (this branch's tip before the slice; its code equals `fe8ac679`), run from a
+`git archive` export with its own target directory.
+
+**Gate 1, identical on base and branch.** Release build of `audit bench capi session-validator`:
+exit 0 on both. `check-graph-determinism.sh`: PASS (100/100) on both;
+`fresh-process-determinism.json` sha256 `9a7f1d6aa535f9824404f3e2e0f95b62c3183528344e8bef3bb47cec242f4051`
+on both, and `diff` of the two files is empty. `graph_fixture -- --check`: exit 0 on both.
+`check-console-fixtures.sh`: "ok (canonical regeneration and 64-track intended/mono/app witnesses)"
+on both. `check-builtins-fixtures.sh`: "ok (50 files)" on both.
+
+**Gate 2.** The workspace command: exit 0, 1109 passed, 0 failed, 9 ignored. `cargo test --locked
+--release -p audit -p bench -p console-workload`: exit 0, 110 passed, 0 failed, 2 ignored. No
+assertion edited; the one test call (`builtins-compiler/src/lib.rs`, formerly `:12185`) changed its
+argument only, to `&model.strips().next().unwrap()`.
+
+**Gate 3.** `cargo fmt --check`, clippy (`--all-features -D warnings`) and `cargo doc` with
+`-D warnings`: exit 0. `check-`/`test-` session, builtins, graph, host-core, workspace and realtime
+policy: all pass.
+
+**Gate 4.** No test added, none superseded.
+
+**Switched to `strips()` / `StripRef`.**
+- session: `StripRef`, `StripKind` (exhaustive), `strips()`, `lower_strip()` (`lower_track`
+  delegates), `path_prefix()`, `collection_path()`; `estimate.rs` effect count, parameter count and
+  per-strip vectors (diagnostic path literals unchanged).
+- graph-compiler `compile.rs`: lowered racks, declared-effect set, stage chains, sidechain edges
+  (`{path_prefix}.sidechain`), the four chain-edge paths (`collection_path()`), response-binding
+  count and string bytes; `banks.rs` rack chains; `ids.rs` `effect_path` takes the strip prefix.
+- builtins-compiler: `validate_for_session`, `processor_seal` (parameter renamed), `expected_tails`,
+  control/meter request validation (`known_strips`), the parameter preflight, the preparation loop,
+  the seal's `tracks` vector (which feeds `planned_strip_banks`), the resource plan;
+  `track_parameters` -> `strip_parameters`; `parameter_diagnostic`, `gain_path`, `cutoff_path`,
+  `filter_order_path`, `matrix_path` take `&StripRef`, the prefix from `path_prefix()`.
+- effect-compiler: the strip loop and its path, `EffectPreparedEntry::strip_path`, the
+  `attach_effect_live_controls` and `attach_effect_observation` paths, `declared_live_addresses`.
+- host-core: `count_effects`.
+
+**Left track-only, each with `// Source semantics: tracks only.`** builtins-compiler
+`track_mono_source`, `session_structural_symmetry` (plus the mono-collapse-guard line) and
+`SessionPoolClasses::from_session`; graph-compiler `track_delays` (plus the `TrackDelay`/#1201
+line); host-core `prepare.rs` track/source/route counts and caps, source mappings (the source
+bindings), live-control track list and requests, meter requests, and the mono-collapse eligibility
+filter; `shape.rs` `track_count`.
+
+**Deviations.** `StripRef` gains a private constructor `StripRef::track` (not public API) and
+derives `Clone, Copy, Debug, PartialEq`, as does `StripKind`. `solo.rs` carries no comment: it is
+outside the authorized paths, and the slice does not touch it.
+
 ## Dependencies
 
 - *Record the submix, send and VCA ruling* (#1197)
