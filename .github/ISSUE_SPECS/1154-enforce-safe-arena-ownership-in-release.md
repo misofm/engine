@@ -1,23 +1,33 @@
-# Make the safe arena API enforce its ownership and aliasing rules in release builds
+# Use a safe single-owner arena for sequential rendering
 
-## Finding and scope
+## Owner decision and source finding
 
-The crate-by-crate housekeeping audit of engine (#1115) found that the public safe `ArenaLease` API relies on caller obligations that safe Rust cannot enforce. In `crates/engine/src/realtime/disjoint.rs`, `checked_write` checks the write capability with `debug_assert!`; `write_read`, `write_read2` and `write_read_stereo` guard output/input aliases only in debug. `read` permits foreign-buffer access after validating the ID, while the builder's wave ordering does not establish the documented E1 happens-before obligation. Leases are Send and the backing arena is Sync, so safe multi-lease callers can violate that obligation. The current single-lease production executor satisfies its intended access order; that fact does not make the public safe constructors/accessors sound for other safe callers. This is a separate safety correction, not a claimed result of behavior-preserving housekeeping.
+On 2026-10-02 the owner ruled that there is no identified need for multi-lease arena support, after root explained #1154's safe-versus-unsafe API choice. Root takes this as authorization to remove multi-lease functionality and keep a safe exclusive arena matching the production single-render-thread model. No multicore executor or deliberately unsafe public multi-lease API is authorized.
 
-## Smallest closable slice and decisions
+The original #1115 finding remains source evidence: checked_write and write_read/write_read2/write_read_stereo use debug-only ownership/alias checks; generic plane offsets are not completely validated before raw slice formation; public Arc-backed leases can allow a foreign writer/read overlap that builder wave numbers do not synchronize. Production currently creates one sequential lease and follows the intended ordering. No current production fault, runtime UB reproducer or completed Miri proof is claimed by that discovery.
 
-Audit every public arena access method, including plane, offset, shape, write-set and alias checks, and construct safe-only release/Miri reproducers. Select a surface that mechanically guarantees spatial disjointness and execution ordering: checked safe admission and prevalidated capabilities, or a deliberately narrowed/unsafe multi-lease API with explicit obligations. The issue must freeze the chosen API/error behavior before implementation and state whether any cross-crate caller needs migration. Preserve validated single-thread render behavior, bits, planar layout, stable ordering and exact retained-byte accounting. Do not reintroduce multicore scheduling.
+## Smallest authorized product slice
 
-Root Sol approves investigation and a bounded brief. An API direction that changes an existing public source surface is collected for the owner's final housekeeping report; no implementation is authorized by this issue yet.
+Remove the general multi-lease builder/access model and shared-arena ownership. Construct exactly one non-cloneable owner of the preallocated planar storage, with no public route to foreign mutable/shared leases. Preserve zero-copy producer/consumer buffer access, reserved silence buffer 0, existing buffer IDs/plane layout, SIMD lane order, graph execution order and every valid render word. Migrate the actual graph constructor and its test helpers; update the engine reexports and current realtime-policy descriptions. Retire tests/error branches that defend multi-lease/wave behavior made unexpressible by this correction; keep their mutation records explicitly historical rather than rewriting old evidence.
 
-## Objective gates
+Audit every remaining safe access method. Invalid plane/buffer/shape, silence writes and output/read or output/output overlap must be rejected before arithmetic can overflow or references can be formed, in both debug and release. Existing Option multi-borrow refusals remain transactional; convenience methods may retain programmer-error panic behavior with actual release guards. No ordinary test executes undefined behavior on the old implementation. Exclusive Rust borrowing must provide access timing; documentation alone is insufficient.
 
-- Release-mode safe-only misuse reproducers cover out-of-write-set mutation, same-buffer output/read aliases, invalid plane/shape and concurrent foreign writer/read access. Run Miri where available; never intentionally execute undefined behavior in an ordinary test process.
-- The selected surface rejects misuse before references are formed, or makes the required unsafe obligation visible at the actual call/ownership boundary. Documentation alone and debug-only assertions are insufficient.
-- Existing valid arena, graph reduction/scatter, zero-copy and allocation/RT gates pass, with one-time unchanged-output evidence if implementation changes. Runtime checks are bounded and introduce no allocation/free, lock, syscall or structural render work.
-- Focused native/target builds and proportional clippy/fmt gates; each new regression records the concrete bug's revert-red evidence or its unique plausible defect. No source/prose grep or resource-byte pin tests.
-- Maximum five coherent implementation attempts after a frozen Sol brief, one adversarial verdict each. Root checkpoints and pushes exact owned paths, synchronizes this issue and closes only after PASS evidence is upstream.
+Preparation owns allocation and validation. Render stays allocation/free/lock/I/O/syscall-free, bounded and zero-copy; no new per-sample validation loop, broad capability framework or extra retained tables. Preserve retained-byte accounting accuracy and caps; deleting ownership bookkeeping may change Rust structural size, but never PCM capacity or a sealed resource-format fixture silently. This issue does not absorb #1074 or add a generic memory walker.
+
+## Brief and execution
+
+The user-requested two GPT-6.1 Sol xhigh agents continue: A supplies the implementation proposal and then owns the single approved product tranche; B independently audits safety, resource consumers and test value, then reviews the frozen implementation. Root Sol owns the final concrete brief approval, exact-path checkpoint commits/pushes, one adversarial verdict per coherent attempt (maximum five), GitHub synchronization and required qualification/main delivery. No implementation starts before root records and synchronizes the exact proposed API/files. Read-only proposal work is authorized now.
+
+Scope is engine's arena implementation/reexports, graph's constructor/test helper migration and directly superseded current documentation. Any additional host, ABI, compiler-resource subsystem or benchmark framework requires a bounded successor rather than expanding this correction. Stop at the first compiling/focused-green product tranche for root checkpoint before further edits or evidence.
+
+## Objective gates and test value
+
+- Existing arena zero-copy address/word, silence, alias/shape/refusal and four/eight-lane scatter owners pass after migration; same-API invalid access regressions run only on the corrected code unless Miri can safely diagnose the old implementation.
+- Focused engine and graph debug/release tests, strict package clippy, formatting and existing realtime/workspace/graph policies. Representative downstream graph-compiler/resource/fixture and actual installed allocator/render gates qualify the changed ownership boundary without new harness/corpus expansion. Freeze the final concrete subset before running it.
+- Compile-only wasm simd128, AArch64 iOS and Android product checks. Use available Miri for a bounded relevant safe-access subset if supported; report unavailable/toolchain limits accurately and record wider qualification separately rather than blocking a proven usable product slice.
+- Every new/rewritten test's verdict names the plausible unique defect; remove superseded multi-lease tests in the same implementation. No prose/source grep tests, permanent old-output digest or private layout/byte pin. One-time old/new valid-output evidence stays in PR evidence, not a committed oracle.
+- No descriptive timing loop or projected speedup. Changes to generated code may be reported only for artifacts actually inspected. Required qualification succeeds before merge; synchronize and close #1154 only once root PASS and its evidence are upstream.
 
 ## Evidence and delivery state
 
-Identified independently by GPT-6.1 Sol xhigh worker A and confirmed by root while reviewing #1115 on 2026-10-01. Current relevant locations: `checked_write`, `read`, `write`/`write_stereo`, `write_read`/`write_read2`/`write_read_stereo`, and `ArenaLeaseSetBuilder::finish`. Representative consumers are in `crates/graph/src/runtime.rs`. Formal release/Miri reproduction and the API ruling remain pending.
+Original finding confirmed by worker A and root under #1115; owner direction now settled. Current production caller is crates/graph/src/runtime.rs; a repository-wide source search finds no other non-test arena consumer. Root started codex/safe-single-owner-arena-1154 from synchronized main 7345ecb9. Exact API proposal and implementation approval are pending the two independent reads. No implementation or validation improvement is claimed yet.
