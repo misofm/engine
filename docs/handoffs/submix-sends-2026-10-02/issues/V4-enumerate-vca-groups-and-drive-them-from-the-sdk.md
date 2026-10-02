@@ -89,6 +89,10 @@ this slice gives them a name and a surface.
    and `sdk/src/generated/**`.
 4. Evals in `sdk/test/live-controls-evals.mjs` and type tests in `sdk/test/live-controls-types.ts`.
 5. `hosts/host-web/MUTATIONS.md` rows for the two exports and the session-map field.
+6. `AGENTS.md`: this slice closes the VCA batch V1-V4, so it removes the decision-13 qualifier from
+   the VCA sentence ("Approved by decision 13 (#1196) as owner-delegated answer (a), landing with
+   the *VCA groups* umbrella ...: no VCA group exists yet."), changing nothing else (*Record the
+   submix, send and VCA ruling*, #1197, D5).
 
 ## Authorized paths
 
@@ -103,6 +107,7 @@ this slice gives them a name and a surface.
   `sdk/src/browser/**`, `sdk/src/index.ts`
 - `sdk/test/{live-controls-evals.mjs,live-controls-types.ts,browser-defaults-evals.mjs,spectrum-browser-evals.mjs,console-evals.mjs,measurement-evals.mjs}`
 - `docs/handoffs/submix-strips-and-sends/APP-LIVE.md` (one "Live VCA groups" section)
+- `AGENTS.md` (that qualifier only)
 - this spec
 
 ## Non-goals

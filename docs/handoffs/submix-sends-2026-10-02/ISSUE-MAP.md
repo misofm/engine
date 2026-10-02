@@ -5,7 +5,8 @@ Filed on 2026-10-02 by *Record the submix, send and VCA ruling* (#1197), under d
 label, which `DESIGN.md`, the `VERIFY`, `REVISION` and `APPLIED` documents in this folder, and the
 plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder is not committed
 except for the unfiled VCA drafts; each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
-GitHub issue body matches it.
+GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) were renamed in
+#1197's attempt 2 to the slug of their GitHub titles; their plan files keep the plan's names.
 
 | Slice | Issue | Title | Spec | Plan file |
 |---|---|---|---|---|
@@ -16,16 +17,16 @@ GitHub issue body matches it.
 | 03 | #1200 | Render a submix strip on its summed input | `.github/ISSUE_SPECS/1200-render-a-submix-strip-on-its-summed-input.md` | `03-render-a-submix-strip-on-its-summed-input.md` |
 | 04 | #1201 | Delay a submix strip's summed input | `.github/ISSUE_SPECS/1201-delay-a-submix-strips-summed-input.md` | `04-delay-a-submix-strips-summed-input.md` |
 | 05 | #1202 | Carry every console slot on every submix strip | `.github/ISSUE_SPECS/1202-carry-every-console-slot-on-every-submix-strip.md` | `05-carry-every-console-slot-on-every-submix-strip.md` |
-| 06 | #1203 | Tap a submix strip at any of the seven send points | `.github/ISSUE_SPECS/1203-tap-a-submix-strip-at-any-send-point.md` | `06-tap-a-submix-strip-at-any-send-point.md` |
+| 06 | #1203 | Tap a submix strip at any of the seven send points | `.github/ISSUE_SPECS/1203-tap-a-submix-strip-at-any-of-the-seven-send-points.md` | `06-tap-a-submix-strip-at-any-send-point.md` |
 | 07 | #1204 | Address submix strips in session edits | `.github/ISSUE_SPECS/1204-address-submix-strips-in-session-edits.md` | `07-address-submix-strips-in-session-edits.md` |
-| 08 | #1205 | Build submix strips and bus taps in the SDK and teach agents to author them | `.github/ISSUE_SPECS/1205-build-submix-strips-in-the-sdk-and-teach-agents-to-author-them.md` | `08-build-submix-strips-in-the-sdk-and-teach-agents-to-author-them.md` |
+| 08 | #1205 | Build submix strips and bus taps in the SDK and teach agents to author them | `.github/ISSUE_SPECS/1205-build-submix-strips-and-bus-taps-in-the-sdk-and-teach-agents-to-author-them.md` | `08-build-submix-strips-in-the-sdk-and-teach-agents-to-author-them.md` |
 | 09 | #1206 | Count and cap submix strips in host preparation and the C ABI | `.github/ISSUE_SPECS/1206-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md` | `09-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md` |
 | 10 | #1207 | List every strip in the live-control handles and file bus effects in the browser | `.github/ISSUE_SPECS/1207-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md` | `10-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md` |
-| 11 | #1208 | Meter any boundary of a submix strip and designate a master strip in host-core | `.github/ISSUE_SPECS/1208-meter-and-designate-submix-strips-in-host-core.md` | `11-meter-and-designate-submix-strips-in-host-core.md` |
+| 11 | #1208 | Meter any boundary of a submix strip and designate a master strip in host-core | `.github/ISSUE_SPECS/1208-meter-any-boundary-of-a-submix-strip-and-designate-a-master-strip-in-host-core.md` | `11-meter-and-designate-submix-strips-in-host-core.md` |
 | 12 | #1209 | Carry submix strips in the browser meter frame | `.github/ISSUE_SPECS/1209-carry-submix-strips-in-the-browser-meter-frame.md` | `12-carry-submix-strips-in-the-browser-meter-frame.md` |
-| 13 | #1210 | Name submix strips in the browser session map and the SDK measurement | `.github/ISSUE_SPECS/1210-name-submix-strips-in-the-browser-session-map-and-sdk-measurement.md` | `13-name-submix-strips-in-the-browser-session-map-and-sdk-measurement.md` |
+| 13 | #1210 | Name submix strips in the browser session map and the SDK measurement | `.github/ISSUE_SPECS/1210-name-submix-strips-in-the-browser-session-map-and-the-sdk-measurement.md` | `13-name-submix-strips-in-the-browser-session-map-and-sdk-measurement.md` |
 | 14 | #1211 | Give every strip one mute owner and live-control producers in host-core | `.github/ISSUE_SPECS/1211-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md` | `14-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md` |
-| 15 | #1212 | Add the notSoloable command reason to every vocabulary spelling | `.github/ISSUE_SPECS/1212-add-the-not-soloable-command-reason.md` | `15-add-the-not-soloable-command-reason.md` |
+| 15 | #1212 | Add the notSoloable command reason to every vocabulary spelling | `.github/ISSUE_SPECS/1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md` | `15-add-the-not-soloable-command-reason.md` |
 | 16 | #1213 | Address submix strips in browser live commands | `.github/ISSUE_SPECS/1213-address-submix-strips-in-browser-live-commands.md` | `16-address-submix-strips-in-browser-live-commands.md` |
 | 17 | #1214 | Drive submix strips from the SDK live controls | `.github/ISSUE_SPECS/1214-drive-submix-strips-from-the-sdk-live-controls.md` | `17-drive-submix-strips-from-the-sdk-live-controls.md` |
 | 18a | #1215 | Gate every route's coefficients through one function | `.github/ISSUE_SPECS/1215-gate-every-routes-coefficients-through-one-function.md` | `18a-gate-every-routes-coefficients-through-one-function.md` |
@@ -58,7 +59,9 @@ BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196.
 | V5 | Deliver value-only VCA edits to the running C ABI plan | `issues/V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` (this folder) |
 
 The root files the VCA umbrella when batch K3 closes (#1224's Sol PASS and the K3 push), and
-re-verifies the drafts' anchors then. Deferred item O11 waits on owner question Q2; nothing is filed
+re-verifies the drafts' anchors then. V4 closes the VCA batch V1-V4, so its draft carries the
+deliverable that removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5); the
+filed V4 must keep it. Deferred item O11 waits on owner question Q2; nothing is filed
 for it.
 
 The probe sources that `DESIGN.md` 3.2 and `VERIFY-1.md` name under `scratchpad/` were never committed.

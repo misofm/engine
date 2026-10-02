@@ -1,7 +1,8 @@
 # Submix strips and live aux sends
 
-The owner decided this on 2026-10-02, and **decision 13** records it
-(`docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`). A mixing console has buses as well as
+The owner's decisions of 2026-10-02 and the planner's verified design are recorded as **decision
+13** (`docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`), which quotes the owner's words and
+marks each point's authority. A mixing console has buses as well as
 channels: a drum bus with its own EQ, compressor and fader, and a delay return fed by sends.
 Today the engine has neither. This umbrella delivers both: submix strips and live aux sends.
 
@@ -17,13 +18,18 @@ Today the engine has neither. This umbrella delivers both: submix strips and liv
     `REVISION-2.md`);
   - `VERIFY-3.md`: PASS-WITH-FIXES on revision 2, applied in `APPLIED-3.md`.
 - **Authority.**
-  - **The owner decided:** submixes carry the same session console slots as tracks, with their own
-    parameters and bypass, plus inserts, fader/mute and pan/matrix (O1). Reverb is out of scope and
-    is held for separate scoping (O2).
-  - **The owner delegated** two questions, VCA groups and the submix strip's channel model and input
-    section, and deferred to the adversarially verified opinion. Those opinions (VCA in scope as its
-    own umbrella; the submix strip is the track's dual-mono strip with all five input-section keys)
-    carry the owner's delegated authority.
+  - **The owner decided:** buses keep the same console effects as tracks, each submix with its own
+    parameters and bypass per slot, and tracks route into a submix whose single fader controls them
+    (O1). Reverb is out of scope and is held for separate scoping (O2).
+  - **The owner directed, and the planner reads the direction into rules subject to owner review:**
+    a submix is a full strip, so it also has inserts, mute and pan/matrix (O1); agents' controls
+    have no human-UX limits, read as arbitrary bus counts, nesting, any tap, a full 2x2 per send and
+    fan-out (O4); SIMD is a core philosophy, applied as DESIGN section 6 says (O5).
+  - **The owner delegated** two questions, "VCA groups and submix inputs", and deferred to the
+    adversarially verified opinion. The planner reads "submix inputs" as the submix strip's input
+    section and, with it, its channel model. Those opinions (VCA in scope as its own umbrella; the
+    submix strip is the track's dual-mono strip with all five input-section keys) carry the owner's
+    delegated authority.
   - **The planner decided** P1-P17 (DESIGN 2.3). Adversarial verification upheld them, and they
     are subject to owner review: the owner has not reviewed them one by one. Owner questions Q1-Q4
     are open (see below).
@@ -77,7 +83,7 @@ Dependency lines in the slices name the exact published titles.
 
 | # | Issue | Title | Depends on |
 |---|---|---|---|
-| 00 | #1197 | Record the submix, send and VCA ruling | owner acceptance of the design |
+| 00 | #1197 | Record the submix, send and VCA ruling | the owner's answers of 2026-10-02 (met) |
 | 01 | #1198 | Iterate session strips, not tracks, wherever strip semantics apply | #1197 |
 | 02 | #1199 | Declare the submix strip in the session grammar and wire | #1198 |
 | 03 | #1200 | Render a submix strip on its summed input | #1199 |

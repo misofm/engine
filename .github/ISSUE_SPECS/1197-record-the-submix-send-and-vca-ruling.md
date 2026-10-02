@@ -24,10 +24,17 @@ This slice changes no code.
   - A submix is a bare summing node (`Submix { id }`, `crates/session/src/model.rs:577`).
   - Routes have no mute, and their gain is a bind-time constant (D3,
     `crates/graph/src/runtime.rs:22-24`).
-- **The owner decided:**
-  - every submix carries every session console slot, plus inserts, fader/mute and `pan`/`matrix`;
-  - reverb is out of scope;
-  - two questions were delegated to the planner: VCA groups, and the submix channel model.
+- **The owner's words (2026-10-02)** are quoted verbatim in the ruling (W1-W5). On them:
+  - the owner decided that buses keep the same console effects as tracks ("let's keep the same
+    console effects for buses as well"), that tracks route into a submix controlled by a single
+    fader, and that reverb is held for separate scoping;
+  - the owner delegated two questions to the adversarially verified opinion: "VCA groups and
+    submix inputs";
+  - the owner gave direction the planner reads into concrete rules: no human-UX limits on agents'
+    controls, and SIMD as a core philosophy;
+  - the owner did **not** review planner decisions P1-P17 one by one. W5's "plan out the items
+    above, adversarially verify, then implement" authorizes implementing the verified plan, not
+    each planner decision.
 - **The design and its reviews.**
   - The design and decision record is `docs/handoffs/submix-sends-2026-10-02/DESIGN.md`, revision 2.
   - It was adversarially verified three times. `VERIFY-1.md` upheld both delegated decisions and
@@ -91,16 +98,21 @@ This slice changes no code.
     deferred until the owner answers DESIGN question Q2; nothing is filed for it.
 - **D4.** Owner questions Q1-Q4 that are still open when this lands are recorded as open. No filed
   slice depends on an answer (DESIGN 8.2).
-- **D5. Approved, not landed.** Every amended `AGENTS.md` sentence that describes behaviour no code
-  has yet is phrased as approved and landing with the umbrella, for example:
-  "Approved by decision 13 (#1196), landing with *Submix strips and live aux sends*: ...".
-  Each batch's closing slice removes, in its own PR, the qualifiers of the behaviours its batch
-  landed:
-  - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205) for the dual-mono
-    strip, chain, console-slot and seven-tap sentences;
-  - *Let a send follow its source strip's mute live in the browser* for the route-mute and
+- **D5. Decided, not landed.** Every amended `AGENTS.md` sentence that describes behaviour no code
+  has yet carries a qualifier that names its authority and the slice it lands with:
+  - an owner decision or an owner-delegated answer: "Approved by decision 13 (#1196) as owner
+    decision O1, landing with *<slice title>* (#N): ...";
+  - owner direction read by the planner, or a planner decision: "Planned under decision 13 (#1196)
+    as planner decision P3, subject to owner review, landing with *<slice title>* (#N): ...".
+
+  A qualifier never calls a planner decision "approved". Each batch's closing slice removes, in its
+  own PR, the qualifiers of the behaviours its batch landed:
+  - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205) for the
+    dual-mono strip, chain, console-slot, strip-insert and seven-tap sentences;
+  - *Let a send follow its source strip's mute live in the browser* (#1224) for the route-mute and
     follow-mute sentences;
-  - the VCA batch's closing slice for the VCA sentence.
+  - V4, *Enumerate VCA groups and drive them from the SDK*, which closes the VCA batch V1-V4, for
+    the VCA sentence (its draft carries the deliverable).
 
   This slice only writes them.
 
@@ -109,10 +121,12 @@ This slice changes no code.
 1. **Ruling record.** Write `docs/rulings/submix-strips-sends-and-vca-2026-10-02.md` in the decision-12
    format: H1, a one-line preface, then `## Decision 13: Submix strips, live aux sends and VCA groups
    (#1196)`. It records:
-   - the owner decisions O1-O5 (DESIGN 2.1);
+   - the owner's words of 2026-10-02, verbatim, and for each of O1-O5 (DESIGN 2.1) whether it is
+     an owner decision, owner direction read by the planner, or a delegation;
    - delegated decisions (a) and (b) (DESIGN 2.2), with VCA sequenced as its own umbrella that
      starts once batch K3 closes, and only its C ABI slice waiting on #1053;
-   - every planner decision P1-P17 the owner accepts (DESIGN 2.3), in particular:
+   - planner decisions P1-P17 (DESIGN 2.3), recorded as subject to owner review because the owner
+     has not reviewed them one by one, in particular:
      - P11: `follows_mute` may be `true` only on a route into a submix; `true` on a route into the
        output refuses with `schema.invalid_enum` at `$.routes[<i>].follows_mute`;
      - P16: from *Render a submix strip on its summed input* (#1200) until *List every strip in the
@@ -125,19 +139,22 @@ This slice changes no code.
    - a closing paragraph on the batches (DESIGN 9.5) and, for each D5 qualifier, the slice whose
      landing removes it.
 2. **`AGENTS.md` amendments**, in the same commit as the ruling, in "Approved audio architecture",
-   each phrased per D5 where the behaviour has not landed:
+   each phrased per D5 where the behaviour has not landed, with the authority the ruling gives it:
    - `:24`: "Tracks are dual-mono" becomes "Strips (tracks and submixes) are dual-mono" (the
      submix half lands with *Render a submix strip on its summed input*).
-   - After the chain line: the chain applies to every strip, and a submix's input is the D9 sum of
-     the routes that target it (lands with *Render a submix strip on its summed input*).
+   - After the chain line: the chain applies to every strip, and a submix's input is the sum of the
+     routes that target it (lands with *Render a submix strip on its summed input*). The binding
+     text does not pin a summation order.
    - `:28`: "every track carries every slot, in that order" becomes "every strip carries every slot,
-     in that order" (lands with *Carry every console slot on every submix strip*, #1202).
+     in that order" (lands with *Carry every console slot on every submix strip*, #1202), and
+     "Inserts are per track ... a track's inserts" becomes "Inserts are per strip ... a strip's
+     inserts" (lands with *Render a submix strip on its summed input*).
    - `:30`, the send-tap sentence: the seven taps exist on every strip (lands with *Tap a submix
      strip at any of the seven send points*, #1203); a route may be muted (lands with *Mute a route in the
      session*, #1216), and a route into a submix may follow its source strip's mute (lands with *Let a route
      into a submix follow its source strip's mute in the session*, #1218).
-   - One new sentence: a VCA group is control-only; it carries no audio and offsets its members'
-     faders and mutes (approved; lands with the VCA umbrella).
+   - One new sentence: a VCA group is control-only; it carries no audio, its dB offset adds to its
+     members' faders, and its mute ORs into their mutes (lands with the VCA umbrella).
    - Nothing about performance tiers, which are deferred.
 3. **Umbrella spec.** Write `.github/ISSUE_SPECS/1196-submix-strips-and-live-aux-sends.md` from
    `DESIGN.md`, with the owner's answers folded in. It lists slices 01-28 (18a and 18b included) with their GitHub numbers
@@ -182,9 +199,15 @@ This slice changes no code.
 - `docs/rulings/` (one new file)
 - `AGENTS.md`
 - `.github/ISSUE_SPECS/`:
-  - new files (the umbrella, this slice, slices 01-28 with 18a and 18b, BM1-BM3);
+  - new files (the umbrella, this slice, slices 01-28 with 18a and 18b, BM1-BM3), including
+    renaming a new file so its name is the slug of its GitHub title;
+  - in *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205), the
+    qualifier-removal deliverable and its authorized paths;
   - the annotations to the `210-*.md` and `1053-*.md` specs.
 - `docs/IMPLEMENTATION_PLAN.md` (one index line)
+- `docs/handoffs/submix-sends-2026-10-02/` (new folder): the design record (`DESIGN.md`), the
+  verifications (`VERIFY-1.md` to `VERIFY-3.md`), the revisions (`REVISION-1.md`, `REVISION-2.md`,
+  `APPLIED-3.md`), `ISSUE-MAP.md` and the unfiled VCA drafts `issues/V0`-`V5`
 - this spec
 
 ## Non-goals
@@ -197,6 +220,9 @@ This slice changes no code.
 
 - **Paraphrase drift.** `AGENTS.md` is binding on every agent. Each amended sentence must say only
   what the ruling says: strips, taps, mute, follow-mute into a submix, and VCA as control-only.
+  Each qualifier claims exactly the authority the ruling gives that point. An amended sentence
+  must not contradict an unamended one; "Inserts are per track" next to "the chain applies to every
+  strip" did, in attempt 1.
 - **Promising before landing.** An unqualified sentence about submix strips would tell an agent a
   feature exists that K1 has not shipped. D5's qualifier is mandatory on every not-yet-landed
   sentence.
@@ -220,9 +246,26 @@ This slice changes no code.
 - The owner's verbatim answers, or "open", for Q1-Q4.
 - The diff of the two annotated specs and of `AGENTS.md`.
 
+## Decision record
+
+- **Attempt 1** (`f622dad1`) failed review with two MAJORs: `AGENTS.md` called planner decisions
+  P3 and P11 "approved", and labelled all of decision 13 an owner decision; and "Inserts are per
+  track" contradicted "the chain applies to every strip".
+- **Attempt 2** learned what the owner actually said and recorded it verbatim (W1-W5). O1 (the
+  console on buses), O2 (reverb held) and the delegation (VCA groups, "submix inputs") are the
+  owner's; the concrete reading of "no human-UX limits" (O4) and how SIMD applies (O5) are owner
+  direction read by the planner; P1-P17 are the planner's, subject to owner review. D5's template
+  now distinguishes "Approved by decision 13" from "Planned under decision 13 ..., subject to owner
+  review". The insert sentence became per-strip with its own qualifier, and #1205 removes it and
+  makes "track-locally" "strip-locally" at K1. The VCA qualifier's removal belongs to V4, whose
+  draft carries it. Five spec files were renamed to the slug of their GitHub titles.
+
 ## Dependencies
 
-None. It needs the owner's acceptance of `DESIGN.md` revision 2. Open owner questions do not block
+None. The owner's words of 2026-10-02 (W5) meet the design dependency: the owner decided O1 and O2,
+delegated VCA groups and submix inputs to the adversarially verified opinion, and asked for the
+plan to be verified and then implemented. The owner did not accept `DESIGN.md` revision 2 as a
+whole, so the ruling records P1-P17 as subject to owner review. Open owner questions do not block
 it (D4).
 
 ## Standing rules for the implementer

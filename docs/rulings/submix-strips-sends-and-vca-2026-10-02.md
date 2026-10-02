@@ -1,6 +1,7 @@
-# Submix strips, sends and VCA groups: owner rulings of 2026-10-02
+# Submix strips, sends and VCA groups: owner rulings and planner decisions of 2026-10-02
 
-Follows decision 12 (`engine-footprint-2026-09-29.md`), recorded from the owner's answers on 2026-10-02.
+Follows decision 12 (`engine-footprint-2026-09-29.md`), recorded from the owner's words on
+2026-10-02, quoted below. Each bullet names whose authority it carries.
 
 ## Decision 13: Submix strips, live aux sends and VCA groups (#1196)
 
@@ -22,25 +23,76 @@ Three Sol adversarial reviews, by verifiers who wrote none of the plan, checked 
 
 All of these documents are in the same handoff folder.
 
-The owner answered on 2026-10-02. The bullets below say, for each point, whose authority it carries:
-the owner's own decision, the owner's delegation, or the planner's. Ruling:
+**The owner's words** (2026-10-02, quoted verbatim, typos included). The owner's original requests:
 
-- **Owner decision: submixes are strips** (DESIGN 2.1, O1). Every submix carries every session
-  console slot, with its own `{slot, bypass, params}` per slot, plus ordered inserts, a per-lane
-  fader and mute, and `pan` or `matrix`. Its input is the master-plan D9 sum (stable edge-ID order,
-  left to right) of the routes that target it. Decision 12 applies to a submix exactly as to a
-  track: its console slots always bank, padded; a bypassed lane stays in its bank; latency is
-  always paid; banking couples cost, never bits.
-- **Owner decision: reverb is out of scope** (O2). It is held for separate scoping. `miso.delay` is
-  the send effect in tests. It declares zero latency, so PDC fixtures use the true-peak limiter.
-- **Owner direction recorded in DESIGN 2.1** (O4, O5). Sends are for agents, so there are no
-  human-UX limits: arbitrary bus counts, nesting, any tap, a full 2x2 per send, and fan-out. The
-  graph stays acyclic, and only configured resources bound it, never a compiled maximum. SIMD is a
-  core philosophy (DESIGN section 6).
-- **Delegated by the owner** (O3). The owner delegated two questions, VCA groups and the submix
-  strip's channel model and input section, and said they defer to the adversarially verified
-  opinion. VERIFY-1 upheld both opinions, and its amendments are folded in. The two answers below
-  therefore carry the owner's delegated authority.
+> W1. "Submixes: we should be able to set the output of a track to an input of a submix track. For
+> example if I have drum tracks, I should be able to route them all to a drum submix so I can
+> control the entire drum kid with a single fader. Please draw experience from how submixes work on
+> traditional consoles as well as modern DAWs, and then let's map out the most efficient and
+> performant design for our engine."
+>
+> W2. "Sends: we should be able to configure aux sends. The most obvious use case is for global
+> effects like reverb. Please draw experience from both traditional consoles and modern DAWs, and
+> let's get the best design implemented."
+>
+> W3. "miso engine is primarily an agent-driven engine in terms of configuration. So don't limit
+> the UX or scope of the engine controls with human UX in mind."
+>
+> W4. "one of our core design phiosophies is maximizng SIMD usage. Please think about how SIMD can
+> maximize performance of submixes and sends."
+
+The owner's answer, after being told that large-format desks give buses the same EQ and dynamics
+as channels, and that each track has its own settings for each console slot:
+
+> W5. "Ok let's keep the same console effects for buses as well. For VCA groups and submix inputs,
+> I'll defer to your adversarially verified opinions. Reverb-wise, let's hold off on that so we can
+> sepnd more time scoing that. I have to sleep now. Please plan out the items above, adversarially
+> verify, then implement"
+
+**Authority.** Every point below carries one of four kinds:
+
+- **owner decision**: the owner's words decide it directly;
+- **owner direction, read by the planner**: the owner gave a directive, and the concrete rule is
+  the planner's reading of it, subject to owner review;
+- **owner-delegated**: the owner deferred the question to the adversarially verified opinion (W5);
+- **planner decision**: the planner's alone, upheld by adversarial verification and subject to
+  owner review.
+
+DESIGN 2.1 labels O1-O5 "owner decisions". This record is narrower, and where the two differ, this
+record governs. W5's "Please plan out the items above, adversarially verify, then implement" is
+the owner's authority for the slices to implement the verified plan, planner decisions included,
+until the owner rules otherwise. It is not the owner's review of each planner decision.
+
+Ruling:
+
+- **O1, owner decision: buses keep the same console effects** (W5). Every submix carries every
+  session console slot, with its own `{slot, bypass, params}` per slot, as each track does. Decision
+  12 applies to a submix exactly as to a track: its console slots always bank, padded; a bypassed
+  lane stays in its bank; latency is always paid; banking couples cost, never bits. The owner also
+  decided, in W1, that a track's output can be routed to a submix's input, and that a submix has a
+  fader that controls everything routed into it.
+  - **Owner direction, read by the planner** (W1's "submix track"): a submix is a full strip, so it
+    also carries ordered inserts, a per-lane mute and `pan` or `matrix`, as DESIGN 2.1's O1 row
+    lists. Subject to owner review.
+  - **Design consequence, not the owner's words:** a submix's input is the sum of the routes that
+    target it, reduced as every reduction is (DESIGN 3.1 D9: stable edge-ID order).
+- **O2, owner decision: reverb is out of scope** (W5: "let's hold off on that"). It is held for
+  separate scoping. The planner's consequence: `miso.delay` is the send effect in tests. It declares
+  zero latency, so PDC fixtures use the true-peak limiter.
+- **O3, owner delegation** (W5: "For VCA groups and submix inputs, I'll defer to your adversarially
+  verified opinions"). The answers are (a) and (b) below. W5 names "submix inputs". The planner reads
+  that as the submix strip's input section and, with it, its channel model, which DESIGN 2.2b
+  answers as one question. The channel-model half rests on that reading.
+- **O4, owner direction, read by the planner** (W2 and W3). Sends are for agents, so the engine sets
+  no human-UX limits. The planner reads that as: arbitrary bus counts, nesting, any tap, a full 2x2
+  per send, and fan-out. These are subject to owner review. Two limits are standing `AGENTS.md`
+  rules, not new ones: the graph stays acyclic (feedback is a future capability), and only
+  configured resources bound it, never a compiled maximum.
+- **O5, owner direction** (W4, and `AGENTS.md`'s SIMD principle). SIMD is a core philosophy. How it
+  applies to buses and sends (DESIGN section 6) is the planner's, subject to owner review.
+- **Owner-delegated answers** (O3). VERIFY-1 upheld both opinions, and its amendments are folded
+  in. The two answers below therefore carry the owner's delegated authority, (b) under the reading
+  of "submix inputs" recorded at O3.
   - **(a) VCA groups are in scope** (DESIGN 2.2a).
     - A VCA is a control-only group. It carries no audio. Its per-lane dB offset adds to each
       member's own fader, and its mute ORs into each member's effective mute.
@@ -60,8 +112,9 @@ the owner's own decision, the owner's delegation, or the planner's. Ruling:
     bypass it on buses and use a linked insert for bus glue.
 - **Planner decisions P1-P17** (DESIGN 2.3). These are the planner's decisions. Adversarial
   verification (VERIFY-1 to VERIFY-3) upheld them, and they are **subject to owner review**: the
-  owner has not reviewed them one by one. The slices implement them as written until the owner
-  rules otherwise. Three of them bind beyond a single slice:
+  owner has not reviewed them one by one. Under W5's "plan out ..., adversarially verify, then
+  implement", the slices implement them as written until the owner rules otherwise. Three of them
+  bind beyond a single slice:
   - **P11, follow-mute.** A route into a submix carries `follows_mute: bool` (route field 7). It
     may be `true` only on a route into a submix. On a route into the output, `true` refuses with
     `schema.invalid_enum` at `$.routes[<i>].follows_mute`. One coefficient function,
@@ -83,7 +136,8 @@ the owner's own decision, the owner's delegation, or the planner's. Ruling:
     Rust-internal names that are no wire or SDK spelling may be renamed where that is clearer.
   - The other planner decisions are recorded in DESIGN 2.3. Among them:
     - strip lowering keyed by the submix's ID (P1);
-    - the route source `{ kind: "submix", submix_id, tap }` (P2);
+    - the route source `{ kind: "submix", submix_id, tap }` (P2), the planner's reading of O4's
+      "any tap" for a submix;
     - route `mute` (P3);
     - route activity and signed zero (P4);
     - the indexed ramp law (P5) and ramp lengths (P6);
@@ -133,10 +187,16 @@ The slices, their dependencies, their gates and the batches are in #1196.
   - C1 (after #1053): #1225 and #1226, the C ABI;
   - BM, after K3: #1227-#1229.
 - **The VCA umbrella** is filed when K3 closes and runs after it.
-- **Approved, not landed.** `AGENTS.md` states these promises with a decision-13 qualifier until
-  they land, and each batch's closing slice removes its qualifiers in its own PR:
+- **Decided, not landed.** `AGENTS.md` states these promises with a decision-13 qualifier until
+  they land. The qualifier names the point's authority: "Approved by decision 13" for an owner
+  decision or an owner-delegated answer, and "Planned under decision 13 ..., subject to owner
+  review" for owner direction read by the planner and for planner decisions. Each batch's closing
+  slice removes its qualifiers in its own PR:
   - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205) removes
-    them from the dual-mono strip, chain, console-slot and seven-tap sentences;
+    them from the dual-mono strip, chain, console-slot, strip-insert and seven-tap sentences, and
+    makes "track-locally" "strip-locally" in the insert sentence of "Effects and plugins";
   - *Let a send follow its source strip's mute live in the browser* (#1224) removes them from the
     route-mute and follow-mute sentences;
-  - the VCA batch's closing slice removes the one on the VCA sentence.
+  - V4, *Enumerate VCA groups and drive them from the SDK*, which closes the VCA batch V1-V4,
+    removes the one on the VCA sentence. V5 (the C ABI) is not needed for that: from V2 on, VCAs
+    apply at preparation on every host.
