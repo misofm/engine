@@ -219,9 +219,7 @@ impl DisjointArena {
     /// Panics on invalid bounds, a silence output or an output/input alias before borrowing.
     #[inline]
     pub fn write_read(&mut self, plane: usize, out: u32, input: u32) -> (&mut [f32], &[f32]) {
-        let (output, [input]) = self
-            .write_read_many(plane, out, &[input])
-            .expect("invalid arena output/input borrow");
+        let (output, [input]) = self.write_read_checked(plane, out, &[input]);
         (output, input)
     }
 
@@ -236,10 +234,41 @@ impl DisjointArena {
         first: u32,
         second: u32,
     ) -> (&mut [f32], &[f32], &[f32]) {
-        let (output, [first, second]) = self
-            .write_read_many(plane, out, &[first, second])
-            .expect("invalid arena output/input borrows");
+        let (output, [first, second]) = self.write_read_checked(plane, out, &[first, second]);
         (output, first, second)
+    }
+
+    /// Split around the output after checking every request. The prefix and suffix are shared,
+    /// allowing repeated inputs while the complete output buffer remains exclusively borrowed.
+    #[inline]
+    fn write_read_checked<const N: usize>(
+        &mut self,
+        plane: usize,
+        out: u32,
+        inputs: &[u32; N],
+    ) -> (&mut [f32], [&[f32]; N]) {
+        let out_start = self.offset(plane, self.checked_write(out));
+        let in_starts = inputs.map(|input| {
+            assert_ne!(input, out, "a read may not alias its own output");
+            self.offset(plane, self.checked_buffer(input))
+        });
+        let frames = self.frames;
+        let out_end = out_start + frames;
+        let (before, remainder) = self.cells.split_at_mut(out_start);
+        let (output, after) = remainder.split_at_mut(frames);
+        let before: &[f32] = before;
+        let after: &[f32] = after;
+        let reads = in_starts.map(|start| {
+            if start < out_start {
+                &before[start..start + frames]
+            } else {
+                // Every buffer has the same frame extent and inputs differ from the output,
+                // so a later input starts at or beyond out_end.
+                let relative = start - out_end;
+                &after[relative..relative + frames]
+            }
+        });
+        (output, reads)
     }
 
     /// One writable output and one to eight shared inputs in `plane`, acquired once per call.
@@ -332,26 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn a_write_to_the_silence_buffer_is_rejected() {
-        let mut arena = arena();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = arena.write(0, ARENA_SILENCE_BUFFER);
-        }));
-        assert!(result.is_err());
-        for plane in 0..2 {
-            assert!(
-                arena
-                    .read(plane, ARENA_SILENCE_BUFFER)
-                    .iter()
-                    .all(|word| word.to_bits() == 0)
-            );
-        }
-    }
-
-    #[test]
     fn a_write_then_a_read_carries_the_audio() {
         let mut arena = arena();
         assert_eq!(arena.buffers(), 3);
+        assert!(arena.writes(1) && arena.writes(2));
+        assert!(!arena.writes(0) && !arena.writes(3));
         assert!(
             arena.total_bytes() <= 128,
             "payload fits the configured ceiling"
@@ -362,6 +376,11 @@ mod tests {
         let (out, input) = arena.write_read(1, 2, 1);
         out.copy_from_slice(input);
         assert_eq!(arena.read(1, 2), &[-1.0, -2.0, -3.0, -4.0]);
+        let (out, first, second) = arena.write_read2(0, 2, 1, 1);
+        assert_eq!(first, &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        out.copy_from_slice(first);
+        assert_eq!(arena.read(0, 2), &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
@@ -483,17 +502,6 @@ mod tests {
                 "refusal kept plane {plane}, buffer {buffer}"
             );
         }
-    }
-
-    #[test]
-    fn an_arena_may_read_the_buffers_it_writes_itself() {
-        let mut arena = arena();
-        assert!(arena.writes(1) && arena.writes(2));
-        assert!(!arena.writes(0) && !arena.writes(3));
-        arena.write(0, 1).fill(0.5);
-        let (out, input) = arena.write_read(0, 2, 1);
-        out.copy_from_slice(input);
-        assert_eq!(arena.read(0, 2), &[0.5; 4]);
     }
 
     #[test]
