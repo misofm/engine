@@ -328,11 +328,12 @@ impl LoweredRacks<'_> {
 /// One strip: the chain after a source, borrowed from the session.
 ///
 /// A strip is the input section, the console slots, the inserts, the fader and mute, and the pan
-/// or matrix. Today only tracks are strips; the compilers iterate [`SessionModel::strips`] wherever
-/// strip semantics apply, so a later strip kind is one new [`StripKind`] variant.
+/// or matrix. Tracks and submixes are strips (#1200 D0); the compilers iterate
+/// [`SessionModel::strips`] wherever strip semantics apply, so a later strip kind is one new
+/// [`StripKind`] variant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StripRef<'a> {
-    /// Stable strip identity (the track ID for a track).
+    /// Stable strip identity (the track ID for a track, the submix ID for a submix).
     pub id: &'a StableId,
     /// What owns this strip.
     pub kind: StripKind<'a>,
@@ -350,12 +351,14 @@ pub struct StripRef<'a> {
 
 /// The owner of a [`StripRef`].
 ///
-/// Deliberately exhaustive: *Render a submix strip on its summed input* adds `Submix`, and every
-/// match on this enum must then fail to compile until it handles the new variant.
+/// Deliberately exhaustive: a later strip kind is a new variant, and every match on this enum
+/// must then fail to compile until it handles it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StripKind<'a> {
     /// A track's strip, whose input is the track's source.
     Track(&'a Track),
+    /// A submix's strip, whose input is the sum of the routes that target it, in route-ID order.
+    Submix(&'a Submix),
 }
 
 impl<'a> StripRef<'a> {
@@ -371,31 +374,51 @@ impl<'a> StripRef<'a> {
             matrix_or_pan: &track.matrix_or_pan,
         }
     }
+
+    /// The strip of one submix. A submix carries no console entries until *Carry every console
+    /// slot on every submix strip* (#1202), so its console section is empty and lowers to no
+    /// effect.
+    fn submix(submix: &'a Submix) -> Self {
+        Self {
+            id: &submix.id,
+            kind: StripKind::Submix(submix),
+            builtins: &submix.builtins,
+            console: &[],
+            inserts: &submix.inserts,
+            fader: &submix.fader,
+            matrix_or_pan: &submix.matrix_or_pan,
+        }
+    }
 }
 
 impl StripRef<'_> {
-    /// The compilers' path prefix: `$.tracks[id=<id>]` for a track (later `$.submixes[id=<id>]`).
-    /// Session validation's index paths never use it.
+    /// The compilers' path prefix: `$.tracks[id=<id>]` for a track, `$.submixes[id=<id>]` for a
+    /// submix. Session validation's index paths never use it.
     #[must_use]
     pub fn path_prefix(&self) -> String {
         format!("{}[id={}]", self.collection_path(), self.id.as_str())
     }
 
-    /// The sealed collection path of the strip's chain edges: `"$.tracks"` for a track (later
-    /// `"$.submixes"`), exactly the literal the four chain-edge sites write today.
+    /// The sealed collection path of the strip's chain edges: `"$.tracks"` for a track,
+    /// `"$.submixes"` for a submix.
     #[must_use]
     pub fn collection_path(&self) -> &'static str {
         match self.kind {
             StripKind::Track(_) => "$.tracks",
+            StripKind::Submix(_) => "$.submixes",
         }
     }
 }
 
 impl SessionModel {
-    /// Every strip, in model order: `tracks`, then (later) `submixes`. On a normalized model that
-    /// is canonical ID order within each segment.
+    /// Every strip, in model order: `tracks`, then `submixes`. On a normalized model that is
+    /// canonical ID order within each segment; the concatenation is **not** sorted, so it is never
+    /// binary-searched.
     pub fn strips(&self) -> impl Iterator<Item = StripRef<'_>> {
-        self.tracks.iter().map(StripRef::track)
+        self.tracks
+            .iter()
+            .map(StripRef::track)
+            .chain(self.submixes.iter().map(StripRef::submix))
     }
 
     /// Lower one track's console entries and inserts to the three internal racks.
@@ -655,8 +678,10 @@ pub enum MatrixOrPan {
 /// A submix strip (decision 13, #1199): a strip whose input is the sum of the routes that target
 /// it. Its values carry the track's grammar, validation and canonical spelling verbatim.
 ///
-/// Until *Render a submix strip on its summed input* (#1200) the graph compiler still lowers a
-/// submix as a bare summing node and ignores the strip (#1199 D7).
+/// The graph compiler lowers it through [`SessionModel::strips`] to the same stage chain a track
+/// lowers to (#1200): its `Input` stage sums the routes that name it, in route-ID order, and the
+/// strip then runs on that sum. Its `delay_samples` is not lowered yet (*Delay a submix strip's
+/// summed input*, #1201).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Submix {
     /// Stable submix identity.

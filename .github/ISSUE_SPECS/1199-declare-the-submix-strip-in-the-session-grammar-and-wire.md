@@ -300,6 +300,10 @@ grammar and the codec only.
     entry until #1202 and is refused at `target.effect_id`, as a track's absent slot is.
   - Per D4 the estimate still charges a submix only as `size_of::<Submix>()`; its insert `Vec`s
     and params are charged with the strip lowering in #1200.
+  - Verdict MINOR-1 (a submix with heavy inserts refused at compile with
+    `capacity.arithmetic_overflow` at `$.canonical`) was closed by #1200's D0, which charges submix
+    inserts through `strips()`; `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are`
+    pins it.
 
 ## Dependencies
 

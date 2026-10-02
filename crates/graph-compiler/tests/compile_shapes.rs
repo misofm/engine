@@ -15,6 +15,9 @@
 //!   drops exactly one window (from
 //!   `builtins::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state`).
 //!
+//! And one claim of #1200's (gate 4): a bus sum stays in the sealed canonical text once a submix
+//! lowers to a strip.
+//!
 //! The mixed session is compiled at both SIMD widths explicitly, so its expectations do not
 //! depend on the development host.
 
@@ -30,8 +33,8 @@ use effect_compiler::{
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
 use graph::{
-    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
-    GraphRuntimeProcessor, TrackStage,
+    GraphBindingBlock, GraphCompileCaps, GraphEdgeId, GraphNodeBinding, GraphNodeId,
+    GraphRuntimeBindings, GraphRuntimeProcessor, StableGraphId, TrackStage,
 };
 use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
@@ -487,11 +490,101 @@ fn representative_console_compiles_with_builtins_and_reports_its_shape() {
     assert_eq!(estimate.routes, 1_024);
     assert_eq!(estimate.effects, 64);
     assert!(estimate.builtin_bank_count > 0);
-    // Every track's post-input, fader and matrix stages are builtin bank members.
-    assert_eq!(artifact.graph().builtin_bank_members().count(), 3 * 256);
+    // Every strip's post-input, fader and matrix stages are builtin bank members: the 256
+    // tracks' and, since a submix lowers to a strip (#1200), the 32 submixes'.
+    assert_eq!(
+        artifact.graph().builtin_bank_members().count(),
+        3 * (256 + 32)
+    );
     let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
     assert!(!evidence.canonical_bytes.is_empty());
     assert!(!evidence.dot.is_empty());
+}
+
+/// #1200 gate 4: a bus that three routes feed keeps its sum in the canonical text and in
+/// `GraphCompiler::reductions`, now recorded on the submix strip's `Input` stage: exactly one
+/// reduction, whose three contributions are the three route-destination edges in route-ID order.
+#[test]
+fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    model.tracks[0].inserts.effects.clear();
+    model.submixes = vec![Submix::unity(stable("bus"))];
+    let template = model.routes[0].clone();
+    let output = model.outputs[0].id.clone();
+    let track = model.tracks[0].id.clone();
+    let mut routes: Vec<Route> = [
+        ("in-a", SendTap::Input),
+        ("in-b", SendTap::PreFader),
+        ("in-c", SendTap::PostPan),
+    ]
+    .into_iter()
+    .map(|(id, tap)| Route {
+        id: stable(id),
+        source: RouteSource::Track {
+            track_id: track.clone(),
+            tap,
+        },
+        destination: RouteDestination::SubmixInput {
+            submix_id: stable("bus"),
+        },
+        ..template.clone()
+    })
+    .collect();
+    routes.push(Route {
+        id: stable("out"),
+        source: RouteSource::SubmixOutput {
+            submix_id: stable("bus"),
+        },
+        destination: RouteDestination::OutputInput { output_id: output },
+        ..template
+    });
+    model.routes = routes;
+    let session = compile_session(&model, compile_caps()).expect("bus session");
+    let artifact = compile(&session, &[], Backend::current());
+
+    let bus_input = GraphNodeId::TrackStage {
+        track_id: StableGraphId::parse("bus").expect("graph id"),
+        stage: TrackStage::Input,
+    };
+    let reductions = GraphCompiler::reductions(artifact.graph());
+    assert_eq!(
+        reductions.len(),
+        1,
+        "the output has one input: only the bus sums"
+    );
+    assert_eq!(reductions[0].node, bus_input);
+    assert_eq!(
+        reductions[0].contributions,
+        ["in-a", "in-b", "in-c"]
+            .map(|route| GraphEdgeId::RouteDestination {
+                route_id: StableGraphId::parse(route).expect("graph id"),
+            })
+            .to_vec()
+    );
+    assert_eq!(artifact.report().semantic_estimate.reductions, 1);
+
+    let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
+    let text = String::from_utf8(evidence.canonical_bytes).expect("canonical text is UTF-8");
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("reduction\t"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        3,
+        "one reduction, one row per contribution: {rows:?}"
+    );
+    for (rank, row) in rows.iter().enumerate() {
+        assert!(
+            row.starts_with(&format!("reduction\ttrack:bus:input\t{rank}\t")),
+            "row {rank}: {row}"
+        );
+    }
+    assert!(
+        !text.lines().any(|line| line.contains("submix:")),
+        "a session submix no longer compiles to a graph `Submix` node"
+    );
 }
 
 /// The canonical session with the conformance delay in each of track `vocal`'s three lowered

@@ -3920,12 +3920,26 @@ pub struct SessionPoolClasses {
 }
 
 impl SessionPoolClasses {
-    /// Seeds every track's witness with its structural (`SOURCE`) term.
+    /// Seeds every track's witness with its structural (`SOURCE`) term, and every submix as
+    /// [`CohortPoolClass::Stereo`], explicitly (#1200 D4).
+    ///
+    /// A submix has no source, so it has no `SOURCE` term to claim: its witness is seeded with that
+    /// term cleared, which no later conjunction can set. A bus is never mono-collapsed. The
+    /// collapse's own guard is the host's eligibility set, [`session_structural_symmetry`], which
+    /// stays tracks-only; this keeps the pool class from ever disagreeing with it.
     // Source semantics: tracks only.
     #[must_use]
     pub fn from_session(session: &CompiledSession) -> Self {
+        let mut by_track: BTreeMap<Box<str>, ChannelSymmetryWitness> =
+            session_structural_symmetry(session).into_iter().collect();
+        for submix in &session.normalized_model().submixes {
+            by_track.insert(
+                Box::<str>::from(submix.id.as_str()),
+                ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::SOURCE),
+            );
+        }
         Self {
-            by_track: session_structural_symmetry(session).into_iter().collect(),
+            by_track,
             pooled_as_stereo: BTreeSet::new(),
         }
     }

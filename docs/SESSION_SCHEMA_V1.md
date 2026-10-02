@@ -45,9 +45,12 @@ A submix is a strip (decision 13, #1199). Its keys, in canonical order, are `id`
 track's, verbatim: neither `pan` nor `matrix` is `schema.missing_field`, both is
 `schema.wrong_type`, and an unknown key is `schema.unknown_field`. Diagnostics use index paths, for
 example `$.submixes[0].fader.left_db`. `Submix::unity` is the transparent strip: identity input
-section, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing. Until
-*Render a submix strip on its summed input* (#1200) lands, a submix still renders as a bare
-summing node and the strip is grammar only. On the wire the submix message carries `id` 1,
+section, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing. A submix
+sums the routes that target it, left to right in route-ID order, and then runs its strip on that
+sum exactly as a track runs its strip on its source: input section, inserts, fader and pan or
+matrix (#1200). A bus is never mono-collapsed, and its insert latency joins plugin-delay
+compensation. Its `delay_samples` is not applied until *Delay a submix strip's summed input*
+(#1201) lands. On the wire the submix message carries `id` 1,
 `builtins` 2, `inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the
 track's field 10); field 3 is reserved for `console`.
 
@@ -226,8 +229,8 @@ Routes use a tagged source and destination port shape. A source is either
 `{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
 makes output sources and track destinations unrepresentable. A submix's input is the sum of the
-routes that target it, and `submix_output` leaves the submix strip after its pan or matrix; until
-#1200 renders the strip, it leaves the bare sum. Routed sidechains reuse the tagged
+routes that target it, summed in route-ID order, and `submix_output` leaves the submix strip
+after its pan or matrix. Routed sidechains reuse the tagged
 source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with

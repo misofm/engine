@@ -5427,6 +5427,54 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
 }
 
+/// #1200 gate 6 (VERIFY-2 N2): a live-controlled browser boot of a session whose bus strip
+/// carries an effect boots and renders. Until #1207 files bus effects, preparation attaches live
+/// controls and observation to track-owned effects only (DESIGN P16), so the browser never sees a
+/// producer or an observation handle it cannot file.
+#[test]
+fn live_controlled_boot_of_a_bus_with_an_effect_renders() {
+    const QUANTUM: u32 = 128;
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture");
+    let bus_id = session::StableId::parse("bus").expect("bus id");
+    let mut bus = session::Submix::unity(bus_id.clone());
+    bus.inserts
+        .effects
+        .push(model.tracks[0].inserts.effects[0].clone());
+    model.submixes.push(bus);
+    // Longer than the eight rendered blocks, so the last one is not the region's final block.
+    model.sources[0].frames = u64::from(QUANTUM) * 16;
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let mut bus_main = model.routes[0].clone();
+    model.routes[0].destination = session::RouteDestination::SubmixInput {
+        submix_id: bus_id.clone(),
+    };
+    bus_main.id = session::StableId::parse("bus-main").expect("route id");
+    bus_main.source = session::RouteSource::SubmixOutput { submix_id: bus_id };
+    model.routes.push(bus_main);
+    let document = canonical_session_json(&model).expect("canonical bus session");
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM * 4,
+        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        live_control_meter_blocks: 2,
+        live_control_observation_taps: 4,
+        ..boot_options(QUANTUM)
+    };
+    let mut host =
+        AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+            panic!(
+                "live-controlled bus boot: {}",
+                String::from_utf8_lossy(failure.diagnostic())
+            )
+        });
+    for block in 0..8 {
+        feed_and_render_tracks(&mut host, block, 0.25);
+    }
+}
+
 #[test]
 fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     const QUANTUM: u32 = 128;
