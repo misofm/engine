@@ -432,7 +432,10 @@ Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-v
   and keeps the admission; its timing half is `a_vca_batch_at_the_bound_fits_a_quantum_in_release`,
   `#[ignore = "release-mode budget; runs nightly"]`, wired into `nightly.yml`'s release-mode
   wall-clock step beside `maximum_document_dense_invalid_boot_finishes_under_one_second_in_release`.
-  It passes in release on this host.
+  It passes in release on this host. The routing contract's pinned list
+  (`NIGHTLY_BUDGET_COMMANDS` in `scripts/check-ci-path-routing.py`) gained the same command after
+  the first host-web entry, so `check-ci-path-routing.py` and `test-ci-path-routing.py` (the
+  `route` job) pass again; the follow-ups verdict's BLOCKER-1 was that missing registration.
 - **NIT-2.** `BrowserVcaShape::transient_bytes`' doc now says the projection over-counts (`try_new`
   holds one reach result, and since #1244's NIT-3 no second one inside `effective_strip_faders`)
   and that at these bounds it is never the binding refusal (the exact retained check or
@@ -444,6 +447,10 @@ Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-v
   ramp. `docs/BUILTINS_AND_METERING_V1.md` says so.
 - **Owner question.** The bounds (256 VCAs, 16,384 pairs) are recorded in decision 13 as planner
   decision V-Q3, subject to owner review.
+- **The "directed fault unexpectedly passed" lines, closed.** They are not a fault and need no
+  issue: they are the two deliberate mutant assertions, `mutant-population` and `isa-build-late`.
+  `scripts/test-workspace-policy.sh` requires status 97 from each, and the line is that
+  assertion's own message under a mutant.
 
 ## Verdict
 
