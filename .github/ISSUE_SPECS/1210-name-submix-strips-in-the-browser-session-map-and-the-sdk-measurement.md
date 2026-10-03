@@ -139,6 +139,8 @@ prefix and `ReadyOwnership.submixes` the submix IDs in canonical order.
   needed)
 - `sdk/test/{live-controls-types.ts,browser-defaults-evals.mjs,spectrum-browser-evals.mjs,measurement-evals.mjs,console-evals.mjs,capability-evals.mjs,live-controls-evals.mjs}`
 - `sdk/assets/**`, `sdk/src/generated/**` (regenerated only)
+- `hosts/host-web/qualification/sdk-response-entry.ts` (amendment A1 only: the `scratchBoot` stubs'
+  `submixes` field)
 - this spec
 
 ## Non-goals
@@ -305,10 +307,42 @@ prefix and `ReadyOwnership.submixes` the submix IDs in canonical order.
   NIT-1 to NIT-3 (poll-time shape reads, a memoised strip list, a no-op parameter) are optional
   refactors and are not taken.
 
+### Amendment A1 (K2 follow-ups verdict BLOCKER-1)
+
+- **Defect.** D5 made the browser engine read `strips = () => [...shape.tracks, ...shape.submixes]`
+  (`sdk/src/browser/engine.ts`), and `SessionShape.submixes` is required. The seven injected
+  `scratchBoot` stubs in `hosts/host-web/qualification/sdk-response-entry.ts` returned `tracks` and
+  no `submixes`, so every browser leg failed at `observationMap` (chromium `TypeError:
+  shape.submixes is not iterable`; firefox `shape.submixes is undefined`; webkit `Spread syntax
+  requires ...iterable not be null or undefined`). The production path was not affected:
+  `scratchBootWithWorker` passes `WasmBoundary.shape()` through, `submixes` included.
+- **Fix.** `submixes: [],` after `tracks: [...]` in each of the seven stubs. Nothing else moves.
+- **Evidence** (x86_64; CI's commands and mode: `build-web-audioworklet.sh --named-twin` into
+  `target/ci/qualification-artifacts`, closure `eeb1d68a...a78193`, module `f08c5433...ba00de`;
+  `sdk/dist` deleted so the run bundles the SDK source as CI does; private pulseaudio null sink;
+  `npm run qualify -- --artifacts ... --sdk-root sdk --browser <b> --check-matrix
+  --self-test-mutations`):
+  - chromium 151.0.7922.34: rc 0, all qualification gates passed;
+  - firefox 153.0: rc 0, all qualification gates passed;
+  - webkit 26.5: rc 0, all qualification gates passed.
+- **Test value.** The three browser legs themselves: red on this fix's revert in all three
+  browsers (the verifier's run on HEAD `0006b77f0`, quoted above).
+- **Why nothing local caught it.** esbuild bundles the harness without type-checking, and
+  `check-sdk-types.sh` covers only `sdk/src` and `sdk/test`. `tsc` does flag the missing field
+  (`Property 'submixes' is missing ... required in type 'SessionShape'`) when pointed at the
+  harness with the SDK's `tsconfig.json`, but the harness carries about 76 pre-existing strict-mode
+  errors (`OfflineAudioContext` is not an `AudioContextLike`, `readonly Transferable[]` against
+  `postMessage`, implicit `any` parameters), so adding it to that gate is not cheap. Follow-up idea,
+  not taken here: clean the harness to strict-mode and add it to `check-sdk-types.sh`, or have
+  `createEngine` refuse a scratch shape without a `submixes` array with a typed `MisoUsageError`
+  (verdict NIT-4).
+
 ## Verdict
 
 - **Attempt 1** (`66b2c7dd7`): Sol PASS, no BLOCKER or MAJOR; two MINOR, four NIT, applied in the K2
   follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1210-attempt1.md`.
+- **K2 follow-ups verdict** (`0006b77f0`): BLOCKER-1, the browser legs, fixed by amendment A1.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/K2-followups-verdict.md`.
 
 ## Dependencies
 
