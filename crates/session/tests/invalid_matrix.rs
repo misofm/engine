@@ -626,6 +626,37 @@ fn submix_source_spellings_refuse_at_their_index_paths() {
     assert_eq!(count, 12);
 }
 
+/// Issue #1216 D1: a route's `mute` is a required boolean, written after `gain_db`.
+///
+/// Red if the key becomes optional (a missing switch would silently parse as on), if it
+/// accepts a non-boolean, or if a muted route loses its switch through the canonical writer.
+#[test]
+fn route_mute_is_a_required_boolean() {
+    const FIELD: &str = "gain_db = 0.0, mute = false";
+    let mut count = 0;
+    parse_case(
+        &mut count,
+        &replaced(FIELD, "gain_db = 0.0"),
+        DiagnosticCode::MissingField,
+        "$.routes[0].mute",
+    );
+    parse_case(
+        &mut count,
+        &replaced(FIELD, "gain_db = 0.0, mute = 0"),
+        DiagnosticCode::WrongType,
+        "$.routes[0].mute",
+    );
+    assert_eq!(count, 2);
+    let muted = parse_session_json(&replaced(FIELD, "gain_db = 0.0, mute = true"))
+        .expect("a muted route parses");
+    assert!(muted.routes[0].mute);
+    let canonical = canonical_session_json(&muted).expect("a muted route canonicalizes");
+    assert_eq!(
+        parse_session_json(&canonical).expect("canonical reparses"),
+        muted
+    );
+}
+
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {
     let mut effect = template.clone();
     effect.sidechain = SidechainDeclaration::Routed(Sidechain {

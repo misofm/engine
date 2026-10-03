@@ -314,6 +314,7 @@ fn route(id: &str, source: RouteSource, destination: RouteDestination, gain_db: 
             rr: 1.0,
         },
         gain_db,
+        mute: false,
     }
 }
 

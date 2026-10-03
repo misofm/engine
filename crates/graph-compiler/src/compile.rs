@@ -324,10 +324,16 @@ impl GraphCompiler {
             let matrix = &route.channel_matrix;
             let matrix = [matrix.ll, matrix.lr, matrix.rl, matrix.rr];
             // The domain check is the live producer's own (issue #1215 D1): a value it would
-            // refuse never compiles, and the plan keeps the unfolded transform it hashes.
-            let transform = route_coefficients(route.gain_db, matrix, false, [false; 2])
-                .ok()
-                .and_then(|_| route_transform(route.gain_db, matrix));
+            // refuse never compiles, and the plan keeps the unfolded transform it hashes. The
+            // session's mute rides the gate (issue #1216 D2); it is not structural.
+            let gate = RouteGate {
+                mute: route.mute,
+                follow_zeroed: [false; 2],
+            };
+            let transform =
+                route_coefficients(route.gain_db, matrix, gate.mute, gate.follow_zeroed)
+                    .ok()
+                    .and_then(|_| route_transform(route.gain_db, matrix));
             let Some(transform) = transform else {
                 diagnostics.push(diag(
                     "graph.gain.non_finite",
@@ -355,7 +361,7 @@ impl GraphCompiler {
                     route_id: gid(route.id.as_str()),
                 },
                 transform,
-                gate: RouteGate::OPEN,
+                gate,
             });
         }
         for (index, strip) in strips.iter().enumerate() {

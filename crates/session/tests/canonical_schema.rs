@@ -210,6 +210,7 @@ fn full_tagged_surface_round_trips_without_field_loss() {
             rr: 1.0,
         },
         gain_db: 0.0,
+        mute: false,
     });
     // A submix tap other than `post_pan` (#1203 verdict NIT-4): a writer that flattens every
     // submix tap to the strip's end loses it here.

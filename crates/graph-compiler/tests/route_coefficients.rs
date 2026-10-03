@@ -5,7 +5,8 @@
 //! handed. The two layers agree only because the second calls the first; this file holds them to
 //! it, pins which column each source lane's gate zeroes, and refuses a fold that overflows.
 //! *Mute a route in the session* (#1216) and *Let a route into a submix follow its source strip's
-//! mute in the session* (#1218) extend it with the gates a session can set.
+//! mute in the session* (#1218) extend it with the gates a session can set; #1216 also holds the
+//! session's mute to the sealed graph text.
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
@@ -134,17 +135,21 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
             route.gain_db = draw.uniform(-120.0, 24.0);
             let matrix = &mut route.channel_matrix;
             [matrix.ll, matrix.lr, matrix.rl, matrix.rr] = [(); 4].map(|()| draw.coefficient());
+            // #1216 gate 2: the session's own switch, drawn per route.
+            route.mute = draw.next().is_multiple_of(2);
             drawn.push((
                 route.id.as_str().to_owned(),
                 route.gain_db,
                 [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
+                route.mute,
             ));
         }
         let artifact = compile(&model).expect("finite routes compile");
         let routes: &[PreparedRoute] = artifact.graph().routes();
         assert_eq!(routes.len(), drawn.len());
-        for (id, gain_db, matrix) in drawn {
-            let context = format!("round {round}, route {id}: {gain_db} dB, {matrix:?}");
+        for (id, gain_db, matrix, mute) in drawn {
+            let context =
+                format!("round {round}, route {id}: {gain_db} dB, {matrix:?}, mute {mute}");
             let prepared = routes
                 .iter()
                 .find(|route| {
@@ -152,15 +157,25 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
                         if route_id.as_str() == id)
                 })
                 .unwrap_or_else(|| panic!("{context}: no prepared route"));
-            assert_eq!(prepared.gate, RouteGate::OPEN, "{context}");
-            let open = route_coefficients(gain_db, matrix, false, [false; 2])
+            // The plan's gate is the session's switch (#1216 D2); nothing else sets it yet.
+            assert_eq!(
+                prepared.gate,
+                RouteGate {
+                    mute,
+                    follow_zeroed: [false; 2]
+                },
+                "{context}"
+            );
+            let checked = route_coefficients(gain_db, matrix, mute, [false; 2])
                 .unwrap_or_else(|error| panic!("{context}: {error:?}"));
             // The constant the runtime binds for this route is the domain-checked one, bit for bit.
             assert_eq!(
-                bits(open),
+                bits(checked),
                 bits(gated_route_coefficients(&prepared.transform, prepared.gate)),
                 "{context}"
             );
+            let open = route_coefficients(gain_db, matrix, false, [false; 2])
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
             for &(mute, source_lane_muted) in &gates {
                 let gate = RouteGate {
                     mute,
@@ -201,17 +216,74 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
     }
     // The same gain with a unit matrix folds to a finite 3.2e34 and is not refused.
     assert!(route_coefficients(700.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2]).is_ok());
-    let mut model = base.clone();
-    model.routes[0].gain_db = 700.0;
-    model.routes[0].channel_matrix.ll = 1.0e10;
-    let id = model.routes[0].id.as_str().to_owned();
-    assert_eq!(
-        compile(&model).err(),
-        Some(vec![(
-            "graph.gain.non_finite".to_owned(),
-            format!("$.routes[id={id}].gain_db")
-        )])
+    // A muted route's values are refused exactly as an open one's (#1216 D2).
+    for mute in [false, true] {
+        let mut model = base.clone();
+        model.routes[0].gain_db = 700.0;
+        model.routes[0].channel_matrix.ll = 1.0e10;
+        model.routes[0].mute = mute;
+        let id = model.routes[0].id.as_str().to_owned();
+        assert_eq!(
+            compile(&model).err(),
+            Some(vec![(
+                "graph.gain.non_finite".to_owned(),
+                format!("$.routes[id={id}].gain_db")
+            )]),
+            "mute {mute}"
+        );
+        model.routes[0].channel_matrix.ll = 1.0;
+        assert!(
+            compile(&model).is_ok(),
+            "a finite 700 dB fold compiles, mute {mute}"
+        );
+    }
+}
+
+/// #1216 gate 5: a route's mute is in the sealed graph text. The same session compiles twice, one
+/// route muted and then open: the texts differ by exactly one `route-mute\t<node>` row, right after
+/// that route's `route-transform` row, and an open route writes no such row.
+///
+/// Red if the gate is invisible to the canonical text (two plans binding different constants
+/// would share one digest), or if the row lands on another route or elsewhere in the text.
+#[test]
+fn a_muted_route_seals_one_route_mute_row_after_its_transform() {
+    let text = |model: &SessionModel| {
+        let artifact = compile(model).expect("the session compiles");
+        String::from_utf8(
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+        )
+        .expect("canonical text is UTF-8")
+    };
+    let open_model = parse_session_json(SESSION).expect("fixture parses");
+    let open = text(&open_model);
+    let open_lines: Vec<&str> = open.lines().collect();
+    assert!(
+        open_lines
+            .iter()
+            .all(|line| !line.starts_with("route-mute")),
+        "an open route writes no gate row"
     );
-    model.routes[0].channel_matrix.ll = 1.0;
-    assert!(compile(&model).is_ok(), "a finite 700 dB fold compiles");
+    // Three choices, so the row is placed by the route and not by the text's first or last route.
+    for index in [0, 4, open_model.routes.len() - 1] {
+        let mut muted_model = open_model.clone();
+        muted_model.routes[index].mute = true;
+        let node = format!("route:{}", muted_model.routes[index].id.as_str());
+        let muted = text(&muted_model);
+        let mut muted_lines: Vec<&str> = muted.lines().collect();
+        let row = format!("route-mute\t{node}");
+        let at = muted_lines
+            .iter()
+            .position(|line| *line == row)
+            .unwrap_or_else(|| panic!("no `{row}` row"));
+        assert!(
+            muted_lines[at - 1].starts_with(&format!("route-transform\t{node}\t")),
+            "`{row}` follows `{}`",
+            muted_lines[at - 1]
+        );
+        muted_lines.remove(at);
+        assert_eq!(
+            muted_lines, open_lines,
+            "the gate row is the only difference ({node})"
+        );
+    }
 }

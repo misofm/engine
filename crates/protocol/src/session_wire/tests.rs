@@ -284,6 +284,10 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             route_id: route.id.clone(),
             gain_db: route.gain_db,
         },
+        SessionEdit::SetRouteMute {
+            route_id: route.id.clone(),
+            mute: true,
+        },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
         },
@@ -1250,6 +1254,7 @@ fn a_tapless_submix_source_is_refused_in_every_shape_that_carries_one() {
             (3, WIRE_MESSAGE, true, destination.clone()),
             (4, WIRE_MESSAGE, true, matrix.clone()),
             (5, WIRE_F32, true, route.gain_db.to_le_bytes().to_vec()),
+            (6, WIRE_BOOL, true, vec![u8::from(route.mute)]),
         ])
     };
     let sidechain_message = |source: &[u8]| {
@@ -1371,8 +1376,12 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
         SessionEdit::RemoveOutput {
             output_id: id("alt-out"),
         },
+        // #1216: a muted route carries field 6 through the codec.
         SessionEdit::UpsertRoute {
-            route: route.clone(),
+            route: Route {
+                mute: true,
+                ..route.clone()
+            },
         },
         SessionEdit::RemoveRoute {
             route_id: route.id.clone(),
@@ -1416,6 +1425,10 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
             route_id: route.id.clone(),
             gain_db: -1.5,
         },
+        SessionEdit::SetRouteMute {
+            route_id: route.id.clone(),
+            mute: true,
+        },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
         },
@@ -1439,7 +1452,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
         .expect("typed route/automation decode");
     assert_eq!(decoded.edits, edits);
     assert_eq!(encode(&decoded.edits), bytes);
-    let SessionEdit::UpsertAutomation { automation } = &decoded.edits[12] else {
+    let SessionEdit::UpsertAutomation { automation } = &decoded.edits[13] else {
         panic!("upsert automation");
     };
     assert_eq!(

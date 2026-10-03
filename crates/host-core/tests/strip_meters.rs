@@ -109,6 +109,7 @@ fn to_output(id: &str, source: RouteSource) -> Route {
             rr: 1.0,
         },
         gain_db: 0.0,
+        mute: false,
     }
 }
 
@@ -316,6 +317,7 @@ fn pair(draw: &mut Draw, console: &Console) -> Pair {
                 rr: coefficient(draw),
             },
             gain_db: draw.in_domain(-12.0, 6.0),
+            mute: false,
         };
         a.routes.push(route.clone());
         let planes = noise_planes(draw, frames);

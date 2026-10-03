@@ -467,6 +467,30 @@ process.stdout.write = function () {
     assert.deepEqual(refusal.diagnostics?.map((row) => row.code), ["schema.unknown_field"]);
   });
 
+  test("a route request's optional mute reaches the document, and a non-boolean mute is refused", async () => {
+    // Issue #1216 gate 7. Red mutations: leave `mute` out of `route`'s admitted keys (the request
+    // is refused as an unknown key) or out of its mapping (the route writes `false`).
+    const muted = request();
+    muted.routes[0].mute = true;
+    const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(muted));
+    assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    const routes = JSON.parse(built.stdout.toString("utf8")).routes;
+    assert.deepEqual(
+      Object.fromEntries(routes.map((row) => [row.id, row.mute])),
+      { "bass-low": false, "low-bus": false, "to-bus": true, "to-main": false },
+    );
+
+    const typed = request();
+    typed.routes[0].mute = "yes";
+    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(typed));
+    failure(refused, 3, "request.shape");
+    // The builder refuses it, at the route's own path, as it does a non-boolean `bypass`.
+    assert.match(
+      JSON.parse(refused.stderr.toString("utf8")).error.message,
+      /route\("to-bus"\)\.mute: expected a boolean/,
+    );
+  });
+
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {
     // #1097 verdict L2. enginectl reads a request before the builder does, so its own key check is
     // the first refusal for a console sidechain or an effect field on an entry, and it must name

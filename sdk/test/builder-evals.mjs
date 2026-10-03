@@ -435,6 +435,29 @@ describe("validation refusals name the offending path", () => {
     );
   });
 
+  test("a route without mute writes \"mute\": false after gain_db; a non-boolean mute is refused", () => {
+    // #1216 gate 7: the engine requires `mute`, so the default must be written. Red mutations:
+    // drop `mute` from the routes key order in `session-json.ts`, default it to anything but
+    // `false` in `normalizeSession`, or skip the builder's boolean check.
+    const json = oneTrack().toJson();
+    assert.match(json, /"gain_db": 0\.0,\n\s*"mute": false\n\s*\}/);
+    assert.equal(oneTrack().toJSON().routes[0].mute, false);
+    const base = session({ id: "route.mute", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .output("out");
+    assert.throws(
+      () =>
+        base.route({
+          id: "r",
+          source: { kind: "track", trackId: "t", tap: "post_pan" },
+          destination: { kind: "output_input", outputId: "out" },
+          mute: 1,
+        }),
+      /route\("r"\)\.mute/,
+    );
+  });
+
   test("the ID namespaces are enforced in both directions", () => {
     const base = session({ id: "ns", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
@@ -924,7 +947,8 @@ describe("canonical float spellings", () => {
       model.routes[0].gain_db = view.getFloat32(0, true);
       const line = writeCanonicalSessionDocument(model).split("\n")
         .find((candidate) => candidate.includes('"gain_db":'));
-      assert.equal(line?.trim(), `"gain_db": ${entry.canonical}`, entry.id);
+      // `mute` follows `gain_db` (#1216), so the line carries its comma.
+      assert.equal(line?.trim(), `"gain_db": ${entry.canonical},`, entry.id);
     }
 
     const minimal = JSON.parse(await readFile(

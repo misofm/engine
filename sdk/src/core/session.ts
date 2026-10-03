@@ -805,6 +805,7 @@ export class SessionBuilder {
       }
     }
     if (spec.gainDb !== undefined) f32(spec.gainDb, `${path}.gainDb`);
+    if (spec.mute !== undefined) bool(spec.mute, `${path}.mute`);
     return this.#next({ routes: [...this.#state.routes, freeze({ ...spec })] });
   }
 
@@ -1536,6 +1537,7 @@ function normalize(state: BuilderState): SessionModel {
       destination: normalizeRouteDestination(spec.destination),
       channel_matrix: matrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
       gain_db: f32(spec.gainDb ?? 0, `route("${spec.id}").gainDb`),
+      mute: spec.mute ?? false,
     }))
     .sort(byId);
   const automation = state.automation

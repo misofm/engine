@@ -270,6 +270,11 @@ pub(crate) fn write_canonical(out: &mut impl core::fmt::Write, parts: CanonicalP
             route.transform.rl.to_bits(),
             route.transform.rr.to_bits()
         );
+        // A muted route binds other bits, so its gate is sealed (issue #1216 D5); an unmuted
+        // route's text is unchanged.
+        if route.gate.mute {
+            let _ = writeln!(out, "route-mute\t{}", node_text(&route.node));
+        }
     }
     for route in parts.routes {
         let _ = writeln!(

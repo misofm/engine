@@ -129,7 +129,8 @@
         "rl": 0.0,
         "rr": 1.0
       },
-      "gain_db": 0.0
+      "gain_db": 0.0,
+      "mute": false
     }
   ],
   "automation": []

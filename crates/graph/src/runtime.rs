@@ -6149,9 +6149,10 @@ fn plain_route_gains(
     {
         return None;
     }
-    parts
-        .route(node)
-        .map(|(transform, gate)| gated_route_coefficients(transform, gate))
+    // A gated route (muted, issue #1216 D4) declines: folding it would accumulate the open
+    // coefficients the route op does not mix. Folding a silenced lane away is deferred item O8.
+    let (transform, gate) = parts.route(node)?;
+    (gate == RouteGate::OPEN).then(|| gated_route_coefficients(transform, gate))
 }
 
 /// Whether anything can *see* the buffer op `index` writes other than by reading it as an input,

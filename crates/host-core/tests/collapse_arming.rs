@@ -214,6 +214,7 @@ fn with_send(mut model: SessionModel, tap: SendTap) -> SessionModel {
             },
             channel_matrix: identity.clone(),
             gain_db: -6.0,
+            mute: false,
         });
     }
     model.routes.push(Route {
@@ -225,6 +226,7 @@ fn with_send(mut model: SessionModel, tap: SendTap) -> SessionModel {
         destination: RouteDestination::OutputInput { output_id: output },
         channel_matrix: identity,
         gain_db: 0.0,
+        mute: false,
     });
     model
 }

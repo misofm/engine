@@ -46,7 +46,7 @@ fn document(revision: u64, console: &str, a: &str, b: &str) -> String {
         format!(
             r#"{{ "id": "{id}-out", "source": {{ "kind": "track", "track_id": "{id}", "tap": "post_pan" }},
               "destination": {{ "kind": "output_input", "output_id": "main-out" }},
-              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0 }}"#
+              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0, "mute": false }}"#
         )
     };
     format!(

@@ -252,7 +252,10 @@ seven taps at the same points of its chain (`input`, `post_input`, `insert_send`
 `insert_return`, `pre_fader`, `post_fader`, `post_pan`; #1203), and `tap` is required on both
 kinds; a pre-fader tap is not gated by the fader mute. The retired `submix_output` (which left the
 strip after its pan or matrix, now `{ kind = "submix", submix_id, tap = "post_pan" }`) is an unknown
-`kind` and refuses with `schema.invalid_enum`. Routed sidechains reuse the tagged source shape,
+`kind` and refuses with `schema.invalid_enum`. Every route carries a required boolean `mute`, written
+after `gain_db` (#1216): the send's on/off switch. A muted route stays in the graph, with its edge,
+its latency compensation and its gain and matrix kept, and contributes silence; muting or unmuting
+a route never changes the plan's structure or latency. Routed sidechains reuse the tagged source shape,
 taps included, and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with

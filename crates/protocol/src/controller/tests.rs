@@ -320,11 +320,11 @@ fn public_b1b_uses_exactly_the_typed_reader_passes_and_replays_identical_bytes()
         .expect("frozen transaction frame");
     let mut limited = controller(8, 1);
     // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
-    // deleting opcodes 0x0006/0x0102/0x0104, and #1094 appended `SetConsole` and
-    // `SetTrackConsole`, so the boundary this row exists to probe is now 40. A smaller number
-    // still refuses, but it stops being a boundary.
-    assert_eq!(conformance::complete_all_opcode_fixture().len(), 41);
-    limited.config.maximum_transaction_edits = 40;
+    // deleting opcodes 0x0006/0x0102/0x0104, #1094 appended `SetConsole` and
+    // `SetTrackConsole`, and #1216 appended `SetRouteMute`, so the boundary this row exists to
+    // probe is now 41. A smaller number still refuses, but it stops being a boundary.
+    assert_eq!(conformance::complete_all_opcode_fixture().len(), 42);
+    limited.config.maximum_transaction_edits = 41;
     assert_eq!(
         limited.process_b1b_btlv(
             &transaction.bytes,

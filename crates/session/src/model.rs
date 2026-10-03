@@ -769,6 +769,9 @@ pub struct Route {
     pub channel_matrix: ChannelMatrix,
     /// Send gain in decibels.
     pub gain_db: f32,
+    /// Send on/off switch.  A muted route stays in the graph, with its edge,
+    /// latency compensation and level kept, and contributes silence.
+    pub mute: bool,
 }
 
 /// A graph source whose role is representable without downstream port metadata.

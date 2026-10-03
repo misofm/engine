@@ -53,10 +53,10 @@ fn base_document() -> String {
           "routes": [
             {{ "id": "a-bus", "source": {{ "kind": "track", "track_id": "a", "tap": "post_pan" }},
               "destination": {{ "kind": "submix_input", "submix_id": "bus" }},
-              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0 }},
+              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0, "mute": false }},
             {{ "id": "bus-out", "source": {{ "kind": "submix", "submix_id": "bus", "tap": "post_pan" }},
               "destination": {{ "kind": "output_input", "output_id": "main-out" }},
-              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0 }} ],
+              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0, "mute": false }} ],
           "automation": [] }}"#,
         track("a"),
         track("x"),

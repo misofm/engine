@@ -69,6 +69,7 @@ fn route(id: &str, source: RouteSource, destination: RouteDestination) -> Route 
             rr: 1.0,
         },
         gain_db: 0.0,
+        mute: false,
     }
 }
 
