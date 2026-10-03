@@ -376,3 +376,26 @@ restored between rows. Delivery host: x86_64 AVX2+FMA.
 `a_bus_fader_record_renders_as_the_session_with_that_fader` also goes red when its own push is
 moved to `strip_controls[2]` (a track's lane): the fader reaches `t2` alone and the output
 differs from the twin's from the commanded block on.
+
+## Issue #1221 — live send records from host-core
+
+Driver: `cargo test -p host-core --features host-core/test-support --test live_routes`, one
+mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. 1221-M8 and
+1221-M11 mutate `graph`; the others mutate `host-core`.
+
+| Row | Mutation | Red |
+| --- | --- | --- |
+| 1221-M1 | `RouteControlProducer::record` passes `[false; 2]` to `route_coefficients` instead of `source_lane_muted` | `the_live_target_is_the_prepared_constant` (the follow-zeroed column carries `gain * lr`) |
+| 1221-M2 | `record` computes its target itself, `10^(gain_db / 20) * coefficient` with the same gating | `the_live_target_is_the_prepared_constant` (one ulp off on every coefficient) |
+| 1221-M3 | `route_controls` collected in reverse | `a_settled_live_edit_through_host_core_equals_a_fresh_plan` (index 1 drives `e-x`, not `c-b`) and `live_send_handles_are_in_canonical_route_order` |
+| 1221-M4 | `set` builds its record with a gain of `0.0` instead of `gain_db` | `a_settled_live_edit_through_host_core_equals_a_fresh_plan` |
+| 1221-M5 | `push` drops the record `try_push` hands back and returns `Ok` | `a_refused_send_record_pushes_nothing` (set `depth + 1` returns `Ok(())`) |
+| 1221-M6 | `record` clamps a too-long `length` to the maximum instead of refusing it | `a_refused_send_record_pushes_nothing` (`Ok(record)` with length `1 << 22`, not `Err(Length)`) |
+| 1221-M7 | `set` pushes a muted step record when `record` refuses, then returns the refusal | `a_refused_send_record_pushes_nothing` (`free()` 3, not 4: a refusal pushed) |
+| 1221-M8 | graph's `attach_route_controls` also takes the routes into the output (`*-main`) | `live_controls_cost_the_standing_sessions_no_fold` (`bank_route_folds()` 0 with `Some(64)`, 64 with `None`) |
+| 1221-M9 | host-core drops the `route_control_resources` total from `admitted_graph_and_model` | `live_send_lanes_are_charged_against_the_graph_cap` (one byte below the admitted total prepares) |
+| 1221-M10 | host-core attaches lanes of depth 1 when no depth was requested | `live_send_lanes_are_charged_against_the_graph_cap` (the idle report charges 2 routes, 1323 bytes) |
+| 1221-M11 | graph's live-route `drain` boxes each record it applies | `live_sends_render_without_allocating`: the process aborts (`SIGABRT`) on the first render-thread allocation, before the counter assertion |
+
+Gate 4's base behaviour was replayed by removing the attach call entirely: the test stays green
+(64 folds with `None` and with `Some(64)`), so the fallback did not apply.

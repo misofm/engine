@@ -235,6 +235,97 @@ distinct and non-constant per track and lane.
 - Gate 4's fold counts (and the base commit's, if the fallback applied).
 - Any digest or canonical-text re-pin, with its reason. None is expected.
 
+### Attempt 1 record (Terra)
+
+Anchors re-found by symbol on `d405abb37`: `let artifact` is at `prepare.rs:1069` (now `let mut`),
+the caps check at `:1146-1166`, the report at `:1325`, the handles at `:1381`. `report()` in
+`tests/prepare.rs` calls `prepare_host_session` and builds no struct, so it needed no change.
+
+**Implementation.**
+
+- `crates/host-core/src/route_controls.rs` (new, `pub mod` in `lib.rs`): `RouteControlProducer`,
+  `RouteControlError { Domain, Length, Full }`, and the re-exports of `RouteControlRecord` and
+  `RouteControlResources` (also re-exported at the crate root).
+  - `record` takes its target from `graph_compiler::route_coefficients` and its mute from
+    `graph::RouteGate { mute, follow_zeroed: source_lane_muted }.silences()`, which is
+    `mute || source_lane_muted == [true, true]` by the gate's own definition. It checks `Domain`,
+    then `Length`, then builds with `RouteControlRecord::new`.
+  - `push` decides `Full` from `free()` before `try_push`. `set` is `record`, then `push`.
+- `prepare.rs` D1: with `Some(depth)`, `artifact.attach_route_live_controls(depth)` runs after the
+  compile and before the caps. `QueueCapacity` maps to `host.resource.allocation`, and
+  `AlreadyAttached` or `BoundRoute` maps to `host.route_control.attach` (Graph). With `None`,
+  nothing is attached.
+- D4: `graph::route_control_resources` of the producers joins `admitted_graph_and_model`
+  (`host.graph.resource.limit`). Its largest allocation joins the effect channels' named-allocation
+  check (`host.resource.limit`). The report gains `route_control_resources`.
+- D3: `HostLiveControlHandles.route_controls`, with the rustdoc note (deliverable 4).
+
+**Deviation.** `RouteControlProducer` exposes `route_id()` (a `&str` method), not a
+`pub route_id: Box<str>` field. It is a `#[repr(transparent)]` wrapper over the graph producer,
+which already owns the ID. A second `Box<str>` field would add 16 bytes a route to the producer
+table that `graph::route_control_resources` does not charge. With the wrapper, host-core retains
+exactly the charged bytes, and the ID is never copied.
+
+**Tests**, in `crates/host-core/tests/live_routes.rs`. Each test's mutations are rows 1221-M1 to
+1221-M11 in `crates/host-core/tests/MUTATIONS.md`. Each was applied, run red and reverted.
+
+- `the_live_target_is_the_prepared_constant` (gate 1). Over 2,000 draws, the record's target bits
+  equal `route_coefficients`, and its mute equals the gate's silence. Over 12 trials, the settled
+  live render equals a fresh plan with `follows_mute` and the fader lane mutes. Red if the
+  producer computes its target, or its follow-zeroed columns, by any path other than the
+  compiler's (M1, M2).
+- `a_settled_live_edit_through_host_core_equals_a_fresh_plan` (gate 2). It runs 6 trials at each
+  of 48 kHz and 44.1 kHz. `c-b` is delayed and `e-x` is not, they go into different buses, and
+  lengths are in {0, 480}. Each send is addressed by its index in `route_controls`, as a host
+  addresses it. Red if host-core attaches lanes to the wrong routes, in the wrong order, or pushes
+  stale values (M3, M4).
+- `a_refused_send_record_pushes_nothing` (gate 3). Red if a refused call pushes, or if `Full` is
+  detected only after a push (M5, M6, M7).
+- `live_controls_cost_the_standing_sessions_no_fold` (gate 4). Red if attaching live controls
+  binds or declines routes into the output and so loses the master fold (M8).
+- `live_send_handles_are_in_canonical_route_order` (gate 5). The routes are declared `zz`, `mm`,
+  `aa`. Each producer's record is drained by exactly its own route's lane. Red if host-core orders
+  producers by declaration, not by lane attach order (M3).
+- `live_send_lanes_are_charged_against_the_graph_cap` (gate 6). The oracle is
+  `graph::route_control_resources` of an independent graph-compiler attach of the same session.
+  Red if the route lanes go uncharged (M9), or are charged on a live-control-free plan (M10).
+- `live_sends_render_without_allocating` (gate 7). Red if any lane state is built or boxed on the
+  render thread (M11). That run aborts on `bench_support`'s audit, as #1220's gate 6 does.
+
+**Gate 4 fold counts:** `bank_route_folds()` is 64 with `None` and 64 with `Some(64)`.
+`route_controls` is empty, and the route charge is zero. Replaying base behaviour (the attach call
+removed) gives 64 and 64 too, so the fallback did not apply.
+
+**Gate 6 numbers** (two sends, depth 8): 1,323 bytes charged. That is 608 queue, 352 owner, 144
+producer table, 4 ID and 215 activity bytes, and the largest allocation is 256 bytes.
+
+**Gates** (this commit, on base `d405abb37`; x86-64-v3 AVX2, AMD EPYC 7313P).
+
+- Gate 8.
+  - `check-host-core-policy.sh`: ok. `test-host-core-policy.sh`: ok.
+  - `check-realtime-policy.sh`: ok (54 regions in 15 files). `test-realtime-policy.sh`: ok.
+  - `check-workspace-policy.sh`: ok.
+  - test-debug-a (DESIGN 7, `--no-fail-fast`): rc 0. 1212 passed, 0 failed and 9 ignored, over 108
+    binaries. That is 1205 plus the 7 new tests.
+  - `run-aarch64-tests.sh debug`: there is no arm64 host here, so it runs **at batch push** (CI
+    `aarch64-debug`, which includes `host-core`).
+  - `cargo build --locked --release -p audit -p bench -p capi -p session-validator`: rc 0.
+  - `./target/release/audit capi`: rc 0, with 0 violations and `pcm_digest` `ff6cdcb96cdcdad5`.
+  - #1053 has not landed: capi requests no `control_queue_depth`, so nothing moves and nothing is
+    re-pinned.
+  - `cargo fmt --all -- --check`: rc 0.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: rc 0.
+- Browser (host-core is linked into the worklet, and a depth now attaches route lanes there).
+  - `build-web-audioworklet.sh --named-twin`: rc 0. The module is `551f943b...`, 2,755,262 bytes,
+    against 2,740,212 in #1220's record (+15,050).
+  - `check-web-audioworklet.sh`: rc 0. The kernel shape is unchanged: 13 kernels,
+    `f32x4_arith=9395`.
+  - `check-browser-expected-resources.py --artifacts`: rc 0. The digests and exact rows agree, and
+    the self-test shows 32 red mutations.
+  - `check-scalar-oracle-absent.py --wasm` on the named twin: rc 0.
+  - `test-web-audioworklet.sh`: rc 0.
+- **No re-pin.**
+
 ## Dependencies
 
 - *Ramp live send coefficients on the render plane* (#1220)

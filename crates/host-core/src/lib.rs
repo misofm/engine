@@ -102,6 +102,7 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
+pub mod route_controls;
 pub mod shape;
 pub mod solo;
 pub mod source;
@@ -143,6 +144,9 @@ pub use response::{
     ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
     ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
     generate_response_grid, prepare_response_preview, query_response_snapshot_into,
+};
+pub use route_controls::{
+    RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{LiveControlMuteDelta, LiveControlSoloState, StripMuteSeed};
