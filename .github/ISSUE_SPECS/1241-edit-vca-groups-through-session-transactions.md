@@ -103,6 +103,10 @@ An agent edits VCAs with session transactions, like every other session entity:
   literals only)
 - `docs/CONTROL_PROTOCOL_REGISTRY.md`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md`
 - this spec
+- **Amendment A1 (root, at attempt 1):** `crates/session/tests/vca.rs`, for one test only: the
+  #1240 attempt-1 verdict's MINOR-1 (`compile_session`'s `vcas` and `members` sorting is
+  untested), adopted here because the normalized model is what this slice's transactions commit.
+  Test-only; no change to the session grammar or validation.
 
 ## Non-goals
 
@@ -162,6 +166,78 @@ An agent edits VCAs with session transactions, like every other session entity:
 - The output of every gate command above, from the PR's head commit.
 - Each new test's name with its one-sentence test-value answer, and the mutation that turned it red.
 - The count and hash re-pins, old and new values.
+
+### Attempt 1 record (Terra)
+
+- **Base.** `250b72e94` (#1242 attempt 1). Every Context anchor held; the one drift is
+  `payload_spec` at `schema.rs:1520` (spec `:1523`).
+- **Implementation.** `schema::session::vca` (`ID` 1 Utf8, `FADER` 2 the `fader` message,
+  `MEMBERS` 3 repeated Utf8 built exactly as `set_track_effect_order::EFFECT_ID`), `upsert_vca`
+  (`VALUE` 1), `remove_vca` (`ID` 1), `set_vca_fader` (`VCA_ID` 1, `VALUE` 2) and their
+  `payload_spec` rows; `tx_vca`/`parse_vca` and the three encode/decode arms. Opcodes
+  `UpsertVca` `0x0700`, `RemoveVca` `0x0701`, `SetVcaFader` `0x0702`: enum, `from_raw`,
+  `SessionEdit` variants, `opcode()`, `apply_session_edit` (`0700` the generic `upsert`, `0701`
+  the generic `remove` -> `NotFound`, `0702` a find by ID -> `NotFound`); `strip_mut` is untouched,
+  so `0203`-`0211` never resolve a VCA. No new diagnostic, no `controller.rs` change (`NotFound`
+  already maps to `session.edit.not_found`). C ABI: no code path classifies edits yet (#1053 has
+  not landed), so every C ABI VCA transaction is a structural commit through the same
+  `SessionStore`; the P13 guard is not applicable in this slice.
+- **Re-pins**, reason "VCA message, opcodes `0700`-`0702`": `COMPLETE_SCHEMA_HASH`
+  `0x95c1_ceb6_8e44_f6e2` -> `0xab35_7b6c_432f_9755` at its four sites (`protocol_corpus.rs`,
+  both parity-script self-test rows, `CONTROL_PROTOCOL_CONFORMANCE.md`,
+  `complete-schema-manifest.md`, each with a re-pin sentence); opcode count 43 -> 46
+  (`model.rs` registry test and doc, `controller/tests.rs` fixture count with the edit limit
+  42 -> 45, the corpus doc comment, the conformance doc, the registry doc, the manifest). The frame
+  count 46 did not move. Corpus: three edits after `SetAutomationSegments` (`UpsertVca` of
+  `drums-vca` over the track and submix `drums`, distinct lane offsets, one lane muted;
+  `RemoveVca`; `SetVcaFader`).
+- **Docs.** Registry: a `0700`-`0702` family row, a strip-addressing bullet (a strip opcode never
+  resolves a VCA ID), the count 46 and its history, and the VCA message `1:id,2:fader,3*:member`
+  with root field 16 = `vcas`.
+- **Deviations.**
+  1. Amendment A1 (above): the #1240 MINOR-1 test, verbatim from the verdict, in
+     `crates/session/tests/vca.rs`.
+  2. `check-protocol-wasm-parity.sh` runs the simd128 guest only (there is no scalar arm in the
+     script: scalar Wasm is refused, #1041/#1062); gate 3's "scalar and simd128" is read as the
+     script's one variant plus its `--self-test`.
+  3. Gate 2 adds cases beyond the list: `0203`, `0210` and `0211` at a VCA ID (beside `020f`), a
+     `0701` of a nested VCA its parent still lists (`reference.missing_entity`), a `0700` reusing a
+     track ID (`id.duplicate`), a `0700` re-upsert that replaces in place, and the positive control
+     (removing the member while the same transaction rewrites the VCA commits).
+- **Tests and test value** (each mutation applied in place by a scratch runner, run red, restored):
+  - `protocol` `session_wire::tests::vca_edits_round_trip_and_members_decode_empty` (gate 1; 64
+    draws, empty and repeated members, both lanes' mutes varying; plus a hand-built VCA message with
+    field IDs 1/2/3 and one with no field 3): red if field 3 is lost, mis-tagged or refused when
+    empty, or the fader is read from the wrong field. Mutations: `parse_vca` drops members -> RED;
+    `MEMBERS` id 3 -> 4 on both sides -> RED; decode refuses zero members -> RED; `FADER` id 2 -> 4
+    on both sides -> RED.
+  - `protocol/tests/vca_edits.rs::vca_edits_commit_and_snapshot_canonically` (gate 2): red if an
+    apply arm edits the wrong VCA, if `0700` appends instead of replacing, if the parent's forward
+    reference is validated per edit, or if the snapshot drops or misorders a VCA. Mutations:
+    `0702` edits the first VCA -> RED; `0700` always pushes -> RED.
+  - `...::vca_refusals_commit_nothing` (gate 2): red if a strip edit reaches a VCA, `0701`/`0702`
+    at an unknown ID is skipped silently, `0701` cascades into its parents' member lists, or a
+    dangling member, cycle or collision commits. Mutations: `020f` falls back to a VCA's fader ->
+    RED; `0701` ignores `NotFound` -> RED; `0701` prunes the removed ID from other VCAs' members ->
+    RED.
+  - `protocol` `model::tests::opcode_registry_appends_the_console_edits_and_reallocates_nothing`
+    (rewritten, gate 3): red if an opcode is in the enum but not `from_raw`, or reuses a retired
+    code. Mutations: `0x0702` arm removed -> RED; `UpsertVca` read from `0x0006` -> RED.
+  - `session/tests/vca.rs::compile_session_normalizes_vcas_and_members_by_id` (A1): red if
+    `compile_session` stops sorting `vcas` or a `members` list. Mutations: members sort removed ->
+    RED; `vcas` sort removed -> RED.
+  - No test was superseded.
+- **Gates** (on this commit's tree, x86-64-v3 host):
+  - Gates 1-2: the tests above, green.
+  - Gate 3: the DSP-crate `cargo test --all-targets` command exit 0 (conformance corpus 46 frames,
+    re-pinned hash); `conformance_fixtures -- --check` exit 0; `check-protocol-wasm-parity.sh`
+    "ok (simd128)" and `--self-test` passed (control green, 1 inert-invocation row, 3 red rebuilds).
+  - Gate 4: the workspace `cargo test` command exit 0; `cargo fmt --all -- --check`;
+    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`;
+    `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`; the protocol-control and
+    workspace policy checks and self-tests; `check-cross-targets.sh` PASS (no `protocol`
+    `memset_pattern16` row). `run-aarch64-tests.sh debug`: at batch push (CI's `aarch64-debug`;
+    this host is x86-64). The browser session shape did not change, so no browser leg was run.
 
 ## Dependencies
 

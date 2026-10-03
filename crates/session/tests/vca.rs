@@ -5,8 +5,8 @@
 
 use serde_json::{Map, Value, json};
 use session::{
-    DiagnosticCode, DiagnosticSet, DualMonoFader, SessionModel, StableId, Submix, Vca,
-    canonical_session_json, parse_session_json,
+    CompileCaps, DiagnosticCode, DiagnosticSet, DualMonoFader, SessionModel, StableId, Submix, Vca,
+    canonical_session_json, compile_session, parse_session_json,
 };
 
 const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
@@ -372,4 +372,40 @@ fn vca_offsets_are_bounded_to_the_fader_domain() {
             "$.vcas[0].fader.left_db".to_owned()
         )]
     );
+}
+
+/// Gate 1, normalization (#1240 verdict MINOR-1, adopted by #1241): `compile_session` keeps `vcas`
+/// and each `members` list sorted by ID, as the canonical writer does, whatever the declared
+/// order (#1240 D1).
+///
+/// Red if `compile_session` stops sorting `vcas` or a `members` list: every other VCA test either
+/// canonicalizes (the writer re-sorts) or reads `parse_session_json`, which does not normalize.
+#[test]
+fn compile_session_normalizes_vcas_and_members_by_id() {
+    let caps = CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_requested_runtime_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_queue_items: u64::MAX,
+        max_source_ring_frames: u64::MAX,
+        max_source_ring_bytes: u64::MAX,
+    };
+    let source = with_vcas(json!([
+        vca_json("z", json!(["vocal", "a"])),
+        vca_json("a", json!([]))
+    ]));
+    let compiled =
+        compile_session(&parse_session_json(&source).expect("valid"), caps).expect("compiles");
+    let vcas: Vec<(&str, Vec<&str>)> = compiled
+        .normalized_model()
+        .vcas
+        .iter()
+        .map(|vca| {
+            (
+                vca.id.as_str(),
+                vca.members.iter().map(StableId::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(vcas, [("a", vec![]), ("z", vec!["a", "vocal"])]);
 }

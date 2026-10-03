@@ -4,7 +4,7 @@ use protocol::*;
 
 use session::{
     Console, ConsoleEntry, ConsoleSlot, EffectIdentity, EffectQuality, LinkMode, Output, RackName,
-    RouteSource, SendTap, SessionModel, StableId, Submix,
+    RouteSource, SendTap, SessionModel, StableId, Submix, Vca,
 };
 
 /// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
@@ -256,6 +256,33 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetAutomationSegments {
             automation_id: automation.id.clone(),
             segments: automation.segments.clone(),
+        },
+        // #1241: a VCA over the track and a submix (members repeat field 3), with distinct lane
+        // offsets and one muted lane, then its removal and a fader set. Codec values: the corpus
+        // is never applied to a store.
+        SessionEdit::UpsertVca {
+            vca: Vca {
+                id: id("drums-vca"),
+                fader: session::DualMonoFader {
+                    left_db: -6.0,
+                    right_db: -4.5,
+                    left_mute: false,
+                    right_mute: true,
+                },
+                members: vec![track_id.clone(), id("drums")],
+            },
+        },
+        SessionEdit::RemoveVca {
+            vca_id: id("drums-vca"),
+        },
+        SessionEdit::SetVcaFader {
+            vca_id: id("drums-vca"),
+            fader: session::DualMonoFader {
+                left_db: 3.0,
+                right_db: -1.5,
+                left_mute: true,
+                right_mute: false,
+            },
         },
     ]
 }
@@ -705,7 +732,9 @@ pub enum ConformanceDecoder {
 /// `0x0506` (`SetRouteMute`) appended, 42 edits, one per allocated opcode. The frame count stays 46.
 /// Issue #1218 repinned it from `39e5a2c1d317a9fe`: route field `follows_mute` (field 7), and
 /// opcode `0x0507` (`SetRouteFollowsMute`) appended, 43 edits. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x95c1_ceb6_8e44_f6e2;
+/// Issue #1241 repinned it from `95c1ceb68e44f6e2`: the VCA message, and opcodes `0x0700`-`0x0702`
+/// (`UpsertVca`, `RemoveVca`, `SetVcaFader`) appended, 46 edits. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xab35_7b6c_432f_9755;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
