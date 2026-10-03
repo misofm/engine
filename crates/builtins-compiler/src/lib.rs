@@ -2844,6 +2844,18 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
         &self.graph.estimate
     }
 
+    /// Give every route into a submix input a live lane before bind (issue #1220 D7), returning
+    /// one producer per lane in canonical route-ID order. Delegates to
+    /// [`PreparedGraphPlan::attach_route_controls`]: the sealed graph is attached in place and
+    /// never handed out. A second call is refused
+    /// ([`graph::GraphRouteControlError::AlreadyAttached`]).
+    pub fn attach_route_live_controls(
+        &mut self,
+        depth: core::num::NonZeroUsize,
+    ) -> Result<Vec<graph::GraphRouteControlProducer>, graph::GraphRouteControlError> {
+        self.graph.attach_route_controls(depth)
+    }
+
     /// Ordinary external nodes required in addition to compiler-owned builtin processors.
     pub fn external_binding_nodes(&self) -> impl Iterator<Item = &GraphNodeId> {
         let builtin_nodes: BTreeSet<_> = self

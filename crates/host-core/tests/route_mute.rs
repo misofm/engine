@@ -590,6 +590,106 @@ fn negative_planes(draw: &mut Draw) -> Planes {
     [plane(), plane()]
 }
 
+/// `muted.len()` tracks route from their `input` taps by `r00..`, with drawn gains and nonzero
+/// matrices, into `sum`; `r<k>` is muted when `muted[k]`. Returns the session, the routes and the
+/// feeds (#1217 verdict 2, MINOR-1).
+fn many_contributors(
+    draw: &mut Draw,
+    sum: Sum,
+    muted: &[bool],
+) -> (SessionModel, Vec<Route>, Feeds) {
+    let (mut model, source, track) = empty_session();
+    let mut feeds = Vec::new();
+    let mut routes = Vec::new();
+    for (index, is_muted) in muted.iter().enumerate() {
+        let id = format!("t{index:02}");
+        add_track(&mut model, &source, &track, &id);
+        let destination = match sum {
+            Sum::Bus => into_bus("b"),
+            Sum::Output => RouteDestination::OutputInput {
+                output_id: sid("main-out"),
+            },
+        };
+        let mut drawn = route(&format!("r{index:02}"), input_tap(&id), destination);
+        drawn.gain_db = draw.in_domain(-12.0, 6.0);
+        let signs = [
+            draw.chance(1, 2),
+            draw.chance(1, 2),
+            draw.chance(1, 2),
+            draw.chance(1, 2),
+        ];
+        drawn.channel_matrix = ChannelMatrix {
+            ll: signed(draw, signs[0]),
+            lr: signed(draw, signs[1]),
+            rl: signed(draw, signs[2]),
+            rr: signed(draw, signs[3]),
+        };
+        drawn.mute = *is_muted;
+        feeds.push((id, planes(draw, None)));
+        routes.push(drawn);
+    }
+    model.routes = routes.clone();
+    if let Sum::Bus = sum {
+        model.routes.push(to_output("b-main", bus_input("b")));
+        model.submixes = vec![Submix::unity(sid("b"), &model.console)];
+    }
+    (model, routes, feeds)
+}
+
+/// #1217 gate 1, three or more contributors (verdict 2, MINOR-1). An inactive route between
+/// active ones -- `open, muted, open` and wider patterns, including later runs that cross the
+/// 8-input reduction group -- leaves every active contribution in the sum: the bus, and the
+/// session output, render the scalar D3 oracle bit for bit, and only the muted routes skip their
+/// mix.
+///
+/// Red if a later active run after an inactive route stores over the earlier active run instead of
+/// adding to it (verdict mutation MC: `route_segments` forgets that the opening run stored), which
+/// silently drops every send before the muted one. No two-contributor case reaches that shape.
+#[test]
+fn a_middle_inactive_route_keeps_every_active_contribution() {
+    let patterns: [(&[usize], usize); 6] = [
+        (&[1], 3),
+        (&[1, 3], 5),
+        (&[3, 9], 12),
+        (&[0, 5, 10], 12),
+        (&[8], 11),
+        (&[2, 3, 4, 5, 6, 7, 8, 9, 10], 12),
+    ];
+    let mut draw = Draw::new(99_217);
+    for (pattern, count) in patterns {
+        let muted: Vec<bool> = (0..count).map(|index| pattern.contains(&index)).collect();
+        for sum in [Sum::Bus, Sum::Output] {
+            let (model, routes, feeds) = many_contributors(&mut draw, sum, &muted);
+            let (actual, mixes) = render_counted(&document(&model), &feeds);
+            let contributions: Vec<(bool, [Vec<f32>; 2])> = routes
+                .iter()
+                .zip(&feeds)
+                .map(|(route, (_, planes))| (!route.mute, mix(route, planes)))
+                .collect();
+            let summed = d3_sum(&contributions);
+            let expected = match sum {
+                Sum::Bus => mix(&to_output("b-main", bus_input("b")), &summed),
+                Sum::Output => summed,
+            };
+            let what = format!("{sum:?}, {count} inputs, muted {pattern:?}");
+            for plane in 0..2 {
+                assert_bits_equal(
+                    &actual[plane],
+                    &expected[plane],
+                    &format!("{what}, plane {plane}"),
+                );
+            }
+            for (index, is_muted) in muted.iter().enumerate() {
+                assert_eq!(
+                    mixes[route_index(&model, &format!("r{index:02}"))],
+                    if *is_muted { 0 } else { BLOCKS as u64 },
+                    "{what}: r{index:02} mixes"
+                );
+            }
+        }
+    }
+}
+
 // ---- #1217 gate 2 ---------------------------------------------------------------------------
 
 /// Tracks `t0..` route from their `input` taps by unity routes `r0..` into bus `b`, whose `input`

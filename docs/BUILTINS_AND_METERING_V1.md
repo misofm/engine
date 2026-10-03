@@ -194,6 +194,84 @@ A gain-reduction tap on a strip that solo has silenced falls toward zero reducti
 effects are seeing silence. That is the true state of that signal path, not an artifact of the
 observation surface.
 
+## Live routes (issue #1220)
+
+A send's level, on/off and 2x2 change on the running plan, declicked, without a rebuild. Once the
+change settles, the route renders exactly the bits of a plan freshly prepared with the new values.
+This is the portable render core. The host-core producer (#1221) and the browser and C ABI
+bindings follow it.
+
+- **Which routes are live (D1).** `PreparedGraphPlan::attach_route_controls`, and its sealed
+  delegate `PreparedBuiltinsGraphArtifact::attach_route_live_controls`, run after compile and
+  before bind. They give every route whose destination is a **submix input** one bounded SPSC queue
+  of `RouteControlRecord`s, in canonical route-ID order, and return the producers. Routes into an
+  output keep their prepared constants, their single-master fold and their structural edits. A
+  second attach is refused. With no attach the plan binds exactly what it bound before.
+- **The record (D2).** A record holds `target`, `mute` and `length`:
+  - `target` is what `graph_compiler::route_coefficients` returns, the same function the compiler
+    binds through;
+  - `mute` is set when the gate silences the route, and then `target` must be four `+0.0`;
+  - `length` is the ramp in samples, at most `ROUTE_RAMP_LENGTH_MAXIMUM = 2^22`, and `0` is a step
+    at the block boundary.
+- **State and the law (D3).** Each live route holds an **indexed ramp** (`lane::kernels::IndexedRamp`),
+  a `position` and a `mute`.
+  - At bind the ramp is settled on the route's prepared gated coefficients, with `position = 0`
+    and `mute` set to the gate's `silences()`. An idle live route therefore mixes the prepared
+    bits.
+  - A record replaces the ramp with
+    `IndexedRamp::new(ramp.coefficients_at(position), target, length)` and resets `position` to 0.
+    Several records in one drain apply in order, and the last one wins.
+  - Frame `f` of a block mixes with `c(k)` at `k = position + f + 1`, and then `position`
+    advances by the quantum, saturating at the ramp's length.
+- **Why the indexed ramp and not D11.** D11 (the faders, matrices and effects) carries
+  `current += step` from frame to frame, so a coefficient's bits depend on its history. Here
+  `c(k) = round(round(k * step) + start)` is a pure function of the frame index, and the settled
+  value is `target` itself, assigned rather than computed. That has three consequences:
+  - the ramp vectorises over frames;
+  - its result does not depend on the lane width;
+  - a settled route is bit-identical to a fresh plan.
+
+  D11 is unchanged everywhere else.
+
+  The ramp does not overshoot its target before the snap while the step's rounding error is
+  relative. When `|target - start| < length * 2^-126`, the step is subnormal (or exactly
+  `2^-126`), and its rounding error is absolute, up to `2^-150`.
+  - `k * step` can then exceed `target - start` by less than `(length - 1) * 2^-150`.
+  - The sum's rounding onto the target's grid can double that. So `c(k)` can pass the target by
+    less than `(length - 1) * 2^-149`, and never by more than `2^-128`, which is reached at
+    `length = 2^22`. That is inaudible.
+  - `c(k)` stays monotone for `k < length`. The snap then assigns `target` exactly, stepping back
+    by the overshoot.
+- **Activity, once per block (D4).** After its drain, the route op decides whether the route is
+  active for the block. It is inactive only when `mute && position >= length && !delayed`. The op
+  writes that bit into the route-activity table before the destination's reduction, a later unit
+  of the same block, reads it.
+  - The block in which a mute ramp ends is mixed whole.
+  - A `length == 0` mute is inactive from the block that drained it.
+  - An unmute is active in the block that drains it, and ramps from the current coefficients.
+  - A plan with a live route always builds the route-activity table.
+- **The delayed-route rule.** A live route whose consumer input carries plugin-delay compensation
+  is never inactive. Muted, it keeps mixing its zero target into its own buffer, and its consumer
+  keeps staging it. The fade reaches the bus whole, `d` samples later and aligned, and the line
+  holds only zero-coefficient output when an unmute arrives. Skipping it would cut the fade still
+  in its line and later release stale arena samples.
+- **The drain (D5).** At the op's start, every block, including while the route is inactive, the
+  op pops exactly the records available at entry and applies each in order. Nothing is dropped: a
+  record that arrives later is applied in a later block, and a full queue refuses a push and hands
+  the record back.
+- **Shape (D6).** A live route is `NodeKind::LiveRoute`, never a `GraphNodeBinding`. It never
+  folds: the fold planner's metadata answers `has_route_control`, and `plain_route_gains` declines
+  such a route, because an epilogue would never drain its queue.
+- **Resources (D8).** `route_control_resources` states exactly what the attach and the bind add:
+  - each queue's retained payload;
+  - the lane box, the plan's binding entry and the render-side owner box, per route;
+  - the producer table;
+  - the route IDs;
+  - the route-activity table, when the compile-time estimate did not already charge it (no
+    prepared gate silences).
+
+  The next slice admits these bytes against the host's caps.
+
 ## Current evidence status
 
 The machine-qualified fixture corpus covers the declared filter, gain, matrix, graph-tap, meter,
