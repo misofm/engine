@@ -188,6 +188,58 @@ every console slot on every submix strip*, #1202).
 - The list of updated `HostPrepareCaps` and `CompileLimits` literals.
 - Confirmation that no digest or oracle moved.
 
+### Attempt 1 record (Terra)
+
+- **D1** (`prepare.rs`): `HostPrepareCaps.maximum_submixes`, checked in the existing count `if`
+  beside `maximum_tracks` (same `host.resource.count`); `HostPrepareReport.submix_count` from
+  `model.submixes.len()`. **D2**: header and `CompileLimits` replace `reserved[4]` with
+  `maximum_submixes; reserved[3]` (header comment states the zero rule); `limits_are_valid` requires
+  `reserved == [0; 3]` and ignores the word; `prepare_caps` maps zero to `maximum_tracks`;
+  `all_limits_nonzero` unchanged. **D3**: host-web `u64::MAX`. Qualification doc paragraph added.
+- **Literals.** `HostPrepareCaps` (18, not 17: K1 added `host-core/tests/submix_strip.rs:80`, outside
+  the authorized list, a one-line compile fix): capi `prepare_caps` and `resource_lifecycle::host_caps`
+  (both mirror the zero rule), `limiter_linked_session.rs`, `response.rs`, host-web, and the 13 test
+  files `collapse_arming`, `effect_live_controls`, `effect_observation`, `fp_environment`,
+  `input_liveness_live_controls`, `live_addressing`, `prepare`, `randomized`, `source_in_place`,
+  `spectrum`, `submix_strip`, `symmetry_witness`, `track_delay` (each `maximum_submixes` = its
+  `maximum_tracks`). `CompileLimits` (`maximum_submixes: 0, reserved: [0; 3]`): `ffi.rs` test
+  `limits()`, `runtime/tests.rs`, `resource_lifecycle.rs` `limits()`, `tools/audit/src/capi.rs`.
+- **Deviation: the C ABI test lives in `crates/capi/tests/resource_lifecycle.rs`**, not a new file.
+  A new file calling the exported functions needs `unsafe`, and `check-realtime-policy.sh` refuses
+  `unsafe` outside its approved list, which names `resource_lifecycle.rs` and which this slice may
+  not edit.
+- **Tests and test value** (mutation each, reverted after):
+  - `host-core/tests/submix_caps.rs::submixes_are_counted_capped_and_reported_apart_from_tracks`
+    (3 tracks with `maximum_tracks = 3`; caps 1 and 4 prepare at the cap and refuse one over with
+    `host.resource.count\t$\n`; cap 0 refuses one submix): red if submixes go uncounted, are
+    counted against `maximum_tracks`, or are missing from the report. Mutations: drop the submix
+    clause -> red; compare against `maximum_tracks` -> red; `submix_count: 0` in the report -> red.
+  - `capi/tests/resource_lifecycle.rs::maximum_submixes_bounds_submixes_and_zero_defers_to_maximum_tracks`
+    (2 tracks, 3 unrouted unity submixes through `miso_engine_v1_compile_session`; word 0 refuses at
+    2 tracks, prepares at 3; word 3 prepares at 2 tracks; word 2 refuses at 2 and at 3 tracks;
+    each of `reserved[0..3]` nonzero -> `RESULT_INVALID_ARGUMENT`): red if the C bound ignores the
+    word, treats zero as "no submixes" or "unbounded", or stops refusing a remaining reserved word.
+    Mutations: map the word to `maximum_tracks` -> red; zero -> 0 -> red; zero -> `u64::MAX` ->
+    red; drop the reserved check -> red; check only `reserved[1..]` -> red; drop the host-core
+    clause -> red.
+  - Layout pins (`abi.rs` test, `abi_smoke.c`): `maximum_submixes == 176`, `reserved == 184`, size
+    208. Mutations: header with the two fields swapped -> `check-capi-abi.sh` red (`abi_smoke.c`
+    static asserts at 176/184); Rust mirror swapped ->
+    `frozen_sizes_alignments_and_representative_offsets_match` red (`left: 200`).
+- **Gates** (x86-64 AVX2 host):
+  - 1, 2: green (above).
+  - 3: `check-capi-abi.sh` ok (shared and static); `--self-test` ok.
+  - 4: release build of audit/bench/capi/session-validator ok; `audit capi`: allocations 0, locks 0,
+    syscalls 0, total violations 0, `pcm_digest` `ff6cdcb96cdcdad5`, identical to the same command
+    on the pre-change tree (one-time comparison). `resource_lifecycle` passes with no oracle or
+    budget edited.
+  - 5: test-debug-a workspace command rc 0 (100 binaries, 1150 passed, 0 failed);
+    `cargo test --release -p audit -p bench -p console-workload` ok (110 passed); host-core,
+    realtime and workspace `check-*`/`test-*` pairs ok; `cargo fmt --check` ok; workspace clippy
+    `-D warnings` clean; `cargo doc` `-D warnings` clean.
+  - 6: `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
+- No test superseded; no digest or oracle moved.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

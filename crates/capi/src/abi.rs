@@ -130,8 +130,12 @@ pub struct CompileLimits {
     pub maximum_replay_bytes: u64,
     /// Maximum retained capability-command replay records.
     pub maximum_replay_entries: u64,
+    /// Maximum session submix strips (#1206). Zero means "use `maximum_tracks`" -- never "no
+    /// submixes" and never "unbounded" -- which is what every caller written before this word was
+    /// named already passes. It occupies the former `reserved[0]`; the layout is unchanged.
+    pub maximum_submixes: u64,
     /// Must be zero in ABI V1.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 3],
 }
 
 /// Caller-owned byte output using query/retry semantics.
@@ -451,7 +455,8 @@ mod tests {
 
         assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
-        assert_eq!(offset_of!(CompileLimits, reserved), 176);
+        assert_eq!(offset_of!(CompileLimits, maximum_submixes), 176);
+        assert_eq!(offset_of!(CompileLimits, reserved), 184);
         assert_eq!(offset_of!(BytesOut, data), 8);
         assert_eq!(offset_of!(BytesOut, required_bytes), 24);
         assert_eq!(offset_of!(SourceChunk, planes), 24);

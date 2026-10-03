@@ -354,7 +354,7 @@ pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
 pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
     limits.struct_size == crate::COMPILE_LIMITS_SIZE
         && limits.reserved0 == 0
-        && limits.reserved == [0; 4]
+        && limits.reserved == [0; 3]
         && all_limits_nonzero(limits)
 }
 
@@ -370,6 +370,12 @@ pub(crate) fn prepare_caps(limits: CompileLimits) -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
+        // #1206 D2: zero is every pre-#1206 caller's value, and means "bound submixes by tracks".
+        maximum_submixes: if limits.maximum_submixes == 0 {
+            limits.maximum_tracks
+        } else {
+            limits.maximum_submixes
+        },
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
         maximum_effects: limits.maximum_effects,

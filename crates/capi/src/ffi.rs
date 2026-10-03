@@ -1186,7 +1186,8 @@ mod tests {
             maximum_control_frame_bytes: 4_096,
             maximum_replay_bytes: 8_192,
             maximum_replay_entries: 16,
-            reserved: [0; 4],
+            maximum_submixes: 0,
+            reserved: [0; 3],
         }
     }
 

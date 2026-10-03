@@ -61,6 +61,14 @@ strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every 
 structural, compiling and swapping a replacement plan, until *Deliver value-only send and
 submix-strip edits to the running C ABI plan* (#1225) lands.
 
+A caller bounds submix strips through `miso_engine_v1_compile_limits.maximum_submixes` (#1206), an
+in-place V1 amendment: the word is the former `reserved[0]`, at offset 176, and `reserved` shrinks
+to three words at 184..207, so the struct stays 208 bytes and no symbol, size or `ABI_VERSION`
+changes. Zero means "use `maximum_tracks`" -- not "no submixes" and not "unbounded" -- which is the
+value every caller written before the word was named already passes. A nonzero value is the bound
+itself; a session over it refuses with `host.resource.count`. The three remaining reserved words
+must still be zero.
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and

@@ -108,6 +108,9 @@ pub struct HostPrepareCaps {
     pub maximum_automation_spans_per_block: u32,
     /// Maximum tracks in the session.
     pub maximum_tracks: u64,
+    /// Maximum submix strips in the session (#1206). A configured bound of its own, never folded
+    /// into `maximum_tracks`: a host that sizes tracks exactly can still bound submixes apart.
+    pub maximum_submixes: u64,
     /// Maximum sources in the session.
     pub maximum_sources: u64,
     /// Maximum routes in the session.
@@ -204,6 +207,8 @@ pub struct HostPrepareReport {
     pub source_count: u64,
     /// Tracks in the session.
     pub track_count: u64,
+    /// Submix strips in the session (#1206).
+    pub submix_count: u64,
     /// Routes in the session.
     pub route_count: u64,
     /// Effect instances in the session.
@@ -766,10 +771,12 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let model = compiled.normalized_model();
     // Source semantics: tracks only.
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
+    let submix_count = u64::try_from(model.submixes.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
     let route_count = u64::try_from(model.routes.len()).map_err(|_| platform("host.count"))?;
     let effect_count = count_effects(model)?;
     if track_count > caps.maximum_tracks
+        || submix_count > caps.maximum_submixes
         || source_count > caps.maximum_sources
         || route_count > caps.maximum_routes
         || effect_count > caps.maximum_effects
@@ -1244,6 +1251,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         quantum_frames: compiled.quantum().0,
         source_count,
         track_count,
+        submix_count,
         route_count,
         effect_count,
         latency_samples: output_latency.0,
