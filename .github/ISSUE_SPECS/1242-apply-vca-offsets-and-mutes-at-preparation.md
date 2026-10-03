@@ -363,6 +363,56 @@ No allocation gate: this slice adds no render-thread state; the composition runs
     `check-cross-targets.sh` PASS (no new `memset_pattern16` row). `run-aarch64-tests.sh debug`: at
     batch push (CI's `aarch64-debug`; this host is x86-64).
 
+### Attempt 2 record (Sol verdict 1: FAIL on MAJOR-1, MINOR-1, two NITs)
+
+- **MAJOR-1, a both-lanes kind 4 on a one-lane VCA mute.** host-web's `COMMAND_MUTE` arm read the
+  effective mute of the first covered lane and staged one record for every covered lane, so with a
+  one-lane VCA mute a `channel` 2 un-mute re-opened the VCA-muted lane (or muted the open one) and
+  desynced `emitted` and the follow-send mirror. It now reads both lanes' effective mutes; when a
+  `Both` command's lanes differ it stages one `Left` and one `Right` record and calls
+  `record_emitted` per lane (the staging array's second slot and `command_staging_count`'s
+  `MAXIMUM_COMMAND_RECORDS * 2` budget already exist, and the free-room pre-check still admits or
+  refuses the batch whole). When the lanes agree -- always without a VCA -- it stages the one
+  record it staged before, so nothing moves for a session without VCAs.
+- **MINOR-1, the submix seeding.** Closed by the randomized browser differential below, which
+  issues kind 4 edits to the VCA-muted buses.
+- **NIT-1, not fixed (recorded).** `compile_ready`'s `effective_strip_faders()` allocates inside
+  `session`, which has no fallible-allocation API (its reach map is a `BTreeMap`). The same
+  preparation has already run the identical composition, at the same sizes, infallibly in the
+  builtins compiler (seal and lowering) before host-web reaches this line, so a `try_reserve` here
+  would guard nothing the compilers had not already allocated; a fallible composition is a
+  session-wide change outside this slice.
+- **NIT-2, not fixed (recorded).** The composition runs up to four times per browser preparation
+  (tail seal, lowering, graph follow map, host-web seeding), each O(strips x reach), bounded by
+  #1243's caps. Computing it once would thread a new field through `CompiledSession`
+  (`crates/session/src/compile.rs`, not an authorized path) or across three crate boundaries; the
+  verdict asked not to restructure it in this slice.
+- **Tests and test value.**
+  - `host-web` `tests::a_both_lane_unmute_keeps_a_one_lane_vca_mute` (the verdict's P1, each lane
+    in turn): red if a `Both` kind 4 stages one record from the first covered lane's effective
+    mute. Mutation: the attempt-1 arm restored -> RED (`emitted` mirror; with that assertion
+    removed, the render differs at block 1 sample 128).
+  - `host-web` `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` (the
+    verdict's P2: random VCA forests over #1224's follow session, eight random batches of solo
+    toggles and kind 4 edits on every lane selector at smoothing 0, against a VCA-free host booted
+    with the test's own effective faders; asserts the seeds reach a both-lane un-mute of a one-lane
+    VCA mute and an un-mute of a VCA-muted submix): red if a `Both` kind 4 stages one lane's value
+    for both, or host-web seeds a strip's VCA mute other than from the effective faders.
+    Mutations: the attempt-1 arm restored -> RED; submixes seeded `vca_mute: [false; 2]` (M2) ->
+    RED (seed 5). Committed at 48 seeds (about 1.3 s in debug); run once at 1,500 seeds as
+    evidence: green (43 s in debug).
+- **Deviation.** `hosts/host-web/MUTATIONS.md` (outside the authorized paths) gains the three
+  mutation rows above, as the repo's mutation ledger for host-web tests.
+- **Gates** (on this commit's tree): `cargo test -p host-web -p host-core` with test support (host-web
+  lib 169 passed, 1 ignored); the workspace `cargo test` command of gate 10 (1,267 passed, 0 failed,
+  9 ignored, exit 0); `cargo fmt --all -- --check`; clippy `-D warnings`; `cargo doc -D warnings`;
+  the session, builtins, graph, host-core, realtime and workspace policy checks and self-tests;
+  `check-cross-targets.sh` PASS; fresh `build-web-audioworklet.sh --named-twin B A`,
+  `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts A` (no re-pin),
+  `test-web-audioworklet.sh A` and `check-sdk-headless.sh A` (357 pass, 0 fail): all exit 0.
+  Gate 8 was not re-run: a session without VCAs stages exactly the record attempt 1 staged.
+  `run-aarch64-tests.sh debug`: at batch push.
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)

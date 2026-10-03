@@ -13156,3 +13156,281 @@ fn a_live_send_edit_keeps_a_vca_muted_column_zeroed() {
         "the mix is audible"
     );
 }
+
+/// Issue #1242 attempt 2 (verdict MAJOR-1). VCA `fx` mutes one lane of `drums`; a kind 4 un-mute
+/// addressed to both lanes (`channel` 2) leaves the VCA-muted lane muted and the other open, so
+/// the strip, its following send `drums-verb` and the solo state's mirrors all stay where they
+/// were: bit-identical to a host that received nothing (the member's own mute was already
+/// `false`). Each lane mute is taken in turn.
+///
+/// Test value: red if a `Both` kind 4 stages one record from the first covered lane's effective
+/// mute, which re-opens a VCA-muted right lane, or silences an un-muted right lane while its
+/// follow send stays open.
+#[test]
+fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
+    for vca_mutes in [[true, false], [false, true]] {
+        let mut live = vca_follow_host(&[], vca_mutes, 0.0);
+        let mut untouched = vca_follow_host(&[], vca_mutes, 0.0);
+        follow_lockstep(
+            &mut [&mut live, &mut untouched],
+            &SOLO_FOLLOW_TRACKS,
+            0,
+            1,
+            false,
+            "warm-up",
+        );
+        stage_lane_mute(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, false, 0);
+        assert_eq!(
+            live.submit_commands(1),
+            RESULT_OK,
+            "un-mute drums, both lanes"
+        );
+        let solo = &live.ready.as_ref().expect("ready").solo;
+        let drums = SOLO_FOLLOW_DRUMS as usize;
+        for (lane, &vca_muted) in vca_mutes.iter().enumerate() {
+            assert_eq!(solo.effective_mute(drums, lane), vca_muted, "lane {lane}");
+            assert_eq!(solo.emitted_mute(drums, lane), vca_muted, "lane {lane}");
+        }
+        assert_eq!(
+            follow_lanes(&live),
+            [[false; 2], vca_mutes],
+            "vca {vca_mutes:?}: follow mirror"
+        );
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut untouched],
+                &SOLO_FOLLOW_TRACKS,
+                1,
+                3,
+                true,
+                &format!("vca {vca_mutes:?}: both-lane un-mute vs untouched"),
+            ),
+            "audible"
+        );
+    }
+}
+
+/// The top-down reach of `strip` in `vcas` (every VCA whose membership closure holds it), sorted by
+/// VCA ID: the randomized browser gate's own reference, independent of `SessionModel::vca_reach`.
+fn vca_reference_reach(vcas: &[session::Vca], strip: &str) -> Vec<usize> {
+    fn below<'a>(
+        vcas: &'a [session::Vca],
+        index: usize,
+        into: &mut std::collections::BTreeSet<&'a str>,
+    ) {
+        for member in &vcas[index].members {
+            if into.insert(member.as_str())
+                && let Some(nested) = vcas.iter().position(|vca| vca.id == *member)
+            {
+                below(vcas, nested, into);
+            }
+        }
+    }
+    let mut reach: Vec<usize> = (0..vcas.len())
+        .filter(|index| {
+            let mut closure = std::collections::BTreeSet::new();
+            below(vcas, *index, &mut closure);
+            closure.contains(strip)
+        })
+        .collect();
+    reach.sort_by(|left, right| vcas[*left].id.cmp(&vcas[*right].id));
+    reach
+}
+
+/// Seeds of the randomized browser VCA gate. Attempt 2 ran 1,500 seeds as evidence; this count
+/// keeps the debug suite near a second.
+const VCA_BROWSER_SEEDS: u64 = 48;
+
+/// Issue #1242 attempt 2 (verdict MAJOR-1 and MINOR-1), a randomized browser differential. Random
+/// VCA forests (one to four VCAs, nested, offsets across the domain, drawn lane mutes) over
+/// #1224's follow session, whose own faders and mutes are drawn too; then eight random batches of
+/// solo toggles and kind 4 edits on any lane selector, all at smoothing 0. The VCA host renders,
+/// every block, bit-identically to a host booted with no VCA and every strip's fader written as
+/// its effective value (the test's own top-down reach and `f64` sum), which receives the same
+/// solos and, for each kind 4, the per-lane equivalent `on || vca_mute[lane]`.
+///
+/// Test value: red if a `Both` kind 4 on a one-lane VCA mute stages one lane's value for both, or
+/// if host-web seeds a strip's VCA mute (a submix's included) other than from the effective
+/// faders, so a later un-mute of a VCA-muted bus reopens it.
+#[test]
+fn a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute() {
+    fn chance(draw: &mut SendDraw, numerator: u64, denominator: u64) -> bool {
+        draw.below(denominator) < numerator
+    }
+    let names = ["bass", "drums", "vocal", "room", "verb"];
+    let (mut split_unmutes, mut submix_unmutes) = (0_u32, 0_u32);
+    for seed in 1..=VCA_BROWSER_SEEDS {
+        let mut draw = SendDraw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let document = follow_document(
+            &SOLO_FOLLOW_TRACKS,
+            &["verb", "room"],
+            &SOLO_FOLLOW_ROUTES,
+            &[],
+            None,
+        );
+        let mut model = parse_session_json(&document).expect("#1224 session parses");
+        let faders = model
+            .tracks
+            .iter_mut()
+            .map(|track| &mut track.fader)
+            .chain(model.submixes.iter_mut().map(|submix| &mut submix.fader));
+        for fader in faders {
+            fader.left_db = draw.uniform(-12.0, 6.0);
+            fader.right_db = draw.uniform(-12.0, 6.0);
+            fader.left_mute = chance(&mut draw, 1, 6);
+            fader.right_mute = chance(&mut draw, 1, 6);
+        }
+        let count = 1 + draw.below(4) as usize;
+        let levels: Vec<u64> = (0..count).map(|_| draw.below(3)).collect();
+        let vca_names: Vec<String> = (0..count).map(|i| format!("v{}", (i * 7) % 11)).collect();
+        model.vcas = (0..count)
+            .map(|i| {
+                let candidates = names.iter().map(|name| (*name).to_owned()).chain(
+                    (0..count)
+                        .filter(|other| levels[*other] > levels[i])
+                        .map(|other| vca_names[other].clone()),
+                );
+                let members: Vec<session::StableId> = candidates
+                    .filter(|_| chance(&mut draw, 1, 2))
+                    .map(|member| strip_id(&member))
+                    .collect();
+                let mut offset = || {
+                    if chance(&mut draw, 1, 4) {
+                        draw.uniform(-144.0, 24.0)
+                    } else {
+                        draw.uniform(-12.0, 12.0)
+                    }
+                };
+                let (left_db, right_db) = (offset(), offset());
+                session::Vca {
+                    id: strip_id(&vca_names[i]),
+                    fader: session::DualMonoFader {
+                        left_db,
+                        right_db,
+                        left_mute: chance(&mut draw, 1, 3),
+                        right_mute: chance(&mut draw, 1, 3),
+                    },
+                    members,
+                }
+            })
+            .collect();
+        // Strip order is the canonical one: tracks, then submixes, each sorted.
+        let canonical = parse_session_json(&canonical_session_json(&model).expect("canonical"))
+            .expect("canonical session parses");
+        let strip_ids: Vec<String> = canonical
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().to_owned())
+            .chain(canonical.submixes.iter().map(|s| s.id.as_str().to_owned()))
+            .collect();
+        let mut plain = canonical.clone();
+        plain.vcas.clear();
+        let mut vca_mute = Vec::new();
+        let faders = plain
+            .tracks
+            .iter_mut()
+            .map(|track| &mut track.fader)
+            .chain(plain.submixes.iter_mut().map(|submix| &mut submix.fader));
+        for (fader, strip) in faders.zip(&strip_ids) {
+            let reach = vca_reference_reach(&canonical.vcas, strip);
+            let lane = |l: usize| -> (f32, bool) {
+                let own = [fader.left_db, fader.right_db][l];
+                if reach.is_empty() {
+                    return (own, false);
+                }
+                let mut sum = f64::from(own);
+                let mut muted = false;
+                for index in &reach {
+                    let vca = &canonical.vcas[*index].fader;
+                    sum += f64::from([vca.left_db, vca.right_db][l]);
+                    muted |= [vca.left_mute, vca.right_mute][l];
+                }
+                (sum.clamp(-144.0, 24.0) as f32, muted)
+            };
+            let (left, right) = (lane(0), lane(1));
+            fader.left_db = left.0;
+            fader.right_db = right.0;
+            fader.left_mute |= left.1;
+            fader.right_mute |= right.1;
+            vca_mute.push([left.1, right.1]);
+        }
+        let mut live = strip_boot(
+            &canonical_session_json(&canonical).expect("canonical"),
+            strip_options(64, 0, 0),
+        );
+        let mut reference = strip_boot(
+            &canonical_session_json(&plain).expect("canonical"),
+            strip_options(64, 0, 0),
+        );
+        follow_lockstep(
+            &mut [&mut live, &mut reference],
+            &SOLO_FOLLOW_TRACKS,
+            0,
+            1,
+            true,
+            &format!("seed {seed}: boot"),
+        );
+        let mut log = Vec::new();
+        for block in 1..=8 {
+            let (mut a, mut b) = (0_usize, 0_usize);
+            for _ in 0..=draw.below(3) {
+                if chance(&mut draw, 1, 2) {
+                    let track = draw.below(3) as u32;
+                    let on = chance(&mut draw, 1, 2);
+                    stage_solo(&mut live, a, track, on, 0);
+                    stage_solo(&mut reference, b, track, on, 0);
+                    (a, b) = (a + 1, b + 1);
+                    log.push(format!("solo {track} {on}"));
+                    continue;
+                }
+                let strip = draw.below(5) as usize;
+                let channel = draw.below(3) as u8;
+                let on = chance(&mut draw, 1, 2);
+                stage_lane_mute(&mut live, a, strip as u32, channel, on, 0);
+                a += 1;
+                let want = |lane: usize| on || vca_mute[strip][lane];
+                if !on && vca_mute[strip] != [false; 2] {
+                    split_unmutes += u32::from(channel == 2 && want(0) != want(1));
+                    submix_unmutes += u32::from(strip >= 3);
+                }
+                let lanes: &[(u8, bool)] = match channel {
+                    0 => &[(0, want(0))],
+                    1 => &[(1, want(1))],
+                    _ if want(0) == want(1) => &[(2, want(0))],
+                    _ => &[(0, want(0)), (1, want(1))],
+                };
+                for (lane, value) in lanes {
+                    stage_lane_mute(&mut reference, b, strip as u32, *lane, *value, 0);
+                    b += 1;
+                }
+                log.push(format!(
+                    "mute strip {strip} channel {channel} {on} (vca {:?})",
+                    vca_mute[strip]
+                ));
+            }
+            assert_eq!(
+                live.submit_commands(a as u32),
+                RESULT_OK,
+                "seed {seed}: live"
+            );
+            assert_eq!(
+                reference.submit_commands(b as u32),
+                RESULT_OK,
+                "seed {seed}: reference"
+            );
+            follow_lockstep(
+                &mut [&mut live, &mut reference],
+                &SOLO_FOLLOW_TRACKS,
+                block,
+                1,
+                true,
+                &format!("seed {seed}: after {log:?}"),
+            );
+        }
+    }
+    assert!(
+        split_unmutes > 0 && submix_unmutes > 0,
+        "the seeds reach a both-lane un-mute of a one-lane VCA mute ({split_unmutes}) and an \
+         un-mute of a VCA-muted submix ({submix_unmutes})"
+    );
+}

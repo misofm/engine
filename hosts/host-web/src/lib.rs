@@ -4571,7 +4571,8 @@ fn admit_commands_staged(
             // A mute command carries the user's *intent*; what reaches the queue is the composed
             // effective mute. With no solo engaged the two are the same value and this stages
             // byte-for-byte what it staged before solo existed. Every lane a selector covers
-            // shares one strip-scoped solo term, so one record still carries the whole command.
+            // shares one strip-scoped solo term; only a one-lane VCA mute splits a `Both` command
+            // into two per-lane records (below).
             //
             // Issue #1213 D3 (VERIFY-2 M4): the effective value is read from the solo state's one
             // composition, which knows a submix is solo-safe; it is never spelled again here. An
@@ -4595,18 +4596,46 @@ fn admit_commands_staged(
                 if !ready.solo.set_user_mute(track, lanes, muted) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
-                // The first lane the selector covers: after `set_user_mute` every covered lane
-                // holds `muted`, and the solo term is per strip, so the covered lanes agree.
-                let lane = usize::from(matches!(lanes, BuiltinLaneSelector::Right));
-                let effective = ready.solo.effective_mute(track, lane);
-                ready.solo.record_emitted(track, lanes, effective);
+                // After `set_user_mute` every covered lane holds `muted` and the solo term is per
+                // strip, but a VCA mute (issue #1242 D3) is per lane: a `Both` command on a strip
+                // whose VCA mutes one lane composes to two different lane values. Then it stages
+                // one `Left` and one `Right` record, each with its own lane's effective mute, and
+                // mirrors each lane separately. When the covered lanes agree -- always, for a
+                // session without VCAs -- it stages the one record it staged before.
                 mute_seen = true;
-                staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                    lanes,
-                    muted: effective,
-                    smoothing_samples,
-                });
-                (strip_count + track, 1)
+                let left = ready.solo.effective_mute(track, 0);
+                let right = ready.solo.effective_mute(track, 1);
+                let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
+                    for (position, (lane, muted)) in [
+                        (BuiltinLaneSelector::Left, left),
+                        (BuiltinLaneSelector::Right, right),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        ready.solo.record_emitted(track, lane, muted);
+                        staged[position] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
+                            lanes: lane,
+                            muted,
+                            smoothing_samples,
+                        });
+                    }
+                    2
+                } else {
+                    let effective = if matches!(lanes, BuiltinLaneSelector::Right) {
+                        right
+                    } else {
+                        left
+                    };
+                    ready.solo.record_emitted(track, lanes, effective);
+                    staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
+                        lanes,
+                        muted: effective,
+                        smoothing_samples,
+                    });
+                    1
+                };
+                (strip_count + track, produced)
             }
             // Solo lowers to nothing here. It moves one live-control bit; the records that bit
             // composes to are the coalescing pass's business, because a batch of alternating
