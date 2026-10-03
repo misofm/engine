@@ -112,9 +112,13 @@ describe("issue 322 -- shared semantic live controls", () => {
         "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
         "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
       ];
+      // Issue #1222 added the three send kinds to the wire; the SDK builds them by name from
+      // issue #1223, which moves them into `kindNames`. Until then they are named here, so any
+      // other kind without a semantic method still turns this red.
+      const kindsAwaitingSdk = ["routeGainDb", "routeMute", "routeMatrix"];
       assert.deepEqual(
         [...ABI_LAYOUT.constants.wireCommandKinds.map((row) => row.name)].sort(),
-        [...kindNames].sort(),
+        [...kindNames, ...kindsAwaitingSdk].sort(),
         "the semantic methods cover the generated command vocabulary exactly",
       );
 

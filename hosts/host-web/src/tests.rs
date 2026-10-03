@@ -10432,3 +10432,862 @@ fn bus_edits_and_a_bus_observation_admit_and_render_without_allocating() {
     assert_eq!(allocations, 0, "admission/render allocated");
     assert_eq!(deallocations, 0, "admission/render freed");
 }
+
+// Issue #1222: browser live send commands. A send is addressed by its live-route index: its
+// position among the routes into submixes, in canonical route-ID order.
+
+/// The live sends of [`send_document`], in live-route (route-ID) order:
+/// `(route id, source strip id, the source is a submix, destination bus)`. Seven sends against
+/// six strips, so a valid live-route index reaches past the strip count.
+const SEND_ROUTES: [(&str, &str, bool, &str); 7] = [
+    ("send-a", "t0", false, "bx"),
+    ("send-b", "t0", false, "by"),
+    ("send-c", "t1", false, "bx"),
+    ("send-d", "t1", false, "by"),
+    ("send-e", "t2", false, "by"),
+    ("send-f", "t2", false, "bx"),
+    ("send-g", "bx", true, "by"),
+];
+/// The order [`send_document`] declares the sends in: not route-ID order.
+const SEND_DECLARATION_ORDER: [usize; 7] = [6, 2, 0, 5, 3, 1, 4];
+/// Strips of [`send_document`]: four tracks, then `bx` and `by`.
+const SEND_STRIPS: u32 = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SendValues {
+    gain_db: f32,
+    matrix: [f32; 4],
+    mute: bool,
+}
+
+/// The session's send values: every matrix asymmetric (`ll != rr`, `lr != rl`) and nonzero.
+const SEND_SEEDS: [SendValues; 7] = [
+    SendValues {
+        gain_db: -3.0,
+        matrix: [0.8, -0.3, 0.25, 0.6],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 2.0,
+        matrix: [-0.5, 0.7, 0.9, -0.2],
+        mute: false,
+    },
+    SendValues {
+        gain_db: -6.0,
+        matrix: [0.35, 0.15, -0.65, 0.45],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 0.0,
+        matrix: [0.6, 0.4, -0.3, 0.9],
+        mute: false,
+    },
+    SendValues {
+        gain_db: -1.5,
+        matrix: [-0.7, -0.2, 0.55, 0.3],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 1.0,
+        matrix: [0.45, -0.85, 0.1, 0.75],
+        mute: true,
+    },
+    SendValues {
+        gain_db: -4.5,
+        matrix: [0.5, 0.2, -0.4, 0.95],
+        mute: false,
+    },
+];
+
+/// Four tracks `t0..t3`, each reading its own source, with a unity strip; two unity submixes `bx`
+/// and `by` (no console slot, no insert, HPF and LPF off); the [`SEND_ROUTES`] sends at `values`;
+/// and every track and bus at unity to the output. `t3` sends nothing.
+fn send_document(values: &[SendValues; 7]) -> String {
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    for index in 0..4 {
+        strip_add_track(&mut model, &source, &track, &format!("t{index}"));
+    }
+    model.submixes = vec![
+        session::Submix::unity(strip_id("bx"), &model.console),
+        session::Submix::unity(strip_id("by"), &model.console),
+    ];
+    for live in SEND_DECLARATION_ORDER {
+        let (id, source, submix, bus) = SEND_ROUTES[live];
+        let mut send = strip_route(
+            &route,
+            id,
+            strip_post_pan(source, submix),
+            strip_into(bus),
+            values[live].matrix,
+        );
+        send.gain_db = values[live].gain_db;
+        send.mute = values[live].mute;
+        model.routes.push(send);
+    }
+    for strip in ["t0", "t1", "t2", "t3", "bx", "by"] {
+        model.routes.push(strip_route(
+            &route,
+            &format!("{strip}-main"),
+            strip_post_pan(strip, strip.starts_with('b')),
+            output.clone(),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    canonical_session_json(&model).expect("send session canonicalizes")
+}
+
+fn send_host(values: &[SendValues; 7], queue_records: u64) -> AudioWorkletEngineHost {
+    strip_boot(&send_document(values), strip_options(queue_records, 0, 0))
+}
+
+/// Feed every track its own two-lane signal for `block` and render it.
+fn send_feed(host: &mut AudioWorkletEngineHost, block: u64) {
+    for feed in 0..4_u64 {
+        submit_strip_source(host, &format!("t{feed}"), block, &strip_planes(feed, block));
+    }
+}
+
+fn send_render(host: &mut AudioWorkletEngineHost, block: u64) -> Vec<f32> {
+    send_feed(host, block);
+    assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+    host.output_pcm().expect("output").to_vec()
+}
+
+/// Stage one send record at wire index `index`.
+fn stage_send(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    kind: u32,
+    route: u32,
+    smoothing: u32,
+    values: [f32; 4],
+) {
+    stage_command(host, index, kind, 255, 255, route, 0, 0, smoothing, values);
+}
+
+/// The host's mirror of every live send, as `SendValues`.
+fn send_mirror(host: &AudioWorkletEngineHost) -> Vec<SendValues> {
+    let routes = &host.ready.as_ref().expect("ready").routes;
+    (0..routes.len())
+        .map(|route| {
+            let entry = routes.get(route).expect("live route");
+            SendValues {
+                gain_db: entry.gain_db,
+                matrix: entry.matrix,
+                mute: entry.mute,
+            }
+        })
+        .collect()
+}
+
+/// Every route queue's free room.
+fn send_queue_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+    host.ready
+        .as_ref()
+        .expect("ready")
+        .route_controls
+        .iter()
+        .map(RouteControlProducer::free)
+        .collect()
+}
+
+/// splitmix64, for the randomized gate.
+struct SendDraw(u64);
+
+impl SendDraw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    /// Uniform in `[low, high)`.
+    fn uniform(&mut self, low: f32, high: f32) -> f32 {
+        let unit = (self.next() >> 40) as f32 / (1_u64 << 24) as f32;
+        low + (high - low) * unit
+    }
+
+    /// A nonzero coefficient in `±[0.1, 1)`.
+    fn coefficient(&mut self) -> f32 {
+        let magnitude = self.uniform(0.1, 1.0);
+        if self.below(2) == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+}
+
+/// Issue #1222 gate 1: kinds 13, 14 and 15 sent at random live routes settle, bit for bit, on the
+/// output of a host booted from a session holding the edited values.
+///
+/// Every track reads its own source with distinct lanes, the sends reach two different buses
+/// (and one bus feeds the other), every matrix is asymmetric, and the sends are declared out of
+/// route-ID order. Live-route index 6 is past the strip count.
+///
+/// Test value: red if a kind's spelling or the index addresses the wrong send (by declaration
+/// order, by overall route index or by strip), the matrix words are read in another order, or a
+/// record is built from a stale mirror field. No browser path has driven a send before.
+#[test]
+fn a_live_send_edit_lands_on_a_fresh_plans_bits() {
+    let mut draw = SendDraw(0x1222);
+    for trial in 0..4 {
+        for smoothing in [0_u32, 480] {
+            let mut edits: Vec<(u32, usize, [f32; 4])> = Vec::new();
+            let mut kinds = vec![
+                COMMAND_ROUTE_GAIN_DB,
+                COMMAND_ROUTE_MUTE,
+                COMMAND_ROUTE_MATRIX,
+            ];
+            for _ in 0..draw.below(4) {
+                kinds.push(COMMAND_ROUTE_GAIN_DB + draw.below(3) as u32);
+            }
+            for _ in 0..kinds.len() {
+                let pick = draw.below(kinds.len() as u64) as usize;
+                let last = kinds.len() - 1;
+                kinds.swap(pick, last);
+            }
+            let mut target = SEND_SEEDS;
+            for kind in kinds {
+                let route = draw.below(SEND_ROUTES.len() as u64) as usize;
+                let values = match kind {
+                    COMMAND_ROUTE_GAIN_DB => {
+                        let gain_db = draw.uniform(-24.0, 6.0);
+                        target[route].gain_db = gain_db;
+                        [gain_db, 0.0, 0.0, 0.0]
+                    }
+                    COMMAND_ROUTE_MUTE => {
+                        let mute = draw.below(2) == 1;
+                        target[route].mute = mute;
+                        [f32::from(u8::from(mute)), 0.0, 0.0, 0.0]
+                    }
+                    _ => {
+                        let matrix = [
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                        ];
+                        target[route].matrix = matrix;
+                        matrix
+                    }
+                };
+                edits.push((kind, route, values));
+            }
+            let what = format!("trial {trial}, smoothing {smoothing}, edits {edits:?}");
+            let mut live = send_host(&SEND_SEEDS, 16);
+            let mut fresh = send_host(&target, 16);
+            for block in 0..2 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            // Two batches, one block apart, so a send can be edited across batches too.
+            let split = edits.len() / 2;
+            for (batch, block) in [(&edits[..split], 2_u64), (&edits[split..], 3)] {
+                for (index, (kind, route, values)) in batch.iter().enumerate() {
+                    stage_send(&mut live, index, *kind, *route as u32, smoothing, *values);
+                }
+                if !batch.is_empty() {
+                    assert_eq!(
+                        live.submit_commands(batch.len() as u32),
+                        RESULT_OK,
+                        "{what}: batch at block {block}"
+                    );
+                }
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            assert_eq!(send_mirror(&live), target, "{what}: the mirror");
+            // 480 samples settle within four 128-frame blocks of the last batch.
+            for block in 4..8 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            let mut audible = false;
+            for block in 8..12 {
+                let left = send_render(&mut live, block);
+                let right = send_render(&mut fresh, block);
+                for (sample, (x, y)) in left.iter().zip(&right).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{what}: block {block} sample {sample}: live {x} vs fresh {y}"
+                    );
+                }
+                audible |= left.iter().any(|sample| *sample != 0.0);
+            }
+            assert!(audible, "{what}: the output carries signal");
+        }
+    }
+}
+
+/// Require a refused submission's typed report, an empty staging count, untouched send and fader
+/// queues and an unchanged, closed send mirror.
+fn assert_send_refusal(
+    host: &AudioWorkletEngineHost,
+    reason: u32,
+    rejected_index: u32,
+    room: &[usize],
+    fader_room: &[usize],
+    what: &str,
+) {
+    let report = *host.command_report();
+    assert_eq!(report.reason, reason, "{what}: reason");
+    assert_eq!(report.rejected_index, rejected_index, "{what}: wire index");
+    assert_eq!(report.admitted, 0, "{what}: admitted");
+    assert_eq!(send_queue_room(host), room, "{what}: send queues");
+    let ready = host.ready.as_ref().expect("ready");
+    let faders: Vec<usize> = ready
+        .controls
+        .iter()
+        .map(|controls| controls.fader.available_capacity())
+        .collect();
+    assert_eq!(faders, fader_room, "{what}: fader queues");
+    assert!(!ready.routes.transaction_open(), "{what}: mirror closed");
+    assert_eq!(send_mirror(host), SEND_SEEDS, "{what}: mirror unchanged");
+}
+
+/// Issue #1222 gate 2: a send batch is all or nothing.
+///
+/// * A valid `routeGainDb` and a `routeMatrix` whose folded coefficient overflows (finite on the
+///   wire, so decode admits it, and refused by the route's own domain rule) stage nothing and
+///   refuse `DOMAIN` at the second record.
+/// * A batch that overfills one send queue is typed backpressure at its first record on that
+///   queue, behind a valid fader record, and pushes nothing.
+/// * A valid send record and a valid fader record, with that fader queue already full, push
+///   neither.
+///
+/// In every case the send mirror is unchanged.
+///
+/// Test value: red if admission pushes a send record, or commits the send mirror, before every
+/// record is validated and every queue -- send queues included -- has room.
+#[test]
+fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
+    const DEPTH: u64 = 4;
+    let depth = DEPTH as usize;
+    let fader_room = vec![depth; SEND_STRIPS as usize];
+    let room = vec![depth; SEND_ROUTES.len()];
+
+    // `send-b` is at +2 dB: `ll = 3e38` folds past `f32::MAX`.
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        0,
+        0,
+        [-9.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(
+        &mut host,
+        1,
+        COMMAND_ROUTE_MATRIX,
+        1,
+        0,
+        [3.0e38, 0.1, 0.2, 0.3],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_DOMAIN,
+        1,
+        &room,
+        &fader_room,
+        "domain",
+    );
+
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    for index in 1..=depth + 1 {
+        stage_send(
+            &mut host,
+            index,
+            COMMAND_ROUTE_GAIN_DB,
+            2,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(host.submit_commands(DEPTH as u32 + 2), RESULT_BACKPRESSURE);
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_BACKPRESSURE,
+        1,
+        &room,
+        &fader_room,
+        "send full",
+    );
+
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    for index in 0..depth {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            3,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(DEPTH as u32),
+        RESULT_OK,
+        "fill t3's fader queue"
+    );
+    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 4, 0, [1.0, 0.0, 0.0, 0.0]);
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        3,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE);
+    let mut full = fader_room.clone();
+    full[3] = 0;
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_BACKPRESSURE,
+        1,
+        &room,
+        &full,
+        "fader full",
+    );
+}
+
+/// Issue #1222 gate 3: the index word is checked against the count its kind addresses. A strip
+/// kind at or past the strip count is `UNKNOWN_TRACK`; a send kind at or past the live-route
+/// count is `unknownRoute`, below the strip count too (a session with fewer sends than strips);
+/// and a valid send index past the strip count (a session with more) is admitted.
+///
+/// Test value: red if the bounds check runs before kind dispatch (send index 6 is refused as an
+/// unknown track, send index 5 passes) or against the wrong count, or if a send reuses the track
+/// reason.
+#[test]
+fn every_kind_is_bounded_by_the_count_it_addresses() {
+    let room = vec![16_usize; SEND_ROUTES.len()];
+    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    for strip in [SEND_STRIPS, SEND_STRIPS + 1, u32::MAX] {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            strip,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "strip {strip}"
+        );
+        assert_send_refusal(
+            &host,
+            COMMAND_REASON_UNKNOWN_TRACK,
+            0,
+            &room,
+            &fader_room,
+            "strip",
+        );
+    }
+    for kind in [
+        COMMAND_ROUTE_GAIN_DB,
+        COMMAND_ROUTE_MUTE,
+        COMMAND_ROUTE_MATRIX,
+    ] {
+        for route in [7_u32, 8, u32::MAX] {
+            stage_send(
+                &mut host,
+                0,
+                COMMAND_ROUTE_GAIN_DB,
+                0,
+                0,
+                [-2.0, 0.0, 0.0, 0.0],
+            );
+            stage_send(&mut host, 1, kind, route, 0, [1.0, 0.0, 0.0, 0.0]);
+            assert_eq!(
+                host.submit_commands(2),
+                RESULT_INVALID_ARGUMENT,
+                "send {route}"
+            );
+            assert_send_refusal(
+                &host,
+                COMMAND_REASON_UNKNOWN_ROUTE,
+                1,
+                &room,
+                &fader_room,
+                "send past the live routes",
+            );
+        }
+    }
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        6,
+        0,
+        [-2.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_OK,
+        "send 6, past the strip count"
+    );
+    let mut room = room;
+    room[6] -= 1;
+    assert_eq!(send_queue_room(&host), room, "send 6's queue holds it");
+
+    // Fewer sends than strips: three sends, four strips. Index 3 and the bus's strip index are
+    // below the strip count and still not sends.
+    let (bus, _) = strip_pair_documents(None);
+    let mut host = strip_boot(&bus, strip_options(16, 0, 0));
+    assert_eq!(host.ready.as_ref().expect("ready").route_controls.len(), 3);
+    for route in [3_u32, STRIP_BUS] {
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_MUTE,
+            route,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "send {route}"
+        );
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_UNKNOWN_ROUTE, "send {route}");
+        assert_eq!(report.rejected_index, 0);
+    }
+    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 2, 0, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "the last send");
+}
+
+/// One malformed send record: `(what, kind, rack, channel, effect, parameter, values)`.
+type SendShape = (&'static str, u32, u8, u8, u32, u32, [f32; 4]);
+
+/// Issue #1222 D1: a send record's fixed shape. Every field a send does not use must be its
+/// not-applicable value, and `routeMute` takes exactly `0` or `1`.
+///
+/// Test value: red if a send kind accepts a lane, a rack, an effect or parameter word, or a value
+/// past its own, or takes a non-boolean mute as a mute.
+#[test]
+fn send_records_are_shape_checked() {
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    let room = vec![16_usize; SEND_ROUTES.len()];
+    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let gain = [-2.0, 0.0, 0.0, 0.0];
+    let malformed: [SendShape; 7] = [
+        ("a lane", COMMAND_ROUTE_GAIN_DB, 255, 2, 0, 0, gain),
+        (
+            "a rack",
+            COMMAND_ROUTE_GAIN_DB,
+            RACK_INSERTS,
+            255,
+            0,
+            0,
+            gain,
+        ),
+        (
+            "an effect",
+            COMMAND_ROUTE_MUTE,
+            255,
+            255,
+            1,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        ),
+        (
+            "a parameter",
+            COMMAND_ROUTE_MATRIX,
+            255,
+            255,
+            0,
+            1,
+            [0.5; 4],
+        ),
+        (
+            "a second gain word",
+            COMMAND_ROUTE_GAIN_DB,
+            255,
+            255,
+            0,
+            0,
+            [-2.0, 0.0, 0.0, 1.0],
+        ),
+        (
+            "a second mute word",
+            COMMAND_ROUTE_MUTE,
+            255,
+            255,
+            0,
+            0,
+            [1.0, 1.0, 0.0, 0.0],
+        ),
+        (
+            "a lane on a matrix",
+            COMMAND_ROUTE_MATRIX,
+            255,
+            0,
+            0,
+            0,
+            [0.5; 4],
+        ),
+    ];
+    for (what, kind, rack, channel, effect, parameter, values) in malformed {
+        stage_command(
+            &mut host, 0, kind, rack, channel, 1, effect, parameter, 0, values,
+        );
+        assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "{what}");
+        assert_send_refusal(&host, COMMAND_REASON_MALFORMED, 0, &room, &fader_room, what);
+    }
+    for value in [0.5_f32, -1.0, 2.0] {
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_MUTE,
+            1,
+            0,
+            [value, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "mute {value}"
+        );
+        assert_send_refusal(
+            &host,
+            COMMAND_REASON_DOMAIN,
+            0,
+            &room,
+            &fader_room,
+            "mute value",
+        );
+    }
+    stage_send(&mut host, 0, COMMAND_ROUTE_GAIN_DB, 1, (1 << 22) + 1, gain);
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_INVALID_ARGUMENT,
+        "ramp past the bound"
+    );
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_DOMAIN,
+        0,
+        &room,
+        &fader_room,
+        "ramp length",
+    );
+}
+
+/// Issue #1222 gate 7: admitting send records of all three kinds -- several on one send -- and
+/// rendering them allocates and frees nothing, after one warm-up round.
+///
+/// Test value: red if admitting a send record or committing the send mirror allocates on the
+/// render-call path.
+#[test]
+fn send_edits_admit_and_render_without_allocating() {
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    for block in 1..3_u64 {
+        let gain = if block == 1 { -8.0 } else { 1.0 };
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_GAIN_DB,
+            3,
+            480,
+            [gain, 0.0, 0.0, 0.0],
+        );
+        stage_send(
+            &mut host,
+            1,
+            COMMAND_ROUTE_MATRIX,
+            3,
+            480,
+            [0.3, -0.6, 0.2, 0.7],
+        );
+        stage_send(
+            &mut host,
+            2,
+            COMMAND_ROUTE_MUTE,
+            6,
+            480,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        stage_command(
+            &mut host,
+            3,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            4,
+            0,
+            0,
+            480,
+            [-3.0, 0.0, 0.0, 0.0],
+        );
+        send_feed(&mut host, block);
+        let ((admission, render), allocations, deallocations) =
+            crate::ffi::live_response_ffi_tests::measured(|| {
+                (host.submit_commands(4), host.render_next())
+            });
+        assert_eq!(
+            admission, RESULT_OK,
+            "block {block}: the send batch is admitted"
+        );
+        assert_eq!(render, RESULT_OK, "block {block}");
+        if block == 2 {
+            assert_eq!(allocations, 0, "admission/render allocated");
+            assert_eq!(deallocations, 0, "admission/render freed");
+        }
+    }
+}
+
+/// The route-lane bytes an independent host-core preparation of `document` charges at
+/// `queue_records`: `graph::route_control_resources` of the attached producers.
+fn send_route_resources(document: &str, queue_records: u64) -> host_core::RouteControlResources {
+    let parsed = parse_host_session(document).expect("send session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("send session compile");
+    let options = strip_options(queue_records, 0, 0);
+    let caps = prepare_caps(&compiled, options, options.source_ring_frames, u64::MAX);
+    let live_controls = live_control_request(options, STRIP_QUANTUM).expect("live-control request");
+    let (engine, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &caps,
+        &live_controls,
+        &[],
+    )
+    .expect("independent send preparation");
+    engine.report.route_control_resources
+}
+
+/// Issue #1222, from the #1221 verdict's MINOR-1: the browser's exact retained budget charges the
+/// route lanes it attaches. Between two queue depths of one session, the host's retained bridge
+/// bytes move by exactly the lanes' charge, and the exact-retained budget refuses one byte below
+/// the total; a session without sends does not move at all.
+///
+/// Test value: red if the browser leaves the route lanes (queues, owners, producer table, IDs,
+/// activity table) out of its exact retained report, so a budget that cannot hold them admits.
+#[test]
+fn the_exact_retained_budget_charges_the_send_lanes() {
+    let document = send_document(&SEND_SEEDS);
+    let bridge = |document: &str, queue_records: u64| {
+        let host = strip_boot(document, strip_options(queue_records, 0, 0));
+        assert_eq!(
+            host.ready.as_ref().expect("ready").routes.len(),
+            if document.contains("send-a") {
+                SEND_ROUTES.len()
+            } else {
+                0
+            }
+        );
+        let resources = *host.resources();
+        (
+            resources.bridge_retained_bytes,
+            resources.bridge_metadata_bytes,
+            resources,
+        )
+    };
+    let shallow = send_route_resources(&document, 8);
+    let deep = send_route_resources(&document, 64);
+    assert_eq!(shallow.routes, SEND_ROUTES.len() as u64);
+    assert!(
+        deep.total_bytes > shallow.total_bytes,
+        "deeper queues cost more"
+    );
+    let (retained_8, metadata_8, _) = bridge(&document, 8);
+    let (retained_64, metadata_64, resources) = bridge(&document, 64);
+    assert_eq!(
+        retained_64 - retained_8,
+        deep.total_bytes - shallow.total_bytes
+    );
+    assert_eq!(
+        metadata_64 - metadata_8,
+        deep.total_bytes - shallow.total_bytes
+    );
+    assert!(resources.largest_bridge_allocation_bytes >= deep.largest_allocation_bytes);
+
+    let (_, track_only) = strip_pair_documents(None);
+    assert_eq!(
+        bridge(&track_only, 8).0,
+        bridge(&track_only, 64).0,
+        "no send, no lane"
+    );
+
+    let exact = exact_retained_report_total(&resources);
+    let admitted = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: exact,
+            ..strip_options(64, 0, 0)
+        },
+    );
+    assert!(admitted.is_ok(), "the exact retained total is admitted");
+    let refused = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: exact - 1,
+            ..strip_options(64, 0, 0)
+        },
+    )
+    .err()
+    .expect("one byte below the exact retained total refuses");
+    assert_eq!(refused.result(), RESULT_REFUSED_BUDGET);
+    assert!(
+        refused
+            .diagnostic()
+            .starts_with(b"host.budget.retained_exact\t"),
+        "the exact aggregate gate refuses: {}",
+        String::from_utf8_lossy(refused.diagnostic())
+    );
+}

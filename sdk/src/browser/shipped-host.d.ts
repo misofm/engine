@@ -17,9 +17,10 @@
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
 // every declared kind live, so the honest summary is now short: `MisoCommandKind.Pan`,
 // `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
-// `.PolarityInvert` and `.InputFilters` are all **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
+// `.PolarityInvert`, `.InputFilters`, `.RouteGainDb`, `.RouteMute` and `.RouteMatrix` are all
+// **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
 // (issue 143), on the observation plane rather than the render one -- they move the
-// `miso.observe.v1` subscription map, not anything rendered. All twelve are in the metadata JSON's
+// `miso.observe.v1` subscription map, not anything rendered. All fifteen are in the metadata JSON's
 // `commandKinds`, each with the `plane` it applies on.
 //
 // * `matrix_ll/lr/rl/rr`, `fader_db`, `mute` and -- since issue 210 phase 3 -- `trim_db` and
@@ -279,6 +280,19 @@ export const enum MisoCommandKind {
   PolarityInvert = 11,
   /// Retarget a builtin input HPF/LPF pair through one prepared target transaction.
   InputFilters = 12,
+  /// Retarget one live send's gain in decibels over `smoothingSamples`. Applied (issue 1222).
+  ///
+  /// `trackIndex` is the send's **live-route index**: its position among the routes into
+  /// submixes, in canonical route-ID order. `rack` and `channel` are `255`, `effectIndex` and
+  /// `parameterId` are `0`, `values[0]` is the gain and `values[1..]` are `0`. The gain and the
+  /// matrix share the prepared route's domain; a value it refuses is `Domain`.
+  RouteGainDb = 13,
+  /// Switch one live send on (`values[0]` exactly `0`) or off (exactly `1`) over
+  /// `smoothingSamples`. Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
+  RouteMute = 14,
+  /// Retarget one live send's 2x2 matrix over `smoothingSamples`: `values` are `ll, lr, rl, rr`.
+  /// Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
+  RouteMatrix = 15,
 }
 
 /// Frozen typed reasons a live-control submission was refused (issue 137 D1).
@@ -319,6 +333,9 @@ export const enum MisoCommandReason {
   ObservationUnbound = 11,
   /// The addressed strip is solo-safe: a submix is never soloed.
   NotSoloable = 12,
+  /// A send kind's `trackIndex` is not a live route of this plan: it is at or past the number of
+  /// routes into submixes.
+  UnknownRoute = 13,
 }
 
 /// One live-control command. `255` means "not applicable to this kind".
@@ -337,17 +354,20 @@ export interface MisoCommand {
   channel: number;
   /// Strip index: `i < tracks.length` is `sessionMap().tracks[i]`, and from there submix
   /// `sessionMap().submixes[i - tracks.length]` (issue 1213). `Solo` addresses tracks only; at a
-  /// submix it is refused `MisoCommandReason.NotSoloable`.
+  /// submix it is refused `MisoCommandReason.NotSoloable`. For `RouteGainDb`, `RouteMute` and
+  /// `RouteMatrix` it is a live-route index instead (issue 1222), refused
+  /// `MisoCommandReason.UnknownRoute` past the last live route.
   trackIndex: number;
   /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
   parameterId: number;
-  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb` and
-  /// `PolarityInvert`; the observation kinds read it as a window length in render blocks, and it
-  /// is ignored by the rest.
+  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb`,
+  /// `PolarityInvert` and the three route kinds; the observation kinds read it as a window length
+  /// in render blocks, and it is ignored by the rest.
   smoothingSamples: number;
-  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. `Mute`, `Solo` and
-  /// `PolarityInvert`: `[0|1, 0, 0, 0]` exactly. Everything else: `[value, 0, 0, 0]`.
+  /// `Pan`: `[left, right, 0, 0]`. `Matrix` and `RouteMatrix`: `[ll, lr, rl, rr]`. `Mute`,
+  /// `Solo`, `PolarityInvert` and `RouteMute`: `[0|1, 0, 0, 0]` exactly. Everything else:
+  /// `[value, 0, 0, 0]`.
   values: [number, number, number, number];
 }
 

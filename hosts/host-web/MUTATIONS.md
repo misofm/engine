@@ -129,10 +129,10 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | gate | mutation | observed red |
 |---|---|---|
 | `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 13;` after reason 12 (`NOT_SOLOABLE`, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 12`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 14;` after reason 13 (`UNKNOWN_ROUTE`, issue #1222; it was 13 after reason 12, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 13`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 12 to `13` (issue #1212; it renumbered reason 11 to `12` before reason 12 existed) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 13 to `14` (issue #1222; reason 12 to `13` under issue #1212, and reason 11 to `12` before that) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -388,3 +388,25 @@ and the mutation was reverted.
 | `tests::a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted` (#1213 gate 2, kind 4 lane; attempt 2 MINOR-2) | kind 4 reads `let lane = 0_usize` | the right-lane mute stages `muted: false`: the bus's right lane stays audible against the booted twin |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
 | `test-web-audioworklet.mjs` bus `observe()` binding (#1213, attempt 2 MAJOR-1) | the host reports `frameSlot: 0` or `Math.min(trackIndex, 1)` for a bus; or the mapping is read as a plain `trackGrDb` index | `frameSlot` is not `T`; the old-contract read is `undefined`, not `submixGrDb[0]` |
+
+## Issue #1222 — browser live send commands
+
+Each row was applied, its test run red, and the tree restored.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, the moved bounds check) | restore the generic `track >= strip_count` check ahead of kind dispatch for every kind | send 7 reports reason 2 (`unknownTrack`), not 13 |
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, reason 13) | refuse an out-of-range send with `COMMAND_REASON_UNKNOWN_TRACK` | the reason is 2, not 13 |
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, fewer sends than strips) | bound the send arm by the strip count and index `route_controls[track]` | send 6 of 7 (past 6 strips) is refused (result 1); on 3 sends and 4 strips, index 3 panics out of bounds |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix`) | build the record from `[ll, rl, lr, rr]` | trial 0: the live output's bits differ from the fresh plan's |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix` decode) | decode `values` as `[v0, v2, v1, v3]` | the mirror differs from the edited values |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, the send band) | push a send's record onto the next send's queue | trial 0: the output's bits differ |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, a stale mirror field) | `routeGainDb` stages its record but leaves the mirror's gain | the mirror keeps the seed gain |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the mirror committed before the room check) | `ready.routes.commit()` as each send record is staged | the domain refusal leaves the mirror at -9 dB |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the send band's room) | `queue_available` reports `u32::MAX` for every send queue | the overfilled send queue fails half-way: result 255, not backpressure |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, push before validation) | push each send record in pass one | the domain refusal leaves send 0's queue at 3 of 4 |
+| `tests::send_records_are_shape_checked` (D1) | drop the `effect_index != 0` rule | the record with an effect word is admitted (reason 0) |
+| `tests::send_edits_admit_and_render_without_allocating` (gate 7) | allocate an 8-byte `Vec` per staged send record | `admission/render allocated` (3) |
+| `tests::the_exact_retained_budget_charges_the_send_lanes` (#1221 verdict MINOR-1) | leave `route_control_resources.total_bytes` out of the bridge rows | the retained delta between depths 8 and 64 is 0, not the lanes' |
+| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 16;` after `COMMAND_ROUTE_MATRIX = 15` | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
+| `check-command-kind-vocabulary.py --self-test` (the JS set gains an undecoded kind) | the host JS set ends `…, 14, 16]` | `the host JS COMMAND_KINDS set disagrees with the Rust host constants` |

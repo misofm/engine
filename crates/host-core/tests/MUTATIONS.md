@@ -399,3 +399,15 @@ mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. 
 
 Gate 4's base behaviour was replayed by removing the attach call entirely: the test stays green
 (64 folds with `None` and with `Some(64)`), so the fallback did not apply.
+
+## Issue #1222 — `LiveRouteState`
+
+Unit tests in `crates/host-core/src/live_route_state.rs`. Each row was applied, run red and
+reverted.
+
+| row | mutation | observed red |
+|---|---|---|
+| 1222-H1 | seed `source_lane_muted` from the session's fader mutes, not the `effective_mute` it is handed | `construction_seeds_every_field_…`: live route 3 (`zz-send`) starts `[false, false]` |
+| 1222-H2 | resolve a submix source without the track offset | the same test: live route 2's `source_strip` is 1, not 4 |
+| 1222-H3 | take the shadow once, at construction, not per transaction | `a_rollback_restores_every_field_…`: rolled back to the seeds, not the committed values |
+| 1222-H4 | keep routes into the output in the mirror | both tests: the mirror has seven entries, not four |

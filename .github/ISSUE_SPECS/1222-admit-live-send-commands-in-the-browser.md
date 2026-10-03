@@ -273,6 +273,172 @@ current lines before editing.
 - The re-anchored mutation list, with each mutation's observed red result.
 - Any digest or artifact re-pin, with its reason.
 
+### Attempt 1 record (Terra)
+
+Anchors re-found by symbol on `1c5ce5d02` (#1221's head). `route_id()` is a method there, not a
+field.
+
+**Implementation.**
+
+- `crates/host-core/src/live_route_state.rs` (new, exported): `LiveRoute`, `LiveRouteState`,
+  `LiveRouteStateError`.
+  - `LiveRouteState::live_routes(model)` is the one selection of live routes: routes into a submix,
+    in the normalized model's order, which is canonical route-ID order.
+  - `try_new(model, effective_mute: &dyn Fn(usize, usize) -> bool)` seeds `gain_db`, `matrix`,
+    `mute`, `follows_mute`, `source_strip` (tracks, then `T + j`) and `source_lane_muted`.
+  - The setters shadow once per transaction; `commit` and `rollback` work as in
+    `LiveControlSoloState`. `empty()` serves a plan with no live route.
+- `hosts/host-web/src/lib.rs`:
+  - Kinds 13 `COMMAND_ROUTE_GAIN_DB`, 14 `COMMAND_ROUTE_MUTE` and 15 `COMMAND_ROUTE_MATRIX` are
+    in the decode whitelist. Reason 13 is `COMMAND_REASON_UNKNOWN_ROUTE`.
+  - D2: the generic strip bound runs only for non-send kinds. A send kind is bounded in its own
+    arm by the send queues and the mirror (`unknownRoute`).
+  - D4: `into_route_edit` checks the shape (`MALFORMED`), and `routeMute` takes exactly 0 or 1
+    (`DOMAIN`).
+    - The record is built from the mirror with the one field replaced, through
+      `RouteControlProducer::record`. `Domain` and `Length` map to `DOMAIN`.
+    - The mirror is updated only after the record is built. It is staged as
+      `AdmittedCommand::Route` on slot `3S + E + route`.
+    - `queue_count` grows by the live-route count. `queue_available` uses `free()`, and `push`
+      uses `push`. `command_staging_count` is unchanged.
+  - `ReadyOwnership` keeps `route_controls`, declared before the plan, and `routes`. At boot it
+    checks the producers' IDs against `live_routes(model)` in order (`web.live_controls.routes`).
+    The mirror is seeded from the solo state's `effective_mute`. `admit_commands` commits or rolls
+    back the mirror where it does so for solo.
+- Every spelling: the host JS set and table, both `.d.ts` copies (enum members, the applied-kind
+  prose, now fifteen, and the `trackIndex`, `smoothingSamples` and `values` docs), both
+  generators, both schema-gate lists, both self-test fixtures, and the regenerated `sdk/assets/**`
+  and `sdk/src/generated/{abi,catalog}.ts`.
+- Re-anchored self-tests (deliverable 4):
+  - In `check-command-kind-vocabulary.py`, the set literal is `[1 … 15]` and `<= 15`. The
+    "added and not threaded" mutation is `COMMAND_SOLO_MODE: u32 = 16`, after
+    `COMMAND_ROUTE_MATRIX`, and its comment is rewritten. The undecoded-kind mutation uses 16. The
+    two "added last" mutations now drop `routeMatrix`.
+  - `test-web-audioworklet.sh` has the same set literal and the same 16 mutation, with its comment
+    rewritten.
+  - `FUTURE_TAP` moves to 14, after `UNKNOWN_ROUTE = 13`, in the script, the shell test and
+    `MUTATIONS.md`. The reason self-test's renumber targets (`UNKNOWN_TAP`, worklet
+    `UNSUPPORTED_KIND`) and its `<= 13` bound move to the next free value too.
+  - The "reason value renumbered" mutation in `check-parameter-metadata-v1.py` is now
+    `commandReasons[13] → 14`.
+  - Observed reds (in-process trace): the 16 kind is caught by `.d.ts MisoCommandKind disagrees
+    with the Rust host constants`, the threading rule, not contiguity. The undecoded 16 is caught
+    by `host JS COMMAND_KINDS set disagrees`, and `FUTURE_TAP = 14` by `host JS table disagrees`.
+    The kind self-test has 32 red mutations, the reason self-test 20, layout 22, and metadata
+    passes.
+
+**Deviations.**
+
+1. **The `free` callgraph rule** (outside the authorized paths). `check-web-audioworklet.sh`
+   failed. `miso_engine_web_v1_command_submit`'s allocation-only closure reached
+   `RouteControlProducer::free` and `GraphRouteControlProducer::free`, and
+   `check-web-audioworklet-callgraph.py` forbids any function whose name contains `free`, as
+   dlmalloc's own `4free` does. Both one-line methods are now `#[inline(always)]`, with a comment
+   saying why: `crates/graph/src/lib.rs` and `crates/host-core/src/route_controls.rs`. There is no
+   API or behaviour change. Renaming `free` would ripple into #1223 to #1226's specs.
+2. **The SDK vocabulary test** (`sdk/test/live-controls-evals.mjs`, outside the authorized paths).
+   `check-sdk-headless.sh` failed. "all twelve command kinds are built by name" requires the
+   semantic methods to cover the wire vocabulary, and the send methods are #1223's (non-goal
+   here). The test now names `routeGainDb`, `routeMute` and `routeMatrix` as awaiting #1223, so
+   any other kind without a method still fails it. **#1223 must move them into `kindNames`.**
+3. **Spec amendment from the #1221 verdict, MINOR-1** (root-routed, `hosts/host-web/src/lib.rs`).
+   The browser's exact retained rows now charge `engine.route_control_resources.total_bytes`, plus
+   the mirror and its shadow, in `bridge_metadata_bytes` and `bridge_retained_bytes`.
+   `largest_allocation_bytes` is folded into both largest rows. The producer `Vec` is kept as
+   host-core built it, so its table bytes, already inside the total, are counted once.
+4. **Gate 2's "non-finite coefficient".** `CommandRecord::decode` refuses any non-finite value
+   word as `MALFORMED` before dispatch, so a non-finite coefficient can never reach `DOMAIN`. The
+   gate uses a finite `ll = 3e38` on `send-b`, which is at +2 dB. The fold overflows, and
+   `route_coefficients` refuses it as `Domain`.
+5. **Constructor shape** (D3 says "takes the routes"). It takes the normalized `SessionModel`, so
+   that the live-route selection and the source-strip resolution are written once, in host-core,
+   and #1226 can seed it from capi's committed model. `effective_mute` is exactly the frozen
+   `&dyn Fn(usize, usize) -> bool`.
+6. With no live controls, a send kind would be `unsupportedKind`. That is the strip kinds' rule,
+   but the arm is defensive and unreachable: a control-free host has no staging buffer and refuses
+   every submission first.
+
+**The acked-batch question, plan swap and cross-route fence** (root notes from #1220 and #1221).
+
+- Admission decodes and validates every record, builds every send record, and updates the mirror
+  under its shadow. It then room-checks every staged entry's queue (strip, input, effect and send
+  bands) before the first push, and commits the mirrors only after every push. Any refusal rolls
+  back the solo state, the send mirror and the input shadows. No ack precedes a drop.
+- **Cross-route fence.** `miso_engine_web_v1_command_submit` runs in the worklet's
+  `port.onmessage`, on the render thread between `process()` calls. So a batch is fully pushed
+  before the next render starts, and nothing pushes during a render. Every live route drains
+  `available_at_entry()` at its op's start, every block (#1220 D4), so all of one batch's records
+  land in the next block: strip and send records alike, across routes. The one-block skew #1220
+  noted needs a concurrent producer, and the browser has none.
+- **Plan swap.** The browser host has no plan swap. One `ReadyOwnership` holds the plan for the
+  host's life, and `route_controls` is a field of it, dropped with the plan. A queued, acked send
+  record can never be stranded by a retirement.
+
+**Tests** (rows in `hosts/host-web/MUTATIONS.md`, "Issue #1222", and
+`crates/host-core/tests/MUTATIONS.md` 1222-H1 to H4; each was applied, run red and reverted).
+
+- `live_route_state::tests::construction_seeds_every_field_from_the_session_and_the_effective_mute`
+  (gate 4). Red if the mirror keeps an output route, resolves a submix source without the track
+  offset, or seeds following lanes from the session instead of the effective mute (H1, H2, H4).
+- `live_route_state::tests::a_rollback_restores_every_field_and_a_commit_keeps_them` (gate 4).
+  Red if a refused batch leaks a field into the next one, through a shadow not retaken per
+  transaction (H3).
+- `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1).
+  - The session has four tracks with distinct per-lane feeds (`strip_planes`), two unity buses
+    and seven sends: three tracks into both buses, plus `bx` into `by`. The sends are declared out
+    of ID order, the matrices are asymmetric and nonzero, and send index 6 is past the 6 strips.
+  - It runs 4 trials × {0, 480}, with kinds 13, 14 and 15 at random sends in two batches. It
+    compares bits against a host booted with the edited values.
+  - Red if the record's matrix words are reordered (`M1b`), a record reaches another send's queue
+    (`M2`), or the mirror is stale or decoded wrong (`M1`, `M3`).
+- `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2). Red if the mirror is
+  committed before the room check (the required row), the send band is not room-checked, or a send
+  record is pushed in pass one (`M6`, `M7`, `M8`).
+- `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3). It covers 7 sends and 6
+  strips, and 3 sends and 4 strips (index 3 and the bus's strip index). Red if the generic bound
+  runs before dispatch, a send reuses `unknownTrack`, or the send arm is bounded by the strip
+  count (`M4`, `M5`, `M12`).
+- `tests::send_records_are_shape_checked` (D1). Red if a send accepts a lane, rack, effect or
+  parameter word, a value past its own, a non-boolean mute, or a ramp past `1 << 22` (`M10`).
+- `tests::send_edits_admit_and_render_without_allocating` (gate 7, `ffi::live_response_ffi_tests::
+  measured` after a warm-up round). Red if send admission or the mirror allocates (`M9`).
+- `tests::the_exact_retained_budget_charges_the_send_lanes` (amendment 3).
+  - Between depths 8 and 64, `bridge_retained` and `bridge_metadata` move by exactly the
+    independent host-core preparation's `route_control_resources.total_bytes` delta.
+  - A send-free session does not move at all.
+  - The exact total is admitted, and one byte below it is refused with
+    `host.budget.retained_exact`.
+  - Red if the lanes go uncharged (`M11`).
+- A first-draft second gate-3 test had no unique catch: its mutation also reddened the test
+  above. It was folded into that test.
+
+**Gates** (this commit, on base `1c5ce5d02`; x86-64-v3 AVX2).
+
+- Gate 5:
+  - kind vocabulary: `--self-test` rc 0 (32 red); plain and `--artifacts` rc 0;
+  - reason vocabulary: `--self-test` rc 0 (20 red); plain rc 0;
+  - parameter metadata: `--self-test` rc 0; `<A>/…parameter-metadata.json` rc 0;
+  - ABI layout: `--self-test` rc 0 (22 caught); `<A>/…abi-layout.json` rc 0;
+  - `test-web-audioworklet.sh` rc 0, with each moved mutation red as above;
+  - `check-sdk-generated.sh <A>` rc 0.
+- Gate 6:
+  - `build-web-audioworklet.sh --named-twin` rc 0. The shipped module is `2daf0f83…`, 2,762,489
+    bytes, against 2,755,262 in #1221's record (+7,227).
+  - `check-web-audioworklet.sh` rc 0. The kernel shape is 13 kernels, `f32x4_arith=9396`.
+  - `check-browser-expected-resources.py --artifacts` rc 0, with the digests and exact rows
+    agreeing and 32 red self-test mutations. `check-scalar-oracle-absent.py --wasm` rc 0.
+  - `check-sdk-types.sh` rc 0. `check-sdk-headless.sh <A>` rc 0, after deviation 2.
+  - `check-host-core-policy.sh`, `test-host-core-policy.sh`, `check-realtime-policy.sh` (54
+    regions) and `check-workspace-policy.sh`: all rc 0.
+  - test-debug-a (DESIGN 7, `--no-fail-fast`): rc 0. 1,221 passed, 0 failed and 9 ignored, over
+    108 binaries. That run had a separate, later-folded gate-3 test; the folded tree re-ran its
+    new host-web and host-core tests green.
+  - `cargo fmt --all -- --check` rc 0.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` rc 0.
+- Gate 7: `send_edits_admit_and_render_without_allocating` passes, with 0 allocations and 0 frees.
+- **No re-pin.** `check-browser-expected-resources` is unchanged (none of its sessions has a send
+  under live controls). The module digest is not a per-change pin (#1061).
+
 ## Dependencies
 
 - *Produce live send records from host-core* (#1221)

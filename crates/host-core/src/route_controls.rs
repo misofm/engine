@@ -57,7 +57,12 @@ impl RouteControlProducer {
     }
 
     /// How many records the queue can accept now.
+    ///
+    /// Always inlined, as the graph producer's is (issue #1222): the browser's command-submit
+    /// closure is held to a callgraph rule that reads function names, and an out-of-line `free`
+    /// reads there as the allocator's.
     #[must_use]
+    #[inline(always)]
     pub fn free(&self) -> usize {
         self.producer.free()
     }

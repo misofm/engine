@@ -2132,6 +2132,18 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 12,
         "name": "inputFilters"
+      },
+      {
+        "value": 13,
+        "name": "routeGainDb"
+      },
+      {
+        "value": 14,
+        "name": "routeMute"
+      },
+      {
+        "value": 15,
+        "name": "routeMatrix"
       }
     ],
     "commandReasons": [
@@ -2186,6 +2198,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 12,
         "name": "notSoloable"
+      },
+      {
+        "value": 13,
+        "name": "unknownRoute"
       }
     ],
     "racks": [
