@@ -325,7 +325,7 @@ fn settled_width<L: Lane>() {
             IndexedRamp::new(start, target, length)
         };
         for frames in BLOCKS {
-            let mut position = ramp.length;
+            let position = ramp.length;
             for block in 0..3 {
                 let (left, right) = planes(&mut rng, frames, block);
                 let (mut got_left, mut got_right) = (left.clone(), right.clone());
@@ -340,8 +340,6 @@ fn settled_width<L: Lane>() {
                 );
                 assert_same(&label, "left", &got_left, &want_left, "mix2x2_block");
                 assert_same(&label, "right", &got_right, &want_right, "mix2x2_block");
-                position = ramp.length.min(position + frames as u32);
-                assert_eq!(position, ramp.length, "{label}: the position saturates");
             }
         }
     }

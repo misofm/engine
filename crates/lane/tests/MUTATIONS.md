@@ -482,7 +482,8 @@ of the tree, then `cargo test --locked -p lane --test route_ramp` (debug), resto
 M1 cannot change a native bit, so it was read on a scratch `cdylib` that calls
 `route_mix_ramp_block::<Simd4>`, built for `wasm32-unknown-unknown` with `+simd128` and the
 workspace's release profile, through `scripts/check-web-audioworklet-callgraph.py --kernel-shape`
-(rule 3). Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v3`.
+(rule 3); M12 and M13 (attempt 2) on the same probe through `--callgraph probe_ramp`, the
+browser's render-closure trap gate. Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v3`.
 
 | # | mutation | gates red (first failure) | result |
 |---|---|---|---|
@@ -499,3 +500,5 @@ workspace's release profile, through `scripts/check-web-audioworklet-callgraph.p
 | 1219-M9 | the ramp body swaps the left plane's coefficient roles (`ll.fma(r, lr * l)`) | gate 1, retarget | RED |
 | 1219-M10 | the settled coefficients computed in `f64` and rounded once | gate 1, retarget, gate 3 (`case 2, length 3830 ... left frame 0`) | RED |
 | 1219-M11 | the settled frames re-implemented as a private loop, and `mix2x2_block` then flushing its outputs (two edits: a static mix that drifts from the ramp's settled path) | gate 3 alone (`case 2, length 3830 ... left frame 3`, `-0.0` against `mix2x2_block`'s `+0.0`) | RED |
+| 1219-M12 | attempt 2: `route_mix_ramp_block` back to `let count = left.len(); let right = &mut right[..count];` | `--callgraph probe_ramp` on the probe: `FAIL probe_ramp: unexpected trap owner in the render closure: ...route_mix_ramp_block...`, `closure=5 traps=3`, entry `slice_index_fail` (unmutated: `closure=4 traps=0 trap_owners=[]`). Native gates cannot see it: bits do not move. | RED (probe), GREEN (native) |
+| 1219-M13 | attempt 2: `route_mix_settled_tail` passes its planes uncut (`mix2x2_block::<f32>(left, right, c)`) | `--callgraph probe_ramp`: `FAIL ... unexpected trap owner ...: route_mix_settled_tail`, `closure=5 traps=3` | RED (probe), GREEN (native) |

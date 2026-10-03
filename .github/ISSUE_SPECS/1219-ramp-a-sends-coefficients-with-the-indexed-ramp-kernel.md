@@ -154,8 +154,7 @@ Nothing in batches K1 or K2 touches these anchors.
    coefficient (VERIFY-2 MINOR 3).*
 3. **A settled ramp is the static mix.** For random targets, a ramp whose `length` has elapsed
    renders bit-identically to `mix2x2_block` with the same target, at every width, including
-   further blocks at `position == length` (position saturation; this is the one place it is
-   tested).
+   further blocks at `position == length` (saturating `position` is the caller's job, #1220).
    *Test value: it turns red if the settled remainder is computed (`start + k * step`) instead of
    assigned, which would leave a live route's bits off a freshly prepared plan's.*
 4. **Policy and the DSP command.**
@@ -238,6 +237,49 @@ No allocation gate: the kernel takes borrowed planes and allocates nothing by co
   - `run-aarch64-tests.sh debug`: no arm64 host and no aarch64-linux target or qemu here, so it runs
     **at batch push** (CI `aarch64-debug`). `Simd4` already runs natively on x86 in every gate
     above.
+
+### Attempt 2 record
+
+Answers the attempt 1 FAIL verdict (`submix-verdicts/1219-attempt1.md`).
+
+- **MAJOR-1 fixed (bits unchanged).** `route_mix_ramp_block` now takes
+  `count = min(left.len(), right.len())` and cuts both planes to it; the outlined
+  `route_mix_settled_tail` does the same before `mix2x2_block::<f32>`. No other index in the kernel
+  or its two tails can fail (`split_at_mut` at `min(count, ..)`, `FRAME_INDEX_OFFSETS[..WIDTH]` is
+  constant, the rest is zipped iteration). The `debug_assert_eq!` on the plane lengths stays.
+  `mix2x2_block` itself is untouched (it is inlined into `render_inner`, the allow-listed owner).
+  Probe: a scratch `cdylib` exporting `probe_ramp`, which calls `route_mix_ramp_block::<Simd4>`,
+  built for `wasm32-unknown-unknown` `+simd128` with the workspace release profile (fat LTO, one
+  codegen unit, `panic = "abort"`), read by `scripts/check-web-audioworklet-callgraph.py`:
+  - `--callgraph probe_ramp`: `closure=4 traps=0 trap_owners=[] entries=[]`, exit 0 (attempt 1:
+    `closure=5 traps=4`, owners `route_mix_ramp_block<f32x4>` and `route_mix_settled_tail`);
+  - the `f32x4` instantiation (the script's own `kernel_arithmetic`): **vector=22 scalar=0**,
+    unchanged. #1220 should record this 22 in its evidence (NIT-1) so a de-vectorised ramp body is
+    visible.
+  - Mutations 1219-M12/M13 (each cut removed alone) turn `--callgraph` red with the matching owner.
+- **MINOR-1 fixed.** The `INDEXED_RAMP_LENGTH_MAXIMUM` doc now limits the no-overshoot bound to a
+  normal step and states the subnormal case: when `|target - start| < length * 2^-126` the step is
+  subnormal, its rounding error absolute (up to `2^-150`), and `c(k)` can pass the target by at most
+  `(length - 1) * 2^-150`, under `2^-128` absolute; monotone, inaudible, and the snap still assigns
+  `target`. #1220's "Live routes" section in `docs/BUILTINS_AND_METERING_V1.md` should carry the same
+  qualifier (outside this issue's paths).
+- **NIT-3 fixed.** Gate 3's tautological `position` saturation assertion is deleted, and gate 3's
+  text above no longer claims to test saturation.
+- **NIT-1** is handed to #1220's evidence (above); **NIT-2** (the scalar snap frames) is a
+  sub-vector remainder the design froze, left for a measured optimisation issue.
+- **Gates**, run on a clean export of `cdde008f2` plus exactly this attempt's four files (the
+  shared worktree carries #1220's uncommitted edits), x86-64-v3, AMD EPYC 7313P, rustc 1.97.1:
+  - `cargo test -p lane --test route_ramp`: 4/4; test-debug-b (DESIGN 7) exit 0, 146
+    `test result: ok`, 0 failures.
+  - `check-lane-policy.sh` ok; `test-lane-policy.sh` exit 0.
+  - `check-unfused-seal.sh` ok (8 registered audit calls); `--self-test` 57/57.
+  - `cargo fmt --all -- --check` exit 0; `cargo clippy --locked --workspace --all-targets
+    --all-features -- -D warnings` exit 0.
+  - Browser: `build-web-audioworklet.sh --named-twin` exit 0, module `1900ef1b...` (unchanged; the
+    kernel is not linked until #1220); `check-web-audioworklet.sh` exit 0 (`render: closure=8
+    traps=5 trap_owners=[render_inner]`, `f32x4_arith=9350 kernels=12`);
+    `check-browser-expected-resources.py --artifacts` exit 0; `test-web-audioworklet.sh` exit 0.
+  - `run-aarch64-tests.sh debug`: no arm64 host; CI `aarch64-debug` at batch push.
 
 ## Dependencies
 

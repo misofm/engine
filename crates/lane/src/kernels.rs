@@ -1058,10 +1058,14 @@ pub fn mix2x2_block<L: Lane>(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
 /// The longest [`IndexedRamp`] in frames: `2^22`.
 ///
 /// Two facts rest on it. A frame index `k <= 2^22` converts to `f32` exactly, so `c(k)` is a
-/// function of the integer index and not of a rounded one; and the indexed law cannot pass its
-/// target before the snap while `(length - 1) * 3u < 1`, `u = 2^-24` the unit roundoff, which holds
-/// up to about `2^22.4` (the submix design's VERIFY-2). A caller refuses a longer length before a
-/// ramp exists.
+/// function of the integer index and not of a rounded one; and, while the step is a normal number,
+/// the indexed law cannot pass its target before the snap while `(length - 1) * 3u < 1`,
+/// `u = 2^-24` the unit roundoff, which holds up to about `2^22.4` (the submix design's VERIFY-2).
+/// That bound assumes relative rounding. When `|target - start| < length * 2^-126` the step is
+/// subnormal, its rounding error is absolute (up to `2^-150`), and `c(k)` can pass the target by
+/// at most `(length - 1) * 2^-150`, under `2^-128` absolute: inaudible, monotonicity still holds,
+/// and the snap still assigns `target` exactly. A caller refuses a longer length before a ramp
+/// exists.
 pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 
 /// The **indexed ramp** of a 2x2 route mix's four coefficients `[ll, lr, rl, rr]`.
@@ -1205,8 +1209,11 @@ pub fn route_mix_ramp_block<L: Lane>(
 ) {
     debug_assert_eq!(left.len(), right.len());
     debug_assert!(ramp.length <= INDEXED_RAMP_LENGTH_MAXIMUM);
-    let count = left.len();
-    let right = &mut right[..count];
+    // Both planes are cut to the shorter one, so no index below can fail: the kernel is never
+    // inlined into `render_inner`, and a bounds check here would be its own trap owner, which the
+    // browser's render-closure gate refuses.
+    let count = core::cmp::min(left.len(), right.len());
+    let (left, right) = (&mut left[..count], &mut right[..count]);
     // `k = position + f + 1 < length` holds for the first `length - position - 1` frames.
     let ramping = ramp.length.saturating_sub(position).saturating_sub(1);
     let ramping = core::cmp::min(count, ramping as usize);
@@ -1257,7 +1264,10 @@ pub fn route_mix_ramp_block<L: Lane>(
 /// (measured on a `wasm32` `simd128` build), one edit away from the browser's kernel-shape rule.
 #[inline(never)]
 fn route_mix_settled_tail(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
-    mix2x2_block::<f32>(left, right, c);
+    // Cut both planes here too: nothing inside this outlined function proves their lengths equal,
+    // so `mix2x2_block`'s own `&mut right[..count]` would otherwise keep a trap.
+    let count = core::cmp::min(left.len(), right.len());
+    mix2x2_block::<f32>(&mut left[..count], &mut right[..count], c);
 }
 
 /// The ramp frames of [`route_mix_ramp_block`] that do not fill a vector: the same arithmetic at
