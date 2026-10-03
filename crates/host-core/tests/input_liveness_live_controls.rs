@@ -115,7 +115,7 @@ fn prepare_with_live_controls(document: &str) -> Host {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
     assert_eq!(handles.strips.len(), TRACKS);
-    assert_eq!(handles.track_controls.len(), TRACKS);
+    assert_eq!(handles.strip_controls.len(), TRACKS);
     Host {
         prepared,
         handles: Some(handles),
@@ -210,7 +210,7 @@ fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
     host.handles
         .as_mut()
         .expect("live controls")
-        .track_controls
+        .strip_controls
         .get_mut(track)
         .expect("a control channel for the addressed track")
         .input

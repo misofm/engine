@@ -589,13 +589,14 @@ fn smoothing(draw: &mut Draw) -> u32 {
     draw.pick(&[0_u32, 1, 17, 64, 480])
 }
 
-/// Up to three live-control records for this block.
+/// Up to three live-control records for this block. The builtin records address every strip,
+/// a submix included (issue #1211 D1), so the differential drives bus builtins too.
 fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> {
     let mut records = Vec::new();
-    let tracks = handles.track_controls.len();
+    let strips = handles.strip_controls.len();
     for _ in 0..draw.below(4) {
         match draw.below(6) {
-            0 if tracks > 0 => {
+            0 if strips > 0 => {
                 let record = if draw.chance(1, 3) {
                     TrackInputRecord::PolarityInvert {
                         lanes: lanes(draw),
@@ -609,9 +610,9 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
                         smoothing_samples: smoothing(draw),
                     }
                 };
-                records.push(Live::Input(draw.below(tracks), record));
+                records.push(Live::Input(draw.below(strips), record));
             }
-            1 if tracks > 0 => {
+            1 if strips > 0 => {
                 let record = if draw.chance(1, 3) {
                     TrackFaderRecord::Mute {
                         lanes: lanes(draw),
@@ -625,9 +626,9 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
                         smoothing_samples: smoothing(draw),
                     }
                 };
-                records.push(Live::Fader(draw.below(tracks), record));
+                records.push(Live::Fader(draw.below(strips), record));
             }
-            2 if tracks > 0 => {
+            2 if strips > 0 => {
                 let mut coefficient = || draw.pick(&[-1.0_f32, -0.5, 0.0, 0.5, 0.707_106_77, 1.0]);
                 let matrix = Matrix2x2 {
                     ll: coefficient(),
@@ -639,7 +640,7 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
                     matrix,
                     smoothing_samples: smoothing(draw),
                 };
-                records.push(Live::Matrix(draw.below(tracks), record));
+                records.push(Live::Matrix(draw.below(strips), record));
             }
             _ if !handles.effect_controls.is_empty() => {
                 let index = draw.below(handles.effect_controls.len());
@@ -702,9 +703,9 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
 /// arm, because every arm has seen the same records.
 fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
     match record {
-        Live::Input(track, record) => handles.track_controls[track].input.try_push(record).is_ok(),
-        Live::Fader(track, record) => handles.track_controls[track].fader.try_push(record).is_ok(),
-        Live::Matrix(track, record) => handles.track_controls[track]
+        Live::Input(track, record) => handles.strip_controls[track].input.try_push(record).is_ok(),
+        Live::Fader(track, record) => handles.strip_controls[track].fader.try_push(record).is_ok(),
+        Live::Matrix(track, record) => handles.strip_controls[track]
             .producer
             .try_push(record)
             .is_ok(),
@@ -724,6 +725,9 @@ struct Reach {
     /// route from a track chain, so its console slots sit at dependency level 1 or more, after
     /// every contributor's chain.
     bus_console_entries: u64,
+    /// Builtin records a submix's producer took (issue #1211 gate 3): the differential's only
+    /// route to a bus strip's input, fader and matrix stages.
+    bus_live_records: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -814,6 +818,11 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
                 "{context}: the arms' queues disagree on {record:?}"
             );
             reach.live_records += u64::from(taken[0]);
+            if let Live::Input(strip, _) | Live::Fader(strip, _) | Live::Matrix(strip, _) = record
+                && *strip >= arms[0].handles.track_count
+            {
+                reach.bus_live_records += u64::from(taken[0]);
+            }
         }
         let base = (block * QUANTUM) as u64;
         let planes: Vec<Vec<f32>> = (0..source_channels)
@@ -910,6 +919,10 @@ fn randomized_consoles_render_the_same_bits_armed_dual_and_serialized() {
     assert!(
         reach.bus_console_entries > 0,
         "the generator must render console entries on a fed bus: {reach:?}"
+    );
+    assert!(
+        reach.bus_live_records > 0,
+        "the generator must push builtin records to a submix's producer: {reach:?}"
     );
 }
 

@@ -284,8 +284,9 @@ pub struct HostPrepareReport {
 pub struct HostLiveControlRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
-    /// Issue #140 turns this into the depth of *every* live channel a track owns: the matrix/pan
-    /// queue #137 shipped, the fader/mute queue, and one queue per prepared effect instance. Each
+    /// Issue #140 turns this into the depth of *every* live channel a strip owns (a submix too,
+    /// issue #1211 D1): the matrix/pan queue #137 shipped, the fader/mute queue, and one queue
+    /// per prepared effect instance. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
@@ -349,9 +350,9 @@ pub struct HostMeterRequest {
 /// `strips` is the addressing authority (issue #1207 D1): every strip of the compiled session,
 /// the tracks first in canonical normalized ID order, then the submixes in canonical normalized ID
 /// order. A host addresses a strip by its index in this vector; the first `track_count` entries are
-/// the tracks, and `track_controls[i]` / `meters[i]` belong to `strips[i]` (a track) whenever they
-/// are present. Because the tracks lead, a track's index is the same whether or not the session
-/// carries submixes.
+/// the tracks. `strip_controls[i]` belongs to `strips[i]` whenever it is present, a submix
+/// included (issue #1211 D1), and default `meters[i]` to `strips[i]` (a track). Because the tracks
+/// lead, a track's index is the same whether or not the session carries submixes.
 pub struct HostLiveControlHandles {
     /// Canonical normalized strip identities: the tracks, then the submixes, each in canonical ID
     /// order. The concatenation as a whole is **not** sorted, so a lookup must search the two
@@ -359,12 +360,14 @@ pub struct HostLiveControlHandles {
     pub strips: Vec<Box<str>>,
     /// How many leading entries of `strips` are tracks.
     pub track_count: usize,
-    /// One control producer per track, in `strips[..track_count]` order; empty when no channel was
-    /// requested.
+    /// One control producer per strip, parallel to `strips` -- the tracks, then the submixes
+    /// (issue #1211 D1); empty when no channel was requested. A host's track lanes are
+    /// `strip_controls[..track_count]`.
     ///
-    /// Each carries all three of a track's builtin channels: the matrix/pan queue (#137 D1), the
-    /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3).
-    pub track_controls: Vec<TrackControlProducer>,
+    /// Each carries all three of a strip's builtin channels: the matrix/pan queue (#137 D1), the
+    /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3). A submix's
+    /// producer carries the submix ID in `track_id`.
+    pub strip_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared track effect instance (#140 A); empty when no channel was
     /// requested. A submix strip's effects get one exactly as a track's do (issue #1207 D5), and
     /// `track_id` then carries the submix ID. Addressed by `(track_id, address)` in the session's
@@ -544,7 +547,7 @@ pub fn prepare_host_runtime(
         caps,
         &HostLiveControlRequest::default(),
     )?;
-    debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
+    debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     Ok(prepared)
 }
 
@@ -742,7 +745,7 @@ pub fn prepare_host_runtime_with_spectrum(
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(request)),
     )?;
-    debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
+    debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Single(capture) => capture,
         PreparedSpectrumCapture::Collection(_) => {
@@ -937,11 +940,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map_err(effect_diagnostics)?,
     };
 
-    // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical track
-    // order, so `HostLiveControlHandles::tracks` and the requested channels cannot disagree.
-    // Source semantics: tracks only for the control requests and default meters below; the strip
-    // list (issue #1207 D1) appends the submixes after the tracks, so `live_control_tracks` is
-    // exactly its track prefix.
+    // Issue #137 D1/D2: the live-control requests are derived here, once, from the canonical strip
+    // order, so `HostLiveControlHandles::strips` and the requested channels cannot disagree. The
+    // strip list (issue #1207 D1) appends the submixes after the tracks. Every strip gets a control
+    // request (issue #1211 D1). Source semantics: tracks only for the default meters below, so
+    // `live_control_tracks` is exactly the strip list's track prefix.
     let live_control_strips: Vec<Box<str>> = model
         .tracks
         .iter()
@@ -957,10 +960,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_control_tracks = &live_control_strips[..live_control_track_count];
     let control_requests: Vec<TrackControlRequest> = match live_controls.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => live_control_tracks
+        Some(depth) => live_control_strips
             .iter()
-            .map(|track| TrackControlRequest {
-                track_id: track.to_string(),
+            .map(|strip| TrackControlRequest {
+                track_id: strip.to_string(),
                 queue_capacity: depth,
             })
             .collect(),
@@ -1223,16 +1226,16 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Canonical normalized track order is the live controls' addressing authority, so both halves
     // are permuted into it here rather than into whatever order preparation happened to build them.
     // A channel whose track is not in that order at all is a hard rejection, never a silent drop.
-    // It covers every strip (issue #1207 D1): a control is still only ever a track's, while a
+    // It covers every strip (issue #1207 D1): every strip has a control (issue #1211 D1), and a
     // selected meter may observe a submix (issue #1208 D1).
     let canonical_index: std::collections::BTreeMap<&str, usize> = live_control_strips
         .iter()
         .enumerate()
         .map(|(index, track)| (&**track, index))
         .collect();
-    let mut track_controls = bound.track_controls;
+    let mut strip_controls = bound.track_controls;
     let mut meters = bound.meter_consumers;
-    if track_controls
+    if strip_controls
         .iter()
         .any(|value| !canonical_index.contains_key(&*value.track_id))
     {
@@ -1244,7 +1247,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(graph_failure("host.meter.order"));
     }
-    track_controls.sort_by_key(|value| canonical_index[&*value.track_id]);
+    strip_controls.sort_by_key(|value| canonical_index[&*value.track_id]);
     if selected_meters.is_some() {
         if meters
             .iter()
@@ -1343,7 +1346,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         HostLiveControlHandles {
             strips: live_control_strips,
             track_count: live_control_track_count,
-            track_controls,
+            strip_controls,
             effect_controls,
             meters,
             effect_observations,

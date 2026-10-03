@@ -8,7 +8,8 @@
 //! state machine at command admission that composes
 //!
 //! ```text
-//! effective_mute(track, lane) = user_mute(track, lane) || (any_solo && !solo(track))
+//! effective_mute(strip, lane) = user_mute(strip, lane)
+//!     || (any_solo && !solo_safe(strip) && !solo(strip))
 //! ```
 //!
 //! and emits the *existing* mute records into the *existing* queues. Nothing below admission
@@ -16,6 +17,18 @@
 //! buys the whole feature its realtime properties for free: no allocation, no cross-lane audio
 //! coupling (the `||` is computed over booleans on the control plane, never from audio), and the
 //! existing per-sample linear declick with the caller's own `smoothing_samples`.
+//!
+//! [`LiveControlSoloState::effective_mute`] is that composition, and it is the **one** place it is
+//! written: a host that needs an effective mute calls it rather than spelling the formula again.
+//!
+//! # One mute owner per strip
+//!
+//! The state is sized per strip (issue #1211 D2, DESIGN P7): the session's tracks, then its
+//! submixes, in the order `HostLiveControlHandles::strips` lists them. Every strip's mute -- a bus
+//! included -- lives here and nowhere else. Only tracks are soloable. A submix entry is
+//! *solo-safe*: its solo bit never engages, it never counts toward `any_solo`, and a solo never
+//! mutes it, so a soloed track stays audible through every bus and return it feeds. A bus that
+//! took a solo-derived mute would silence the soloed track's own bus path.
 //!
 //! # Why the host has to mirror user mute
 //!
@@ -27,7 +40,7 @@
 //!
 //! Restore is **per lane**. `TrackFaderRecord::Mute` carries one `muted` bool, so a track whose
 //! user mute is `[true, false]` needs two records, not one; the worst case for a whole session is
-//! `2 * track_count` records. [`LiveControlSoloState::track_delta`] is what states that bound.
+//! `2 * strip_count` records. [`LiveControlSoloState::track_delta`] is what states that bound.
 //!
 //! # Never emit a redundant mute record
 //!
@@ -73,20 +86,33 @@ const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
     )
 }
 
-/// The net mute records one track still owes the render plane.
+/// The net mute records one strip still owes the render plane.
 ///
-/// At most two, because a lane selector carries one `muted` bool and a track has two lanes. Both
+/// At most two, because a lane selector carries one `muted` bool and a strip has two lanes. Both
 /// lanes changing to the *same* value is one `Both` record -- which is exactly the record an
 /// explicit `mute` command with `channel = 2` lowers to, so a solo and an explicit mute put
 /// the same bytes in the same queue.
 pub type LiveControlMuteDelta = [Option<(BuiltinLaneSelector, bool)>; 2];
 
+/// One strip's starting point for [`LiveControlSoloState::try_new`] (issue #1211 D2).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StripMuteSeed {
+    /// `[left_mute, right_mute]` as the compiled session declares the strip's fader.
+    pub mutes: [bool; 2],
+    /// Whether the strip is solo-safe: never soloable and never solo-muted. Tracks are not; every
+    /// submix is.
+    pub solo_safe: bool,
+}
+
 /// Solo-in-place live-control state for one prepared session.
 ///
-/// Track indices are the canonical track order (`HostLiveControlHandles::tracks`), which is the
-/// compiled session's normalized order and the same order every queue and meter slot uses.
+/// Indices are strip indices in the canonical strip order (`HostLiveControlHandles::strips`): the
+/// tracks, then the submixes, each in the compiled session's normalized order -- the same order
+/// every control queue uses.
 #[derive(Debug)]
 pub struct LiveControlSoloState {
+    /// Fixed at construction; no transaction ever changes it, so it has no shadow.
+    solo_safe: Box<[bool]>,
     solo: Box<[bool]>,
     user_mute: Box<[[bool; 2]]>,
     emitted: Box<[[bool; 2]]>,
@@ -99,25 +125,28 @@ pub struct LiveControlSoloState {
 }
 
 impl LiveControlSoloState {
-    /// Allocate live-control solo state for a session whose baked per-lane fader mutes are `mutes`.
+    /// Allocate live-control solo state for a session with one seed per strip.
     ///
-    /// `mutes[t]` is `[left_mute, right_mute]` of track `t` as the compiled session declares it --
-    /// the same words `track_parameters` bakes into the prepared fader section. Solo starts
-    /// disengaged, so the effective mute at preparation *is* the user mute, and the emitted mirror
-    /// starts equal to it: the render plane has already been told exactly this much.
+    /// `seeds[s].mutes` is `[left_mute, right_mute]` of strip `s` as the compiled session declares
+    /// it -- the same words the prepared fader section bakes -- and `seeds[s].solo_safe` says
+    /// whether the strip may be soloed (a track) or never (a submix). Solo starts disengaged, so the
+    /// effective mute at preparation *is* the user mute, and the emitted mirror starts equal to it:
+    /// the render plane has already been told exactly this much.
     ///
     /// # Errors
     ///
-    /// Returns the allocator's own error when any of the six arrays cannot be reserved. Every
+    /// Returns the allocator's own error when any of the seven arrays cannot be reserved. Every
     /// allocation here happens at preparation; none of them can happen again later.
-    pub fn try_new(mutes: &[[bool; 2]]) -> Result<Self, TryReserveError> {
-        let solo = try_boxed(mutes.len(), false)?;
-        let solo_shadow = try_boxed(mutes.len(), false)?;
-        let user_mute = try_boxed_from(mutes)?;
-        let user_mute_shadow = try_boxed_from(mutes)?;
-        let emitted = try_boxed_from(mutes)?;
-        let emitted_shadow = try_boxed_from(mutes)?;
+    pub fn try_new(seeds: &[StripMuteSeed]) -> Result<Self, TryReserveError> {
+        let solo_safe = try_boxed_map(seeds, |seed| seed.solo_safe)?;
+        let solo = try_boxed(seeds.len(), false)?;
+        let solo_shadow = try_boxed(seeds.len(), false)?;
+        let user_mute = try_boxed_map(seeds, |seed| seed.mutes)?;
+        let user_mute_shadow = try_boxed_map(seeds, |seed| seed.mutes)?;
+        let emitted = try_boxed_map(seeds, |seed| seed.mutes)?;
+        let emitted_shadow = try_boxed_map(seeds, |seed| seed.mutes)?;
         Ok(Self {
+            solo_safe,
             solo,
             user_mute,
             emitted,
@@ -130,13 +159,13 @@ impl LiveControlSoloState {
         })
     }
 
-    /// Tracks these live controls address.
+    /// Strips these live controls address: the tracks, then the submixes.
     #[must_use]
     pub const fn track_count(&self) -> usize {
         self.solo.len()
     }
 
-    /// The one control-plane global: is any track soloed?
+    /// The one control-plane global: is any track soloed? A solo-safe entry never counts.
     #[must_use]
     pub const fn any_solo(&self) -> bool {
         self.solo_count > 0
@@ -148,18 +177,25 @@ impl LiveControlSoloState {
         self.solo_count
     }
 
-    /// Whether one track's solo bit is engaged. `false` for an index these live controls have no
-    /// track for.
+    /// Whether one strip's solo bit is engaged. `false` for an index these live controls have no
+    /// strip for, and always `false` for a solo-safe strip.
     #[must_use]
-    pub fn solo(&self, track: usize) -> bool {
-        self.solo.get(track).copied().unwrap_or(false)
+    pub fn solo(&self, strip: usize) -> bool {
+        self.solo.get(strip).copied().unwrap_or(false)
+    }
+
+    /// Whether one strip is solo-safe (a submix): never soloable, never solo-muted. `false` for an
+    /// index these live controls have no strip for.
+    #[must_use]
+    pub fn solo_safe(&self, strip: usize) -> bool {
+        self.solo_safe.get(strip).copied().unwrap_or(false)
     }
 
     /// The user's mute *intent* for one lane, which solo never overwrites.
     #[must_use]
-    pub fn user_mute(&self, track: usize, lane: usize) -> bool {
+    pub fn user_mute(&self, strip: usize, lane: usize) -> bool {
         self.user_mute
-            .get(track)
+            .get(strip)
             .and_then(|lanes| lanes.get(lane))
             .copied()
             .unwrap_or(false)
@@ -167,18 +203,20 @@ impl LiveControlSoloState {
 
     /// The effective mute the render plane was last told, per lane.
     #[must_use]
-    pub fn emitted_mute(&self, track: usize, lane: usize) -> bool {
+    pub fn emitted_mute(&self, strip: usize, lane: usize) -> bool {
         self.emitted
-            .get(track)
+            .get(strip)
             .and_then(|lanes| lanes.get(lane))
             .copied()
             .unwrap_or(false)
     }
 
-    /// `user_mute || (any_solo && !my_solo)` -- the composition, in one place.
+    /// `user_mute || (any_solo && !solo_safe && !soloed)` -- the effective-mute composition, and
+    /// the **one** place it is written. Every host that needs an effective mute calls this.
     #[must_use]
-    pub fn effective_mute(&self, track: usize, lane: usize) -> bool {
-        self.user_mute(track, lane) || (self.any_solo() && !self.solo(track))
+    pub fn effective_mute(&self, strip: usize, lane: usize) -> bool {
+        self.user_mute(strip, lane)
+            || (self.any_solo() && !self.solo_safe(strip) && !self.solo(strip))
     }
 
     /// Whether a transaction has mutated anything since the last commit or rollback.
@@ -187,14 +225,20 @@ impl LiveControlSoloState {
         self.open
     }
 
-    /// Engage or clear one track's solo bit. `false` when `track` names no track.
-    pub fn set_solo(&mut self, track: usize, engaged: bool) -> bool {
-        if track >= self.solo.len() {
+    /// Engage or clear one track's solo bit. `false`, changing nothing, when `strip` names no strip
+    /// or a solo-safe one.
+    pub fn set_solo(&mut self, strip: usize, engaged: bool) -> bool {
+        if strip >= self.solo.len() {
+            return false;
+        }
+        // Source semantics: tracks only.
+        // Only tracks are soloable; a submix entry is solo-safe, so its solo bit never engages.
+        if self.solo_safe[strip] {
             return false;
         }
         self.shadow();
-        let previous = self.solo[track];
-        self.solo[track] = engaged;
+        let previous = self.solo[strip];
+        self.solo[strip] = engaged;
         match (previous, engaged) {
             (false, true) => self.solo_count = self.solo_count.saturating_add(1),
             (true, false) => self.solo_count = self.solo_count.saturating_sub(1),
@@ -203,44 +247,44 @@ impl LiveControlSoloState {
         true
     }
 
-    /// Record the user's mute intent for the lanes `lanes` covers. `false` when `track` is unknown.
-    pub fn set_user_mute(&mut self, track: usize, lanes: BuiltinLaneSelector, muted: bool) -> bool {
-        if track >= self.user_mute.len() {
+    /// Record the user's mute intent for the lanes `lanes` covers. `false` when `strip` is unknown.
+    pub fn set_user_mute(&mut self, strip: usize, lanes: BuiltinLaneSelector, muted: bool) -> bool {
+        if strip >= self.user_mute.len() {
             return false;
         }
         self.shadow();
         for lane in 0..2 {
             if covers(lanes, lane) {
-                self.user_mute[track][lane] = muted;
+                self.user_mute[strip][lane] = muted;
             }
         }
         true
     }
 
-    /// Record that a mute record for `lanes` has been staged for this track.
+    /// Record that a mute record for `lanes` has been staged for this strip.
     ///
     /// The caller stages the record; this is the mirror update that keeps [`Self::track_delta`]
     /// from staging it a second time in the same submission.
-    pub fn record_emitted(&mut self, track: usize, lanes: BuiltinLaneSelector, muted: bool) {
-        if track >= self.emitted.len() {
+    pub fn record_emitted(&mut self, strip: usize, lanes: BuiltinLaneSelector, muted: bool) {
+        if strip >= self.emitted.len() {
             return;
         }
         self.shadow();
         for lane in 0..2 {
             if covers(lanes, lane) {
-                self.emitted[track][lane] = muted;
+                self.emitted[strip][lane] = muted;
             }
         }
     }
 
-    /// The records this track still owes -- never a redundant one, at most two.
+    /// The records this strip still owes -- never a redundant one, at most two.
     #[must_use]
-    pub fn track_delta(&self, track: usize) -> LiveControlMuteDelta {
-        let left = self.effective_mute(track, 0);
-        let right = self.effective_mute(track, 1);
+    pub fn track_delta(&self, strip: usize) -> LiveControlMuteDelta {
+        let left = self.effective_mute(strip, 0);
+        let right = self.effective_mute(strip, 1);
         match (
-            left != self.emitted_mute(track, 0),
-            right != self.emitted_mute(track, 1),
+            left != self.emitted_mute(strip, 0),
+            right != self.emitted_mute(strip, 1),
         ) {
             (false, false) => [None, None],
             (true, false) => [Some((BuiltinLaneSelector::Left, left)), None],
@@ -290,10 +334,13 @@ fn try_boxed<T: Clone>(count: usize, value: T) -> Result<Box<[T]>, TryReserveErr
     Ok(buffer.into_boxed_slice())
 }
 
-fn try_boxed_from(values: &[[bool; 2]]) -> Result<Box<[[bool; 2]]>, TryReserveError> {
+fn try_boxed_map<T>(
+    seeds: &[StripMuteSeed],
+    field: impl Fn(&StripMuteSeed) -> T,
+) -> Result<Box<[T]>, TryReserveError> {
     let mut buffer = Vec::new();
-    buffer.try_reserve_exact(values.len())?;
-    buffer.extend_from_slice(values);
+    buffer.try_reserve_exact(seeds.len())?;
+    buffer.extend(seeds.iter().map(field));
     Ok(buffer.into_boxed_slice())
 }
 
@@ -301,8 +348,16 @@ fn try_boxed_from(values: &[[bool; 2]]) -> Result<Box<[[bool; 2]]>, TryReserveEr
 mod tests {
     use super::*;
 
+    /// Soloable track seeds only: every test written before submixes existed runs on these.
     fn state(mutes: &[[bool; 2]]) -> LiveControlSoloState {
-        LiveControlSoloState::try_new(mutes).expect("solo state")
+        let seeds: Vec<StripMuteSeed> = mutes
+            .iter()
+            .map(|&mutes| StripMuteSeed {
+                mutes,
+                solo_safe: false,
+            })
+            .collect();
+        LiveControlSoloState::try_new(&seeds).expect("solo state")
     }
 
     /// Solo `S` composes to exactly "mute everything outside `S`", and nothing else moves.
@@ -446,6 +501,121 @@ mod tests {
                 emitted[track]
             );
         }
+    }
+
+    /// Three soloable tracks, then two solo-safe submixes: `[true, false]` and `[false, false]`.
+    fn strips() -> LiveControlSoloState {
+        let track = |mutes| StripMuteSeed {
+            mutes,
+            solo_safe: false,
+        };
+        let submix = |mutes| StripMuteSeed {
+            mutes,
+            solo_safe: true,
+        };
+        LiveControlSoloState::try_new(&[
+            track([false; 2]),
+            track([false, true]),
+            track([false; 2]),
+            submix([true, false]),
+            submix([false; 2]),
+        ])
+        .expect("solo state")
+    }
+
+    /// Gate 1 (issue #1211): a bus never takes a solo-derived mute, whatever the tracks do.
+    #[test]
+    fn a_solo_safe_strip_keeps_its_user_mute_through_every_solo_transition() {
+        let mut solo = strips();
+        let bus_mutes = |solo: &LiveControlSoloState| {
+            [3, 4].map(|strip| [solo.effective_mute(strip, 0), solo.effective_mute(strip, 1)])
+        };
+        let settled = [[true, false], [false, false]];
+        assert_eq!(bus_mutes(&solo), settled);
+        // Engage and release every track's solo in turn, overlapping, and back to none.
+        for (track, engaged) in [
+            (0, true),
+            (2, true),
+            (0, false),
+            (1, true),
+            (2, false),
+            (1, false),
+        ] {
+            assert!(solo.set_solo(track, engaged));
+            assert_eq!(bus_mutes(&solo), settled, "after solo({track}) = {engaged}");
+            for strip in [3, 4] {
+                assert_eq!(
+                    solo.track_delta(strip),
+                    [None, None],
+                    "bus {strip} owes nothing"
+                );
+            }
+        }
+        // The soloable tracks still took their solo-derived mutes on the way.
+        assert!(solo.set_solo(1, true));
+        assert!(solo.effective_mute(0, 0) && solo.effective_mute(2, 1));
+        assert!(!solo.effective_mute(1, 0) && solo.effective_mute(1, 1));
+    }
+
+    /// Gate 1: soloing a bus is refused, moves nothing and opens no transaction.
+    #[test]
+    fn a_solo_safe_strip_cannot_be_soloed() {
+        let mut solo = strips();
+        for strip in [3, 4] {
+            assert!(solo.solo_safe(strip));
+            assert!(!solo.set_solo(strip, true), "bus {strip} accepted a solo");
+            assert!(!solo.solo(strip));
+        }
+        assert!(!solo.any_solo());
+        assert_eq!(solo.solo_count(), 0);
+        assert!(!solo.transaction_open());
+        // Nothing was solo-muted by the refused requests.
+        for strip in 0..5 {
+            assert_eq!(solo.track_delta(strip), [None, None], "strip {strip}");
+        }
+        // A real solo still counts exactly once, and a bus request does not add to it.
+        assert!(solo.set_solo(0, true));
+        assert!(!solo.set_solo(4, true));
+        assert_eq!(solo.solo_count(), 1);
+        assert!(!solo.solo_safe(0) && !solo.solo_safe(5));
+    }
+
+    /// Gate 1: a refused batch leaves every strip -- the solo-safe ones too -- as it found it.
+    #[test]
+    fn rollback_restores_every_strip_including_the_solo_safe_ones() {
+        let mut solo = strips();
+        assert!(solo.set_solo(1, true));
+        solo.record_emitted(0, BuiltinLaneSelector::Both, true);
+        solo.commit();
+        let snapshot = |solo: &LiveControlSoloState| {
+            (0..5)
+                .map(|strip| {
+                    (
+                        solo.solo(strip),
+                        [solo.user_mute(strip, 0), solo.user_mute(strip, 1)],
+                        [solo.emitted_mute(strip, 0), solo.emitted_mute(strip, 1)],
+                        [solo.effective_mute(strip, 0), solo.effective_mute(strip, 1)],
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot(&solo);
+
+        // The refused batch: it touches both buses and two tracks, and tries to solo a bus.
+        assert!(solo.set_user_mute(3, BuiltinLaneSelector::Both, false));
+        assert!(solo.set_user_mute(4, BuiltinLaneSelector::Right, true));
+        solo.record_emitted(4, BuiltinLaneSelector::Right, true);
+        solo.record_emitted(3, BuiltinLaneSelector::Left, false);
+        assert!(!solo.set_solo(3, true));
+        assert!(solo.set_solo(2, true));
+        assert!(solo.set_solo(1, false));
+        assert!(solo.set_user_mute(0, BuiltinLaneSelector::Left, true));
+        solo.rollback();
+
+        assert!(!solo.transaction_open());
+        assert_eq!(solo.solo_count(), 1);
+        assert_eq!(snapshot(&solo), before);
+        assert!(solo.solo_safe(3) && solo.solo_safe(4) && !solo.solo_safe(2));
     }
 
     /// An out-of-range track is refused rather than silently folded onto track 0.

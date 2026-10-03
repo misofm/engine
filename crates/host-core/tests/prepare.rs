@@ -710,10 +710,10 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         expected,
         "live-control track order is the canonical normalized order"
     );
-    assert_eq!(handles.track_controls.len(), expected.len());
+    assert_eq!(handles.strip_controls.len(), expected.len());
     assert_eq!(handles.meters.len(), expected.len());
     for (index, track) in expected.iter().enumerate() {
-        assert_eq!(&*handles.track_controls[index].track_id, track.as_str());
+        assert_eq!(&*handles.strip_controls[index].track_id, track.as_str());
         assert_eq!(&*handles.meters[index].track_id, track.as_str());
     }
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
@@ -728,7 +728,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         },
         smoothing_samples: 0,
     };
-    let producer = &mut handles.track_controls[0].producer;
+    let producer = &mut handles.strip_controls[0].producer;
     for _ in 0..4 {
         producer
             .try_push(record)
@@ -755,7 +755,7 @@ fn no_live_control_request_attaches_nothing_and_charges_nothing() {
         &HostLiveControlRequest::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
-    assert!(handles.track_controls.is_empty());
+    assert!(handles.strip_controls.is_empty());
     assert!(handles.meters.is_empty());
     assert_eq!(handles.strips.len(), 9);
     assert_eq!(plain.report.builtin_meter_payload_bytes, 0);

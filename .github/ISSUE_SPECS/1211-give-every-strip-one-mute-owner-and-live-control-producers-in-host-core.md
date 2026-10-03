@@ -181,6 +181,76 @@ strip set, so a `TrackControlRequest` may name a submix and gets that strip's th
 - The randomized reach counts.
 - Whether #1053 had landed, and so whether D4 applied.
 
+### Attempt 1 record (Terra)
+
+- **D1** (`host-core/src/prepare.rs`): the control requests iterate `live_control_strips` (tracks,
+  then submixes); `HostLiveControlHandles.track_controls` -> `strip_controls`, documented parallel
+  to `strips` (track lanes `strip_controls[..track_count]`); the `control_queue_depth` doc, the
+  handles doc and the request/order comments say "strip". `canonical_index` and the sort were
+  already over every strip (#1207), so the order needed no code change.
+- **D2** (`host-core/src/solo.rs`, `lib.rs`): `StripMuteSeed { mutes, solo_safe }` re-exported;
+  `try_new(&[StripMuteSeed])`; a construction-only `solo_safe` array (no shadow: no transaction
+  changes it); `set_solo` returns `false` before taking the shadow on a solo-safe entry (so a
+  refused bus solo opens no transaction), under the comment `// Source semantics: tracks only.`
+  and the one line the #1198 verdict asked for; `effective_mute = user_mute || (any_solo &&
+  !solo_safe && !soloed)`, the module doc and method doc name it the one composition; new
+  `solo_safe(strip)` reader; the struct doc names `HostLiveControlHandles::strips` and strip
+  indices; parameters renamed `track` -> `strip`. The redundant-record rule, shadow, `commit` and
+  `rollback` are unchanged (they copy whole arrays, so they cover every strip).
+- **D3** (`host-web/src/lib.rs`): one `StripMuteSeed { solo_safe: false }` per track,
+  `handles.strip_controls` into `ReadyOwnership.controls`, the `input_filter_shadows` emptiness
+  check renamed. **Deviation (doc only):** the `ReadyOwnership.controls` field doc (outside the
+  cited lines) now says per-strip and that commands address only the track prefix, so it does not
+  claim per-track after this change. The command guard (`track >= ready.tracks.len()`) is
+  untouched, so no index `>= T` reaches `controls` or the solo state.
+- **D4**: #1053 has not landed (capi reads no live-control handles); its spec carries the rename
+  note (`1053-*.md:165`). D4 did not apply.
+- **Readers renamed**: `collapse_arming.rs`, `input_liveness_live_controls.rs` (two),
+  `prepare.rs` (four), `randomized.rs`, `spectrum.rs`, `symmetry_witness.rs` (anchors moved by
+  K2's earlier slices, found by symbol), plus `strip_handles.rs` (#1207, not in the Context list):
+  its "none per bus" assertion was superseded and is rewritten to `controls == strips`.
+  `prepare.rs:675`'s `bound.track_controls` is the builtins compiler's field and stays.
+  **Not renamed:** `LiveControlSoloState::track_count()` and `track_delta()` keep their names
+  (doc now says strips); renaming them touches `host-web/src/tests.rs`, which this slice may edit
+  only for the renamed field.
+- **Tests and test value** (each mutation applied, run red, reverted; rows 1211-M1..M7 in
+  `crates/host-core/tests/MUTATIONS.md`):
+  - `solo::tests::a_solo_safe_strip_keeps_its_user_mute_through_every_solo_transition` (gate 1):
+    red if a bus can be solo-muted. M2 (drop `!solo_safe`) -> red.
+  - `solo::tests::a_solo_safe_strip_cannot_be_soloed` (gate 1): red if a bus can be soloed or
+    `any_solo` counts a solo-safe entry. M1 (drop guard) -> red; M4 (guard bumps `solo_count`)
+    -> red.
+  - `solo::tests::rollback_restores_every_strip_including_the_solo_safe_ones` (gate 1): red if the
+    shadow restores only the soloable entries. M3 (rollback skips solo-safe user mutes) -> red;
+    M1 -> red.
+  - The seven pre-existing solo unit tests run unchanged on all-soloable seeds (helper `state`).
+  - `tests/strip_controls.rs::a_bus_fader_record_renders_as_the_session_with_that_fader`
+    (gate 2; 3 tracks into `bus`, `bus` to output, queue depth 8; `strip_controls == [t0, t1, t2,
+    bus]`; blocks 0-1 differ from the -6 dB twin, blocks 2-5 bit-identical after a `FaderDb`
+    -6 dB / smoothing 0 push on `strip_controls[3].fader`): red if a submix gets no control
+    request, its producer is not parallel to its strip, or the record lands on a track's lane.
+    M5 (tracks-only requests) -> red; M6 (sort by ID) -> red; pushing on `[2]` -> red.
+  - `tests/strip_handles.rs::handles_list_tracks_then_submixes_and_file_bus_effects` (rewritten
+    assertion): red if the builtin controls stop being parallel to the strips. M5 -> red
+    (`left: ["t0", "t1", "t2"]`).
+  - `tests/randomized.rs` (gate 3): `live_records` draws over `strip_controls.len()`; new
+    `Reach.bus_live_records`, asserted `> 0`. Red if the generator stops driving a bus strip's
+    producer. M7 (draw over `track_count`) -> `bus_live_records: 0`, red.
+- **Randomized reach** (12 seeds): `consoles: 12, refused: 0, armed_collapse_blocks: 53,
+  live_records: 180, bus_console_entries: 11, bus_live_records: 6`; all three arms bit-identical.
+- **Gates** (x86_64 AVX2 host, this commit's tree):
+  - 1-3: the tests above pass.
+  - 4: every existing host-core and host-web live-control, solo and meter test passes with only
+    the rename and the `StripMuteSeed` construction (no host-web test edited).
+  - 5: DESIGN section 7 workspace test command rc 0 (103 test binaries, 1162 passed, 0 failed);
+    `check-/test-host-core-policy.sh`, `check-/test-realtime-policy.sh`,
+    `check-/test-workspace-policy.sh` ok; `cargo fmt --all -- --check` ok; workspace clippy
+    `--all-targets --all-features -D warnings` clean; `cargo doc` with `-D warnings` clean.
+  - `run-aarch64-tests.sh debug`: no arm64 host; at the K2 push (CI `aarch64-debug`).
+  - D4 gates: not applicable.
+- No digest, oracle or canonical text re-pinned; superseded: the `strip_handles.rs` "none per bus"
+  control assertion (rewritten in place).
+
 ## Dependencies
 
 - *List every strip in the live-control handles and file bus effects in the browser* (#1207)

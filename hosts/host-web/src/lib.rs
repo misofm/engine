@@ -34,8 +34,9 @@ use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
     LiveControlSoloState, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
-    SourceSubmission, apply_input_filter_edit, compile_host_model, compiled_session_shape,
-    control_table_bytes, parse_host_session, prepare_host_runtime_with_live_controls_and_spectrum,
+    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
+    compiled_session_shape, control_table_bytes, parse_host_session,
+    prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
 use host_core::{
@@ -1411,8 +1412,9 @@ impl PreparedSpectrumCapture {
 /// the source consumers) before its control-side producers, and the compiled session model outlives
 /// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
-    /// Issue #137 D1 / #140 B: per-track control-side producers -- matrix/pan and fader/mute --
+    /// Issue #137 D1 / #140 B: per-strip control-side producers -- matrix/pan and fader/mute --
     /// declared first so they are released before the plan that owns their consumer endpoints.
+    /// Parallel to the strips (issue #1211 D3); commands address only the track prefix for now.
     controls: Vec<TrackControlProducer>,
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
@@ -5853,7 +5855,7 @@ fn compile_ready(
         .max(id_arena)
         .max(engine.session_largest_allocation_bytes);
     let mut input_filter_shadows = Vec::new();
-    if !handles.track_controls.is_empty() {
+    if !handles.strip_controls.is_empty() {
         input_filter_shadows
             .try_reserve_exact(session.normalized_model().tracks.len())
             .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -5952,7 +5954,8 @@ fn compile_ready(
     // fader mutes -- the same `left_mute`/`right_mute` words `track_parameters` compiles into the
     // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
     // because that order is the addressing authority for every queue, meter and command index.
-    let mut prepared_mutes: Vec<[bool; 2]> = Vec::new();
+    // One seed per *track*, none solo-safe (issue #1211 D3): the browser addresses no submix yet.
+    let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
     prepared_mutes
         .try_reserve_exact(track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -5973,7 +5976,10 @@ fn compile_ready(
             count(track.inserts.effects.len())?,
             count(model.console.post_insert.len())?,
         ]);
-        prepared_mutes.push([track.fader.left_mute, track.fader.right_mute]);
+        prepared_mutes.push(StripMuteSeed {
+            mutes: [track.fader.left_mute, track.fader.right_mute],
+            solo_safe: false,
+        });
     }
     for submix in &model.submixes {
         rack_effects.push([
@@ -6198,7 +6204,7 @@ fn compile_ready(
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(decoded_bytes);
     let ready = ReadyOwnership {
-        controls: handles.track_controls,
+        controls: handles.strip_controls,
         effect_controls: effect_controls.into_boxed_slice(),
         effect_observations: effect_observations.into_boxed_slice(),
         observation_tracks: observation_tracks.into_boxed_slice(),

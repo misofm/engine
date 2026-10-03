@@ -891,7 +891,7 @@ fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
 
     let control = console
         .handles
-        .track_controls
+        .strip_controls
         .iter_mut()
         .find(|producer| producer.track_id.as_ref() == "eq3")
         .expect("a control channel for the addressed track");

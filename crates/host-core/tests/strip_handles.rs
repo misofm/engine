@@ -1,9 +1,10 @@
 //! Issue #1207 gate 2: the live-control handles list every strip, tracks first.
 //!
 //! `HostLiveControlHandles::strips` is the addressing authority: the tracks in canonical ID order,
-//! then the submixes in canonical ID order. The per-track channels (`track_controls`, `meters`)
-//! stay parallel to the track prefix, and a submix's effects get a live channel and an observation
-//! handle exactly as a track's do (D5 removed the K1 interim).
+//! then the submixes in canonical ID order. The builtin control producers (`strip_controls`) are
+//! parallel to every strip (issue #1211 D1), the default meters stay parallel to the track prefix,
+//! and a submix's effects get a live channel and an observation handle exactly as a track's do (D5
+//! removed the K1 interim).
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -74,8 +75,9 @@ fn document() -> String {
 }
 
 /// Red if a submix lands inside the track prefix (or the strips stop being tracks-then-submixes),
-/// if the control requests or default meters start to cover buses, or if a bus effect stays
-/// without a live channel or an observation handle.
+/// if the builtin controls stop being parallel to the strips (issue #1211 D1), if the default
+/// meters start to cover buses, or if a bus effect stays without a live channel or an observation
+/// handle.
 #[test]
 fn handles_list_tracks_then_submixes_and_file_bus_effects() {
     let (_, _, handles) = prepare_host_session_with_live_controls(
@@ -98,13 +100,13 @@ fn handles_list_tracks_then_submixes_and_file_bus_effects() {
 
     let tracks = &strips[..handles.track_count];
     let controls: Vec<&str> = handles
-        .track_controls
+        .strip_controls
         .iter()
         .map(|control| control.track_id.as_ref())
         .collect();
     assert_eq!(
-        controls, tracks,
-        "one builtin channel per track, none per bus"
+        controls, strips,
+        "one builtin channel per strip, in strip order"
     );
     let meters: Vec<&str> = handles
         .meters

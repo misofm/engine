@@ -427,7 +427,7 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
         },
     )
     .expect("live controls, meters and spectrum prepare together");
-    assert_eq!(handles.track_controls.len(), 9);
+    assert_eq!(handles.strip_controls.len(), 9);
     assert_eq!(handles.meters.len(), 9);
     assert_eq!(
         host.report.spectrum_capture_retained_bytes,

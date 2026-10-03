@@ -291,7 +291,7 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
     let mut planes = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         if let Some(write) = live.filter(|write| write.block == block) {
-            handles.track_controls[write.track]
+            handles.strip_controls[write.track]
                 .input
                 .try_push(write.record)
                 .expect("bounded queue room");
