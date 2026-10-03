@@ -3966,7 +3966,7 @@ pub extern "C" fn miso_engine_web_v1_live_control_track_count(handle: u32) -> u3
 /// Copy one canonical track ID into the ID staging buffer; returns its byte length.
 ///
 /// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation already sized for the longest source, track or submix ID in the session.
+/// preparation already sized for the longest source, track, submix or route ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
@@ -3986,10 +3986,31 @@ pub extern "C" fn miso_engine_web_v1_live_control_submix_count(handle: u32) -> u
 /// D1).
 ///
 /// Zero means "no such submix". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation sized for the longest source, track or submix ID in the session.
+/// preparation sized for the longest source, track, submix or route ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_submix_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_submix_id(index))
+}
+
+/// Return the number of live routes -- the routes into submixes, in canonical route-ID order -- or
+/// zero before compilation or without live controls (issue #1223 D1).
+///
+/// Live route `i` is the send a send kind's (`13`-`15`) index word `i` addresses, because this
+/// enumerates exactly the plan's live send producers, in their order.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_live_control_route_count(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.live_control_route_count()).unwrap_or(0)
+    })
+}
+
+/// Copy one live route ID into the ID staging buffer; returns its byte length (issue #1223 D1).
+///
+/// Zero means "no such live route". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
+/// preparation sized for the longest source, track, submix or route ID in the session.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_live_control_route_id(handle: u32, index: u32) -> u32 {
+    with_host_mut(handle, 0, |host| host.copy_live_control_route_id(index))
 }
 
 /// Return the number of prepared resident observation effects in the current owner map.

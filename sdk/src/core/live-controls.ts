@@ -186,6 +186,8 @@ interface LiveControlLayout {
   readonly console: readonly LayoutRow[];
   readonly tracks: ReadonlyMap<string, StripInstances>;
   readonly submixes: ReadonlyMap<string, StripInstances>;
+  /** The IDs of the session's routes into the output, which are never live (issue #1223 D4). */
+  readonly outputRoutes: ReadonlySet<string>;
 }
 
 /** Which kind of strip a strip-level edit builder addresses; it names the strip in messages. */
@@ -254,7 +256,11 @@ function layoutOf(session: SessionLike, map: SessionMap): LiveControlLayout {
         + "live controls resolve IDs only against the session the engine booted",
     );
   }
-  return Object.freeze({ console: Object.freeze(slots), tracks, submixes });
+  const outputRoutes = new Set(model.routes
+    .filter((route) => (route.destination as Readonly<Record<string, unknown>> | undefined)?.kind
+      === "output_input")
+    .map((route) => String(route.id)));
+  return Object.freeze({ console: Object.freeze(slots), tracks, submixes, outputRoutes });
 }
 
 /**
@@ -426,12 +432,16 @@ function trackEdit(
 export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
   readonly #submixes: ReadonlyMap<string, number>;
+  readonly #routes: ReadonlyMap<string, number>;
   readonly #layout: LiveControlLayout | undefined;
 
   constructor(map: SessionMap, session?: SessionLike) {
     this.#tracks = new Map(map.tracks.map((id, index) => [id, index] as const));
     const trackCount = map.tracks.length;
     this.#submixes = new Map(map.submixes.map((id, index) => [id, trackCount + index] as const));
+    // Issue #1223 D4: a send's index is its position in the engine's own enumeration, never a
+    // sort of the session's routes here.
+    this.#routes = new Map(map.routes.map((id, index) => [id, index] as const));
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
   }
 
@@ -471,6 +481,30 @@ export class LiveControlEdits {
       `the compiled session has no track or submix '${stripId}'; expected one of `
         + `${[...this.#tracks.keys(), ...this.#submixes.keys()].join(", ")}`,
     );
+  }
+
+  /**
+   * A live send's edits, by its route ID (issue #1223 D4). Only routes into submixes are live; a
+   * route into the output changes only through the session, and is refused here as the engine
+   * would refuse its index, with `unknownRoute`.
+   */
+  route(routeId: string): RouteEdits {
+    const index = this.#routes.get(routeId);
+    if (index === undefined) {
+      if (this.#layout?.outputRoutes.has(routeId) === true) {
+        throw new MisoUsageError(
+          `route '${routeId}' goes to the output, and output routes are not live: only routes into `
+            + "submixes (sends) take live edits; change an output route through the session",
+          "unknownRoute",
+        );
+      }
+      throw new MisoUsageError(
+        `the compiled session has no live route '${routeId}'; expected one of `
+          + `${[...this.#routes.keys()].join(", ") || "none"}`,
+        "unknownRoute",
+      );
+    }
+    return new RouteEdits(index);
   }
 }
 
@@ -691,6 +725,49 @@ export class TrackEdits extends StripEdits {
 export class SubmixEdits extends StripEdits {
   constructor(stripIndex: number, submixId?: string, layout?: LiveControlLayout) {
     super("submix", stripIndex, submixId, layout);
+  }
+}
+
+/**
+ * A live send's edits (issue #1223 D4): its gain, its mute and its 2x2 matrix, each over an
+ * optional `smoothingSamples`. `routeIndex` is the send's live-route index, its position in
+ * `SessionMap.routes`; `LiveControlEdits.route(id)` computes it. The record's `rack` and
+ * `channel` are not applicable (`255`). The engine holds the gain and the matrix to the prepared
+ * route's domain and refuses a value outside it with `domain`.
+ */
+export class RouteEdits {
+  readonly #routeIndex: number;
+
+  constructor(routeIndex: number) {
+    this.#routeIndex = u32(routeIndex, "routeIndex");
+  }
+
+  gainDb(db: number, options: SmoothingOptions = {}): LaneEdit {
+    return trackEdit("routeGainDb", this.#routeIndex, {
+      smoothingSamples: smoothing(options),
+      values: values(finite(db, "gainDb")),
+    });
+  }
+
+  /** `true` silences the send, `false` opens it. */
+  mute(enabled: boolean, options: SmoothingOptions = {}): LaneEdit {
+    return trackEdit("routeMute", this.#routeIndex, {
+      smoothingSamples: smoothing(options),
+      values: values(enabled ? 1 : 0),
+    });
+  }
+
+  /** The send's 2x2 matrix, written `ll, lr, rl, rr`. */
+  matrix(matrix: MatrixValues, options: SmoothingOptions = {}): LaneEdit {
+    return trackEdit("routeMatrix", this.#routeIndex, {
+      smoothingSamples: smoothing(options),
+      values: values(
+        finite(matrix.ll, "matrix.ll"),
+        finite(matrix.lr, "matrix.lr"),
+        finite(matrix.rl, "matrix.rl"),
+        finite(matrix.rr, "matrix.rr"),
+      ),
+    });
   }
 }
 

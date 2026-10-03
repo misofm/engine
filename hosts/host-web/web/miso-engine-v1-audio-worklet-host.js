@@ -989,7 +989,7 @@ class MisoAudioWorkletHost {
         : pending.response === "eqConfig"
           ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1064,6 +1064,9 @@ class MisoAudioWorkletHost {
       // sections.
       && Array.isArray(message.submixes)
       && message.submixes.every((value) => typeof value === "string" && value.length > 0)
+      // Issue #1223 D3: the live route IDs, in the live-route index order the send kinds address.
+      && Array.isArray(message.routes)
+      && message.routes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)

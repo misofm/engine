@@ -57,6 +57,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_input_filters_config_copy",
     "miso_engine_web_v1_input_filters_prepare",
+    "miso_engine_web_v1_live_control_route_count",
+    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",

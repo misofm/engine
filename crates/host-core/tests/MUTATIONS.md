@@ -411,3 +411,9 @@ reverted.
 | 1222-H2 | resolve a submix source without the track offset | the same test: live route 2's `source_strip` is 1, not 4 |
 | 1222-H3 | take the shadow once, at construction, not per transaction | `a_rollback_restores_every_field_…`: rolled back to the seeds, not the committed values |
 | 1222-H4 | keep routes into the output in the mirror | both tests: the mirror has seven entries, not four |
+
+## Issue #1223 — the session shape's route IDs
+
+| row | mutation | observed red |
+|---|---|---|
+| 1223-H1 | `longest_route_id_bytes` measures only the routes into submixes | `the_session_shape_measures_every_route_id`: 7, not 39 |

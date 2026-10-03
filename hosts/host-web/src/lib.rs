@@ -2046,7 +2046,8 @@ impl AudioWorkletEngineHost {
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2152,6 +2153,16 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn live_control_submixes(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.submixes)
+    }
+
+    /// Number of live routes (issue #1223 D1): exactly the plan's live send producers, the routes
+    /// into submixes in canonical route-ID order, which is the order a send kind's index word
+    /// reads. Zero before compilation and without live controls.
+    #[must_use]
+    pub fn live_control_route_count(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.route_controls.len())
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -2938,6 +2949,18 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
+    }
+
+    /// Copy one live route ID into ID staging; returns its byte length (issue #1223 D1). The
+    /// index is the live-route index, read from the producer the send kinds address.
+    pub(crate) fn copy_live_control_route_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let Some(producer) = ready.route_controls.get(index as usize) else {
+            return 0;
+        };
+        Self::copy_id_into_staging(self.buffers.as_mut(), producer.route_id().as_bytes())
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).

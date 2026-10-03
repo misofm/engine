@@ -936,7 +936,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
   test("withSession() on live controls built without the booted document refuses rather than trusts", () => {
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
-      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [] },
+      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [], routes: [] },
       () => assert.fail("nothing is submitted"),
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);

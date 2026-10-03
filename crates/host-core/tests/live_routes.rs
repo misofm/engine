@@ -22,7 +22,8 @@ use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler, route_
 use host_core::{
     HostLiveControlHandles, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy,
     PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlResources,
-    SourceSubmission, compile_host_session, prepare_host_session_with_live_controls,
+    SourceSubmission, compile_host_session, compiled_session_shape,
+    prepare_host_session_with_live_controls,
 };
 use session::{
     ChannelMatrix, Console, Effect, EffectIdentity, EffectQuality, LinkMode, Route,
@@ -772,6 +773,26 @@ fn live_send_handles_are_in_canonical_route_order() {
     }
     let idle = Live::new(&model, &Vec::new(), None);
     assert!(idle.handles.route_controls.is_empty());
+}
+
+/// Issue #1223 gate 4 (D2): `longest_route_id_bytes` is the longest route ID over every route of
+/// the session, which here is a route into the output, longer than every send, source, track and
+/// submix ID.
+///
+/// Test value: red if the shape measures only the live sends, or another ID family, so a host
+/// sizing its ID staging from it would undersize it for a route it may name.
+#[test]
+fn the_session_shape_measures_every_route_id() {
+    let mut model = out_of_order();
+    let long = "t1-main-to-the-room-and-past-every-send";
+    model
+        .routes
+        .push(to_output(long, tap("t1", SendTap::PostPan)));
+    let compiled = compile_host_session(&document(&model), &caps()).expect("session compiles");
+    let shape = compiled_session_shape(&compiled).expect("shape");
+    assert_eq!(shape.longest_route_id_bytes, long.len() as u64);
+    assert_eq!(shape.longest_submix_id_bytes, "bus-a".len() as u64);
+    assert_eq!(shape.longest_track_id_bytes, "t0".len() as u64);
 }
 
 // ---- Gate 6 -------------------------------------------------------------------------------------

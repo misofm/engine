@@ -212,6 +212,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
+  miso_engine_web_v1_live_control_route_count \
+  miso_engine_web_v1_live_control_route_id \
   miso_engine_web_v1_live_control_submix_count \
   miso_engine_web_v1_live_control_submix_id \
   miso_engine_web_v1_live_control_track_count \

@@ -201,6 +201,113 @@ No allocation gate: the exports run on the control plane, and no render-thread s
 - Each new eval's name, with its one-sentence test-value answer.
 - The ARTIFACT CHANGED report for the shipped module.
 
+### Attempt 1 record (Terra)
+
+Base `466f0ab63` (#1222's head). Anchors re-found by symbol.
+
+**Implementation.**
+
+- D2: `HostSessionShape.longest_route_id_bytes` measures every route of the session. The ID
+  staging buffer is sized from the maximum of the source, track, submix and route lengths
+  (`lib.rs` boot, and the three test mirrors in `tests.rs`).
+- D1: `miso_engine_web_v1_live_control_route_count` and `_route_id` (`ffi.rs`) read
+  `ReadyOwnership::route_controls`, the producers the send kinds index, through
+  `live_control_route_count()` and `copy_live_control_route_id()`. A host without live controls
+  has no producers and reports 0. Both names are added, sorted, to all four export lists, so each
+  list grows by exactly two (`abi_layout::EXPORTS` is now 120).
+- D3: the worklet reads the route IDs under the track and submix rules and posts `routes`. The
+  host JS exact field list and validator, `MisoSessionMap.routes` (in both `.d.ts` copies,
+  byte-identical), `SessionMap.routes` (`boundary.ts` reads the exports; the browser map copies
+  the reply), and every stub listed in Context move with it.
+- D4: `LiveControlEdits.route(id)` returns `RouteEdits` (`gainDb`, `mute`, `matrix`;
+  `SmoothingOptions` only). Records are kinds 13, 14 and 15 at `SessionMap.routes`' index, with
+  `rack` and `channel` 255. An unknown ID throws `MisoUsageError` with `diagnosticCode`
+  `unknownRoute`. With a session, an output route's message says output routes are not live
+  (`layoutOf` now also collects the output route IDs); otherwise it lists the live routes.
+- #1222 deviation 2 is undone: `routeGainDb`, `routeMute` and `routeMatrix` are in `kindNames`,
+  and the `kindsAwaitingSdk` exception is gone. The test is renamed "every command kind is built
+  by name, and the strip and effect kinds are admitted by live Wasm": its one-track session has
+  no send, and the send kinds are admitted in the #1223 evals.
+- D6: the "Live sends (#1223, batch K3)" section in `APP-LIVE.md`.
+- `check-session-map-shape.py`: the two exact-list mutations carry `"routes"`, and three new
+  mutations are added (host list without `routes`, worklet without `routes`, `.d.ts` without
+  `routes`). The self-test now catches 20.
+
+**Tests and test value.** Each mutation was applied, run red and reverted. The rows are in
+`hosts/host-web/MUTATIONS.md` "Issue #1223" and `crates/host-core/tests/MUTATIONS.md` 1223-H1.
+
+- `tests::live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them` (gate 4,
+  D1). The session has a 63-byte live send, longer than every source, track and submix ID. A
+  second send, `send-a`, sorts before it, and `bx-main` sorts before both.
+  - Red if staging ignores route IDs. `id_staging_bytes` is 2, not 63; without that assertion,
+    the copy trips `compiled ID exceeds its projected staging capacity`.
+  - Red if the export enumerates anything but the live send producers. Reading all routes puts
+    `bx-main` at index 0.
+- `live_routes::the_session_shape_measures_every_route_id` (gate 4, host-core). Red if
+  `longest_route_id_bytes` measures only the live sends (7, not 39) or another ID family.
+- `live-controls-evals.mjs` "a send edit encodes its kind at the engine's live-route index, over
+  both transports" (gate 1). Sends are declared `snare-drums`, `vox-verb`, `kick-verb`,
+  `kick-drums`, so `kick-verb` is 1 live but 2 by declaration and 2 among all routes.
+  - Red if the SDK indexes by its own order of the session's routes, the browser map loses the
+    engine's list, `OfflineEngine.sessionMap()` reorders it, or the matrix words are written
+    `ll, rl, lr, rr`.
+- "an unknown or output route ID refuses before any record is built" (gate 2). Red if an ID the
+  SDK cannot place falls back to an index, or if the output-route reason is lost.
+- "a live send gain equals the session booted at that gain from the edit's block on" (gate 3,
+  shipped module). Red if the engine's export, the map or the encoding disagree on which send an
+  index names.
+  - Its unique catch: E1, a module rebuilt so that admission pushes onto route `index ^ 1`, turns
+    only this eval red. Gate 1 stays green there because admission is `ok`.
+- `live-controls-types.ts` (D4 and D5): `route()` returns `RouteEdits`, whose keys are exactly
+  `gainDb | mute | matrix`, and `MisoSessionMap.routes` is `readonly string[]`.
+  `@ts-expect-error` covers a lane option, a partial matrix and `faderDb`. Red if a send gains a
+  lane option (`LaneOptions`) or a strip method.
+- `test-web-audioworklet.mjs` (D3). The fake engine enumerates `zz-send`, `aa-send`, deliberately
+  unsorted. Red if the worklet sorts or reorders them, the host validator accepts a non-string
+  route, or construction skips the empty/oversized ID check. The four host-reply mutations mirror
+  #1210 gate 3.
+- No test is superseded. No digest or prose is pinned.
+
+**Deviations.**
+
+1. D5 says "the two exports are added to the `.d.ts`". The host `.d.ts` declares no export list,
+   so there was nothing to add there. The exports reach TypeScript through the regenerated
+   `sdk/src/generated/abi.ts` (`ExportName`). `RouteEdits` is an SDK type
+   (`sdk/src/core/live-controls.ts`, exported by `index.ts`'s existing `export *`), not a host
+   type.
+2. `hosts/host-web/qualification/qualification.js` is unchanged. It reads `sessionMap()` and
+   reports chosen fields, but spells no exact field list. K2 did not touch it for `submixes`
+   either.
+3. `scripts/test-web-audioworklet.sh`'s sed mutation still matches unchanged: it is a substring
+   of the grown list. A routes sed mutation would duplicate the Python self-test's, so none was
+   added.
+
+**Gates** (x86-64-v3 AVX2; A = `target/ci/k3-1223-artifacts`, B = `target/ci/k3-1223-named`;
+logs in `target/ci/k3-1223-logs/`). Every gate returned rc 0.
+
+- Gate 5:
+  - `check-sdk-types.sh`;
+  - `check-sdk-generated.sh A`;
+  - `check-sdk-headless.sh A` (355 pass, 0 fail);
+  - `sdk-package.sh check A`;
+  - `build-web-audioworklet.sh --named-twin B A`;
+  - `check-web-audioworklet.sh A B/…simd128.named.wasm` (the export list grew by exactly the two
+    names);
+  - `check-abi-layout-v1.py --self-test` (22 caught) and on `A/…abi-layout.json`;
+  - `check-session-map-shape.py --self-test` (20 caught) and plain;
+  - `check-browser-expected-resources.py --artifacts A` (digests and exact rows agree, 32 red
+    mutations; `idStagingBytes` did not move);
+  - `test-web-audioworklet.sh`.
+- Gate 6:
+  - test-debug-a (DESIGN 7, `--no-fail-fast`): 108 binaries, 1,222 passed, 0 failed, 9 ignored;
+  - `check-host-core-policy.sh`, `test-host-core-policy.sh` and `check-workspace-policy.sh`;
+  - `cargo fmt --all -- --check`;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
+- **ARTIFACT CHANGED** (expected: two new exports and the worklet reader): `2daf0f83…`
+  (2,762,489 B, #1222's record) -> `97a758d8fa5d274a2c2e1603d768101632f55b5a24ddc99fec22067d88be7d23`
+  (2,763,281 B, +792). The named twin is `9e75ffa1…` (3,153,509 B). The module digest is not a
+  per-change pin (#1061).
+
 ## Dependencies
 
 - *Admit live send commands in the browser* (#1222)

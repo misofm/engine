@@ -1,7 +1,7 @@
 /** Issue #322 compile-time red probes for the catalog-derived live controls. */
 
 import { LiveControlEdits } from "../src/core/live-controls.ts";
-import type { SubmixEdits, TrackEdits } from "../src/core/live-controls.ts";
+import type { RouteEdits, SubmixEdits, TrackEdits } from "../src/core/live-controls.ts";
 import type {
   MisoCommandAck,
   MisoCommandRequest,
@@ -67,6 +67,7 @@ const edits = new LiveControlEdits({
   sources: [],
   metersAttached: true,
   submixes: [],
+  routes: [],
 });
 const track = edits.track("t");
 
@@ -138,6 +139,7 @@ const busEdits = new LiveControlEdits({
   sources: [],
   metersAttached: false,
   submixes: ["bus"],
+  routes: ["t-bus"],
 });
 const bus = busEdits.submix("bus");
 bus.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -151,3 +153,19 @@ void notTrack;
 // @ts-expect-error strip() may name a bus, so it never offers solo
 busEdits.strip("t").solo(true);
 busEdits.strip("bus").effect("inserts", 0, "miso.compressor").observe("Gain Reduction", true, 1);
+
+// Issue #1223 D4/D5: a send's live edits are exactly its gain, mute and matrix. A send has no lane
+// (its record's channel is not applicable), no effects and no solo, and route() says so in its type.
+type _RouteReturn = Assert<Exact<ReturnType<LiveControlEdits["route"]>, RouteEdits>>;
+type _RouteSurface = Assert<Exact<keyof RouteEdits, "gainDb" | "mute" | "matrix">>;
+type _SessionMapRoutes = Assert<Exact<MisoSessionMap["routes"], readonly string[]>>;
+const send = busEdits.route("t-bus");
+send.gainDb(-12, { smoothingSamples: 480 });
+send.mute(true);
+send.matrix({ ll: 1, lr: 0.25, rl: 0, rr: 0.5 }, { smoothingSamples: 0 });
+// @ts-expect-error a send has no lane: its edits move both of its lanes together
+send.gainDb(-12, { channel: "left" });
+// @ts-expect-error a send's matrix names all four coefficients
+send.matrix({ ll: 1, rr: 1 });
+// @ts-expect-error a send is not a strip: it has no fader
+send.faderDb(-6);

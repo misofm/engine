@@ -72,7 +72,7 @@ function encodeBrowserCommands(commands) {
 }
 
 describe("issue 322 -- shared semantic live controls", () => {
-  test("all twelve command kinds are built by name and admitted by live Wasm", async () => {
+  test("every command kind is built by name, and the strip and effect kinds are admitted by live Wasm", async () => {
     const engine = await createOfflineEngine(compressorDocument(), {
       asset,
       liveControls: { commandQueueRecords: 64, meterBlocks: 2, observationTaps: 1 },
@@ -108,17 +108,16 @@ describe("issue 322 -- shared semantic live controls", () => {
       assert.equal(unsubscribe.admitted, 1);
       assert.equal(unsubscribe.appliedAtSample, 128n);
 
+      // The send kinds are built by `RouteEdits` and admitted by live Wasm in the issue 1223
+      // evals below; this session has no send.
       const kindNames = [
         "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
         "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
+        "routeGainDb", "routeMute", "routeMatrix",
       ];
-      // Issue #1222 added the three send kinds to the wire; the SDK builds them by name from
-      // issue #1223, which moves them into `kindNames`. Until then they are named here, so any
-      // other kind without a semantic method still turns this red.
-      const kindsAwaitingSdk = ["routeGainDb", "routeMute", "routeMatrix"];
       assert.deepEqual(
         [...ABI_LAYOUT.constants.wireCommandKinds.map((row) => row.name)].sort(),
-        [...kindNames, ...kindsAwaitingSdk].sort(),
+        [...kindNames].sort(),
         "the semantic methods cover the generated command vocabulary exactly",
       );
 
@@ -141,7 +140,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("unknown tracks and numeric domains refuse before transport", async () => {
     let calls = 0;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [] },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] },
       () => {
         calls += 1;
         throw new Error("must not be called");
@@ -264,6 +263,7 @@ describe("issue 322 -- shared semantic live controls", () => {
           sources: [{ id: "s", channels: 2, frames: 4_800n }],
           metersAttached: false,
           submixes: [],
+          routes: [],
         };
       },
       async command(value) {
@@ -370,7 +370,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("a torn acknowledgement is rejected after, never before, transport answers", async () => {
     let answered = false;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [] },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] },
       async () => {
         answered = true;
         return {
@@ -606,11 +606,180 @@ describe("issue 1214 -- live controls drive submix strips", () => {
       // The layout is held to the compiled strips: a map that lacks the session's submixes is
       // refused rather than resolving bus IDs the engine never compiled.
       assert.throws(
-        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [] }, built),
+        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [] }, built),
         /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
       );
     } finally {
       engine.dispose();
+    }
+  });
+});
+
+/**
+ * Issue #1223: tracks `kick`, `snare` and `vox`, each on its own source; unity buses `drums` and
+ * `verb` (no console slot, no insert, an identity input section); four sends declared out of
+ * route-ID order -- `snare-drums`, `vox-verb`, `kick-verb`, `kick-drums` -- and both buses to the
+ * output. The live routes are therefore `kick-drums`, `kick-verb`, `snare-drums`, `vox-verb`,
+ * while the declaration puts `kick-verb` at 2 and every route in ID order puts it at 2 too (behind
+ * `drums-out`).
+ */
+function sendSession({ kickVerbDb = 0 } = {}) {
+  let built = session({ id: "send.live", sampleRateHz: 48_000, revision: 1 });
+  const ids = ["kick", "snare", "vox"];
+  for (const id of ids) {
+    built = built.source(`s-${id}`, {
+      channels: 2, bitDepth: 24, frames: 4_800, content: `blake3:${"0".repeat(64)}`,
+    });
+  }
+  for (const id of ids) built = built.track(id, { source: `s-${id}` });
+  built = built.submix("drums").submix("verb").output("out");
+  const sends = [
+    ["snare-drums", "snare", "drums", 0],
+    ["vox-verb", "vox", "verb", -3],
+    ["kick-verb", "kick", "verb", kickVerbDb],
+    ["kick-drums", "kick", "drums", 0],
+  ];
+  for (const [id, trackId, submixId, gainDb] of sends) {
+    built = built.route({
+      id,
+      source: { kind: "track", trackId, tap: "post_pan" },
+      destination: { kind: "submix_input", submixId },
+      gainDb,
+    });
+  }
+  for (const bus of ["drums", "verb"]) {
+    built = built.route({
+      id: `${bus}-out`,
+      source: { kind: "submix", submixId: bus, tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+  }
+  return built;
+}
+
+describe("issue 1223 -- live controls drive sends", () => {
+  test("a send edit encodes its kind at the engine's live-route index, over both transports", async () => {
+    // Gate 1. Red if the SDK indexes a send by its own order of the session (declaration, or every
+    // route by ID), if the browser map drops the engine's route list, or if a send record's kind,
+    // rack, channel or matrix words are written otherwise.
+    const engine = await createOfflineEngine(sendSession(), {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    let request;
+    const host = {
+      async sessionMap() {
+        return { tag: "miso.sessionmap.v1", requestId: 1, result: 0, ...engine.sessionMap() };
+      },
+      async command(value) {
+        request = value;
+        const records = encodeBrowserCommands(value.commands);
+        const report = engine.submitCommands(records, value.commands.length);
+        return {
+          tag: "miso.ack.v1",
+          requestId: 2,
+          result: report.result,
+          reason: report.reason,
+          rejectedIndex: report.rejectedIndex,
+          admitted: report.admitted,
+          appliedAtSample: report.appliedAtSample,
+          records,
+        };
+      },
+    };
+    try {
+      const routes = engine.sessionMap().routes;
+      assert.deepEqual(routes, ["kick-drums", "kick-verb", "snare-drums", "vox-verb"]);
+      for (const controls of [engine.liveControls(), await createBrowserLiveControls(host)]) {
+        const send = controls.edit.route("kick-verb");
+        const edits = [
+          send.gainDb(-12, { smoothingSamples: 64 }),
+          send.mute(true),
+          send.matrix({ ll: 0.5, lr: 0.25, rl: -0.75, rr: 0.125 }, { smoothingSamples: 32 }),
+        ];
+        assert.deepEqual(edits.map((edit) => edit.kind), ["routeGainDb", "routeMute", "routeMatrix"]);
+        assert.deepEqual(edits.map((edit) => edit.trackIndex), edits.map(() => routes.indexOf("kick-verb")));
+        assert.equal(controls.edit.route("vox-verb").gainDb(0).trackIndex, 3);
+        const report = await controls.submit(...edits);
+        assert.equal(report.ok, true, report.reasonName);
+        assert.equal(report.admitted, 3);
+      }
+      const common = { rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0 };
+      assert.deepEqual(request, {
+        commands: [
+          { kind: 13, ...common, smoothingSamples: 64, values: [-12, 0, 0, 0] },
+          { kind: 14, ...common, smoothingSamples: 0, values: [1, 0, 0, 0] },
+          { kind: 15, ...common, smoothingSamples: 32, values: [0.5, 0.25, -0.75, 0.125] },
+        ],
+      });
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("an unknown or output route ID refuses before any record is built", async () => {
+    // Gate 2. Red if the SDK hands an ID it cannot place to some index (a track's, an output
+    // route's, or index 0) instead of refusing, or loses the output-route reason with a session.
+    const built = sendSession();
+    const engine = await createOfflineEngine(built, {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    try {
+      const controls = engine.liveControls();
+      const unknownRoute = (pattern) => (error) =>
+        error instanceof MisoUsageError && error.diagnosticCode === "unknownRoute"
+          && pattern.test(error.message);
+      const listed = /no live route '[^']+'; expected one of kick-drums, kick-verb, snare-drums, vox-verb/;
+      assert.throws(() => controls.edit.route("nope"), unknownRoute(listed));
+      assert.throws(() => controls.edit.route("kick"), unknownRoute(listed));
+      assert.throws(() => controls.edit.route("drums-out"),
+        unknownRoute(/route 'drums-out' goes to the output, and output routes are not live/));
+      // Without the session the SDK cannot tell an output route from a typo, so it lists the
+      // live routes instead.
+      const bare = new LiveControlEdits(engine.sessionMap());
+      assert.throws(() => bare.route("drums-out"), unknownRoute(listed));
+      assert.equal(bare.route("snare-drums").mute(false).trackIndex, 2);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a live send gain equals the session booted at that gain from the edit's block on", async () => {
+    // Gate 3, through the shipped module. Red if the route export, the session map or the
+    // encoding disagrees with the engine about which send an index names, or about the gain word.
+    const options = { asset, liveControls: { commandQueueRecords: 64 } };
+    const live = await createOfflineEngine(sendSession(), options);
+    const booted = await createOfflineEngine(sendSession({ kickVerbDb: -12 }), options);
+    try {
+      const boundary = 4;
+      const quantum = live.shape().quantumFrames;
+      let differedBefore = false;
+      for (let block = 0; block < boundary; block += 1) {
+        feedDistinct(live, block);
+        feedDistinct(booted, block);
+        const [a, b] = [live.render(), booted.render()];
+        differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
+      }
+      assert.ok(differedBefore, "the send gain must be audible, or the comparison proves nothing");
+
+      const controls = live.liveControls();
+      const report = await controls.submit(
+        controls.edit.route("kick-verb").gainDb(-12, { smoothingSamples: 0 }),
+      );
+      assert.equal(report.ok, true, report.reasonName);
+      assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
+      for (let block = boundary; block < boundary + 4; block += 1) {
+        feedDistinct(live, block);
+        feedDistinct(booted, block);
+        const [a, b] = [live.render(), booted.render()];
+        assert.ok(a.left.some((sample) => sample !== 0), "the mix carries signal");
+        assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
+        assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
+      }
+    } finally {
+      live.dispose();
+      booted.dispose();
     }
   });
 });

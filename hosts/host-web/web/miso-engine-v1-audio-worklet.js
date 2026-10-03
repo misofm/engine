@@ -613,7 +613,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
     // sections), read through the same staging exactly as the track IDs are. Preparation sizes
-    // that staging for the longest source, track or submix ID, so the capacity check below is a
+    // that staging for the longest source, track, submix or route ID, so the capacity check below is a
     // corrupt-artifact check, not a limit a valid session can reach.
     const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
     if (!u32(submixCount)) return false;
@@ -628,6 +628,23 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         id += String.fromCharCode(bytes[byte]);
       }
       this.submixIds.push(id);
+    }
+    // Issue #1223 D3: the live route IDs -- the routes into submixes, in canonical route-ID
+    // order -- read through the same staging. Live route `i` is what a send kind's (13-15) index
+    // word `i` addresses, so the SDK takes its route indices from this list and never sorts.
+    const routeCount = this.exports.miso_engine_web_v1_live_control_route_count(this.handle);
+    if (!u32(routeCount)) return false;
+    this.routeIds = [];
+    for (let index = 0; index < routeCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_live_control_route_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      this.routeIds.push(id);
     }
 
     // Issue #207: source introspection, read once here for the same reason the track identities
@@ -1002,6 +1019,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         })),
         metersAttached: this.metersAttached === true,
         submixes: [...this.submixIds],
+        routes: [...this.routeIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {

@@ -30,6 +30,9 @@ pub struct HostSessionShape {
     pub longest_track_id_bytes: u64,
     /// Longest declared submix ID in bytes, or zero when there are no submixes (issue #1210 D2).
     pub longest_submix_id_bytes: u64,
+    /// Longest declared route ID in bytes, over every route of the session (not only the live
+    /// ones), or zero when there are no routes (issue #1223 D2).
+    pub longest_route_id_bytes: u64,
     /// Number of sources.
     pub source_count: u64,
     /// Number of tracks.
@@ -82,6 +85,14 @@ pub fn compiled_session_shape(
                 .submixes
                 .iter()
                 .map(|submix| submix.id.as_str().len())
+                .max()
+                .unwrap_or(0),
+        )?,
+        longest_route_id_bytes: count(
+            model
+                .routes
+                .iter()
+                .map(|route| route.id.as_str().len())
                 .max()
                 .unwrap_or(0),
         )?,

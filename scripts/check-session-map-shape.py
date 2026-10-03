@@ -425,21 +425,37 @@ def self_test() -> None:
             "the host's acknowledgement validator does not expect the source list",
             mutate(
                 HOST_JS,
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]',
-                '["tag", "requestId", "result", "tracks", "metersAttached", "submixes"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]',
+                '["tag", "requestId", "result", "tracks", "metersAttached", "submixes", "routes"]',
             ),
         ),
         (
             "the host's acknowledgement validator does not expect the submix list (issue #1210)",
             mutate(
                 HOST_JS,
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]',
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "routes"]',
             ),
         ),
         (
             "the worklet posts no submix list while the host and .d.ts expect one (issue #1210)",
             mutate(WORKLET_JS, "        submixes: [...this.submixIds],\n", ""),
+        ),
+        (
+            "the host's acknowledgement validator does not expect the route list (issue #1223)",
+            mutate(
+                HOST_JS,
+                '"metersAttached", "submixes", "routes"]',
+                '"metersAttached", "submixes"]',
+            ),
+        ),
+        (
+            "the worklet posts no route list while the host and .d.ts expect one (issue #1223)",
+            mutate(WORKLET_JS, "        routes: [...this.routeIds],\n", ""),
+        ),
+        (
+            "the .d.ts session map does not declare the route list (issue #1223)",
+            mutate(HOST_DTS, "  readonly routes: readonly string[];\n", ""),
         ),
         (
             "the host validates a stale per-source field set",

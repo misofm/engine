@@ -283,9 +283,10 @@ export const enum MisoCommandKind {
   /// Retarget one live send's gain in decibels over `smoothingSamples`. Applied (issue 1222).
   ///
   /// `trackIndex` is the send's **live-route index**: its position among the routes into
-  /// submixes, in canonical route-ID order. `rack` and `channel` are `255`, `effectIndex` and
-  /// `parameterId` are `0`, `values[0]` is the gain and `values[1..]` are `0`. The gain and the
-  /// matrix share the prepared route's domain; a value it refuses is `Domain`.
+  /// submixes, in canonical route-ID order, which is `sessionMap().routes` (issue 1223). `rack`
+  /// and `channel` are `255`, `effectIndex` and `parameterId` are `0`, `values[0]` is the gain
+  /// and `values[1..]` are `0`. The gain and the matrix share the prepared route's domain; a value
+  /// it refuses is `Domain`.
   RouteGainDb = 13,
   /// Switch one live send on (`values[0]` exactly `0`) or off (exactly `1`) over
   /// `smoothingSamples`. Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
@@ -334,7 +335,7 @@ export const enum MisoCommandReason {
   /// The addressed strip is solo-safe: a submix is never soloed.
   NotSoloable = 12,
   /// A send kind's `trackIndex` is not a live route of this plan: it is at or past the number of
-  /// routes into submixes.
+  /// routes into submixes, `sessionMap().routes.length`.
   UnknownRoute = 13,
 }
 
@@ -428,6 +429,10 @@ export interface MisoSessionMap {
   /// Canonical normalized submix order (issue 1210): submix `j` is strip `tracks.length + j`, and
   /// the meter frame's submix sections (`submixPeaks`, `submixGrDb`) follow this order.
   readonly submixes: readonly string[];
+  /// The live routes (issue 1223): the routes into submixes, in canonical route-ID order. A send
+  /// kind's (`RouteGainDb`, `RouteMute`, `RouteMatrix`) `trackIndex` `i` addresses `routes[i]`.
+  /// A route into the output is not live and is not listed.
+  readonly routes: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
@@ -911,10 +916,11 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track, submix and source order (issues 137 D1, 207,
-  /// 1210).
+  /// Read the compiled session's canonical track, submix, live route and source order (issues 137
+  /// D1, 207, 1210, 1223).
   ///
-  /// `tracks` then `submixes` is the strip order `trackIndex` addresses; `sources` is what
+  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, and `routes` the
+  /// live-route order a send kind's `trackIndex` addresses; `sources` is what
   /// `submitSource`/`seekSource` feed, with the channel count and region every submission has to
   /// agree with.
   sessionMap(): Promise<MisoSessionMap>;

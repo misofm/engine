@@ -436,7 +436,7 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
       createHost: async request => {
         assert.equal((request.options.liveControls?.commandQueueRecords ?? 0) > 0, attached);
         return {
-          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] }; },
+          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] }; },
           async command(request) { commands++; return { result: 0, reason: 0, rejectedIndex: 0,
             admitted: request.commands.length, appliedAtSample: 128n }; },
           async dispose() { closed.push("host"); },
@@ -475,7 +475,7 @@ test("a browser engine's live controls address a submix by its strip index", asy
     createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
       audioWorklet: { async addModule() {} }, async close() {} }),
     createHost: async () => ({
-      async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false }; },
+      async sessionMap() { return { tracks: ["t"], submixes: ["aaa", "bus"], sources: [], metersAttached: false, routes: [] }; },
       async command(request) {
         received.push(...request.commands);
         return { result: 0, reason: 0, rejectedIndex: 0, admitted: request.commands.length, appliedAtSample: 128n };

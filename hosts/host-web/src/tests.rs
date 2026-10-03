@@ -180,7 +180,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         shape
             .longest_source_id_bytes
             .max(shape.longest_track_id_bytes)
-            .max(shape.longest_submix_id_bytes),
+            .max(shape.longest_submix_id_bytes)
+            .max(shape.longest_route_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -926,7 +927,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3386,7 +3388,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -5940,6 +5943,80 @@ fn submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them() {
     assert_ne!(handle, 0, "the submix-free session boots");
     assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
     assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+}
+
+/// Issue #1223 gate 4 and D1: the route exports enumerate exactly the live sends, in the order a
+/// send kind's index word reads, through ID staging sized for the longest route ID.
+///
+/// Two tracks feed one unity bus through two sends: a 63-byte `zz-` send, longer than every
+/// source, track and submix ID, and `send-a`; every strip also routes to the output, and
+/// `bx-main` sorts before both sends. Red if the staging capacity ignores route IDs (the long
+/// ID's copy overruns the buffer and traps), or if the export enumerates any order or subset
+/// other than the live send producers' (all routes would put `bx-main` at index 0).
+#[test]
+fn live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them() {
+    let long = format!("zz-{}", "x".repeat(60));
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    for id in ["t0", "t1"] {
+        strip_add_track(&mut model, &source, &track, id);
+    }
+    model.submixes = vec![session::Submix::unity(strip_id("bx"), &model.console)];
+    for (id, from) in [(long.as_str(), "t0"), ("send-a", "t1")] {
+        model.routes.push(strip_route(
+            &route,
+            id,
+            strip_post_pan(from, false),
+            strip_into("bx"),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    for strip in ["t0", "t1", "bx"] {
+        model.routes.push(strip_route(
+            &route,
+            &format!("{strip}-main"),
+            strip_post_pan(strip, strip == "bx"),
+            output.clone(),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    let document = canonical_session_json(&model).expect("long send session canonicalizes");
+
+    let handle = crate::ffi::test_boot(document.as_bytes(), strip_options(4, 0, 0));
+    assert_ne!(handle, 0, "the long-send session boots");
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, long.len() as u64);
+    assert_eq!(miso_engine_web_v1_live_control_route_count(handle), 2);
+    for (index, expected) in ["send-a", long.as_str()].iter().enumerate() {
+        let length = miso_engine_web_v1_live_control_route_id(handle, index as u32);
+        assert_eq!(length, expected.len() as u32, "live route {index}");
+        assert_eq!(
+            crate::ffi::test_read_source_id(handle, length).expect("staged route ID"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(miso_engine_web_v1_live_control_route_id(handle, 2), 0);
+    assert_eq!(
+        miso_engine_web_v1_live_control_route_count(handle.wrapping_add(1)),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+    // Without live controls there are no send producers, so no live route.
+    let handle = crate::ffi::test_boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..boot_options(STRIP_QUANTUM)
+        },
+    );
+    assert_ne!(
+        handle, 0,
+        "the long-send session boots without live controls"
+    );
+    assert_eq!(miso_engine_web_v1_live_control_route_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_live_control_route_id(handle, 0), 0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 

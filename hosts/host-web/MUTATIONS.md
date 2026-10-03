@@ -410,3 +410,27 @@ Each row was applied, its test run red, and the tree restored.
 | `tests::the_exact_retained_budget_charges_the_send_lanes` (#1221 verdict MINOR-1) | leave `route_control_resources.total_bytes` out of the bridge rows | the retained delta between depths 8 and 64 is 0, not the lanes' |
 | `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 16;` after `COMMAND_ROUTE_MATRIX = 15` | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
 | `check-command-kind-vocabulary.py --self-test` (the JS set gains an undecoded kind) | the host JS set ends `…, 14, 16]` | `the host JS COMMAND_KINDS set disagrees with the Rust host constants` |
+
+## Issue #1223 — live route enumeration and the SDK's send edits
+
+Each row was applied, its test run red, and the tree restored. SDK rows ran
+`node --test test/live-controls-evals.mjs` (or `tsc`) against the slice's built module; E1 rebuilt
+the module with the mutation.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them` (gate 4, staging) | drop `longest_route_id_bytes` from the ID staging size | `id_staging_bytes` is 2, not 63; with that assertion removed, the 63-byte copy trips `compiled ID exceeds its projected staging capacity` |
+| the same test (D1, the enumeration) | the route-ID export reads the model's routes, not the live send producers | live route 0 is 7 bytes (`bx-main`), not 6 (`send-a`) |
+| `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.routeIds].sort()` | `issue #1223: the enumerated live-route order` |
+| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `routes.every(...)` check | `the host accepted a session map with a non-string route` |
+| `test-web-audioworklet.mjs` (worklet construction) | read a route ID without the length/capacity check | `an empty route ID must fail initialization` |
+| `live-controls-evals.mjs` gate 1 (and gate 3) | `route(id)` indexes the send among every route of the session, sorted | `a send edit encodes its kind at the engine's live-route index` and `a live send gain equals the session booted at that gain` |
+| `live-controls-evals.mjs` gate 1 | `RouteEdits.matrix` writes `ll, rl, lr, rr` | the browser request's values differ |
+| `live-controls-evals.mjs` gate 1 | the browser map prepends the track IDs to `routes` | `kick-verb` encodes index 4, not 1 |
+| `live-controls-evals.mjs` gate 1 (and gates 2, 3) | `OfflineEngine.sessionMap()` reverses the engine's route list | all three #1223 evals |
+| `live-controls-evals.mjs` gate 2 | an unknown route ID falls back to index 0 | `an unknown or output route ID refuses before any record is built` |
+| `live-controls-evals.mjs` gate 2 | drop the output-route branch | the same eval: the message lists the live routes instead |
+| `live-controls-evals.mjs` gate 3 only (E1, rebuilt module) | admission pushes a send record onto route `index ^ 1`'s queue | `a live send gain equals the session booted at that gain`; gate 1 stays green (admission is `ok`) |
+| `live-controls-evals.mjs` (the vocabulary test) | drop `routeMatrix` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
+| `live-controls-types.ts` | `RouteEdits.gainDb` takes `LaneOptions` | `Unused '@ts-expect-error'` (a send has no lane) |
+| `live-controls-types.ts` | `RouteEdits` gains `faderDb` | `_RouteSurface` fails, and the `faderDb` `@ts-expect-error` is unused |
