@@ -5,7 +5,10 @@
 //! below holds the track cap at the session's exact track count and the submix cap at zero, so a
 //! VCA counted against either would refuse the at-the-cap session too.
 
-use host_core::{HostPrepareCaps, HostShapePolicy, PrepareRejection, prepare_host_session};
+use host_core::{
+    HostPrepareCaps, HostShapePolicy, PrepareRejection, compile_host_session,
+    compiled_session_shape, prepare_host_session,
+};
 use session::{DualMonoFader, StableId, Vca, canonical_session_json, parse_session_json};
 
 /// Three tracks, each routed to the main output.
@@ -39,12 +42,18 @@ fn caps(maximum_vcas: u64) -> HostPrepareCaps {
 
 /// The fixture's three tracks plus `vcas` empty, unity VCA groups.
 fn session(vcas: usize) -> String {
+    let ids: Vec<String> = (0..vcas).map(|index| format!("vca{index}")).collect();
+    session_with(&ids)
+}
+
+/// The fixture's three tracks plus one empty, unity VCA group per ID.
+fn session_with(ids: &[String]) -> String {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
     assert_eq!(model.tracks.len() as u64, TRACKS);
     assert!(model.submixes.is_empty());
-    for index in 0..vcas {
+    for id in ids {
         model.vcas.push(Vca {
-            id: StableId::parse(&format!("vca{index}")).expect("stable id"),
+            id: StableId::parse(id).expect("stable id"),
             fader: DualMonoFader {
                 left_db: 0.0,
                 right_db: 0.0,
@@ -89,4 +98,30 @@ fn vcas_are_counted_capped_and_reported_apart_from_tracks_and_submixes() {
     assert_eq!(failure.as_bytes(), b"host.resource.count\t$\n");
     let (_, prepared) = prepare_host_session(&session(0), &caps(0)).expect("no VCA, zero cap");
     assert_eq!(prepared.report.vca_count, 0);
+}
+
+/// Issue #1246 gate 3 (D2): `longest_vca_id_bytes` is the longest VCA ID, here one between two
+/// shorter ones in canonical order and longer than every source, track and route ID, which keep
+/// their own measures.
+///
+/// Test value: red if the shape leaves VCA IDs unmeasured, or measures only the first or the last
+/// VCA, so a host sizing its ID staging from it would undersize it for a VCA ID it copies.
+#[test]
+fn the_session_shape_measures_the_longest_vca_id() {
+    let long = "mm-the-drums-and-every-room-mic-under-one-hand";
+    let ids = ["a".to_owned(), long.to_owned(), "zz".to_owned()];
+    let compiled = compile_host_session(&session_with(&ids), &caps(3)).expect("session compiles");
+    let shape = compiled_session_shape(&compiled).expect("shape");
+    assert_eq!(shape.longest_vca_id_bytes, long.len() as u64);
+    assert_eq!(shape.longest_source_id_bytes, "fixture-source".len() as u64);
+    assert_eq!(shape.longest_track_id_bytes, "t0".len() as u64);
+    assert_eq!(shape.longest_route_id_bytes, "t0-main".len() as u64);
+
+    let none = compile_host_session(&session(0), &caps(0)).expect("session compiles");
+    assert_eq!(
+        compiled_session_shape(&none)
+            .expect("shape")
+            .longest_vca_id_bytes,
+        0
+    );
 }

@@ -266,6 +266,11 @@ export interface SessionMap {
    * the output is not live and is not listed.
    */
   readonly routes: readonly string[];
+  /**
+   * The VCA IDs (issue #1246 D3), in canonical VCA-ID order, as the engine enumerates them. A VCA
+   * edit's index word `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
+   */
+  readonly vcas: readonly string[];
 }
 
 interface ObservationLayoutField {
@@ -557,8 +562,8 @@ export class WasmBoundary {
   }
 
   /**
-   * The canonical track/source/submix order, the live routes in the engine's own order, and
-   * whether meter observers were prepared.
+   * The canonical track/source/submix order, the live routes and the VCAs in the engine's own
+   * order, and whether meter observers were prepared.
    */
   sessionMap(): SessionMap {
     const shape = this.shape();
@@ -568,7 +573,20 @@ export class WasmBoundary {
       metersAttached: this.#metersAttached,
       submixes: shape.submixes,
       routes: this.#liveRoutes(),
+      vcas: this.#liveVcas(),
     });
+  }
+
+  /** The VCA IDs, read from the engine's enumeration, never sorted here (issue #1246). */
+  #liveVcas(): readonly string[] {
+    const handle = this.#live();
+    const vcaCount = Number(this.#exports.miso_engine_web_v1_live_control_vca_count(handle));
+    const vcas: string[] = [];
+    for (let index = 0; index < vcaCount; index += 1) {
+      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_vca_id(handle, index));
+      vcas.push(this.#readIdBuffer(idBytes));
+    }
+    return Object.freeze(vcas);
   }
 
   /** The live route IDs, read from the engine's enumeration, never sorted here (issue #1223). */

@@ -425,16 +425,16 @@ def self_test() -> None:
             "the host's acknowledgement validator does not expect the source list",
             mutate(
                 HOST_JS,
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]',
-                '["tag", "requestId", "result", "tracks", "metersAttached", "submixes", "routes"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes", "vcas"]',
+                '["tag", "requestId", "result", "tracks", "metersAttached", "submixes", "routes", "vcas"]',
             ),
         ),
         (
             "the host's acknowledgement validator does not expect the submix list (issue #1210)",
             mutate(
                 HOST_JS,
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]',
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "routes"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes", "vcas"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "routes", "vcas"]',
             ),
         ),
         (
@@ -445,8 +445,8 @@ def self_test() -> None:
             "the host's acknowledgement validator does not expect the route list (issue #1223)",
             mutate(
                 HOST_JS,
-                '"metersAttached", "submixes", "routes"]',
-                '"metersAttached", "submixes"]',
+                '"metersAttached", "submixes", "routes", "vcas"]',
+                '"metersAttached", "submixes", "vcas"]',
             ),
         ),
         (
@@ -456,6 +456,22 @@ def self_test() -> None:
         (
             "the .d.ts session map does not declare the route list (issue #1223)",
             mutate(HOST_DTS, "  readonly routes: readonly string[];\n", ""),
+        ),
+        (
+            "the host's acknowledgement validator does not expect the VCA list (issue #1246)",
+            mutate(
+                HOST_JS,
+                '"metersAttached", "submixes", "routes", "vcas"]',
+                '"metersAttached", "submixes", "routes"]',
+            ),
+        ),
+        (
+            "the worklet posts no VCA list while the host and .d.ts expect one (issue #1246)",
+            mutate(WORKLET_JS, "        vcas: [...this.vcaIds],\n", ""),
+        ),
+        (
+            "the .d.ts session map does not declare the VCA list (issue #1246)",
+            mutate(HOST_DTS, "  readonly vcas: readonly string[];\n", ""),
         ),
         (
             "the host validates a stale per-source field set",

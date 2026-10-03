@@ -226,6 +226,108 @@ surface, and removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence.
 - Each new test's name with its one-sentence test-value answer, and the mutation that turned it red.
 - The ARTIFACT CHANGED report and the regenerated layout diff.
 
+### Attempt 1 record (Terra)
+
+Base `86c050075` (#1245's head). Anchors re-found by symbol.
+
+**Implementation.**
+
+- D2: `HostSessionShape.longest_vca_id_bytes`; the ID staging size takes the maximum of all five
+  longest-ID terms (`lib.rs` boot and the three `tests.rs` mirrors).
+- D1: `miso_engine_web_v1_live_control_vca_count` / `_vca_id` (`ffi.rs`), through
+  `live_control_vca_count()` and `copy_live_control_vca_id()` (`lib.rs`). Both names are inserted
+  right after `..._track_id` in all four export lists (123 names in `check-web-audioworklet.sh`,
+  `EXPORTS: [&str; 122]`).
+- D3: the worklet reads the VCA IDs under the route rules and posts `vcas`; the host JS exact
+  field list and validator, `MisoSessionMap.vcas` (both `.d.ts` copies byte-identical), the SDK
+  `SessionMap.vcas` (headless `#liveVcas()` reads the exports; the browser map copies the reply)
+  and every Context stub carry it. The hermetic stub enumerates `["zz-vca", "aa-vca"]`.
+- D4: `LiveControlEdits.vca(id)` returns `VcaEdits` (`faderDb`, `mute`, `LaneOptions`), kinds 16
+  and 17 at `SessionMap.vcas`' index, `rack` 255, built as `StripEdits.faderDb`/`mute` build kinds
+  3/4. An unknown ID throws `MisoUsageError` with `diagnosticCode` `unknownVca`, listing the VCAs
+  (or `none`). Exported by `index.ts`'s existing `export *`.
+- D5: no metadata change. D6: `vcaFaderDb`/`vcaMute` are in `kindNames`; `kindsAwaitingSdk` is
+  gone. D7: the `AGENTS.md` qualifier sentence is removed, nothing else.
+- `check-session-map-shape.py`: the exact-list mutation literals carry `"vcas"`; three new
+  mutations (host list without `vcas` -- the spec's named one -- worklet without `vcas`, `.d.ts`
+  without `vcas`). The self-test now catches 23.
+- `APP-LIVE.md` "Live VCA groups (#1246)"; `MUTATIONS.md` rows in `hosts/host-web/` and
+  `crates/host-core/tests/` (1246-H1, -H2).
+
+**Tests and test value.** Every mutation was applied, run red and reverted (rows in
+`hosts/host-web/MUTATIONS.md` "Issue #1246").
+
+- `vca_caps::the_session_shape_measures_the_longest_vca_id` (gate 3, host-core). Red if the shape
+  leaves VCA IDs unmeasured or measures only the first/last VCA (the 46-byte VCA sits between two
+  short ones in canonical order). H1 (`.next()` for `.max()`): 1, not 46; H2 (tracks): red.
+- `tests::live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them` (gate 3, D1).
+  A 73-byte `zz-` VCA, longer than every other ID, lists `vocal` and the nested `aa`; VCAs are
+  declared and nested out of canonical order; a kind 16 at each exported index must move exactly
+  that VCA's members. Red if staging ignores VCA IDs, the export's order is not the admission
+  index's, or the host answers without live controls. Mutations W1-W4 all red.
+- `live-controls-evals.mjs` "a VCA edit encodes its kind at the engine's VCA index, over both
+  transports" (gate 1). The document declares `drums`, `fx`, `band`; the engine's order is `band`,
+  `drums`, `fx`. Red if the SDK indexes by any other order, either map loses or reorders the list,
+  or a record word is wrong; also asserts `vcas` is `[]` without VCAs and without live controls.
+- "an unknown VCA ID refuses with unknownVca before any record is built" (gate 1). Red if an ID
+  the SDK cannot place (a typo, a member strip, a submix) reaches an index, or the reason is not
+  `unknownVca`.
+- "a live VCA fader and mute equal the session booted at those values from the edit's block on"
+  (gate 2, shipped module; a both-lane fader on `drums` and a left-lane mute on `fx`; members feed
+  a unity bus or the output). Unique catch: E1, a module rebuilt so admission rides VCA
+  `index ^ 1`'s offset, turns only this eval red (gate 1 stays green: admission is `ok`).
+- `live-controls-types.ts`: `vca()` returns `VcaEdits` with keys exactly `faderDb | mute`;
+  `MisoSessionMap.vcas` and `SessionMap.vcas` are `readonly string[]` and required;
+  `@ts-expect-error` covers a numeric mute, `solo`, `pan`, `effect` and a foreign option. T1-T4 red.
+- `test-web-audioworklet.mjs` (D3, gate 4): the stub's "an empty VCA ID" and "a VCA ID longer than
+  staging" mutations are refused at boot; the host refuses four malformed `vcas` replies. K1-K5
+  (worklet without either check, worklet sorts, host validator without either check) all red.
+- No test is superseded. No digest or prose is pinned.
+
+**Deviations.**
+
+1. D1 says `ReadyOwnership` keeps a VCA-ID list built at boot. It does not copy one: `_vca_count`
+   is `ready.vcas.vca_count()` (the live VCA state, the exact bound admission refuses an index
+   against, so it is 0 without live controls), and `_vca_id(i)` copies
+   `ready.session.normalized_model().vcas[i].id` -- the retained model that state was built from,
+   as `copy_session_source_id` reads sources -- for `i` below that count. Same order and authority,
+   no duplicate retained allocation and no unaccounted bridge bytes (the #1245 exact retained
+   budget test stays unchanged).
+2. `scripts/test-web-audioworklet.sh` is unchanged: its sed mutation still matches a substring of
+   the grown host list, and a `vcas` sed mutation would duplicate the Python self-test's.
+3. `hosts/host-web/qualification/` is unchanged: its stubs build `SessionShape` (`scratchBoot`),
+   which did not change, and `qualification.js` spells no exact session-map field list. All three
+   browser legs pass in SDK source-bundle mode.
+
+**Gates** (x86-64-v3 AVX2; A = `/tmp/claude-1002/kv-1246/A`, B = `.../B`; logs in
+`/tmp/claude-1002/kv-1246/logs/`). Every gate returned rc 0.
+
+- Gate 4: `check-session-map-shape.py --self-test` (23 caught) and plain;
+  `test-web-audioworklet.sh`.
+- Gate 5: `build-web-audioworklet.sh --named-twin B A`; `check-abi-layout-v1.py --self-test`
+  (22 caught) and on `A/...abi-layout.json`; `check-web-audioworklet.sh A B/...named.wasm`
+  (exports grew by exactly the two names); `check-browser-expected-resources.py --artifacts A`
+  (digests and exact rows agree, 32 red mutations, no re-pin); `check-sdk-generated.sh A`;
+  `check-sdk-types.sh`; `check-sdk-headless.sh A` (360 pass, 0 fail); `sdk-package.sh check A`;
+  the browser legs, `npm run qualify -- ... --check-matrix --self-test-mutations` under a private
+  PulseAudio null sink with stray `sdk/dist` deleted: chromium 151.0.7922.34, firefox 153.0 and
+  webkit 26.5 "all qualification gates passed" (SDK source-bundle mode).
+- Gate 6: workspace tests (`--no-fail-fast`): 115 binaries, 1,288 passed, 0 failed, 9 ignored;
+  `cargo fmt --check`; clippy `-D warnings`; `cargo doc` `-D warnings`; host-core, realtime and
+  workspace policy check + test; `check-cross-targets.sh`.
+- Gate 7 (on the batch head with this slice): the DSP-crate tests (146 binaries, 791 passed, 0
+  failed); release `audit`/`bench`/`console-workload` tests (110 passed); the release build;
+  `audit capi`; `trace-graph-audit.sh`; `check-graph-determinism.sh`; `graph_fixture --check`;
+  `check-builtins-fixtures.sh`; `check-console-fixtures.sh`; `check-protocol-wasm-parity.sh`;
+  `check-capi-abi.sh` and `--self-test`. `run-aarch64-tests.sh debug`: no arm64 host here, so
+  recorded "at batch push" (CI's `aarch64-debug`).
+- **ARTIFACT CHANGED** (expected: two exports and the worklet reader): `731f65cb...f5e`
+  (2,848,600 B, #1245's record) -> `5d21f73e9f6667f7f77ac19d216ea689ebcf46529ba134d7617e2539e3c92675`
+  (2,849,413 B, +813); named twin `386b0651...4743` (3,252,917 B). Not a per-change pin (#1061).
+- Regenerated layout diff: `sdk/assets/miso-engine-v1-abi-layout.json` and
+  `sdk/src/generated/abi.ts` each gain exactly `miso_engine_web_v1_live_control_vca_count` and
+  `miso_engine_web_v1_live_control_vca_id`.
+
 ## Dependencies
 
 - *Ride VCA groups live in the browser* (#1245)

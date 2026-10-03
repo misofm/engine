@@ -63,6 +63,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
+    "miso_engine_web_v1_live_control_vca_count",
+    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",

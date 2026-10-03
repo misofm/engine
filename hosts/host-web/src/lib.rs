@@ -2117,7 +2117,8 @@ impl AudioWorkletEngineHost {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2250,6 +2251,17 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .map_or(0, |ready| ready.route_controls.len())
+    }
+
+    /// Number of live VCAs (issue #1246 D1): the session's VCAs in canonical VCA-ID order, which
+    /// is the order a VCA kind's (`16`, `17`) index word reads. It is the live VCA state's own
+    /// count, the bound admission refuses an index against, so it is zero before compilation,
+    /// without VCAs and without live controls.
+    #[must_use]
+    pub fn live_control_vca_count(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.vcas.vca_count())
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -3048,6 +3060,24 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), producer.route_id().as_bytes())
+    }
+
+    /// Copy one VCA ID into ID staging; returns its byte length (issue #1246 D1). VCA `index` is
+    /// the normalized model's `vcas[index]`, the model the live VCA state was built from, and an
+    /// index at or past [`Self::live_control_vca_count`] -- every index without live controls --
+    /// copies nothing.
+    pub(crate) fn copy_live_control_vca_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let index = index as usize;
+        if index >= ready.vcas.vca_count() {
+            return 0;
+        }
+        let Some(vca) = ready.session.normalized_model().vcas.get(index) else {
+            return 0;
+        };
+        Self::copy_id_into_staging(self.buffers.as_mut(), vca.id.as_str().as_bytes())
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).

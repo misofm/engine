@@ -189,6 +189,7 @@ async function testMainRealm() {
             metersAttached: true,
             submixes: ["aaa-bus", "zzz-bus"],
             routes: ["zz-send", "aa-send"],
+            vcas: ["zz-vca", "aa-vca"],
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
@@ -1367,6 +1368,11 @@ async function testMainRealm() {
       ["a route list that is not an array", (map) => ({ ...map, routes: "zz-send" })],
       ["a non-string route", (map) => ({ ...map, routes: ["zz-send", 7] })],
       ["an empty route ID", (map) => ({ ...map, routes: ["zz-send", ""] })],
+      // Issue #1246 D3: the VCA list is held to the same rules.
+      ["no VCA list", ({ vcas: _dropped, ...rest }) => rest],
+      ["a VCA list that is not an array", (map) => ({ ...map, vcas: "zz-vca" })],
+      ["a non-string VCA", (map) => ({ ...map, vcas: ["zz-vca", 7] })],
+      ["an empty VCA ID", (map) => ({ ...map, vcas: ["zz-vca", ""] })],
     ]) {
       const mapHost = await createMisoAudioWorkletHost({
         context,
@@ -1523,6 +1529,7 @@ async function testMainRealm() {
     assert.equal(map.metersAttached, true);
     assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
     assert.deepEqual(map.routes, ["zz-send", "aa-send"], "issue #1223: the live-route order is delivered");
+    assert.deepEqual(map.vcas, ["zz-vca", "aa-vca"], "issue #1246: the VCA order is delivered");
 
     const pan = {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
@@ -2164,6 +2171,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   // Issue #1223 D3: the live route IDs, deliberately not in sorted order, so a worklet that sorts
   // or otherwise reorders the engine's enumeration (the order send commands index) is visible.
   const routeIds = ["zz-send", "aa-send"];
+  // Issue #1246 D3: the VCA IDs, deliberately not in sorted order, so a worklet that sorts or
+  // otherwise reorders the engine's enumeration (the order VCA commands index) is visible.
+  const vcaIds = ["zz-vca", "aa-vca"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
   // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
@@ -2329,6 +2339,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
       return id.length;
     },
+    miso_engine_web_v1_live_control_vca_count: () => vcaIds.length,
+    miso_engine_web_v1_live_control_vca_id: (_handle, index) => {
+      const id = vcaIds[index];
+      if (id === undefined) return 0;
+      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
+      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
+      return id.length;
+    },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
@@ -2374,7 +2392,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 0;
     },
   };
-  return { exports, calls, trackIds, submixIds, routeIds, sourceRows, meterFrameFloats, meterHeader };
+  return {
+    exports, calls, trackIds, submixIds, routeIds, vcaIds, sourceRows, meterFrameFloats, meterHeader,
+  };
 }
 
 function createTelemetryClock(elapsedMsByBlock) {
@@ -3279,6 +3299,7 @@ async function testProcessor() {
       assert.equal(map.metersAttached, true);
       assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
       assert.deepEqual(map.routes, fake.routeIds, "issue #1223: the enumerated live-route order");
+      assert.deepEqual(map.vcas, fake.vcaIds, "issue #1246: the enumerated VCA order");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
@@ -3306,6 +3327,10 @@ async function testProcessor() {
         ["an empty route ID", (e) => { e.miso_engine_web_v1_live_control_route_id = () => 0; }],
         ["a route ID longer than staging",
           (e) => { e.miso_engine_web_v1_live_control_route_id = () => 65; }],
+        // Issue #1246 D3: the VCA IDs are read under the same rules.
+        ["an empty VCA ID", (e) => { e.miso_engine_web_v1_live_control_vca_id = () => 0; }],
+        ["a VCA ID longer than staging",
+          (e) => { e.miso_engine_web_v1_live_control_vca_id = () => 65; }],
         ["a submix count the meter header disagrees with",
           (e) => {
             const read = e.miso_engine_web_v1_live_control_submix_id;

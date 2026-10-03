@@ -1,7 +1,8 @@
 /** Issue #322 compile-time red probes for the catalog-derived live controls. */
 
 import { LiveControlEdits } from "../src/core/live-controls.ts";
-import type { RouteEdits, SubmixEdits, TrackEdits } from "../src/core/live-controls.ts";
+import type { RouteEdits, SubmixEdits, TrackEdits, VcaEdits } from "../src/core/live-controls.ts";
+import type { SessionMap } from "../src/core/boundary.ts";
 import type {
   MisoCommandAck,
   MisoCommandRequest,
@@ -68,6 +69,7 @@ const edits = new LiveControlEdits({
   metersAttached: true,
   submixes: [],
   routes: [],
+  vcas: [],
 });
 const track = edits.track("t");
 
@@ -140,6 +142,7 @@ const busEdits = new LiveControlEdits({
   metersAttached: false,
   submixes: ["bus"],
   routes: ["t-bus"],
+  vcas: [],
 });
 const bus = busEdits.submix("bus");
 bus.faderDb(-6, { channel: "left", smoothingSamples: 32 });
@@ -173,3 +176,35 @@ send.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, { channel: "left" });
 send.matrix({ ll: 1, rr: 1 });
 // @ts-expect-error a send is not a strip: it has no fader
 send.faderDb(-6);
+
+// Issue #1246 D3/D4: a VCA's live edits are exactly its lane-selectable fader offset and mute. A
+// VCA has no audio path, so it has no pan, matrix, trim, effect or solo, and vca() says so in its
+// type. Both session maps carry the VCA list, and neither may leave it out.
+type _VcaReturn = Assert<Exact<ReturnType<LiveControlEdits["vca"]>, VcaEdits>>;
+type _VcaSurface = Assert<Exact<keyof VcaEdits, "faderDb" | "mute">>;
+type _SessionMapVcas = Assert<Exact<MisoSessionMap["vcas"], readonly string[]>>;
+type _SdkSessionMapVcas = Assert<Exact<SessionMap["vcas"], readonly string[]>>;
+const vcaEdits = new LiveControlEdits({
+  tracks: ["t"],
+  sources: [],
+  metersAttached: false,
+  submixes: [],
+  routes: [],
+  vcas: ["drums"],
+});
+const drums = vcaEdits.vca("drums");
+drums.faderDb(-6, { channel: "left", smoothingSamples: 32 });
+drums.mute(true, { channel: "right" });
+// @ts-expect-error a VCA's mute is a boolean
+drums.mute(1);
+// @ts-expect-error a VCA has no solo
+drums.solo(true);
+// @ts-expect-error a VCA has no audio path to pan
+drums.pan(-1, 1);
+// @ts-expect-error a VCA has no effects
+drums.effect("inserts", 0, "miso.compressor");
+// @ts-expect-error a VCA's options are a lane and smoothing only
+drums.faderDb(-6, { gainDb: 0 });
+// @ts-expect-error a session map always carries its VCA list
+const noVcas: SessionMap = { tracks: [], sources: [], metersAttached: false, submixes: [], routes: [] };
+void noVcas;

@@ -297,12 +297,13 @@ export const enum MisoCommandKind {
   /// Ride one VCA's per-lane dB offset over `smoothingSamples`. Applied (issue 1245).
   ///
   /// `trackIndex` is a **VCA index**: the VCA's position in the session's `vcas`, in canonical
-  /// VCA-ID order, refused `MisoCommandReason.UnknownVca` at or past the VCA count. `rack` is
-  /// `255`, `channel` is `0` left, `1` right or `2` both, `effectIndex` and `parameterId` are `0`,
-  /// `values[0]` is the offset in `[-144, 24]` dB and `values[1..]` are `0`. Every member's
-  /// effective fader -- its own value plus every reaching VCA's offset, clamped to the fader
-  /// domain -- follows through its own declicked fader ramp; a member keeps its own balance, and
-  /// its own `FaderDb` moves still land on top of the VCA.
+  /// VCA-ID order, which is `sessionMap().vcas` (issue 1246), refused
+  /// `MisoCommandReason.UnknownVca` at or past the VCA count. `rack` is `255`, `channel` is `0`
+  /// left, `1` right or `2` both, `effectIndex` and `parameterId` are `0`, `values[0]` is the
+  /// offset in `[-144, 24]` dB and `values[1..]` are `0`. Every member's effective fader -- its
+  /// own value plus every reaching VCA's offset, clamped to the fader domain -- follows through
+  /// its own declicked fader ramp; a member keeps its own balance, and its own `FaderDb` moves
+  /// still land on top of the VCA.
   VcaFaderDb = 16,
   /// Mute (`values[0]` exactly `1`) or un-mute (exactly `0`) one VCA's lanes over
   /// `smoothingSamples`. Applied (issue 1245). Addressed and shaped as `VcaFaderDb`. A VCA mute
@@ -352,8 +353,8 @@ export const enum MisoCommandReason {
   /// A send kind's `trackIndex` is not a live route of this plan: it is at or past the number of
   /// routes into submixes, `sessionMap().routes.length`.
   UnknownRoute = 13,
-  /// A VCA kind's `trackIndex` is not a VCA of this session: it is at or past the number of VCAs
-  /// (every index, in a session without VCAs).
+  /// A VCA kind's `trackIndex` is not a VCA of this session: it is at or past the number of VCAs,
+  /// `sessionMap().vcas.length` (every index, in a session without VCAs).
   UnknownVca = 14,
 }
 
@@ -452,6 +453,9 @@ export interface MisoSessionMap {
   /// kind's (`RouteGainDb`, `RouteMute`, `RouteMatrix`) `trackIndex` `i` addresses `routes[i]`.
   /// A route into the output is not live and is not listed.
   readonly routes: readonly string[];
+  /// The VCAs (issue 1246), in canonical VCA-ID order. A VCA kind's (`VcaFaderDb`, `VcaMute`)
+  /// `trackIndex` `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
+  readonly vcas: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
@@ -935,13 +939,13 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track, submix, live route and source order (issues 137
-  /// D1, 207, 1210, 1223).
+  /// Read the compiled session's canonical track, submix, live route, VCA and source order (issues
+  /// 137 D1, 207, 1210, 1223, 1246).
   ///
-  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, and `routes` the
-  /// live-route order a send kind's `trackIndex` addresses; `sources` is what
-  /// `submitSource`/`seekSource` feed, with the channel count and region every submission has to
-  /// agree with.
+  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, `routes` the live-route
+  /// order a send kind's `trackIndex` addresses and `vcas` the VCA order a VCA kind's addresses;
+  /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
+  /// submission has to agree with.
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(

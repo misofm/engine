@@ -503,3 +503,35 @@ tree restored (driver and log: the #1245 attempt 1 record).
 | `check-command-reason-vocabulary.py --self-test` | re-anchored past reason 14: `FUTURE_TAP = 15`, `UNKNOWN_TAP` renumbered to 15, the worklet's `UNSUPPORTED_KIND = 15`, `reason <= 14`, the JS table and the schema gate's list truncated | every one refused (20 red mutations) |
 | `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindsAwaitingSdk` | `the semantic methods cover the generated command vocabulary exactly` |
 
+
+## Issue #1246 — VCA enumeration and the SDK's VCA edits
+
+Each row was applied, its test run red, and the tree restored. SDK rows ran
+`node --test test/live-controls-evals.mjs` (or `check-sdk-types.sh`) against the slice's built
+module; E1 rebuilt the module with the mutation.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them` (gate 3, staging) | drop `longest_vca_id_bytes` from the ID staging size | `id_staging_bytes` is not the 73-byte VCA ID's length |
+| the same test (D1, the enumeration) | `_vca_id` reads the VCAs in reverse | VCA 0 is 73 bytes, not 2 (`aa`) |
+| the same test (D1, the count) | `_vca_count` reads the model's VCA count, not the live VCA state's | the host without live controls answers 3, not 0 |
+| the same test (D1, the bound) | `_vca_id` drops its live-state bound | the host without live controls copies VCA 0 |
+| `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.vcaIds].sort()` | `issue #1246: the enumerated VCA order` |
+| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `vcas.every(...)` check | `the host accepted a session map with a non-string VCA` |
+| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `Array.isArray(message.vcas)` check | the "no VCA list" reply throws inside the validator instead of failing the host |
+| `test-web-audioworklet.mjs` (worklet construction) | read a VCA ID without the empty-length check | `an empty VCA ID must fail initialization` |
+| `test-web-audioworklet.mjs` (worklet construction) | read a VCA ID without the capacity check | `a VCA ID longer than staging must fail initialization` |
+| `live-controls-evals.mjs` gates 1 and 2 | `vca(id)` indexes the engine's list reversed | all three #1246 evals |
+| `live-controls-evals.mjs` gate 1 | the browser map's `vcas` is `[]` | `a VCA edit encodes its kind at the engine's VCA index` (the browser transport refuses `drums`) |
+| `live-controls-evals.mjs` gates 1 and 2 | `OfflineEngine.sessionMap()` reverses the engine's VCA list | all three #1246 evals |
+| `live-controls-evals.mjs` gates 1 and 2 | `VcaEdits.mute` ignores the lane option (always both) | gate 1's channel word and gate 2's left-lane mute render |
+| `live-controls-evals.mjs` gate 1 | `VcaEdits.mute` builds kind 4 (`mute`) | gate 1's kinds; gate 2 is blind here (`fx`'s index 2 is `vox`'s strip index) |
+| `live-controls-evals.mjs` gates 1 and 2 | `VcaEdits.faderDb` writes `-db` without the domain check | gate 1's value word and gate 2's render |
+| `live-controls-evals.mjs` (the refusal eval) | an unknown VCA is refused `unknownRoute` | `an unknown VCA ID refuses with unknownVca` |
+| `live-controls-evals.mjs` (the refusal eval) | `vca(id)` falls back to a track's index | the same eval: `vca("kick")` returns edits |
+| `live-controls-evals.mjs` gate 2 only (E1, rebuilt module) | admission rides VCA `index ^ 1`'s offset | `a live VCA fader and mute equal the session booted`; gate 1 stays green (admission is `ok`) |
+| `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
+| `live-controls-types.ts` | `SessionMap.vcas` is optional | `_SdkSessionMapVcas` fails, and the missing-`vcas` `@ts-expect-error` is unused |
+| `live-controls-types.ts` | `VcaEdits` gains `solo` | `_VcaSurface` fails |
+| `live-controls-types.ts` | `VcaEdits.faderDb` accepts a `gainDb` option | `Unused '@ts-expect-error'` |
+| `live-controls-types.ts` | `VcaEdits.mute` accepts a number | `Unused '@ts-expect-error'` |

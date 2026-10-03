@@ -85,6 +85,44 @@ await controls.submit(
   and `channel` are `255`. An app that writes raw records takes the index from that list; an index
   past it is refused whole with reason `unknownRoute` (13).
 
+## Live VCA groups (#1246)
+
+A VCA group (a session `vcas` entry, built with `session(..).vca(id, { members, fader? })`) is live
+in an engine booted with live controls. It carries no audio: its per-lane dB offset adds to every
+member's own fader (clamped to the fader's `[-144, 24]` dB), and its mute mutes every member, a
+submix included. Address it by its VCA ID:
+
+```ts
+await controls.submit(
+  controls.edit.vca("drums").faderDb(-6, { smoothingSamples: 480 }),
+  controls.edit.vca("fx").mute(true, { channel: "left" }),
+);
+```
+
+- `vca(id)` returns `VcaEdits`: `faderDb(db, options?)` and `mute(on, options?)` (`true` mutes
+  the members), built exactly as a strip's `faderDb` and `mute` are. `options` takes `channel`
+  (`"left"`, `"right"` or `"both"`, the default) and `smoothingSamples`. The offset is held to the
+  builtin `fader_db` domain the parameter metadata already publishes; there is no VCA metadata
+  family.
+- A member keeps its own fader and mute: `edit.track(id).faderDb(..)` still moves the member's own
+  value, and the VCA's offset lands on top of it. Solo never clears a VCA mute, un-muting a VCA
+  never clears a member's own mute, and a member's `follows_mute` sends follow the VCA's mute. A
+  VCA has no solo, no pan and no send trim.
+- `SessionMap.vcas` (from `OfflineEngine.sessionMap()`, and the browser host's
+  `miso.sessionmap.v1` reply) lists the VCAs in canonical (sorted) VCA-ID order, as the engine
+  enumerates them; it is `[]` without VCAs and without live controls. The SDK takes a VCA's index
+  from that list and never from the session. `MisoSessionMap`/`SessionMap` gained a **required**
+  `vcas`, as they gained `routes` and `submixes`: a test fake of `sessionMap()` must return it.
+- `edit.vca(id)` throws `MisoUsageError` (`diagnosticCode` `unknownVca`) for any ID not in
+  `SessionMap.vcas` -- a typo, a member strip's ID, or any ID without live controls -- and lists
+  the VCAs it knows.
+- On the wire a VCA record is kind `vcaFaderDb` (16) or `vcaMute` (17), shaped as `faderDb` (3)
+  and `mute` (4): `channel` selects the lane, `values[0]` is the offset in dB or `0`/`1`, and
+  `rack` is `255`. Its index word is the **VCA index**, the VCA's position in `SessionMap.vcas`;
+  an index past it is refused whole with reason `unknownVca` (14).
+- A grouping change (adding a VCA, changing its members) is a session edit, not a live one. The
+  saved session keeps each member's own value and each VCA's value, never the effective value.
+
 ## Master designation
 
 `liveControls.masterTrackPlusOne` keeps its name and now takes a **strip index plus one** (tracks

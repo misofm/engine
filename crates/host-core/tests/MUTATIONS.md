@@ -462,3 +462,10 @@ H9-H15 mutate `src/vca.rs`; H7 and H8 mutate `src/solo.rs`.
 generator reaches rather than by a unique catch (AGENTS.md): over its 12 seeds it pushes 82 fader,
 40 mute and 25 route records, with 15 one-lane VCA mutes, 100 VCA-muted submix observations, 14
 follow records of VCA-muted sources, 33 solos and 19 refused, rolled-back batches.
+
+## Issue #1246 — the session shape's VCA IDs
+
+| row | mutation | observed red |
+|---|---|---|
+| 1246-H1 | `longest_vca_id_bytes` measures the first VCA, not the longest | `the_session_shape_measures_the_longest_vca_id`: 1, not 46 |
+| 1246-H2 | `longest_vca_id_bytes` measures the track IDs | the same test: 2, not 46 |

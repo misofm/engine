@@ -181,7 +181,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
             .longest_source_id_bytes
             .max(shape.longest_track_id_bytes)
             .max(shape.longest_submix_id_bytes)
-            .max(shape.longest_route_id_bytes),
+            .max(shape.longest_route_id_bytes)
+            .max(shape.longest_vca_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -928,7 +929,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3389,7 +3391,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -15005,4 +15008,88 @@ fn a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it() {
         3,
         "the batch's first block vs booted muted"
     ));
+}
+
+// ---- Issue #1246: VCA groups enumerated for the SDK ----
+
+/// Issue #1246 gate 3 and D1: the VCA exports enumerate the session's VCAs in the order a VCA
+/// kind's index word reads, through ID staging sized for the longest VCA ID.
+///
+/// Three VCAs, declared out of canonical order: a 73-byte `zz-` VCA, longer than every source,
+/// track, submix and route ID, that lists `vocal` and the nested `aa`; `mm` over `drums`; and `aa`
+/// over `bass`. Membership order (`zz-`, `mm`, then `aa`) and declaration order both differ from
+/// canonical order (`aa`, `mm`, `zz-`), and the three reach distinct strip sets, so a kind 16 at
+/// exported index `i` must move exactly the strips of the VCA the export names at `i`.
+///
+/// Test value: red if the staging capacity ignores VCA IDs (the long ID's copy overruns the
+/// buffer and traps), if the export enumerates any order other than the live VCA state's (the
+/// index admission bounds and composes by), or if it answers without live controls.
+#[test]
+fn live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them() {
+    let long = format!("zz-{}", "x".repeat(70));
+    let rows: [VcaRow<'_>; 3] = [
+        (long.as_str(), [0.0; 2], [false; 2], &["vocal", "aa"]),
+        ("mm", [0.0; 2], [false; 2], &["drums"]),
+        ("aa", [0.0; 2], [false; 2], &["bass"]),
+    ];
+    let model = vca_ride_model(&[], &rows);
+    let document = canonical_session_json(&model).expect("long VCA session canonicalizes");
+    let canonical = ["aa", "mm", long.as_str()];
+
+    let handle = crate::ffi::test_boot(document.as_bytes(), strip_options(16, 0, 0));
+    assert_ne!(handle, 0, "the long-VCA session boots");
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, long.len() as u64);
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 3);
+    for (index, expected) in canonical.iter().enumerate() {
+        let length = miso_engine_web_v1_live_control_vca_id(handle, index as u32);
+        assert_eq!(length, expected.len() as u32, "VCA {index}");
+        assert_eq!(
+            crate::ffi::test_read_source_id(handle, length).expect("staged VCA ID"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, u32::MAX), 0);
+    assert_eq!(
+        miso_engine_web_v1_live_control_vca_count(handle.wrapping_add(1)),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 0);
+
+    // Exported VCA `i` is the VCA a kind 16 at index `i` rides: its members' effective faders, and
+    // nobody else's, move. Strip order: `bass` 0, `drums` 1, `vocal` 2, `room` 3, `verb` 4.
+    let reached: [&[usize]; 3] = [&[0], &[1], &[0, 2]];
+    for (index, strips) in reached.iter().enumerate() {
+        let mut host = vca_ride_host(&model, 16);
+        assert_eq!(host.live_control_vca_count(), 3);
+        let length = host.copy_live_control_vca_id(index as u32) as usize;
+        let staged = &host.buffers.as_ref().expect("buffers").source_id[..length];
+        assert_eq!(staged, canonical[index].as_bytes(), "VCA {index}");
+        let before = vca_mirror(&host);
+        stage_vca(&mut host, 0, COMMAND_VCA_FADER_DB, index as u32, 2, -6.0, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "ride VCA {index}");
+        let after = vca_mirror(&host);
+        let moved: Vec<usize> = (0..VCA_STRIPS.len())
+            .filter(|strip| before[*strip] != after[*strip])
+            .collect();
+        assert_eq!(moved, *strips, "VCA {index} ({}) moved", canonical[index]);
+    }
+
+    // Without live controls the VCA kinds are refused, so no VCA is enumerated.
+    let handle = crate::ffi::test_boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..boot_options(STRIP_QUANTUM)
+        },
+    );
+    assert_ne!(
+        handle, 0,
+        "the long-VCA session boots without live controls"
+    );
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
