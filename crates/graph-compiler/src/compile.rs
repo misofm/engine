@@ -514,6 +514,7 @@ impl GraphCompiler {
             &effects.entries,
             track_delay_bytes,
             &track_delays,
+            &route_transforms,
         ) else {
             return Err(failure(
                 effects,

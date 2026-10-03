@@ -25,6 +25,7 @@ pub use runtime::{
     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
+    test_only_route_activity_built, test_only_route_mix_counts, test_only_route_mix_reset,
     test_only_selected_split_fader, test_only_set_bank_meter_declined,
     test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
     test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
@@ -2266,6 +2267,19 @@ pub struct PreparedRoute {
     pub node: GraphNodeId,
     pub transform: RouteTransform,
     pub gate: RouteGate,
+}
+
+/// The bytes a bind allocates for its route-activity table when some prepared route's gate
+/// silences, bounded from `routes` prepared routes over a graph of `nodes` nodes (issue #1217 D6);
+/// `None` on overflow. A plan with no silencing gate builds no table and allocates none of this.
+///
+/// The bound is `size_of::<RouteActivity>() + routes * size_of::<bool>() + nodes *
+/// size_of::<u32>() + routes * (size_of::<(u32, u32)>() + size_of::<RouteInput>())`: the boxed
+/// table, one activity bit per route, one entry per unit (at most one per node), and at most one
+/// destination range and one route input per route.
+#[must_use]
+pub fn route_activity_bound_bytes(routes: u64, nodes: u64) -> Option<u64> {
+    runtime::route_activity_bound_bytes(routes, nodes)
 }
 
 /// One strip's declared input-side time alignment (#210 phase 2; submixes since #1201).

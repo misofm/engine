@@ -240,8 +240,9 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
 }
 
 /// #1216 gate 5: a route's mute is in the sealed graph text. The same session compiles twice, one
-/// route muted and then open: the texts differ by exactly one `route-mute\t<node>` row, right after
-/// that route's `route-transform` row, and an open route writes no such row.
+/// route muted and then open: outside the `estimate` row (which charges #1217's route-activity
+/// table), the texts differ by exactly one `route-mute\t<node>` row, right after that route's
+/// `route-transform` row, and an open route writes no such row.
 ///
 /// Red if the gate is invisible to the canonical text (two plans binding different constants
 /// would share one digest), or if the row lands on another route or elsewhere in the text.
@@ -281,9 +282,20 @@ fn a_muted_route_seals_one_route_mute_row_after_its_transform() {
             muted_lines[at - 1]
         );
         muted_lines.remove(at);
+        // A muted route also makes bind build the route-activity table, which the sealed
+        // `estimate` row charges (#1217 D6; `route_activity.rs` holds the charge to what bind
+        // retains), so that row is set aside here.
+        let without_estimate = |lines: &[&str]| -> Vec<String> {
+            lines
+                .iter()
+                .filter(|line| !line.starts_with("estimate\t"))
+                .map(|line| (*line).to_owned())
+                .collect()
+        };
         assert_eq!(
-            muted_lines, open_lines,
-            "the gate row is the only difference ({node})"
+            without_estimate(&muted_lines),
+            without_estimate(&open_lines),
+            "the gate row is the only difference outside the estimate ({node})"
         );
     }
 }

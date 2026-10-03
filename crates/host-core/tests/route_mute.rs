@@ -1,17 +1,28 @@
-//! Issue #1216: a route's `mute` is a session switch, and it is not structural.
+//! Issue #1216: a route's `mute` is a session switch, and it is not structural. Issue #1217: an
+//! undelayed muted route is inactive -- neither mixed nor read by its destination's sum.
 //!
-//! * **Gate 1, a muted route mixes zero coefficients.** Bus `b` sums two contributors fed
-//!   distinct noise, one route muted; the bus renders the bits of a track fed the scalar D9 sum
-//!   that mixes the muted route with `[+0.0; 4]` (D3).
-//! * **Gate 3, mute is not structural.** Muting the route PDC delays leaves every inserted delay,
-//!   route timing and the output latency unchanged.
-//! * **Gate 4, no folded muted lane.** A bus with a muted contributor declines the route fold and
-//!   renders the bits of the same plan bound with the fold declined.
+//! * **#1217 gate 1, an inactive route is neither mixed nor read.** A bus, and the session output,
+//!   sum two contributors fed distinct noise, one route muted, and render the scalar D3 oracle
+//!   bit for bit (the first input in route-ID order owns the store; a later one is added only when
+//!   active), while the muted route's op never mixes. A muted route that is its bus's sole, in-place
+//!   contributor leaves the bus exact `+0.0`.
+//! * **#1217 gate 2, the first input owns the store**, with `+0.0` when it is inactive.
+//! * **#1216 gate 3, mute is not structural.** Muting the route PDC delays leaves every inserted
+//!   delay, route timing and the output latency unchanged.
+//! * **#1217 gate 3, a muted delayed route stays active**, mixing `[+0.0; 4]` every block.
+//! * **#1216 gate 4, no folded muted lane.** A bus with a muted contributor declines the route fold
+//!   and renders the bits of the same plan bound with the fold declined.
+//! * **#1217 gate 5**: those sessions render without one allocator call after warm-up.
+//!
+//! #1216's gate 1 (a muted route mixes zero coefficients) was superseded by #1217's: an undelayed
+//! muted route is no longer mixed at all.
 
+use bench_support::alloc as bench_alloc;
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use dsp_reference::randomized::{Draw, first_difference, run_seeds};
 use effect_compiler::{EffectCompileCaps, launch_native_effect_registry};
 use effect_contract::LatencySamples;
+use engine::realtime::audit;
 use graph::{GraphCompileCaps, GraphEdgeId};
 use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
@@ -30,9 +41,6 @@ const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-fra
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
 const FRAMES: usize = QUANTUM * BLOCKS;
-const TEST: &str = "a_muted_route_mixes_zero_coefficients";
-const REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test route_mute \
-                      -- --exact a_muted_route_mixes_zero_coefficients";
 
 fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
@@ -214,7 +222,106 @@ fn assert_bits_equal(actual: &[f32], expected: &[f32], what: &str) {
     }
 }
 
-// ---- Gate 1 -------------------------------------------------------------------------------
+// ---- #1217: the scalar D3 oracle ----------------------------------------------------------
+
+/// A stereo block's two planes.
+type Planes = [Vec<f32>; 2];
+/// Each track's id and its source planes.
+type Feeds = Vec<(String, Planes)>;
+
+/// Renders [`BLOCKS`] quanta of `document`; returns its output planes and the route-op mixes each
+/// prepared route ran, in canonical route-ID order (`graph::test_only_route_mix_counts`, which the
+/// bind resets and which counts only in a plan that built a route-activity table).
+fn render_counted(document: &str, feeds: &[(String, [Vec<f32>; 2])]) -> ([Vec<f32>; 2], Vec<u64>) {
+    let (out, _) = render(document, feeds);
+    (out, graph::test_only_route_mix_counts())
+}
+
+/// The position of route `id` among `model`'s routes in route-ID order: its index in the
+/// executor's route-activity table and in [`render_counted`]'s mix counts.
+fn route_index(model: &SessionModel, id: &str) -> usize {
+    let mut ids: Vec<&str> = model.routes.iter().map(|route| route.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.iter()
+        .position(|candidate| *candidate == id)
+        .expect("a declared route")
+}
+
+/// A route's coefficients `(ll, lr, rl, rr)`: `gain * matrix` when open, `[+0.0; 4]` when muted.
+fn coefficients(route: &Route) -> [f32; 4] {
+    if route.mute {
+        return [0.0; 4];
+    }
+    let gain = math::db_to_gain_f32(route.gain_db);
+    let m = &route.channel_matrix;
+    [gain * m.ll, gain * m.lr, gain * m.rl, gain * m.rr]
+}
+
+/// One route's mix of `planes`, per frame `left = (lr * r) + (ll * l)` and
+/// `right = (rr * r) + (rl * l)` (#1215 D3).
+fn mix(route: &Route, planes: &[Vec<f32>; 2]) -> [Vec<f32>; 2] {
+    let [ll, lr, rl, rr] = coefficients(route);
+    let frames = planes[0].len();
+    let mut out = [vec![0.0_f32; frames], vec![0.0_f32; frames]];
+    for frame in 0..frames {
+        let (l, r) = (planes[0][frame], planes[1][frame]);
+        out[0][frame] = (lr * r) + (ll * l);
+        out[1][frame] = (rr * r) + (rl * l);
+    }
+    out
+}
+
+/// The P4/D3 sum of a destination's contributions in route-ID order, each `(active, planes)`: the
+/// first owns the store (its planes when active, `+0.0` when inactive) and each later one is added
+/// only when active. Never "the first active stores".
+fn d3_sum(contributions: &[(bool, [Vec<f32>; 2])]) -> [Vec<f32>; 2] {
+    let (first_active, first) = &contributions[0];
+    let mut sum = if *first_active {
+        first.clone()
+    } else {
+        [vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]]
+    };
+    for (active, planes) in &contributions[1..] {
+        if *active {
+            for plane in 0..2 {
+                for (total, sample) in sum[plane].iter_mut().zip(&planes[plane]) {
+                    *total += *sample;
+                }
+            }
+        }
+    }
+    sum
+}
+
+fn input_tap(track: &str) -> RouteSource {
+    RouteSource::Track {
+        track_id: sid(track),
+        tap: SendTap::Input,
+    }
+}
+
+fn bus_input(bus: &str) -> RouteSource {
+    RouteSource::Submix {
+        submix_id: sid(bus),
+        tap: SendTap::Input,
+    }
+}
+
+fn assert_all_bits(planes: &[Vec<f32>; 2], expected: f32, what: &str) {
+    for (plane, samples) in planes.iter().enumerate() {
+        if let Some(frame) = samples
+            .iter()
+            .position(|sample| sample.to_bits() != expected.to_bits())
+        {
+            panic!(
+                "{what}: plane {plane} frame {frame}: {:?}, expected {expected:?}",
+                samples[frame]
+            );
+        }
+    }
+}
+
+// ---- #1217 gate 1 ---------------------------------------------------------------------------
 
 /// A nonzero magnitude in `[0.1, 1]` with the given sign.
 fn signed(draw: &mut Draw, negative: bool) -> f32 {
@@ -239,125 +346,236 @@ fn planes(draw: &mut Draw, zero: Option<[f32; 2]>) -> [Vec<f32>; 2] {
     [plane(0), plane(1)]
 }
 
-/// The D9 sum of `routes` in route-ID order, each by the D3 expression `(lr * r) + (ll * l)`
-/// over its coefficients: `gain * matrix` for an open route and `[+0.0; 4]` for a muted one.
-fn routed_sum(routes: &mut [(&Route, &[Vec<f32>; 2])]) -> [Vec<f32>; 2] {
-    routes.sort_by(|x, y| x.0.id.cmp(&y.0.id));
-    let mut sum = [vec![0.0_f32; FRAMES], vec![0.0_f32; FRAMES]];
-    for (rank, (route, planes)) in routes.iter().enumerate() {
-        let (ll, lr, rl, rr) = if route.mute {
-            (0.0, 0.0, 0.0, 0.0)
-        } else {
-            let gain = math::db_to_gain_f32(route.gain_db);
-            let m = &route.channel_matrix;
-            (gain * m.ll, gain * m.lr, gain * m.rl, gain * m.rr)
-        };
-        for frame in 0..FRAMES {
-            let (l, r) = (planes[0][frame], planes[1][frame]);
-            let left = (lr * r) + (ll * l);
-            let right = (rr * r) + (rl * l);
-            if rank == 0 {
-                sum[0][frame] = left;
-                sum[1][frame] = right;
-            } else {
-                sum[0][frame] += left;
-                sum[1][frame] += right;
-            }
-        }
-    }
-    sum
+/// Where gate 1's two contributors are summed.
+#[derive(Clone, Copy, Debug)]
+enum Sum {
+    /// Bus `b`, whose `input` tap feeds the output by the unity route `b-main`.
+    Bus,
+    /// The session output itself: the host-master reduction.
+    Output,
 }
 
-/// Gate 1. Tracks `t0` and `t1` route from their `input` taps into bus `b` by `r0` and `r1`, with
-/// drawn gains and nonzero matrices, and one of the two (drawn) is muted; the bus's `input` tap (its
-/// D9 sum) feeds the output. The oracle renders no submix and no mute: a track reads the scalar
-/// [`routed_sum`] and feeds the output from its own `input` tap, by the same unity route.
-///
-/// The open contributor's every fourth frame is the signed zero that makes its contribution `-0.0`
-/// on both lanes (its matrix columns share a sign per source lane, and the zero takes the other
-/// sign), so on those frames the bus sum *is* the muted contribution, `(+0.0 * r) + (+0.0 * l)`,
-/// whose sign follows the muted track's samples alone. The `input` taps keep every signed zero:
-/// a strip's pan would turn some of them positive and hide the muted contribution's sign.
-///
-/// Red if the compiler drops `mute` (the muted route mixes its open coefficients), or applies it
-/// as anything other than four `+0.0` coefficients: through the gain, a muted coefficient keeps
-/// its matrix entry's sign, and the zero frames show it.
-#[test]
-fn a_muted_route_mixes_zero_coefficients() {
-    let input = |track: &str| RouteSource::Track {
-        track_id: sid(track),
-        tap: SendTap::Input,
-    };
-    let mut negative_zeros = 0;
-    let ran = run_seeds(TEST, REPLAY, 16, |seed| {
-        let mut draw = Draw::new(seed);
-        let (mut model, source, track) = empty_session();
-        let muted = draw.below(2);
-        let mut feeds = Vec::new();
-        let mut routes = Vec::new();
-        for index in 0..2 {
-            let id = format!("t{index}");
-            add_track(&mut model, &source, &track, &id);
-            let mut drawn = route(&format!("r{index}"), input(&id), into_bus("b"));
-            drawn.gain_db = draw.in_domain(-12.0, 6.0);
-            // Column signs: `ll`/`rl` scale the left source lane, `lr`/`rr` the right.
-            let (left_negative, right_negative) = (draw.chance(1, 2), draw.chance(1, 2));
-            drawn.channel_matrix = ChannelMatrix {
-                ll: signed(&mut draw, left_negative),
-                lr: signed(&mut draw, right_negative),
-                rl: signed(&mut draw, left_negative),
-                rr: signed(&mut draw, right_negative),
-            };
-            drawn.mute = index == muted;
-            // A zero of the column's opposite sign makes each open product `-0.0`.
-            let zero = |negative: bool| if negative { 0.0 } else { -0.0 };
-            let zeros = (!drawn.mute).then(|| [zero(left_negative), zero(right_negative)]);
-            feeds.push((id, planes(&mut draw, zeros)));
-            routes.push(drawn);
-        }
-        model.routes = routes.clone();
-        model.routes.push(to_output(
-            "b-main",
-            RouteSource::Submix {
-                submix_id: sid("b"),
-                tap: SendTap::Input,
+/// Tracks `t0` and `t1` route from their `input` taps by `r0` and `r1`, with drawn gains and
+/// nonzero matrices, into `sum`; route `r<muted>` is muted. Returns the session, the two routes and
+/// the feeds. The open contributor's every fourth frame is the signed zero that makes its
+/// contribution `-0.0` on both lanes, so a muted route that is still mixed shows its sign there.
+fn two_contributors(draw: &mut Draw, sum: Sum, muted: usize) -> (SessionModel, Vec<Route>, Feeds) {
+    let (mut model, source, track) = empty_session();
+    let mut feeds = Vec::new();
+    let mut routes = Vec::new();
+    for index in 0..2 {
+        let id = format!("t{index}");
+        add_track(&mut model, &source, &track, &id);
+        let destination = match sum {
+            Sum::Bus => into_bus("b"),
+            Sum::Output => RouteDestination::OutputInput {
+                output_id: sid("main-out"),
             },
-        ));
+        };
+        let mut drawn = route(&format!("r{index}"), input_tap(&id), destination);
+        drawn.gain_db = draw.in_domain(-12.0, 6.0);
+        // Column signs: `ll`/`rl` scale the left source lane, `lr`/`rr` the right.
+        let (left_negative, right_negative) = (draw.chance(1, 2), draw.chance(1, 2));
+        drawn.channel_matrix = ChannelMatrix {
+            ll: signed(draw, left_negative),
+            lr: signed(draw, right_negative),
+            rl: signed(draw, left_negative),
+            rr: signed(draw, right_negative),
+        };
+        drawn.mute = index == muted;
+        // A zero of the column's opposite sign makes each open product `-0.0`.
+        let zero = |negative: bool| if negative { 0.0 } else { -0.0 };
+        let zeros = (!drawn.mute).then(|| [zero(left_negative), zero(right_negative)]);
+        feeds.push((id, planes(draw, zeros)));
+        routes.push(drawn);
+    }
+    model.routes = routes.clone();
+    if let Sum::Bus = sum {
+        model.routes.push(to_output("b-main", bus_input("b")));
         model.submixes = vec![Submix::unity(sid("b"), &model.console)];
-        let (actual, _) = render(&document(&model), &feeds);
+    }
+    (model, routes, feeds)
+}
 
-        let mut contributions: Vec<(&Route, &[Vec<f32>; 2])> = routes
-            .iter()
-            .zip(feeds.iter().map(|(_, planes)| planes))
-            .collect();
-        let sum = routed_sum(&mut contributions);
-        let (mut oracle, _, track) = empty_session();
-        add_track(&mut oracle, &source, &track, "summed");
-        oracle
-            .routes
-            .push(to_output("summed-main", input("summed")));
-        let (expected, _) = render(&document(&oracle), &[("summed".to_owned(), sum)]);
-        for plane in 0..2 {
-            assert_bits_equal(
-                &actual[plane],
-                &expected[plane],
-                &format!("seed {seed}, r{muted} muted, plane {plane}"),
+const GATE_1: &str = "an_inactive_route_is_neither_mixed_nor_read";
+const GATE_1_REPLAY: &str = "cargo test -p host-core --features host-core/test-support --test \
+                             route_mute -- --exact an_inactive_route_is_neither_mixed_nor_read";
+
+/// #1217 gate 1, two undelayed contributors. One of `r0` and `r1` (drawn) is muted, so it is
+/// inactive. Summed by bus `b` and, separately, by the session output (the host-master form), the
+/// rendered output equals the scalar D3 oracle bit for bit -- through `b-main`'s unity mix for the
+/// bus -- and the muted route's op never mixes while the open one mixes every block.
+///
+/// When `r0` is muted the zero frames render `+0.0 + (-0.0) = +0.0`; when `r1` is, `-0.0` alone.
+/// Mixing the muted route instead adds its `(+0.0 * r) + (+0.0 * l)`, whose sign follows the muted
+/// track's samples, so a muted route that is still mixed moves those zeros.
+///
+/// Red if a muted undelayed route is still mixed or added (the counter, and the signed zeros), or
+/// if either reduction form moves the store owner.
+#[test]
+fn an_inactive_route_is_neither_mixed_nor_read() {
+    let mut negative_zeros = 0;
+    let ran = run_seeds(GATE_1, GATE_1_REPLAY, 16, |seed| {
+        for sum in [Sum::Bus, Sum::Output] {
+            let mut draw = Draw::new(seed);
+            let muted = draw.below(2);
+            let (model, routes, feeds) = two_contributors(&mut draw, sum, muted);
+            let (actual, mixes) = render_counted(&document(&model), &feeds);
+            let contributions: Vec<(bool, [Vec<f32>; 2])> = routes
+                .iter()
+                .zip(&feeds)
+                .map(|(route, (_, planes))| (!route.mute, mix(route, planes)))
+                .collect();
+            let summed = d3_sum(&contributions);
+            let expected = match sum {
+                Sum::Bus => mix(&to_output("b-main", bus_input("b")), &summed),
+                Sum::Output => summed,
+            };
+            let what = format!("seed {seed}, {sum:?}, r{muted} muted");
+            for plane in 0..2 {
+                assert_bits_equal(
+                    &actual[plane],
+                    &expected[plane],
+                    &format!("{what}, plane {plane}"),
+                );
+            }
+            assert!(
+                actual.iter().flatten().any(|sample| *sample != 0.0),
+                "{what}: the open route rendered audio"
             );
+            let open = 1 - muted;
+            assert_eq!(
+                mixes[route_index(&model, &format!("r{muted}"))],
+                0,
+                "{what}: the muted route's op mixed"
+            );
+            assert_eq!(
+                mixes[route_index(&model, &format!("r{open}"))],
+                BLOCKS as u64,
+                "{what}: the open route's op mixes every block"
+            );
+            if let Sum::Output = sum {
+                negative_zeros += actual
+                    .iter()
+                    .flatten()
+                    .filter(|sample| sample.to_bits() == (-0.0_f32).to_bits())
+                    .count();
+            }
         }
-        assert!(
-            actual.iter().flatten().any(|sample| *sample != 0.0),
-            "seed {seed}: the open route rendered audio"
-        );
-        negative_zeros += actual
-            .iter()
-            .flatten()
-            .filter(|sample| sample.to_bits() == (-0.0_f32).to_bits())
-            .count();
     });
     if !dsp_reference::randomized::replaying() {
         assert_eq!(ran, 16);
-        // The muted contribution's sign reached the output, or the zero frames prove nothing.
-        assert!(negative_zeros > 0, "no muted contribution rendered as -0.0");
+        // The open contribution's `-0.0` reached the output, or the zero frames prove nothing.
+        assert!(negative_zeros > 0, "no zero frame rendered as -0.0");
+    }
+}
+
+/// Track `t` feeds bus `c` alone, by `t-c` from its `post_pan` tap, and `c`'s `input` tap feeds
+/// the output by the unity route `c-main`; `t-c` is muted when `muted`. `t-c` is its tap's sole
+/// reader, so it mixes in place over the tap, and `c`'s input reads `t-c` in place in turn.
+fn in_place_chain(muted: bool) -> SessionModel {
+    let (mut model, source, track) = empty_session();
+    add_track(&mut model, &source, &track, "t");
+    let mut into = route("t-c", post_pan("t"), into_bus("c"));
+    into.mute = muted;
+    model.routes.push(into);
+    model.routes.push(to_output("c-main", bus_input("c")));
+    model.submixes = vec![Submix::unity(sid("c"), &model.console)];
+    model
+}
+
+/// #1217 gate 1, the in-place sole contributor. With `t-c` muted, `c`'s input is exact `+0.0` on
+/// both planes, so the output, `c-main`'s unity mix of it, is too; `t-c` never mixes, while `c-main`
+/// mixes every block. The same chain open renders audio, so the muted render is not silent by
+/// construction.
+///
+/// Red if an inactive in-place route leaves the raw tap in its destination: the skipped route's
+/// buffer still holds `t`'s `post_pan` audio, and a destination that aliased it would pass it on.
+#[test]
+fn an_inactive_in_place_sole_route_fills_its_bus_with_positive_zero() {
+    let mut draw = Draw::new(1_217);
+    let feeds = vec![("t".to_owned(), planes(&mut draw, None))];
+    let (open, _) = render_counted(&document(&in_place_chain(false)), &feeds);
+    assert!(
+        open.iter().flatten().any(|sample| *sample != 0.0),
+        "the open chain renders audio, or this is vacuous"
+    );
+    let model = in_place_chain(true);
+    let (actual, mixes) = render_counted(&document(&model), &feeds);
+    assert_all_bits(&actual, 0.0, "the muted sole route's bus");
+    assert_eq!(mixes[route_index(&model, "t-c")], 0, "t-c mixed");
+    assert_eq!(
+        mixes[route_index(&model, "c-main")],
+        BLOCKS as u64,
+        "c-main mixes every block"
+    );
+}
+
+// ---- #1217 gate 2 ---------------------------------------------------------------------------
+
+/// Tracks `t0..` route from their `input` taps by unity routes `r0..` into bus `b`, whose `input`
+/// tap feeds the output by the unity route `b-main`. Track `t<k>` is fed `feeds[k]`, and `r<k>` is
+/// muted when `muted[k]`.
+fn unity_bus(muted: &[bool]) -> SessionModel {
+    let (mut model, source, track) = empty_session();
+    for (index, muted) in muted.iter().enumerate() {
+        let id = format!("t{index}");
+        add_track(&mut model, &source, &track, &id);
+        let mut into = route(&format!("r{index}"), input_tap(&id), into_bus("b"));
+        into.mute = *muted;
+        model.routes.push(into);
+    }
+    model.routes.push(to_output("b-main", bus_input("b")));
+    model.submixes = vec![Submix::unity(sid("b"), &model.console)];
+    model
+}
+
+/// #1217 gate 2. A unity route mixes an all-`-0.0` block to `-0.0`, and `b-main`'s unity mix
+/// passes the bus input's zero sign to the output.
+///
+/// * `r0` muted, `r1` open over an all-`-0.0` block: the inactive first input still owns the store,
+///   so the bus input is `+0.0 + (-0.0) = +0.0`, and the output is `+0.0` everywhere.
+/// * `r0` open over an all-`-0.0` block, `r1` and `r2` muted: the bus input is `r0`'s `-0.0` alone,
+///   and so is the output.
+///
+/// Red if the store owner moves to the first *active* input (the first case renders `-0.0`), or if
+/// an active first input's `-0.0` is lost, for instance to a `+0.0` fill it is then added to (the
+/// second renders `+0.0`).
+#[test]
+fn the_first_route_in_id_order_owns_the_store() {
+    let mut draw = Draw::new(12_172);
+    let negative = [vec![-0.0_f32; FRAMES], vec![-0.0_f32; FRAMES]];
+    let mut noise = || planes(&mut draw, None);
+    let cases: [(&[bool], Vec<Planes>, f32, &str); 2] = [
+        (
+            &[true, false],
+            vec![noise(), negative.clone()],
+            0.0,
+            "r0 muted, r1 open at -0.0",
+        ),
+        (
+            &[false, true, true],
+            vec![negative.clone(), noise(), noise()],
+            -0.0,
+            "r0 open at -0.0, r1 and r2 muted",
+        ),
+    ];
+    for (muted, inputs, expected, what) in cases {
+        let model = unity_bus(muted);
+        let feeds: Vec<(String, [Vec<f32>; 2])> = inputs
+            .into_iter()
+            .enumerate()
+            .map(|(index, planes)| (format!("t{index}"), planes))
+            .collect();
+        let (actual, mixes) = render_counted(&document(&model), &feeds);
+        assert_all_bits(&actual, expected, what);
+        for (index, muted) in muted.iter().enumerate() {
+            assert_eq!(
+                mixes[route_index(&model, &format!("r{index}"))],
+                if *muted { 0 } else { BLOCKS as u64 },
+                "{what}: r{index}'s mixes"
+            );
+        }
     }
 }
 
@@ -541,4 +759,199 @@ fn a_bus_with_a_muted_contributor_folds_no_lane() {
         "the muted bus rendered audio"
     );
     eprintln!("route_mute gate 4: the open bus folds {open_folds} lanes, the muted bus 0");
+}
+
+// ---- #1217 gate 3 ---------------------------------------------------------------------------
+
+/// The true-peak limiter's prepared latency at 48 kHz, and the compensation `d-e` carries.
+const LIMITER_LATENCY: usize = 486;
+
+/// Tracks `d` and `s` feed bus `e`: `d` by `d-e` from its `input` tap, when `with_d`, muted; `s`
+/// by `s-e` from its `post_pan` tap, through a true-peak limiter insert. PDC delays `d-e`'s edge
+/// into `e` by the limiter's latency. `e`'s `input` tap feeds the output by the unity route
+/// `e-main`.
+fn delayed_bus(with_d: bool) -> SessionModel {
+    let (mut model, source, track) = empty_session();
+    for id in ["d", "s"] {
+        add_track(&mut model, &source, &track, id);
+    }
+    model.tracks[1].inserts.effects.push(Effect {
+        id: sid("ceiling"),
+        identity: EffectIdentity::Native {
+            effect_id: sid("miso.true-peak-limiter"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: Vec::new(),
+        sidechain: SidechainDeclaration::None,
+    });
+    if with_d {
+        let mut muted = route("d-e", input_tap("d"), into_bus("e"));
+        muted.mute = true;
+        model.routes.push(muted);
+    }
+    model
+        .routes
+        .push(route("s-e", post_pan("s"), into_bus("e")));
+    model.routes.push(to_output("e-main", bus_input("e")));
+    model.submixes = vec![Submix::unity(sid("e"), &model.console)];
+    model
+}
+
+/// #1217 gate 3. `d-e` is muted, but its edge into `e` carries the 486-sample compensation, so it
+/// stays active: its op mixes `[+0.0; 4]` every block and its line stages that mix.
+///
+/// The oracle is D3 over `e`'s inputs in route-ID order: `d-e` first, so it owns the store, with
+/// its delayed zero-coefficient mix, then `s-e`. `s-e`'s contribution `s` comes from the render of
+/// the same session without `d-e`, through `e-main`'s unity mix, where `out = (+0.0 * s_r) + s_l`
+/// is `s_l` exactly wherever `s_l` is nonzero. The delayed zero mix is `+0.0` (the line's initial
+/// state) for the first 486 frames and a signed zero after them, so wherever `s` is nonzero the
+/// oracle is `s`, and wherever `s` is zero it must lie in those first 486 frames (asserted), where
+/// the oracle is `+0.0 + s = +0.0` on both lanes, and so is its `e-main` mix.
+///
+/// Red if a delayed muted route goes inactive: its op stops mixing, and its consumer would stage,
+/// every block, an arena buffer this block never wrote.
+#[test]
+fn a_muted_delayed_route_stays_active() {
+    let model = delayed_session_checked();
+    let mut draw = Draw::new(12_173);
+    let feeds: Vec<(String, [Vec<f32>; 2])> = ["d", "s"]
+        .iter()
+        .map(|id| ((*id).to_owned(), planes(&mut draw, None)))
+        .collect();
+    let (reference, _) = render_counted(&document(&delayed_bus(false)), &feeds);
+    let (actual, mixes) = render_counted(&document(&model), &feeds);
+    assert!(
+        graph::test_only_route_activity_built(),
+        "a plan with a muted route builds its route-activity table"
+    );
+    let mut expected = reference.clone();
+    for (plane, samples) in expected.iter_mut().enumerate() {
+        for (frame, sample) in samples.iter_mut().enumerate() {
+            if *sample == 0.0 {
+                assert!(
+                    frame < LIMITER_LATENCY,
+                    "plane {plane} frame {frame}: `s` is zero past the delayed line's +0.0 \
+                     prefix, so this oracle cannot fix the sum's zero sign"
+                );
+                *sample = 0.0;
+            }
+        }
+    }
+    for plane in 0..2 {
+        assert_bits_equal(
+            &actual[plane],
+            &expected[plane],
+            &format!("plane {plane}: e's input against the D3 oracle"),
+        );
+    }
+    assert!(
+        actual.iter().flatten().any(|sample| *sample != 0.0),
+        "the bus renders audio"
+    );
+    assert_eq!(
+        mixes[route_index(&model, "d-e")],
+        BLOCKS as u64,
+        "the muted delayed route mixes its zero coefficients every block"
+    );
+}
+
+/// [`delayed_bus`] with `d-e`, after asserting from the compiled plan that `d-e` is the one route
+/// PDC delays, by [`LIMITER_LATENCY`] samples.
+fn delayed_session_checked() -> SessionModel {
+    let model = delayed_bus(true);
+    let artifact = graph_artifact(&document(&model));
+    let route = graph::StableGraphId::parse("d-e").expect("graph id");
+    assert!(
+        matches!(
+            artifact.graph().inserted_delays.as_slice(),
+            [delay] if delay.samples == LatencySamples(LIMITER_LATENCY as u64)
+                && matches!(&delay.edge_id, GraphEdgeId::RouteDestination { route_id }
+                    if *route_id == route)
+        ),
+        "d-e's edge into e carries the limiter's compensation: {:?}",
+        artifact.graph().inserted_delays
+    );
+    model
+}
+
+// ---- #1217 gate 5 ---------------------------------------------------------------------------
+
+/// After block 0, every render of `document` allocates and frees nothing: the render audit and
+/// `bench_support::alloc`'s thread-scoped counters both read exact zero around each call.
+fn assert_renders_without_allocating(document: &str, feeds: &[(String, [Vec<f32>; 2])]) {
+    let compiled = compile_host_session(document, &caps()).expect("compile");
+    let prepared = prepare_host_runtime(&compiled, &caps()).expect("prepare");
+    assert!(
+        graph::test_only_route_activity_built(),
+        "the plan builds its route-activity table, or this is vacuous"
+    );
+    let rate = prepared.report.sample_rate_hz;
+    let (mut session, mut sources, _) = prepared
+        .start_render_session()
+        .unwrap_or_else(|_| panic!("render session starts"));
+    audit::warm_up();
+    bench_alloc::assert_installed();
+    for block in 0..BLOCKS {
+        let range = block * QUANTUM..(block + 1) * QUANTUM;
+        for (id, planes) in feeds {
+            sources
+                .submit(
+                    id.as_bytes(),
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: range.start as u64,
+                        sample_rate_hz: rate,
+                        planes: &[&planes[0][range.clone()], &planes[1][range.clone()]],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("source block");
+        }
+        let mut pcm = [0.0_f32; QUANTUM * 2];
+        audit::reset();
+        let mark = bench_alloc::current_thread_counters();
+        let (report, snapshot) = audit::in_render_scope(|| {
+            let report = session.render_planar(&mut pcm, 2, QUANTUM, QUANTUM, range.start as u64);
+            (report, audit::snapshot())
+        });
+        let delta = bench_alloc::current_thread_delta_since(mark);
+        assert!(report.is_ok(), "render: {report:?}");
+        // Block 0 is the warm-up: the first render may initialise process statics.
+        if block > 0 {
+            assert_eq!(
+                (snapshot.allocations, snapshot.deallocations),
+                (0, 0),
+                "block {block}: the render audit saw the allocator"
+            );
+            assert_eq!(
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (0, 0, 0),
+                "block {block}: the render thread allocated or freed"
+            );
+        }
+    }
+}
+
+/// #1217 gate 5. Gate 1's bus and output sessions, its in-place chain and gate 3's delayed bus
+/// render without one allocator call after warm-up.
+///
+/// Red if the route-activity table or a destination's route inputs are built or resized on the
+/// render thread.
+#[test]
+fn route_activity_renders_without_allocating() {
+    let mut draw = Draw::new(12_175);
+    for sum in [Sum::Bus, Sum::Output] {
+        let (model, _, feeds) = two_contributors(&mut draw, sum, 0);
+        assert_renders_without_allocating(&document(&model), &feeds);
+    }
+    let one = vec![("t".to_owned(), planes(&mut draw, None))];
+    assert_renders_without_allocating(&document(&in_place_chain(true)), &one);
+    let two: Vec<(String, [Vec<f32>; 2])> = ["d", "s"]
+        .iter()
+        .map(|id| ((*id).to_owned(), planes(&mut draw, None)))
+        .collect();
+    assert_renders_without_allocating(&document(&delayed_session_checked()), &two);
 }

@@ -9,9 +9,21 @@ use crate::ids::is_summing_node;
 use crate::pdc::TimingResult;
 use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedAutomationSpan};
 
-/// Eleven inputs because the estimate is a function of that many independent facts about the
+/// Twelve inputs because the estimate is a function of that many independent facts about the
 /// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
 /// before the #99 module split, where the crate-level allow covered it.
+///
+/// # The route-activity table (issue #1217 D6)
+///
+/// `prepared_routes` are the compile's prepared routes. When some route's gate silences it, bind builds the
+/// executor's route-activity table, and `graph_metadata_bytes` charges
+/// [`graph::route_activity_bound_bytes`]`(routes.len(), nodes.len())`:
+///
+/// `size_of::<RouteActivity>() + R * size_of::<bool>() + N * size_of::<u32>()
+///  + R * (size_of::<(u32, u32)>() + size_of::<RouteInput>())`
+///
+/// for `R` prepared routes over `N` nodes (`N` bounds the executor's units). With no silencing gate
+/// bind builds nothing and the charge is zero, so the estimate is byte for byte what it was.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resource_estimate(
     quantum: u32,
@@ -27,6 +39,7 @@ pub(crate) fn resource_estimate(
     // phase 2, #1201).
     track_delay_bytes: u64,
     track_delays: &[PreparedTrackDelay],
+    prepared_routes: &[PreparedRoute],
 ) -> Option<GraphResourceEstimate> {
     let count = |value: usize| u64::try_from(value).ok();
     let logical_nodes = count(nodes.len())?;
@@ -89,8 +102,14 @@ pub(crate) fn resource_estimate(
             .checked_add(effect.metadata.state_sizes.total()?)?
             .checked_add(effect.metadata.scratch_bytes)?;
     }
+    let route_activity_bytes = if prepared_routes.iter().any(|route| route.gate.silences()) {
+        graph::route_activity_bound_bytes(count(prepared_routes.len())?, logical_nodes)?
+    } else {
+        0
+    };
     let graph_metadata_bytes =
-        graph_metadata_bytes(nodes, edges, schedule, levels, buffers, timing)?;
+        graph_metadata_bytes(nodes, edges, schedule, levels, buffers, timing)?
+            .checked_add(route_activity_bytes)?;
     let incremental_plan_bytes = audio_bytes
         .checked_add(delay_bytes)?
         .checked_add(declared_effect_bytes)?

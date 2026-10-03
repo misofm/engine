@@ -255,7 +255,16 @@ strip after its pan or matrix, now `{ kind = "submix", submix_id, tap = "post_pa
 `kind` and refuses with `schema.invalid_enum`. Every route carries a required boolean `mute`, written
 after `gain_db` (#1216): the send's on/off switch. A muted route stays in the graph, with its edge,
 its latency compensation and its gain and matrix kept, and contributes silence; muting or unmuting
-a route never changes the plan's structure or latency. Routed sidechains reuse the tagged source shape,
+a route never changes the plan's structure or latency. A muted route whose edge into its
+destination carries no latency compensation contributes nothing: it is neither mixed nor read
+(#1217). A muted route whose edge is compensated keeps running and contributes its mix with `+0.0`
+coefficients through its delay, so its compensation line never holds stale audio. Either way the
+first route in route-ID order owns the destination's sum -- its contribution when it contributes,
+else `+0.0` -- and each later contributing route is added to it in order. A lone contributing
+`-0.0` therefore keeps its sign only as the first route, and a destination whose every route is
+muted and uncompensated sums to exact `+0.0`. A zero coefficient times a non-finite `input`-tap
+sample is NaN, so a muted compensated route can carry NaN into a bus input; the bus's input section
+sanitizes it, but a meter at the bus's `input` boundary sees it. Routed sidechains reuse the tagged source shape,
 taps included, and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with

@@ -216,6 +216,88 @@ non-constant signal per lane.
 - Each new test's name with its one-sentence test-value answer.
 - The `MUTATIONS.md` rows with their observed red results.
 
+### Attempt 1 record (Terra)
+
+- **Interruption.** An earlier attempt-1 implementer was interrupted with uncommitted edits to
+  `graph-compiler/src/{compile,estimate}.rs` and `graph/src/{lib,runtime}.rs` (saved as
+  `submix-verdicts/1217-interrupted.patch`, outside the repo). They were reviewed against D1-D7 and
+  **kept**: they compiled, and they held the runtime, estimate and counter halves of the slice. This
+  attempt added the tests, the docs, the `MUTATIONS.md` rows and one test repair, and ran every gate.
+- **Implementation.** `RouteActivity` (`runtime.rs`) is built at bind by `route_activity` only
+  when some prepared route's gate silences it. It holds one `active` bit per prepared route in
+  route-ID order, a per-unit `u32` (a route op's route index, or a tagged destination index), and
+  per destination its `(position, route)` pairs. A route is inactive iff it is silenced and its
+  consumer's `InputRef.delay` is `None` (D1, D2). The fold master is skipped (its contributors are
+  retired, open routes). `execute_op` returns before staging or reduction for an inactive route
+  op (D4). A destination's sum goes through `route_segments`, which yields `Zero` (an inactive
+  first input still owns the store with `+0.0`, including the in-place sole-input case),
+  `Store(0, k)` (today's `reduce_plane` over the opening active run) and `Add(i, j)` (later active
+  runs through `reduce_run`/`reduce_run_into` with `store = false`, the same left-to-right chain).
+  With every input active the walk yields one `Store(0, count)`, which is exactly today's
+  reduction. With no silencing gate nothing is built and `execute_op` sees `None`. The estimate
+  charges `graph::route_activity_bound_bytes(R, N)` inside `graph_metadata_bytes` (D6, formula in
+  the `resource_estimate` doc comment), and `compile.rs` passes `&route_transforms`.
+  `test_only_route_mix_counts`/`_reset` and `test_only_route_activity_built` live in fixed
+  thread-local cells, so they allocate nothing (D7).
+- **Anchor drift.** Found by symbol: `reduce_plane` `runtime.rs:399`, `bank_gather_source` `:3193`,
+  `execute_op` `:3219`, `build_sequential` `:5404`; the `resource_estimate` call is at
+  `compile.rs:505`, not `:485`.
+- **Deviation 1 (`execute_op` argument).** The argument is `Option<(&mut RouteActivity, usize)>`,
+  not `Option<&mut RouteActivity>`. A `RuntimeOp` does not know its unit index, and adding one would
+  be the `RuntimeOp` field D5 forbids. The borrow is still `&mut`, as #1220 needs.
+- **Deviation 2 (the bank assertion's site).** The `debug_assert!` sits where `Runtime::execute`
+  dispatches a bank unit, just before `bank_gather_source` is called: the unit is neither a route
+  nor a route destination. Putting it inside `bank_gather_source` would need the table passed into
+  that function. This form is stronger: it covers every member, not only the gathered one.
+  `route_activity` also refuses a destination it finds in a bank unit (a `debug_assert!`; in release
+  it keeps those routes active).
+- **Deviation 3 (a path outside the authorized list).**
+  `graph-compiler/tests/route_coefficients.rs::a_muted_route_seals_one_route_mute_row_after_its_transform`
+  (#1216 gate 5) asserted that the `route-mute` row is the only difference between a muted and an
+  open canonical text. D6 charges the table in `graph_metadata_bytes`, which the sealed `estimate`
+  row carries (`49460` against `48915` on the nine-track fixture). The test now sets the `estimate`
+  row aside, and gate 4 holds the charge.
+- **Superseded test.** #1216 gate 1 `a_muted_route_mixes_zero_coefficients` (an undelayed muted
+  route mixes `[+0.0; 4]`) is deleted. #1217 gate 1 replaces it: on this tree it was red at
+  `seed 0, r0 muted, plane 0: sample 16: 0.0 != -0.0`, which is D3 working as specified.
+- **Unchanged where nothing is muted.** `check-graph-determinism.sh` output is byte-identical to the
+  base commit's (`graph_fixture` built from `f48fe7c74` in a temporary worktree; `cmp` exit 0). That
+  output, `graph_fixture --check` and the console and builtins fixture gates are all green, so the
+  unmuted canonical text, estimate row included, did not move.
+- **Tests and test value** (each mutation applied, run red, reverted; rows `1217-1`..`1217-10` in
+  `crates/graph/tests/MUTATIONS.md`):
+  - `host-core/tests/route_mute.rs::an_inactive_route_is_neither_mixed_nor_read` (gate 1; 16 seeds,
+    bus `b` through `b-main` and the session output, the host-master form, against the scalar D3
+    oracle plus per-route mix counts): red if a muted undelayed route is still mixed or added, or if
+    either reduction form moves the store owner (1217-1, -2, -3, -5, -6).
+  - `...::an_inactive_in_place_sole_route_fills_its_bus_with_positive_zero` (gate 1, bus `c`): red
+    if an inactive in-place route leaves the raw tap in its destination (1217-4, red in this test
+    alone).
+  - `...::the_first_route_in_id_order_owns_the_store` (gate 2): red if the store moves to the first
+    active input, or if an active first input's `-0.0` is lost (1217-3, -5).
+  - `...::a_muted_delayed_route_stays_active` (gate 3; the 486-sample delay on `d-e`'s
+    `RouteDestination` edge is asserted from the compiled plan; `d-e` is first in route-ID order,
+    and the oracle is D3 with `s-e`'s contribution taken from the render without `d-e`): red if a
+    delayed muted route goes inactive (1217-7: 0 mixes against 8).
+  - `graph-compiler/tests/route_activity.rs::a_route_activity_table_is_built_only_for_a_silencing_gate_and_is_charged`
+    (gate 4; nine-track fixture, `eq5-main` muted, fold declined in both binds; charged 545 bytes
+    against 237 retained, measured by `bench_support::alloc`): red if the table is built for a
+    plan that cannot need it, or is left uncharged (1217-9, -10).
+  - `...::route_activity_renders_without_allocating` (gate 5; gate 1's bus, output and in-place
+    sessions and gate 3's session, armed render audit plus thread counters, exact zero after block
+    0): red if the table or the route inputs are built or resized on the render thread (1217-8,
+    `SIGABRT` on the armed audit).
+- **Gates (x86-64 AVX2, this tree).**
+  - Gate 6: the release build of `audit`/`bench`/`capi`/`session-validator`;
+    `check-graph-determinism.sh` (100/100, `cmp` with the base exit 0);
+    `graph_fixture -- --check`; `check-console-fixtures.sh`; `check-builtins-fixtures.sh`;
+    `audit capi` (`allocations 0`, `total_violations 0`, digest `ff6cdcb96cdcdad5`); and
+    `cargo test --release -p audit -p bench -p console-workload` (110 passed, 0 failed, including
+    `every_standing_workload_folds_one_route_per_track`). All green.
+  - Gate 7: `check-`/`test-graph-policy.sh` and `check-`/`test-realtime-policy.sh` green;
+    `cargo fmt --check` and the workspace clippy (`-D warnings`) clean; test-debug-a (`--no-fail-fast`) passed 1,186 tests in 106 binaries, 0 failed, 9 ignored. Its first run failed only #1216 gate 5, which Deviation 3 then repaired.
+    `run-aarch64-tests.sh debug` runs at the K3 push (CI `aarch64-debug`), since this host is x86.
+
 ## Dependencies
 
 - *Mute a route in the session* (#1216)
