@@ -208,6 +208,73 @@ No render code and no host wiring change here.
 - Each new test's name with its one-sentence test-value answer, and the mutation that turned it red
   (recorded in `crates/host-core/tests/MUTATIONS.md`).
 
+### Attempt 1 record (Terra)
+
+- **D1** `crates/host-core/src/vca.rs`, re-exported (`LiveVcaState`, `LiveVcaFaderDelta`), with
+  the frozen signatures. Per VCA `db`/`mute`, per strip own `db` and emitted effective `db`
+  (seeded from `effective_strip_faders()`), the reach flattened from `vca_reach()` into CSR tables
+  (`reach_start`/`reach`, ascending VCA ID; inverse `reached_start`/`reached`, ascending strip,
+  built by count, prefix sum and a transient cursor), and a shadow of the four mutable arrays.
+  `effective_db` calls `session::vca_effective_db(own, reach offsets)`; nothing re-spells it. A
+  model with no VCA returns `empty()` before `vca_reach()` runs. Indices are `usize` (4 bytes on
+  wasm32). `retained_bytes`/`largest_allocation_bytes` sum/max the twelve boxed arrays. Zero fills
+  only (`repeat_n(0)`); the rest are copies, so no splatted non-zero store (cross-targets: host-core
+  still 4 `memset_pattern16` calls). No name contains `free`.
+  - Out-of-range behaviour (not frozen by D1, chosen on the solo/route precedent): unknown
+    VCA/strip -> `false` or no-op; `effective_db` of an unknown strip/lane is `0.0`; of an unreached
+    strip, the value preparation baked; `fader_delta` of an unreached strip is empty.
+- **D2** `solo.rs`: `set_vca_mute(strip, [bool; 2]) -> bool`, `vca_mute_shadow` reserved in
+  `try_new`, copied in `shadow()`, restored in `rollback()`; `covers` became `pub(crate)` for the
+  VCA module; the module/field docs that said the term had no setter and no shadow are corrected.
+- **Tests** (`crates/host-core/tests/vca_live.rs`; mutations in `tests/MUTATIONS.md`, 1244-H1..H15,
+  all 15 red; driver and logs `/tmp/claude-1002/kv-1244/`):
+  - `a_live_recompute_equals_preparation` (gate 1, 32 seeds, 2-8 tracks, 1-4 submixes, up to 10
+    VCAs over 4 levels, up to 64 edits, values across the domain plus edge/tiny words): red if live
+    composition differs from preparation in order, reach, clamp or lane, if a member's own value is
+    overwritten by an effective one, or if the inverse table misses a nested member (H1, H2, H3,
+    H9). Reach: 193 multi-VCA strips, 394 diamond (VCA, strip) pairs, 79 reached submixes, 5,721
+    clamped-lane observations, 3 refused unreached member edits.
+  - `a_composition_never_owes_a_redundant_record` (gate 2, randomized, 16 seeds x 48 edits): red if
+    a delta re-emits an unchanged target, misses a moved one, or the mirror is not seeded from the
+    prepared values (H5, H13, H14). Shapes: 3,954 empty, 55 `Both`, 703 one-lane, 136 two-record.
+  - `an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_lanes` (gate 2,
+    named cases: members clamped at -144 before and after, a member-less VCA, `Both`, `Right`,
+    `Left`+`Right`, a member's own move, an unreached strip refused): red if a clamped or
+    unreached move owes a record or a selector disagrees with the moved lanes (H5, H13, H14).
+  - `a_clamped_member_returns_to_its_own_value` (gate 3): red if the effective value is stored as
+    the member's own (H4).
+  - `rollback_restores_every_mirror_and_commit_keeps_them` (gate 4): red if a refused submission
+    leaves any mirror changed, including the strip-mute owner's VCA term (H6, H7, H15).
+  - `a_vca_mute_wins_over_solo_and_reaches_the_following_sends` (gate 5): red if solo clears a VCA
+    mute, solo-safe exempts a submix, or the VCA mute misses the follow composition (H8, H9).
+  - `the_command_path_allocates_nothing_and_the_retained_bytes_are_measured` (gate 6; 63 command
+    passes after one warm-up: `allocations == 0`, `deallocations == 0`; `retained_bytes ==
+    requested - released` around `try_new`; VCA-free `try_new` allocates nothing): red if a setter
+    or delta allocates, the VCA-free path allocates, or the bytes omit a table or shadow (H10, H11,
+    H12).
+  - `live_vca_moves_render_as_a_fresh_plan` (the caller's settled-render proof, beyond the frozen
+    gates; 12 seeds x 8 blocks): random batches of VCA dB/mute moves (one lane or both), member
+    moves, solos and user mutes go through `LiveVcaState`, the strip-mute owner and the route mirror
+    by the D3 flow, owed records pushed at zero smoothing, or the batch is rolled back; every block
+    equals, bit for bit, a plan freshly prepared from the session the test edited itself (its own
+    intent, not the states' readback). A randomized differential, judged by reach: 82 fader, 40
+    mute and 25 route records, 15 one-lane VCA mutes, 100 VCA-muted submix observations, 14 follow
+    records of VCA-muted sources, 33 solos, 19 rollbacks. Red under H1, H3, H4, H8, H9, H14, H15.
+  - `MISO_ENGINE_RANDOMIZED_SCALE=25` (release): all green.
+- No test superseded; no digest, oracle or pin moved.
+- **Gates** (x86-64-v3 AVX2 host, tree = this commit):
+  - 7: workspace test command rc 0 (115 binaries, 1,275 passed, 0 failed, 9 ignored);
+    `cargo fmt --check` ok; clippy `--all-features -D warnings` clean; `cargo doc -D warnings`
+    clean; host-core, realtime and workspace `check-*`/`test-*` ok; `check-cross-targets.sh` PASS
+    (host-core 4 `memset_pattern16` calls, at its ceiling); `run-aarch64-tests.sh debug`: at batch
+    push (no arm64 host).
+  - Because `solo.rs` is on the browser's command path: `build-web-audioworklet.sh --named-twin`
+    and `check-web-audioworklet.sh` ok (callgraph included); `check-browser-expected-resources.py
+    --artifacts` ok, no re-pin.
+- **For #1245** (INFO-1 of the #1243 verdict): the state keeps about `2 x usize` per (strip,
+  reaching VCA) pair plus `O(strips + VCAs)` mirrors; at the measured 1 MiB worst case (~1.7 M
+  pairs) that is ~14 MiB on wasm32, which `retained_bytes` reports for the host to charge.
+
 ## Dependencies
 
 - *Apply VCA offsets and mutes at preparation* (#1242)

@@ -433,3 +433,32 @@ are in `hosts/host-web/MUTATIONS.md`.
 | row | mutation | observed red |
 |---|---|---|
 | 1223-H1 | `longest_route_id_bytes` measures only the routes into submixes | `the_session_shape_measures_every_route_id`: 7, not 39 |
+
+## Issue #1244 — `LiveVcaState` and the strip-mute owner's VCA term
+
+Driver: `cargo test -p host-core --features host-core/test-support --test vca_live --lib`, one
+mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. Rows H1-H6 and
+H9-H15 mutate `src/vca.rs`; H7 and H8 mutate `src/solo.rs`.
+
+| row | mutation | observed red |
+|---|---|---|
+| 1244-H1 | `effective_db` sums in `f32` and clamps in `f32` instead of calling `session::vca_effective_db` | `a_live_recompute_equals_preparation` (seed 4, edit 31), `a_composition_never_owes_a_redundant_record` (seed 0: seeded), `live_vca_moves_render_as_a_fresh_plan` |
+| 1244-H2 | `effective_db` reads the reach's offsets in descending VCA-ID order | `a_live_recompute_equals_preparation` (seed 4), `a_composition_never_owes_a_redundant_record` |
+| 1244-H3 | the inverse table records a strip under its first reaching VCA only | `a_live_recompute_equals_preparation` (`reached_by`, seed 0, vca 3), `live_vca_moves_render_as_a_fresh_plan` (seed 2, block 1) |
+| 1244-H4 | `record_emitted_db` also writes the effective value into the member's own value | `a_clamped_member_returns_to_its_own_value`, `an_unchanged_effective_value_…`, `a_composition_never_owes_…`, `live_vca_moves_render_as_a_fresh_plan` |
+| 1244-H5 | `fader_delta` owes both lanes whenever either moved | `an_unchanged_effective_value_…`, `a_composition_never_owes_a_redundant_record` (seed 0, edit 3, strip 5) |
+| 1244-H6 | `rollback` leaves the emitted mirror as the transaction left it | `rollback_restores_every_mirror_and_commit_keeps_them` |
+| 1244-H7 | the strip-mute owner's `rollback` leaves `vca_mute` as the transaction left it | `rollback_restores_every_mirror_and_commit_keeps_them` |
+| 1244-H8 | the strip-mute owner's `set_vca_mute` refuses a solo-safe strip | `a_vca_mute_wins_over_solo_and_reaches_the_following_sends`, `live_vca_moves_render_as_a_fresh_plan` |
+| 1244-H9 | `vca_mute` reads the left lane's mute for the right lane | `a_live_recompute_equals_preparation`, `a_vca_mute_wins_over_solo_…`, `live_vca_moves_render_as_a_fresh_plan` |
+| 1244-H10 | `try_new` builds tables for a model with no VCA instead of returning `empty()` | `the_command_path_allocates_nothing_and_the_retained_bytes_are_measured` |
+| 1244-H11 | `retained_bytes` leaves out the emitted mirror's shadow | `the_command_path_allocates_nothing_and_the_retained_bytes_are_measured` (`retained_bytes` != net bytes) |
+| 1244-H12 | `effective_db` collects the reach's offsets into a `Vec` before composing | `the_command_path_allocates_nothing_…` ("the command path allocated or freed") |
+| 1244-H13 | the emitted mirror is seeded from the members' own values, not the prepared effective ones | `an_unchanged_effective_value_…`, `a_composition_never_owes_a_redundant_record` (seed 0: seeded) |
+| 1244-H14 | `fader_delta` folds two disagreeing lanes into one `Both` carrying the left value | `an_unchanged_effective_value_…`, `a_composition_never_owes_…` (seed 0, edit 34, strip 3), `live_vca_moves_render_as_a_fresh_plan` |
+| 1244-H15 | `rollback` leaves the VCA values as the transaction left them | `rollback_restores_every_mirror_and_commit_keeps_them`, `live_vca_moves_render_as_a_fresh_plan` (seed 1, block 2) |
+
+`live_vca_moves_render_as_a_fresh_plan` is a randomized differential and is judged by what its
+generator reaches rather than by a unique catch (AGENTS.md): over its 12 seeds it pushes 82 fader,
+40 mute and 25 route records, with 15 one-lane VCA mutes, 100 VCA-muted submix observations, 14
+follow records of VCA-muted sources, 33 solos and 19 refused, rolled-back batches.

@@ -30,7 +30,9 @@
 //! `session::SessionModel::effective_strip_faders` composed it at preparation. Mute wins: solo
 //! never clears it, solo-safe is not VCA-safe (a VCA-muted submix stays muted), and a VCA has no
 //! solo, so it never counts toward `any_solo`. It is kept apart from the user mute, which stays
-//! the member's own intent. Nothing changes it yet, so, like `solo_safe`, it has no shadow.
+//! the member's own intent. A live VCA mute move sets it through
+//! [`LiveControlSoloState::set_vca_mute`] with `crate::LiveVcaState::vca_mute` (issue #1244 D2),
+//! and it is transactional like the user mute.
 //!
 //! # One mute owner per strip
 //!
@@ -87,8 +89,8 @@ use builtins::BuiltinLaneSelector;
 /// Whether a lane selector addresses one lane index.
 ///
 /// `BuiltinLaneSelector::covers` is private to its own crate; this is the same two-line rule and
-/// is exercised by every test in this module.
-const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
+/// is exercised by every test in this module and the VCA module.
+pub(crate) const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
     matches!(
         (lanes, lane),
         (BuiltinLaneSelector::Left, 0)
@@ -127,7 +129,7 @@ pub struct StripMuteSeed {
 pub struct LiveControlSoloState {
     /// Fixed at construction; no transaction ever changes it, so it has no shadow.
     solo_safe: Box<[bool]>,
-    /// Fixed at construction, like `solo_safe` (issue #1242 D3).
+    /// Seeded at preparation (issue #1242 D3), moved by [`Self::set_vca_mute`] (issue #1244 D2).
     vca_mute: Box<[[bool; 2]]>,
     solo: Box<[bool]>,
     user_mute: Box<[[bool; 2]]>,
@@ -136,6 +138,7 @@ pub struct LiveControlSoloState {
     solo_shadow: Box<[bool]>,
     user_mute_shadow: Box<[[bool; 2]]>,
     emitted_shadow: Box<[[bool; 2]]>,
+    vca_mute_shadow: Box<[[bool; 2]]>,
     solo_count_shadow: u32,
     open: bool,
 }
@@ -152,11 +155,12 @@ impl LiveControlSoloState {
     ///
     /// # Errors
     ///
-    /// Returns the allocator's own error when any of the eight arrays cannot be reserved. Every
+    /// Returns the allocator's own error when any of the nine arrays cannot be reserved. Every
     /// allocation here happens at preparation; none of them can happen again later.
     pub fn try_new(seeds: &[StripMuteSeed]) -> Result<Self, TryReserveError> {
         let solo_safe = try_boxed_map(seeds, |seed| seed.solo_safe)?;
         let vca_mute = try_boxed_map(seeds, |seed| seed.vca_mute)?;
+        let vca_mute_shadow = try_boxed_map(seeds, |seed| seed.vca_mute)?;
         let solo = try_boxed(seeds.len(), false)?;
         let solo_shadow = try_boxed(seeds.len(), false)?;
         let user_mute = try_boxed_map(seeds, |seed| seed.mutes)?;
@@ -179,6 +183,7 @@ impl LiveControlSoloState {
             solo_shadow,
             user_mute_shadow,
             emitted_shadow,
+            vca_mute_shadow,
             solo_count_shadow: 0,
             open: false,
         })
@@ -299,6 +304,19 @@ impl LiveControlSoloState {
         true
     }
 
+    /// Set one strip's VCA mute term, `[left, right]`: whether any VCA reaching it mutes the lane
+    /// now (`crate::LiveVcaState::vca_mute`, issue #1244 D2). `false`, changing nothing, for an
+    /// unknown strip. Like a user mute it is transactional, and [`Self::strip_delta`] then owes
+    /// exactly the lanes whose effective mute it changed.
+    pub fn set_vca_mute(&mut self, strip: usize, lanes: [bool; 2]) -> bool {
+        if strip >= self.vca_mute.len() {
+            return false;
+        }
+        self.shadow();
+        self.vca_mute[strip] = lanes;
+        true
+    }
+
     /// Record that a mute record for `lanes` has been staged for this strip.
     ///
     /// The caller stages the record; this is the mirror update that keeps [`Self::strip_delta`]
@@ -348,6 +366,7 @@ impl LiveControlSoloState {
         self.solo.copy_from_slice(&self.solo_shadow);
         self.user_mute.copy_from_slice(&self.user_mute_shadow);
         self.emitted.copy_from_slice(&self.emitted_shadow);
+        self.vca_mute.copy_from_slice(&self.vca_mute_shadow);
         self.solo_count = self.solo_count_shadow;
         self.open = false;
     }
@@ -360,6 +379,7 @@ impl LiveControlSoloState {
         self.solo_shadow.copy_from_slice(&self.solo);
         self.user_mute_shadow.copy_from_slice(&self.user_mute);
         self.emitted_shadow.copy_from_slice(&self.emitted);
+        self.vca_mute_shadow.copy_from_slice(&self.vca_mute);
         self.solo_count_shadow = self.solo_count;
         self.open = true;
     }

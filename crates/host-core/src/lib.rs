@@ -108,6 +108,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 pub mod spectrum;
+pub mod vca;
 // Issues #996 and #997: the true-peak limiter's linked-pair session test. A unit test rather than
 // a `tests/` file because it prepares at every bank width through the `#[cfg(test)]` backend seam
 // in `prepare`, which `tests/` cannot see.
@@ -169,6 +170,7 @@ pub use spectrum::{
     SpectrumWindow, spectrum_analysis_history_resources, spectrum_capture_collection_resources,
     spectrum_capture_resources, spectrum_capture_resources_for,
 };
+pub use vca::{LiveVcaFaderDelta, LiveVcaState};
 
 /// The control-side half of one prepared effect's live-control channel (issue #140 A).
 ///
