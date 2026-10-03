@@ -4,11 +4,12 @@ import assert from "node:assert/strict";
 import { before, describe, test } from "node:test";
 
 import { createBrowserLiveControls } from "../src/browser/live-controls.ts";
-import { EngineLiveControls } from "../src/core/live-controls.ts";
+import { EngineLiveControls, LiveControlEdits } from "../src/core/live-controls.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
+import { effect, session } from "../src/core/session.ts";
 import { createOfflineEngine } from "../src/headless/engine.ts";
 import { effectEntry, moduleBytes, ramp, sessionDocument } from "./support.mjs";
 
@@ -385,5 +386,227 @@ describe("issue 322 -- shared semantic live controls", () => {
       /violated whole-batch admission/,
     );
     assert.equal(answered, true, "the SDK inspected an acknowledgement only after transport settled");
+  });
+});
+
+const RACK = Object.fromEntries(ABI_LAYOUT.constants.racks.map((row) => [row.name, row.value]));
+
+/**
+ * Issue #1214 gates 1-2: tracks `kick`, `snare` and `vox`, each on its own source; `kick` and
+ * `snare` feed `drums`, `vox` feeds `verb`, and both buses feed the output. Each bus has no console
+ * slots, no inserts and an identity input section.
+ */
+function submixDocument({ drumsFaderDb = 0 } = {}) {
+  const document = JSON.parse(sessionDocument());
+  const [source] = document.sources;
+  const [track] = document.tracks;
+  const [route] = document.routes;
+  const ids = ["kick", "snare", "vox"];
+  document.sources = ids.map((id) => ({ ...structuredClone(source), id: `s-${id}` }));
+  document.tracks = ids.map((id) => ({ ...structuredClone(track), id, source_id: `s-${id}` }));
+  const bus = (id, faderDb) => ({
+    id,
+    builtins: structuredClone(track.builtins),
+    console: [],
+    inserts: { effects: [] },
+    fader: { ...structuredClone(track.fader), left_db: faderDb, right_db: faderDb },
+    pan: structuredClone(track.pan),
+  });
+  document.submixes = [bus("drums", drumsFaderDb), bus("verb", 0)];
+  const feedBus = (trackId, submixId) => ({
+    ...structuredClone(route),
+    id: `${trackId}-${submixId}`,
+    source: { kind: "track", track_id: trackId, tap: "post_pan" },
+    destination: { kind: "submix_input", submix_id: submixId },
+  });
+  const busOut = (submixId) => ({
+    ...structuredClone(route),
+    id: `${submixId}-out`,
+    source: { kind: "submix", submix_id: submixId, tap: "post_pan" },
+  });
+  document.routes = [
+    feedBus("kick", "drums"), feedBus("snare", "drums"), feedBus("vox", "verb"),
+    busOut("drums"), busOut("verb"),
+  ];
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+/** A distinct deterministic signal per source and lane, so a gain on one strip moves only its sum. */
+function feedDistinct(engine, block) {
+  const shape = engine.shape();
+  for (const [sourceIndex, source] of shape.sources.entries()) {
+    engine.submitSource({
+      sourceId: source.id,
+      generation: 1n,
+      startFrame: BigInt(block * shape.quantumFrames),
+      planes: Array.from({ length: source.channels }, (_unused, channel) =>
+        ramp(shape.quantumFrames, 1_009 * (sourceIndex + 1) + block * 16 + channel)),
+      endOfRegion: false,
+    });
+  }
+}
+
+/**
+ * Issue #1214 gate 3: console slots `eq` then `comp`, so `comp` is slot 1; `drums` runs inserts
+ * `tone` then `glue`, so `glue` is its insert 1, while `verb` runs `glue` alone at insert 0 and
+ * track `kick` carries no insert at all.
+ */
+function builtSubmixSession() {
+  const compressor = (slotId) => effect("miso.compressor", { threshold: -12 }, { slotId });
+  let built = session({ id: "submix.live", sampleRateHz: 48_000, revision: 1 })
+    .source("s", { channels: 2, bitDepth: 24, frames: 4_800, content: `blake3:${"0".repeat(64)}` })
+    .console({
+      preInsert: [
+        { slot: "eq", effectId: "miso.parametric-eq" },
+        { slot: "comp", effectId: "miso.compressor" },
+      ],
+    });
+  const entries = [{ slot: "eq" }, { slot: "comp" }];
+  built = built
+    .track("kick", { source: "s", console: entries })
+    .submix("drums", {
+      console: entries,
+      inserts: [effect("miso.parametric-eq", {}, { slotId: "tone" }), compressor("glue")],
+    })
+    .submix("verb", { console: entries, inserts: [compressor("glue")] })
+    .output("out")
+    .route({
+      id: "kick-drums",
+      source: { kind: "track", trackId: "kick", tap: "post_pan" },
+      destination: { kind: "submix_input", submixId: "drums" },
+    })
+    .route({
+      id: "kick-verb",
+      source: { kind: "track", trackId: "kick", tap: "post_fader" },
+      destination: { kind: "submix_input", submixId: "verb" },
+    });
+  for (const bus of ["drums", "verb"]) {
+    built = built.route({
+      id: `${bus}-out`,
+      source: { kind: "submix", submixId: bus, tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+  }
+  return built;
+}
+
+describe("issue 1214 -- live controls drive submix strips", () => {
+  test("a submix encodes its strip index T + j and IDs resolve only in their own list", async () => {
+    // Gate 1. Red if the SDK indexes submixes from 0, resolves them against tracks, or lets a
+    // submix ID through track(); the batch below also proves the shipped module admits every
+    // builtin edit the SDK builds at a bus index.
+    const engine = await createOfflineEngine(submixDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    try {
+      const controls = engine.liveControls();
+      assert.deepEqual(engine.shape().submixes, ["drums", "verb"]);
+      assert.equal(controls.edit.submix("verb").faderDb(-6).trackIndex, 4);
+      assert.equal(controls.edit.submix("drums").pan(-1, 1).trackIndex, 3);
+      assert.equal(controls.edit.track("vox").faderDb(-6).trackIndex, 2);
+      assert.throws(() => controls.edit.submix("kick"), (error) =>
+        error instanceof MisoUsageError && /no submix 'kick'; expected one of drums, verb/.test(error.message));
+      assert.throws(() => controls.edit.submix("nope"), MisoUsageError);
+      assert.throws(() => controls.edit.track("drums"), MisoUsageError);
+      assert.equal("solo" in controls.edit.submix("drums"), false, "a bus has no solo edit");
+
+      const verb = controls.edit.submix("verb");
+      const edits = [
+        verb.pan(-0.5, 0.5),
+        verb.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }),
+        verb.faderDb(-3, { channel: "left" }),
+        verb.mute(false, { channel: "right" }),
+        verb.trimDb(1.5),
+        verb.polarityInvert(false),
+        verb.hpfHz(40, { channel: "left" }),
+        verb.lpfHz(16_000, { channel: "right" }),
+        verb.inputFilters({ hpfHz: 30, lpfHz: 18_000 }),
+      ];
+      assert.deepEqual(edits.map((edit) => edit.trackIndex), edits.map(() => 4));
+      const report = await controls.submit(...edits);
+      assert.equal(report.ok, true, report.reasonName);
+      assert.equal(report.admitted, edits.length);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a live bus fader equals the bus booted at that fader from the edit's block on", async () => {
+    // Gate 2, through the shipped module. Red if the SDK's record reaches the wrong strip (a track
+    // inside the bus, the other bus) or the wrong band of the right strip.
+    const options = { asset, liveControls: { commandQueueRecords: 64 } };
+    const live = await createOfflineEngine(submixDocument(), options);
+    const booted = await createOfflineEngine(submixDocument({ drumsFaderDb: -6 }), options);
+    try {
+      const boundary = 4;
+      const quantum = live.shape().quantumFrames;
+      let differedBefore = false;
+      for (let block = 0; block < boundary; block += 1) {
+        feedDistinct(live, block);
+        feedDistinct(booted, block);
+        const [a, b] = [live.render(), booted.render()];
+        differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
+      }
+      assert.ok(differedBefore, "the bus fader must be audible, or the comparison proves nothing");
+
+      const controls = live.liveControls();
+      const report = await controls.submit(
+        controls.edit.submix("drums").faderDb(-6, { smoothingSamples: 0 }),
+      );
+      assert.equal(report.ok, true, report.reasonName);
+      assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
+      for (let block = boundary; block < boundary + 4; block += 1) {
+        feedDistinct(live, block);
+        feedDistinct(booted, block);
+        const [a, b] = [live.render(), booted.render()];
+        assert.ok(a.left.some((sample) => sample !== 0), "the mix carries signal");
+        assert.deepEqual([...a.left], [...b.left], `left block ${block}`);
+        assert.deepEqual([...a.right], [...b.right], `right block ${block}`);
+      }
+    } finally {
+      live.dispose();
+      booted.dispose();
+    }
+  });
+
+  test("console slots and inserts resolve by ID on a bus of an SDK-built session", async () => {
+    // Gate 3. Red if layoutOf walks tracks only (no 'glue' on drums), refuses a session with
+    // submixes as mismatched, or resolves a bus insert against another strip's chain.
+    const built = builtSubmixSession();
+    const engine = await createOfflineEngine(built, {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    try {
+      const controls = engine.liveControls();
+      const address = (edit) => [edit.trackIndex, edit.rack, edit.effectIndex];
+      const glue = controls.edit.submix("drums").insert("glue", "miso.compressor")
+        .parameter("threshold", -18);
+      const comp = controls.edit.submix("drums").console("comp", "miso.compressor").bypass(true);
+      assert.deepEqual(address(glue), [1, RACK.inserts, 1]);
+      assert.equal(glue.kind, "effectParam");
+      assert.deepEqual(address(comp), [1, RACK.console, 1]);
+      assert.deepEqual(
+        address(controls.edit.submix("verb").insert("glue", "miso.compressor").bypass(true)),
+        [2, RACK.inserts, 0],
+      );
+      assert.throws(() => controls.edit.submix("drums").insert("ghost", "miso.compressor"),
+        /submix 'drums' has no insert 'ghost'; its inserts are tone, glue/);
+      assert.throws(() => controls.edit.track("kick").insert("glue", "miso.compressor"),
+        /track 'kick' has no insert 'glue'/);
+      const report = await controls.submit(glue, comp);
+      assert.equal(report.ok, true, report.reasonName);
+      assert.equal(report.admitted, 2);
+
+      // The layout is held to the compiled strips: a map that lacks the session's submixes is
+      // refused rather than resolving bus IDs the engine never compiled.
+      assert.throws(
+        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [] }, built),
+        /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
+      );
+    } finally {
+      engine.dispose();
+    }
   });
 });

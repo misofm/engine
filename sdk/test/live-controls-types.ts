@@ -1,6 +1,7 @@
 /** Issue #322 compile-time red probes for the catalog-derived live controls. */
 
 import { LiveControlEdits } from "../src/core/live-controls.ts";
+import type { SubmixEdits, TrackEdits } from "../src/core/live-controls.ts";
 import type {
   MisoCommandAck,
   MisoCommandRequest,
@@ -125,3 +126,24 @@ track.console(0, "miso.parametric-eq");
 eq.parameter("band-1-kind", "bell");
 eq.parameter("hpf-enabled", true);
 eq.parameter("lpf-enabled", false);
+
+// Issue #1214 gate 5: a bus's live edits are a track's minus solo, and submix() says so in its type.
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type _SubmixReturn = Assert<Exact<ReturnType<LiveControlEdits["submix"]>, SubmixEdits>>;
+type _SubmixHasNoSolo = Assert<"solo" extends keyof SubmixEdits ? false : true>;
+type _TrackKeepsSolo = Assert<"solo" extends keyof TrackEdits ? true : false>;
+type _SameStripSurface = Assert<Exact<Exclude<keyof TrackEdits, "solo">, keyof SubmixEdits>>;
+const busEdits = new LiveControlEdits({
+  tracks: ["t"],
+  sources: [],
+  metersAttached: false,
+  submixes: ["bus"],
+});
+const bus = busEdits.submix("bus");
+bus.faderDb(-6, { channel: "left", smoothingSamples: 32 });
+bus.effect("inserts", 0, "miso.compressor").parameter("threshold", -18);
+// @ts-expect-error a bus is solo-safe, so its live edits have no solo
+bus.solo(true);
+// @ts-expect-error a bus's edits are not a track's (they lack solo)
+const notTrack: TrackEdits = bus;
+void notTrack;

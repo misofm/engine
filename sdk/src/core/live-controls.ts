@@ -163,25 +163,32 @@ interface LayoutRow {
   readonly effectId: string;
 }
 
-/** One track's instance of a console slot or an insert, with the bypass its session authored. */
+/** One strip's instance of a console slot or an insert, with the bypass its session authored. */
 interface InstanceRow extends LayoutRow {
   readonly bypass: boolean;
+}
+
+/** One strip's console entries (in slot order) and inserts (in chain order). */
+interface StripInstances {
+  readonly console: readonly InstanceRow[];
+  readonly inserts: readonly InstanceRow[];
 }
 
 /**
  * The part of a built session live controls need to resolve stable IDs to live addresses.
  *
  * The SDK never parses a document (ruling 5438024085), so this comes only from a session the SDK
- * built: the console slots in slot order, and each track's console entries (in the same order)
- * and inserts (in chain order), each with its authored bypass.
+ * built: the console slots in slot order, and each strip's -- every track's and every submix's --
+ * console entries (in the same order) and inserts (in chain order), each with its authored bypass.
  */
 interface LiveControlLayout {
   readonly console: readonly LayoutRow[];
-  readonly tracks: ReadonlyMap<string, {
-    readonly console: readonly InstanceRow[];
-    readonly inserts: readonly InstanceRow[];
-  }>;
+  readonly tracks: ReadonlyMap<string, StripInstances>;
+  readonly submixes: ReadonlyMap<string, StripInstances>;
 }
+
+/** Which kind of strip a strip-level edit builder addresses; it names the strip in messages. */
+type StripKind = "track" | "submix";
 
 function modelOf(session: SessionLike): SessionModel {
   const candidate = session as { readonly toJSON?: unknown; readonly schema_version?: unknown };
@@ -200,20 +207,20 @@ function layoutRow(record: unknown, idKey: "slot" | "id"): LayoutRow {
   return Object.freeze({ id: String(row[idKey]), effectId: String(identity?.effect_id ?? "") });
 }
 
-function layoutOf(session: SessionLike, tracks: readonly string[]): LiveControlLayout {
-  const model = modelOf(session);
-  const consoleRecord = model.console as Readonly<Record<string, readonly unknown[]>>;
-  const slots = [...(consoleRecord.pre_insert ?? []), ...(consoleRecord.post_insert ?? [])]
-    .map((slot) => layoutRow(slot, "slot"));
-  const instances = new Map<string, {
-    readonly console: readonly InstanceRow[];
-    readonly inserts: readonly InstanceRow[];
-  }>();
-  for (const track of model.tracks) {
-    const entries = (track.console as readonly Readonly<Record<string, unknown>>[] | undefined) ?? [];
-    const effects = (track.inserts as Readonly<Record<string, readonly unknown[]>>).effects ?? [];
-    instances.set(String(track.id), Object.freeze({
-      // Entries follow slot order, so entry `i` is slot `i`'s instance on this track.
+/**
+ * Each strip's instances: a track and a submix carry the same `console` and `inserts` shapes, so
+ * one walk serves both.
+ */
+function stripInstances(
+  strips: readonly Readonly<Record<string, unknown>>[],
+  slots: readonly LayoutRow[],
+): Map<string, StripInstances> {
+  const instances = new Map<string, StripInstances>();
+  for (const strip of strips) {
+    const entries = (strip.console as readonly Readonly<Record<string, unknown>>[] | undefined) ?? [];
+    const effects = (strip.inserts as Readonly<Record<string, readonly unknown[]>> | undefined)?.effects ?? [];
+    instances.set(String(strip.id), Object.freeze({
+      // Entries follow slot order, so entry `i` is slot `i`'s instance on this strip.
       console: Object.freeze(slots.map((slot, index) =>
         Object.freeze({ ...slot, bypass: entries[index]?.bypass === true }))),
       inserts: Object.freeze(effects.map((effect) => Object.freeze({
@@ -222,15 +229,31 @@ function layoutOf(session: SessionLike, tracks: readonly string[]): LiveControlL
       }))),
     }));
   }
-  const declared = [...instances.keys()].sort();
-  const compiled = [...tracks].sort();
-  if (declared.length !== compiled.length || declared.some((id, index) => id !== compiled[index])) {
+  return instances;
+}
+
+function sameIds(declared: Iterable<string>, compiled: readonly string[]): boolean {
+  const left = [...declared].sort();
+  const right = [...compiled].sort();
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+function layoutOf(session: SessionLike, map: SessionMap): LiveControlLayout {
+  const model = modelOf(session);
+  const consoleRecord = model.console as Readonly<Record<string, readonly unknown[]>>;
+  const slots = [...(consoleRecord.pre_insert ?? []), ...(consoleRecord.post_insert ?? [])]
+    .map((slot) => layoutRow(slot, "slot"));
+  const tracks = stripInstances(model.tracks, slots);
+  const submixes = stripInstances(model.submixes ?? [], slots);
+  if (!sameIds(tracks.keys(), map.tracks) || !sameIds(submixes.keys(), map.submixes)) {
+    const list = (ids: Iterable<string>) => [...ids].sort().join(", ") || "none";
     throw new MisoUsageError(
-      `the session declares tracks ${declared.join(", ")}, but the engine compiled ${compiled.join(", ")}; `
+      `the session declares tracks ${list(tracks.keys())} and submixes ${list(submixes.keys())}, `
+        + `but the engine compiled tracks ${list(map.tracks)} and submixes ${list(map.submixes)}; `
         + "live controls resolve IDs only against the session the engine booted",
     );
   }
-  return Object.freeze({ console: Object.freeze(slots), tracks: instances });
+  return Object.freeze({ console: Object.freeze(slots), tracks, submixes });
 }
 
 /**
@@ -391,17 +414,24 @@ function trackEdit(
 /**
  * A semantic edit builder bound to the engine's canonical session map.
  *
+ * A record's index word is a strip index: the tracks in canonical order (`0..T`), then the
+ * submixes (`T + j` for `SessionMap.submixes[j]`). `track(id)` and `submix(id)` resolve an ID in
+ * their own list only, so neither can reach the other kind of strip.
+ *
  * Given the session the SDK built for this engine, it also resolves console slot IDs and insert
- * IDs to live addresses (`TrackEdits.console()`, `TrackEdits.insert()`). Without one, effects are
- * addressed by index through `TrackEdits.effect()`.
+ * IDs to live addresses (`console()`, `insert()`) on every strip. Without one, effects are
+ * addressed by index through `effect()`.
  */
 export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
+  readonly #submixes: ReadonlyMap<string, number>;
   readonly #layout: LiveControlLayout | undefined;
 
   constructor(map: SessionMap, session?: SessionLike) {
     this.#tracks = new Map(map.tracks.map((id, index) => [id, index] as const));
-    this.#layout = session === undefined ? undefined : layoutOf(session, map.tracks);
+    const trackCount = map.tracks.length;
+    this.#submixes = new Map(map.submixes.map((id, index) => [id, trackCount + index] as const));
+    this.#layout = session === undefined ? undefined : layoutOf(session, map);
   }
 
   track(trackId: string): TrackEdits {
@@ -413,26 +443,50 @@ export class LiveControlEdits {
     }
     return new TrackEdits(index, trackId, this.#layout);
   }
+
+  /**
+   * A submix strip's live edits: everything a track's strip offers except `solo` (a bus is
+   * solo-safe; the engine refuses a solo at a submix index with `notSoloable`).
+   */
+  submix(submixId: string): SubmixEdits {
+    const index = this.#submixes.get(submixId);
+    if (index === undefined) {
+      throw new MisoUsageError(
+        `the compiled session has no submix '${submixId}'; expected one of `
+          + `${[...this.#submixes.keys()].join(", ") || "none"}`,
+      );
+    }
+    return new SubmixEdits(index, submixId, this.#layout);
+  }
 }
 
 const NO_LAYOUT = "this engine was not booted from a session the SDK built, so there is nothing to "
   + "resolve IDs against (the SDK never parses a document); call liveControls().withSession(session) "
   + "with the builder, or address the effect by index with effect()";
 
-/** Every strip-level live edit. Methods build data and never mutate the engine. */
-export class TrackEdits {
-  readonly #trackIndex: number;
-  readonly #trackId: string | undefined;
+/**
+ * Every live edit a strip -- a track or a submix -- shares. Methods build data and never mutate
+ * the engine. `TrackEdits` adds `solo`; `SubmixEdits` adds nothing.
+ */
+export abstract class StripEdits {
+  /** The record's index word: a strip index, the tracks then the submixes. */
+  protected readonly stripIndex: number;
+  /** `track 'kick'` or `submix 'drums'`, for messages. */
+  readonly #label: string;
   readonly #layout: LiveControlLayout | undefined;
+  readonly #instances: StripInstances | undefined;
 
-  constructor(trackIndex: number, trackId?: string, layout?: LiveControlLayout) {
-    this.#trackIndex = trackIndex;
-    this.#trackId = trackId;
+  protected constructor(kind: StripKind, stripIndex: number, stripId?: string, layout?: LiveControlLayout) {
+    this.stripIndex = stripIndex;
+    this.#label = `${kind} '${stripId}'`;
     this.#layout = layout;
+    this.#instances = stripId === undefined
+      ? undefined
+      : (kind === "track" ? layout?.tracks : layout?.submixes)?.get(stripId);
   }
 
   pan(left: number, right: number, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("pan", this.#trackIndex, {
+    return trackEdit("pan", this.stripIndex, {
       smoothingSamples: smoothing(options),
       values: values(
         builtinNumber("matrix_ll", left),
@@ -442,7 +496,7 @@ export class TrackEdits {
   }
 
   matrix(matrix: MatrixValues, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("matrix", this.#trackIndex, {
+    return trackEdit("matrix", this.stripIndex, {
       smoothingSamples: smoothing(options),
       values: values(
         builtinNumber("matrix_ll", matrix.ll),
@@ -454,7 +508,7 @@ export class TrackEdits {
   }
 
   faderDb(db: number, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("faderDb", this.#trackIndex, {
+    return trackEdit("faderDb", this.stripIndex, {
       channel: lane(options),
       smoothingSamples: smoothing(options),
       values: values(builtinNumber("fader_db", db)),
@@ -462,22 +516,15 @@ export class TrackEdits {
   }
 
   mute(enabled: boolean, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("mute", this.#trackIndex, {
+    return trackEdit("mute", this.stripIndex, {
       channel: lane(options),
       smoothingSamples: smoothing(options),
       values: values(enabled ? 1 : 0),
     });
   }
 
-  solo(enabled: boolean, options: SmoothingOptions = {}): LaneEdit {
-    return trackEdit("solo", this.#trackIndex, {
-      smoothingSamples: smoothing(options),
-      values: values(enabled ? 1 : 0),
-    });
-  }
-
   trimDb(db: number, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("trimDb", this.#trackIndex, {
+    return trackEdit("trimDb", this.stripIndex, {
       channel: lane(options),
       smoothingSamples: smoothing(options),
       values: values(builtinNumber("trim_db", db)),
@@ -485,7 +532,7 @@ export class TrackEdits {
   }
 
   polarityInvert(enabled: boolean, options: LaneOptions = {}): LaneEdit {
-    return trackEdit("polarityInvert", this.#trackIndex, {
+    return trackEdit("polarityInvert", this.stripIndex, {
       channel: lane(options),
       smoothingSamples: smoothing(options),
       values: values(enabled ? 1 : 0),
@@ -494,7 +541,7 @@ export class TrackEdits {
 
   /** Set one lane's HPF cutoff through the prepared input-filter owner. */
   hpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
-    return trackEdit("inputFilters", this.#trackIndex, {
+    return trackEdit("inputFilters", this.stripIndex, {
       channel: lane(options),
       parameterId: 3,
       values: values(builtinNumber("hpf_hz", value)),
@@ -503,7 +550,7 @@ export class TrackEdits {
 
   /** Set one lane's LPF cutoff through the prepared input-filter owner. */
   lpfHz(value: number, options: InputFilterOptions = {}): LaneEdit {
-    return trackEdit("inputFilters", this.#trackIndex, {
+    return trackEdit("inputFilters", this.stripIndex, {
       channel: lane(options),
       parameterId: 4,
       values: values(builtinNumber("lpf_hz", value)),
@@ -515,7 +562,7 @@ export class TrackEdits {
     if (filters === null || typeof filters !== "object" || Array.isArray(filters)) {
       throw new MisoUsageError("inputFilters requires an object with hpfHz and lpfHz");
     }
-    return trackEdit("inputFilters", this.#trackIndex, {
+    return trackEdit("inputFilters", this.stripIndex, {
       channel: lane(options),
       values: values(
         builtinNumber("hpf_hz", filters.hpfHz),
@@ -526,7 +573,7 @@ export class TrackEdits {
 
   /**
    * Address an effect by its live address: a console slot by its index in the session's slot order
-   * (`pre_insert`, then `post_insert`), or an insert by its index in the track's chain.
+   * (`pre_insert`, then `post_insert`), or an insert by its index in the strip's chain.
    */
   effect<E extends EffectId>(
     rack: LiveControlRack,
@@ -541,13 +588,13 @@ export class TrackEdits {
     const index = u32(effectIndex, "effectIndex");
     // With a layout, the instance at this address is known, whatever `effectId` claims, so its
     // authored bypass is carried to `bypass()`.
-    const instance = this.#layout?.tracks.get(this.#trackId ?? "")?.[rack][index];
+    const instance = this.#instances?.[rack][index];
     return new EffectEdits(
-      this.#trackIndex,
+      this.stripIndex,
       RACKS[rack],
       index,
       effectId,
-      instance === undefined ? undefined : authoredInstance(rack, instance, this.#trackId ?? ""),
+      instance === undefined ? undefined : authoredInstance(rack, instance, this.#label),
     );
   }
 
@@ -570,24 +617,24 @@ export class TrackEdits {
     return this.#resolved("console", index, declared, effectId);
   }
 
-  /** Address one of this track's inserts by its stable ID or its index in chain order. */
+  /** Address one of this strip's inserts by its stable ID or its index in chain order. */
   insert<E extends EffectId>(insert: string | number, effectId: E): EffectEdits<E> {
     if (typeof insert === "number") {
-      const row = this.#layout?.tracks.get(this.#trackId ?? "")?.inserts[insert];
+      const row = this.#instances?.inserts[insert];
       if (this.#layout !== undefined && row === undefined) {
-        throw new MisoUsageError(`track '${this.#trackId}' has no insert at index ${insert}`);
+        throw new MisoUsageError(`${this.#label} has no insert at index ${insert}`);
       }
       return row === undefined
         ? this.effect("inserts", insert, effectId)
         : this.#resolved("inserts", insert, row, effectId);
     }
     if (this.#layout === undefined) throw new MisoUsageError(`insert('${insert}'): ${NO_LAYOUT}`);
-    const rows = this.#layout.tracks.get(this.#trackId ?? "")?.inserts ?? [];
+    const rows = this.#instances?.inserts ?? [];
     const index = rows.findIndex((row) => row.id === insert);
     const row = rows[index];
     if (row === undefined) {
       throw new MisoUsageError(
-        `track '${this.#trackId}' has no insert '${insert}'; its inserts are `
+        `${this.#label} has no insert '${insert}'; its inserts are `
           + `${rows.map((candidate) => candidate.id).join(", ") || "none"}`,
       );
     }
@@ -609,6 +656,30 @@ export class TrackEdits {
   }
 }
 
+/** A track strip's live edits: every strip edit, plus `solo`. */
+export class TrackEdits extends StripEdits {
+  constructor(trackIndex: number, trackId?: string, layout?: LiveControlLayout) {
+    super("track", trackIndex, trackId, layout);
+  }
+
+  solo(enabled: boolean, options: SmoothingOptions = {}): LaneEdit {
+    return trackEdit("solo", this.stripIndex, {
+      smoothingSamples: smoothing(options),
+      values: values(enabled ? 1 : 0),
+    });
+  }
+}
+
+/**
+ * A submix strip's live edits: every strip edit and no `solo`. `stripIndex` is the submix's strip
+ * index, `T + j`; `LiveControlEdits.submix(id)` computes it from the session map.
+ */
+export class SubmixEdits extends StripEdits {
+  constructor(stripIndex: number, submixId?: string, layout?: LiveControlLayout) {
+    super("submix", stripIndex, submixId, layout);
+  }
+}
+
 /**
  * What the session authored for the instance a live edit addresses, when the SDK knows it: the
  * instance's real effect (whatever the caller's `effectId` claims), its session bypass, and a name
@@ -620,11 +691,11 @@ export interface AuthoredInstance {
   readonly label: string;
 }
 
-function authoredInstance(rack: LiveControlRack, row: InstanceRow, trackId: string): AuthoredInstance {
+function authoredInstance(rack: LiveControlRack, row: InstanceRow, strip: string): AuthoredInstance {
   return Object.freeze({
     effectId: row.effectId,
     bypass: row.bypass,
-    label: `${rack === "console" ? "console slot" : "insert"} '${row.id}' on track '${trackId}'`,
+    label: `${rack === "console" ? "console slot" : "insert"} '${row.id}' on ${strip}`,
   });
 }
 
@@ -638,7 +709,7 @@ export class EffectEdits<E extends EffectId> {
 
   /**
    * `authored` is the addressed instance as the booted session declares it, when the SDK has that
-   * session; `TrackEdits` supplies it. Without it, `bypass(false)` cannot know the instance keeps a
+   * session; `StripEdits` supplies it. Without it, `bypass(false)` cannot know the instance keeps a
    * prepared bypass.
    */
   constructor(trackIndex: number, rack: number, effectIndex: number, effectId: E, authored?: AuthoredInstance) {

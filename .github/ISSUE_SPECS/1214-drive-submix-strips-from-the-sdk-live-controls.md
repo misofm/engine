@@ -188,6 +188,59 @@ at a submix index refuses with reason 12, `notSoloable`.
 - Each new eval's name with its one-sentence test-value answer.
 - The K2 boundary gate log, and the K2 push link with its CI run.
 
+### Attempt 1 record (Terra)
+
+- **D1/D2** (`sdk/src/core/live-controls.ts`): `LiveControlEdits.submix(id)` resolves in
+  `SessionMap.submixes` only and encodes `T + j`; unknown IDs throw `MisoUsageError` naming the
+  known submixes (or `none`). The strip surface moved to one exported base, `abstract class
+  StripEdits` (protected `stripIndex`; messages name `track 'x'` or `submix 'x'`); `TrackEdits
+  extends StripEdits` adds only `solo`, `SubmixEdits extends StripEdits` adds nothing. `TrackEdits`'
+  public constructor is unchanged. Exported through the existing `export *`; `index.ts` and
+  `barrel-surface.ts` untouched. **D3**: `layoutOf(session, map)` walks `model.tracks` and
+  `model.submixes` through one `stripInstances()`; the layout keeps separate `tracks`/`submixes`
+  maps, and the consistency check compares each list with the compiled one. **D4**:
+  `docs/handoffs/submix-strips-and-sends/APP-LIVE.md`.
+- **Tests and test value** (each mutation applied, run red, reverted):
+  - `live-controls-evals.mjs` "a submix encodes its strip index T + j and IDs resolve only in their
+    own list" (gate 1; shipped module, tracks kick/snare/vox, buses drums/verb; also submits all
+    nine builtin edits on `verb`, admitted 9): red if submixes index from 0, resolve against tracks,
+    or a submix ID passes `track()`. Mutations: base 0 -> red; base +1 -> red; `submix()` reads
+    `#tracks` -> red; `track()` falls back to submixes -> red.
+  - "a live bus fader equals the bus booted at that fader from the edit's block on" (gate 2;
+    distinct LCG source per track; blocks 0-3 must differ, blocks 4-7 bit-identical L and R,
+    `appliedAtSample` 512): red if the record reaches another strip or band. Mutations: base 0 /
+    +1 -> red; `faderDb` forced to the left lane -> red (only this test).
+  - "console slots and inserts resolve by ID on a bus of an SDK-built session" (gate 3; slots
+    `eq`,`comp`; drums inserts `tone`,`glue`; verb `glue` alone; both edits admitted `ok`): red if
+    `layoutOf` walks tracks only, refuses submixes as mismatched, resolves a bus against another
+    strip's chain, or drops the submix consistency check. Mutations: submixes walk `[]` -> red;
+    tracks+submixes compared against `map.tracks` -> red; bus instances read from the tracks map
+    -> red (only this test); submix comparison dropped -> red.
+  - `browser-defaults-evals.mjs` "a browser engine's live controls address a submix by its strip
+    index" (gate 4): red if the browser `SessionMap` drops `submixes`. Mutation: browser map
+    `submixes: []` -> red.
+  - `live-controls-types.ts` gate 5 (`Exact<ReturnType<submix>, SubmixEdits>`, no `solo` key,
+    `TrackEdits` minus `solo` equals `SubmixEdits`' keys, `@ts-expect-error` on `bus.solo` and on
+    assigning a `SubmixEdits` to `TrackEdits`): red if solo is exposed on a bus or `submix()`
+    widens. Mutations: `submix()` returns `TrackEdits` -> 3 TS errors; `SubmixEdits.solo` added
+    -> 4 TS errors.
+- No existing test edited or superseded; no digest, oracle or canonical text pinned.
+- **Gates** (x86_64 AVX2; A = `target/ci/k2-1214-artifacts`, B = `target/ci/k2-1214-named`; logs
+  in `target/ci/k2-1214-logs/`), all rc 0: 6: `check-sdk-types.sh`; `check-sdk-headless.sh` (346
+  pass, 0 fail); `sdk-package.sh check`. 7 (at `c13ac5e1d` plus this slice): workspace test
+  command (103 binaries, 1172 passed, 0 failed); DSP crates and conformance (145 binaries, 787
+  passed); `cargo test --release -p audit -p bench -p console-workload` (110 passed); release
+  build; `audit capi`; `trace-graph-audit.sh`; `check-graph-determinism.sh`; `graph_fixture
+  --check`; `check-builtins-fixtures.sh`; `check-console-fixtures.sh`; `check-capi-abi.sh` and
+  `--self-test`; `build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`;
+  `check-browser-expected-resources.py --artifacts` (32 red mutations); `test-web-audioworklet.sh`;
+  `check-sdk-generated.sh`; `check-/test-host-core-policy.sh`; `check-/test-realtime-policy.sh`;
+  `cargo fmt --check`; workspace clippy `-D warnings`; `cargo doc -D warnings`.
+  `run-aarch64-tests.sh debug`: no arm64 host; at batch push.
+- **Artifact unchanged:** shipped module `7d6c0a8b...0f90b` (2 695 834 B), byte-identical to
+  #1213's (no engine change).
+- K2 push link and CI run: the root's, at the batch push.
+
 ## Dependencies
 
 - *Name submix strips in the browser session map and the SDK measurement* (#1210)

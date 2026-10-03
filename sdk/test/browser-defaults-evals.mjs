@@ -461,3 +461,34 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
     assert.deepEqual(closed, ["host", "context"]);
   });
 }
+
+test("a browser engine's live controls address a submix by its strip index", async () => {
+  // Issue #1214 gate 4: the browser path builds its own SessionMap from the host's reply, so the
+  // headless evals pass even when this one drops `submixes`. Red if the browser map loses the
+  // submix list (edit.submix() throws) or the record carries the submix's list index (0, which is
+  // track `t`) rather than its strip index T + j = 1.
+  const received = [];
+  const engine = await createEngine({
+    document: new Uint8Array([1]), policy: { liveControls: { commandQueueRecords: 64 } },
+    scratchBoot: async () => shape,
+    createContext: () => ({ sampleRate: 48000, renderQuantumSize: 128, state: "running",
+      audioWorklet: { async addModule() {} }, async close() {} }),
+    createHost: async () => ({
+      async sessionMap() { return { tracks: ["t"], submixes: ["bus"], sources: [], metersAttached: false }; },
+      async command(request) {
+        received.push(...request.commands);
+        return { result: 0, reason: 0, rejectedIndex: 0, admitted: request.commands.length, appliedAtSample: 128n };
+      },
+      async dispose() {},
+    }),
+  });
+  try {
+    const controls = await engine.liveControls();
+    assert.equal((await controls.submit(controls.edit.submix("bus").faderDb(-6))).ok, true);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].trackIndex, 1);
+    assert.deepEqual(received[0].values, [-6, 0, 0, 0]);
+  } finally {
+    await engine.close();
+  }
+});
