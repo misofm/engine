@@ -9670,11 +9670,55 @@ fn live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track() {
     }
 }
 
+/// Issue #1213 gate 1, the prepared-EQ arm (attempt 2, verdict MINOR-1): a live EQ parameter
+/// staged through the prepared companion on a bus insert renders the bits the same edit renders
+/// on the reference track's insert.
+///
+/// Test value: red if the prepared-owner EQ path spells its queue base or its admission owner
+/// marker with the track count instead of the strip count (`prepared_queue_address`'s Eq band, the
+/// admission's EQ `queue_slot`), which gate 1's compressor insert never exercises.
+#[test]
+fn a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track() {
+    let (_, _, _, mut eq, _) = strip_base();
+    eq.id = strip_id("eq");
+    eq.identity = session::EffectIdentity::Native {
+        effect_id: strip_id("miso.parametric-eq"),
+    };
+    eq.params = Vec::new();
+    let (bus, reference) = strip_pair_documents(Some(eq));
+    let mut a = strip_boot(&bus, strip_options(64, 0, 0));
+    let mut b = strip_boot(&reference, strip_options(64, 0, 0));
+    let mut block = 0;
+    for _ in 0..2 {
+        strip_render_pair(&mut a, &mut b, block, "before");
+        block += 1;
+    }
+    for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
+        stage_prepared_eq_parameter(host, 0, index, RACK_INSERTS, 0, 4, -12.0);
+        assert_eq!(
+            host.submit_prepared_commands(1, 104),
+            RESULT_OK,
+            "prepared EQ at strip {index}"
+        );
+    }
+    let mut audible = false;
+    for _ in 0..6 {
+        audible |= strip_render_pair(&mut a, &mut b, block, "prepared EQ");
+        block += 1;
+    }
+    assert!(audible);
+}
+
 /// Gates 2 and 3's session: tracks `a`, `b` and `c`, each reading its own source; `a` and `b`
 /// feed the bus `drums` post-pan, `a` also sends post-fader into the return `verb`, `c` goes
 /// straight to the output, and both submixes reach the output. Strip order `[a, b, c, drums,
 /// verb]`, so `drums` is strip index 3 and `verb` 4.
 fn solo_bus_host(drums_muted: bool) -> AudioWorkletEngineHost {
+    solo_bus_host_lanes([drums_muted, drums_muted])
+}
+
+/// [`solo_bus_host`] with `drums`' fader booted with per-lane mutes `[left, right]`.
+fn solo_bus_host_lanes(drums_muted: [bool; 2]) -> AudioWorkletEngineHost {
     let (mut model, source, track, _, route) = strip_base();
     let output = route.destination.clone();
     for id in ["a", "b", "c"] {
@@ -9682,8 +9726,8 @@ fn solo_bus_host(drums_muted: bool) -> AudioWorkletEngineHost {
     }
     let mut drums = session::Submix::unity(strip_id("drums"), &model.console);
     drums.fader.left_db = -3.0;
-    drums.fader.left_mute = drums_muted;
-    drums.fader.right_mute = drums_muted;
+    drums.fader.left_mute = drums_muted[0];
+    drums.fader.right_mute = drums_muted[1];
     let mut verb = session::Submix::unity(strip_id("verb"), &model.console);
     verb.fader.right_db = -5.0;
     model.submixes = vec![drums, verb];
@@ -9797,6 +9841,46 @@ fn a_bus_mute_command_equals_the_bus_booted_muted() {
         solo_bus_compare(&mut live, &mut booted, 2, 4, "drums muted live vs at boot"),
         "c and verb stay audible"
     );
+}
+
+/// Issue #1213 gate 2(a), per lane (attempt 2, verdict MINOR-2): a single-lane kind 4 at a bus
+/// index mutes exactly that lane, bit-identically to a host booted with only that lane muted.
+///
+/// Test value: red if kind 4 takes the effective mute of the wrong lane (for example always the
+/// left), which stages `Mute { Right, muted: false }` for a right-lane mute with no solo engaged:
+/// an acknowledged mute that never mutes.
+#[test]
+fn a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted() {
+    for (channel, lanes) in [(1_u8, [false, true]), (0_u8, [true, false])] {
+        let mut live = solo_bus_host_lanes([false, false]);
+        let mut booted = solo_bus_host_lanes(lanes);
+        stage_command(
+            &mut live,
+            0,
+            COMMAND_MUTE,
+            255,
+            channel,
+            3,
+            0,
+            0,
+            STRIP_QUANTUM,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            live.submit_commands(1),
+            RESULT_OK,
+            "mute drums lane {channel}"
+        );
+        // Two blocks cover the one-quantum ramp; both hosts render them, unchecked.
+        for block in 0..2 {
+            solo_bus_render(&mut live, block);
+            solo_bus_render(&mut booted, block);
+        }
+        assert!(
+            solo_bus_compare(&mut live, &mut booted, 2, 4, "lane mute live vs at boot"),
+            "the other lane, c and verb stay audible"
+        );
+    }
 }
 
 /// Issue #1213 gate 2(b): soloing track `a`, which feeds the bus `drums` and the return `verb`,
@@ -9933,7 +10017,7 @@ fn a_bus_can_be_unmuted_while_a_track_is_soloed() {
 ///
 /// Test value: red if admission pushes a bus record before every record is validated.
 #[test]
-fn a_bus_record_behind_a_bad_track_record_is_never_pushed() {
+fn a_bus_record_ahead_of_a_bad_track_record_is_never_pushed() {
     let (mut a, _) = strip_pair(None, 4, 0);
     stage_command(
         &mut a,
@@ -10220,8 +10304,9 @@ fn a_bus_limiter_can_be_the_designated_master() {
 /// Issue #1213 gate 7: admitting a batch of bus edits, a bus observation and a track solo, then
 /// rendering, allocates and frees nothing.
 ///
-/// Test value: red if strip-sized admission, the strip-wide solo coalescing or the bus fold
-/// allocates on the admission or render path.
+/// Test value: red if strip-sized admission or the strip-wide solo coalescing allocates on the
+/// admission or render path. The bus gain-reduction fold runs in `poll_meters`, outside the
+/// measured closure; #1209's `bus_meters_render_and_poll_without_allocating` covers it.
 #[test]
 fn bus_edits_and_a_bus_observation_admit_and_render_without_allocating() {
     let (mut a, _) = strip_pair(None, 64, 2);

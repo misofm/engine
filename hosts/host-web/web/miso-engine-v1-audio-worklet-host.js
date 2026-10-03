@@ -1347,7 +1347,8 @@ class MisoAudioWorkletHost {
             rack: subscription.rack,
             effectIndex: subscription.effectIndex,
             tapId: subscription.tapId,
-            // The frame carries one gain-reduction slot per track, so the slot is the track.
+            // The frame carries one gain-reduction entry per strip (trackGrDb, then submixGrDb),
+            // so the slot is the strip index (issue #1213).
             frameSlot: subscription.trackIndex,
             windowBlocks: subscription.windowBlocks === 0
               ? Number(this.#liveControlMeterBlocks)

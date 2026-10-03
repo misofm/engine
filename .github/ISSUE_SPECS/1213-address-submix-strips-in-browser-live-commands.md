@@ -339,6 +339,59 @@ All gates are native tests in `hosts/host-web/src/tests.rs` unless stated, at 48
   changed. No re-pin; CI's `artifact-identity` line is the authority.
 - No digest, oracle or canonical text re-pinned; no test superseded.
 
+### Attempt 2 record (Sol, after the attempt 1 FAIL verdict)
+
+Docs and tests only; no engine logic changed. **Authorized path added (A2):**
+`scripts/test-web-audioworklet.mjs` (the verdict's two harness assertions).
+
+- **MAJOR-1 (`frameSlot`).** `MisoObservationBinding.frameSlot` is defined as the **strip index**
+  (equal to `trackIndex`): below `MisoMeterFrame.trackCount` it indexes `trackGrDb`, from there
+  `submixGrDb[frameSlot - trackCount]`. The shipped host already reports `frameSlot: trackIndex`;
+  only its comment changed. Same pass, `.d.ts` and its byte mirror `sdk/src/browser/shipped-host.d.ts`:
+  the addressing header, `MisoCommandReason.UnknownTrack`, `MisoCommand.trackIndex`,
+  `MisoSessionMap.tracks`, `MisoObservationSubscription.trackIndex` and `sessionMap()` now say
+  strip index (tracks, then submixes); `docs/EFFECT_OBSERVATION_V1.md` states the `frameSlot`
+  mapping. No SDK source reads `frameSlot`. No wire change.
+- **MINOR-1.** `a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (gate 1's prepared-EQ
+  arm; the verifier's probe).
+- **MINOR-2.** `a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted` (the verifier's
+  right-lane probe, both lanes); `solo_bus_host` now delegates to `solo_bus_host_lanes`. The
+  verifier's track-under-solo probe is not committed: it does not discriminate the lane mutation.
+- **MINOR-3.** The worklet's D5a classifier is driven through `makeProcessor()` and
+  `receiveEqTargetConfig` in `testProcessor()`. This corrects attempt 1's "no harness path".
+- **MINOR-4.** `WebObservationSelection.track_index` and `WebObservationResult.track_index` say
+  strip index; `admit_commands`' doc says two more per strip and `2 * strip_count`.
+- **NITs.** 1: gate 7's doc drops the bus-fold clause (the fold runs in `poll_meters`, outside
+  `measured`; #1209's test covers it). 2: gate 4a renamed
+  `a_bus_record_ahead_of_a_bad_track_record_is_never_pushed` (test and `MUTATIONS.md` row). 3: the
+  optional typed command builder is not done. 4: attempt 1's gate 1 sentence overclaimed the
+  prepared-EQ spellings; the MINOR-1 arm now covers them.
+- **Tests and test value** (each mutation applied, run red, restored; rows in
+  `hosts/host-web/MUTATIONS.md`):
+  - `a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track`: red if the prepared-owner EQ
+    path spells its queue base or admission owner marker with the track count. Mutations:
+    `prepared_queue_address` Eq base `ready.tracks.len() * 3` -> red; admission marker
+    `queue_slot: ready.tracks.len() * 3 + effect` -> red. The committed attempt 1 suite survived both.
+  - `a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted`: red if kind 4 takes the
+    effective mute of the wrong lane (an acknowledged right-lane mute that never mutes). Mutation:
+    `let lane = 0_usize` -> red.
+  - `test-web-audioworklet.mjs` worklet classifier block: red if a bad rack or effect at a bus index
+    reports `unknownTrack`. Mutation: `message.trackIndex >= this.trackCount` -> red (`2` vs `4`).
+  - `test-web-audioworklet.mjs` bus `observe()` binding: red if a bus binding's `frameSlot` does
+    not resolve, through the documented mapping, to the frame's `submixGrDb[0]`. Mutations: host
+    `frameSlot: 0` -> red; host `Math.min(trackIndex, 1)` -> red; the mapping read as a plain
+    `trackGrDb` index (the old contract) -> red (`undefined` vs `1.25`).
+- **Gates** (x86_64 AVX2; A = `target/ci/k2-1213c-artifacts`, B = `target/ci/k2-1213c-named`), all
+  rc 0: `cargo fmt --check`; `cargo test -p host-web --lib` (141 passed, 0 failed, 1 ignored);
+  `build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`;
+  `check-browser-expected-resources.py --artifacts`; `test-web-audioworklet.sh`;
+  `check-sdk-generated.sh`; `check-sdk-types.sh`; `check-sdk-headless.sh` (346 pass, 0 fail); `sdk-package.sh check`;
+  `check-/test-` realtime, host-core and workspace policy; workspace clippy `-D warnings`;
+  `cargo doc` `-D warnings`. Not rerun: the DESIGN section 7 workspace test command (disk; this
+  attempt touches only host-web tests, docs and the JS harness).
+- **ARTIFACT UNCHANGED:** shipped module `7d6c0a8b...0f90b` (2 695 834 B), the same as attempt 1.
+  The Rust doc edits keep `lib.rs`'s line count, so no panic-location line moves.
+
 ## Dependencies
 
 - *Carry submix strips in the browser meter frame* (#1209)

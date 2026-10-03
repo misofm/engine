@@ -1845,6 +1845,37 @@ async function testMainRealm() {
     });
     assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
     assert.equal(unsubscribed.bindings[0].trackIndex, 0);
+    // Issue #1213 (attempt 2, verdict MAJOR-1): a bus tap's binding. `frameSlot` is the strip
+    // index, so it resolves into `trackGrDb` below `trackCount` and into
+    // `submixGrDb[frameSlot - trackCount]` from there; for bus `0` that is the frame's
+    // `submixGrDb[0]`. Red if `observe()` reports a bus `frameSlot` the documented mapping does not
+    // land on the bus's entry, or if the mapping is read as a plain `trackGrDb` index (the
+    // pre-#1213 contract), where a bus slot falls past the end.
+    {
+      const frameReading = (frame, frameSlot) => frameSlot < frame.trackCount
+        ? frame.trackGrDb[frameSlot]
+        : frame.submixGrDb[frameSlot - frame.trackCount];
+      const busSubscription = {
+        trackIndex: map.tracks.length, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0,
+      };
+      const busAck = await liveControlHost.observe({
+        subscriptions: [{ ...busSubscription, armed: true }],
+      });
+      assert.equal(busAck.result, 0);
+      const busBinding = busAck.bindings.find(
+        (binding) => binding.trackIndex === map.tracks.length,
+      );
+      assert.equal(busBinding.frameSlot, map.tracks.length, "a bus's frameSlot is its strip index");
+      assert.equal(meterFrames[0].trackCount, map.tracks.length);
+      assert.equal(frameReading(meterFrames[0], busBinding.frameSlot), meterFrames[0].submixGrDb[0],
+        "the documented mapping lands on the bus's submixGrDb entry");
+      assert.equal(frameReading(meterFrames[0], busAck.bindings[0].frameSlot),
+        meterFrames[0].trackGrDb[0], "and a track's frameSlot still indexes trackGrDb");
+      const busOff = await liveControlHost.observe({
+        subscriptions: [{ ...busSubscription, armed: false }],
+      });
+      assert.deepEqual(busOff.bindings, unsubscribed.bindings, "the bus binding disarms");
+    }
     for (const broken of [
       // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
       { trackIndex: -1 }, { rack: 0 }, { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" },
@@ -2709,6 +2740,29 @@ async function testProcessor() {
       });
       return { processor, fake };
     };
+
+    // Issue #1213 D5a (attempt 2, verdict MINOR-3): the worklet's eq-config refusal classifier
+    // bounds the index by every strip -- this processor has 2 tracks and 1 submix -- so a bad rack
+    // or effect at the bus index `T + 0` reports that, and only `T + S` is an unknown track.
+    // Red mutation: revert the classifier to `message.trackIndex >= this.trackCount` -> the bus
+    // assertions fail with `2` (unknownTrack).
+    {
+      const { processor, fake } = makeProcessor();
+      fake.exports.miso_engine_web_v1_eq_target_config_copy = () => 1;
+      fake.exports.miso_engine_web_v1_input_filters_config_copy = () => 1;
+      const classify = (trackIndex, rack) => {
+        processor.port.posts.length = 0;
+        processor.receiveEqTargetConfig({ requestId: 7, trackIndex, rack, effectIndex: 9 });
+        const reply = processor.port.posts.at(-1).message;
+        assert.equal(reply.tag, "miso.eq-target-config.v1");
+        assert.equal(reply.result, 1);
+        return reply.reason;
+      };
+      assert.equal(classify(1, 1), 4, "a track's missing insert is unknownEffect");
+      assert.equal(classify(2, 1), 4, "the bus (T + 0) missing insert is unknownEffect");
+      assert.equal(classify(2, 0), 3, "the bus with a retired rack is unknownRack");
+      assert.equal(classify(3, 1), 2, "T + S is unknownTrack");
+    }
 
     const explicitHopOptions = (spectrumHopFrames) => ({
       ...limits,

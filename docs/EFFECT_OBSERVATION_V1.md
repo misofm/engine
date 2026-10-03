@@ -121,6 +121,8 @@ an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
 subscription map — `{ trackIndex, rack, effectIndex, tapId, frameSlot, windowBlocks }` — which is
 the only place that can express it.
+`frameSlot` is the strip index (issue #1213): below `trackCount` it indexes `trackGrDb`, and from
+there a bus's reading is `submixGrDb[frameSlot - trackCount]`.
 
 Several armed taps on one track fold max-magnitude into the one slot, on the control plane. Each
 tap keeps its own cell.

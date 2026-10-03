@@ -689,7 +689,7 @@ pub struct WebObservationSelection {
     pub struct_size: u32,
     /// Browser ABI version.
     pub abi_version: u32,
-    /// Canonical normalized track index.
+    /// Strip index: canonical normalized tracks, then submixes (issue #1213, spelling P17).
     pub track_index: u32,
     /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
     pub rack: u32,
@@ -713,7 +713,7 @@ pub struct WebObservationResult {
     pub abi_version: u32,
     /// One of the `OBSERVATION_STATUS_*` values.
     pub status: u32,
-    /// Canonical normalized track index.
+    /// Strip index: canonical normalized tracks, then submixes (issue #1213, spelling P17).
     pub track_index: u32,
     /// [`RACK_INSERTS`] or [`RACK_CONSOLE`]; the retired `0` and `2` are refused.
     pub rack: u32,
@@ -4301,9 +4301,9 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 /// that broke a rule.
 ///
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
-/// parameter), and one submission that touches solo owes up to two *more* per track (issue #210
-/// phase 1), which is why `command_decoded` is `2 * MAXIMUM_COMMAND_RECORDS + 2 * track_count`
-/// long and why the room counted is per lowered record rather than per wire record.
+/// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
+/// phase 1; per strip since issue #1213), which is why `command_decoded` is
+/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` long and why the room counted is per lowered record rather than per wire record.
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///
