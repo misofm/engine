@@ -449,6 +449,41 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
+  test("a solo at a bus index is refused notSoloable with invalidArgument through the shipped module", async () => {
+    // Issue #1213 D4 (and #1212 NIT-2): reason 12 and result 1 together, end to end, from the
+    // real admission rather than a mocked reply. Red if a bus can be soloed, if the refusal
+    // reports another reason, or if reason 12 maps to another result.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
+    });
+    try {
+      let report;
+      const writer = new LiveControlWriter({
+        submit: (records, count) => (report = engine.submitCommands(records, count)),
+      });
+      writer.stage({
+        kind: "solo",
+        trackIndex: 1, // the bus: one track, then the submix
+        rack: 255,
+        channel: 255,
+        effectIndex: 0,
+        parameterId: 0,
+        smoothingSamples: 0,
+        values: [1, 0, 0, 0],
+      });
+      await assert.rejects(writer.flush(), MisoUsageError);
+      assert.equal(report.reason, 12);
+      assert.equal(report.reasonName, "notSoloable");
+      assert.equal(report.result, 1);
+      assert.equal(report.code, "invalidArgument");
+      assert.equal(report.rejectedIndex, 0);
+      assert.equal(report.admitted, 0);
+    } finally {
+      engine.dispose();
+    }
+  });
+
   test("a session prepared without meters refuses the lease as unsupported", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
     try {

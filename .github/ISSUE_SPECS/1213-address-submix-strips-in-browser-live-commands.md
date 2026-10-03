@@ -243,8 +243,10 @@ All gates are native tests in `hosts/host-web/src/tests.rs` unless stated, at 48
   `strip_count()` and `track_delta()` becomes `strip_delta()` (it counts strips while
   `HostLiveControlHandles::track_count` counts tracks). host-web's own copy of the effective-mute
   formula is deleted in favour of host-core's `effective_mute` (D3).
+- **A1e (#1212 PASS verdict NIT-2).** A gate asserts reason 12 with result 1 together on the real
+  shipped path.
 - **Authorized paths added:** `crates/host-core/src/solo.rs` (the A1d rename, its callers and
-  docs; widens "doc comments only"), `sdk/test/capability-evals.mjs` (the A1a and D5a headless
+  docs; widens "doc comments only"), `sdk/test/capability-evals.mjs` (the A1a, A1e and D5a headless
   gates).
 
 ## Evidence
@@ -320,11 +322,15 @@ All gates are native tests in `hosts/host-web/src/tests.rs` unless stated, at 48
     strip an unknown track" (D5a): red if the SDK classifier bounds by the track count. Mutation:
     track count only -> red. The worklet's twin classifier has no harness path (no existing test
     drives `receiveEqTargetConfig`), so its one-line change is untested beyond the build gates.
+  - `capability-evals.mjs` "a solo at a bus index is refused notSoloable with invalidArgument
+    through the shipped module" (D4, #1212 PASS NIT-2): `reason === 12` and `result === 1`
+    together from the real admission. Red if a bus can be soloed, or reason 12 reports another
+    result. Mutation: drop the D4 check, artifact rebuilt into a scratch dir -> red (reason 2).
 - **Gate 8:** no existing host-web test edited except the two A1d renames; all pass.
 - **Gates** (x86_64 AVX2; A = `target/ci/k2-1213-artifacts`, B = `target/ci/k2-1213-named`), all
   rc 0: `build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`;
   `check-browser-expected-resources.py --artifacts` (32 red mutations); `test-web-audioworklet.sh`;
-  `check-sdk-generated.sh`; `check-sdk-types.sh`; `check-sdk-headless.sh` (341 pass, 0 fail); DESIGN
+  `check-sdk-generated.sh`; `check-sdk-types.sh`; `check-sdk-headless.sh` (342 pass, 0 fail); DESIGN
   section 7 workspace test command (103 binaries, 1172 passed, 0 failed); `check-/test-` host-core,
   realtime and workspace policy; `cargo fmt --check`; workspace clippy `-D warnings`; `cargo doc`
   `-D warnings`. `run-aarch64-tests.sh debug`: no arm64 host; at the K2 push.

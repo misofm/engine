@@ -381,3 +381,4 @@ and the mutation was reverted.
 | `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
 | `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
 | `tests::bus_edits_and_a_bus_observation_admit_and_render_without_allocating` (#1213 gate 7) | allocate a `submixes.len()`-capacity `Vec` in admission | `admission/render allocated` (1) |
+| `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
