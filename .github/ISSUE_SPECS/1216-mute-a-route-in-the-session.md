@@ -160,8 +160,10 @@ numbers before editing.
 
     It runs today's `route_transform` checks, then `gated_route_coefficients` with
     `RouteGate { mute, follow_zeroed: source_lane_muted }`, and returns `Domain` if `route_transform`
-    refuses **or** any folded coefficient is not finite (VERIFY-2 MINOR 3: a finite gain times a
-    finite coefficient can overflow, for example +700 dB with `ll = 1e10`).
+    refuses **or** any coefficient of the **open** fold
+    (`gated_route_coefficients(&transform, RouteGate::OPEN)`) is not finite, so domain validity never
+    depends on the gate (VERIFY-2 MINOR 3: a finite gain times a finite coefficient can overflow, for
+    example +700 dB with `ll = 1e10`; #1215 MINOR-1).
   - **This slice:** the compiler's route lowering calls `route_coefficients` with `route.mute` (and
     `source_lane_muted = [false; 2]`) for its domain check and keeps `route_transform`'s unfolded
     transform plus `RouteGate { mute: route.mute, follow_zeroed: [false; 2] }` in `PreparedRoute`. A `Domain` refusal
@@ -348,6 +350,123 @@ with other constants).
 - Each new test's name with its one-sentence test-value answer.
 - The re-pin list, each with its reason.
 - A diff summary confirming that every migrated document changed only by the added key.
+
+### Attempt 1 record (Terra)
+
+- **Implementation.** Session: `Route.mute`, parsed as a required boolean (`schema.missing_field` at
+  `$.routes[<i>].mute`), route field key 6, walk count `[6]`. Protocol: `route::MUTE` (field 6,
+  `Wire::Bool`, required), `set_route_mute` (`ROUTE_ID` 1, `MUTE` 2), `SetRouteMute = 0x0506` (enum,
+  `from_raw`, variant, opcode map, apply arm, encode, decode). Graph: `plain_route_gains` returns
+  `None` unless the gate is `RouteGate::OPEN` (D4). Graph compiler: the lowering builds
+  `RouteGate { mute: route.mute, follow_zeroed: [false; 2] }`, passes it to `route_coefficients` and
+  stores it in `PreparedRoute` (D2); the canonical text writes `route-mute\t<node>` right after a
+  muted route's `route-transform` row (D5). SDK: `RouteSpec.mute?`, boolean-validated, written as
+  `mute` after `gain_db` (default `false`); `enginectl` admits `mute`. The SDK rebuild helper in
+  `console-evals.mjs` now passes `mute: route.mute`.
+- **Anchor drift.** `COMPLETE_SCHEMA_HASH` was `0xa1dc_c56f_2e4a_48f9` at the K3 base (K1/K2
+  re-pinned it after `fe8ac679`); the skill's `channel_matrix` bullet is at `SKILL.md:79`; the opcode
+  count sentence is `CONTROL_PROTOCOL_REGISTRY.md:81`. K1/K2 added session `Route` literals in
+  `host-core/tests/{strip_controls,strip_meters,submix_strip}.rs` and inline routes in
+  `crates/protocol/tests/submix_strip_edits.rs`; all are migrated (both Context greps list them).
+  `canonical-minimal.json` declares no route, so it needs no edit.
+- **Deviation 1 (pin the spec missed).** `crates/capi/src/runtime/tests.rs`
+  `ALL_COMMAND_RESPONSE_VECTORS[1]` pins the C ABI snapshot response, whose length field is the
+  nine-track fixture's canonical snapshot size: re-pinned 13,729 to 13,918 (`0x365e`), reason "route
+  field `mute` added, value false" (21 bytes x 9 routes). The file is in the `Route {` grep's list
+  (its `RemoveRoute`); the change is the length bytes and one comment line.
+- **Deviation 2 (gate 4 topology).** With the bus feeding the output from `post_pan`, a muted
+  contributor makes the bus decline and the planner then folds the *output's* single contributor
+  (`bus-main`, 1 lane): the bus was not the plan's only fold candidate. The gate-4 session feeds the
+  output from the bus's `pre_fader` tap, so the output's contributor reads mid-strip and the bus is
+  the one candidate. Measured: open bus 8 lanes folded, muted bus 0.
+- **Deviation 3 (gate 1 taps).** Gate 1 routes the contributors from their `input` taps and the bus
+  to the output from its `input` tap (the oracle track likewise): a strip's pan turns some signed
+  zeros positive, which hid the muted contribution's sign (measured: a gain-path mute stayed green
+  through `post_pan` taps). The bus input is still the D9 sum under test.
+- **Re-pins, each "route field `mute` added, value false" unless stated.**
+  `COMPLETE_SCHEMA_HASH` `0xa1dc_c56f_2e4a_48f9` -> `0x39e5_a2c1_d317_a9fe` at its four sites (reason
+  "route field `mute`, opcode `0506`"); opcode count 41 -> 42 (model test, controller fixture count,
+  `CONTROL_PROTOCOL_CONFORMANCE.md`, `CONTROL_PROTOCOL_REGISTRY.md`, `complete-schema-manifest.md`),
+  controller edit limit 40 -> 41; `canonical.json` sha256 `5f887676...` -> `0be977ee...` in both
+  `prepare_256_tracks-*.toml` and `fixture_builtins.rs`; their `MANIFEST.tsv` rows (`57b65ec0...` ->
+  `d5d19ee7...`, `2f5f80f3...` -> `66824cd9...`); the MANIFEST digest `fced289f...` -> `6d466903...`
+  in `builtins_graph.rs` and `fixture_builtins.rs`; `sessionDocumentBytes` 1905 -> 1926 and its
+  self-test row 1906 -> 1927; the capi vector above. `fixtures/graph/` did not move (an unmuted
+  route's text is unchanged). The writer corpus was regenerated by its command.
+- **Migration diff.** Every changed JSON document (20, including the three regenerated derived
+  fixtures) parses to its base exactly once each route's `mute` key is removed, and every route ends
+  `gain_db, mute` with `mute: false` (checked with a script against `HEAD`). The inline Rust, JS and
+  writer-corpus sessions changed by the key alone.
+- **Tests and test value (each mutation applied, run red, reverted).**
+  - `session/tests/invalid_matrix.rs::route_mute_is_a_required_boolean`: red if `mute` becomes
+    optional or non-boolean, or a muted route loses its switch through the canonical writer.
+    Mutation: parse ignores the key (`Some(false)`) -> RED.
+  - `protocol model::tests::set_route_mute_switches_the_route_in_the_committed_snapshot`: red if the
+    `0506` apply arm writes the wrong route or ignores the value. Mutation: always mute -> RED.
+  - Extended `opcode_registry_appends_the_console_edits_and_reallocates_nothing` (42, `0x0506`):
+    `0x0506` arm removed -> RED (41 != 42). Extended
+    `every_route_and_automation_opcode_round_trips_canonically` (an upserted muted route and a
+    `SetRouteMute`): route decode drops field 6 -> RED.
+  - Gate 2, extended `every_route_coefficient_comes_from_the_one_gated_function` (random `mute` per
+    route; a muted overflow is still refused): red if the compiler stores a gate whose `mute`
+    differs from the session's. Mutation: lowering stores `RouteGate::OPEN` -> RED.
+  - Gate 5, `graph-compiler/tests/route_coefficients.rs::a_muted_route_seals_one_route_mute_row_after_its_transform`
+    (first, middle and last route): red if the gate is invisible to the canonical text. Mutations:
+    no row -> RED; open gate stored -> RED.
+  - Gate 1, `host-core/tests/route_mute.rs::a_muted_route_mixes_zero_coefficients` (16 seeds): red if
+    the session grammar or compiler drops `mute` (the BTLV codec drop is the protocol round trip's
+    catch, above) or mutes by anything other than four `+0.0`. Mutations: open gate
+    stored -> RED; mute through the gain (`0.0 * coefficient`) -> RED (`-0.0 != 0.0` at sample 12).
+  - Gate 3, `route_mute.rs::muting_the_delayed_route_moves_no_delay_or_latency`: red if a muted
+    *delayed* route loses its PDC line, which the activity rule (#1217) must not drop. Mutation: the
+    lowering skips a muted route -> RED (also red under gates 1 and 5; verdict NIT 3).
+  - Gate 4, `route_mute.rs::a_bus_with_a_muted_contributor_folds_no_lane`: red if the fold folds a
+    gated route. Mutations: no decline -> RED (8 folds); fold with `RouteGate::OPEN` coefficients ->
+    RED (8 folds).
+  - Gate 7: `builder-evals.mjs` "a route without mute writes "mute": false after gain_db; a
+    non-boolean mute is refused", `console-evals.mjs` "a session with one muted send is the engine's
+    canonical JSON, byte for byte", `enginectl-cli.mjs` "a route request's optional mute reaches the
+    document, and a non-boolean mute is refused": red if the SDK omits, misplaces or mistypes the
+    key. Mutations: writer omits `mute` -> RED (builder, console); `mute` before `gain_db` -> RED
+    (builder, console); normalisation drops it -> RED (builder, console); no boolean check -> RED
+    (builder); `enginectl` key not admitted -> RED. The existing "bounded Rust-authority corpus" eval
+    now expects the `gain_db` line's comma.
+- **Gates (worktree head before commit, x86-64-v3 host).**
+  - 8: release build ok; `check-graph-determinism.sh` PASS (100/100), and
+    `target/issue6/fresh-process-determinism.json` is byte-identical (`cmp`) to the parent's;
+    `graph_fixture -- --check` exit 0 (no fixture moved); `check-console-fixtures.sh` ok;
+    `check-builtins-fixtures.sh` ok (50 files) with only the listed re-pins;
+    `cargo test --locked --release -p audit -p bench -p console-workload` 110 passed, 0 failed;
+    `audit capi` output byte-identical (`cmp`) to the earlier run (`pcm_digest ff6cdcb96cdcdad5`).
+    No `output_sha256` moved.
+  - 9: test-debug-a exit 0 (1181 passed, 0 failed, 9 ignored; run with `--no-fail-fast`);
+    test-debug-b exit 0 (787 passed, 0 failed, 24 ignored); `check-protocol-wasm-parity.sh` ok
+    (simd128); browser `--self-test` ok (32 red mutations) and `--artifacts <A>` ok;
+    `check-sdk-types.sh` ok; `check-sdk-headless.sh <A>` 349 passed; `sdk-package.sh check <A>` ok
+    (16 enginectl tests); `cargo fmt --all -- --check` ok; clippy `-D warnings` ok; the seven
+    check/test policy pairs ok.
+  - 10: `run-aarch64-tests.sh debug` not runnable on this x86 host; at batch push (CI
+    `aarch64-debug`).
+- **No bit moved (unmuted sessions).** The determinism record, the graph fixtures, every builtins
+  `output_sha256`, the console-workload counts and the `audit capi` PCM digest are unchanged.
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **NIT-1.** D2's copy of the frozen interface says the domain check is of the open fold (#1215
+  MINOR-1's text).
+- **NIT-2.** The `3.2e34` comment in `route_coefficients.rs` is `1.0e35`.
+- **NIT-3.** The record's gate-1 and gate-3 test-value sentences are reworded (above).
+- **NIT-4.** No change: enginectl leaves the `mute` boolean check to the builder, as for `bypass`.
+- **NIT-5.** The transform is derived once (`route_values`, #1215 NIT-2).
+- **INFO.** A delayed muted route writes `-0.0` words, which keep its destination out of a
+  `+0.0` silence latch: a performance note for the silence work (DESIGN O2), never a bit change.
+
+## Verdict
+
+- **Attempt 1** (`f48fe7c74`): Sol PASS. No BLOCKER, MAJOR or MINOR; five NITs, applied or
+  answered above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1216-attempt1.md`.
 
 ## Dependencies
 

@@ -252,7 +252,32 @@ seven taps at the same points of its chain (`input`, `post_input`, `insert_send`
 `insert_return`, `pre_fader`, `post_fader`, `post_pan`; #1203), and `tap` is required on both
 kinds; a pre-fader tap is not gated by the fader mute. The retired `submix_output` (which left the
 strip after its pan or matrix, now `{ kind = "submix", submix_id, tap = "post_pan" }`) is an unknown
-`kind` and refuses with `schema.invalid_enum`. Routed sidechains reuse the tagged source shape,
+`kind` and refuses with `schema.invalid_enum`. Every route carries a required boolean `mute`, written
+after `gain_db` (#1216): the send's on/off switch. A muted route stays in the graph, with its edge,
+its latency compensation and its gain and matrix kept, and contributes silence; muting or unmuting
+a route never changes the plan's structure or latency. Every route also carries a required boolean
+`follows_mute`, written after `mute` (#1218). With `follows_mute: true` the send follows its source
+strip's lane mutes (the source's fader `left_mute` and `right_mute`, on a track or a submix): a
+muted source lane's column of the route matrix (`ll` and `rl` for the left lane, `lr` and `rr` for
+the right) contributes `+0.0`, never by way of the gain, and a send whose two source lanes are both
+muted is silenced exactly as a muted route is (below). It is what makes a `pre_fader` (or earlier)
+send go quiet with its muted strip; from a `post_fader` or `post_pan` tap the fader mute already
+silences the lane, so the follow changes no audible sample. A send whose two source lanes are muted
+is skipped, and its silent contribution becomes `+0.0` instead of a signed zero. Only a route into a submix
+may follow: a route into the output is never live, so `follows_mute: true` there refuses with
+`schema.invalid_enum` at `$.routes[<i>].follows_mute` ("follows_mute applies only to a route into
+a submix"). The refusal is a validation, not a parse, so a transaction that sets the flag and
+re-points the route into a submix commits. The prepared follow is part of the sealed graph text (a
+`route-follow-zeroed` row). A muted route whose edge into its
+destination carries no latency compensation contributes nothing: it is neither mixed nor read
+(#1217). A muted route whose edge is compensated keeps running and contributes its mix with `+0.0`
+coefficients through its delay, so its compensation line never holds stale audio. Either way the
+first route in route-ID order owns the destination's sum -- its contribution when it contributes,
+else `+0.0` -- and each later contributing route is added to it in order. A lone contributing
+`-0.0` therefore keeps its sign only as the first route, and a destination whose every route is
+muted and uncompensated sums to exact `+0.0`. A zero coefficient times a non-finite `input`-tap
+sample is NaN, so a muted compensated route can carry NaN into a bus input; the bus's input section
+sanitizes it, but a meter at the bus's `input` boundary sees it. Routed sidechains reuse the tagged source shape,
 taps included, and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with

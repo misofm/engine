@@ -390,7 +390,7 @@ test("browser live controls retain the managed observation conflict hook", async
     async sessionMap() {
       return {
         tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,
-        submixes: [],
+        submixes: [], routes: [],
       };
     },
     async command(request) {

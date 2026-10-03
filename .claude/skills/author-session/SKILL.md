@@ -77,6 +77,11 @@ target it.
   A routed sidechain's `source` has the same two shapes. The retired `submix_output` source is
   `schema.invalid_enum`.
 - A route `channel_matrix` has `ll`, `lr`, `rl`, `rr` and no smoothing field.
+- A route has exactly `id`, `source`, `destination`, `channel_matrix`, `gain_db`, `mute`,
+  `follows_mute`, every key required. `mute` is the send's on/off switch; a muted route stays in the
+  graph and contributes silence. `follows_mute: true` makes a send follow its source strip's lane
+  mutes (a muted lane's matrix column contributes nothing); only a route into a submix may set it,
+  and `true` on a route into the output is `schema.invalid_enum`.
 - `fader` contains `left_db`, `right_db`, `left_mute`, `right_mute`. Solo is live monitoring state
   and never appears in a session document.
 

@@ -290,7 +290,7 @@ fn session_with_every_effect(effects: &[&str]) -> String {
 "builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},
 "console":[],"inserts":{{"effects":{rack}}},
 "fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0,"mute":false,"follows_mute":false}}],"automation":[]}}"#
     )
 }
 
@@ -696,7 +696,7 @@ fn prepares(effect_id: &str, port_id: &str) -> bool {
 "tracks":[
 {{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
 {{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"console":[],"inserts":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
-"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_pan"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0,"mute":false,"follows_mute":false}}],"automation":[]}}"#
     );
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,

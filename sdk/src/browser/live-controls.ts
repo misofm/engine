@@ -50,6 +50,7 @@ export async function createBrowserLiveControls(
     sources: Object.freeze(remoteMap.sources.map((source) => Object.freeze({ ...source }))),
     metersAttached: remoteMap.metersAttached,
     submixes: Object.freeze([...remoteMap.submixes]),
+    routes: Object.freeze([...remoteMap.routes]),
   });
   return new EngineLiveControls(map, async (edits): Promise<CommandReport> => {
     const ack = await host.command({ commands: edits.map(browserCommand) });

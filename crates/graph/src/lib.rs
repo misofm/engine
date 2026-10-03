@@ -25,7 +25,8 @@ pub use runtime::{
     test_only_observation_dispatch_counts, test_only_observation_dispatch_reset,
     test_only_reset_selected_split_fader, test_only_reset_split_pair_table_witness,
     test_only_resident_input_counts, test_only_resident_input_reset,
-    test_only_selected_split_fader, test_only_set_bank_meter_declined,
+    test_only_route_activity_built, test_only_route_drained_counts, test_only_route_mix_counts,
+    test_only_route_mix_reset, test_only_selected_split_fader, test_only_set_bank_meter_declined,
     test_only_set_bank_sample_peak_declined, test_only_set_completion_disabled,
     test_only_set_route_fold_declined, test_only_set_scatter_redirect_declined,
     test_only_set_source_in_place_declined, test_only_source_plane_counts,
@@ -206,6 +207,7 @@ pub mod test_only_phase_profile {
 }
 
 use core::cell::Cell;
+use core::num::NonZeroUsize;
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -746,6 +748,67 @@ pub struct RouteTransform {
     pub rl: f32,
     pub rr: f32,
 }
+
+/// What silences a route, beside its gain and matrix (DESIGN 5.7, issue #1215).
+///
+/// `mute` silences the whole route; `follow_zeroed[lane]` zeroes the column that carries that
+/// source lane (left feeds `ll` and `rl`, right feeds `lr` and `rr`). Every prepared route is
+/// [`RouteGate::OPEN`] until a session can mute a route or let it follow its source strip's mute.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteGate {
+    pub mute: bool,
+    pub follow_zeroed: [bool; 2],
+}
+
+impl RouteGate {
+    pub const OPEN: Self = Self {
+        mute: false,
+        follow_zeroed: [false; 2],
+    };
+
+    /// Muted, or follow-zeroed on both source lanes: the route contributes nothing.
+    #[must_use]
+    pub const fn silences(self) -> bool {
+        self.mute || (self.follow_zeroed[0] && self.follow_zeroed[1])
+    }
+}
+
+/// The four coefficients a route applies: its 2x2 with the linear gain folded in, gated.
+///
+/// The one derivation of a route's constants (D3, #98 F4; DESIGN 5.7): the runtime binds a route
+/// op and a fold lane from it, and a live producer pushes what it returns, so the bits a plan binds
+/// and the bits a live change sends cannot differ. A silencing gate returns `[+0.0; 4]`; otherwise
+/// each product is `gain * coefficient` in that operand order, unfused, with the column of a
+/// follow-zeroed source lane replaced by `+0.0`.
+#[must_use]
+pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGate) -> [f32; 4] {
+    if gate.silences() {
+        return [0.0; 4];
+    }
+    let [left_zeroed, right_zeroed] = gate.follow_zeroed;
+    [
+        if left_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.ll
+        },
+        if right_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.lr
+        },
+        if left_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.rl
+        },
+        if right_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.rr
+        },
+    ]
+}
 /// The graph's frozen reduction, over one frame's worth of contributions (evidence only).
 ///
 /// Render never calls this: it reduces whole blocks through `lane`'s `sum2_block` and
@@ -805,6 +868,10 @@ pub struct PreparedGraphPlan {
     /// that named no observation capacity, which is what keeps the runtime unobserved *and*
     /// byte-identical rather than merely disabled.
     effect_observations: Vec<GraphEffectObservationBinding>,
+    /// Issue #1220 D6: one lane per live route, `None` until
+    /// [`attach_route_controls`](Self::attach_route_controls) runs. `None` and an empty list both
+    /// bind every route op to its prepared constants, exactly as a plan without the field did.
+    route_controls: Option<Vec<GraphRouteControlBinding>>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -846,6 +913,225 @@ pub struct GraphEffectObservationBinding {
     pub node: EffectNodeId,
     /// The render-side lane; the readers stay on the control plane.
     pub observation: Box<ObservationLane>,
+}
+
+/// The longest live-route ramp in samples (issue #1220 D2): the indexed ramp's own bound.
+pub const ROUTE_RAMP_LENGTH_MAXIMUM: u32 = lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM;
+
+/// One live change of a send's coefficients (issue #1220 D2).
+///
+/// `target` is what `graph_compiler::route_coefficients` returns for the route's new gain, matrix,
+/// mute and follow state; `mute` is true when that gate silences the route; `length` is the ramp
+/// in samples, `0` being a step at the block boundary. The constructor is the only way to build
+/// one, so every record a lane drains is in bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteControlRecord {
+    target: [f32; 4],
+    mute: bool,
+    length: u32,
+}
+
+impl RouteControlRecord {
+    /// `None` when `length > ROUTE_RAMP_LENGTH_MAXIMUM`, or when `mute` is true and any target
+    /// coefficient is not `+0.0` (bitwise): a muted route's coefficients are the four `+0.0` its
+    /// gate gives ([`gated_route_coefficients`]).
+    #[must_use]
+    pub fn new(target: [f32; 4], mute: bool, length: u32) -> Option<Self> {
+        if length > ROUTE_RAMP_LENGTH_MAXIMUM
+            || (mute && target.iter().any(|coefficient| coefficient.to_bits() != 0))
+        {
+            return None;
+        }
+        Some(Self {
+            target,
+            mute,
+            length,
+        })
+    }
+    /// The coefficients `[ll, lr, rl, rr]` the ramp ends on.
+    #[must_use]
+    pub const fn target(&self) -> [f32; 4] {
+        self.target
+    }
+    /// Whether the route is silenced once the ramp ends.
+    #[must_use]
+    pub const fn mute(&self) -> bool {
+        self.mute
+    }
+    /// The ramp's length in samples; `0` is a step.
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.length
+    }
+}
+
+/// The render-side half of one live route's record queue (issue #1220 D6).
+///
+/// Built only by [`PreparedGraphPlan::attach_route_controls`]; its route op drains it at the start
+/// of every block.
+pub struct RouteControlLane {
+    pub(crate) consumer: engine::realtime::Consumer<RouteControlRecord>,
+}
+
+/// One live route's lane, carried **beside** the prepared routes (issue #1220 D6), as
+/// [`GraphEffectControlBinding`] is beside the prepared effects: a plan without route controls
+/// holds none, and its route ops bind exactly the constants they bound before.
+pub struct GraphRouteControlBinding {
+    /// The route node this lane drives.
+    pub node: GraphNodeId,
+    /// Consumer half of the bounded queue; the producer stays on the control plane.
+    pub control: Box<RouteControlLane>,
+}
+
+/// The control-plane half of one live route's record queue (issue #1220 D7).
+pub struct GraphRouteControlProducer {
+    /// The route's session ID.
+    pub route_id: Box<str>,
+    producer: engine::realtime::Producer<RouteControlRecord>,
+    /// The bytes of the plan's route-activity table that this attach added and the compile-time
+    /// estimate did not charge (D8): the same for every producer of one attach.
+    activity_bytes: u64,
+    /// The largest single allocation of that table, or `0` with it.
+    activity_largest: u64,
+}
+
+/// A full live-route queue: the record was not queued, and is handed back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteQueueFull {
+    pub record: RouteControlRecord,
+}
+
+impl GraphRouteControlProducer {
+    /// How many records the queue can accept now.
+    ///
+    /// Always inlined (issue #1222): the browser's command-submit closure is held to
+    /// `check-web-audioworklet-callgraph.py`'s allocation rule, which reads function *names*, and
+    /// an out-of-line function named `free` is indistinguishable there from the allocator's.
+    #[must_use]
+    #[inline(always)]
+    pub fn free(&self) -> usize {
+        self.producer.available_capacity()
+    }
+    /// Queue one record; a full queue refuses it and hands it back. Nothing is dropped.
+    pub fn try_push(&mut self, record: RouteControlRecord) -> Result<(), RouteQueueFull> {
+        self.producer
+            .try_push(record)
+            .map_err(|full| RouteQueueFull { record: full.value })
+    }
+}
+
+/// Why [`PreparedGraphPlan::attach_route_controls`] refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphRouteControlError {
+    /// Route controls are already attached to this plan.
+    AlreadyAttached,
+    /// A route into a submix is also a node the plan requires a processor for; a live route is
+    /// never a [`GraphNodeBinding`] (its op would not mix).
+    BoundRoute,
+    /// A queue of this depth cannot be allocated.
+    QueueCapacity,
+}
+
+/// The bytes bind allocates for one live route's render-side owner, its boxed state (issue #1220
+/// D8): stated so a caller can check [`route_control_resources`] from first principles.
+pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
+
+/// What attaching route controls and binding the plan add (issue #1220 D8): an upper bound on
+/// what the attached artifact retains before bind and on what the bound plan retains.
+///
+/// Every field is in bytes except `routes`. `total_bytes` is the sum of the five byte fields and
+/// `largest_allocation_bytes` the largest single allocation among them. Every field but
+/// `activity_bytes` is the exact size of what it names; `activity_bytes` is
+/// `route_activity_bound_bytes`, an upper bound.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteControlResources {
+    /// Live routes: one queue, one lane, one binding, one owner and one producer each.
+    pub routes: u64,
+    /// Each queue's retained ring header and slots
+    /// (`engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>`).
+    pub queue_bytes: u64,
+    /// Per route: the boxed [`RouteControlLane`], the plan's [`GraphRouteControlBinding`] entry
+    /// (held until bind) and the boxed render-side owner bind builds.
+    pub owner_bytes: u64,
+    /// The producer table: one [`GraphRouteControlProducer`] per route.
+    pub producer_table_bytes: u64,
+    /// The route IDs' bytes, twice: the producer's `route_id`, and the plan's
+    /// [`GraphRouteControlBinding`] node ID (held until bind) -- a second heap copy (#1220 verdict
+    /// MINOR-1).
+    pub route_id_bytes: u64,
+    /// The route-activity table, with its per-unit route indices, when the compile-time estimate
+    /// did not already charge it (no prepared route's gate silences); `0` otherwise.
+    pub activity_bytes: u64,
+    pub total_bytes: u64,
+    pub largest_allocation_bytes: u64,
+}
+
+/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and of the
+/// bind that consumes its lanes (issue #1220 D8): an upper bound on both the attached and the bound
+/// state ([`RouteControlResources`]). Saturating; empty for no producers.
+#[must_use]
+pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> RouteControlResources {
+    let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    if producers.is_empty() {
+        return RouteControlResources::default();
+    }
+    let routes = count(producers.len());
+    let mut queue_bytes = 0_u64;
+    let mut route_id_bytes = 0_u64;
+    let mut largest = 0_u64;
+    for producer in producers {
+        let payload = NonZeroUsize::new(producer.producer.capacity()).and_then(|capacity| {
+            engine::realtime::bounded_spsc_retained_payload::<RouteControlRecord>(capacity).ok()
+        });
+        let (total, single) = payload.map_or((u64::MAX, u64::MAX), |payload| {
+            (
+                count(payload.total_bytes().unwrap_or(usize::MAX)),
+                count(payload.largest_allocation_bytes()),
+            )
+        });
+        queue_bytes = queue_bytes.saturating_add(total);
+        largest = largest.max(single);
+        // The producer's copy and the binding's node-ID copy.
+        route_id_bytes =
+            route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
+        largest = largest.max(count(producer.route_id.len()));
+    }
+    let lane = count(core::mem::size_of::<RouteControlLane>());
+    let binding = count(core::mem::size_of::<GraphRouteControlBinding>());
+    let owner = count(LIVE_ROUTE_OWNER_BYTES);
+    let owner_bytes = routes.saturating_mul(lane.saturating_add(binding).saturating_add(owner));
+    let producer_table_bytes =
+        routes.saturating_mul(count(core::mem::size_of::<GraphRouteControlProducer>()));
+    let activity_bytes = producers
+        .iter()
+        .map(|producer| producer.activity_bytes)
+        .max()
+        .unwrap_or(0);
+    let activity_largest = producers
+        .iter()
+        .map(|producer| producer.activity_largest)
+        .max()
+        .unwrap_or(0);
+    largest = largest
+        .max(lane)
+        .max(owner)
+        .max(routes.saturating_mul(binding))
+        .max(producer_table_bytes)
+        .max(activity_largest);
+    RouteControlResources {
+        routes,
+        queue_bytes,
+        owner_bytes,
+        producer_table_bytes,
+        route_id_bytes,
+        activity_bytes,
+        total_bytes: queue_bytes
+            .saturating_add(owner_bytes)
+            .saturating_add(producer_table_bytes)
+            .saturating_add(route_id_bytes)
+            .saturating_add(activity_bytes),
+        largest_allocation_bytes: largest,
+    }
 }
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
@@ -1346,6 +1632,94 @@ impl PreparedGraphPlan {
         self.program = self.lower_from_current_fields();
         Ok(self)
     }
+    /// Give every route into a submix input a live lane (issue #1220 D1, D7): one bounded queue of
+    /// `depth` records per route, in canonical route-ID order, whose producers are returned.
+    ///
+    /// Runs after compile and before bind. Routes into an output keep their prepared constants,
+    /// their fold and their structural edits. Bind turns each lane's route op into a live route,
+    /// which drains its queue at the start of every block and ramps by the indexed ramp; a live
+    /// route never folds (VERIFY-2 M3). Without this call the plan binds what it bound before.
+    ///
+    /// Refused when called twice ([`GraphRouteControlError::AlreadyAttached`]), when a route into
+    /// a submix is a node the plan requires a processor for, or when `depth` cannot be allocated.
+    pub fn attach_route_controls(
+        &mut self,
+        depth: NonZeroUsize,
+    ) -> Result<Vec<GraphRouteControlProducer>, GraphRouteControlError> {
+        if self.route_controls.is_some() {
+            return Err(GraphRouteControlError::AlreadyAttached);
+        }
+        // D1: the route's destination edge lands on a submix input (a strip `Input` stage, which
+        // only a submix has as a route destination; the legacy `Submix` node likewise).
+        let into_submix: BTreeSet<&StableGraphId> = self
+            .spec
+            .edges
+            .iter()
+            .filter_map(|edge| match (&edge.id, &edge.destination.node) {
+                (
+                    GraphEdgeId::RouteDestination { route_id },
+                    GraphNodeId::TrackStage {
+                        stage: TrackStage::Input,
+                        ..
+                    }
+                    | GraphNodeId::Submix { .. },
+                ) => Some(route_id),
+                _ => None,
+            })
+            .collect();
+        let mut live: Vec<&GraphNodeId> = self
+            .routes
+            .iter()
+            .map(|route| &route.node)
+            .filter(|node| {
+                matches!(node, GraphNodeId::Route { route_id } if into_submix.contains(route_id))
+            })
+            .collect();
+        live.sort_unstable();
+        live.dedup();
+        let required: BTreeSet<&GraphNodeId> = self.required_bindings.iter().collect();
+        if live.iter().any(|node| required.contains(node)) {
+            return Err(GraphRouteControlError::BoundRoute);
+        }
+        // D8: bind builds the route-activity table for a plan with a live route. The compile-time
+        // estimate charged it already when some prepared gate silences; otherwise it is this
+        // attach's to state.
+        let (activity_bytes, activity_largest) =
+            if live.is_empty() || self.routes.iter().any(|route| route.gate.silences()) {
+                (0, 0)
+            } else {
+                let routes = u64::try_from(self.routes.len()).unwrap_or(u64::MAX);
+                let nodes = u64::try_from(self.spec.nodes.len()).unwrap_or(u64::MAX);
+                (
+                    runtime::route_activity_bound_bytes(routes, nodes).unwrap_or(u64::MAX),
+                    runtime::route_activity_largest_bytes(routes, nodes).unwrap_or(u64::MAX),
+                )
+            };
+        let mut bindings = Vec::with_capacity(live.len());
+        let mut producers = Vec::with_capacity(live.len());
+        for node in live {
+            let GraphNodeId::Route { route_id } = node else {
+                continue;
+            };
+            let (producer, consumer) = engine::realtime::bounded_spsc::<RouteControlRecord>(
+                depth,
+                engine::realtime::QueueGeneration(0),
+            )
+            .map_err(|_| GraphRouteControlError::QueueCapacity)?;
+            bindings.push(GraphRouteControlBinding {
+                node: node.clone(),
+                control: Box::new(RouteControlLane { consumer }),
+            });
+            producers.push(GraphRouteControlProducer {
+                route_id: route_id.as_str().into(),
+                producer,
+                activity_bytes,
+                activity_largest,
+            });
+        }
+        self.route_controls = Some(bindings);
+        Ok(producers)
+    }
     /// The lowered executable program, or `None` when the plan's schedule, levels and spec
     /// disagree (which bind-time structural validation rejects).
     #[must_use]
@@ -1425,6 +1799,7 @@ impl PreparedGraphPlan {
             effects: parts.effects,
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
+            route_controls: None,
             banks: parts.banks,
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
@@ -2204,6 +2579,21 @@ impl GraphNodeObserverBinding {
 pub struct PreparedRoute {
     pub node: GraphNodeId,
     pub transform: RouteTransform,
+    pub gate: RouteGate,
+}
+
+/// The bytes a bind allocates for its route-activity table when some prepared route's gate
+/// silences, bounded from `routes` prepared routes over a graph of `nodes` nodes (issue #1217 D6);
+/// `None` on overflow. A plan with no silencing gate builds no table and allocates none of this,
+/// unless route controls are attached, whose charge states it ([`route_control_resources`]).
+///
+/// The bound is `size_of::<RouteActivity>() + routes * size_of::<bool>() + nodes *
+/// size_of::<u32>() + routes * (size_of::<(u32, u32)>() + size_of::<RouteInput>())`: the boxed
+/// table, one activity bit per route, one entry per unit (at most one per node), and at most one
+/// destination range and one route input per route.
+#[must_use]
+pub fn route_activity_bound_bytes(routes: u64, nodes: u64) -> Option<u64> {
+    runtime::route_activity_bound_bytes(routes, nodes)
 }
 
 /// One strip's declared input-side time alignment (#210 phase 2; submixes since #1201).
@@ -2392,7 +2782,8 @@ impl GraphExecutor {
             source_inputs,
             plan.track_delays,
             frames,
-        );
+        )
+        .with_route_controls(plan.route_controls.unwrap_or_default());
         // Issue #918: the claims a bank's gather may read in place, in claim order. Only a driver
         // that lends its played planes offers any, and `build_sequential` decides which of them
         // are bound in place.
@@ -3523,6 +3914,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             })
             .collect();
         for observer in &mut bindings.observers {
@@ -4643,6 +5035,7 @@ mod tests {
                         rl: coefficient(&mut state),
                         rr: coefficient(&mut state),
                     },
+                    gate: RouteGate::OPEN,
                 });
             }
         }
@@ -4699,6 +5092,7 @@ mod tests {
                     rl: -0.25,
                     rr: 0.75,
                 },
+                gate: RouteGate::OPEN,
             });
         }
         assert!(output_fed, "seed {seed}: the output must be fed");
@@ -5245,6 +5639,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             });
             bindings.push(GraphNodeBinding::new(
                 input.clone(),
@@ -5759,10 +6154,12 @@ mod tests {
                 PreparedRoute {
                     node: route_a,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
                 PreparedRoute {
                     node: route_b,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
             ],
             track_delays: Vec::new(),
@@ -6464,6 +6861,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             }],
             track_delays: Vec::new(),
             effects: vec![GraphPreparedEffect {
@@ -6731,10 +7129,12 @@ mod tests {
                 PreparedRoute {
                     node: route_direct,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
                 PreparedRoute {
                     node: route_effect,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
             ],
             track_delays: Vec::new(),

@@ -9,7 +9,7 @@ use graph::{
     GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphNodeId, GraphPortId, GraphPortKind,
     GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor, GraphResourceEstimate,
     GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec, PreparedGraphPlan,
-    PreparedGraphPlanParts, PreparedRoute, RouteTransform, StableGraphId, TrackStage,
+    PreparedGraphPlanParts, PreparedRoute, RouteGate, RouteTransform, StableGraphId, TrackStage,
 };
 use graph_compiler::Backend;
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
@@ -423,6 +423,7 @@ fn a_hand_built_65_537_input_plan_binds_and_renders_every_track() {
                 rl: 0.0,
                 rr: 1.0,
             },
+            gate: RouteGate::OPEN,
         })
         .collect();
     let plan = hand_built_plan(

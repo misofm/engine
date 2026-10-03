@@ -54,7 +54,7 @@
         "backend": 1,
         "optionsBytes": "64",
         "statusBytes": "80",
-        "sessionDocumentBytes": "1905",
+        "sessionDocumentBytes": "1955",
         "diagnosticBytes": "16384",
         "idStagingBytes": "14",
         "sourcePcmStagingBytes": "1024",

@@ -90,6 +90,24 @@ export const CATALOG = deepFreeze(
       "name": "inputFilters",
       "applied": true,
       "plane": "render"
+    },
+    {
+      "value": 13,
+      "name": "routeGainDb",
+      "applied": true,
+      "plane": "render"
+    },
+    {
+      "value": 14,
+      "name": "routeMute",
+      "applied": true,
+      "plane": "render"
+    },
+    {
+      "value": 15,
+      "name": "routeMatrix",
+      "applied": true,
+      "plane": "render"
     }
   ],
   "commandReasons": [
@@ -144,6 +162,10 @@ export const CATALOG = deepFreeze(
     {
       "value": 12,
       "name": "notSoloable"
+    },
+    {
+      "value": 13,
+      "name": "unknownRoute"
     }
   ],
   "observationVocabularies": {

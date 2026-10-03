@@ -663,6 +663,8 @@ describe("issue #1097 -- what the builder writes is what the engine's canonical 
           : { kind: "submix_input", submixId: route.destination.submix_id },
         matrix: route.channel_matrix,
         gainDb: route.gain_db,
+        mute: route.mute,
+        followsMute: route.follows_mute,
       });
     }
     assert.deepEqual(model.automation, []);
@@ -711,6 +713,9 @@ describe("issue #1097 -- what the builder writes is what the engine's canonical 
         id: "t-bus",
         source: { kind: "track", trackId: "t", tap: "insert_send" },
         destination: { kind: "submix_input", submixId: "bus" },
+        // #1218 (VERIFY-2 M8): the non-default value, so a rebuild that drops `followsMute`
+        // writes the submix default `true` and differs.
+        followsMute: false,
       });
     const expected = await engineCanonical("bus-rebuild", written.toJson());
     const model = JSON.parse(expected);
@@ -931,7 +936,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
   test("withSession() on live controls built without the booted document refuses rather than trusts", () => {
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
-      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [] },
+      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [], routes: [] },
       () => assert.fail("nothing is submitted"),
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);
@@ -1245,5 +1250,101 @@ describe("issue #1205 -- submix strips and bus taps through the SDK", () => {
     const straight = await renderFrom(direct);
     assert.ok(straight.flat().some((sample) => sample !== 0), "the fixture must carry signal");
     assert.deepEqual(bus, straight);
+  });
+});
+
+describe("issue #1216 -- a muted send through the SDK", () => {
+  test("a session with one muted send is the engine's canonical JSON, byte for byte", async () => {
+    // Gate 7. Red mutations: write `mute` before `gain_db` in `session-json.ts`'s route key
+    // order, or drop it from `normalizeSession`'s route record -> the engine re-serializes the
+    // document differently, or refuses it (`schema.missing_field`) and prints nothing.
+    const built = session({ id: "console.muted-send", sampleRateHz: 48_000, revision: 1 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+      .track("t", { source: "stem" })
+      .submix("verb")
+      .output("out")
+      .route({
+        id: "t-out",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .route({
+        id: "t-verb",
+        source: { kind: "track", trackId: "t", tap: "post_fader" },
+        destination: { kind: "submix_input", submixId: "verb" },
+        gainDb: -6,
+        mute: true,
+      })
+      .route({
+        id: "verb-out",
+        source: { kind: "submix", submixId: "verb", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    const text = built.toJson();
+    assert.equal(await engineCanonical("muted-send", text), text);
+    assert.deepEqual(
+      built.toJSON().routes.map((row) => [row.id, row.mute]),
+      [["t-out", false], ["t-verb", true], ["verb-out", false]],
+    );
+  });
+});
+
+describe("issue #1218 -- a send that follows its source's mute, through the SDK", () => {
+  test("follow sends from a muted track and a muted bus are the engine's canonical JSON, byte for byte", async () => {
+    // Gate 7. Red mutations: write `follows_mute` before `mute` in `session-json.ts`'s route key
+    // order, drop it from `normalizeSession`'s route record, or default it to `true` on a route
+    // into the output -> the engine re-serializes the document differently, or refuses it
+    // (`schema.missing_field`, `schema.invalid_enum`) and prints nothing.
+    const built = session({ id: "console.follow-send", sampleRateHz: 48_000, revision: 1 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+      .track("t", { source: "stem", fader: { leftMute: true } })
+      .submix("verb", { fader: { rightMute: true } })
+      .submix("echo")
+      .output("out")
+      .route({
+        id: "echo-out",
+        source: { kind: "submix", submixId: "echo", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .route({
+        id: "t-echo",
+        source: { kind: "track", trackId: "t", tap: "pre_fader" },
+        destination: { kind: "submix_input", submixId: "echo" },
+        followsMute: false,
+      })
+      .route({
+        id: "t-out",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .route({
+        id: "t-verb",
+        source: { kind: "track", trackId: "t", tap: "pre_fader" },
+        destination: { kind: "submix_input", submixId: "verb" },
+        gainDb: -6,
+      })
+      .route({
+        id: "verb-echo",
+        source: { kind: "submix", submixId: "verb", tap: "pre_fader" },
+        destination: { kind: "submix_input", submixId: "echo" },
+      })
+      .route({
+        id: "verb-out",
+        source: { kind: "submix", submixId: "verb", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+    const text = built.toJson();
+    assert.equal(await engineCanonical("follow-send", text), text);
+    assert.deepEqual(
+      built.toJSON().routes.map((row) => [row.id, row.follows_mute]),
+      [
+        ["echo-out", false],
+        ["t-echo", false],
+        ["t-out", false],
+        ["t-verb", true],
+        ["verb-echo", true],
+        ["verb-out", false],
+      ],
+    );
   });
 });

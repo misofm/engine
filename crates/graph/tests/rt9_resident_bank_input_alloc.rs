@@ -430,6 +430,7 @@ fn prepared(
                 rl: 0.5,
                 rr: 1.25,
             },
+            gate: RouteGate::OPEN,
         }],
         track_delays: vec![],
         effects: vec![],

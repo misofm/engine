@@ -129,10 +129,10 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | gate | mutation | observed red |
 |---|---|---|
 | `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 13;` after reason 12 (`NOT_SOLOABLE`, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 12`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 14;` after reason 13 (`UNKNOWN_ROUTE`, issue #1222; it was 13 after reason 12, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 13`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 12 to `13` (issue #1212; it renumbered reason 11 to `12` before reason 12 existed) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 13 to `14` (issue #1222; reason 12 to `13` under issue #1212, and reason 11 to `12` before that) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -388,3 +388,85 @@ and the mutation was reverted.
 | `tests::a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted` (#1213 gate 2, kind 4 lane; attempt 2 MINOR-2) | kind 4 reads `let lane = 0_usize` | the right-lane mute stages `muted: false`: the bus's right lane stays audible against the booted twin |
 | `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
 | `test-web-audioworklet.mjs` bus `observe()` binding (#1213, attempt 2 MAJOR-1) | the host reports `frameSlot: 0` or `Math.min(trackIndex, 1)` for a bus; or the mapping is read as a plain `trackGrDb` index | `frameSlot` is not `T`; the old-contract read is `undefined`, not `submixGrDb[0]` |
+
+## Issue #1222 — browser live send commands
+
+Each row was applied, its test run red, and the tree restored.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, the moved bounds check) | restore the generic `track >= strip_count` check ahead of kind dispatch for every kind | send 7 reports reason 2 (`unknownTrack`), not 13 |
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, reason 13) | refuse an out-of-range send with `COMMAND_REASON_UNKNOWN_TRACK` | the reason is 2, not 13 |
+| `tests::every_kind_is_bounded_by_the_count_it_addresses` (gate 3, fewer sends than strips) | bound the send arm by the strip count and index `route_controls[track]` | send 6 of 7 (past 6 strips) is refused (result 1); on 3 sends and 4 strips, index 3 panics out of bounds |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix`) | build the record from `[ll, rl, lr, rr]` | trial 0: the live output's bits differ from the fresh plan's |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, `routeMatrix` decode) | decode `values` as `[v0, v2, v1, v3]` | the mirror differs from the edited values |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, the send band) | push a send's record onto the next send's queue | trial 0: the output's bits differ |
+| `tests::a_live_send_edit_lands_on_a_fresh_plans_bits` (gate 1, a stale mirror field) | `routeGainDb` stages its record but leaves the mirror's gain | the mirror keeps the seed gain |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the mirror committed before the room check) | `ready.routes.commit()` as each send record is staged | the domain refusal leaves the mirror at -9 dB |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, the send band's room) | `queue_available` reports `u32::MAX` for every send queue | the overfilled send queue fails half-way: result 255, not backpressure |
+| `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, push before validation) | push each send record in pass one | the domain refusal leaves send 0's queue at 3 of 4 |
+| `tests::send_records_are_shape_checked` (D1) | drop the `effect_index != 0` rule | the record with an effect word is admitted (reason 0) |
+| `tests::send_edits_admit_and_render_without_allocating` (gate 7) | allocate an 8-byte `Vec` per staged send record | `admission/render allocated` (3) |
+| `tests::the_exact_retained_budget_charges_the_send_lanes` (#1221 verdict MINOR-1) | leave `route_control_resources.total_bytes` out of the bridge rows | the retained delta between depths 8 and 64 is 0, not the lanes' |
+| K3 follow-up (verdict MINOR-1/2, V1): `tests::a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits` | `compile_ready` seeds the send mirror with `\|_, _\| false` | RED here and in #1224's `a_one_lane_mute_follows_into_its_own_source_column` |
+| K3 follow-up (V8) | the record is built with `[false; 2]`, not `next.source_lane_muted` | RED in this test only |
+| K3 follow-up (V2) | `route_slot` omits `+ self.effect_controls.len()` | RED here (inserts run), in gate 2 (refused at index 0, not 1) and in #1224's `a_delayed_send_follows_like_an_explicit_send_mute` |
+| K3 follow-up (V6): `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, admitted then refused) | `ready.routes.commit()` dropped on success | RED here and in #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` |
+| K3 follow-up (verdict MINOR-4, V3): `tests::the_exact_retained_budget_charges_the_send_lanes` (absolute check) | the bridge rows charge `route_control_resources.queue_bytes`, not `total_bytes` | RED |
+| K3 follow-up (V4) | the mirror and shadow bytes dropped from the bridge rows | RED |
+| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 16;` after `COMMAND_ROUTE_MATRIX = 15` | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
+| `check-command-kind-vocabulary.py --self-test` (the JS set gains an undecoded kind) | the host JS set ends `…, 14, 16]` | `the host JS COMMAND_KINDS set disagrees with the Rust host constants` |
+
+## Issue #1223 — live route enumeration and the SDK's send edits
+
+Each row was applied, its test run red, and the tree restored. SDK rows ran
+`node --test test/live-controls-evals.mjs` (or `tsc`) against the slice's built module; E1 rebuilt
+the module with the mutation.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them` (gate 4, staging) | drop `longest_route_id_bytes` from the ID staging size | `id_staging_bytes` is 2, not 63; with that assertion removed, the 63-byte copy trips `compiled ID exceeds its projected staging capacity` |
+| the same test (D1, the enumeration) | the route-ID export reads the model's routes, not the live send producers | live route 0 is 7 bytes (`bx-main`), not 6 (`send-a`) |
+| `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.routeIds].sort()` | `issue #1223: the enumerated live-route order` |
+| `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `routes.every(...)` check | `the host accepted a session map with a non-string route` |
+| `test-web-audioworklet.mjs` (worklet construction) | read a route ID without the length/capacity check | `an empty route ID must fail initialization` |
+| `live-controls-evals.mjs` gate 1 (and gate 3) | `route(id)` indexes the send among every route of the session, sorted | `a send edit encodes its kind at the engine's live-route index` and `a live send gain equals the session booted at that gain` |
+| `live-controls-evals.mjs` gate 1 | `RouteEdits.matrix` writes `ll, rl, lr, rr` | the browser request's values differ |
+| `live-controls-evals.mjs` gate 1 | the browser map prepends the track IDs to `routes` | `kick-verb` encodes index 4, not 1 |
+| `live-controls-evals.mjs` gate 1 (and gates 2, 3) | `OfflineEngine.sessionMap()` reverses the engine's route list | all three #1223 evals |
+| `live-controls-evals.mjs` gate 2 | an unknown route ID falls back to index 0 | `an unknown or output route ID refuses before any record is built` |
+| `live-controls-evals.mjs` gate 2 | drop the output-route branch | the same eval: the message lists the live routes instead |
+| `live-controls-evals.mjs` gate 3 only (E1, rebuilt module) | admission pushes a send record onto route `index ^ 1`'s queue | `a live send gain equals the session booted at that gain`; gate 1 stays green (admission is `ok`) |
+| `live-controls-evals.mjs` (the vocabulary test) | drop `routeMatrix` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
+| `live-controls-types.ts` | `RouteEdits.gainDb` takes `LaneOptions` | `Unused '@ts-expect-error'` (a send has no lane) |
+| `live-controls-types.ts` | `RouteEdits` gains `faderDb` | `_RouteSurface` fails, and the `faderDb` `@ts-expect-error` is unused |
+
+## Issue #1224 — sends follow their source strip's mute
+
+Each row was applied, its test run red, and the tree restored. "Audio" rows ran with the tests'
+`follow_lanes` mirror assertions removed, so the red is the rendered output's, not the mirror's.
+
+| gate | mutation | observed red |
+|---|---|---|
+| deliverable 3 (a): `tests::a_follow_never_pushes_a_redundant_send_record` (gate 2) | `delta` yields every following route, changed or not | `solo drums` is refused: `delta` yields the unchanged `drums-verb`, whose strip staged no mute record (`malformed`); gates 3, 5, 9 and the staging test go red too. With that guard also bypassed (a missing strip record read as ramp 0), the red is `only bass-room follows`: a redundant `drums-verb` record was pushed |
+| deliverable 3 (b): `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1) | the follow pass placed before the solo coalescing pass | `solo vocal` is refused (`malformed`): no strip mute record is staged yet for the follow's ramp; gates 2, 3, 4, 9 and the staging test go red too. The red is the `malformed` guard's: gate 1 checks settled blocks only; with the guard replaced by a ramp-0 fallback, the audio red is `a_solo_follow_ramps_at_the_solo_window` (K3 follow-up row below) |
+| deliverable 3 (c): `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3) | push each follow record as it is built, before the room check | `solo: send queues`: `bass-room`'s queue lost a slot on a refused batch |
+| `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1, audio) | no follow pass (`if false && …`) | `soloed vs booted muted: block 6 sample 0: 0.031146944 vs 0.6195009` -- the measured leak |
+| gates 4, 5 and 6 (audio) | no follow pass | gate 4 `[false, false] -> [true, false]` block 4; gate 5 `bus lanes [true, true]` block 4; gate 6 `muted` block 5 sample 102 (frame 742 = the edit at 256 + 486) |
+| gate 1 and gate 6 (audio) | build the follow record with the mirror's old `source_lane_muted` | gate 1 at block 6 sample 0; gate 6 `muted` at block 5 sample 102 |
+| `tests::a_one_lane_mute_follows_into_its_own_source_column` (gate 4, audio) | `followed_lanes` returns `[lane 1, lane 0]` | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 `bus lanes [false, true]` too |
+| gate 4 (audio) | `followed_lanes` reads lane 0 for both | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 too |
+| `tests::muting_a_bus_silences_its_followed_send` (gate 5, audio) | the follow pass's effective mute is `strip < tracks.len() && …` | `bus lanes [true, true]`: block 4 sample 0 |
+| `tests::a_delayed_send_follows_like_an_explicit_send_mute` (gate 6, audio) | the ramp is the *first* strip mute record staged for the source | `un-muted`: block 13 sample 102 (200-sample ramp against 480) |
+| gate 6 (audio) | the follow record's ramp length is 0 | `muted`: block 5 sample 102 |
+| gate 3 | `ready.routes.commit()` right after the follow pass | `solo: follow lanes`: the refused batch kept the followed lanes |
+| gate 3 (the overlong window) | clamp the follow ramp to `2^22` | `overlong`: the strip mute is admitted (`0`), not `invalidArgument` |
+| gate 2 | skip `LiveRouteState::follow` after staging | `solo vocal too` is refused: the stale mirror re-yields `bass-room` in a batch that staged no `bass` mute record (`malformed`); with that guard bypassed, `no send record`: the redundant record is pushed |
+| `tests::follow_records_admit_and_render_without_allocating` (gate 9) | allocate an 8-byte `Vec` per follow record | `admission/render allocated` |
+| `tests::the_decode_staging_holds_a_full_batch_and_its_follow_records` (D4) | `command_staging_count` adds `route_count * 0` | the length pin (536 + 0, not 572); with the pin removed, the batch is refused `reason 1` (`malformed`, the staging bound) |
+| K3 follow-up (verdict MINOR-3, probe P2): `tests::each_follow_takes_its_own_source_strips_window` | the ramp lookup ignores the source strip (any strip's last mute record) | RED in this test only |
+| K3 follow-up (verdict MINOR-3, probe P1): `tests::a_follow_record_carries_the_mirrors_live_values` | the follow record drops the send's own `mute` (`entry.mute` -> `false`) | RED in this test only |
+| K3 follow-up (verdict MINOR-3, probe P1) | the follow record uses 0 dB, not the mirror's `gain_db` | RED in this test only |
+| K3 follow-up (verdict MINOR-3, probe P4): `tests::a_solo_follow_ramps_at_the_solo_window` | the ramp lookup sees only records staged before the coalescing pass, with a ramp-0 fallback for the guard (the pass-ordering defect with its guard bypassed) | RED in this test only |
+| K3 follow-up (verdict MINOR-1, probe P3): `tests::a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp` | the ramp lookup matches any strip-mute record on the source strip, changed lane or not (attempt 1's rule) | RED in this test only; it was red at `eff44271d` |
+| K3 follow-ups verdict MINOR-1 (probe V4): `tests::a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp` | the changed-lane rule's `Both` arm is `changed[0] && changed[1]` (for `\|\|`) | RED in this test only (the batch is refused, `malformed`); every other lib test stays green |

@@ -1053,9 +1053,19 @@ pub(crate) mod session {
         pub(crate) const CHANNEL_MATRIX: FieldSpec =
             FieldSpec::msg(4, true, false, &channel_matrix::SPEC);
         pub(crate) const GAIN_DB: FieldSpec = FieldSpec::req(5, Wire::F32);
+        pub(crate) const MUTE: FieldSpec = FieldSpec::req(6, Wire::Bool);
+        pub(crate) const FOLLOWS_MUTE: FieldSpec = FieldSpec::req(7, Wire::Bool);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Route",
-            fields: &[ID, SOURCE, DESTINATION, CHANNEL_MATRIX, GAIN_DB],
+            fields: &[
+                ID,
+                SOURCE,
+                DESTINATION,
+                CHANNEL_MATRIX,
+                GAIN_DB,
+                MUTE,
+                FOLLOWS_MUTE,
+            ],
         };
     }
     pub(crate) mod automation_target {
@@ -1452,6 +1462,24 @@ pub(crate) mod session {
             fields: &[ROUTE_ID, GAIN_DB],
         };
     }
+    pub(crate) mod set_route_mute {
+        use super::*;
+        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetRouteMute",
+            fields: &[ROUTE_ID, MUTE],
+        };
+    }
+    pub(crate) mod set_route_follows_mute {
+        use super::*;
+        pub(crate) const ROUTE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const FOLLOWS_MUTE: FieldSpec = FieldSpec::req(2, Wire::Bool);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetRouteFollowsMute",
+            fields: &[ROUTE_ID, FOLLOWS_MUTE],
+        };
+    }
     pub(crate) mod upsert_automation {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &automation::SPEC);
@@ -1529,6 +1557,8 @@ pub(crate) mod session {
             SetRouteDestination => &set_route_destination::SPEC,
             SetRouteChannelMatrix => &set_route_matrix::SPEC,
             SetRouteGainDb => &set_route_gain::SPEC,
+            SetRouteMute => &set_route_mute::SPEC,
+            SetRouteFollowsMute => &set_route_follows_mute::SPEC,
             UpsertAutomation => &upsert_automation::SPEC,
             RemoveAutomation => &remove_automation::SPEC,
             SetAutomationTarget => &set_automation_target::SPEC,

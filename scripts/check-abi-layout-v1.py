@@ -77,11 +77,12 @@ BUFFER_KINDS = [
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
     "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
+    "routeGainDb", "routeMute", "routeMatrix",
 ]
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable",
+    "notSoloable", "unknownRoute",
 ]
 RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]
@@ -140,6 +141,8 @@ EXPORTS = [
     "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_input_filters_config_copy",
     "miso_engine_web_v1_input_filters_prepare",
+    "miso_engine_web_v1_live_control_route_count",
+    "miso_engine_web_v1_live_control_route_id",
     "miso_engine_web_v1_live_control_submix_count",
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",

@@ -20,8 +20,8 @@ use graph::{
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
     GraphPreparedEffect, GraphPreparedEffectBank, GraphResourceEstimate,
     GraphScalarOwnerResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
-    PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord,
-    RouteTiming, RouteTransform, StableGraphId, TrackStage,
+    PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelay, RackId, ReductionRecord, RouteGate,
+    RouteTiming, RouteTransform, StableGraphId, TrackStage, gated_route_coefficients,
 };
 /// Re-exported so a caller can name the compile input without taking a `lane`
 /// dependency of its own: the backend is this crate's input now, so this crate publishes its type
@@ -30,7 +30,7 @@ use graph::{
 pub use lane::Backend;
 use rack::{RackLocation, RackProgram};
 use rack_compiler::{BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups};
-use session::{ChannelMatrix, RouteDestination, RouteSource, SendTap, SidechainDeclaration};
+use session::{RouteDestination, RouteSource, SendTap, SidechainDeclaration};
 use sha2::{Digest, Sha256};
 
 pub struct GraphCompiler;
@@ -242,6 +242,8 @@ mod estimate;
 mod ids;
 mod pdc;
 mod schedule;
+
+pub use ids::{RouteValueError, route_coefficients};
 
 #[cfg(test)]
 mod tests {

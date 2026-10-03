@@ -15,7 +15,10 @@
     { "value": 9, "name": "solo", "applied": true, "plane": "render" },
     { "value": 10, "name": "trimDb", "applied": true, "plane": "render" },
     { "value": 11, "name": "polarityInvert", "applied": true, "plane": "render" },
-    { "value": 12, "name": "inputFilters", "applied": true, "plane": "render" }
+    { "value": 12, "name": "inputFilters", "applied": true, "plane": "render" },
+    { "value": 13, "name": "routeGainDb", "applied": true, "plane": "render" },
+    { "value": 14, "name": "routeMute", "applied": true, "plane": "render" },
+    { "value": 15, "name": "routeMatrix", "applied": true, "plane": "render" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
@@ -30,7 +33,8 @@
     { "value": 9, "name": "wrongState" },
     { "value": 10, "name": "unknownTap" },
     { "value": 11, "name": "observationUnbound" },
-    { "value": 12, "name": "notSoloable" }
+    { "value": 12, "name": "notSoloable" },
+    { "value": 13, "name": "unknownRoute" }
   ],
   "observationVocabularies": {
     "kinds": [{ "value": 1, "name": "gainReductionDb" }],

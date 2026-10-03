@@ -217,6 +217,7 @@ Batches K1 and K2 do not move these anchors in substance; slices 18a-21 add what
 - `crates/builtins-compiler/src/lib.rs` (only the `impl<R> PreparedBuiltinsGraphArtifact<R>` block, D7)
 - `crates/graph-compiler/src/{compile.rs,lib.rs,ids.rs}`, only if a binding helper is needed
 - `crates/graph-compiler/tests/live_routes.rs` (new)
+- `crates/host-core/tests/route_mute.rs` (amendment A1, the MINOR-1 case only)
 - `scripts/check-web-audioworklet.sh` (the `--kernel-min` value at `:471` and its ratchet comment at `:454-469` only)
 - `docs/BUILTINS_AND_METERING_V1.md`
 - this spec
@@ -299,8 +300,10 @@ input section on the destination bus (VERIFY-2 MINOR 7).
    - `RouteControlRecord::new` returns `None` for `length = (1 << 22) + 1` and for `mute = true` with
      a nonzero target.
 
-   *Test value: it turns red if the drain is unbounded, drops or reorders a record, or is skipped
-   while the route is inactive.*
+   *Test value: it turns red if the drain drops or reorders a record, or is skipped while the route
+   is inactive.* (Verdict MINOR-2 struck "is unbounded": single-threaded, an unbounded drain applies
+   exactly what a bounded one does. The bound is structural: the drain loops over
+   `available_at_entry()`, at most the capacity.)
 6. **Render allocates nothing.** In a two-thread test, `try_push` runs on one thread while `render`
    runs on another; `allocations == 0` and `frees == 0` around every render call after warm-up,
    measured with `bench_support::alloc`'s thread-scoped counters.
@@ -340,6 +343,20 @@ input section on the destination bus (VERIFY-2 MINOR 7).
     - `cargo fmt --all -- --check`
     - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 
+## Amendment A1 (root, from the #1217 attempt-2 PASS verdict)
+
+- **MINOR-1.** Add a case with three or more contributors (open, muted, open) to
+  `crates/host-core/tests/route_mute.rs`. The mutation "drop the open routes before the muted one"
+  (MC: `route_segments` forgets that the opening run stored) must turn it red. That file is added
+  to the authorized paths for this case alone.
+- **NIT-1.** The live tests cover the arena-form `+0.0` fill of a bus whose every input becomes
+  inactive.
+- **From the #1219 attempt-2 verdict.**
+  - Record the linked kernel's `f32x4` vector:scalar count.
+  - Wherever the ramp law is documented, qualify it with the corrected bound from that verdict's
+    MINOR-A. With a subnormal step, the overshoot is below `(length - 1) * 2^-149` and never more
+    than `2^-128`. "Monotone" holds only for `k < length`, and the snap steps back to the target.
+
 ## Evidence
 
 - The output of every gate command above, from the PR's head commit.
@@ -347,6 +364,231 @@ input section on the destination bus (VERIFY-2 MINOR 7).
 - The `MUTATIONS.md` rows and the red mutation results for gates 2, 3 and 7.
 - The kernel-shape gate's count before and after.
 - Any digest or canonical-text re-pin, with its reason. None is expected.
+
+### Attempt 1 record (Terra)
+
+**Implementation.**
+
+- **Graph, `lib.rs`.**
+  - `ROUTE_RAMP_LENGTH_MAXIMUM`.
+  - `RouteControlRecord` (D2): `new` refuses a `length` past the maximum, and a mute whose target
+    is not four `+0.0` bitwise.
+  - `RouteControlLane`: the consumer half.
+  - `GraphRouteControlBinding`.
+  - `GraphRouteControlProducer`: `route_id`, `free`, `try_push`.
+  - `RouteQueueFull { record }`, `GraphRouteControlError`, `RouteControlResources` and
+    `route_control_resources`.
+  - `PreparedGraphPlan.route_controls: Option<Vec<_>>`, which `new` sets to `None`, and
+    `attach_route_controls` (D7).
+    - D1 selects the routes whose `RouteDestination` edge lands on a strip `Input` (or the legacy
+      `Submix`) node, in canonical route-ID order.
+    - Each gets one `bounded_spsc(depth, QueueGeneration(0))`.
+    - A second call returns `AlreadyAttached`.
+  - `GraphExecutor::new` hands the lanes to `RuntimeParts::with_route_controls`. Neither
+    `PreparedGraphPlanParts` nor `GraphBuiltinsCompileRequest` nor `RuntimeOp` gained a field.
+- **Runtime, `runtime.rs`.**
+  - `NodeKind::LiveRoute(Box<LiveRoute>)`. `LiveRoute` holds `{ ramp, position, mute, delayed,
+    route, control }`, and at bind it is `settled(prepared)` with `mute = gate.silences()` (D3).
+  - `node_kind`'s route branch takes a lane when one exists (D6).
+  - In `execute_op`, a live route drains `available_at_entry()` records first, every block and
+    while inactive, applying each by D3 (D5). It then decides `!(mute && position >= length &&
+    !delayed)` and writes `RouteActivity::set_active` before anything reads it, returning early
+    when inactive (D4). Its mix arm calls `route_mix_ramp_block::<FrameLane>` and saturates
+    `position`. All of this is in a `REALTIME_POLICY` region.
+  - `build_sequential` builds the table when a gate silences or a lane exists.
+  - `route_activity` also returns each route's `delayed` (its consumer `InputRef.delay`), and
+    `bind_live_routes` stores the route index and `delayed` in each `LiveRoute`.
+  - Both `PlanningMetadata` impls gain `has_route_control`, and `plain_route_gains` declines such
+    a route (VERIFY-2 M3).
+  - Test-only per-route `test_only_route_drained_counts`, reset with the mix counts.
+- **Builtins compiler.** `PreparedBuiltinsGraphArtifact::attach_route_live_controls` delegates to
+  the plan (D7). The seal doctests are unchanged and pass.
+- **D9.** `--kernel-min` 11 to 13 (base 12, plus the linked kernel), and the ratchet comment is
+  updated.
+- **Docs.** `docs/BUILTINS_AND_METERING_V1.md` gains "Live routes (issue #1220)": D1 to D5 and D8,
+  the **indexed ramp**, why it is not D11, the subnormal-step overshoot qualifier (#1219 attempt-2
+  MINOR-A wording), and the
+  delayed-route rule. The `RouteActivity` and `route_activity_bound_bytes` doc comments are updated.
+
+**Deviations.**
+
+1. **D8's charge is broken out and slightly wider.**
+   - `RouteControlResources` has `routes`, `queue_bytes`, `owner_bytes`, `producer_table_bytes`,
+     `route_id_bytes`, `activity_bytes`, `total_bytes` and `largest_allocation_bytes`.
+   - `owner_bytes` also charges each lane's `Box<RouteControlLane>` and the plan's
+     `GraphRouteControlBinding` entry, which is held from attach until bind consumes it. So the
+     charge bounds both the attached and the bound state.
+   - `graph::LIVE_ROUTE_OWNER_BYTES` (`size_of::<LiveRoute>()`) is public, so that gate 8 computes
+     the formula from first principles.
+   - Each producer carries the attach's uncharged activity bytes, and the function takes their
+     maximum: one attach's producers describe one plan.
+2. **Error variants beyond `AlreadyAttached`.** `BoundRoute` covers a live route the plan requires
+   a processor for, which would make it a `GraphNodeBinding`. `QueueCapacity` covers an
+   unallocatable depth.
+3. **`LiveRoute`'s activity index and `delayed` are set after the table is built**
+   (`bind_live_routes`), not in `node_kind`. The consumer's delay is known only from the program
+   walk.
+4. **The gate 2 sends read `input` taps**, which are the source exactly, so the oracle needs no
+   strip model. Gates 3 and 4 use `post_pan` as specified. Gate 3's `c` source is strictly
+   positive, so every zero `c-b` mixes is `+0.0`, and `a`'s `+0.0` sum has one sign.
+5. **Gate 6.** Before each block, the render thread waits until the producer thread has pushed
+   since the last one, and it asserts that the block applied a record. Its red mutation aborts the
+   process: `bench_support`'s armed audit raises `SIGABRT` on any render-thread allocation, before
+   the counter assertion.
+6. **Gate 4** runs 10 trials per rate. Each trial edits `c-b` (delayed) and `e-x` (undelayed),
+   and every other trial also edits `a-b`, with the mute drawn at 30%. Every length in {0, 1, 37,
+   480, 4800} occurs.
+
+**Tests**, in `crates/graph-compiler/tests/live_routes.rs` unless stated. Each mutation was
+applied, run red and reverted. The rows are 1220-1 to 1220-12 in `crates/graph/tests/MUTATIONS.md`.
+
+- `idle_attached_lanes_change_nothing` (gate 1). It is red if an idle lane's bind state is not
+  the prepared, gated coefficients, or if attaching changes activity (1220-1, 1220-2).
+- `the_block_in_which_a_mute_ramp_ends_is_mixed_whole` (gate 2, against the scalar oracle). It is
+  red if activity is decided after the mix or mid-block, which drops frames 0 to 94 of block 3
+  (1220-3).
+- `a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero` (#1217 NIT-1). It is red
+  if the arena-form sum skips an all-inactive destination and leaves a stale earlier sum on the
+  bus (1220-10, V3c). No other test reaches a bus that was dirty before going all-inactive.
+- `a_delayed_send_round_trips_through_mute_without_a_cut_or_stale_audio` (gate 3). The delay of
+  486 is asserted from the compiled plan, and `a`'s `+0.0` from the plan without `c`. It is red if
+  a delayed muted live route goes inactive and its fade in the line is cut (1220-4), or if its line
+  is not fed the zero-coefficient mix.
+- `a_settled_live_edit_equals_a_fresh_plan` (gate 4, 48 kHz and 44.1 kHz). It is red if a record
+  reaches the wrong route (1220-5a), or if a muted route keeps a contribution the prepared plan
+  lacks (1220-5b). The lane suite's #1219 M2 holds "settled computed".
+- `the_drain_is_bounded_and_lossless` (gate 5). It is red if the drain drops or bounds records
+  wrongly (1220-6a), or is skipped while inactive (1220-6b). The order is checked both ways: the
+  output must equal "last record only" and differ from "reversed".
+- `live_routes_render_without_allocating` (gate 6). It is red if a drain, an application or the
+  activity write allocates on the render thread (1220-7). This is the only test that drains
+  records pushed concurrently by another thread.
+- `no_live_route_folds` (gate 7). It is red if the fold folds a live route (1220-8). The prepared
+  bus folds 8 lanes and the live one 0.
+- `route_control_resources_cover_the_allocation` (gate 8). It is red if a queue, a box, an ID or
+  the uncharged activity table leaves the charge (1220-9a, 1220-9b).
+  - No silencing gate: charged 1659 bytes, retained 1459.
+  - A muted route: charged 1444, retained 1316.
+- `route_controls_attach_once` (D7). It is red if a second attach replaces the first's lanes and
+  orphans its producers (1220-12).
+- `crates/host-core/tests/route_mute.rs::a_middle_inactive_route_keeps_every_active_contribution`
+  (A1 MINOR-1, adapted from the verifier's probe). It is red if a later active run stores over an
+  earlier one (1220-11, MC: `Bus, 3 inputs, muted [1], plane 0: sample 0: 0.29300022 !=
+  0.36220396`). It is red in this test alone.
+
+**Gates** (head of this commit, on base `0268a1c74`; x86-64-v3 AVX2, AMD EPYC 7313P).
+
+- Gate 9.
+  - The release build of `audit`, `bench`, `capi` and `session-validator`: rc 0.
+  - `cargo test --release -p audit -p bench -p console-workload`: 110 passed, 0 failed, 2
+    ignored. The `route_folds` counts are unchanged.
+  - `graph_fixture -- --check`: rc 0.
+  - `check-graph-determinism.sh`: PASS (100/100), and the JSON is `cmp`-identical to the one
+    `graph_fixture` built at base `cdde008f2` produced. This is a compile fingerprint.
+  - Render bits: the browser identity fixture's PCM digests pass (`check-browser-expected-resources`).
+    `idle_attached_lanes_change_nothing` covers attach-idle against no attach.
+- Gate 10.
+  - test-debug-a (DESIGN 7, `--no-fail-fast`): rc 0. 1205 passed, 0 failed, 9 ignored, 107
+    binaries; that is 1194 plus the 11 new tests.
+  - The realtime check and test policies: ok (54 regions in 15 files). Graph: PASS and ok.
+    Builtins: ok and ok. Workspace policy: ok.
+  - `cargo fmt --all -- --check`: rc 0. Workspace `clippy --all-targets --all-features -D
+    warnings`: rc 0. (Verdict MINOR-3 corrected an earlier sentence here: `cargo clippy --locked -p
+    graph -p builtins-compiler --all-targets -- -D warnings`, without features, is **not** clean.
+    It reports two dead-code errors in `builtins-compiler`'s lib test target, `initial_matrix_state`
+    and `BoundaryVariant::{Nonadjacent, NonadjacentOutputConflict}`, identical at parent
+    `0268a1c74`, so pre-existing; filed as its own issue, see the verdict record below.)
+  - Browser (the D9 instantiation is now linked):
+    - `build-web-audioworklet.sh --named-twin`: rc 0. The module is `c21d647a...`, 2,740,212 bytes
+      against 2,726,858 at base (+13,354, +0.49%).
+    - `check-web-audioworklet.sh`: rc 0. The render closure's only trap owner is
+      `PreparedRenderPlan::render_inner`, as before.
+    - Kernel shape **before: 12** (`f32x4_arith=9350`, base `0268a1c74`, where `--kernel-min 13` is
+      red). **After: 13** (`f32x4_arith=9395`).
+    - `route_mix_ramp_block<f32x4>` is **22 vector : 0 scalar**, with no `unreachable`.
+    - `check-browser-expected-resources.py --artifacts`: rc 0. The digests agree, and the self-test
+      shows 32 red mutations.
+    - `check-scalar-oracle-absent.py`: rc 0. `test-web-audioworklet.sh`: rc 0. The V8 spill gate
+      (Node v22.23.2): ok.
+  - `run-aarch64-tests.sh debug`: no arm64 host here, so it runs **at batch push** (CI
+    `aarch64-debug`). On this host the live routes run `FrameLane = Simd8`. The simd128 module
+    carries the 4-lane instantiation.
+- **No re-pin.**
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1.** `route_control_resources` charges each route ID twice: the producer's copy and the
+  binding's node-ID copy, which the plan holds from attach until bind. Its rustdoc and
+  `docs/BUILTINS_AND_METERING_V1.md` call it an upper bound on the attached and the bound state;
+  every part is the exact size of what it names except the activity table, which is
+  `route_activity_bound_bytes`. New test `route_control_resources_cover_the_attached_state`
+  (two 127-byte route IDs, a muted plan): what the attach alone retains is within the charge. Test
+  value: red if the charge counts each route ID once. Mutation (count once): RED, "the charge 1694
+  covers the 1804 bytes the attach retains". Gate 8's formula counts the IDs twice; its numbers are
+  now 1,663 (no silencing gate) and 1,448 (muted).
+- **MINOR-2.** Gate 5's test value (above and in the test's doc) no longer claims an unbounded
+  drain is red; the bound is structural.
+- **MINOR-3.** The record's clippy sentence is corrected; the pre-existing dead code is filed as
+  *Remove the dead code builtins-compiler reports under no-features clippy* (#1235).
+- **NIT-1.** `scripts/check-web-audioworklet-callgraph.py`'s `KERNEL_ROSTER` gains
+  `route-mix-ramp f32x4` (`lane7kernels20route_mix_ramp_block.*4wide6f32x4`, ceiling 0.10; head:
+  vector 22, scalar 0, budget 8). Mutation: `route_mix_settled_tail` made `#[inline(always)]`,
+  module rebuilt: the row fails (`vector=22 scalar=18 budget=8.0`), while the base's analyser,
+  without the row, passes the same module. The analyser's self-test passes.
+- **NIT-2, NIT-3.** No change (recorded by the verdict as acceptable).
+
+### Amendment A2 (root, from the K3 follow-ups verdict BLOCKER-1)
+
+- **The defect.** `bash scripts/check-cross-targets.sh` (CI's required `cross-target` job) failed
+  on the K3 follow-up tree `843e27558`: `graph: memset_pattern16 calls rose from 10 to 11 (#1018)`.
+  The verdict bisected it to attempt 1 (`d405abb37`). The call is in
+  `lane::kernels::route_mix_ramp_block::<f32x4>`, instantiated in `graph`: the advance
+  `L::splat(L::WIDTH as f32)` (pattern `0x40800000` x 4, `4.0`) was stored to a stack slot through
+  `_memset_pattern16` on `aarch64-apple-ios`, a libc call inside a render kernel (the #1018 class
+  the ratchet exists to stop). No per-slice gate ran `check-cross-targets.sh`. Raising the ceiling
+  to 11 was not an equivalent fix and was not taken.
+- **The fix** (the verdict's proved edit, `crates/lane/src/kernels.rs`, kernel owned by #1219):
+  each chunk's frame-index vector is `L::splat(first as f32).add(offsets)` from a `u32` counter
+  `first` (from `position`, `+= L::WIDTH` per chunk), so there is no splatted constant to store.
+  Every index is an exact integer below `2^22`, so every value and every bit is unchanged.
+- **Comment numbers.** The kernel now has 21 vector operations (was 22): the `kernels.rs`
+  settled-tail doc, the `KERNEL_ROSTER` row's comment and the `SCALAR_SLACK` comment in
+  `scripts/check-web-audioworklet-callgraph.py`, and the `--kernel-min` comment in
+  `scripts/check-web-audioworklet.sh` say 21. NIT-1's record above (22) is the attempt-1 value.
+- **Evidence** (x86-64-v3, rustc 1.97.1, Node 22.23.2):
+  - `bash scripts/check-cross-targets.sh`: rc 0, `cross-target matrix: PASS`; graph back to
+    **10** `memset_pattern16` calls, every other row at its ceiling, the iOS and Android
+    eight-lane scans and the wasm rows pass.
+  - Bits: `cargo test -p lane --test route_ramp` 4/4 (the kernel against the indexed-ramp law,
+    bit for bit, at every width). The verdict's `k3fv_render_digests` probe (the #1222 send
+    session with live gain, matrix and mute; the #1224 solo-follow session under all 16 session
+    lane-mute combinations with live lane mutes, a solo and an un-solo) gives 17 render digests
+    byte-identical to `843e27558`'s. Not committed (a one-time "no bit moved" comparison).
+  - Browser: `build-web-audioworklet.sh --named-twin` rc 0; `check-web-audioworklet.sh` rc 0,
+    render `closure=8 traps=5` with sole owner `render_inner`, `kernels=13`, roster row
+    `route-mix-ramp f32x4 vector=21 scalar=0 budget=8.0`; `check-browser-expected-resources.py
+    --artifacts` rc 0 (32 red mutations); `test-web-audioworklet.sh` rc 0. ARTIFACT CHANGED: the
+    shipped module moves from `4b0c2fb3...1e15` (2,765,142 B) to
+    `79822522837672d3389b56ff5e8d252156e37ec88ca0ae06ae95e3b983d09203` (2,765,126 B; named twin
+    `4e5a17f4...`, 3,155,498 B).
+  - The roster row still bites: `route_mix_settled_tail` made `#[inline(always)]`, module rebuilt:
+    `FAIL roster route-mix-ramp f32x4: vector=21 scalar=18 budget=8.0`, rc 1. Restored.
+  - test-debug-a (the CI command): 108 binaries, 1,240 passed (the K3 follow-up's 1,239 plus
+    #1224's V4 test), 0 failed, 9 ignored; `cargo test -p lane --all-targets --features
+    lane/test-support` 68 passed; fmt; workspace clippy `--all-features -D warnings`; rustdoc
+    `-D warnings`; the lane, graph and workspace policy check/test pairs: all rc 0.
+    `run-aarch64-tests.sh`: no arm64 host, CI `aarch64-debug`/`aarch64-release` at the push.
+- **LESSON** (root ledger): per-slice gates for a slice that touches `lane`, `graph` or an effect
+  crate include `check-cross-targets.sh`, next to `check-web-audioworklet.sh`.
+- Verdict: `docs/handoffs/submix-sends-2026-10-02/verdicts/K3-followups-verdict.md`; probes
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/K3-followups-verifier-scratch.rs`.
+
+## Verdict
+
+- **Attempt 1** (`d405abb37`): Sol PASS. Three MINORs and three NITs, applied or answered above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1220-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1220-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

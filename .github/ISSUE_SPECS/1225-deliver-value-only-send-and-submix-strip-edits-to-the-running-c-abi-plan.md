@@ -172,6 +172,16 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
 
 - **#1053's L0 window.** A live edit during a plan swap must land in the candidate, never the
   retiring plan.
+- **Acked records at a plan swap** (#1221 verdict, "The acked-batch question across a plan's
+  life"). A route producer belongs to the plan it was prepared with, and a record still queued when
+  that plan retires is discarded with it. That is correct only because the committed model already
+  holds the acked value, so the replacement prepares it as a constant: the edit survives as a step
+  at the swap boundary, its ramp lost. The producers must be swapped with the plan atomically at
+  the L0 boundary.
+- **No cross-route fence.** Records to different routes (or a strip and a route) in one transaction
+  sit in different queues, and each drains at its own consumer's op, so they can apply up to one
+  block apart. This is the same skew #1053 accepts for strip records; accept at most one quantum
+  and say so in the docs, or add a fence.
 - **Replay.** An exact replay pushes nothing, and queue room is unchanged.
 - **Delayed sends.** A send with a compensation delay keeps running while muted (`DESIGN.md` P4), so
   its settled comparison point is `latency_samples` plus the ramp plus its compensation delay.
@@ -215,8 +225,12 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
    - An exact replay pushes nothing.
    - A live edit while a candidate is pending lands in the candidate.
 
-   *Test value: it turns red if a route record is pushed before every queue's room is checked, or
-   if the commit can still fail after a push.*
+   - An edit acked, then a structural swap before the render thread drains it: the new plan renders
+     the edited value from the swap boundary (a step), and no later block renders the pre-edit
+     value (#1221 verdict).
+
+   *Test value: it turns red if a route record is pushed before every queue's room is checked, if
+   the commit can still fail after a push, or if an acked edit is lost at a plan swap.*
 4. **Realtime.** Extend the two-thread barrier test (#1053's gate 4 shape, in
    `crates/capi/tests/resource_lifecycle.rs`) to race send and bus edits against render and a
    structural swap, over 20 runs: `allocations == 0` and `frees == 0` around every render call,

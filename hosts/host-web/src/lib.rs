@@ -33,9 +33,10 @@ use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime}
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
-    LiveControlSoloState, PrepareDiagnostics, PrepareRejection, PreparedHost, SourceControlError,
-    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
+    LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
+    SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
+    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -862,6 +863,29 @@ pub const COMMAND_TRIM_DB: u32 = 10;
 pub const COMMAND_POLARITY_INVERT: u32 = 11;
 /// Retarget a builtin input HPF/LPF pair through prepared filter targets.
 pub const COMMAND_INPUT_FILTERS: u32 = 12;
+/// Retarget one live send's gain in decibels over an explicit ramp window (issue #1222 D1).
+///
+/// The index word is a **live-route index**: the send's position among the routes into submixes,
+/// in canonical route-ID order -- not a strip index. An index past the last live route refuses
+/// with [`COMMAND_REASON_UNKNOWN_ROUTE`]. `values[0]` is the gain; `values[1..]` must be `0.0`,
+/// `rack` and `channel` must be `255`, and `effect_index` and `parameter_id` must be `0`, or the
+/// record is `MALFORMED`. `smoothing_samples` is the ramp length.
+///
+/// Admission keeps a mirror of every live send's gain, matrix and mute
+/// ([`host_core::LiveRouteState`]): a send record carries all of them folded into four
+/// coefficients, so the record is built from the mirror with this one field replaced, through
+/// [`host_core::RouteControlProducer::record`] -- the prepared route's own coefficient function.
+/// A value that function refuses, or a ramp past its bound, is `DOMAIN`.
+pub const COMMAND_ROUTE_GAIN_DB: u32 = 13;
+/// Switch one live send on or off over an explicit ramp window (issue #1222 D1).
+///
+/// Addressed and shaped as [`COMMAND_ROUTE_GAIN_DB`]; `values[0]` must be exactly `0.0` (on) or
+/// `1.0` (muted), anything else is `DOMAIN`, exactly as `mute` requires.
+pub const COMMAND_ROUTE_MUTE: u32 = 14;
+/// Retarget one live send's 2x2 matrix over an explicit ramp window (issue #1222 D1).
+///
+/// Addressed and shaped as [`COMMAND_ROUTE_GAIN_DB`]; `values[0..4]` are `ll, lr, rl, rr`.
+pub const COMMAND_ROUTE_MATRIX: u32 = 15;
 
 /// The `rack` of an effect-addressed record: one of the track's inserts (decision 12, #1096).
 ///
@@ -988,6 +1012,11 @@ pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 /// Its own reason, not `MALFORMED` or `UNKNOWN_TRACK`: the record is well formed and the strip
 /// exists, and a caller that solos a bus learns that it addressed the wrong kind of strip.
 pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;
+/// A send kind's index word is not a live route of this plan (issue #1222 D2).
+///
+/// Its own reason, not `UNKNOWN_TRACK`: a send is addressed by its live-route index, not a strip
+/// index, and a caller that names a send that does not exist learns which address was wrong.
+pub const COMMAND_REASON_UNKNOWN_ROUTE: u32 = 13;
 
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
@@ -1429,6 +1458,14 @@ struct ReadyOwnership {
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
     effect_controls: Box<[Option<EffectControlProducer>]>,
+    /// Issue #1222: one live send producer per route into a submix, in canonical route-ID order
+    /// (`HostLiveControlHandles::route_controls`), so a send command's live-route index reaches
+    /// its queue with one index and no search. Declared before the plan that owns their lanes.
+    route_controls: Vec<RouteControlProducer>,
+    /// Issue #1222 D3: every live send's gain, matrix and mute, parallel to `route_controls`. A
+    /// send record folds all of them, so a command that moves one rebuilds the record from this
+    /// mirror. It carries its own transaction shadow, committed or rolled back with `solo`.
+    routes: LiveRouteState,
     /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
     /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
     /// or without submixes.
@@ -1439,7 +1476,7 @@ struct ReadyOwnership {
     /// Decoded submission staging. Two entries per staged record, because one wire record
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * strip_count` for the coalesced solo emission (issue #210 phase 1, per strip
-    /// since issue #1213).
+    /// since issue #1213), plus one per live send for the follow pass (issue #1224 D4).
     command_decoded: Box<[StagedCommand]>,
     /// Issue #210 phase 1: the live controls' solo bits and their mirrors of user mute and of what
     /// the render plane was last told. Solo composes into the *existing* mute records at admission
@@ -1635,7 +1672,8 @@ impl ReadyOwnership {
     /// | `0 .. strips` | strip `s`'s matrix/pan queue |
     /// | `strips .. 2 * strips` | strip `s`'s fader/mute queue |
     /// | `2 * strips .. 3 * strips` | strip `s`'s input trim/polarity queue (#210 phase 3) |
-    /// | `3 * strips ..` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
+    /// | `3 * strips .. 3 * strips + E` | effect instances: `(strip, pre_insert/inserts/post_insert, position)` |
+    /// | `3 * strips + E ..` | live send `r`'s queue, by live-route index (issue #1222 D4) |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.
@@ -1676,8 +1714,19 @@ impl ReadyOwnership {
             )
             .ok();
         }
-        let producer = self.effect_controls.get(slot - tracks * 3)?.as_ref()?;
+        let effect = slot - tracks * 3;
+        if let Some(route) = effect.checked_sub(self.effect_controls.len()) {
+            return u32::try_from(self.route_controls.get(route)?.free()).ok();
+        }
+        let producer = self.effect_controls.get(effect)?.as_ref()?;
         u32::try_from(producer.producer().available_capacity()).ok()
+    }
+
+    /// The dense destination-queue index of live send `route` (issue #1222 D4): the band after
+    /// the effects. `None` for an index past the last live route.
+    fn route_slot(&self, route: usize) -> Option<usize> {
+        (route < self.route_controls.len())
+            .then(|| self.strip_count() * 3 + self.effect_controls.len() + route)
     }
 
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
@@ -1701,6 +1750,13 @@ impl ReadyOwnership {
             AdmittedCommand::Input(record) => {
                 let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
                 producer.input.try_push(record).map_err(|_| ())
+            }
+            AdmittedCommand::Route(record) => {
+                let route = (slot - tracks * 3)
+                    .checked_sub(self.effect_controls.len())
+                    .ok_or(())?;
+                let producer = self.route_controls.get_mut(route).ok_or(())?;
+                producer.push(record).map_err(|_| ())
             }
             AdmittedCommand::Effect(record) => {
                 let effect = slot - tracks * 3;
@@ -1751,6 +1807,15 @@ impl ReadyOwnership {
     }
 }
 
+/// The one field a send command moves (issue #1222 D1).
+#[derive(Clone, Copy)]
+enum RouteEdit {
+    GainDb(f32),
+    Mute(bool),
+    /// `[ll, lr, rl, rr]`.
+    Matrix([f32; 4]),
+}
+
 /// One decoded record and the payload its destination queue takes (issue #140 C).
 #[derive(Clone, Copy)]
 enum AdmittedCommand {
@@ -1762,6 +1827,8 @@ enum AdmittedCommand {
     Input(TrackInputRecord),
     /// One effect instance's channel (#140 A).
     Effect(EffectControlRecord),
+    /// One live send's channel (issue #1222 D4).
+    Route(RouteControlRecord),
 }
 
 #[derive(Clone, Copy)]
@@ -1979,7 +2046,8 @@ impl AudioWorkletEngineHost {
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2085,6 +2153,16 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn live_control_submixes(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.submixes)
+    }
+
+    /// Number of live routes (issue #1223 D1): exactly the plan's live send producers, the routes
+    /// into submixes in canonical route-ID order, which is the order a send kind's index word
+    /// reads. Zero before compilation and without live controls.
+    #[must_use]
+    pub fn live_control_route_count(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.route_controls.len())
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -2871,6 +2949,18 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
+    }
+
+    /// Copy one live route ID into ID staging; returns its byte length (issue #1223 D1). The
+    /// index is the live-route index, read from the producer the send kinds address.
+    pub(crate) fn copy_live_control_route_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let Some(producer) = ready.route_controls.get(index as usize) else {
+            return 0;
+        };
+        Self::copy_id_into_staging(self.buffers.as_mut(), producer.route_id().as_bytes())
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
@@ -3961,6 +4051,9 @@ impl CommandRecord {
                 | COMMAND_TRIM_DB
                 | COMMAND_POLARITY_INVERT
                 | COMMAND_INPUT_FILTERS
+                | COMMAND_ROUTE_GAIN_DB
+                | COMMAND_ROUTE_MUTE
+                | COMMAND_ROUTE_MATRIX
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -4134,6 +4227,38 @@ impl CommandRecord {
         }
     }
 
+    /// Check one send record's fixed shape and read its value (issue #1222 D1).
+    ///
+    /// `rack` and `channel` are `255`, `effect_index` and `parameter_id` are `0`, and every value
+    /// word past the kind's own is `0.0`; anything else is `MALFORMED`, as the fader kinds rule. A
+    /// `routeMute` value other than exactly `0.0` or `1.0` is `DOMAIN`, as `mute` rules. The gain
+    /// and matrix domains are the prepared route's, checked when the record is built.
+    fn into_route_edit(self) -> Result<RouteEdit, u32> {
+        let own = match self.kind {
+            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE => 1,
+            COMMAND_ROUTE_MATRIX => 4,
+            _ => return Err(COMMAND_REASON_MALFORMED),
+        };
+        if self.rack != RACK_NOT_APPLICABLE
+            || self.channel != 255
+            || self.effect_index != 0
+            || self.parameter_id != 0
+            || self.values[own..].iter().any(|value| *value != 0.0)
+        {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        match self.kind {
+            COMMAND_ROUTE_GAIN_DB => Ok(RouteEdit::GainDb(self.values[0])),
+            COMMAND_ROUTE_MUTE => {
+                if self.values[0] != 0.0 && self.values[0] != 1.0 {
+                    return Err(COMMAND_REASON_DOMAIN);
+                }
+                Ok(RouteEdit::Mute(self.values[0] == 1.0))
+            }
+            _ => Ok(RouteEdit::Matrix(self.values)),
+        }
+    }
+
     /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
     ///
     /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
@@ -4302,9 +4427,10 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 ///
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
 /// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
-/// phase 1; per strip since issue #1213), which is why `command_decoded` is
-/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` long and why the room counted is per lowered
-/// record rather than per wire record.
+/// phase 1; per strip since issue #1213), and one that changes a strip's effective mute owes one
+/// more per live send that follows it (issue #1224), which is why `command_decoded` is
+/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count + route_count` long and why the room counted is
+/// per lowered record rather than per wire record.
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///
@@ -4336,10 +4462,12 @@ fn admit_commands(
     ) {
         Ok(()) => {
             ready.solo.commit();
+            ready.routes.commit();
             Ok(())
         }
         Err(rejection) => {
             ready.solo.rollback();
+            ready.routes.rollback();
             for shadow in &mut ready.input_filter_shadows {
                 shadow.rollback();
             }
@@ -4400,11 +4528,21 @@ fn admit_commands_staged(
     let mut solo_seen = false;
     let mut solo_first_wire_index = 0_u32;
     let mut solo_smoothing = 0_u32;
+    // Issue #1224 D3: whether any strip mute record was staged, so the follow pass below runs.
+    let mut mute_seen = false;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
         let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
         let track = command.track_index as usize;
-        if track >= strip_count {
+        // Issue #1222 D2: the index word is read by kind. A send kind's is a live-route index,
+        // checked against the live routes in its own arm below; every other kind's is a strip
+        // index, checked here against the strip count. One generic check ahead of the dispatch
+        // would refuse a valid send at or past the strip count, and pass an invalid one below it.
+        let route_kind = matches!(
+            command.kind,
+            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX
+        );
+        if !route_kind && track >= strip_count {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
         let mut staged = [AdmittedCommand::Effect(EffectControlRecord::Bypass(false)); 2];
@@ -4462,6 +4600,7 @@ fn admit_commands_staged(
                 let lane = usize::from(matches!(lanes, BuiltinLaneSelector::Right));
                 let effective = ready.solo.effective_mute(track, lane);
                 ready.solo.record_emitted(track, lanes, effective);
+                mute_seen = true;
                 staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: effective,
@@ -4493,6 +4632,56 @@ fn admit_commands_staged(
                 solo_seen = true;
                 solo_smoothing = command.smoothing_samples;
                 (strip_count + track, 0)
+            }
+            // Issue #1222 D4: a send kind moves one field of its mirror and stages one record
+            // built from the whole mirror, through the prepared route's own coefficient function.
+            // The mirror is touched only once the record is built, and every later record in the
+            // batch reads it, so several edits of one send stage one record each, in wire order,
+            // and the render plane, applying them in order, settles on the last.
+            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX => {
+                // No live controls at all: the session has no write path for any send.
+                if ready.controls.is_empty() {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                let (Some(slot), Some(producer), Some(&current)) = (
+                    ready.route_slot(track),
+                    ready.route_controls.get(track),
+                    ready.routes.get(track),
+                ) else {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
+                };
+                let edit = command
+                    .into_route_edit()
+                    .map_err(|reason| refuse(reason, index))?;
+                let mut next = current;
+                match edit {
+                    RouteEdit::GainDb(gain_db) => next.gain_db = gain_db,
+                    RouteEdit::Mute(mute) => next.mute = mute,
+                    RouteEdit::Matrix(matrix) => next.matrix = matrix,
+                }
+                let record = producer
+                    .record(
+                        next.gain_db,
+                        next.matrix,
+                        next.mute,
+                        next.source_lane_muted,
+                        command.smoothing_samples,
+                    )
+                    .map_err(|error| match error {
+                        RouteControlError::Domain
+                        | RouteControlError::Length
+                        | RouteControlError::Full => refuse(COMMAND_REASON_DOMAIN, index),
+                    })?;
+                let moved = match edit {
+                    RouteEdit::GainDb(gain_db) => ready.routes.set_gain_db(track, gain_db),
+                    RouteEdit::Mute(mute) => ready.routes.set_mute(track, mute),
+                    RouteEdit::Matrix(matrix) => ready.routes.set_matrix(track, matrix),
+                };
+                if !moved {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_ROUTE, index));
+                }
+                staged[0] = AdmittedCommand::Route(record);
+                (slot, 1)
             }
             COMMAND_INPUT_FILTERS => {
                 if !prepared_submission {
@@ -4726,6 +4915,97 @@ fn admit_commands_staged(
                 };
                 lowered += 1;
                 ready.solo.record_emitted(strip, lanes, muted);
+            }
+        }
+    }
+    // Issue #1224 D3: the follow pass. It runs after every kind 4 record and the coalescing pass
+    // above, so it reads the batch's final effective mutes: a send with `follows_mute` whose
+    // source strip's effective lane mutes moved gets one record, built from its mirror through
+    // the prepared route's coefficient function, with the new source lanes. `delta` yields only a
+    // change, so a settled send is never retargeted.
+    //
+    // The ramp is the last strip-mute record staged for the source strip in this batch that
+    // covers a lane whose effective mute changed, in staging order (kind 4 records in wire order,
+    // then the coalescing pass's), and the follow record answers to that record's wire index.
+    // Every effective-mute change stages a strip mute record covering its lane, so one always
+    // exists; a follow without one is refused rather than guessed.
+    //
+    // Nothing is pushed here: the records join the room check below with every other staged
+    // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
+    if (solo_seen || mute_seen) && !ready.routes.is_empty() {
+        let follow_start = lowered;
+        let route_base = strip_count * 3 + ready.effect_controls.len();
+        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
+        for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &effective_mute)
+        {
+            let (Some(entry), Some(producer)) =
+                (ready.routes.get(route), ready.route_controls.get(route))
+            else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            let fader_slot = (strip_count + entry.source_strip) as u32;
+            // Only a record covering a lane whose effective mute changed sets the ramp: a no-op
+            // record on the other lane must not (#1224 verdict MINOR-1). The scan stops at the
+            // follow records, which are never strip mutes (MINOR-2).
+            let changed = [
+                source_lane_muted[0] != entry.source_lane_muted[0],
+                source_lane_muted[1] != entry.source_lane_muted[1],
+            ];
+            let Some((smoothing_samples, wire_index)) = ready.command_decoded[..follow_start]
+                .iter()
+                .rev()
+                .find_map(|staged| match staged.kind {
+                    StagedCommandKind::Command(AdmittedCommand::Fader(
+                        TrackFaderRecord::Mute {
+                            lanes,
+                            smoothing_samples,
+                            ..
+                        },
+                    )) if staged.queue_slot == fader_slot
+                        && match lanes {
+                            BuiltinLaneSelector::Left => changed[0],
+                            BuiltinLaneSelector::Right => changed[1],
+                            BuiltinLaneSelector::Both => changed[0] || changed[1],
+                        } =>
+                    {
+                        Some((smoothing_samples, staged.original_wire_index))
+                    }
+                    _ => None,
+                })
+            else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            // A ramp past `ROUTE_RAMP_LENGTH_MAXIMUM` cannot be followed at the strip's length, so
+            // the strip mute that asked for it is refused whole, never clamped.
+            let record = producer
+                .record(
+                    entry.gain_db,
+                    entry.matrix,
+                    entry.mute,
+                    source_lane_muted,
+                    smoothing_samples,
+                )
+                .map_err(|_| refuse(COMMAND_REASON_DOMAIN, wire_index as usize))?;
+            let slot = route_base + route;
+            let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+                return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, wire_index as usize));
+            };
+            *wanted = wanted.saturating_add(1);
+            let Some(staged) = ready.command_decoded.get_mut(lowered) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            *staged = StagedCommand {
+                queue_slot: slot as u32,
+                original_wire_index: wire_index,
+                kind: StagedCommandKind::Command(AdmittedCommand::Route(record)),
+            };
+            lowered += 1;
+        }
+        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
+        for staged in follow_start..lowered {
+            let route = ready.command_decoded[staged].queue_slot as usize - route_base;
+            if !ready.routes.follow(route, &effective_mute) {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             }
         }
     }
@@ -6109,11 +6389,65 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(effect_control_largest);
+    // Issue #1222 D3: the live sends, in `handles.route_controls` order, which must be the
+    // model's live-route order -- the order a command's live-route index and the mirror both
+    // read. Checked by ID here, once, rather than assumed.
+    let route_controls = handles.route_controls;
+    let live_routes_in_order = route_controls.is_empty()
+        || (LiveRouteState::live_routes(model).count() == route_controls.len()
+            && LiveRouteState::live_routes(model)
+                .zip(&route_controls)
+                .all(|(route, producer)| route.id.as_str() == producer.route_id()));
+    if !live_routes_in_order {
+        return Err(fixed_diagnostic("web.live_controls.routes").into());
+    }
+    let solo = LiveControlSoloState::try_new(&prepared_mutes)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    // A following send's source lanes start at its source strip's effective mute; solo is never
+    // persisted, so at preparation that is the session fader mute the compiler folded in.
+    let routes = if route_controls.is_empty() {
+        LiveRouteState::empty()
+    } else {
+        LiveRouteState::try_new(model, &|strip, lane| solo.effective_mute(strip, lane))
+            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?
+    };
+    // Retained bridge state the browser owns for its live sends (issue #1222; #1221 verdict
+    // MINOR-1): every byte the route lanes add -- queues, render-side owners, the producer table
+    // this host keeps as host-core built it, the route IDs and the activity table -- which the
+    // compile-time graph estimate deliberately leaves out, plus the mirror and its shadow.
+    let route_mirror_bytes = u64::try_from(routes.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<host_core::LiveRoute>() as u64))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let route_retained = engine
+        .route_control_resources
+        .total_bytes
+        .checked_add(route_mirror_bytes)
+        .and_then(|bytes| bytes.checked_add(route_mirror_bytes))
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    let route_largest = engine
+        .route_control_resources
+        .largest_allocation_bytes
+        .max(route_mirror_bytes);
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(route_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(route_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes =
+        report.largest_bridge_allocation_bytes.max(route_largest);
+    report.largest_named_allocation_bytes =
+        report.largest_named_allocation_bytes.max(route_largest);
     // Three per-strip bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity, each
-    // `T + S` long since issue #1213 D1; the effect band follows and covers every strip.
+    // `T + S` long since issue #1213 D1; the effect band follows and covers every strip, and the
+    // live send band follows it (issue #1222 D4).
     let queue_count = strip_count
         .checked_mul(3)
         .and_then(|value| value.checked_add(total_effects as usize))
+        .and_then(|value| value.checked_add(route_controls.len()))
         .ok_or_else(|| fixed_diagnostic("web.live_controls.effects"))?;
     // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
     // the command producers use, so one index serves both the subscribe path and the poll.
@@ -6240,7 +6574,7 @@ fn compile_ready(
     // The decoded command array carries the enlarged internal EffectControlRecord enum. Its
     // typed backing is a separate retained allocation from the public 48-byte wire staging row;
     // charge the full actual array before the final aggregate budget check.
-    let decoded_count = command_staging_count(strip_count)?;
+    let decoded_count = command_staging_count(strip_count, routes.len())?;
     let decoded_bytes = u64::try_from(decoded_count)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<StagedCommand>() as u64))
@@ -6269,9 +6603,10 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
-        command_decoded: boxed_command_staging(strip_count)?,
-        solo: LiveControlSoloState::try_new(&prepared_mutes)
-            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?,
+        command_decoded: boxed_command_staging(strip_count, routes.len())?,
+        solo,
+        route_controls,
+        routes,
         in_flight: boxed_zero_u32(queue_count)?,
         has_in_flight_commands: false,
         input_filter_shadows: input_filter_shadows.into_boxed_slice(),
@@ -6367,7 +6702,10 @@ fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec<u8>> {
+fn boxed_command_staging(
+    strip_count: usize,
+    route_count: usize,
+) -> Result<Box<[StagedCommand]>, Vec<u8>> {
     // Two entries per staged wire record: one `channel = both` command on a per-lane effect
     // parameter lowers to one record per lane (#140 C).
     //
@@ -6378,7 +6716,10 @@ fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec
     // `TrackFaderRecord::Mute` carries one `muted` bool and a strip whose user mute is asymmetric
     // needs one record per lane to restore. The two terms add rather than max: a batch may carry
     // 256 effect-parameter records *and* a solo toggle.
-    let count = command_staging_count(strip_count)?;
+    //
+    // Plus `route_count` for issue #1224's follow pass: at most one record per live send per
+    // batch, because `delta` yields each send once, after the batch's last strip mute.
+    let count = command_staging_count(strip_count, route_count)?;
     let empty = StagedCommand {
         queue_slot: 0,
         original_wire_index: 0,
@@ -6394,9 +6735,10 @@ fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec
     Ok(value.into_boxed_slice())
 }
 
-fn command_staging_count(strip_count: usize) -> Result<usize, Vec<u8>> {
+fn command_staging_count(strip_count: usize, route_count: usize) -> Result<usize, Vec<u8>> {
     (MAXIMUM_COMMAND_RECORDS as usize * 2)
         .checked_add(strip_count.checked_mul(2).ok_or_else(arithmetic)?)
+        .and_then(|count| count.checked_add(route_count))
         .ok_or_else(arithmetic)
 }
 

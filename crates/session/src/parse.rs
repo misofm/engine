@@ -1316,7 +1316,15 @@ fn parse_output(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) 
 fn parse_route(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Route> {
     parser.keys(
         table,
-        &["id", "source", "destination", "channel_matrix", "gain_db"],
+        &[
+            "id",
+            "source",
+            "destination",
+            "channel_matrix",
+            "gain_db",
+            "mute",
+            "follows_mute",
+        ],
         &path,
     );
     let id = parser.id(table, "id", &path);
@@ -1324,12 +1332,16 @@ fn parse_route(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -
     let destination = parse_record(parser, table, "destination", &path, parse_route_destination);
     let channel_matrix = parse_record(parser, table, "channel_matrix", &path, parse_channel_matrix);
     let gain_db = parser.f32(table, "gain_db", &path);
+    let mute = parser.bool(table, "mute", &path);
+    let follows_mute = parser.bool(table, "follows_mute", &path);
     Some(Route {
         id: id?,
         source: source?,
         destination: destination?,
         channel_matrix: channel_matrix?,
         gain_db: gain_db?,
+        mute: mute?,
+        follows_mute: follows_mute?,
     })
 }
 

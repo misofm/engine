@@ -19,7 +19,7 @@ use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_
 use crate::ids::{
     PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
-    prepared_effect_node, route_destination_node, route_source_node, route_transform,
+    prepared_effect_node, route_destination_node, route_source_node, route_values,
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
@@ -320,8 +320,46 @@ impl GraphCompiler {
                 TailSamples::Finite(0),
             );
         }
+        // #1218 D2: a following route reads its source strip's lane mutes. The map is built only
+        // when some route follows; IDs are unique across tracks and submixes.
+        let strip_mutes: BTreeMap<&str, [bool; 2]> = if model.routes.iter().any(|r| r.follows_mute)
+        {
+            strips
+                .iter()
+                .map(|strip| {
+                    (
+                        strip.id.as_str(),
+                        [strip.fader.left_mute, strip.fader.right_mute],
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         for route in &model.routes {
-            let Some(transform) = route_transform(route.gain_db, &route.channel_matrix) else {
+            let matrix = &route.channel_matrix;
+            let matrix = [matrix.ll, matrix.lr, matrix.rl, matrix.rr];
+            // The domain check is the live producer's own (issue #1215 D1): a value it would
+            // refuse never compiles, and the plan keeps the unfolded transform it hashes. The
+            // session's mute rides the gate (issue #1216 D2); it is not structural. A following
+            // route's source lane mutes ride it too (issue #1218 D2): they zero the coefficient
+            // columns through `gated_route_coefficients`, never the gain.
+            let follow_zeroed = if route.follows_mute {
+                let source = match &route.source {
+                    RouteSource::Track { track_id, .. } => track_id.as_str(),
+                    RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+                };
+                *strip_mutes
+                    .get(source)
+                    .expect("a validated route source names a strip")
+            } else {
+                [false; 2]
+            };
+            let gate = RouteGate {
+                mute: route.mute,
+                follow_zeroed,
+            };
+            let Ok(transform) = route_values(route.gain_db, matrix) else {
                 diagnostics.push(diag(
                     "graph.gain.non_finite",
                     &format!("$.routes[id={}].gain_db", route.id),
@@ -348,6 +386,7 @@ impl GraphCompiler {
                     route_id: gid(route.id.as_str()),
                 },
                 transform,
+                gate,
             });
         }
         for (index, strip) in strips.iter().enumerate() {
@@ -500,6 +539,7 @@ impl GraphCompiler {
             &effects.entries,
             track_delay_bytes,
             &track_delays,
+            &route_transforms,
         ) else {
             return Err(failure(
                 effects,

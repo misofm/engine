@@ -93,8 +93,10 @@ state; slices 24 and 25 added the route band and kinds. Re-read the current line
   - For each yielded route it updates the mirror's `source_lane_muted` (shadowed), builds the record
     with `RouteControlProducer::record`, and stages it on the route's slot.
   - Its ramp length is the smoothing of the **last strip-mute record staged for that source strip in
-    this batch, in staging order** (kind 4 records in wire order, then the coalescing pass's records,
-    which carry `solo_smoothing`) (VERIFY-2 MINOR 9).
+    this batch that covers a lane whose effective mute changed, in staging order** (kind 4 records in
+    wire order, then the coalescing pass's records, which carry `solo_smoothing`) (VERIFY-2 MINOR 9;
+    amended by the attempt 1 verdict, MINOR-1: a no-op record on the other lane must not set it).
+    When both lanes change through records with different windows, the last one wins.
 - **D4. All or nothing.**
   - Strip mute records and follow records are room-checked together before any push.
   - A full route queue refuses the whole batch as typed backpressure, and both mirrors (solo and
@@ -228,6 +230,185 @@ so a comparison at the output is exact.
 - Each new test's name, with its one-sentence test-value answer.
 - The `MUTATIONS.md` rows, with their observed red results.
 - The K3 boundary gate log and the ARTIFACT CHANGED report for the shipped module.
+
+### Attempt 1 record (Terra)
+
+Base `932f348a8` (#1223 attempt 1). Anchors re-found by symbol.
+
+**Implementation.**
+
+- `crates/host-core/src/live_route_state.rs` (exported from `lib.rs`):
+  - `LiveRouteMuteFollow::delta(routes, effective_mute)` is D2's frozen signature. It yields
+    `(route, [effective_mute(source, 0), effective_mute(source, 1)])` only for a route with
+    `follows_mute` whose lanes differ from the mirror's.
+  - `LiveRouteState::follow(route, effective_mute)` records those lanes under the transaction
+    shadow. It refuses an unknown index or a non-following route, whose lanes stay `[false; 2]`.
+    `try_new`, `delta` and `follow` share one private `followed_lanes`, so D1's lane read is
+    written once.
+  - `solo.rs`: one doc sentence pointing at `delta`.
+- `hosts/host-web/src/lib.rs`, `admit_commands_staged` (D3, D4):
+  - The follow pass runs once per batch, after the kind 4 records and the solo coalescing pass,
+    when the batch staged a strip mute or moved a solo bit and the plan has live sends.
+  - For each yielded send it builds the record from the mirror through
+    `RouteControlProducer::record`, with the new lanes. The ramp and the wire index come from the
+    last `TrackFaderRecord::Mute` staged on the source strip's fader slot, scanning the staged
+    entries backwards, which is staging order (kind 4 in wire order, then coalesced).
+  - The record is staged on slot `3S + E + route` and counted in `command_wanted`. Nothing is
+    pushed: the existing room check covers it with every other entry. The mirror lanes move with
+    `follow` after every record is built. `admit_commands` already commits or rolls back both
+    mirrors.
+  - `command_staging_count(strip_count, route_count)` adds the live-send count, and the bridge
+    accounting charges it.
+
+**Decisions inside the spec.**
+
+1. **A follow with no strip mute record is refused `malformed`.** Every effective-mute change
+   stages a strip mute record, so this guard cannot fire on a correct tree. Mutations that break
+   the invariant trip it, and the MUTATIONS rows also record their reds with it bypassed.
+2. **A window past `ROUTE_RAMP_LENGTH_MAXIMUM` (`2^22`) refuses the strip mute `domain`** at its
+   wire index, when a send follows that strip's change. It is not clamped, because D3 ties the
+   ramp to the strip's. Before this slice such a kind 4 was admitted. It now refuses only when it
+   moves a followed send. Gate 3 covers it.
+3. **Cost.** The ramp lookup scans the staged entries once per yielded send, `O(sends x
+   staged)`, on the worklet's control path, and nothing allocates. (Amended by verdict MINOR-2: the
+   scan stops at the follow records, `[..follow_start]`, so its bound is `sends x (2 * 256 + 2 *
+   strips)` entries; the attempt-1 text's "at most 572 entries" described the staging test, not a
+   bound, and the attempt-1 scan, `[..lowered]`, also walked the follow records already staged.) Any per-strip memo is left to the weekly pass.
+4. **The `effective_mute` closure** reads `ready.solo.effective_mute`, the one composition, so a
+   bus source follows only its own mute (solo-safe).
+
+**Tests** (each answer is *which plausible defect turns it red that no existing test catches*):
+
+- `live_route_state::tests::delta_yields_every_following_send_of_a_changed_strip_and_nothing_else`
+  (gate 7). Red if `delta` stops at a strip's first following send, yields an unchanged send, or
+  reads another strip.
+- `live_route_state::tests::delta_follows_one_lane_at_a_time` (gate 7). Red if a lane maps to the
+  other column, one lane is read for both, or a bus source loses the track offset.
+- `live_route_state::tests::a_send_without_follow_never_follows_and_a_followed_change_is_not_yielded_twice`
+  (gate 7). Red if a non-following send is yielded or followed, `follow` records lanes other than
+  `delta`'s, or a follow escapes the shadow.
+- `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1). Red if
+  solo leaves the pre-fader follow sends open: the measured leak, red at block 6 with the follow
+  pass removed. Also red if it reads the wrong strip, or leaves a residue after the un-solo.
+- `tests::a_follow_never_pushes_a_redundant_send_record` (gate 2). Red if `delta` re-emits an
+  unchanged target, or the mirror is not updated, so the next batch re-emits.
+- `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3). Red if strip mutes
+  commit while their follows do not: an early push, an early commit, or a clamped ramp.
+- `tests::a_one_lane_mute_follows_into_its_own_source_column` (gate 4). It covers all 12
+  transitions between the four lane states, plus solo over a left-only mute and back. Red on a
+  swapped or duplicated lane.
+- `tests::muting_a_bus_silences_its_followed_send` (gate 5). Red if follow reads tracks only, so
+  a bus mute leaves its send open, or if solo mutes a bus's send.
+- `tests::a_delayed_send_follows_like_an_explicit_send_mute` (gate 6). The plan is asserted by
+  behaviour: fed `drums` alone, the output is exactly zero for frames 0-485 and nonzero at 486,
+  and `graph_delay_bytes > 0`. Red if the follow ramp is the first strip record's, has length 0,
+  or uses stale lanes.
+- `tests::follow_records_admit_and_render_without_allocating` (gate 9). Red if the follow pass
+  allocates.
+- `tests::the_decode_staging_holds_a_full_batch_and_its_follow_records` (D4): 6 tracks x 6 buses,
+  so 545 entries against the old 536. Red if staging is not grown by the send count.
+
+Every row in `hosts/host-web/MUTATIONS.md` "Issue #1224" and `crates/host-core/tests/MUTATIONS.md`
+1224-H1 to H5 was applied, run red and reverted. Deliverable 3's three rows:
+
+- `delta` emitting every follows route: gate 2 red;
+- the follow pass before coalescing: gate 1 red;
+- the push before the room check: gate 3 red.
+
+**Docs.** `docs/BUILTINS_AND_METERING_V1.md` has "Sends follow mute (issue #1224)" under "Solo in
+place", and the required sentence in "Metering and observation while soloed". In `AGENTS.md`, only
+the route-mute and follow-mute qualifier sentence ("Planned under decision 13 ... a route has
+neither.") is removed. The VCA qualifier stays, because V4 owns it.
+
+**Gates** (x86-64-v3 AVX2; A = `target/ci/k3-1224-artifacts`, B = `target/ci/k3-1224-named`).
+Every gate below returned rc 0.
+
+- Gate 8:
+  - `build-web-audioworklet.sh --named-twin B A`;
+  - `check-web-audioworklet.sh A B/…named.wasm`;
+  - `check-browser-expected-resources.py --artifacts A`: digests and exact rows agree, 32 red
+    self-test mutations, no re-pin;
+  - `check-sdk-headless.sh A`;
+  - `test-web-audioworklet.sh`.
+  - CI's browser legs: `npm run qualify -- --artifacts A --sdk-root sdk --browser
+    {chromium,firefox,webkit} --check-matrix --self-test-mutations` under a private PulseAudio
+    null sink, as in `qualification.yml`, with the SDK source bundle (CI's mode). All three:
+    "all qualification gates passed".
+- Gate 10:
+  - `check-host-core-policy.sh`, `test-host-core-policy.sh` and `check-realtime-policy.sh`;
+  - test-debug-a: 108 binaries, 1,233 passed, 0 failed, 9 ignored;
+  - `cargo fmt --all -- --check`;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, rc 0 after
+    one `needless_range_loop` fix in a new test. The final tree re-ran the host-web and host-core
+    tests: 359 passed.
+  - `run-aarch64-tests.sh debug`: not run, because the host is x86-64. It is left to CI's
+    `aarch64-debug` at the K3 push.
+- Gate 11 (K3 boundary):
+  - test-debug-b: 791 passed, 0 failed, 24 ignored;
+  - `cargo test --release -p audit -p bench -p console-workload`: 110 passed;
+  - the release build, `audit capi`, `trace-graph-audit.sh`, `check-graph-determinism.sh`,
+    `graph_fixture --check`, `check-builtins-fixtures.sh` and `check-console-fixtures.sh`;
+  - `check-protocol-wasm-parity.sh`, and `check-capi-abi.sh` with and without `--self-test`;
+  - `check-sdk-generated.sh A`, `check-sdk-types.sh` and `sdk-package.sh check A`.
+- **ARTIFACT CHANGED** (expected: the follow pass and the grown staging): `97a758d8…` (2,763,281 B,
+  #1223's record) -> `e323e4b17ff9a76bb38ae94ec3a18657ff43b68aab4eb8deae0f9f2006552e45`
+  (2,765,144 B, +1,863). The named twin is `90d7d9cb…` (3,155,519 B). The module digest is not a
+  per-change pin (#1061).
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Amendments, applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1 (D3 amended).** The follow ramp is the last strip-mute record staged for the source
+  strip that **covers a lane whose effective mute changed** (`hosts/host-web/src/lib.rs`, the
+  follow pass): a no-op record on the other lane no longer sets it, so a batch with `mute L @480`
+  and a no-op `mute R=false @0` fades the send over 480 samples instead of stepping it. D3's text
+  above is amended. New test `a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp` (probe
+  P3): red at `eff44271d`, green now; restoring attempt 1's rule turns it red alone.
+- **MINOR-2.** The lookup scans `command_decoded[..follow_start]`, never the follow records already
+  appended (quadratic in yielded sends at attempt 1). Deliverable 3's cost sentence is corrected.
+- **MINOR-3.** Probes adopted as committed tests, each with its mutation run (each RED in that test
+  alone, then reverted):
+  - `a_follow_record_carries_the_mirrors_live_values` (P1): the follow record drops the send's
+    own `mute` (M5); it uses 0 dB, not the mirror's gain (M9).
+  - `each_follow_takes_its_own_source_strips_window` (P2): the lookup ignores the source strip
+    (M2).
+  - `a_solo_follow_ramps_at_the_solo_window` (P4): the lookup sees only records staged before the
+    coalescing pass, with a ramp-0 fallback (the pass-ordering defect, its guard bypassed).
+  - Gate 1's test-value sentence no longer claims the pass ordering; `hosts/host-web/MUTATIONS.md`
+    says deliverable 3(b)'s red is the `malformed` guard's, and records the rows above.
+- **MINOR-4.** `docs/BUILTINS_AND_METERING_V1.md` "Sends follow mute": the `2^22` refusal applies
+  only when a mute change moves a following send (a solo's window counts the same way, reported
+  at the batch's first solo record; the same kind 4 is admitted otherwise), and a full send
+  queue's backpressure index is the first record staged on that send's queue.
+- **NITs 1-3.** Not applied (the overlong-solo index convention, `route_base` respelling
+  `route_slot`, a repeated clause); left for a later touch.
+- **ARTIFACT CHANGED.** With every K3 follow-up applied, the shipped module is
+  `4b0c2fb3581d895af68800f88976ebc5cef1f879fd6d4898dce5cbafa31a1e15` (2,765,142 B; named twin
+  `8410ed88...`, 3,155,514 B). Render closure unchanged (`closure=8 traps=5`, sole owner
+  `render_inner`); kernels 13.
+- **Gates** (x86-64-v3 AVX2, the follow-up tree), all rc 0: `build-web-audioworklet.sh
+  --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`, `check-web-audioworklet-v8-spill.py`; the CI browser legs (`npm run
+  qualify -- --check-matrix --self-test-mutations`, SDK source bundle, private PulseAudio null
+  sink) on chromium, firefox and webkit; `check-sdk-generated.sh`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh`, `sdk-package.sh check`; host-web lib suite 164 passed, 0 failed, 1
+  ignored; test-debug-a 1,239 passed, 0 failed, 9 ignored; test-debug-b 791 passed, 0 failed, 24
+  ignored; fmt; workspace clippy `-D warnings`; rustdoc `-D warnings`; the policy check/test
+  pairs. `run-aarch64-tests.sh debug`: at batch push (CI `aarch64-debug`).
+- **K3 follow-ups verdict MINOR-1** (the amended D3 rule's `Both` arm was untested). Probe V4
+  adopted as `a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp`: `bass` starts
+  `[F, T]`; one batch mutes `bass` on both lanes at 400, re-mutes its right lane at 0 (a no-op) and
+  mutes `drums`' right lane at 64, compared bit for bit with the same batch without the no-op.
+  Test value: red if the `Both` arm asks for both lanes to have changed, which refuses a both-lane
+  mute of a strip with one lane already muted and a following send (user-visible). Mutation
+  `BuiltinLaneSelector::Both => changed[0] && changed[1]`: RED in this test only (host-web lib
+  161 passed, 1 failed), restored; `hosts/host-web/MUTATIONS.md` records the row.
+
+## Verdict
+
+- **Attempt 1** (`eff44271d`): Sol PASS. Four MINORs and three NITs; the MINORs are applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1224-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1224-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

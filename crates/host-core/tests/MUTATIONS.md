@@ -376,3 +376,60 @@ restored between rows. Delivery host: x86_64 AVX2+FMA.
 `a_bus_fader_record_renders_as_the_session_with_that_fader` also goes red when its own push is
 moved to `strip_controls[2]` (a track's lane): the fader reaches `t2` alone and the output
 differs from the twin's from the commanded block on.
+
+## Issue #1221 — live send records from host-core
+
+Driver: `cargo test -p host-core --features host-core/test-support --test live_routes`, one
+mutation at a time, tree restored between rows. Delivery host: x86_64 AVX2+FMA. 1221-M8 and
+1221-M11 mutate `graph`; the others mutate `host-core`.
+
+| Row | Mutation | Red |
+| --- | --- | --- |
+| 1221-M1 | `RouteControlProducer::record` passes `[false; 2]` to `route_coefficients` instead of `source_lane_muted` | `the_live_target_is_the_prepared_constant` (the follow-zeroed column carries `gain * lr`) |
+| 1221-M2 | `record` computes its target itself, `10^(gain_db / 20) * coefficient` with the same gating | `the_live_target_is_the_prepared_constant` (one ulp off on every coefficient) |
+| 1221-M3 | `route_controls` collected in reverse | `a_settled_live_edit_through_host_core_equals_a_fresh_plan` (index 1 drives `e-x`, not `c-b`) and `live_send_handles_are_in_canonical_route_order` |
+| 1221-M4 | `set` builds its record with a gain of `0.0` instead of `gain_db` | `a_settled_live_edit_through_host_core_equals_a_fresh_plan` |
+| 1221-M5 | `push` drops the record `try_push` hands back and returns `Ok` | `a_refused_send_record_pushes_nothing` (set `depth + 1` returns `Ok(())`) |
+| 1221-M6 | `record` clamps a too-long `length` to the maximum instead of refusing it | `a_refused_send_record_pushes_nothing` (`Ok(record)` with length `1 << 22`, not `Err(Length)`) |
+| 1221-M7 | `set` pushes a muted step record when `record` refuses, then returns the refusal | `a_refused_send_record_pushes_nothing` (`free()` 3, not 4: a refusal pushed) |
+| 1221-M8 | graph's `attach_route_controls` also takes the routes into the output (`*-main`) | `live_controls_cost_the_standing_sessions_no_fold` (`bank_route_folds()` 0 with `Some(64)`, 64 with `None`) |
+| 1221-M9 | host-core drops the `route_control_resources` total from `admitted_graph_and_model` | `live_send_lanes_are_charged_against_the_graph_cap` (one byte below the admitted total prepares) |
+| 1221-M10 | host-core attaches lanes of depth 1 when no depth was requested | `live_send_lanes_are_charged_against_the_graph_cap` (the idle report charges 2 routes, 1323 bytes) |
+| 1221-M11 | graph's live-route `drain` boxes each record it applies | `live_sends_render_without_allocating`: the process aborts (`SIGABRT`) on the first render-thread allocation, before the counter assertion |
+
+Gate 4's base behaviour was replayed by removing the attach call entirely: the test stays green
+(64 folds with `None` and with `Some(64)`), so the fallback did not apply.
+
+## Issue #1222 — `LiveRouteState`
+
+Unit tests in `crates/host-core/src/live_route_state.rs`. Each row was applied, run red and
+reverted.
+
+| row | mutation | observed red |
+|---|---|---|
+| 1222-H1 | seed `source_lane_muted` from the session's fader mutes, not the `effective_mute` it is handed | `construction_seeds_every_field_…`: live route 3 (`zz-send`) starts `[false, false]` |
+| 1222-H2 | resolve a submix source without the track offset | the same test: live route 2's `source_strip` is 1, not 4 |
+| 1222-H3 | take the shadow once, at construction, not per transaction | `a_rollback_restores_every_field_…`: rolled back to the seeds, not the committed values |
+| 1222-H4 | keep routes into the output in the mirror | both tests: the mirror has seven entries, not four |
+
+## Issue #1224 — `LiveRouteMuteFollow::delta` and `LiveRouteState::follow`
+
+Unit tests in `crates/host-core/src/live_route_state.rs` (gate 7). Each row was applied, run red
+and reverted.
+
+| row | mutation | observed red |
+|---|---|---|
+| 1224-H1 | `delta` yields every following route, changed or not | all three `delta` tests: `seeded: nothing changed` yields four routes |
+| 1224-H2 | `delta` drops its `follows_mute` check | `delta_follows_one_lane_at_a_time` and `a_send_without_follow_never_follows_…`: `b-send` is yielded |
+| 1224-H3 | `delta` stops after its first yield (`.take(1)`) | `delta_yields_every_following_send_…`: only `a-send`, not `b-send`; `a_send_without_follow_…`: only route 0 |
+| 1224-H4 | `follow` drops its `follows_mute` check | `a_send_without_follow_…`: `b-send does not follow` |
+| 1224-H5 | `follow` writes the lanes without the transaction shadow | `a_send_without_follow_…`: `state.transaction_open()` is false |
+
+The host-web rows of the same issue, `followed_lanes` swapping or duplicating a lane among them,
+are in `hosts/host-web/MUTATIONS.md`.
+
+## Issue #1223 — the session shape's route IDs
+
+| row | mutation | observed red |
+|---|---|---|
+| 1223-H1 | `longest_route_id_bytes` measures only the routes into submixes | `the_session_shape_measures_every_route_id`: 7, not 39 |

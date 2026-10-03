@@ -93,6 +93,7 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+pub mod live_route_state;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
     EqTargetPreparerError, INPUT_FILTER_EDIT_CAPACITY, INPUT_FILTER_TARGET_CAPACITY,
@@ -102,6 +103,7 @@ pub use control_preparation::{
 pub mod prepare;
 pub mod render_session;
 pub mod response;
+pub mod route_controls;
 pub mod shape;
 pub mod solo;
 pub mod source;
@@ -125,6 +127,7 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
     HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
@@ -143,6 +146,9 @@ pub use response::{
     ResponseSnapshot, ResponseSnapshotCollector, ResponseSnapshotMode, ResponseSnapshotOutput,
     ResponseSnapshotOwner, ResponseSnapshotQueryError, ResponseSnapshotQuerySummary,
     generate_response_grid, prepare_response_preview, query_response_snapshot_into,
+};
+pub use route_controls::{
+    RouteControlError, RouteControlProducer, RouteControlRecord, RouteControlResources,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{LiveControlMuteDelta, LiveControlSoloState, StripMuteSeed};

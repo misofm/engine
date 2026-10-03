@@ -46,7 +46,7 @@ fn document(revision: u64, console: &str, a: &str, b: &str) -> String {
         format!(
             r#"{{ "id": "{id}-out", "source": {{ "kind": "track", "track_id": "{id}", "tap": "post_pan" }},
               "destination": {{ "kind": "output_input", "output_id": "main-out" }},
-              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0 }}"#
+              "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }}, "gain_db": 0.0, "mute": false, "follows_mute": false }}"#
         )
     };
     format!(
@@ -836,4 +836,81 @@ fn a_track_cannot_change_the_slot_set_through_its_entries() {
         assert_eq!(store.revision(), SessionRevision(7), "{name}");
         assert_eq!(store.canonical_snapshot(), snapshot, "{name}");
     }
+}
+
+/// #1218 gates 6 and 7 (D1). `SetRouteFollowsMute` (`0x0507`), through the wire, is validated on
+/// the final candidate like every edit:
+///
+/// - `true` on route `a-out`, whose destination is the output, refuses the whole transaction with
+///   `schema.invalid_enum` at `$.routes[0].follows_mute`; the revision, model and snapshot stay;
+/// - the same edit followed by re-pointing `a-out` into submix `bus` commits, and the committed
+///   snapshot is the canonical JSON of the hand-edited model;
+/// - `false` then commits back.
+///
+/// Red if an output route can follow (a strip's main route would stay silent after a live
+/// unmute, VERIFY-2 N1), if the refusal were a per-edit check that refused the re-pointing
+/// transaction, or if `0x0507` writes the wrong route or ignores the value.
+#[test]
+fn set_route_follows_mute_is_legal_only_on_a_route_into_a_submix() {
+    let mut start = base();
+    start
+        .submixes
+        .push(Submix::unity(id("bus"), &start.console));
+    let mut store = SessionStore::new(start, caps()).expect("a unity bus compiles");
+    let revision = store.revision();
+    let snapshot = store.canonical_snapshot().to_owned();
+    let model = store.compiled().normalized_model().clone();
+    assert_eq!(model.routes[0].id.as_str(), "a-out");
+    let follow = |follows_mute| SessionEdit::SetRouteFollowsMute {
+        route_id: id("a-out"),
+        follows_mute,
+    };
+
+    let refused = through_the_wire(&[follow(true)]);
+    let error = store
+        .apply_transaction(ExpectedRevision::Exact(revision), &refused)
+        .expect_err("an output route cannot follow");
+    assert_eq!(
+        refusal_codes(&error, refused.len()),
+        [(
+            "schema.invalid_enum".to_owned(),
+            "$.routes[0].follows_mute".to_owned()
+        )]
+    );
+    assert_eq!(store.revision(), revision);
+    assert_eq!(store.canonical_snapshot(), snapshot);
+    assert_eq!(store.compiled().normalized_model(), &model);
+
+    let repointed = through_the_wire(&[
+        follow(true),
+        SessionEdit::SetRouteDestination {
+            route_id: id("a-out"),
+            destination: session::RouteDestination::SubmixInput {
+                submix_id: id("bus"),
+            },
+        },
+    ]);
+    let commit = store
+        .apply_transaction(ExpectedRevision::Exact(revision), &repointed)
+        .expect("a follow on a route re-pointed into a submix commits");
+    assert_eq!(commit.revision.0, revision.0 + 1);
+    let mut expected = model.clone();
+    expected.revision = revision.0 + 1;
+    expected.routes[0].follows_mute = true;
+    expected.routes[0].destination = session::RouteDestination::SubmixInput {
+        submix_id: id("bus"),
+    };
+    assert_eq!(
+        store.canonical_snapshot(),
+        canonical_session_json(&expected).expect("canonical")
+    );
+    assert!(!store.compiled().normalized_model().routes[1].follows_mute);
+
+    store
+        .apply_transaction(
+            ExpectedRevision::Exact(SessionRevision(revision.0 + 1)),
+            &through_the_wire(&[follow(false)]),
+        )
+        .expect("a follow switched off commits");
+    assert!(!store.compiled().normalized_model().routes[0].follows_mute);
 }

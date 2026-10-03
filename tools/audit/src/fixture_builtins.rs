@@ -5099,7 +5099,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"5f887676f5af0b6dd600b5021ad31b1f3512cdd7ad0c770151e7e4f9aca13c07\""),
+            benchmark_field_pair("session_template_sha256", "\"d946f4630cc188f1a0c611a2207b70884f686f7f619e926bb87bd123cac981a6\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5272,7 +5272,12 @@ mod tests {
             // Re-pinned by issue #1093: `canonical.json` moved to decision 12's console shape, so
             // the two `prepare_256_tracks` workloads name its new digest (and the `post_pan` tap);
             // no PCM, meter, response or resource payload moved.
-            "fced289fb8d0891068ac824b6104266e33b69876e6014cf06afeed9eb6a1e2f9",
+            // Re-pinned by issue #1216: route field `mute` added, value false, so `canonical.json`
+            // and the two `prepare_256_tracks` workloads naming it move; nothing else moved.
+            // Re-pinned by issue #1218: route field `follows_mute` added, value false, so
+            // `canonical.json` and the two `prepare_256_tracks` workloads naming it move; nothing
+            // else moved.
+            "867d900422200e9b79af284f0709a1da08db3c2caa589e24bcd1f49ebb5e4def",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

@@ -212,6 +212,8 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
+  miso_engine_web_v1_live_control_route_count \
+  miso_engine_web_v1_live_control_route_id \
   miso_engine_web_v1_live_control_submix_count \
   miso_engine_web_v1_live_control_submix_id \
   miso_engine_web_v1_live_control_track_count \
@@ -455,7 +457,11 @@ fi
 #
 # The `--kernel-min` half of the ratchet -- the part that actually counts kernels -- rises from 8
 # to 11, by the three this wave added. It never drops. The artifact carried thirteen then; since
-# #1110 removed the eight-lane multiband body it carries twelve, a one-kernel slack.
+# #1110 removed the eight-lane multiband body it carried twelve, a one-kernel slack. Issue #1220
+# links the live route's indexed-ramp mix, `lane::kernels::route_mix_ramp_block<f32x4>` (21 vector
+# / 0 scalar since the #1220 amendment; 22 at attempt 1), into the render path: the artifact
+# carries thirteen and the floor rises to that count, so the slack is spent and losing any one
+# kernel is red.
 #
 # The pattern counts four-lane kernels only (`4wide6f32x4`; it was `4wide6f32x[48]`), so an
 # eight-lane kernel can never pad the count. Eight lanes are refused outright instead: the
@@ -470,7 +476,7 @@ printf '%s
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
 ' "$named_disassembly" |
-  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 11 ||
+  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x4' --kernel-min 13 ||
   exit 1
 
 # #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation

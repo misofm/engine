@@ -180,7 +180,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         shape
             .longest_source_id_bytes
             .max(shape.longest_track_id_bytes)
-            .max(shape.longest_submix_id_bytes),
+            .max(shape.longest_submix_id_bytes)
+            .max(shape.longest_route_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -926,7 +927,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3386,7 +3388,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             shape
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
-                .max(shape.longest_submix_id_bytes),
+                .max(shape.longest_submix_id_bytes)
+                .max(shape.longest_route_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3452,7 +3455,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             "{name}: exact owner slices, owner box and once-retained factory"
         );
         let decoded_count =
-            command_staging_count(shape.track_count as usize).expect("decoded command count");
+            command_staging_count(shape.track_count as usize, 0).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
         let input_shadow_bytes = if live_control_command_queue_records == 0 {
             0
@@ -5940,6 +5943,80 @@ fn submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them() {
     assert_ne!(handle, 0, "the submix-free session boots");
     assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
     assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+}
+
+/// Issue #1223 gate 4 and D1: the route exports enumerate exactly the live sends, in the order a
+/// send kind's index word reads, through ID staging sized for the longest route ID.
+///
+/// Two tracks feed one unity bus through two sends: a 63-byte `zz-` send, longer than every
+/// source, track and submix ID, and `send-a`; every strip also routes to the output, and
+/// `bx-main` sorts before both sends. Red if the staging capacity ignores route IDs (the long
+/// ID's copy overruns the buffer and traps), or if the export enumerates any order or subset
+/// other than the live send producers' (all routes would put `bx-main` at index 0).
+#[test]
+fn live_route_ids_enumerate_in_send_index_order_through_staging_sized_for_them() {
+    let long = format!("zz-{}", "x".repeat(60));
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    for id in ["t0", "t1"] {
+        strip_add_track(&mut model, &source, &track, id);
+    }
+    model.submixes = vec![session::Submix::unity(strip_id("bx"), &model.console)];
+    for (id, from) in [(long.as_str(), "t0"), ("send-a", "t1")] {
+        model.routes.push(strip_route(
+            &route,
+            id,
+            strip_post_pan(from, false),
+            strip_into("bx"),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    for strip in ["t0", "t1", "bx"] {
+        model.routes.push(strip_route(
+            &route,
+            &format!("{strip}-main"),
+            strip_post_pan(strip, strip == "bx"),
+            output.clone(),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    let document = canonical_session_json(&model).expect("long send session canonicalizes");
+
+    let handle = crate::ffi::test_boot(document.as_bytes(), strip_options(4, 0, 0));
+    assert_ne!(handle, 0, "the long-send session boots");
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, long.len() as u64);
+    assert_eq!(miso_engine_web_v1_live_control_route_count(handle), 2);
+    for (index, expected) in ["send-a", long.as_str()].iter().enumerate() {
+        let length = miso_engine_web_v1_live_control_route_id(handle, index as u32);
+        assert_eq!(length, expected.len() as u32, "live route {index}");
+        assert_eq!(
+            crate::ffi::test_read_source_id(handle, length).expect("staged route ID"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(miso_engine_web_v1_live_control_route_id(handle, 2), 0);
+    assert_eq!(
+        miso_engine_web_v1_live_control_route_count(handle.wrapping_add(1)),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+
+    // Without live controls there are no send producers, so no live route.
+    let handle = crate::ffi::test_boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..boot_options(STRIP_QUANTUM)
+        },
+    );
+    assert_ne!(
+        handle, 0,
+        "the long-send session boots without live controls"
+    );
+    assert_eq!(miso_engine_web_v1_live_control_route_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_live_control_route_id(handle, 0), 0);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
@@ -10431,4 +10508,2473 @@ fn bus_edits_and_a_bus_observation_admit_and_render_without_allocating() {
     assert_eq!(render, RESULT_OK);
     assert_eq!(allocations, 0, "admission/render allocated");
     assert_eq!(deallocations, 0, "admission/render freed");
+}
+
+// Issue #1222: browser live send commands. A send is addressed by its live-route index: its
+// position among the routes into submixes, in canonical route-ID order.
+
+/// The live sends of [`send_document`], in live-route (route-ID) order:
+/// `(route id, source strip id, the source is a submix, destination bus)`. Seven sends against
+/// six strips, so a valid live-route index reaches past the strip count.
+const SEND_ROUTES: [(&str, &str, bool, &str); 7] = [
+    ("send-a", "t0", false, "bx"),
+    ("send-b", "t0", false, "by"),
+    ("send-c", "t1", false, "bx"),
+    ("send-d", "t1", false, "by"),
+    ("send-e", "t2", false, "by"),
+    ("send-f", "t2", false, "bx"),
+    ("send-g", "bx", true, "by"),
+];
+/// The order [`send_document`] declares the sends in: not route-ID order.
+const SEND_DECLARATION_ORDER: [usize; 7] = [6, 2, 0, 5, 3, 1, 4];
+/// Strips of [`send_document`]: four tracks, then `bx` and `by`.
+const SEND_STRIPS: u32 = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SendValues {
+    gain_db: f32,
+    matrix: [f32; 4],
+    mute: bool,
+}
+
+/// The session's send values: every matrix asymmetric (`ll != rr`, `lr != rl`) and nonzero.
+const SEND_SEEDS: [SendValues; 7] = [
+    SendValues {
+        gain_db: -3.0,
+        matrix: [0.8, -0.3, 0.25, 0.6],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 2.0,
+        matrix: [-0.5, 0.7, 0.9, -0.2],
+        mute: false,
+    },
+    SendValues {
+        gain_db: -6.0,
+        matrix: [0.35, 0.15, -0.65, 0.45],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 0.0,
+        matrix: [0.6, 0.4, -0.3, 0.9],
+        mute: false,
+    },
+    SendValues {
+        gain_db: -1.5,
+        matrix: [-0.7, -0.2, 0.55, 0.3],
+        mute: false,
+    },
+    SendValues {
+        gain_db: 1.0,
+        matrix: [0.45, -0.85, 0.1, 0.75],
+        mute: true,
+    },
+    SendValues {
+        gain_db: -4.5,
+        matrix: [0.5, 0.2, -0.4, 0.95],
+        mute: false,
+    },
+];
+
+/// Four tracks `t0..t3`, each reading its own source, with a unity strip; two unity submixes `bx`
+/// and `by` (no console slot, no insert, HPF and LPF off); the [`SEND_ROUTES`] sends at `values`;
+/// and every track and bus at unity to the output. `t3` sends nothing.
+fn send_document(values: &[SendValues; 7]) -> String {
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    for index in 0..4 {
+        strip_add_track(&mut model, &source, &track, &format!("t{index}"));
+    }
+    model.submixes = vec![
+        session::Submix::unity(strip_id("bx"), &model.console),
+        session::Submix::unity(strip_id("by"), &model.console),
+    ];
+    for live in SEND_DECLARATION_ORDER {
+        let (id, source, submix, bus) = SEND_ROUTES[live];
+        let mut send = strip_route(
+            &route,
+            id,
+            strip_post_pan(source, submix),
+            strip_into(bus),
+            values[live].matrix,
+        );
+        send.gain_db = values[live].gain_db;
+        send.mute = values[live].mute;
+        model.routes.push(send);
+    }
+    for strip in ["t0", "t1", "t2", "t3", "bx", "by"] {
+        model.routes.push(strip_route(
+            &route,
+            &format!("{strip}-main"),
+            strip_post_pan(strip, strip.starts_with('b')),
+            output.clone(),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    canonical_session_json(&model).expect("send session canonicalizes")
+}
+
+fn send_host(values: &[SendValues; 7], queue_records: u64) -> AudioWorkletEngineHost {
+    strip_boot(&send_document(values), strip_options(queue_records, 0, 0))
+}
+
+/// Feed every track its own two-lane signal for `block` and render it.
+fn send_feed(host: &mut AudioWorkletEngineHost, block: u64) {
+    for feed in 0..4_u64 {
+        submit_strip_source(host, &format!("t{feed}"), block, &strip_planes(feed, block));
+    }
+}
+
+fn send_render(host: &mut AudioWorkletEngineHost, block: u64) -> Vec<f32> {
+    send_feed(host, block);
+    assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+    host.output_pcm().expect("output").to_vec()
+}
+
+/// Stage one send record at wire index `index`.
+fn stage_send(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    kind: u32,
+    route: u32,
+    smoothing: u32,
+    values: [f32; 4],
+) {
+    stage_command(host, index, kind, 255, 255, route, 0, 0, smoothing, values);
+}
+
+/// The host's mirror of every live send, as `SendValues`.
+fn send_mirror(host: &AudioWorkletEngineHost) -> Vec<SendValues> {
+    let routes = &host.ready.as_ref().expect("ready").routes;
+    (0..routes.len())
+        .map(|route| {
+            let entry = routes.get(route).expect("live route");
+            SendValues {
+                gain_db: entry.gain_db,
+                matrix: entry.matrix,
+                mute: entry.mute,
+            }
+        })
+        .collect()
+}
+
+/// Every route queue's free room.
+fn send_queue_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+    host.ready
+        .as_ref()
+        .expect("ready")
+        .route_controls
+        .iter()
+        .map(RouteControlProducer::free)
+        .collect()
+}
+
+/// splitmix64, for the randomized gate.
+struct SendDraw(u64);
+
+impl SendDraw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    /// Uniform in `[low, high)`.
+    fn uniform(&mut self, low: f32, high: f32) -> f32 {
+        let unit = (self.next() >> 40) as f32 / (1_u64 << 24) as f32;
+        low + (high - low) * unit
+    }
+
+    /// A nonzero coefficient in `±[0.1, 1)`.
+    fn coefficient(&mut self) -> f32 {
+        let magnitude = self.uniform(0.1, 1.0);
+        if self.below(2) == 0 {
+            magnitude
+        } else {
+            -magnitude
+        }
+    }
+}
+
+/// Issue #1222 gate 1: kinds 13, 14 and 15 sent at random live routes settle, bit for bit, on the
+/// output of a host booted from a session holding the edited values.
+///
+/// Every track reads its own source with distinct lanes, the sends reach two different buses
+/// (and one bus feeds the other), every matrix is asymmetric, and the sends are declared out of
+/// route-ID order. Live-route index 6 is past the strip count.
+///
+/// Test value: red if a kind's spelling or the index addresses the wrong send (by declaration
+/// order, by overall route index or by strip), the matrix words are read in another order, or a
+/// record is built from a stale mirror field. No browser path has driven a send before.
+#[test]
+fn a_live_send_edit_lands_on_a_fresh_plans_bits() {
+    let mut draw = SendDraw(0x1222);
+    for trial in 0..4 {
+        for smoothing in [0_u32, 480] {
+            let mut edits: Vec<(u32, usize, [f32; 4])> = Vec::new();
+            let mut kinds = vec![
+                COMMAND_ROUTE_GAIN_DB,
+                COMMAND_ROUTE_MUTE,
+                COMMAND_ROUTE_MATRIX,
+            ];
+            for _ in 0..draw.below(4) {
+                kinds.push(COMMAND_ROUTE_GAIN_DB + draw.below(3) as u32);
+            }
+            for _ in 0..kinds.len() {
+                let pick = draw.below(kinds.len() as u64) as usize;
+                let last = kinds.len() - 1;
+                kinds.swap(pick, last);
+            }
+            let mut target = SEND_SEEDS;
+            for kind in kinds {
+                let route = draw.below(SEND_ROUTES.len() as u64) as usize;
+                let values = match kind {
+                    COMMAND_ROUTE_GAIN_DB => {
+                        let gain_db = draw.uniform(-24.0, 6.0);
+                        target[route].gain_db = gain_db;
+                        [gain_db, 0.0, 0.0, 0.0]
+                    }
+                    COMMAND_ROUTE_MUTE => {
+                        let mute = draw.below(2) == 1;
+                        target[route].mute = mute;
+                        [f32::from(u8::from(mute)), 0.0, 0.0, 0.0]
+                    }
+                    _ => {
+                        let matrix = [
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                        ];
+                        target[route].matrix = matrix;
+                        matrix
+                    }
+                };
+                edits.push((kind, route, values));
+            }
+            let what = format!("trial {trial}, smoothing {smoothing}, edits {edits:?}");
+            let mut live = send_host(&SEND_SEEDS, 16);
+            let mut fresh = send_host(&target, 16);
+            for block in 0..2 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            // Two batches, one block apart, so a send can be edited across batches too.
+            let split = edits.len() / 2;
+            for (batch, block) in [(&edits[..split], 2_u64), (&edits[split..], 3)] {
+                for (index, (kind, route, values)) in batch.iter().enumerate() {
+                    stage_send(&mut live, index, *kind, *route as u32, smoothing, *values);
+                }
+                if !batch.is_empty() {
+                    assert_eq!(
+                        live.submit_commands(batch.len() as u32),
+                        RESULT_OK,
+                        "{what}: batch at block {block}"
+                    );
+                }
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            assert_eq!(send_mirror(&live), target, "{what}: the mirror");
+            // 480 samples settle within four 128-frame blocks of the last batch.
+            for block in 4..8 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            let mut audible = false;
+            for block in 8..12 {
+                let left = send_render(&mut live, block);
+                let right = send_render(&mut fresh, block);
+                for (sample, (x, y)) in left.iter().zip(&right).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{what}: block {block} sample {sample}: live {x} vs fresh {y}"
+                    );
+                }
+                audible |= left.iter().any(|sample| *sample != 0.0);
+            }
+            assert!(audible, "{what}: the output carries signal");
+        }
+    }
+}
+
+/// The sends of [`seeded_send_document`], in live-route (route-ID) order:
+/// `(route id, source strip id, the source is a submix, destination bus, follows_mute)`. Every send
+/// taps pre-fader, so a muted strip still carries signal at the tap and only `follows_mute` can
+/// silence its lanes there. Following sends leave every track for `bx` and three for `by`; `f-h`
+/// and `f-j` do not follow; `f-i` follows bus `bx`, whose right lane is muted.
+const SEEDED_SENDS: [(&str, &str, bool, &str, bool); 10] = [
+    ("f-a", "t0", false, "bx", true),
+    ("f-b", "t1", false, "bx", true),
+    ("f-c", "t2", false, "bx", true),
+    ("f-d", "t3", false, "bx", true),
+    ("f-e", "t0", false, "by", true),
+    ("f-f", "t1", false, "by", true),
+    ("f-g", "t2", false, "by", true),
+    ("f-h", "t3", false, "by", false),
+    ("f-i", "bx", true, "by", true),
+    ("f-j", "t1", false, "by", false),
+];
+
+/// Four tracks `t0..t3` with fader lane mutes `[F,F]`, `[T,F]`, `[F,T]` and `[T,T]` (every
+/// combination), each reading its own source; unity submixes `bx` (right lane muted) and `by`; the
+/// [`SEEDED_SENDS`] at `values`, declared in reverse route-ID order; and every strip at unity to
+/// the output. With `with_inserts`, every track carries the fixture's compressor insert, so the
+/// effect band is four queues long.
+fn seeded_send_document(values: &[SendValues], with_inserts: bool) -> String {
+    let (mut model, source, mut track, compressor, route) = strip_base();
+    if with_inserts {
+        track.inserts.effects = vec![compressor];
+    }
+    let output = route.destination.clone();
+    let mutes = [[false, false], [true, false], [false, true], [true, true]];
+    for (index, [left, right]) in mutes.into_iter().enumerate() {
+        strip_add_track(&mut model, &source, &track, &format!("t{index}"));
+        model.tracks[index].fader.left_mute = left;
+        model.tracks[index].fader.right_mute = right;
+    }
+    let mut bx = session::Submix::unity(strip_id("bx"), &model.console);
+    bx.fader.right_mute = true;
+    model.submixes = vec![bx, session::Submix::unity(strip_id("by"), &model.console)];
+    for (live, (id, source, submix, bus, follows)) in SEEDED_SENDS.iter().enumerate().rev() {
+        let tap = session::SendTap::PreFader;
+        let source = if *submix {
+            session::RouteSource::Submix {
+                submix_id: strip_id(source),
+                tap,
+            }
+        } else {
+            session::RouteSource::Track {
+                track_id: strip_id(source),
+                tap,
+            }
+        };
+        let mut send = strip_route(&route, id, source, strip_into(bus), values[live].matrix);
+        send.gain_db = values[live].gain_db;
+        send.mute = values[live].mute;
+        send.follows_mute = *follows;
+        model.routes.push(send);
+    }
+    for strip in ["t0", "t1", "t2", "t3", "bx", "by"] {
+        model.routes.push(strip_route(
+            &route,
+            &format!("{strip}-main"),
+            strip_post_pan(strip, strip.starts_with('b')),
+            output.clone(),
+            [1.0, 0.0, 0.0, 1.0],
+        ));
+    }
+    canonical_session_json(&model).expect("seeded send session canonicalizes")
+}
+
+/// [`seeded_send_document`]'s session values: unmuted, every matrix nonzero and drawn at random.
+fn seeded_send_values() -> Vec<SendValues> {
+    let mut draw = SendDraw(0xFEED);
+    (0..SEEDED_SENDS.len())
+        .map(|_| SendValues {
+            gain_db: draw.uniform(-9.0, 3.0),
+            matrix: [
+                draw.coefficient(),
+                draw.coefficient(),
+                draw.coefficient(),
+                draw.coefficient(),
+            ],
+            mute: false,
+        })
+        .collect()
+}
+
+/// One batch of random kind 13, 14 and 15 records on [`seeded_send_document`]'s sends, six trials
+/// at smoothing 0 and 480 each: every record must take exactly one slot of its own send's queue,
+/// and the output must settle, bit for bit, on a host booted from the edited values.
+fn seeded_send_edits_land_on_a_fresh_plan(with_inserts: bool, seed: u64) {
+    let seeds = seeded_send_values();
+    let mut draw = SendDraw(seed);
+    for trial in 0..6 {
+        for smoothing in [0_u32, 480] {
+            let mut target = seeds.clone();
+            let mut edits: Vec<(u32, usize, [f32; 4])> = Vec::new();
+            for _ in 0..3 + draw.below(6) {
+                let kind = COMMAND_ROUTE_GAIN_DB + draw.below(3) as u32;
+                let route = draw.below(SEEDED_SENDS.len() as u64) as usize;
+                let values = match kind {
+                    COMMAND_ROUTE_GAIN_DB => {
+                        let gain_db = draw.uniform(-24.0, 6.0);
+                        target[route].gain_db = gain_db;
+                        [gain_db, 0.0, 0.0, 0.0]
+                    }
+                    COMMAND_ROUTE_MUTE => {
+                        let mute = draw.below(2) == 1;
+                        target[route].mute = mute;
+                        [f32::from(u8::from(mute)), 0.0, 0.0, 0.0]
+                    }
+                    _ => {
+                        let matrix = [
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                            draw.coefficient(),
+                        ];
+                        target[route].matrix = matrix;
+                        matrix
+                    }
+                };
+                edits.push((kind, route, values));
+            }
+            let what = format!(
+                "inserts {with_inserts}, trial {trial}, smoothing {smoothing}, edits {edits:?}"
+            );
+            let options = strip_options(16, 0, 0);
+            let mut live = strip_boot(&seeded_send_document(&seeds, with_inserts), options);
+            let mut fresh = strip_boot(&seeded_send_document(&target, with_inserts), options);
+            assert_eq!(
+                live.ready.as_ref().expect("ready").route_controls.len(),
+                SEEDED_SENDS.len()
+            );
+            for block in 0..2 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            let before = send_queue_room(&live);
+            for (index, (kind, route, values)) in edits.iter().enumerate() {
+                stage_send(&mut live, index, *kind, *route as u32, smoothing, *values);
+            }
+            assert_eq!(
+                live.submit_commands(edits.len() as u32),
+                RESULT_OK,
+                "{what}"
+            );
+            let mut expected = before;
+            for (_, route, _) in &edits {
+                expected[*route] -= 1;
+            }
+            assert_eq!(
+                send_queue_room(&live),
+                expected,
+                "{what}: each record on its own send's queue"
+            );
+            // 480 samples settle within four 128-frame blocks of the batch.
+            for block in 2..7 {
+                send_render(&mut live, block);
+                send_render(&mut fresh, block);
+            }
+            let mut audible = false;
+            for block in 7..11 {
+                let left = send_render(&mut live, block);
+                let right = send_render(&mut fresh, block);
+                for (sample, (x, y)) in left.iter().zip(&right).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{what}: block {block} sample {sample}: live {x} vs fresh {y}"
+                    );
+                }
+                audible |= left.iter().any(|sample| *sample != 0.0);
+            }
+            assert!(audible, "{what}: the output carries signal");
+        }
+    }
+}
+
+/// Issue #1222, from its verdict's MINOR-1 and MINOR-2: live edits on following pre-fader sends
+/// whose source strips carry every lane-mute combination -- tracks `[F,F]`, `[T,F]`, `[F,T]`,
+/// `[T,T]` and a bus with its right lane muted -- take one slot of their own send's queue each and
+/// settle, bit for bit, on a fresh plan, so the mirror's seeded `source_lane_muted` is the
+/// prepared plan's follow-zeroed lanes. The session runs twice: without effects, and with an
+/// insert on every track, so the send band starts after a four-queue effect band (`3S + E + r`).
+///
+/// Test value: red if a send record is built without the mirror's `source_lane_muted`, so a live
+/// gain, matrix or unmute edit on a send that follows a muted strip leaks the muted lane into the
+/// bus; no other test edits a send whose source lanes start muted.
+#[test]
+fn a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits() {
+    seeded_send_edits_land_on_a_fresh_plan(false, 0xA11CE);
+    seeded_send_edits_land_on_a_fresh_plan(true, 0xB0B);
+}
+
+/// Require a refused submission's typed report, an empty staging count, untouched send and fader
+/// queues and an unchanged, closed send mirror.
+fn assert_send_refusal(
+    host: &AudioWorkletEngineHost,
+    reason: u32,
+    rejected_index: u32,
+    room: &[usize],
+    fader_room: &[usize],
+    what: &str,
+) {
+    let report = *host.command_report();
+    assert_eq!(report.reason, reason, "{what}: reason");
+    assert_eq!(report.rejected_index, rejected_index, "{what}: wire index");
+    assert_eq!(report.admitted, 0, "{what}: admitted");
+    assert_eq!(send_queue_room(host), room, "{what}: send queues");
+    let ready = host.ready.as_ref().expect("ready");
+    let faders: Vec<usize> = ready
+        .controls
+        .iter()
+        .map(|controls| controls.fader.available_capacity())
+        .collect();
+    assert_eq!(faders, fader_room, "{what}: fader queues");
+    assert!(!ready.routes.transaction_open(), "{what}: mirror closed");
+    assert_eq!(send_mirror(host), SEND_SEEDS, "{what}: mirror unchanged");
+}
+
+/// Issue #1222 gate 2: a send batch is all or nothing.
+///
+/// * A valid `routeGainDb` and a `routeMatrix` whose folded coefficient overflows (finite on the
+///   wire, so decode admits it, and refused by the route's own domain rule) stage nothing and
+///   refuse `DOMAIN` at the second record.
+/// * A batch that overfills one send queue is typed backpressure at its first record on that
+///   queue, behind a valid fader record, and pushes nothing.
+/// * A valid send record and a valid fader record, with that fader queue already full, push
+///   neither; nor, in a session with an insert on every track, do a valid send record and a valid
+///   effect-bypass record with that effect queue already full.
+///
+/// In every case the send mirror is unchanged. And a refused batch after an admitted one keeps
+/// the admitted values: the mirror holds them, and a further edit settles on a fresh plan holding
+/// them.
+///
+/// Test value: red if admission pushes a send record, or commits the send mirror, before every
+/// record is validated and every queue -- send and effect queues included -- has room, or if a
+/// refused batch rolls the mirror back past an admitted batch the render plane applied.
+#[test]
+fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
+    const DEPTH: u64 = 4;
+    let depth = DEPTH as usize;
+    let fader_room = vec![depth; SEND_STRIPS as usize];
+    let room = vec![depth; SEND_ROUTES.len()];
+
+    // `send-b` is at +2 dB: `ll = 3e38` folds past `f32::MAX`.
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        0,
+        0,
+        [-9.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(
+        &mut host,
+        1,
+        COMMAND_ROUTE_MATRIX,
+        1,
+        0,
+        [3.0e38, 0.1, 0.2, 0.3],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_DOMAIN,
+        1,
+        &room,
+        &fader_room,
+        "domain",
+    );
+
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    for index in 1..=depth + 1 {
+        stage_send(
+            &mut host,
+            index,
+            COMMAND_ROUTE_GAIN_DB,
+            2,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(host.submit_commands(DEPTH as u32 + 2), RESULT_BACKPRESSURE);
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_BACKPRESSURE,
+        1,
+        &room,
+        &fader_room,
+        "send full",
+    );
+
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    for index in 0..depth {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            3,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(DEPTH as u32),
+        RESULT_OK,
+        "fill t3's fader queue"
+    );
+    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 4, 0, [1.0, 0.0, 0.0, 0.0]);
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        3,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE);
+    let mut full = fader_room.clone();
+    full[3] = 0;
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_BACKPRESSURE,
+        1,
+        &room,
+        &full,
+        "fader full",
+    );
+
+    // With an insert on every track the effect band sits between the strip bands and the send
+    // band: a send record beside an effect record whose queue is full pushes neither.
+    let mut host = strip_boot(
+        &seeded_send_document(&seeded_send_values(), true),
+        strip_options(DEPTH, 0, 0),
+    );
+    send_render(&mut host, 0);
+    for index in 0..depth {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_BYPASS,
+            RACK_INSERTS,
+            255,
+            0,
+            0,
+            0,
+            0,
+            [(index % 2) as f32, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(DEPTH as u32),
+        RESULT_OK,
+        "fill t0's insert queue"
+    );
+    let room = send_queue_room(&host);
+    let mirror = send_mirror(&host);
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        0,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_EFFECT_BYPASS,
+        RACK_INSERTS,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE);
+    let report = *host.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(report.rejected_index, 1, "refused at the effect record");
+    assert_eq!(report.admitted, 0);
+    assert_eq!(
+        send_queue_room(&host),
+        room,
+        "the send record is not pushed"
+    );
+    assert_eq!(send_mirror(&host), mirror, "the mirror is unchanged");
+    assert!(
+        !host
+            .ready
+            .as_ref()
+            .expect("ready")
+            .routes
+            .transaction_open()
+    );
+
+    // A refusal after an admission rolls the mirror back to the admitted values, which the render
+    // plane has applied, and a further edit is built from them.
+    let mut host = send_host(&SEND_SEEDS, DEPTH);
+    send_render(&mut host, 0);
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        0,
+        0,
+        [-9.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    send_render(&mut host, 1);
+    // `send-b` is at +2 dB: `ll = 3e38` folds past `f32::MAX`.
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_MATRIX,
+        0,
+        0,
+        [0.1, 0.2, 0.3, 0.4],
+    );
+    stage_send(
+        &mut host,
+        1,
+        COMMAND_ROUTE_MATRIX,
+        1,
+        0,
+        [3.0e38, 0.1, 0.2, 0.3],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    let mut admitted = SEND_SEEDS;
+    admitted[0].gain_db = -9.0;
+    assert_eq!(
+        send_mirror(&host),
+        admitted,
+        "the admitted gain survives the refusal"
+    );
+    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 0, 0, [0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let mut fresh = send_host(&admitted, DEPTH);
+    send_render(&mut fresh, 0);
+    send_render(&mut fresh, 1);
+    for block in 2..6 {
+        let left = send_render(&mut host, block);
+        let right = send_render(&mut fresh, block);
+        for (sample, (x, y)) in left.iter().zip(&right).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "block {block} sample {sample}: live {x} vs fresh {y}"
+            );
+        }
+    }
+}
+
+/// Issue #1222 gate 3: the index word is checked against the count its kind addresses. A strip
+/// kind at or past the strip count is `UNKNOWN_TRACK`; a send kind at or past the live-route
+/// count is `unknownRoute`, below the strip count too (a session with fewer sends than strips);
+/// and a valid send index past the strip count (a session with more) is admitted.
+///
+/// Test value: red if the bounds check runs before kind dispatch (send index 6 is refused as an
+/// unknown track, send index 5 passes) or against the wrong count, or if a send reuses the track
+/// reason.
+#[test]
+fn every_kind_is_bounded_by_the_count_it_addresses() {
+    let room = vec![16_usize; SEND_ROUTES.len()];
+    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    for strip in [SEND_STRIPS, SEND_STRIPS + 1, u32::MAX] {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            strip,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "strip {strip}"
+        );
+        assert_send_refusal(
+            &host,
+            COMMAND_REASON_UNKNOWN_TRACK,
+            0,
+            &room,
+            &fader_room,
+            "strip",
+        );
+    }
+    for kind in [
+        COMMAND_ROUTE_GAIN_DB,
+        COMMAND_ROUTE_MUTE,
+        COMMAND_ROUTE_MATRIX,
+    ] {
+        for route in [7_u32, 8, u32::MAX] {
+            stage_send(
+                &mut host,
+                0,
+                COMMAND_ROUTE_GAIN_DB,
+                0,
+                0,
+                [-2.0, 0.0, 0.0, 0.0],
+            );
+            stage_send(&mut host, 1, kind, route, 0, [1.0, 0.0, 0.0, 0.0]);
+            assert_eq!(
+                host.submit_commands(2),
+                RESULT_INVALID_ARGUMENT,
+                "send {route}"
+            );
+            assert_send_refusal(
+                &host,
+                COMMAND_REASON_UNKNOWN_ROUTE,
+                1,
+                &room,
+                &fader_room,
+                "send past the live routes",
+            );
+        }
+    }
+    stage_send(
+        &mut host,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        6,
+        0,
+        [-2.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_OK,
+        "send 6, past the strip count"
+    );
+    let mut room = room;
+    room[6] -= 1;
+    assert_eq!(send_queue_room(&host), room, "send 6's queue holds it");
+
+    // Fewer sends than strips: three sends, four strips. Index 3 and the bus's strip index are
+    // below the strip count and still not sends.
+    let (bus, _) = strip_pair_documents(None);
+    let mut host = strip_boot(&bus, strip_options(16, 0, 0));
+    assert_eq!(host.ready.as_ref().expect("ready").route_controls.len(), 3);
+    for route in [3_u32, STRIP_BUS] {
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_MUTE,
+            route,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "send {route}"
+        );
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_UNKNOWN_ROUTE, "send {route}");
+        assert_eq!(report.rejected_index, 0);
+    }
+    stage_send(&mut host, 0, COMMAND_ROUTE_MUTE, 2, 0, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "the last send");
+}
+
+/// One malformed send record: `(what, kind, rack, channel, effect, parameter, values)`.
+type SendShape = (&'static str, u32, u8, u8, u32, u32, [f32; 4]);
+
+/// Issue #1222 D1: a send record's fixed shape. Every field a send does not use must be its
+/// not-applicable value, and `routeMute` takes exactly `0` or `1`.
+///
+/// Test value: red if a send kind accepts a lane, a rack, an effect or parameter word, or a value
+/// past its own, or takes a non-boolean mute as a mute.
+#[test]
+fn send_records_are_shape_checked() {
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    let room = vec![16_usize; SEND_ROUTES.len()];
+    let fader_room = vec![16_usize; SEND_STRIPS as usize];
+    let gain = [-2.0, 0.0, 0.0, 0.0];
+    let malformed: [SendShape; 7] = [
+        ("a lane", COMMAND_ROUTE_GAIN_DB, 255, 2, 0, 0, gain),
+        (
+            "a rack",
+            COMMAND_ROUTE_GAIN_DB,
+            RACK_INSERTS,
+            255,
+            0,
+            0,
+            gain,
+        ),
+        (
+            "an effect",
+            COMMAND_ROUTE_MUTE,
+            255,
+            255,
+            1,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+        ),
+        (
+            "a parameter",
+            COMMAND_ROUTE_MATRIX,
+            255,
+            255,
+            0,
+            1,
+            [0.5; 4],
+        ),
+        (
+            "a second gain word",
+            COMMAND_ROUTE_GAIN_DB,
+            255,
+            255,
+            0,
+            0,
+            [-2.0, 0.0, 0.0, 1.0],
+        ),
+        (
+            "a second mute word",
+            COMMAND_ROUTE_MUTE,
+            255,
+            255,
+            0,
+            0,
+            [1.0, 1.0, 0.0, 0.0],
+        ),
+        (
+            "a lane on a matrix",
+            COMMAND_ROUTE_MATRIX,
+            255,
+            0,
+            0,
+            0,
+            [0.5; 4],
+        ),
+    ];
+    for (what, kind, rack, channel, effect, parameter, values) in malformed {
+        stage_command(
+            &mut host, 0, kind, rack, channel, 1, effect, parameter, 0, values,
+        );
+        assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "{what}");
+        assert_send_refusal(&host, COMMAND_REASON_MALFORMED, 0, &room, &fader_room, what);
+    }
+    for value in [0.5_f32, -1.0, 2.0] {
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_MUTE,
+            1,
+            0,
+            [value, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            RESULT_INVALID_ARGUMENT,
+            "mute {value}"
+        );
+        assert_send_refusal(
+            &host,
+            COMMAND_REASON_DOMAIN,
+            0,
+            &room,
+            &fader_room,
+            "mute value",
+        );
+    }
+    stage_send(&mut host, 0, COMMAND_ROUTE_GAIN_DB, 1, (1 << 22) + 1, gain);
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_INVALID_ARGUMENT,
+        "ramp past the bound"
+    );
+    assert_send_refusal(
+        &host,
+        COMMAND_REASON_DOMAIN,
+        0,
+        &room,
+        &fader_room,
+        "ramp length",
+    );
+}
+
+/// Issue #1222 gate 7: admitting send records of all three kinds -- several on one send -- and
+/// rendering them allocates and frees nothing, after one warm-up round.
+///
+/// Test value: red if admitting a send record or committing the send mirror allocates on the
+/// render-call path.
+#[test]
+fn send_edits_admit_and_render_without_allocating() {
+    let mut host = send_host(&SEND_SEEDS, 16);
+    send_render(&mut host, 0);
+    for block in 1..3_u64 {
+        let gain = if block == 1 { -8.0 } else { 1.0 };
+        stage_send(
+            &mut host,
+            0,
+            COMMAND_ROUTE_GAIN_DB,
+            3,
+            480,
+            [gain, 0.0, 0.0, 0.0],
+        );
+        stage_send(
+            &mut host,
+            1,
+            COMMAND_ROUTE_MATRIX,
+            3,
+            480,
+            [0.3, -0.6, 0.2, 0.7],
+        );
+        stage_send(
+            &mut host,
+            2,
+            COMMAND_ROUTE_MUTE,
+            6,
+            480,
+            [1.0, 0.0, 0.0, 0.0],
+        );
+        stage_command(
+            &mut host,
+            3,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            4,
+            0,
+            0,
+            480,
+            [-3.0, 0.0, 0.0, 0.0],
+        );
+        send_feed(&mut host, block);
+        let ((admission, render), allocations, deallocations) =
+            crate::ffi::live_response_ffi_tests::measured(|| {
+                (host.submit_commands(4), host.render_next())
+            });
+        assert_eq!(
+            admission, RESULT_OK,
+            "block {block}: the send batch is admitted"
+        );
+        assert_eq!(render, RESULT_OK, "block {block}");
+        if block == 2 {
+            assert_eq!(allocations, 0, "admission/render allocated");
+            assert_eq!(deallocations, 0, "admission/render freed");
+        }
+    }
+}
+
+/// The report of an independent host-core preparation of `document` at `queue_records`: its
+/// `route_control_resources` are `graph::route_control_resources` of the attached producers.
+fn send_prepare_report(document: &str, queue_records: u64) -> host_core::HostPrepareReport {
+    let parsed = parse_host_session(document).expect("send session parse");
+    let compiled = compile_host_model(
+        &parsed,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("send session compile");
+    let options = strip_options(queue_records, 0, 0);
+    let caps = prepare_caps(&compiled, options, options.source_ring_frames, u64::MAX);
+    let live_controls = live_control_request(options, STRIP_QUANTUM).expect("live-control request");
+    let (engine, _handles) = prepare_host_runtime_with_selected_meters_between_render_calls(
+        &compiled,
+        &caps,
+        &live_controls,
+        &[],
+    )
+    .expect("independent send preparation");
+    engine.report
+}
+
+/// Issue #1222, from the #1221 verdict's MINOR-1 and the #1222 verdict's MINOR-4: the browser's
+/// exact retained budget charges the route lanes it attaches and the send mirror.
+///
+/// * Between two queue depths of one session, the host's retained bridge bytes move by exactly the
+///   lanes' depth-dependent charge.
+/// * At one depth, removing one send (`send-g`) moves them by exactly that send's whole share:
+///   the document-dependent bridge rows (the document, the ID staging and one decoded-command
+///   entry for the follow pass), the compiled session model, the route lanes' whole
+///   `route_control_resources.total_bytes` and the mirror's two `LiveRoute` entries (the live
+///   values and their shadow), each from an independent preparation of the two sessions.
+/// * The exact-retained budget refuses one byte below the total, and a session without sends does
+///   not move with depth at all.
+///
+/// Test value: red if the browser leaves any part of the route lanes (queues, render-side owners,
+/// producer table, IDs, activity table) or the mirror and its shadow out of its exact retained
+/// report, so a budget that cannot hold them admits.
+#[test]
+fn the_exact_retained_budget_charges_the_send_lanes() {
+    let document = send_document(&SEND_SEEDS);
+    let mut twin = parse_session_json(&document).expect("send session parses");
+    twin.routes.retain(|route| route.id.as_str() != "send-g");
+    let twin = canonical_session_json(&twin).expect("twin session canonicalizes");
+    let bridge = |document: &str, queue_records: u64, sends: usize| {
+        let host = strip_boot(document, strip_options(queue_records, 0, 0));
+        assert_eq!(host.ready.as_ref().expect("ready").routes.len(), sends);
+        *host.resources()
+    };
+    let shallow = send_prepare_report(&document, 8);
+    let deep = send_prepare_report(&document, 64);
+    let twin_deep = send_prepare_report(&twin, 64);
+    let (lanes_8, lanes_64) = (
+        shallow.route_control_resources,
+        deep.route_control_resources,
+    );
+    assert_eq!(lanes_8.routes, SEND_ROUTES.len() as u64);
+    assert_eq!(
+        twin_deep.route_control_resources.routes,
+        SEND_ROUTES.len() as u64 - 1
+    );
+    assert!(
+        lanes_64.total_bytes > lanes_8.total_bytes,
+        "deeper queues cost more"
+    );
+    let at_8 = bridge(&document, 8, SEND_ROUTES.len());
+    let resources = bridge(&document, 64, SEND_ROUTES.len());
+    let without = bridge(&twin, 64, SEND_ROUTES.len() - 1);
+    assert_eq!(
+        resources.bridge_retained_bytes - at_8.bridge_retained_bytes,
+        lanes_64.total_bytes - lanes_8.total_bytes
+    );
+    assert_eq!(
+        resources.bridge_metadata_bytes - at_8.bridge_metadata_bytes,
+        lanes_64.total_bytes - lanes_8.total_bytes
+    );
+    assert!(resources.largest_bridge_allocation_bytes >= lanes_64.largest_allocation_bytes);
+
+    let document_rows = (resources.session_document_bytes - without.session_document_bytes)
+        + (resources.id_staging_bytes - without.id_staging_bytes)
+        + size_of::<StagedCommand>() as u64;
+    let lanes = lanes_64.total_bytes - twin_deep.route_control_resources.total_bytes;
+    let model = deep.session_model_bytes - twin_deep.session_model_bytes;
+    let mirror = 2 * size_of::<host_core::LiveRoute>() as u64;
+    assert_eq!(
+        resources.bridge_retained_bytes - without.bridge_retained_bytes,
+        document_rows + model + lanes + mirror,
+        "one send's whole retained share"
+    );
+    assert_eq!(
+        resources.bridge_metadata_bytes - without.bridge_metadata_bytes,
+        size_of::<StagedCommand>() as u64 + model + lanes + mirror,
+        "one send's whole metadata share"
+    );
+
+    let (_, track_only) = strip_pair_documents(None);
+    assert_eq!(
+        bridge(&track_only, 8, 0).bridge_retained_bytes,
+        bridge(&track_only, 64, 0).bridge_retained_bytes,
+        "no send, no lane"
+    );
+
+    let exact = exact_retained_report_total(&resources);
+    let admitted = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: exact,
+            ..strip_options(64, 0, 0)
+        },
+    );
+    assert!(admitted.is_ok(), "the exact retained total is admitted");
+    let refused = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: exact - 1,
+            ..strip_options(64, 0, 0)
+        },
+    )
+    .err()
+    .expect("one byte below the exact retained total refuses");
+    assert_eq!(refused.result(), RESULT_REFUSED_BUDGET);
+    assert!(
+        refused
+            .diagnostic()
+            .starts_with(b"host.budget.retained_exact\t"),
+        "the exact aggregate gate refuses: {}",
+        String::from_utf8_lossy(refused.diagnostic())
+    );
+}
+
+// Issue #1224: a send with `follows_mute` follows its source strip's effective mute live. Every
+// session here feeds each track its own two-lane signal (`strip_planes`), every send matrix is
+// asymmetric, and every bus is a unity submix (no console slot, no insert, input section
+// identity), so a comparison at the output is exact.
+
+/// One #1224 route: `(id, source strip, the source is a submix, tap, destination bus or `None`
+/// for the output, matrix, follows_mute)`.
+type FollowRoute<'a> = (
+    &'a str,
+    &'a str,
+    bool,
+    session::SendTap,
+    Option<&'a str>,
+    [f32; 4],
+    bool,
+);
+
+const FOLLOW_UNITY: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+/// A strip-to-output route at unity from the post-pan tap.
+const fn follow_main<'a>(id: &'a str, source: &'a str, bus: bool) -> FollowRoute<'a> {
+    (
+        id,
+        source,
+        bus,
+        session::SendTap::PostPan,
+        None,
+        FOLLOW_UNITY,
+        false,
+    )
+}
+
+/// Tracks `tracks` (track `tracks[i]` reads its own source, fed `strip_planes(i, _)`), unity
+/// submixes `buses`, the routes `routes`, the fader lane mutes `muted` by strip ID, and a
+/// true-peak limiter insert (default parameters) on track `limited`.
+fn follow_document(
+    tracks: &[&str],
+    buses: &[&str],
+    routes: &[FollowRoute<'_>],
+    muted: &[(&str, [bool; 2])],
+    limited: Option<&str>,
+) -> String {
+    let (mut model, source, track, mut limiter, template) = strip_base();
+    let output = template.destination.clone();
+    for id in tracks {
+        strip_add_track(&mut model, &source, &track, id);
+    }
+    model.submixes = buses
+        .iter()
+        .map(|id| session::Submix::unity(strip_id(id), &model.console))
+        .collect();
+    limiter.id = strip_id("ceiling");
+    limiter.identity = session::EffectIdentity::Native {
+        effect_id: strip_id("miso.true-peak-limiter"),
+    };
+    limiter.params = Vec::new();
+    for track in &mut model.tracks {
+        if limited == Some(track.id.as_str()) {
+            track.inserts.effects = vec![limiter.clone()];
+        }
+    }
+    for (id, lanes) in muted {
+        let fader = match model.tracks.iter_mut().find(|t| t.id.as_str() == *id) {
+            Some(track) => &mut track.fader,
+            None => {
+                &mut model
+                    .submixes
+                    .iter_mut()
+                    .find(|s| s.id.as_str() == *id)
+                    .expect("muted strip")
+                    .fader
+            }
+        };
+        (fader.left_mute, fader.right_mute) = (lanes[0], lanes[1]);
+    }
+    for (id, from, bus, tap, into, matrix, follows) in routes {
+        let source = if *bus {
+            session::RouteSource::Submix {
+                submix_id: strip_id(from),
+                tap: *tap,
+            }
+        } else {
+            session::RouteSource::Track {
+                track_id: strip_id(from),
+                tap: *tap,
+            }
+        };
+        let destination = into.map_or_else(|| output.clone(), strip_into);
+        let mut route = strip_route(&template, id, source, destination, *matrix);
+        route.follows_mute = *follows;
+        model.routes.push(route);
+    }
+    canonical_session_json(&model).expect("#1224 session canonicalizes")
+}
+
+/// Feed `tracks[i]` `strip_planes(i, block)` (or zeros for track `silent`), render, and return
+/// the output.
+fn follow_render(
+    host: &mut AudioWorkletEngineHost,
+    tracks: &[&str],
+    block: u64,
+    silent: Option<&str>,
+) -> Vec<f32> {
+    for (feed, id) in tracks.iter().enumerate() {
+        let planes = if silent == Some(*id) {
+            let zeros = vec![0.0_f32; STRIP_QUANTUM as usize];
+            [zeros.clone(), zeros]
+        } else {
+            strip_planes(feed as u64, block)
+        };
+        submit_strip_source(host, id, block, &planes);
+    }
+    assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+    host.output_pcm().expect("output").to_vec()
+}
+
+/// Render `blocks` blocks from `first` on every host in lockstep, requiring every host's output
+/// bit-identical to the first's when `checked`. Returns whether any compared block carried signal.
+fn follow_lockstep(
+    hosts: &mut [&mut AudioWorkletEngineHost],
+    tracks: &[&str],
+    first: u64,
+    blocks: u64,
+    checked: bool,
+    what: &str,
+) -> bool {
+    let mut audible = false;
+    for block in first..first + blocks {
+        let outputs: Vec<Vec<f32>> = hosts
+            .iter_mut()
+            .map(|host| follow_render(host, tracks, block, None))
+            .collect();
+        if checked {
+            for (other, output) in outputs.iter().enumerate().skip(1) {
+                for (sample, (x, y)) in outputs[0].iter().zip(output).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{what}: host 0 vs {other}, block {block} sample {sample}: {x} vs {y}"
+                    );
+                }
+            }
+            audible |= outputs[0].iter().any(|sample| *sample != 0.0);
+        }
+    }
+    audible
+}
+
+/// Stage one kind 4 record on `channel` (0 left, 1 right, 2 both).
+fn stage_lane_mute(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    strip: u32,
+    channel: u8,
+    on: bool,
+    smoothing: u32,
+) {
+    let value = if on { 1.0 } else { 0.0 };
+    stage_command(
+        host,
+        index,
+        COMMAND_MUTE,
+        255,
+        channel,
+        strip,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Every live send's follow-zeroed source lanes.
+fn follow_lanes(host: &AudioWorkletEngineHost) -> Vec<[bool; 2]> {
+    let routes = &host.ready.as_ref().expect("ready").routes;
+    (0..routes.len())
+        .map(|route| routes.get(route).expect("live route").source_lane_muted)
+        .collect()
+}
+
+/// Every fader queue's free room, by strip.
+fn follow_fader_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+    host.ready
+        .as_ref()
+        .expect("ready")
+        .controls
+        .iter()
+        .map(|controls| controls.fader.available_capacity())
+        .collect()
+}
+
+/// Gate 1's tracks, in feed order. Canonical strip order: `bass` 0, `drums` 1, `vocal` 2, then
+/// the submixes `room` 3 and `verb` 4. Live sends, in route-ID order: `bass-room` 0,
+/// `drums-verb` 1.
+const SOLO_FOLLOW_TRACKS: [&str; 3] = ["drums", "bass", "vocal"];
+const SOLO_FOLLOW_DRUMS: u32 = 1;
+const SOLO_FOLLOW_VOCAL: u32 = 2;
+const SOLO_FOLLOW_ROUTES: [FollowRoute<'static>; 7] = [
+    (
+        "drums-verb",
+        "drums",
+        false,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    (
+        "bass-room",
+        "bass",
+        false,
+        session::SendTap::PreFader,
+        Some("room"),
+        [-0.5, 0.7, 0.9, -0.2],
+        true,
+    ),
+    follow_main("drums-main", "drums", false),
+    follow_main("bass-main", "bass", false),
+    follow_main("vocal-main", "vocal", false),
+    follow_main("verb-main", "verb", true),
+    follow_main("room-main", "room", true),
+];
+
+fn solo_follow_host(muted: &[(&str, [bool; 2])], queue_records: u64) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &SOLO_FOLLOW_TRACKS,
+            &["verb", "room"],
+            &SOLO_FOLLOW_ROUTES,
+            muted,
+            None,
+        ),
+        strip_options(queue_records, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 1: soloing `vocal` silences `drums`' and `bass`' pre-fader `follows_mute`
+/// sends into `verb` and `room` with their faders, bit-identically to a host booted with `drums`
+/// and `bass` muted (where #1218 prepares both sends silenced), once the ramps settle; un-soloing
+/// restores both, bit-identically to an unedited host.
+///
+/// Test value: red if solo composition ignores routes (the measured leak: the pre-fader sends stay
+/// open under solo), reads the wrong strip or lane, or leaves a residue after the ramp. It checks
+/// settled blocks only: the solo state is final when the batch loop ends, so running the follow
+/// pass before the coalescing pass is red here only through its `malformed` guard, and
+/// `a_solo_follow_ramps_at_the_solo_window` is the audio gate for that ordering (#1224 verdict
+/// MINOR-3).
+#[test]
+fn soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest() {
+    let mut live = solo_follow_host(&[], 16);
+    let mut muted = solo_follow_host(&[("drums", [true; 2]), ("bass", [true; 2])], 16);
+    let mut open = solo_follow_host(&[], 16);
+    follow_lockstep(
+        &mut [&mut live, &mut muted, &mut open],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        2,
+        false,
+        "warm-up",
+    );
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[true; 2], [true; 2]],
+        "both sends follow"
+    );
+    // 480 samples settle within four 128-frame blocks.
+    follow_lockstep(
+        &mut [&mut live, &mut muted],
+        &SOLO_FOLLOW_TRACKS,
+        2,
+        4,
+        false,
+        "solo ramp",
+    );
+    follow_render(&mut open, &SOLO_FOLLOW_TRACKS, 2, None);
+    for block in 3..6 {
+        follow_render(&mut open, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut muted],
+            &SOLO_FOLLOW_TRACKS,
+            6,
+            3,
+            true,
+            "soloed vs booted muted"
+        ),
+        "vocal stays audible"
+    );
+    for block in 6..9 {
+        follow_render(&mut open, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [false; 2]],
+        "both sends reopen"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut open],
+        &SOLO_FOLLOW_TRACKS,
+        9,
+        4,
+        false,
+        "un-solo ramp",
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut open],
+            &SOLO_FOLLOW_TRACKS,
+            13,
+            3,
+            true,
+            "un-soloed vs unedited"
+        ),
+        "the mix is audible"
+    );
+}
+
+/// Issue #1224 gate 2: no redundant send record.
+///
+/// * Soloing `drums` (a follow source) moves only `bass-room`; soloing `vocal` on top, which is
+///   no `follows_mute` source and changes no follow source's effective mute, pushes no send
+///   record.
+/// * Muting `drums` pushes one record on `drums-verb`; muting it again pushes none (its strip
+///   record is staged, as kind 4 always is).
+/// * A redundant solo toggle -- `vocal` on again, and a batch turning it off and back on -- pushes
+///   no send record and leaves the output bit-identical to a twin that received neither.
+///
+/// Test value: red if `delta` re-emits an unchanged target (a settled send's ramp restarts, which
+/// is digest visible) or the follow pass emits for a strip whose effective mute did not move.
+#[test]
+fn a_follow_never_pushes_a_redundant_send_record() {
+    let mut live = solo_follow_host(&[], 16);
+    let mut twin = solo_follow_host(&[], 16);
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "warm-up",
+    );
+    let full = vec![16_usize; 2];
+
+    for host in [&mut live, &mut twin] {
+        stage_solo(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "solo drums");
+        assert_eq!(send_queue_room(host), [15, 16], "only bass-room follows");
+        stage_solo(host, 0, SOLO_FOLLOW_VOCAL, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "solo vocal too");
+        assert_eq!(send_queue_room(host), [15, 16], "no send record");
+    }
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        1,
+        1,
+        false,
+        "drain",
+    );
+    assert_eq!(send_queue_room(&live), full);
+
+    for host in [&mut live, &mut twin] {
+        stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums");
+        assert_eq!(send_queue_room(host), [16, 15], "drums-verb follows");
+        assert_eq!(follow_lanes(host), [[true; 2], [true; 2]]);
+        stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums again");
+        assert_eq!(send_queue_room(host), [16, 15], "no second send record");
+    }
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        2,
+        2,
+        true,
+        "settled",
+    );
+
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "vocal on again");
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(2), RESULT_OK, "vocal off and on");
+    assert_eq!(send_queue_room(&live), full, "no send record");
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut twin],
+            &SOLO_FOLLOW_TRACKS,
+            4,
+            4,
+            true,
+            "redundant toggles vs none"
+        ),
+        "vocal is audible"
+    );
+}
+
+/// Issue #1224 gate 3: a submission whose follow records would overfill a send queue is typed
+/// backpressure at the strip mute that asked for them, and nothing moves: no strip mute record
+/// and no send record is pushed, and the solo state and the send mirror are unchanged and closed.
+/// Once the queue drains, a strip mute whose window is longer than any send ramp is refused
+/// `domain` the same way, and then the solo is admitted.
+///
+/// Test value: red if strip mutes commit while their follows do not -- a follow record pushed
+/// before the room check, a send queue left out of it, a mirror committed on refusal, or a follow
+/// ramp silently clamped away from its strip's window.
+#[test]
+fn a_full_send_queue_refuses_the_strip_mutes_it_follows() {
+    const DEPTH: u64 = 4;
+    let mut host = solo_follow_host(&[], DEPTH);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    for index in 0..DEPTH as usize {
+        stage_send(
+            &mut host,
+            index,
+            COMMAND_ROUTE_GAIN_DB,
+            1,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(DEPTH as u32),
+        RESULT_OK,
+        "fill drums-verb"
+    );
+    let room = send_queue_room(&host);
+    assert_eq!(room, [DEPTH as usize, 0]);
+    let fader_room = follow_fader_room(&host);
+    let lanes = follow_lanes(&host);
+    let mirror = send_mirror(&host);
+
+    let refused = |host: &AudioWorkletEngineHost, index: u32, what: &str| {
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE, "{what}: reason");
+        assert_eq!(report.rejected_index, index, "{what}: wire index");
+        assert_eq!(report.admitted, 0, "{what}: admitted");
+        assert_eq!(send_queue_room(host), room, "{what}: send queues");
+        assert_eq!(follow_fader_room(host), fader_room, "{what}: fader queues");
+        assert_eq!(follow_lanes(host), lanes, "{what}: follow lanes");
+        assert_eq!(send_mirror(host), mirror, "{what}: send mirror");
+        let ready = host.ready.as_ref().expect("ready");
+        assert!(
+            !ready.routes.transaction_open(),
+            "{what}: send mirror closed"
+        );
+        assert!(!ready.solo.transaction_open(), "{what}: solo state closed");
+        assert!(!ready.solo.any_solo(), "{what}: no solo engaged");
+        assert!(
+            !ready.solo.user_mute(SOLO_FOLLOW_DRUMS as usize, 0),
+            "{what}: drums"
+        );
+    };
+
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE, "solo vocal");
+    refused(&host, 0, "solo");
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        SOLO_FOLLOW_VOCAL,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    stage_mute(&mut host, 1, SOLO_FOLLOW_DRUMS, true, 480);
+    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE, "mute drums");
+    refused(&host, 1, "kind 4");
+
+    // A strip mute whose window no send ramp can take (past `ROUTE_RAMP_LENGTH_MAXIMUM`, `2^22`)
+    // is refused `domain` at its wire index once a send follows it, rather than clamped.
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
+    let drained = send_queue_room(&host);
+    assert_eq!(drained, [DEPTH as usize; 2]);
+    stage_mute(&mut host, 0, SOLO_FOLLOW_DRUMS, true, (1 << 22) + 1);
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "overlong");
+    let report = *host.command_report();
+    assert_eq!(
+        (report.reason, report.rejected_index, report.admitted),
+        (COMMAND_REASON_DOMAIN, 0, 0)
+    );
+    assert_eq!(send_queue_room(&host), drained, "overlong: send queues");
+    assert_eq!(
+        follow_fader_room(&host),
+        fader_room,
+        "overlong: fader queues"
+    );
+    assert_eq!(follow_lanes(&host), lanes, "overlong: follow lanes");
+    assert!(!host.ready.as_ref().expect("ready").solo.user_mute(1, 0));
+
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "drained: admitted");
+    assert_eq!(follow_lanes(&host), [[true; 2], [true; 2]]);
+}
+
+/// Gate 4's tracks, in feed order. Strips: `drums` 0, `vocal` 1, `verb` 2; one live send,
+/// `drums-verb`.
+const LANE_FOLLOW_TRACKS: [&str; 2] = ["drums", "vocal"];
+const LANE_FOLLOW_ROUTES: [FollowRoute<'static>; 4] = [
+    (
+        "drums-verb",
+        "drums",
+        false,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    follow_main("drums-main", "drums", false),
+    follow_main("vocal-main", "vocal", false),
+    follow_main("verb-main", "verb", true),
+];
+
+fn lane_follow_host(drums: [bool; 2]) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &LANE_FOLLOW_TRACKS,
+            &["verb"],
+            &LANE_FOLLOW_ROUTES,
+            &[("drums", drums)],
+            None,
+        ),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 4: per lane. From every lane-mute state of `drums` to every other, kind 4
+/// records on the lanes that change (one `both` record when both move together) land on the
+/// output of a host booted in the target state, whose prepared send has the same source columns
+/// zeroed. Then, over a left-only mute, soloing `vocal` follows both lanes, and un-soloing returns
+/// the send to the left-only state.
+///
+/// Test value: red if the follow path maps a source lane to the other column, zeroes both columns
+/// for a one-lane mute, reads one lane for both, or loses a user's lane mute across a solo.
+#[test]
+fn a_one_lane_mute_follows_into_its_own_source_column() {
+    let states = [[false, false], [true, false], [false, true], [true, true]];
+    for from in states {
+        for to in states {
+            if from == to {
+                continue;
+            }
+            let what = format!("{from:?} -> {to:?}");
+            let mut live = lane_follow_host(from);
+            let mut booted = lane_follow_host(to);
+            let mut staged = 0;
+            if from[0] != to[0] && from[1] != to[1] && to[0] == to[1] {
+                stage_lane_mute(&mut live, 0, 0, 2, to[0], 480);
+                staged = 1;
+            } else {
+                for lane in 0..2 {
+                    if from[lane] != to[lane] {
+                        stage_lane_mute(&mut live, staged, 0, lane as u8, to[lane], 480);
+                        staged += 1;
+                    }
+                }
+            }
+            assert_eq!(live.submit_commands(staged as u32), RESULT_OK, "{what}");
+            assert_eq!(follow_lanes(&live), [to], "{what}: the mirror");
+            follow_lockstep(
+                &mut [&mut live, &mut booted],
+                &LANE_FOLLOW_TRACKS,
+                0,
+                4,
+                false,
+                &what,
+            );
+            assert!(
+                follow_lockstep(
+                    &mut [&mut live, &mut booted],
+                    &LANE_FOLLOW_TRACKS,
+                    4,
+                    3,
+                    true,
+                    &what
+                ),
+                "{what}: audible"
+            );
+        }
+    }
+
+    let mut live = lane_follow_host([true, false]);
+    let mut soloed = lane_follow_host([true, true]);
+    let mut left = lane_follow_host([true, false]);
+    stage_solo(&mut live, 0, 1, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "solo vocal");
+    assert_eq!(follow_lanes(&live), [[true, true]]);
+    follow_lockstep(
+        &mut [&mut live, &mut soloed],
+        &LANE_FOLLOW_TRACKS,
+        0,
+        4,
+        false,
+        "solo",
+    );
+    follow_lockstep(&mut [&mut left], &LANE_FOLLOW_TRACKS, 0, 4, false, "solo");
+    follow_lockstep(
+        &mut [&mut live, &mut soloed],
+        &LANE_FOLLOW_TRACKS,
+        4,
+        3,
+        true,
+        "soloed",
+    );
+    follow_lockstep(&mut [&mut left], &LANE_FOLLOW_TRACKS, 4, 3, false, "soloed");
+    stage_solo(&mut live, 0, 1, false, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[true, false]],
+        "the user's left mute stays"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut left],
+        &LANE_FOLLOW_TRACKS,
+        7,
+        4,
+        false,
+        "un-solo",
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut left],
+            &LANE_FOLLOW_TRACKS,
+            11,
+            3,
+            true,
+            "un-soloed"
+        ),
+        "audible"
+    );
+}
+
+/// Gate 5's tracks, in feed order. Strips: `t0` 0, `t1` 1, then the submixes `drums` 2 and
+/// `verb` 3. Live sends, in route-ID order: `drums-verb` 0, `t0-drums` 1, `t1-drums` 2. `t1` also
+/// reaches the output directly, so a fully muted bus leaves the output audible.
+const BUS_FOLLOW_TRACKS: [&str; 2] = ["t0", "t1"];
+const BUS_FOLLOW_DRUMS: u32 = 2;
+const BUS_FOLLOW_ROUTES: [FollowRoute<'static>; 6] = [
+    (
+        "t0-drums",
+        "t0",
+        false,
+        session::SendTap::PostPan,
+        Some("drums"),
+        [0.35, 0.15, -0.65, 0.45],
+        false,
+    ),
+    (
+        "t1-drums",
+        "t1",
+        false,
+        session::SendTap::PostPan,
+        Some("drums"),
+        [0.6, 0.4, -0.3, 0.9],
+        false,
+    ),
+    (
+        "drums-verb",
+        "drums",
+        true,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    follow_main("drums-main", "drums", true),
+    follow_main("verb-main", "verb", true),
+    follow_main("t1-main", "t1", false),
+];
+
+fn bus_follow_host(drums: [bool; 2]) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &BUS_FOLLOW_TRACKS,
+            &["drums", "verb"],
+            &BUS_FOLLOW_ROUTES,
+            &[("drums", drums)],
+            None,
+        ),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 5: a bus as the source. Kind 4 muting bus `drums` (both lanes, then its right
+/// lane alone) silences its pre-fader `follows_mute` send into `verb` and un-muting restores it,
+/// each matching a freshly booted host with the bus in that state. Soloing `t0` leaves the bus,
+/// which is solo-safe, and its send alone: no send record.
+///
+/// Test value: red if follow composition reads only tracks' mutes (a bus mute leaves its sends
+/// open), resolves a bus source without the track offset, or solo-mutes a bus's sends.
+#[test]
+fn muting_a_bus_silences_its_followed_send() {
+    for (channel, lanes) in [(2_u8, [true, true]), (1, [false, true])] {
+        let what = format!("bus lanes {lanes:?}");
+        let mut live = bus_follow_host([false; 2]);
+        let mut muted = bus_follow_host(lanes);
+        let mut open = bus_follow_host([false; 2]);
+        stage_lane_mute(&mut live, 0, BUS_FOLLOW_DRUMS, channel, true, 480);
+        assert_eq!(live.submit_commands(1), RESULT_OK, "{what}: mute");
+        assert_eq!(follow_lanes(&live)[0], lanes, "{what}: drums-verb follows");
+        follow_lockstep(
+            &mut [&mut live, &mut muted],
+            &BUS_FOLLOW_TRACKS,
+            0,
+            4,
+            false,
+            &what,
+        );
+        follow_lockstep(&mut [&mut open], &BUS_FOLLOW_TRACKS, 0, 4, false, &what);
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut muted],
+                &BUS_FOLLOW_TRACKS,
+                4,
+                3,
+                true,
+                &what
+            ),
+            "{what}: audible"
+        );
+        follow_lockstep(&mut [&mut open], &BUS_FOLLOW_TRACKS, 4, 3, false, &what);
+        stage_lane_mute(&mut live, 0, BUS_FOLLOW_DRUMS, channel, false, 480);
+        assert_eq!(live.submit_commands(1), RESULT_OK, "{what}: un-mute");
+        assert_eq!(follow_lanes(&live)[0], [false; 2], "{what}: reopened");
+        follow_lockstep(
+            &mut [&mut live, &mut open],
+            &BUS_FOLLOW_TRACKS,
+            7,
+            4,
+            false,
+            &what,
+        );
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut open],
+                &BUS_FOLLOW_TRACKS,
+                11,
+                3,
+                true,
+                &what
+            ),
+            "{what}: audible"
+        );
+    }
+
+    let mut host = bus_follow_host([false; 2]);
+    follow_render(&mut host, &BUS_FOLLOW_TRACKS, 0, None);
+    stage_solo(&mut host, 0, 0, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "solo t0");
+    assert_eq!(send_queue_room(&host), [16; 3], "no send record");
+    assert_eq!(follow_lanes(&host)[0], [false; 2]);
+}
+
+/// Gate 6's tracks, in feed order. Strips: `drums` 0, `s` 1, then `verb` 2. `s` carries a
+/// true-peak limiter (486 samples at 48 kHz) into `verb`, so PDC delays `drums-verb`, `drums`'
+/// only path, by 486 samples. One live send per host is `drums-verb` (route-ID order:
+/// `drums-verb` 0, `s-verb` 1).
+const DELAYED_FOLLOW_TRACKS: [&str; 2] = ["drums", "s"];
+const DELAYED_FOLLOW_LATENCY: usize = 486;
+
+fn delayed_follow_document(follows: bool) -> String {
+    follow_document(
+        &DELAYED_FOLLOW_TRACKS,
+        &["verb"],
+        &[
+            (
+                "drums-verb",
+                "drums",
+                false,
+                session::SendTap::PreFader,
+                Some("verb"),
+                [0.8, -0.3, 0.25, 0.6],
+                follows,
+            ),
+            (
+                "s-verb",
+                "s",
+                false,
+                session::SendTap::PostPan,
+                Some("verb"),
+                [0.35, 0.15, -0.65, 0.45],
+                false,
+            ),
+            follow_main("verb-main", "verb", true),
+        ],
+        &[],
+        Some("s"),
+    )
+}
+
+/// Issue #1224 gate 6: a delayed follow-muted send. `drums-verb` carries the 486-sample
+/// compensation (asserted from the plan: fed `drums` alone, the output is exactly zero for 486
+/// frames and carries `drums` from frame 486). Host A follows: it mutes and un-mutes `drums` with
+/// kind 4. Host B has the same session with `follows_mute` false and sends the same kind 4 records
+/// plus kind 14 on the send. The mute is one record at 480 samples; the un-mute is two kind 4
+/// records, at 200 and then 480 samples, so the follow takes the last one's ramp. Both hosts
+/// render the same bits on every block, including the 486 samples after each edit.
+///
+/// Test value: red if the follow path deactivates a delayed send, re-sends a stale target, or uses
+/// a ramp length other than the last strip mute's (the first, or none).
+#[test]
+fn a_delayed_send_follows_like_an_explicit_send_mute() {
+    let probe_document = delayed_follow_document(true);
+    let mut probe = strip_boot(&probe_document, strip_options(16, 0, 0));
+    assert!(
+        probe.resources().graph_delay_bytes > 0,
+        "the plan carries a delay line"
+    );
+    let mut probed = Vec::new();
+    for block in 0..5 {
+        let output = follow_render(&mut probe, &DELAYED_FOLLOW_TRACKS, block, Some("s"));
+        let frames = STRIP_QUANTUM as usize;
+        probed.extend((0..frames).map(|frame| (output[frame], output[frames + frame])));
+    }
+    let first = probed
+        .iter()
+        .position(|(left, right)| *left != 0.0 || *right != 0.0);
+    assert_eq!(
+        first,
+        Some(DELAYED_FOLLOW_LATENCY),
+        "drums reaches verb 486 samples late"
+    );
+
+    let mut follow = strip_boot(&probe_document, strip_options(16, 0, 0));
+    let mut explicit = strip_boot(&delayed_follow_document(false), strip_options(16, 0, 0));
+    follow_lockstep(
+        &mut [&mut follow, &mut explicit],
+        &DELAYED_FOLLOW_TRACKS,
+        0,
+        2,
+        true,
+        "idle",
+    );
+
+    stage_lane_mute(&mut follow, 0, 0, 2, true, 480);
+    stage_lane_mute(&mut explicit, 0, 0, 2, true, 480);
+    stage_send(
+        &mut explicit,
+        1,
+        COMMAND_ROUTE_MUTE,
+        0,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(follow.submit_commands(1), RESULT_OK, "A: mute drums");
+    assert_eq!(
+        explicit.submit_commands(2),
+        RESULT_OK,
+        "B: mute drums and its send"
+    );
+    assert_eq!(follow_lanes(&follow)[0], [true; 2]);
+    follow_lockstep(
+        &mut [&mut follow, &mut explicit],
+        &DELAYED_FOLLOW_TRACKS,
+        2,
+        8,
+        true,
+        "muted",
+    );
+
+    for host in [&mut follow, &mut explicit] {
+        stage_lane_mute(host, 0, 0, 2, false, 200);
+        stage_lane_mute(host, 1, 0, 2, false, 480);
+    }
+    stage_send(&mut explicit, 2, COMMAND_ROUTE_MUTE, 0, 480, [0.0; 4]);
+    assert_eq!(follow.submit_commands(2), RESULT_OK, "A: un-mute drums");
+    assert_eq!(
+        explicit.submit_commands(3),
+        RESULT_OK,
+        "B: un-mute drums and its send"
+    );
+    assert_eq!(follow_lanes(&follow)[0], [false; 2]);
+    assert!(
+        follow_lockstep(
+            &mut [&mut follow, &mut explicit],
+            &DELAYED_FOLLOW_TRACKS,
+            10,
+            8,
+            true,
+            "un-muted"
+        ),
+        "audible"
+    );
+}
+
+/// Issue #1224 gate 9: admitting solo toggles and kind 4 mutes that stage follow records, then
+/// rendering, allocates and frees nothing.
+///
+/// Test value: red if the follow pass or the grown staging allocates on the admission or render
+/// path.
+#[test]
+fn follow_records_admit_and_render_without_allocating() {
+    let mut host = solo_follow_host(&[], 64);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    // Warm every path once outside the measurement.
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    for (feed, id) in SOLO_FOLLOW_TRACKS.iter().enumerate() {
+        submit_strip_source(&mut host, id, 2, &strip_planes(feed as u64, 2));
+    }
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    stage_lane_mute(&mut host, 1, SOLO_FOLLOW_DRUMS, 0, true, 128);
+    stage_solo(&mut host, 2, SOLO_FOLLOW_VOCAL, false, 480);
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            (host.submit_commands(3), host.render_next())
+        });
+    assert_eq!(admission, RESULT_OK, "the follow batch is admitted");
+    assert_eq!(render, RESULT_OK);
+    assert_eq!(follow_lanes(&host), [[false; 2], [true, false]]);
+    assert_eq!(allocations, 0, "admission/render allocated");
+    assert_eq!(deallocations, 0, "admission/render freed");
+}
+
+/// Issue #1224 D4: the decode staging holds a full batch, a solo transition and every follow
+/// record it owes. Six tracks, each with a compressor insert and a pre-fader `follows_mute` send
+/// into each of six buses (36 live sends): 255 `channel = both` threshold records (510 entries)
+/// and one solo of `t0` (five coalesced strip records, then 30 follow records) need 545 entries,
+/// past the 536 that `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` holds.
+///
+/// Test value: red if the staging is not grown by the live-send count, so a legal batch whose
+/// solo moves many followed sends is refused `malformed` by the staging bound.
+#[test]
+fn the_decode_staging_holds_a_full_batch_and_its_follow_records() {
+    const TRACKS: [&str; 6] = ["t0", "t1", "t2", "t3", "t4", "t5"];
+    const BUSES: [&str; 6] = ["b0", "b1", "b2", "b3", "b4", "b5"];
+    let ids: Vec<(String, &str, &str)> = TRACKS
+        .iter()
+        .flat_map(|track| {
+            BUSES
+                .iter()
+                .map(move |bus| (format!("{track}-{bus}"), *track, *bus))
+        })
+        .collect();
+    let routes: Vec<FollowRoute<'_>> = ids
+        .iter()
+        .map(|(id, track, bus)| {
+            (
+                id.as_str(),
+                *track,
+                false,
+                session::SendTap::PreFader,
+                Some(*bus),
+                [0.8, -0.3, 0.25, 0.6],
+                true,
+            )
+        })
+        .collect();
+    let (_, _, _, compressor, _) = strip_base();
+    let document = follow_document(&TRACKS, &BUSES, &routes, &[], None);
+    let mut model = parse_session_json(&document).expect("staging session");
+    for track in &mut model.tracks {
+        track.inserts.effects = vec![compressor.clone()];
+    }
+    let document = canonical_session_json(&model).expect("staging session canonicalizes");
+    let mut host = strip_boot(&document, strip_options(128, 0, 0));
+    let strips = TRACKS.len() + BUSES.len();
+    assert_eq!(
+        host.command_staging_entries(),
+        Some(MAXIMUM_COMMAND_RECORDS as usize * 2 + strips * 2 + routes.len()),
+    );
+    follow_render(&mut host, &TRACKS, 0, None);
+    let records = MAXIMUM_COMMAND_RECORDS as usize;
+    for index in 0..records - 1 {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_PARAM,
+            1,
+            2,
+            (index % TRACKS.len()) as u32,
+            0,
+            1,
+            0,
+            [-12.0, 0.0, 0.0, 0.0],
+        );
+    }
+    stage_solo(&mut host, records - 1, 0, true, 480);
+    assert_eq!(
+        host.submit_commands(MAXIMUM_COMMAND_RECORDS),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason,
+    );
+    assert_eq!(host.command_report().admitted, MAXIMUM_COMMAND_RECORDS);
+    let lanes = follow_lanes(&host);
+    for (route, lanes) in lanes.iter().enumerate() {
+        let muted = route >= BUSES.len();
+        assert_eq!(*lanes, [muted; 2], "live send {route}");
+    }
+}
+
+// ---- #1224 verdict MINOR-1 and MINOR-3: the verifier's probes P1-P4, adopted ----
+
+/// The first sample at which two outputs differ in bits, with both values.
+fn first_bit_difference(a: &[f32], b: &[f32]) -> Option<(usize, f32, f32)> {
+    a.iter()
+        .zip(b)
+        .enumerate()
+        .find(|(_, (x, y))| x.to_bits() != y.to_bits())
+        .map(|(i, (x, y))| (i, *x, *y))
+}
+
+/// The solo-follow session with `follows_mute` kept or cleared on every send.
+fn solo_follow_host_with_follows(follows: bool) -> AudioWorkletEngineHost {
+    let routes: Vec<FollowRoute<'static>> = SOLO_FOLLOW_ROUTES
+        .iter()
+        .map(|r| (r.0, r.1, r.2, r.3, r.4, r.5, r.6 && follows))
+        .collect();
+    strip_boot(
+        &follow_document(&SOLO_FOLLOW_TRACKS, &["verb", "room"], &routes, &[], None),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1224 D1 (verdict probe P1): a follow record carries the mirror's live gain, matrix and
+/// mute, not the prepared route's. Kinds 13-15 edit `drums-verb`'s gain and matrix and mute
+/// `bass-room`; one-lane source mutes then move both sends. Once settled, the output is
+/// bit-identical to a host booted with the edited values and the mutes.
+///
+/// Test value: red if a follow record drops the send's own `mute` (a user-muted send reopens its
+/// column on a one-lane source mute) or uses the prepared gain or matrix instead of the mirror's;
+/// no other test follows a send whose values were edited live.
+#[test]
+fn a_follow_record_carries_the_mirrors_live_values() {
+    // strips: bass 0, drums 1, vocal 2, room 3, verb 4; sends: bass-room 0, drums-verb 1.
+    let edited = [0.45_f32, -0.65, 0.15, 0.9];
+    let boot = |muted: &[(&str, [bool; 2])], values: bool| {
+        let document = follow_document(
+            &SOLO_FOLLOW_TRACKS,
+            &["verb", "room"],
+            &SOLO_FOLLOW_ROUTES,
+            muted,
+            None,
+        );
+        let mut model = parse_session_json(&document).expect("model");
+        if values {
+            for route in &mut model.routes {
+                match route.id.as_str() {
+                    "drums-verb" => {
+                        route.gain_db = -6.0;
+                        route.channel_matrix = session::ChannelMatrix {
+                            ll: edited[0],
+                            lr: edited[1],
+                            rl: edited[2],
+                            rr: edited[3],
+                        };
+                    }
+                    "bass-room" => route.mute = true,
+                    _ => {}
+                }
+            }
+        }
+        strip_boot(
+            &canonical_session_json(&model).expect("canonical"),
+            strip_options(16, 0, 0),
+        )
+    };
+    let mut live = boot(&[], false);
+    stage_send(
+        &mut live,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        1,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(&mut live, 1, COMMAND_ROUTE_MATRIX, 1, 0, edited);
+    stage_send(&mut live, 2, COMMAND_ROUTE_MUTE, 0, 0, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(live.submit_commands(3), RESULT_OK);
+    // drums left only; bass right only (bass-room is user-muted: the right lane must not reopen it).
+    stage_lane_mute(&mut live, 0, 1, 0, true, 480);
+    stage_lane_mute(&mut live, 1, 0, 1, true, 480);
+    assert_eq!(live.submit_commands(2), RESULT_OK);
+    assert_eq!(follow_lanes(&live), [[false, true], [true, false]]);
+    let mut booted = boot(&[("drums", [true, false]), ("bass", [false, true])], true);
+    for block in 0..5 {
+        follow_render(&mut live, &SOLO_FOLLOW_TRACKS, block, None);
+        follow_render(&mut booted, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    for block in 5..8 {
+        let a = follow_render(&mut live, &SOLO_FOLLOW_TRACKS, block, None);
+        let b = follow_render(&mut booted, &SOLO_FOLLOW_TRACKS, block, None);
+        let difference = first_bit_difference(&a, &b);
+        assert!(difference.is_none(), "block {block}: {difference:?}");
+    }
+}
+
+/// Issue #1224 D3 (verdict probe P2): two strips muted in one batch with different windows (480
+/// and 37 samples). Each following send ramps with its own source strip's window, block for block
+/// like an explicit `routeMute` at that window.
+///
+/// Test value: red if the ramp lookup ignores the source strip and takes any strip's last mute
+/// record; no other test mutes two follow sources at different windows in one batch.
+#[test]
+fn each_follow_takes_its_own_source_strips_window() {
+    let mut follow = solo_follow_host_with_follows(true);
+    let mut explicit = solo_follow_host_with_follows(false);
+    for host in [&mut follow, &mut explicit] {
+        stage_mute(host, 0, 1, true, 480); // drums
+        stage_mute(host, 1, 0, true, 37); // bass
+    }
+    stage_send(
+        &mut explicit,
+        2,
+        COMMAND_ROUTE_MUTE,
+        1,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(
+        &mut explicit,
+        3,
+        COMMAND_ROUTE_MUTE,
+        0,
+        37,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(follow.submit_commands(2), RESULT_OK);
+    assert_eq!(explicit.submit_commands(4), RESULT_OK);
+    for block in 0..6 {
+        let a = follow_render(&mut follow, &SOLO_FOLLOW_TRACKS, block, None);
+        let b = follow_render(&mut explicit, &SOLO_FOLLOW_TRACKS, block, None);
+        let difference = first_bit_difference(&a, &b);
+        assert!(difference.is_none(), "block {block}: {difference:?}");
+    }
+}
+
+/// Issue #1224 D3 (verdict probe P4): a solo's follow records ramp at the solo's window, block for
+/// block like explicit `routeMute` records at that window (gate 6's comparison, driven by solo).
+///
+/// Test value: red if the follow pass runs before the solo coalescing pass (it then finds no
+/// strip-mute record for the solo's window) or a solo's follow takes any ramp but the solo's.
+#[test]
+fn a_solo_follow_ramps_at_the_solo_window() {
+    let mut follow = solo_follow_host_with_follows(true);
+    let mut explicit = solo_follow_host_with_follows(false);
+    stage_solo(&mut follow, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    stage_solo(&mut explicit, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    stage_send(
+        &mut explicit,
+        1,
+        COMMAND_ROUTE_MUTE,
+        0,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    stage_send(
+        &mut explicit,
+        2,
+        COMMAND_ROUTE_MUTE,
+        1,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(follow.submit_commands(1), RESULT_OK);
+    assert_eq!(explicit.submit_commands(3), RESULT_OK);
+    for block in 0..6 {
+        let a = follow_render(&mut follow, &SOLO_FOLLOW_TRACKS, block, None);
+        let b = follow_render(&mut explicit, &SOLO_FOLLOW_TRACKS, block, None);
+        let difference = first_bit_difference(&a, &b);
+        assert!(difference.is_none(), "block {block}: {difference:?}");
+    }
+}
+
+/// Issue #1224 D3 as amended (verdict MINOR-1, probe P3): `drums`' left lane is muted at 480 in a
+/// batch that also carries a no-op kind 4 on its already-unmuted right lane. Host X sends the
+/// no-op at 0, host Y at 480, host Z sends none. The strip renders the same in all three (a
+/// settled unity lane retargeted to itself is exact), so any difference is the follow record's
+/// ramp, which must be the changed lane's 480.
+///
+/// Test value: red if a strip-mute record that covers no lane whose effective mute changed sets
+/// the follow ramp, which steps the send while its strip fades (an audible click on the return).
+#[test]
+fn a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp() {
+    let (mut x, mut y, mut z) = (
+        solo_follow_host_with_follows(true),
+        solo_follow_host_with_follows(true),
+        solo_follow_host_with_follows(true),
+    );
+    stage_lane_mute(&mut x, 0, 1, 0, true, 480);
+    stage_lane_mute(&mut x, 1, 1, 1, false, 0);
+    stage_lane_mute(&mut y, 0, 1, 0, true, 480);
+    stage_lane_mute(&mut y, 1, 1, 1, false, 480);
+    stage_lane_mute(&mut z, 0, 1, 0, true, 480);
+    assert_eq!(x.submit_commands(2), RESULT_OK);
+    assert_eq!(y.submit_commands(2), RESULT_OK);
+    assert_eq!(z.submit_commands(1), RESULT_OK);
+    let (mut xy, mut yz) = (None, None);
+    for block in 0..6 {
+        let a = follow_render(&mut x, &SOLO_FOLLOW_TRACKS, block, None);
+        let b = follow_render(&mut y, &SOLO_FOLLOW_TRACKS, block, None);
+        let c = follow_render(&mut z, &SOLO_FOLLOW_TRACKS, block, None);
+        if xy.is_none() {
+            xy = first_bit_difference(&a, &b).map(|d| (block, d));
+        }
+        if yz.is_none() {
+            yz = first_bit_difference(&b, &c).map(|d| (block, d));
+        }
+    }
+    assert_eq!(yz, None, "the no-op at 480 is invisible");
+    assert_eq!(
+        xy, None,
+        "a no-op record on the unchanged right lane set the left follow's ramp"
+    );
+}
+
+/// Issue #1224 D3 as amended (K3 follow-ups verdict MINOR-1, probe V4): one `Both` record whose
+/// left lane changes and whose right lane is already muted. `bass` starts with its right lane
+/// muted; the batch mutes `bass` on both lanes at 400, re-mutes its right lane at 0 (a no-op) and
+/// mutes `drums`' right lane at 64. Host X carries the no-op, host Z does not. The strip renders the
+/// same in both, so any difference is `bass-room`'s follow ramp, which must be the `Both`
+/// record's 400.
+///
+/// Test value: red if the `Both` arm of the changed-lane rule asks for both lanes to have changed
+/// (`&&` for `||`): that refuses the batch, so a both-lane mute of a strip with one lane already
+/// muted and a following send fails; P3 above covers single-lane records only.
+#[test]
+fn a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp() {
+    let muted = [("bass", [false, true])];
+    let mut x = solo_follow_host(&muted, 16);
+    let mut z = solo_follow_host(&muted, 16);
+    // strips: bass 0, drums 1; channel 2 is both lanes.
+    stage_lane_mute(&mut x, 0, 0, 2, true, 400);
+    stage_lane_mute(&mut x, 1, 0, 1, true, 0);
+    stage_lane_mute(&mut x, 2, SOLO_FOLLOW_DRUMS, 1, true, 64);
+    stage_lane_mute(&mut z, 0, 0, 2, true, 400);
+    stage_lane_mute(&mut z, 1, SOLO_FOLLOW_DRUMS, 1, true, 64);
+    assert_eq!(x.submit_commands(3), RESULT_OK);
+    assert_eq!(z.submit_commands(2), RESULT_OK);
+    let (mut difference, mut audible) = (None, false);
+    for block in 0..8 {
+        let a = follow_render(&mut x, &SOLO_FOLLOW_TRACKS, block, None);
+        let c = follow_render(&mut z, &SOLO_FOLLOW_TRACKS, block, None);
+        audible |= a.iter().any(|sample| *sample != 0.0);
+        if difference.is_none() {
+            difference = first_bit_difference(&a, &c).map(|d| (block, d));
+        }
+    }
+    assert!(audible);
+    assert_eq!(
+        difference, None,
+        "a later no-op lane record set the follow ramp a `Both` record owns"
+    );
 }

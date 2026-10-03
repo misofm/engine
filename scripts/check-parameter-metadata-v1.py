@@ -34,6 +34,7 @@ SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
     "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
+    "routeGainDb", "routeMute", "routeMatrix",
 ]
 # The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
 # tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
@@ -53,7 +54,7 @@ PLANE_OBSERVATION = "observation"
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable",
+    "notSoloable", "unknownRoute",
 ]
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
@@ -635,7 +636,7 @@ def self_test() -> int:
             slice(10, None)
         )),
         ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
-        ("reason value renumbered", lambda d: d["commandReasons"][12].update(value=13)),
+        ("reason value renumbered", lambda d: d["commandReasons"][13].update(value=14)),
         (
             "builtin live disagrees with update rate",
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),

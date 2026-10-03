@@ -188,6 +188,7 @@ async function testMainRealm() {
             ],
             metersAttached: true,
             submixes: ["aaa-bus", "zzz-bus"],
+            routes: ["zz-send", "aa-send"],
           };
           if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
@@ -1361,6 +1362,11 @@ async function testMainRealm() {
       ["a submix list that is not an array", (map) => ({ ...map, submixes: "aaa-bus" })],
       ["a non-string submix", (map) => ({ ...map, submixes: ["aaa-bus", 7] })],
       ["an empty submix ID", (map) => ({ ...map, submixes: ["aaa-bus", ""] })],
+      // Issue #1223 D3: the live-route list is held to the same rules.
+      ["no route list", ({ routes: _dropped, ...rest }) => rest],
+      ["a route list that is not an array", (map) => ({ ...map, routes: "zz-send" })],
+      ["a non-string route", (map) => ({ ...map, routes: ["zz-send", 7] })],
+      ["an empty route ID", (map) => ({ ...map, routes: ["zz-send", ""] })],
     ]) {
       const mapHost = await createMisoAudioWorkletHost({
         context,
@@ -1516,6 +1522,7 @@ async function testMainRealm() {
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
     assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
+    assert.deepEqual(map.routes, ["zz-send", "aa-send"], "issue #1223: the live-route order is delivered");
 
     const pan = {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
@@ -2154,6 +2161,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
+  // Issue #1223 D3: the live route IDs, deliberately not in sorted order, so a worklet that sorts
+  // or otherwise reorders the engine's enumeration (the order send commands index) is visible.
+  const routeIds = ["zz-send", "aa-send"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
   // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
@@ -2311,6 +2321,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
       return id.length;
     },
+    miso_engine_web_v1_live_control_route_count: () => routeIds.length,
+    miso_engine_web_v1_live_control_route_id: (_handle, index) => {
+      const id = routeIds[index];
+      if (id === undefined) return 0;
+      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
+      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
+      return id.length;
+    },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
@@ -2356,7 +2374,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
       return 0;
     },
   };
-  return { exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader };
+  return { exports, calls, trackIds, submixIds, routeIds, sourceRows, meterFrameFloats, meterHeader };
 }
 
 function createTelemetryClock(elapsedMsByBlock) {
@@ -3260,6 +3278,7 @@ async function testProcessor() {
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
       assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
+      assert.deepEqual(map.routes, fake.routeIds, "issue #1223: the enumerated live-route order");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
@@ -3283,6 +3302,10 @@ async function testProcessor() {
         ["an empty submix ID", (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 0; }],
         ["a submix ID longer than staging",
           (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 65; }],
+        // Issue #1223 D3: the live route IDs are read under the same rules.
+        ["an empty route ID", (e) => { e.miso_engine_web_v1_live_control_route_id = () => 0; }],
+        ["a route ID longer than staging",
+          (e) => { e.miso_engine_web_v1_live_control_route_id = () => 65; }],
         ["a submix count the meter header disagrees with",
           (e) => {
             const read = e.miso_engine_web_v1_live_control_submix_id;

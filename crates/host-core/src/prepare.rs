@@ -33,6 +33,7 @@ use source::{
 };
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
+use crate::route_controls::{RouteControlProducer, RouteControlResources};
 use crate::source::{ControlSourceBuilder, SourceControlSet};
 use crate::spectrum::{
     SpectrumCapture, SpectrumCaptureCollection, SpectrumCaptureCollectionRequest,
@@ -259,6 +260,11 @@ pub struct HostPrepareReport {
     pub control_retained_bytes: u64,
     /// Native effect-control table and transferred owner payload allocations.
     pub effect_control_resources: EffectControlResources,
+    /// The live send lanes' queues, owners, producer table, route IDs and any route-activity table
+    /// they add (issue #1221 D4): `graph::route_control_resources` of the attached producers.
+    /// Charged with the effect channels against `maximum_graph_session_plus_plan_bytes` and the
+    /// named-allocation cap. All zero when no control channel was requested.
+    pub route_control_resources: RouteControlResources,
     /// Engine-owned bytes the compiled plan's observation lanes and slots retain (issue #143 R7).
     ///
     /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
@@ -386,6 +392,17 @@ pub struct HostLiveControlHandles {
     /// descriptor declares no tap. Addressed by `(track_id, address)`, exactly as
     /// [`Self::effect_controls`] is.
     pub effect_observations: Vec<EffectObservationHandle>,
+    /// One live send producer per route into a submix, in canonical route-ID order -- the order
+    /// the render plane's lanes were attached in (issue #1221 D3). Empty when no channel was
+    /// requested, and routes into the output have none: they keep their prepared constants and
+    /// their fold.
+    ///
+    /// Every host that prepares through host-core with live controls gets these: the browser now,
+    /// and C ABI plans too once #1053 attaches live controls there. A settled record's bits are a
+    /// static route's by construction, because [`RouteControlProducer::record`] takes its target
+    /// from `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
+    /// route's constants with.
+    pub route_controls: Vec<RouteControlProducer>,
     /// The designated master strip index, echoed back after validation against `strips.len()`
     /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
     pub master_track: Option<u32>,
@@ -1066,7 +1083,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         )
     })?;
     let builtin_resources = builtins.resource_report();
-    let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+    let mut artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
         dispatch: backend,
         plan_id: 1,
         effects,
@@ -1097,6 +1114,24 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             ),
         )
     })?;
+    // Issue #1221 D1: one live lane per route into a submix, attached before bind and before the
+    // caps below, so its charge is refused by the same checks as the effect channels. Without a
+    // control channel nothing is attached and the plan binds exactly what it bound before.
+    let graph_route_controls = match live_controls.control_queue_depth {
+        None => Vec::new(),
+        Some(depth) => artifact
+            .attach_route_live_controls(depth)
+            .map_err(|error| match error {
+                graph::GraphRouteControlError::QueueCapacity => {
+                    resource("host.resource.allocation")
+                }
+                graph::GraphRouteControlError::AlreadyAttached
+                | graph::GraphRouteControlError::BoundRoute => {
+                    graph_failure("host.route_control.attach")
+                }
+            })?,
+    };
+    let route_control_resources = graph::route_control_resources(&graph_route_controls);
     let output_latency = artifact.report().output_latency;
     let output_tail = artifact.report().output_tail;
     let graph_resources = artifact.graph_resource_estimate().clone();
@@ -1126,11 +1161,14 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .total_bytes()
                 .ok_or_else(|| resource("host.effect.resource.arithmetic"))?,
         )
+        .and_then(|bytes| bytes.checked_add(route_control_resources.total_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
         return Err(resource("host.graph.resource.limit"));
     }
-    if native_effect_control_resources.largest_allocation_bytes()
+    if native_effect_control_resources
+        .largest_allocation_bytes()
+        .max(route_control_resources.largest_allocation_bytes)
         > caps.maximum_named_allocation_bytes
     {
         return Err(resource("host.resource.limit"));
@@ -1309,6 +1347,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
         effect_control_resources: native_effect_control_resources,
+        route_control_resources,
         observation_retained_bytes,
         spectrum_capture_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
@@ -1350,6 +1389,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             effect_controls,
             meters,
             effect_observations,
+            route_controls: graph_route_controls
+                .into_iter()
+                .map(RouteControlProducer::new)
+                .collect(),
             master_track,
         },
         spectrum_capture,

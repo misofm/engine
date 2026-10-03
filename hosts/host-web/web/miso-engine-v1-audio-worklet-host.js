@@ -234,6 +234,7 @@ const COMMAND_REASONS = Object.freeze([
   "unknownTap",
   "observationUnbound",
   "notSoloable",
+  "unknownRoute",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.
@@ -255,7 +256,7 @@ const COMMAND_FIELDS = [
 // This set is the bound: `validCommand` asks it, never a hand-written `kind <= 12`. It is one of
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 const NOT_APPLICABLE = 255;
 
 function validCommand(command) {
@@ -988,7 +989,7 @@ class MisoAudioWorkletHost {
         : pending.response === "eqConfig"
           ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes", "routes"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1063,6 +1064,9 @@ class MisoAudioWorkletHost {
       // sections.
       && Array.isArray(message.submixes)
       && message.submixes.every((value) => typeof value === "string" && value.length > 0)
+      // Issue #1223 D3: the live route IDs, in the live-route index order the send kinds address.
+      && Array.isArray(message.routes)
+      && message.routes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)

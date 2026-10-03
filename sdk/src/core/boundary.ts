@@ -260,6 +260,12 @@ export interface SessionMap {
    * sections. Submix `j` is strip `tracks.length + j`.
    */
   readonly submixes: readonly string[];
+  /**
+   * The live routes (issue #1223 D3): the routes into submixes, in canonical route-ID order, as
+   * the engine enumerates them. A send edit's index word `i` addresses `routes[i]`. A route into
+   * the output is not live and is not listed.
+   */
+  readonly routes: readonly string[];
 }
 
 interface ObservationLayoutField {
@@ -550,7 +556,10 @@ export class WasmBoundary {
     return id.byteLength;
   }
 
-  /** The canonical track/source/submix order plus whether meter observers were prepared. */
+  /**
+   * The canonical track/source/submix order, the live routes in the engine's own order, and
+   * whether meter observers were prepared.
+   */
   sessionMap(): SessionMap {
     const shape = this.shape();
     return Object.freeze({
@@ -558,7 +567,20 @@ export class WasmBoundary {
       sources: shape.sources,
       metersAttached: this.#metersAttached,
       submixes: shape.submixes,
+      routes: this.#liveRoutes(),
     });
+  }
+
+  /** The live route IDs, read from the engine's enumeration, never sorted here (issue #1223). */
+  #liveRoutes(): readonly string[] {
+    const handle = this.#live();
+    const routeCount = Number(this.#exports.miso_engine_web_v1_live_control_route_count(handle));
+    const routes: string[] = [];
+    for (let index = 0; index < routeCount; index += 1) {
+      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_route_id(handle, index));
+      routes.push(this.#readIdBuffer(idBytes));
+    }
+    return Object.freeze(routes);
   }
 
   /** Read the current prepared owner's stable resident-observation bindings. */

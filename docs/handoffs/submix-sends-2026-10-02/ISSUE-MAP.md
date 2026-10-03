@@ -8,8 +8,9 @@ except for the unfiled VCA drafts; each filed spec is `.github/ISSUE_SPECS/<numb
 GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) were renamed in
 #1197's attempt 2 to the slug of their GitHub titles; their plan files keep the plan's names.
 A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes; the rows of
-#1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, and the rows of
-#1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, where each last stood.
+#1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, the rows of
+#1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, and the rows of #1206-#1214 (closed by
+PR #1233) link it at `cfa086d4`, where each last stood.
 
 The umbrella's app-facing documents -- `APP-SDK.md`, the session migration script and, later,
 `APP-LIVE.md` -- live in [`docs/handoffs/submix-strips-and-sends/`](../submix-strips-and-sends/),
@@ -28,15 +29,15 @@ the verdicts (`verdicts/`).
 | 06 | #1203 | Tap a submix strip at any of the seven send points | [`1203-tap-a-submix-strip-at-any-of-the-seven-send-points.md`](https://github.com/misofm/engine/blob/b6b1bdf4bbc2d2640335457e3dd47339516a0501/.github/ISSUE_SPECS/1203-tap-a-submix-strip-at-any-of-the-seven-send-points.md) (retired, closed) | `06-tap-a-submix-strip-at-any-send-point.md` |
 | 07 | #1204 | Address submix strips in session edits | [`1204-address-submix-strips-in-session-edits.md`](https://github.com/misofm/engine/blob/b6b1bdf4bbc2d2640335457e3dd47339516a0501/.github/ISSUE_SPECS/1204-address-submix-strips-in-session-edits.md) (retired, closed) | `07-address-submix-strips-in-session-edits.md` |
 | 08 | #1205 | Build submix strips and bus taps in the SDK and teach agents to author them | [`1205-build-submix-strips-and-bus-taps-in-the-sdk-and-teach-agents-to-author-them.md`](https://github.com/misofm/engine/blob/b6b1bdf4bbc2d2640335457e3dd47339516a0501/.github/ISSUE_SPECS/1205-build-submix-strips-and-bus-taps-in-the-sdk-and-teach-agents-to-author-them.md) (retired, closed) | `08-build-submix-strips-in-the-sdk-and-teach-agents-to-author-them.md` |
-| 09 | #1206 | Count and cap submix strips in host preparation and the C ABI | `.github/ISSUE_SPECS/1206-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md` | `09-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md` |
-| 10 | #1207 | List every strip in the live-control handles and file bus effects in the browser | `.github/ISSUE_SPECS/1207-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md` | `10-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md` |
-| 11 | #1208 | Meter any boundary of a submix strip and designate a master strip in host-core | `.github/ISSUE_SPECS/1208-meter-any-boundary-of-a-submix-strip-and-designate-a-master-strip-in-host-core.md` | `11-meter-and-designate-submix-strips-in-host-core.md` |
-| 12 | #1209 | Carry submix strips in the browser meter frame | `.github/ISSUE_SPECS/1209-carry-submix-strips-in-the-browser-meter-frame.md` | `12-carry-submix-strips-in-the-browser-meter-frame.md` |
-| 13 | #1210 | Name submix strips in the browser session map and the SDK measurement | `.github/ISSUE_SPECS/1210-name-submix-strips-in-the-browser-session-map-and-the-sdk-measurement.md` | `13-name-submix-strips-in-the-browser-session-map-and-sdk-measurement.md` |
-| 14 | #1211 | Give every strip one mute owner and live-control producers in host-core | `.github/ISSUE_SPECS/1211-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md` | `14-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md` |
-| 15 | #1212 | Add the notSoloable command reason to every vocabulary spelling | `.github/ISSUE_SPECS/1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md` | `15-add-the-not-soloable-command-reason.md` |
-| 16 | #1213 | Address submix strips in browser live commands | `.github/ISSUE_SPECS/1213-address-submix-strips-in-browser-live-commands.md` | `16-address-submix-strips-in-browser-live-commands.md` |
-| 17 | #1214 | Drive submix strips from the SDK live controls | `.github/ISSUE_SPECS/1214-drive-submix-strips-from-the-sdk-live-controls.md` | `17-drive-submix-strips-from-the-sdk-live-controls.md` |
+| 09 | #1206 | Count and cap submix strips in host preparation and the C ABI | [`1206-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1206-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md) (retired, closed) | `09-count-and-cap-submix-strips-in-host-preparation-and-the-c-abi.md` |
+| 10 | #1207 | List every strip in the live-control handles and file bus effects in the browser | [`1207-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1207-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md) (retired, closed) | `10-list-every-strip-in-the-live-control-handles-and-file-bus-effects-in-the-browser.md` |
+| 11 | #1208 | Meter any boundary of a submix strip and designate a master strip in host-core | [`1208-meter-any-boundary-of-a-submix-strip-and-designate-a-master-strip-in-host-core.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1208-meter-any-boundary-of-a-submix-strip-and-designate-a-master-strip-in-host-core.md) (retired, closed) | `11-meter-and-designate-submix-strips-in-host-core.md` |
+| 12 | #1209 | Carry submix strips in the browser meter frame | [`1209-carry-submix-strips-in-the-browser-meter-frame.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1209-carry-submix-strips-in-the-browser-meter-frame.md) (retired, closed) | `12-carry-submix-strips-in-the-browser-meter-frame.md` |
+| 13 | #1210 | Name submix strips in the browser session map and the SDK measurement | [`1210-name-submix-strips-in-the-browser-session-map-and-the-sdk-measurement.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1210-name-submix-strips-in-the-browser-session-map-and-the-sdk-measurement.md) (retired, closed) | `13-name-submix-strips-in-the-browser-session-map-and-sdk-measurement.md` |
+| 14 | #1211 | Give every strip one mute owner and live-control producers in host-core | [`1211-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1211-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md) (retired, closed) | `14-give-every-strip-one-mute-owner-and-live-control-producers-in-host-core.md` |
+| 15 | #1212 | Add the notSoloable command reason to every vocabulary spelling | [`1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md) (retired, closed) | `15-add-the-not-soloable-command-reason.md` |
+| 16 | #1213 | Address submix strips in browser live commands | [`1213-address-submix-strips-in-browser-live-commands.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1213-address-submix-strips-in-browser-live-commands.md) (retired, closed) | `16-address-submix-strips-in-browser-live-commands.md` |
+| 17 | #1214 | Drive submix strips from the SDK live controls | [`1214-drive-submix-strips-from-the-sdk-live-controls.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1214-drive-submix-strips-from-the-sdk-live-controls.md) (retired, closed) | `17-drive-submix-strips-from-the-sdk-live-controls.md` |
 | 18a | #1215 | Gate every route's coefficients through one function | `.github/ISSUE_SPECS/1215-gate-every-routes-coefficients-through-one-function.md` | `18a-gate-every-routes-coefficients-through-one-function.md` |
 | 18b | #1216 | Mute a route in the session | `.github/ISSUE_SPECS/1216-mute-a-route-in-the-session.md` | `18b-mute-a-route-in-the-session.md` |
 | 19 | #1217 | Skip an inactive route in its destination's sum | `.github/ISSUE_SPECS/1217-skip-an-inactive-route-in-its-destinations-sum.md` | `19-skip-an-inactive-route-in-its-destinations-sum.md` |
@@ -69,7 +70,8 @@ BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196.
 The root files the VCA umbrella when batch K3 closes (#1224's Sol PASS and the K3 push), and
 re-verifies the drafts' anchors then. V4 closes the VCA batch V1-V4, so its draft carries the
 deliverable that removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5); the
-filed V4 must keep it. Deferred item O11 waits on owner question Q2; nothing is filed
-for it.
+filed V4 must keep it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are filed as *Bound route
+gain and matrix values* (#1237), and Q1's answer as *Let a strip override a console slot's link
+mode* (#1236). Both are standalone, outside #1196.
 
 The probe sources that `DESIGN.md` 3.2 and `VERIFY-1.md` name under `scratchpad/` were never committed.

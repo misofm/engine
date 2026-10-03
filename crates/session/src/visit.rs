@@ -105,7 +105,7 @@ pub mod keys {
  // exactly as the track's field 10 (#1199 D1).
  key_module!(submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,CONSOLE="console":3,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6);
  key_module!(output,"Output fields.";ID="id":1);
- key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5);
+ key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5,MUTE="mute":6,FOLLOWS_MUTE="follows_mute":7);
  key_module!(route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3);
  key_module!(route_destination,"Route-destination fields.";KIND="kind":1,SUBMIX_ID="submix_id":2,OUTPUT_ID="output_id":2);
  key_module!(channel_matrix,"Channel-matrix fields.";LL="ll":1,LR="lr":2,RL="rl":3,RR="rr":4);
@@ -229,8 +229,8 @@ mod walk {
         }
         Output=>output |s,v,_o,f| [1] {v.id(f::ID,&s.id)}
         ChannelMatrix=>channel_matrix |s,v,_o,f| [4] {v.f32(f::LL,s.ll),v.f32(f::LR,s.lr),v.f32(f::RL,s.rl),v.f32(f::RR,s.rr)}
-        Route=>route |s,v,o,f| [5] {
-          v.id(f::ID,&s.id),s.source.record(Some(f::SOURCE),o,v),s.destination.record(Some(f::DESTINATION),o,v),s.channel_matrix.record(Some(f::CHANNEL_MATRIX),o,v),v.f32(f::GAIN_DB,s.gain_db)
+        Route=>route |s,v,o,f| [7] {
+          v.id(f::ID,&s.id),s.source.record(Some(f::SOURCE),o,v),s.destination.record(Some(f::DESTINATION),o,v),s.channel_matrix.record(Some(f::CHANNEL_MATRIX),o,v),v.f32(f::GAIN_DB,s.gain_db),v.bool(f::MUTE,s.mute),v.bool(f::FOLLOWS_MUTE,s.follows_mute)
         }
         Automation=>automation |s,v,o,f| [2+s.segments.len() as u32] {v.id(f::ID,&s.id),s.target.record(Some(f::TARGET),o,v),array(f::SEGMENTS,&s.segments,o,v)}
         AutomationTarget=>target |s,v,_o,f| [5] {

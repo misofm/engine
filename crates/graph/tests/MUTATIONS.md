@@ -685,3 +685,52 @@ after the run. x86-64 AVX2 host, debug profile.
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 1201-2 | the `SumDelay` line runs in `execute_op`'s early-return path, before the reduction, and returns (the `TrackDelay` position) | `graph/src/runtime.rs` `execute_op` | `cargo test -p graph --lib a_bus_delay_runs_on_the_sum_after_the_reduction` | RED: `lane 0 sample 5: 0 != 5398.029` -- the reduction never writes the bus buffer, so the delayed sum is never there. |
+
+## Issue #1217 -- an inactive route is skipped in its destination's sum
+
+Applied one at a time to the attempt-1 tree of *Skip an inactive route in its destination's sum*,
+each source file restored after its run. x86-64 AVX2 host, debug profile. The render gates are
+`host-core/tests/route_mute.rs` (`cargo test -p host-core --features
+host-core/test-support,graph/test-support --test route_mute`); gate 4 is
+`graph-compiler/tests/route_activity.rs`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1217-1 | a silenced undelayed route stays active (bind never clears its bit): it mixes `[+0.0; 4]` | `graph/src/runtime.rs` `route_activity` | gates 1 and 2 | RED: `an_inactive_route_is_neither_mixed_nor_read` (`seed 0, Bus, r0 muted, plane 0: sample 16: -0.0 != 0.0`), `the_first_route_in_id_order_owns_the_store` (`r0 muted, r1 open at -0.0: plane 0 frame 1: -0.0, expected 0.0`), and the in-place test (`frame 0: -0.0, expected 0.0`). |
+| 1217-2 | an inactive route's op still runs (D4's early return removed; the destination still skips it) | `graph/src/runtime.rs` `execute_op` | gates 1 and 2 | RED: `seed 0, Bus, r0 muted: the muted route's op mixed`, `t-c mixed`, and gate 2's mix counts. |
+| 1217-3 | the first *active* input owns the store (no `+0.0` store for an inactive first input) | `graph/src/runtime.rs` `route_segments` | gates 1 and 2 | RED: `seed 0, Bus, r0 muted, plane 0: sample 0: -0.0 != 0.0`; `r0 muted, r1 open at -0.0: plane 0 frame 0: -0.0, expected 0.0`; the in-place test (`frame 0: -0.15693776, expected 0.0`). |
+| 1217-4 | an inactive sole input leaves the destination's in-place buffer alone (the `+0.0` store only when `count > 1`) | `graph/src/runtime.rs` `route_segments` | gate 1, in place | RED, 1 of 7: `the muted sole route's bus: plane 0 frame 0: -0.15693776, expected 0.0` -- the raw `post_pan` tap. |
+| 1217-5 | an active opening run is fill-`+0.0`-then-add instead of today's reduction | `graph/src/runtime.rs` `reduce_gated` | gates 1 and 2 | RED: `r0 open at -0.0, r1 and r2 muted: plane 0 frame 0: 0.0, expected -0.0`; `seed 2, Bus, r1 muted, plane 0: sample 0: 0.0 != -0.0`. |
+| 1217-6 | the host-master form's later run stores instead of adding | `graph/src/runtime.rs` `reduce_gated_into` | gate 1 | RED, 1 of 7: `seed 0, Output, r0 muted, plane 0: sample 0: -0.0 != 0.0`. |
+| 1217-7 | a delayed muted route goes inactive (`&& input.delay.is_none()` dropped) | `graph/src/runtime.rs` `route_activity` | gate 3 | Attempt 1: RED, 1 of 7, by the counter only (`a_muted_delayed_route_stays_active`, 0 mixes against 8). Attempt 2: also RED **on audio**, `a_muted_delayed_routes_line_carries_its_zero_mix` (`plane 0: e's input, d-e's delayed zero mix alone: sample 486: 0.0 != -0.0`), and #1218's `a_fully_follow_muted_delayed_send_stays_active` by its counter. |
+| 1217-8 | a route destination copies its route inputs to a `Vec` per block | `graph/src/runtime.rs` `execute_op` | gate 5 | RED: `route_activity_renders_without_allocating` aborts (`SIGABRT`) on the armed render audit. |
+| 1217-9 | bind builds the table whatever the gates | `graph/src/runtime.rs` `build_sequential`, `route_activity` | gate 4 | RED: `a plan without a silencing route builds no route-activity table`. |
+| 1217-10 | the estimate charges no table | `graph-compiler/src/estimate.rs` `resource_estimate` | gate 4 | RED: `graph_metadata_bytes grew by 0, the bound plan by 237`. |
+| 1217-11 | the host-master form stores nothing for an inactive first input (`SumSegment::Zero => {}` in `reduce_gated_into`) | `graph/src/runtime.rs` `reduce_gated_into` | gate 1 (attempt 2, host planes pre-filled with `HOST_SENTINEL = 7.0`) | RED: `an_inactive_route_is_neither_mixed_nor_read` (`seed 0, Output, r0 muted, plane 0: sample 0: 7.0 != 0.0`) and `a_destination_whose_every_route_is_muted_renders_positive_zero` (`Output, 2 muted routes: plane 0 frame 0: 7.0, expected 0.0`). GREEN on the whole file with the sentinel set back to `0.0`, which is the attempt-1 hole. |
+| 1217-12 | the host-master form skips its sum when every route input is inactive (an early `return` in `reduce_gated_into`) | `graph/src/runtime.rs` `reduce_gated_into` | gate 1, every contributor muted | RED, 1 of 12: `a_destination_whose_every_route_is_muted_renders_positive_zero` (`Output, 2 muted routes: plane 0 frame 0: 7.0, expected 0.0`). |
+| 1217-13 | the estimate charges twice the table's bound (`route_activity_bytes * 2`) | `graph-compiler/src/estimate.rs` `resource_estimate` | #1216 gate 5, tightened (attempt 2, NIT-1) | RED: `a_muted_route_seals_one_route_mute_row_after_its_transform` (`the estimate moves by the route-activity charge (545 bytes) and nothing else (route:eq0-main)`); gate 4's lower-bound check stays green. |
+
+## Issue #1220 -- live send coefficients ramp on the render plane
+
+Applied one at a time to the attempt-1 tree of *Ramp live send coefficients on the render plane*,
+each source file restored after its run. x86-64 AVX2 host, debug profile. The gates are
+`graph-compiler/tests/live_routes.rs` (`cargo test -p graph-compiler --test live_routes`); the
+#1217 verdict-2 MINOR-1 row runs `host-core/tests/route_mute.rs`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1220-1 | an idle live route settles on `[0.0; 4]` instead of its prepared coefficients | `graph/src/runtime.rs` `LiveRoute::new` | gate 1 | RED, 7 of 10, `idle_attached_lanes_change_nothing` among them. |
+| 1220-2 | a live route binds unmuted whatever its gate (`mute: false`) | `graph/src/runtime.rs` `LiveRoute::new` | gate 1 | RED, 1 of 10: `attaching changes no route's activity` (the muted undelayed `e-x` mixes). |
+| 1220-3 | activity decided as if after the mix (`position + 128 >= length`) | `graph/src/runtime.rs` `LiveRoute::active` | gate 2 | RED, 1 of 10: `r0 mixes blocks 0 to 3, then stops` (the fade's last block dropped). |
+| 1220-4 | a delayed muted live route goes inactive (`&& !self.delayed` dropped) | `graph/src/runtime.rs` `LiveRoute::active` | gate 3 | RED: `the delayed send mixes every block, muted or not`, and gate 1's activity comparison. |
+| 1220-5a | producers carry their route IDs reversed (a record reaches the wrong route) | `graph/src/lib.rs` `attach_route_controls` | gate 4 | RED, 6 of 10: `48000 Hz trial 0 ...`. |
+| 1220-5b | a mute record keeps the old target (the muted route leaves a contribution) | `graph/src/runtime.rs` `LiveRoute::drain` | gate 4 | RED, 3 of 10: `48000 Hz trial 3 ...`, gates 2 and 3. |
+| 1220-6a | the drain applies one record per block | `graph/src/runtime.rs` `LiveRoute::drain` | gate 5 | RED, 1 of 10: the drained-record count after one render is not `depth`. |
+| 1220-6b | an inactive live route returns before its drain | `graph/src/runtime.rs` `execute_op` | gate 5 | RED, 3 of 10: gate 5's unmute is never seen, gates 2 and 4. |
+| 1220-7 | the drain allocates per applied record | `graph/src/runtime.rs` `LiveRoute::drain` | gate 6 | RED: `SIGABRT` on the armed render audit; run alone, gate 6 aborts too. |
+| 1220-8 | the fold no longer declines a live route (`has_route_control` dropped from `plain_route_gains`) | `graph/src/runtime.rs` `plain_route_gains` | gate 7 | RED, 1 of 10: `no live route folds` (8 lanes fold). |
+| 1220-9a | the attach charges no route-activity table | `graph/src/lib.rs` `attach_route_controls` | gate 8 | RED: `resources.activity_bytes` against the formula. |
+| 1220-9b | the queues are left out of the charge | `graph/src/lib.rs` `route_control_resources` | gate 8 | RED: `resources.queue_bytes` against the formula. |
+| 1220-10 | the arena-form sum skips a destination whose every input is inactive (#1217 verdict 2, V3c) | `graph/src/runtime.rs` `reduce_gated` | `a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero` | RED, 1 of 10: `plane 0 frame 0: -1.2888975, expected +0.0`. |
+| 1220-11 | `route_segments` forgets that an opening run stored (#1217 verdict 2, MC) | `graph/src/runtime.rs` `route_segments` | `host-core` `a_middle_inactive_route_keeps_every_active_contribution` | RED, 1 of 13: `Bus, 3 inputs, muted [1], plane 0: sample 0: 0.29300022 != 0.36220396`. |
+| 1220-12 | a second attach is accepted (the `AlreadyAttached` refusal removed) | `graph/src/lib.rs` `attach_route_controls` | `route_controls_attach_once` | RED: the second call returns `Ok(2)`, replacing the first call's lanes and orphaning its producers. |

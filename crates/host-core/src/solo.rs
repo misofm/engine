@@ -20,6 +20,8 @@
 //!
 //! [`LiveControlSoloState::effective_mute`] is that composition, and it is the **one** place it is
 //! written: a host that needs an effective mute calls it rather than spelling the formula again.
+//! A send that follows its source strip's mute reads it too, handed to
+//! [`crate::LiveRouteMuteFollow::delta`] as a function (issue #1224).
 //!
 //! # One mute owner per strip
 //!

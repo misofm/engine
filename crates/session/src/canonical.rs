@@ -414,6 +414,8 @@ mod tests {
                 rr: 1.0,
             },
             gain_db: 0.0,
+            mute: false,
+            follows_mute: false,
         });
         canonical_session_json(&model).expect("full tagged surface canonicalizes")
     }

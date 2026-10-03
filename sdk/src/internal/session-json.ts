@@ -79,7 +79,7 @@ const OBJECT_KEY_ORDERS = {
   pan: ["left", "right", "smoothing_samples"],
   matrix: ["ll", "lr", "rl", "rr", "smoothing_samples"],
   outputs: ["id"],
-  routes: ["id", "source", "destination", "channel_matrix", "gain_db"],
+  routes: ["id", "source", "destination", "channel_matrix", "gain_db", "mute", "follows_mute"],
   channel_matrix: ["ll", "lr", "rl", "rr"],
   automation: ["id", "target", "segments"],
   target: ["entity_id", "rack", "effect_id", "parameter_id", "channel"],

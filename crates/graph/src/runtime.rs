@@ -289,7 +289,10 @@ use effect_contract::{
     ResponseSnapshotKind, ResponseSnapshotRequest as OwnerSnapshotRequest, ResponseSnapshotSummary,
 };
 use lane::Lane;
-use lane::kernels::{mix2x2_block, ordered_accumulate_block, pdc_delay_block, sum_into_block};
+use lane::kernels::{
+    IndexedRamp, mix2x2_block, ordered_accumulate_block, pdc_delay_block, route_mix_ramp_block,
+    sum_into_block,
+};
 use rack::{BankChain, BankMembers, BankPlaneViews, FoldCohort, ResidentFoldCohort};
 
 // Read only by the scalar pairing passes, which are test-only (issue #1059).
@@ -428,8 +431,23 @@ fn reduce_many<L: Lane>(arena: &mut DisjointArena, plane: usize, out: u32, input
         inputs.len() >= 2,
         "fan-in zero is a fill and fan-in one a copy"
     );
+    reduce_run::<L>(arena, plane, out, inputs, true);
+}
+
+/// [`reduce_many`]'s body over one run of one or more inputs: with `store`, the run's first group
+/// stores and each later group reloads and adds; without it, every group reloads the running sum
+/// already in `out` and adds (issue #1217 D3, a later run of active inputs). The order is the
+/// one left-to-right chain either way.
+#[inline(always)]
+fn reduce_run<L: Lane>(
+    arena: &mut DisjointArena,
+    plane: usize,
+    out: u32,
+    inputs: &[u32],
+    store: bool,
+) {
     for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
-        let initial_store = index == 0;
+        let initial_store = store && index == 0;
         let reduced = match group.len() {
             1 => reduce_group::<L, 1>(arena, plane, out, group, initial_store),
             2 => reduce_group::<L, 2>(arena, plane, out, group, initial_store),
@@ -452,7 +470,11 @@ fn reduce_many<L: Lane>(arena: &mut DisjointArena, plane: usize, out: u32, input
 }
 
 /// One group of `N` consecutive inputs: one arena borrow, one pass over the output.
-#[inline]
+///
+/// Always inlined, as [`reduce_group_into`] is: with two callers ([`reduce_many`] and
+/// [`reduce_gated`]'s later runs) LLVM would otherwise outline an `f32x4` instantiation carrying
+/// [`accumulate_group`]'s scalar tail (issue #1217 attempt 2).
+#[inline(always)]
 fn reduce_group<L: Lane, const N: usize>(
     arena: &mut DisjointArena,
     plane: usize,
@@ -590,8 +612,20 @@ fn reduce_many_into<L: Lane>(
         inputs.len() >= 2,
         "fan-in zero is a fill and fan-in one a copy"
     );
+    reduce_run_into::<L>(arena, plane, target, inputs, true);
+}
+
+/// [`reduce_run`] into the host's plane.
+#[inline(always)]
+fn reduce_run_into<L: Lane>(
+    arena: &DisjointArena,
+    plane: usize,
+    target: &mut [f32],
+    inputs: &[u32],
+    store: bool,
+) {
     for (index, group) in inputs.chunks(REDUCE_GROUP).enumerate() {
-        let initial_store = index == 0;
+        let initial_store = store && index == 0;
         let reduced = match group.len() {
             1 => reduce_group_into::<L, 1>(arena, plane, target, group, initial_store),
             2 => reduce_group_into::<L, 2>(arena, plane, target, group, initial_store),
@@ -614,7 +648,11 @@ fn reduce_many_into<L: Lane>(
 }
 
 /// One group of `N` consecutive inputs into the host's plane: `N` shared reads, one pass.
-#[inline]
+///
+/// Always inlined: it has two callers ([`reduce_many_into`] and [`reduce_gated_into`]'s later
+/// runs), and an outlined `f32x4` instantiation would carry [`accumulate_group`]'s scalar tail,
+/// which `scripts/check-web-audioworklet.sh`'s kernel-shape rule refuses (issue #1217 attempt 2).
+#[inline(always)]
 fn reduce_group_into<L: Lane, const N: usize>(
     arena: &DisjointArena,
     plane: usize,
@@ -627,6 +665,269 @@ fn reduce_group_into<L: Lane, const N: usize>(
     };
     let sources = (*ids).map(|input| arena.read(plane, input));
     accumulate_group::<L, N>(target, sources, initial_store)
+}
+
+/// One step of a route destination's sum (issue #1217 D3), as [`route_segments`] hands it on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SumSegment {
+    /// The first input in edge order is inactive. It still owns the store, with `+0.0`.
+    Zero,
+    /// The opening run of active inputs `[start, end)`, which starts at input 0: today's
+    /// reduction of that run, so a lone active `-0.0` keeps its sign.
+    Store(usize, usize),
+    /// A later run of active inputs `[start, end)`, added to the running sum in edge order.
+    Add(usize, usize),
+}
+
+/// A destination's sum as segments, in edge order: `first + sum(active later inputs)`, where the
+/// first input owns the store (its value when active, `+0.0` when inactive) and an inactive input
+/// is never read (issue #1217 D3).
+///
+/// `count` is the op's input count, and `pairs` its route inputs by ascending position. Each
+/// pair's activity bit is read once. With every input active the walk hands on one
+/// `Store(0, count)`, which is exactly today's reduction. An inactive in-place sole input hands on
+/// `Zero` alone, so the destination fills `+0.0` over the raw tap its buffer still holds.
+#[inline]
+fn route_segments(
+    count: usize,
+    pairs: &[RouteInput],
+    active: &[bool],
+    mut sink: impl FnMut(SumSegment),
+) {
+    let mut start = 0;
+    let mut stored = false;
+    for pair in pairs {
+        if active.get(pair.route as usize).copied().unwrap_or(true) {
+            continue;
+        }
+        let position = pair.position as usize;
+        if start < position {
+            sink(if stored {
+                SumSegment::Add(start, position)
+            } else {
+                SumSegment::Store(start, position)
+            });
+            stored = true;
+        } else if position == 0 {
+            sink(SumSegment::Zero);
+            stored = true;
+        }
+        start = position + 1;
+    }
+    if start < count {
+        sink(if stored {
+            SumSegment::Add(start, count)
+        } else {
+            SumSegment::Store(start, count)
+        });
+    }
+}
+
+/// [`reduce_plane`] over both planes of a route destination (issue #1217 D3).
+#[inline]
+fn reduce_gated(
+    arena: &mut DisjointArena,
+    out: u32,
+    inputs: &[u32],
+    pairs: &[RouteInput],
+    active: &[bool],
+) {
+    route_segments(inputs.len(), pairs, active, |segment| {
+        for plane in 0..2 {
+            match segment {
+                SumSegment::Zero => arena.write(plane, out).fill(0.0),
+                SumSegment::Store(start, end) => {
+                    reduce_plane(arena, plane, out, &inputs[start..end]);
+                }
+                SumSegment::Add(start, end) => {
+                    reduce_run::<FrameLane>(arena, plane, out, &inputs[start..end], false);
+                }
+            }
+        }
+    });
+}
+
+/// [`reduce_gated`] into the host's planes: the session Output as a route destination.
+#[inline]
+fn reduce_gated_into(
+    arena: &DisjointArena,
+    out: u32,
+    (left, right): (&mut [f32], &mut [f32]),
+    inputs: &[u32],
+    pairs: &[RouteInput],
+    active: &[bool],
+) {
+    route_segments(inputs.len(), pairs, active, |segment| {
+        for (plane, target) in [(0, &mut *left), (1, &mut *right)] {
+            match segment {
+                SumSegment::Zero => target.fill(0.0),
+                SumSegment::Store(start, end) => {
+                    reduce_plane_into(arena, plane, out, target, &inputs[start..end]);
+                }
+                SumSegment::Add(start, end) => {
+                    reduce_run_into::<FrameLane>(arena, plane, target, &inputs[start..end], false);
+                }
+            }
+        }
+    });
+}
+
+/// One route input of a destination op (issue #1217 D5): its position in the op's inputs, and
+/// the route's index in canonical route-ID order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RouteInput {
+    position: u32,
+    route: u32,
+}
+
+/// [`RouteActivity::units`] for a unit that is neither a route op nor a route destination.
+const UNROUTED: u32 = u32::MAX;
+/// The tag bit of a destination's entry in [`RouteActivity::units`]; the rest is its index in
+/// [`RouteActivity::destinations`]. An untagged entry is a route op's route index.
+const ROUTE_DESTINATION: u32 = 1 << 31;
+
+/// Which routes are active this block, and where the executor reads that (issue #1217 D5).
+///
+/// Built at bind ([`route_activity`]) only for a plan with a route that can be inactive, and
+/// carried **beside** the ops: `RuntimeOp`'s layout is a reported byte. A route is inactive when
+/// its gate silences it and its input into its destination carries no compensation delay (D1); a
+/// silenced delayed route stays active and mixes its zero coefficients, so its consumer's line
+/// never stages audio this block did not write (D2). The bit is plain data, fixed at bind for a
+/// prepared route; a live route's op rewrites its own bit once per block, after its drain and
+/// before its destination reads it (issue #1220 D4), which is why [`execute_op`] borrows the table
+/// mutably. A plan with a live route always builds the table.
+pub(crate) struct RouteActivity {
+    /// One bit per prepared route, in canonical route-ID order.
+    active: Box<[bool]>,
+    /// One entry per unit: [`UNROUTED`], a route op's route index, or [`ROUTE_DESTINATION`]
+    /// tagging a destination's index.
+    units: Box<[u32]>,
+    /// Per destination, its half-open range of [`Self::inputs`].
+    destinations: Box<[(u32, u32)]>,
+    /// Every destination's route inputs, destination by destination, by ascending position.
+    inputs: Box<[RouteInput]>,
+}
+
+impl RouteActivity {
+    /// The route index of unit `unit`'s op, when that op is a route.
+    #[inline]
+    fn route_of(&self, unit: usize) -> Option<usize> {
+        let slot = *self.units.get(unit)?;
+        (slot & ROUTE_DESTINATION == 0).then_some(slot as usize)
+    }
+
+    /// Unit `unit`'s route inputs, when its op is a route destination.
+    #[inline]
+    fn destination_of(&self, unit: usize) -> Option<&[RouteInput]> {
+        let slot = *self.units.get(unit)?;
+        if slot == UNROUTED || slot & ROUTE_DESTINATION == 0 {
+            return None;
+        }
+        let (start, end) = *self
+            .destinations
+            .get((slot & !ROUTE_DESTINATION) as usize)?;
+        self.inputs.get(start as usize..end as usize)
+    }
+
+    /// Whether route `route` mixes this block.
+    #[inline]
+    fn is_active(&self, route: usize) -> bool {
+        self.active.get(route).copied().unwrap_or(true)
+    }
+
+    /// Whether unit `unit` is neither a route op nor a route destination.
+    #[inline]
+    fn unrouted(&self, unit: usize) -> bool {
+        self.units.get(unit).is_none_or(|slot| *slot == UNROUTED)
+    }
+
+    /// Issue #1220 D4: a live route's op writes its own bit, once per block, before its
+    /// destination's reduction (a later unit of the same block) reads it.
+    #[inline]
+    fn set_active(&mut self, route: usize, active: bool) {
+        if let Some(bit) = self.active.get_mut(route) {
+            *bit = active;
+        }
+    }
+}
+
+/// One live route's render state (issue #1220 D3-D6): the indexed ramp it mixes by, how far into
+/// that ramp it is, whether it is muted once the ramp ends, and its lane.
+///
+/// At bind the ramp is settled on the route's prepared, gated coefficients, `position` is 0 and
+/// `mute` is the gate's `silences()`, so an idle live route mixes exactly the bits its
+/// `NodeKind::Route` would ([`route_mix_ramp_block`] of a settled ramp is [`mix2x2_block`] of its
+/// target) and is inactive exactly when that route would be.
+pub(crate) struct LiveRoute {
+    /// The current ramp; `ramp.coefficients_at(position)` are the last mixed frame's coefficients.
+    ramp: IndexedRamp,
+    /// The ramp index of the last frame mixed, saturated at `ramp.length`; never wraps.
+    position: u32,
+    /// Whether the last applied record (or the prepared gate) silences the route.
+    mute: bool,
+    /// Whether the route's one consumer input carries a compensation delay (its `InputRef.delay`).
+    /// A delayed live route is never inactive (VERIFY-1 BLOCKER-1).
+    delayed: bool,
+    /// The route's index in the plan's [`RouteActivity`]: canonical route-ID order.
+    route: u32,
+    control: Box<crate::RouteControlLane>,
+}
+
+impl LiveRoute {
+    pub(crate) fn new(
+        prepared: [f32; 4],
+        mute: bool,
+        control: Box<crate::RouteControlLane>,
+    ) -> Self {
+        Self {
+            ramp: IndexedRamp::settled(prepared),
+            position: 0,
+            mute,
+            delayed: false,
+            route: u32::MAX,
+            control,
+        }
+    }
+
+    /// D5: apply, in order, exactly the records available at entry, each ramping from the
+    /// coefficients the route is at (D3). Later records wait for a later block; none is dropped.
+    /// Returns how many were applied.
+    #[inline]
+    fn drain(&mut self) -> usize {
+        let available = self.control.consumer.available_at_entry();
+        let mut applied = 0;
+        for _ in 0..available {
+            let Ok(record) = self.control.consumer.try_pop() else {
+                break;
+            };
+            debug_assert!(record.length() <= crate::ROUTE_RAMP_LENGTH_MAXIMUM);
+            self.ramp = IndexedRamp::new(
+                self.ramp.coefficients_at(self.position),
+                record.target(),
+                record.length(),
+            );
+            self.mute = record.mute();
+            self.position = 0;
+            applied += 1;
+        }
+        applied
+    }
+
+    /// D4: whether the route mixes this block, decided after the drain and before anything
+    /// reads it. Inactive only when muted, past its ramp, and undelayed: the block in which a mute
+    /// ramp ends is mixed whole, and a delayed route keeps feeding its line.
+    #[inline]
+    const fn active(&self) -> bool {
+        !(self.mute && self.position >= self.ramp.length && !self.delayed)
+    }
+
+    /// D3: mix one block by the indexed ramp, then advance and saturate `position`.
+    #[inline]
+    fn mix(&mut self, left: &mut [f32], right: &mut [f32]) {
+        route_mix_ramp_block::<FrameLane>(left, right, &self.ramp, self.position);
+        let frames = u32::try_from(left.len()).unwrap_or(u32::MAX);
+        self.position = core::cmp::min(self.position.saturating_add(frames), self.ramp.length);
+    }
 }
 
 // REALTIME_POLICY_END
@@ -842,6 +1143,9 @@ pub(crate) enum NodeKind {
     LiveControlEffect(Box<LiveControlEffect>),
     /// A route's 2x2 matrix, with the route gain already folded in (D3).
     Route([f32; 4]),
+    /// A route whose coefficients change live (issue #1220 D6): it drains its lane at the start
+    /// of every block, ramps by the indexed ramp and writes its own activity bit.
+    LiveRoute(Box<LiveRoute>),
     /// A homogeneous-bank member: the reduction gathers its input, the bank does the work.
     BankMember,
 }
@@ -1522,9 +1826,11 @@ impl NodeKind {
             Self::Bound(processor) => processor.channel_symmetry(),
             // Not a per-track upstream stage: nothing here can make the two channels disagree,
             // and nothing here is collapsed.
-            Self::Identity | Self::SourceInput | Self::Route(_) | Self::BankMember => {
-                ChannelSymmetryWitness::SYMMETRIC
-            }
+            Self::Identity
+            | Self::SourceInput
+            | Self::Route(_)
+            | Self::LiveRoute(_)
+            | Self::BankMember => ChannelSymmetryWitness::SYMMETRIC,
         }
     }
 
@@ -2230,6 +2536,10 @@ pub(crate) struct Runtime {
     /// mode each claim gets and why the rest keep the copy. A claim nothing reads is named here
     /// too, which is what makes the copy loop skip it.
     source_plane_of_buffer: Box<[u32]>,
+    /// Issue #1217 D5: which routes mix this block, built at bind by [`route_activity`] only for a
+    /// plan with a silencing route gate or (issue #1220) a live route. `None` otherwise, and every
+    /// op then runs as it did before.
+    route_activity: Option<Box<RouteActivity>>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2280,6 +2590,7 @@ pub(crate) struct RuntimeWithoutSplitPairTable {
     folds: u64,
     output_unit: Option<usize>,
     source_plane_of_buffer: Box<[u32]>,
+    route_activity: Option<Box<RouteActivity>>,
 }
 
 pub(crate) fn scalar_split_runtime_layout() -> (u64, u64) {
@@ -2470,6 +2781,7 @@ impl Runtime {
             folds,
             output_unit,
             source_plane_of_buffer: Box::default(),
+            route_activity: None,
         }
     }
 
@@ -2587,7 +2899,7 @@ impl Runtime {
         match &self.units[index] {
             RuntimeUnit::Op(op) => match (&op.kind, &*op.inputs) {
                 (NodeKind::Bound(_), _) => BOUND,
-                (NodeKind::Route(_), _) => ROUTE,
+                (NodeKind::Route(_) | NodeKind::LiveRoute(_), _) => ROUTE,
                 (NodeKind::Identity, [single]) if op.split_pair.is_none() => {
                     if *single == op.output {
                         IDENTITY_ALIAS
@@ -2630,6 +2942,7 @@ impl Runtime {
             bank_outputs,
             output_unit,
             source_plane_of_buffer,
+            route_activity,
             ..
         } = self;
         // GraphExecutor reaches this unit only after the previous execute and observe both
@@ -2659,6 +2972,9 @@ impl Runtime {
                     split_pairs,
                     first_sample,
                     host,
+                    route_activity
+                        .as_deref_mut()
+                        .map(|activity| (activity, index)),
                 )
             }
             RuntimeUnit::Bank {
@@ -2669,6 +2985,14 @@ impl Runtime {
                 master,
             } => {
                 let lanes = *lanes;
+                // Issue #1217 D5: a route destination is a submix's `Input` stage or the session
+                // Output, never a bank member, so no gather below bypasses a D3 reduction.
+                debug_assert!(
+                    route_activity
+                        .as_deref()
+                        .is_none_or(|activity| activity.unrouted(index)),
+                    "a bank unit is neither a route nor a route destination"
+                );
                 // Only the first slot reduces graph inputs; the chain computes the rest -- and a
                 // member whose whole reduction *is* the dedication copy does not even do that:
                 // the gather reads its producer's buffer directly. See `bank_gather_source`.
@@ -2676,7 +3000,8 @@ impl Runtime {
                     if let Some(source) = bank_gather_source(member) {
                         bank_inputs[lane] = source;
                     } else {
-                        // A bank member is never the Output op.
+                        // A bank member is never the Output op, a route, or a route
+                        // destination.
                         execute_op(
                             member,
                             arena,
@@ -2684,6 +3009,7 @@ impl Runtime {
                             track_delays,
                             split_pairs,
                             first_sample,
+                            None,
                             None,
                         )?;
                         bank_inputs[lane] = member.output;
@@ -2991,6 +3317,11 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
 /// [`output_planes`] or [`output_and_sidechain_planes`], so the two storages cannot diverge site by
 /// site. Staging a delayed input still goes through the arena, because a staging buffer is the
 /// op's input, not its output.
+///
+/// `routes` is the plan's [`RouteActivity`] and this op's unit index, `None` in a plan that built
+/// none and for a bank member (issue #1217 D5). An inactive route's op returns before its
+/// reduction and its mix (D4), and a route destination's reduction is [`reduce_gated`]'s D3 sum.
+#[allow(clippy::too_many_arguments)]
 fn execute_op(
     op: &mut RuntimeOp,
     arena: &mut DisjointArena,
@@ -2999,6 +3330,7 @@ fn execute_op(
     split_pairs: &mut [Box<dyn GraphRuntimeSplitPairProcessor>],
     first_sample: u64,
     mut host: Option<HostMaster<'_>>,
+    routes: Option<(&mut RouteActivity, usize)>,
 ) -> Result<(), RenderError> {
     let output = op.output;
     if let NodeKind::TrackDelay { line, .. } = op.kind {
@@ -3014,6 +3346,37 @@ fn execute_op(
     }
     if matches!(op.kind, NodeKind::SourceInput) {
         // The coordinator's source set already wrote this node's output for this block.
+        return Ok(());
+    }
+    let mut routes = routes;
+    // Issue #1220 D4, D5: a live route drains its lane first, every block and inactive or not
+    // (an inactive op that skipped the drain would never see its unmute), then decides this
+    // block's activity once and writes it before its destination, a later unit, reduces.
+    if let NodeKind::LiveRoute(live) = &mut op.kind {
+        let applied = live.drain();
+        #[cfg(any(test, feature = "test-support"))]
+        test_only_count_route_drained(live.route as usize, applied);
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = applied;
+        let active = live.active();
+        if let Some((activity, _)) = routes.as_mut() {
+            activity.set_active(live.route as usize, active);
+        }
+        if !active {
+            return Ok(());
+        }
+    }
+    let routes = routes.map(|(activity, unit)| (&*activity, unit));
+    // Issue #1217 D4: an inactive route's op does not run. A route has one undelayed input
+    // (its compensation is 0), so there is nothing to stage either, and its destination neither
+    // aliases nor adds the buffer this leaves unwritten.
+    let route = match (&op.kind, routes) {
+        (NodeKind::Route(_), Some((activity, unit))) => activity.route_of(unit),
+        _ => None,
+    };
+    if let (Some(route), Some((activity, _))) = (route, routes)
+        && !activity.is_active(route)
+    {
         return Ok(());
     }
     // A delayed edge stages its producer's words before the consuming op reduces them.
@@ -3040,16 +3403,30 @@ fn execute_op(
     // no inputs is a submix nothing routes into and its fill **is** its audio; a `SourceInput` and
     // a `TrackDelay` are already skipped above; every other kind -- `SumDelay` included -- reduces
     // first and processes in place, so its fill is the value it processes.
+    //
+    // A route destination reduces only its active inputs, with the first input in edge order
+    // owning the store (issue #1217 D3).
     if !op.inputs.is_empty() || !matches!(op.kind, NodeKind::Bound(_)) {
-        match host.as_mut() {
-            None => {
+        let gated = routes.and_then(|(activity, unit)| {
+            activity
+                .destination_of(unit)
+                .map(|pairs| (pairs, &*activity.active))
+        });
+        match (host.as_mut(), gated) {
+            (None, None) => {
                 reduce_plane(arena, 0, output, &op.inputs);
                 reduce_plane(arena, 1, output, &op.inputs);
             }
-            Some(host) => {
+            (Some(host), None) => {
                 let (left, right) = host.planes_mut();
                 reduce_plane_into(arena, 0, output, left, &op.inputs);
                 reduce_plane_into(arena, 1, output, right, &op.inputs);
+            }
+            (None, Some((pairs, active))) => {
+                reduce_gated(arena, output, &op.inputs, pairs, active);
+            }
+            (Some(host), Some((pairs, active))) => {
+                reduce_gated_into(arena, output, host.planes_mut(), &op.inputs, pairs, active);
             }
         }
     }
@@ -3077,8 +3454,18 @@ fn execute_op(
             }
         }
         NodeKind::Route(coefficients) => {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(route) = route {
+                test_only_count_route_mix(route);
+            }
             let (out_left, out_right) = output_planes(arena, &mut host, output);
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
+        }
+        NodeKind::LiveRoute(live) => {
+            #[cfg(any(test, feature = "test-support"))]
+            test_only_count_route_mix(live.route as usize);
+            let (out_left, out_right) = output_planes(arena, &mut host, output);
+            live.mix(out_left, out_right);
         }
         NodeKind::Bound(processor) => {
             let (out_left, out_right) = output_planes(arena, &mut host, output);
@@ -3621,7 +4008,8 @@ use rack::{
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform, TrackStage,
+    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteGate, RouteTransform, TrackStage,
+    gated_route_coefficients,
     program::{ExecutionProgram, Op},
 };
 
@@ -3917,7 +4305,7 @@ pub(crate) fn bank_membership(
 
 /// Everything a bound plan hands the runtime, consumed exactly once per node.
 pub(crate) struct RuntimeParts {
-    pub(crate) routes: BTreeMap<GraphNodeId, RouteTransform>,
+    pub(crate) routes: BTreeMap<GraphNodeId, (RouteTransform, RouteGate)>,
     pub(crate) effects: BTreeMap<GraphNodeId, GraphPreparedEffect>,
     /// Issue #140 A: live-control channels by effect node, taken by whichever owner renders that
     /// node -- the per-node `LiveControlEffect`, or the bank slot that holds the node's lane.
@@ -3925,6 +4313,9 @@ pub(crate) struct RuntimeParts {
     /// Issue #143 D3: observation lanes by effect node, taken by whichever owner renders that
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
     effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
+    /// Issue #1220 D6: live-route lanes by route node, taken by `node_kind` for that route's op.
+    /// Empty for a plan without route controls, so every route binds `NodeKind::Route`.
+    route_controls: BTreeMap<GraphNodeId, Box<crate::RouteControlLane>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) split_pairs: BTreeMap<GraphNodeId, SplitPairSlot>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
@@ -4013,7 +4404,7 @@ impl RuntimeParts {
         Self {
             routes: routes
                 .into_iter()
-                .map(|route| (route.node, route.transform))
+                .map(|route| (route.node, (route.transform, route.gate)))
                 .collect(),
             effects: effects
                 .into_iter()
@@ -4027,6 +4418,7 @@ impl RuntimeParts {
                 .into_iter()
                 .map(|binding| (binding.node, binding.observation))
                 .collect(),
+            route_controls: BTreeMap::new(),
             bindings: bindings
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
@@ -4045,6 +4437,19 @@ impl RuntimeParts {
             response_metadata,
             frames,
         }
+    }
+
+    /// Issue #1220 D6: the plan's live-route lanes, keyed by route node exactly as effect controls
+    /// are keyed by effect node.
+    pub(crate) fn with_route_controls(
+        mut self,
+        controls: Vec<crate::GraphRouteControlBinding>,
+    ) -> Self {
+        self.route_controls = controls
+            .into_iter()
+            .map(|binding| (binding.node, binding.control))
+            .collect();
+        self
     }
 
     /// The node-kind decision used by the sequential executor.
@@ -4089,8 +4494,18 @@ impl RuntimeParts {
                     self.frames,
                 ))),
             }
-        } else if let Some(transform) = self.routes.remove(node) {
-            NodeKind::Route(folded_route(&transform))
+        } else if let Some((transform, gate)) = self.routes.remove(node) {
+            let prepared = gated_route_coefficients(&transform, gate);
+            // Issue #1220 D6: a route with a lane is live; its activity index and delay are set
+            // once the plan's route-activity table exists (`bind_live_routes`).
+            match self.route_controls.remove(node) {
+                None => NodeKind::Route(prepared),
+                Some(control) => NodeKind::LiveRoute(Box::new(LiveRoute::new(
+                    prepared,
+                    gate.silences(),
+                    control,
+                ))),
+            }
         } else if let Some([left, right]) = self.track_delays.remove(node) {
             // A delay entry on a node that is not a source input: a submix's `Input`, which
             // reduces the routes that target it (#1201 D2). Without this arm the entry would sit
@@ -5154,6 +5569,21 @@ pub(crate) fn build_sequential(
     #[cfg(any(test, feature = "test-support"))]
     test_only_reset_selected_split_fader();
     let mut parts = parts;
+    // Issue #1217 D5: the prepared routes and their gates in canonical route-ID order, taken
+    // before `node_kind` consumes them, and only when some gate silences or (issue #1220 D4) some
+    // route is live: a plan with neither binds exactly what it bound before.
+    let route_gates: Vec<(GraphNodeId, RouteGate)> =
+        if parts.routes.values().any(|(_, gate)| gate.silences())
+            || !parts.route_controls.is_empty()
+        {
+            parts
+                .routes
+                .iter()
+                .map(|(node, (_, gate))| (node.clone(), *gate))
+                .collect()
+        } else {
+            Vec::new()
+        };
     // The arena reserves buffer 0 as the always-zero silence slot, so a coloured buffer `b` is
     // arena buffer `b + ARENA_BASE`.
     let arena = |buffer: u32| buffer + ARENA_BASE;
@@ -5344,6 +5774,21 @@ pub(crate) fn build_sequential(
         &parts.response_metadata,
         &retired,
     );
+    let route_activity = route_activity(
+        program,
+        spec,
+        &route_gates,
+        &units,
+        &op_slot,
+        &retired,
+        fold.as_ref().map(|fold| fold.master_op),
+    )
+    .map(|(activity, delayed)| {
+        bind_live_routes(&mut units, &activity, &delayed);
+        activity
+    });
+    #[cfg(any(test, feature = "test-support"))]
+    test_only_record_route_activity(route_activity.is_some(), &route_gates);
     let arena = DisjointArena::try_new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -5380,7 +5825,266 @@ pub(crate) fn build_sequential(
         output_unit,
     );
     runtime.source_plane_of_buffer = source_plane_of_buffer;
+    runtime.route_activity = route_activity;
     runtime
+}
+
+/// Issue #1217 D5: the executor's [`RouteActivity`], or `None` when no route gate silences.
+///
+/// `routes` are the prepared routes and their gates in canonical route-ID order (empty when no
+/// gate silences), and a route's index is its position there. Walking the program's ops in order,
+/// the last op to write a buffer is the producer an input reads, so each emitted op's route
+/// inputs are found by position:
+///
+/// * a route op that is a unit of its own gets its route index (a retired route has no unit, and
+///   is open: the fold declines a gated route);
+/// * every other emitted op that reads a route is a destination, with its `(position, route)`
+///   pairs, except the fold's master, whose inputs became its own output and whose contributors are
+///   all retired, open routes;
+/// * a route is inactive (D1) when its gate silences it and its consumer reads it undelayed. A
+///   delayed input names its staging buffer, which the consumer stages every block, so a silenced
+///   delayed route stays active and mixes `[+0.0; 4]` (D2).
+///
+/// A route destination is a submix's `Input` stage or the session Output, never a bank member. A
+/// destination this walk found in a bank unit would be one whose reduction the gather can bypass,
+/// so it is refused in debug and, in release, its routes are kept active, which is the plan's
+/// zero-coefficient mix.
+///
+/// `routes` is empty unless some gate silences or some route is live (issue #1220 D4), and then
+/// nothing is built. Beside the table it returns, per route, whether its consumer reads it through
+/// a compensation delay, which a live route needs (D4) and the table itself does not keep.
+#[allow(clippy::type_complexity)]
+fn route_activity(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    routes: &[(GraphNodeId, RouteGate)],
+    units: &[RuntimeUnit],
+    op_slot: &[Option<(usize, usize)>],
+    retired: &std::collections::BTreeSet<usize>,
+    master_op: Option<usize>,
+) -> Option<(Box<RouteActivity>, Vec<bool>)> {
+    if routes.is_empty() {
+        return None;
+    }
+    let route_of = |op: usize| {
+        let node = &spec.nodes[program.ops[op].node as usize].id;
+        routes.binary_search_by(|(id, _)| id.cmp(node)).ok()
+    };
+    // Below the tag bit, so a route index is never read back as a tagged destination.
+    let index = |value: usize| {
+        u32::try_from(value)
+            .ok()
+            .filter(|value| value & ROUTE_DESTINATION == 0)
+            .expect("a route table index fits below the destination tag bit")
+    };
+    let mut active = vec![true; routes.len()];
+    let mut delayed = vec![false; routes.len()];
+    let mut slots = vec![UNROUTED; units.len()];
+    let mut destinations: Vec<(u32, u32)> = Vec::new();
+    let mut inputs: Vec<RouteInput> = Vec::new();
+    let mut owner: Vec<Option<usize>> = vec![None; program.buffers as usize];
+    for (op_index, op) in program.ops.iter().enumerate() {
+        let unit = op_slot
+            .get(op_index)
+            .copied()
+            .flatten()
+            .map(|(unit, _)| unit)
+            .filter(|_| !retired.contains(&op_index));
+        if let Some(route) = route_of(op_index) {
+            if let Some(unit) = unit {
+                slots[unit] = index(route);
+            }
+        } else if Some(op_index) != master_op
+            && let Some(unit) = unit
+        {
+            let start = inputs.len();
+            for (position, input) in program.inputs_of(op).iter().enumerate() {
+                let Some(route) = owner[input.buffer.0 as usize].and_then(route_of) else {
+                    continue;
+                };
+                if routes[route].1.silences() && input.delay.is_none() {
+                    active[route] = false;
+                }
+                delayed[route] = input.delay.is_some();
+                inputs.push(RouteInput {
+                    position: index(position),
+                    route: index(route),
+                });
+            }
+            if inputs.len() > start {
+                if matches!(units[unit], RuntimeUnit::Op(_)) {
+                    slots[unit] = ROUTE_DESTINATION | index(destinations.len());
+                    destinations.push((index(start), index(inputs.len())));
+                } else {
+                    debug_assert!(false, "a route destination is never a bank member");
+                    for pair in inputs.drain(start..) {
+                        active[pair.route as usize] = true;
+                    }
+                }
+            }
+        }
+        owner[op.output.0 as usize] = Some(op_index);
+    }
+    Some((
+        Box::new(RouteActivity {
+            active: active.into_boxed_slice(),
+            units: slots.into_boxed_slice(),
+            destinations: destinations.into_boxed_slice(),
+            inputs: inputs.into_boxed_slice(),
+        }),
+        delayed,
+    ))
+}
+
+/// Issue #1220 D4, D6: give every live route op its index in `activity` and whether its consumer
+/// reads it delayed, at bind. A live route is a plain unit of its own (it is never a bank member,
+/// and it never folds), so its unit's entry in `activity` is its route index.
+fn bind_live_routes(units: &mut [RuntimeUnit], activity: &RouteActivity, delayed: &[bool]) {
+    for (unit, owner) in units.iter_mut().enumerate() {
+        let RuntimeUnit::Op(op) = owner else {
+            continue;
+        };
+        let NodeKind::LiveRoute(live) = &mut op.kind else {
+            continue;
+        };
+        let route = activity
+            .route_of(unit)
+            .expect("a live route's op is a route unit of the activity table");
+        live.route = u32::try_from(route).expect("a route index fits u32");
+        live.delayed = delayed.get(route).copied().unwrap_or(false);
+    }
+}
+
+/// The bytes bind allocates for one live route's render-side owner (issue #1220 D8): its box.
+#[must_use]
+pub(crate) const fn live_route_owner_bytes() -> usize {
+    core::mem::size_of::<LiveRoute>()
+}
+
+/// The largest single allocation of the [`RouteActivity`] table [`route_activity_bound_bytes`]
+/// bounds: its box, or the largest of its four exact-length tables.
+#[must_use]
+pub(crate) fn route_activity_largest_bytes(routes: u64, nodes: u64) -> Option<u64> {
+    let size = |bytes: usize| u64::try_from(bytes).ok();
+    Some(
+        size(core::mem::size_of::<RouteActivity>())?
+            .max(routes.checked_mul(size(core::mem::size_of::<bool>())?)?)
+            .max(nodes.checked_mul(size(core::mem::size_of::<u32>())?)?)
+            .max(routes.checked_mul(size(core::mem::size_of::<(u32, u32)>())?)?)
+            .max(routes.checked_mul(size(core::mem::size_of::<RouteInput>())?)?),
+    )
+}
+
+/// The bytes bind allocates for a [`RouteActivity`], bounded from what a compile knows: `routes`
+/// prepared routes over a graph of `nodes` nodes (issue #1217 D6).
+///
+/// `size_of::<RouteActivity>()` for its box, plus `routes` activity bits, plus one `u32` unit entry
+/// per node (a unit holds at least one op and an op is one node, so `nodes` bounds the units), plus
+/// `routes` destination ranges and `routes` route inputs (each route has exactly one consumer
+/// edge, so neither table can outgrow it). The tables are exact-length boxed slices, so this is
+/// what the allocator is asked for, and never less.
+#[must_use]
+pub(crate) fn route_activity_bound_bytes(routes: u64, nodes: u64) -> Option<u64> {
+    let size = |bytes: usize| u64::try_from(bytes).ok();
+    size(core::mem::size_of::<RouteActivity>())?
+        .checked_add(routes.checked_mul(size(core::mem::size_of::<bool>())?)?)?
+        .checked_add(nodes.checked_mul(size(core::mem::size_of::<u32>())?)?)?
+        .checked_add(routes.checked_mul(size(core::mem::size_of::<(u32, u32)>())?)?)?
+        .checked_add(routes.checked_mul(size(core::mem::size_of::<RouteInput>())?)?)
+}
+
+/// How many routes [`test_only_route_mix_counts`] counts: a fixed table, so neither bind nor
+/// render allocates for it (gate 4 measures what bind retains).
+#[cfg(any(test, feature = "test-support"))]
+const TEST_ONLY_ROUTE_MIX_CAPACITY: usize = 64;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Whether the last bind on this thread built a [`RouteActivity`] (issue #1217 D7).
+    static ROUTE_ACTIVITY_BUILT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The last bind's prepared route count, when it built a [`RouteActivity`], else 0.
+    static ROUTE_MIX_ROUTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Route-op mixes per route index of that bind.
+    static ROUTE_MIX_COUNTS: std::cell::Cell<[u64; TEST_ONLY_ROUTE_MIX_CAPACITY]> =
+        const { std::cell::Cell::new([0; TEST_ONLY_ROUTE_MIX_CAPACITY]) };
+    /// Issue #1220: live-route records applied per route index of that bind.
+    static ROUTE_DRAINED_COUNTS: std::cell::Cell<[u64; TEST_ONLY_ROUTE_MIX_CAPACITY]> =
+        const { std::cell::Cell::new([0; TEST_ONLY_ROUTE_MIX_CAPACITY]) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_record_route_activity(built: bool, routes: &[(GraphNodeId, RouteGate)]) {
+    ROUTE_ACTIVITY_BUILT.with(|slot| slot.set(built));
+    ROUTE_MIX_ROUTES.with(|slot| {
+        slot.set(if built {
+            routes.len().min(TEST_ONLY_ROUTE_MIX_CAPACITY)
+        } else {
+            0
+        });
+    });
+    ROUTE_MIX_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAINED_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_route_drained(route: usize, applied: usize) {
+    ROUTE_DRAINED_COUNTS.with(|counts| {
+        let mut value = counts.get();
+        if let Some(count) = value.get_mut(route) {
+            *count += applied as u64;
+        }
+        counts.set(value);
+    });
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_only_count_route_mix(route: usize) {
+    ROUTE_MIX_COUNTS.with(|counts| {
+        let mut value = counts.get();
+        if let Some(count) = value.get_mut(route) {
+            *count += 1;
+        }
+        counts.set(value);
+    });
+}
+
+/// Whether the last plan bound on this thread built a [`RouteActivity`] (issue #1217 D7): `true`
+/// only for a plan with a silencing route gate.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_activity_built() -> bool {
+    ROUTE_ACTIVITY_BUILT.with(std::cell::Cell::get)
+}
+
+/// Route-op mixes executed per route node on this thread since the last bind or reset (issue
+/// #1217 D7), one entry per prepared route in canonical route-ID order (the first 64). Counted
+/// only in a plan that built a [`RouteActivity`]; empty for any other.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_mix_counts() -> Vec<u64> {
+    let routes = ROUTE_MIX_ROUTES.with(std::cell::Cell::get);
+    ROUTE_MIX_COUNTS.with(|counts| counts.get()[..routes].to_vec())
+}
+
+/// Zero this thread's route-mix and drained-record counts, keeping the bound plan's routes.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn test_only_route_mix_reset() {
+    ROUTE_MIX_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+    ROUTE_DRAINED_COUNTS.with(|counts| counts.set([0; TEST_ONLY_ROUTE_MIX_CAPACITY]));
+}
+
+/// Live-route records applied per route on this thread since the last bind or reset (issue
+/// #1220), indexed as [`test_only_route_mix_counts`]: one entry per prepared route in canonical
+/// route-ID order (the first 64), in a plan that built a [`RouteActivity`].
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+#[must_use]
+pub fn test_only_route_drained_counts() -> Vec<u64> {
+    let routes = ROUTE_MIX_ROUTES.with(std::cell::Cell::get);
+    ROUTE_DRAINED_COUNTS.with(|counts| counts.get()[..routes].to_vec())
 }
 
 /// Whether first-slot bank member `member` reads arena buffer `buffer` and nothing else, and does
@@ -6023,20 +6727,6 @@ fn apply_scatter_redirects(
     }
 }
 
-/// A route's 2x2 with its linear gain folded in, once, at bind (D3, #98 F4).
-///
-/// One derivation, two callers: [`RuntimeParts::node_kind`] builds `NodeKind::Route` from it and
-/// [`route_fold`] builds `FoldLane` from it, so a chain's epilogue cannot apply constants that
-/// differ from the ones the route op it replaced would have applied.
-const fn folded_route(transform: &RouteTransform) -> [f32; 4] {
-    [
-        transform.gain * transform.ll,
-        transform.gain * transform.lr,
-        transform.gain * transform.rl,
-        transform.gain * transform.rr,
-    ]
-}
-
 /// The route constants `node_kind` *would* hand this node, asked without consuming anything.
 ///
 /// [`RuntimeParts::node_kind`] takes the node's binding, its prepared effect and its route out of
@@ -6051,7 +6741,9 @@ trait PlanningMetadata {
     fn has_binding(&self, node: &GraphNodeId) -> bool;
     fn has_effect(&self, node: &GraphNodeId) -> bool;
     fn has_observer(&self, node: &GraphNodeId) -> bool;
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform>;
+    /// Issue #1220 D6: whether the route has a live lane, which makes it `NodeKind::LiveRoute`.
+    fn has_route_control(&self, node: &GraphNodeId) -> bool;
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)>;
 }
 
 impl PlanningMetadata for RuntimeParts {
@@ -6070,8 +6762,13 @@ impl PlanningMetadata for RuntimeParts {
     fn has_observer(&self, node: &GraphNodeId) -> bool {
         self.observers.contains_key(node)
     }
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
-        self.routes.get(node)
+    fn has_route_control(&self, node: &GraphNodeId) -> bool {
+        self.route_controls.contains_key(node)
+    }
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)> {
+        self.routes
+            .get(node)
+            .map(|(transform, gate)| (transform, *gate))
     }
 }
 
@@ -6089,9 +6786,11 @@ struct BorrowedPlanningMetadata<'a> {
     effects: std::collections::BTreeSet<&'a crate::EffectNodeId>,
     /// The plan's own observers and the bindings', together.
     observers: std::collections::BTreeSet<&'a GraphNodeId>,
-    /// Each route node's transform. When a node is listed twice the later entry wins (`insert`
-    /// replaces), which is what a reverse search of `plan.routes` returned.
-    routes: BTreeMap<&'a GraphNodeId, &'a RouteTransform>,
+    /// Each route node's transform and gate. When a node is listed twice the later entry wins
+    /// (`insert` replaces), which is what a reverse search of `plan.routes` returned.
+    routes: BTreeMap<&'a GraphNodeId, (&'a RouteTransform, RouteGate)>,
+    /// Issue #1220 D6: the route nodes with a live lane.
+    route_controls: std::collections::BTreeSet<&'a GraphNodeId>,
 }
 
 impl<'a> BorrowedPlanningMetadata<'a> {
@@ -6102,7 +6801,7 @@ impl<'a> BorrowedPlanningMetadata<'a> {
     ) -> Self {
         let mut routes = BTreeMap::new();
         for route in &plan.routes {
-            routes.insert(&route.node, &route.transform);
+            routes.insert(&route.node, (&route.transform, route.gate));
         }
         Self {
             membership: bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks),
@@ -6123,6 +6822,12 @@ impl<'a> BorrowedPlanningMetadata<'a> {
                 .map(|observer| &observer.node)
                 .collect(),
             routes,
+            route_controls: plan
+                .route_controls
+                .iter()
+                .flatten()
+                .map(|binding| &binding.node)
+                .collect(),
         }
     }
 }
@@ -6143,7 +6848,10 @@ impl PlanningMetadata for BorrowedPlanningMetadata<'_> {
     fn has_observer(&self, node: &GraphNodeId) -> bool {
         self.observers.contains(node)
     }
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
+    fn has_route_control(&self, node: &GraphNodeId) -> bool {
+        self.route_controls.contains(node)
+    }
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)> {
         self.routes.get(node).copied()
     }
 }
@@ -6157,10 +6865,16 @@ fn plain_route_gains(
         || parts.membership().contains_key(&index)
         || parts.has_binding(node)
         || parts.has_effect(node)
+        // Issue #1220 D6 (VERIFY-2 M3): a live route never folds. Its epilogue would never drain
+        // its lane, so no record it is sent would ever be applied.
+        || parts.has_route_control(node)
     {
         return None;
     }
-    parts.route(node).map(folded_route)
+    // A gated route (muted, issue #1216 D4) declines: folding it would accumulate the open
+    // coefficients the route op does not mix. Folding a silenced lane away is deferred item O8.
+    let (transform, gate) = parts.route(node)?;
+    (gate == RouteGate::OPEN).then(|| gated_route_coefficients(transform, gate))
 }
 
 /// Whether anything can *see* the buffer op `index` writes other than by reading it as an input,
@@ -6870,7 +7584,10 @@ pub(crate) fn route_folds_over_program(
         Vec::new(),
         1,
     );
-    parts.routes.clone_from(routes);
+    parts.routes = routes
+        .iter()
+        .map(|(node, transform)| (node.clone(), (*transform, RouteGate::OPEN)))
+        .collect();
     parts.membership = lanes
         .iter()
         .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
@@ -7677,10 +8394,28 @@ mod tests {
             .copy_from_slice(&[-0.75, 1.0]);
         arena.write_stereo(ARENA_BASE + 1).0.fill(91.0);
         arena.write_stereo(ARENA_BASE + 1).1.fill(-91.0);
-        execute_op(&mut fader, &mut arena, &mut [], &mut [], &mut [], 0, None)
-            .expect("earlier fader");
+        execute_op(
+            &mut fader,
+            &mut arena,
+            &mut [],
+            &mut [],
+            &mut [],
+            0,
+            None,
+            None,
+        )
+        .expect("earlier fader");
         assert_eq!(
-            execute_op(&mut matrix, &mut arena, &mut [], &mut [], &mut [], 0, None),
+            execute_op(
+                &mut matrix,
+                &mut arena,
+                &mut [],
+                &mut [],
+                &mut [],
+                0,
+                None,
+                None
+            ),
             Err(RenderError::InvalidEnvelope)
         );
         assert_eq!(arena.read_stereo(ARENA_BASE).0, &[0.5, -1.0]);
@@ -9490,7 +10225,17 @@ mod tests {
                 split_pair: None,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut arena, &mut [], &mut [], &mut [], 0, None).expect("op");
+            execute_op(
+                &mut op,
+                &mut arena,
+                &mut [],
+                &mut [],
+                &mut [],
+                0,
+                None,
+                None,
+            )
+            .expect("op");
             let (left, right) = arena.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
@@ -10360,6 +11105,7 @@ mod tests {
                         rl: 0.3,
                         rr: 1.125 - 0.046875 * track as f32,
                     },
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: Vec::new(),
@@ -10877,6 +11623,7 @@ mod tests {
                 .map(|(index, node)| crate::PreparedRoute {
                     node: node.clone(),
                     transform: transform(index),
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: Vec::new(),
@@ -12794,6 +13541,7 @@ mod tests {
                         rl: 0.3,
                         rr: 1.125 - 0.046875 * track as f32,
                     },
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: shape

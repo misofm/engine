@@ -51,6 +51,40 @@ await controls.submit(
   `readObservations()` and the managed `subscribeObservations()` accept that selection: the
   managed owner arms and disarms through `edit.strip(id)`, which resolves a track or a submix ID.
 
+## Live sends (#1223, batch K3)
+
+A send -- a route into a submix -- is live in an engine booted with live controls
+(`liveControls: { commandQueueRecords: .. }`). Address it by its route ID:
+
+```ts
+await controls.submit(
+  controls.edit.route("kick-verb").gainDb(-12, { smoothingSamples: 480 }),
+  controls.edit.route("snare-verb").mute(true),
+  controls.edit.route("vox-delay").matrix({ ll: 1, lr: 0.25, rl: 0, rr: 0.8 }),
+);
+```
+
+- `route(id)` returns `RouteEdits`: `gainDb(db, options?)`, `mute(on, options?)` (`true` silences
+  the send) and `matrix({ ll, lr, rl, rr }, options?)`. `options` takes `smoothingSamples` only: a
+  send has no lane, so an edit moves both of its lanes together. The engine holds the gain and the
+  matrix to the session's route domain and refuses a value outside it with `domain`.
+- `SessionMap.routes` (from `OfflineEngine.sessionMap()`, and the browser host's
+  `miso.sessionmap.v1` reply) lists the live routes in canonical (sorted) route-ID order, as the
+  engine enumerates them. The SDK takes a send's index from that list and never from the session.
+  `MisoSessionMap`/`SessionMap` gained a **required** `routes` (`[]` with no send), as K2 gave it a
+  required `submixes`: a test fake of `sessionMap()` must return both, or live-control construction
+  throws a `TypeError` even in an app that never uses sends (a map built `as MisoSessionMap` hides
+  the omission from TypeScript).
+- Only routes into submixes are live. A route into the output, and every route's `follows_mute`,
+  stay structural: they change only through the session. `edit.route(id)` throws
+  `MisoUsageError` (`diagnosticCode` `unknownRoute`) for any ID not in `SessionMap.routes`; for an
+  engine booted from an SDK builder (or after `withSession(builder)`) the message says when the ID
+  is an output route, and otherwise it lists the live routes.
+- On the wire a send record is kind `routeGainDb` (13), `routeMute` (14) or `routeMatrix` (15).
+  Its index word is the **live-route index**, the send's position in `SessionMap.routes`; `rack`
+  and `channel` are `255`. An app that writes raw records takes the index from that list; an index
+  past it is refused whole with reason `unknownRoute` (13).
+
 ## Master designation
 
 `liveControls.masterTrackPlusOne` keeps its name and now takes a **strip index plus one** (tracks
