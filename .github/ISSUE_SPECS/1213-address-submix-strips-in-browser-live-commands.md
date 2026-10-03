@@ -392,6 +392,14 @@ Docs and tests only; no engine logic changed. **Authorized path added (A2):**
 - **ARTIFACT UNCHANGED:** shipped module `7d6c0a8b...0f90b` (2 695 834 B), the same as attempt 1.
   The Rust doc edits keep `lib.rs`'s line count, so no panic-location line moves.
 
+## Verdict
+
+- **Attempt 1** (`e4a6269fe`, follow-up `c13ac5e1d`): Sol FAIL. MAJOR-1: `observe()` reports a bus
+  binding's `frameSlot` past `trackGrDb`; MINOR-1 to MINOR-4 and NITs.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1213-attempt1.md`; the verifier's probes are
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1213-attempt1-verifier-scratch.rs`.
+- **Attempt 2** (`89ba1b233`): verdict pending.
+
 ## Dependencies
 
 - *Carry submix strips in the browser meter frame* (#1209)

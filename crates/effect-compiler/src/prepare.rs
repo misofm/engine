@@ -635,8 +635,8 @@ fn prepare_with_console_eligibility(
 pub struct EffectControlProducer {
     /// Session-stable identity of the strip (a track or a submix) this channel addresses.
     pub track_id: Box<str>,
-    /// The instance's live address within its track: a console slot by its slot index, an insert
-    /// by its index (decision 12, issue #1096).
+    /// The instance's live address within its strip (a track or a submix): a console slot by its
+    /// slot index, an insert by its index (decision 12, issue #1096).
     ///
     /// This is the `(rack, effect_index)` the `miso.command.v1` wire addresses. It is derived from
     /// the normalized session model here rather than from `EffectPreparedSession::entries`, which
@@ -1543,7 +1543,7 @@ pub fn attach_effect_live_controls(
 pub struct EffectObservationHandle {
     /// Normalized identity of the strip (a track or a submix) this instance belongs to.
     pub track_id: Box<str>,
-    /// The instance's live address within its track (issue #1096).
+    /// The instance's live address within its strip, a track or a submix (issue #1096).
     pub address: LiveEffectAddress,
     /// The instance's session-declared identifier.
     pub effect_id: Box<str>,

@@ -79,6 +79,8 @@ built over every strip. After batch K1 the builtins compiler's `known_tracks` se
   strips; a bus whose strip carries a limiter can now be designated.
 - **D4. host-web** compiles against D1 (the field rename at `lib.rs:5720`) and changes no behaviour.
   *Carry submix strips in the browser meter frame* (#1209) requests bus meters.
+  *Consequence (verdict MINOR 1):* a browser boot naming a bus as master now prepares where it
+  refused, with `masterGrDb` `null` until #1213 (its gate 6); #1213 completes it, and K2 ships both.
 
 ## Deliverables
 
@@ -216,6 +218,25 @@ built over every strip. After batch K1 the builtins compiler's `known_tracks` se
     `--all-targets --all-features -D warnings` clean; `cargo doc` with `-D warnings` clean.
   - 7: `run-aarch64-tests.sh debug`: no arm64 host; at the K2 push (CI `aarch64-debug`).
 - No digest, oracle or canonical text re-pinned; no test superseded.
+
+## Decision record (K2 follow-ups)
+
+- **D4's consequence** (verdict MINOR 1). D4 changes no host-web *code*, but a browser boot naming
+  a bus as master (`live_control_master_track_plus_one` in `T + 1 ..= T + S`) now prepares where
+  it used to refuse. Until #1213 its `masterGrDb` stayed `null`; #1213 completes it (gate 6,
+  `a_bus_limiter_can_be_the_designated_master`), so K2 ships #1208 and #1213 together and needs no
+  interim track-only bound.
+- **NIT 1:** `meter_period_frames`/`meter_queue_depth` say per meter, `meter_tap` the default
+  per-track set, and the meter handle comment says request order (canonical track order for the
+  default set). **NIT 2** belonged to #1213. **NIT 3:** #1209's gate 2 now relates bus sample
+  peaks to each other and to the master (#1209 verdict MINOR-1).
+
+## Verdict
+
+- **Attempt 1** (`60d3289b3`): Sol PASS, no BLOCKER or MAJOR; one MINOR, three NIT, applied in the
+  K2 follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1208-attempt1.md`;
+  the verifier's probe is
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1208-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

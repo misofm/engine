@@ -304,6 +304,27 @@ and the gain-reduction fold skips strip indices `>= T` (that slice's D4) until t
   `0a6e44c9...`; the bytes move because the frame, header and poll changed. No re-pin (not a
   release change); CI's `artifact-identity` line is the authority.
 
+## Decision record (K2 follow-ups)
+
+- **Gate 2 checks values** (verdict MINOR-1). The headless frame test now requires bus-a = 2 x
+  bus-b and master = bus-a + bus-b per lane (relative 1e-5), and every `trackGrDb` and
+  `submixGrDb` word 0. Test value: red if the SDK reader takes the master pair from a bus slot or
+  reads `trackGrDb` from the old `2T + 2` base. Mutations S1 (master from bus-a's slot) and S2
+  (`trackGrDb` at `2T + 2`) each turn it red.
+- **The worklet runs `S = 0` again** (verdict MINOR-2). `createFakeExports` takes `submixIds`
+  (default one bus), and a new processor block decodes a meter frame with no submix and with two.
+  Test value: red if the worklet refuses or mis-slices a frame whose submix section is empty.
+  Mutation W0 (refuse `submixCount === 0`) turns it red.
+- **NIT 1:** #1213 gate 5 under R2 (A1c there). **NIT 2:** `243-sdk-boot.md` notes the 72-byte
+  header. **NIT 3** (`reservedPad` unchecked) is not taken: optional, and it would add an SDK
+  refusal for no present defect. **INFO 1** is noted.
+
+## Verdict
+
+- **Attempt 1** (`7f6e148f6`): Sol PASS, no BLOCKER or MAJOR; two MINOR, applied in the K2 follow-up
+  commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1209-attempt1.md`; the verifier's
+  probe is `docs/handoffs/submix-sends-2026-10-02/verdicts/1209-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Meter any boundary of a submix strip and designate a master strip in host-core* (#1208)

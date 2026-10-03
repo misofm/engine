@@ -147,3 +147,7 @@ bus.solo(true);
 // @ts-expect-error a bus's edits are not a track's (they lack solo)
 const notTrack: TrackEdits = bus;
 void notTrack;
+// #1214 MINOR-1: strip() resolves either kind and offers only what every strip shares.
+// @ts-expect-error strip() may name a bus, so it never offers solo
+busEdits.strip("t").solo(true);
+busEdits.strip("bus").effect("inserts", 0, "miso.compressor").observe("Gain Reduction", true, 1);

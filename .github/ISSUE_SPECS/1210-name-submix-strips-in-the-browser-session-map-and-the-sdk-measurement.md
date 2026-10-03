@@ -294,6 +294,22 @@ prefix and `ReadyOwnership.submixes` the submix IDs in canonical order.
   (`invalidArgument`) after the SDK resolves it to its strip index. Gate 4 needs only the track
   read; a bus-tap read needs a host-web successor (or #1213).
 
+## Decision record (K2 follow-ups)
+
+- **The worklet's submix order is pinned** (verdict MINOR-1). The processor's session-map block
+  runs with two submixes (`["aa-bus", "zz-bus"]`) and requires `map.submixes` in that order.
+  Test value: red if the worklet enumerates or posts the submix IDs in another order. Mutation M5
+  (`this.submixIds.unshift(id)`) turns it red.
+- **MINOR-2** landed in #1213 (A1a): a headless selected read of a bus tap.
+- **NIT-4:** the native staging test asserts `id_staging_bytes >=` the longest ID, a ceiling.
+  NIT-1 to NIT-3 (poll-time shape reads, a memoised strip list, a no-op parameter) are optional
+  refactors and are not taken.
+
+## Verdict
+
+- **Attempt 1** (`66b2c7dd7`): Sol PASS, no BLOCKER or MAJOR; two MINOR, four NIT, applied in the K2
+  follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1210-attempt1.md`.
+
 ## Dependencies
 
 - *Carry submix strips in the browser meter frame* (#1209)

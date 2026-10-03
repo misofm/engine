@@ -290,11 +290,11 @@ pub struct HostLiveControlRequest {
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
-    /// Per-track meter window in frames, or `None` for no meters.
+    /// Meter window in frames for every meter (default or selected), or `None` for no meters.
     pub meter_period_frames: Option<NonZeroU32>,
-    /// Bounded per-track meter snapshot queue depth.
+    /// Bounded per-meter snapshot queue depth.
     pub meter_queue_depth: NonZeroUsize,
-    /// Which chain boundary the per-track meters observe.
+    /// Which chain boundary the default per-track meters observe.
     pub meter_tap: MeterTap,
     /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
     /// capacity at all** (issue #143 D3, level 1).
@@ -368,7 +368,7 @@ pub struct HostLiveControlHandles {
     /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3). A submix's
     /// producer carries the submix ID in `track_id`.
     pub strip_controls: Vec<TrackControlProducer>,
-    /// One control producer per prepared track effect instance (#140 A); empty when no channel was
+    /// One control producer per prepared strip effect instance (#140 A); empty when no channel was
     /// requested. A submix strip's effects get one exactly as a track's do (issue #1207 D5), and
     /// `track_id` then carries the submix ID. Addressed by `(track_id, address)` in the session's
     /// own terms (decision 12, issue #1096): a console slot by its index in the session's slot
@@ -990,8 +990,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .iter()
             .enumerate()
             .map(|(index, (track, tap, metrics))| {
-                // Handles are `index + 1` so they are nonzero and stable in canonical track
-                // order; nothing outside this function invents a meter handle.
+                // Handles are `index + 1`: nonzero, stable in request order (canonical track order
+                // for the default set); nothing outside this function invents a meter handle.
                 let handle = u64::try_from(index)
                     .ok()
                     .and_then(|value| value.checked_add(1))

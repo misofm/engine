@@ -4052,7 +4052,7 @@ pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, i
     copy_observation_id(handle, index, true)
 }
 
-/// Return one bound observation effect's track index, or zero when out of range.
+/// One bound observation effect's strip index (tracks, then submixes), or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
     with_host(handle, 0, |host| {

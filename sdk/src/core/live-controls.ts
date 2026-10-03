@@ -17,9 +17,10 @@ import type { LaneEdit } from "./writer.ts";
  * Where a live effect edit lands (owner decision 12, S1c's live address).
  *
  * A `console` address is a session console slot by its index in the session's slot order --
- * `pre_insert`, then `post_insert` -- which is also its index in every track's `console` array. An
- * `inserts` address is the track's insert by its index in chain order. `TrackEdits.console()` and
- * `TrackEdits.insert()` resolve stable IDs to those indices; `TrackEdits.effect()` takes the index.
+ * `pre_insert`, then `post_insert` -- which is also its index in every strip's (track's or
+ * submix's) `console` array. An `inserts` address is the strip's insert by its index in chain
+ * order. `StripEdits.console()` and `StripEdits.insert()` resolve stable IDs to those indices;
+ * `StripEdits.effect()` takes the index.
  */
 export type LiveControlRack = "console" | "inserts";
 export type LiveControlChannel = "left" | "right" | "both";
@@ -458,6 +459,19 @@ export class LiveControlEdits {
     }
     return new SubmixEdits(index, submixId, this.#layout);
   }
+
+  /**
+   * Either kind of strip by its ID -- a track, else a submix (strip IDs are unique across both) --
+   * for an edit every strip shares, such as arming an effect observation. It never offers `solo`.
+   */
+  strip(stripId: string): StripEdits {
+    if (this.#tracks.has(stripId)) return this.track(stripId);
+    if (this.#submixes.has(stripId)) return this.submix(stripId);
+    throw new MisoUsageError(
+      `the compiled session has no track or submix '${stripId}'; expected one of `
+        + `${[...this.#tracks.keys(), ...this.#submixes.keys()].join(", ")}`,
+    );
+  }
 }
 
 const NO_LAYOUT = "this engine was not booted from a session the SDK built, so there is nothing to "
@@ -837,7 +851,8 @@ export class EngineLiveControls {
 
   /**
    * `session` is the session the SDK built for this engine, when there is one; it is what lets
-   * `edit.track(id).console(slot, ...)` and `.insert(id, ...)` resolve stable IDs. `booted` is the
+   * `edit.track(id)`'s or `edit.submix(id)`'s `.console(slot, ...)` and `.insert(id, ...)` resolve
+   * stable IDs. `booted` is the
    * document the engine booted, exactly as it was staged; both SDK engines supply it, and
    * `withSession()` holds its session to it.
    */

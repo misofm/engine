@@ -189,6 +189,16 @@ No earlier K2 slice touches the reason vocabulary.
     change is whitespace only. Clippy, the workspace tests and the policy gates ran on the final
     tree.
 
+## Decision record (K2 follow-ups)
+
+- **NIT-1:** the `MUTATIONS.md` vocabulary self-test row says twenty mutations (the self-test's
+  own count). **NIT-2** landed in #1213 (A1e). **NIT-3:** host-web's constant pin lists reason 12.
+
+## Verdict
+
+- **Attempt 1** (`047a503d6`): Sol PASS, NITs only, applied in the K2 follow-up commit as above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1212-attempt1.md`.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

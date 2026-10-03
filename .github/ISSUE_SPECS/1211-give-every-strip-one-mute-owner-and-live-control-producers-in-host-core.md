@@ -251,6 +251,20 @@ strip set, so a `TrackControlRequest` may name a submix and gets that strip's th
 - No digest, oracle or canonical text re-pinned; superseded: the `strip_handles.rs` "none per bus"
   control assertion (rewritten in place).
 
+## Decision record (K2 follow-ups)
+
+- **MINOR-1** (`track_count()`/`track_delta()` counting strips) landed in #1213 (A1d) as
+  `strip_count()`/`strip_delta()`.
+- **NIT-1:** #1213 deleted host-web's inline effective-mute copy. NIT-2 to NIT-4 are not taken:
+  #1213 gate 1 covers every kind on a bus with paired hosts, and a host-core seed helper remains a
+  candidate for the C ABI slices.
+
+## Verdict
+
+- **Attempt 1** (`4ee4d3f30`): Sol PASS, no BLOCKER or MAJOR; one MINOR, four NIT.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1211-attempt1.md`; the verifier's probe is
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1211-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *List every strip in the live-control handles and file bus effects in the browser* (#1207)

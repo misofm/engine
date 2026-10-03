@@ -205,8 +205,10 @@ export async function adjustVocal(controls: EngineLiveControls) {
 }
 ```
 
-`console(slot, effectId)` addresses a session console slot by its slot ID and `insert(id or index,
-effectId)` one of the track's inserts; `effect("console" | "inserts", index, effectId)` takes the
+`controls.edit.submix(id)` addresses a submix strip (a bus) the same way, with every edit a track
+offers except `solo` (a bus is solo-safe), and `controls.edit.strip(id)` resolves either kind by
+ID. `console(slot, effectId)` addresses a session console slot by its slot ID and `insert(id or
+index, effectId)` one of the strip's inserts; `effect("console" | "inserts", index, effectId)` takes the
 live address directly (a console slot's index in `preInsert`-then-`postInsert` order). IDs resolve
 against the session the engine booted when it was booted from a `session(...)` builder; for a
 document booted from text, call `controls.withSession(builder)` first, because the SDK never parses

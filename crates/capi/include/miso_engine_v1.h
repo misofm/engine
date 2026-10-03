@@ -132,7 +132,7 @@ typedef struct miso_engine_v1_compile_limits {
     /* Maximum session submix strips. Zero means "use maximum_tracks"; it never means
        "no submixes" or "unbounded". Formerly reserved[0]; the layout is unchanged. */
     uint64_t maximum_submixes;
-    uint64_t reserved[3];
+    uint64_t reserved[3]; /* Must be zero in ABI V1. */
 } miso_engine_v1_compile_limits;
 
 typedef struct miso_engine_v1_bytes_out {

@@ -284,6 +284,30 @@ preparation and the C ABI* (#1206) added `maximum_submixes`; it moved no anchor 
   bus effects at strip index `T + j`; commands at such an index are still refused by the
   per-track guard until #1213.
 
+## Decision record (K2 follow-ups)
+
+- **Gate 1 sees the submix order** (verdict MINOR-1). `bus_effect_host`'s buses now differ in
+  shape: `aaa-bus` carries the compressor then `t1`'s EQ, `zzz-bus` the compressor alone, and
+  gate 1 checks every insert of every strip (13 dense slots). Test value: red if host-web fills
+  its per-strip tables (`rack_effects`, `effect_base`) in another submix order than
+  `handles.strips`. Mutation M9 (`for submix in model.submixes.iter().rev()` in `compile_ready`)
+  turns it red: the misfiled producers refuse the boot. The boot consistency check still compares
+  counts only; part 1 of the fix is enough.
+- **Gate 4 omits `poll_meters`** (verdict MINOR-2): folded into #1209 gate 5,
+  `bus_meters_render_and_poll_without_allocating`.
+- **INFO-4:** K2 is pushed whole, never split between #1207 and #1210 (root).
+- **NITs:** `effect_controls`' doc says "strip effect instance"; the effect-compiler `address`
+  docs say "within its strip (a track or a submix)"; host-web's `observation_track_index` export
+  doc says strip index. `prepare.rs`'s "cannot disagree" comment and `solo.rs` were corrected by
+  #1211.
+
+## Verdict
+
+- **Attempt 1** (`7bdb45187`): Sol PASS, no BLOCKER or MAJOR; two MINOR, three INFO and NITs,
+  applied in the K2 follow-up commit as above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1207-attempt1.md`; the verifier's probe is
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1207-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Count and cap submix strips in host preparation and the C ABI* (#1206)

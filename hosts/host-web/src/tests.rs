@@ -362,9 +362,10 @@ fn frozen_layouts_and_values_are_exact() {
             COMMAND_REASON_BACKPRESSURE,
             COMMAND_REASON_WRONG_STATE,
             COMMAND_REASON_UNKNOWN_TAP,
-            COMMAND_REASON_OBSERVATION_UNBOUND
+            COMMAND_REASON_OBSERVATION_UNBOUND,
+            COMMAND_REASON_NOT_SOLOABLE
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
     assert_eq!(offset_of!(WebBootOptions, struct_size), 0);
     assert_eq!(offset_of!(WebBootOptions, require_quantum_frames), 12);
@@ -5472,13 +5473,23 @@ fn bus_effect_host(quantum: u32) -> AudioWorkletEngineHost {
             .collect();
     }
     let compressor = model.tracks[0].inserts.effects[0].clone();
-    for (bus, feeder) in [("aaa-bus", 0_usize), ("zzz-bus", 1)] {
+    // The buses differ in shape (#1207 verdict MINOR-1): `aaa-bus` carries the compressor then
+    // `t1`'s EQ, `zzz-bus` the compressor alone, so a host table filled in another submix order
+    // than `handles.strips` misfiles every bus effect after the first.
+    let equalizer = model.tracks[1].inserts.effects[0].clone();
+    for (bus, feeder, inserts) in [
+        ("aaa-bus", 0_usize, &[&compressor, &equalizer][..]),
+        ("zzz-bus", 1, &[&compressor][..]),
+    ] {
         let id = session::StableId::parse(bus).expect("bus id");
         let mut submix = session::Submix::unity(id.clone(), &model.console);
         for entry in &mut submix.console {
             entry.bypass = false;
         }
-        submix.inserts.effects.push(compressor.clone());
+        submix
+            .inserts
+            .effects
+            .extend(inserts.iter().map(|&effect| effect.clone()));
         model.submixes.push(submix);
         let mut out = model.routes[feeder].clone();
         model.routes[feeder].destination = session::RouteDestination::SubmixInput {
@@ -5515,7 +5526,9 @@ fn bus_effect_host(quantum: u32) -> AudioWorkletEngineHost {
 ///
 /// Red if a bus producer or observation handle is refused or misfiled, if a lookup
 /// binary-searches the unsorted strip list (`aaa-bus` is missed and boot refuses), or if the K1
-/// interim (DESIGN P16) is left in place (the bus slots stay `None`).
+/// interim (DESIGN P16) is left in place (the bus slots stay `None`). The buses' insert chains
+/// differ in length, so it is also red if host-web fills its per-strip tables in another submix
+/// order than `handles.strips` (#1207 verdict MINOR-1).
 #[test]
 fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
     const QUANTUM: u32 = 128;
@@ -5529,17 +5542,18 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
     assert_eq!(host.live_control_tracks().len(), 2, "the track prefix only");
     // Strip order, computed here: the tracks, then the submixes at `T + j`.
     let strips = ["t0", "t1", "aaa-bus", "zzz-bus"];
-    // Every strip carries the two console slots (slot 0 the EQ, slot 1 the limiter) and one
-    // insert: the compressor on `t0` and both buses, the EQ on `t1`.
-    let inserts = [
-        "miso.compressor",
-        "miso.parametric-eq",
-        "miso.compressor",
-        "miso.compressor",
+    // Every strip carries the two console slots (slot 0 the EQ, slot 1 the limiter) and its own
+    // inserts: the compressor on `t0`, the EQ on `t1`, the compressor then the EQ on `aaa-bus`,
+    // the compressor alone on `zzz-bus`.
+    let inserts: [&[&str]; 4] = [
+        &["miso.compressor"],
+        &["miso.parametric-eq"],
+        &["miso.compressor", "miso.parametric-eq"],
+        &["miso.compressor"],
     ];
     let mut filed = 0;
     for (strip, id) in strips.iter().enumerate() {
-        let effects = [
+        let console = [
             (
                 LiveEffectAddress {
                     rack: LiveEffectRack::Console,
@@ -5554,15 +5568,17 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
                 },
                 "miso.true-peak-limiter",
             ),
+        ];
+        let chain = inserts[strip].iter().enumerate().map(|(index, &native)| {
             (
                 LiveEffectAddress {
                     rack: LiveEffectRack::Inserts,
-                    index: 0,
+                    index: u32::try_from(index).expect("insert index"),
                 },
-                inserts[strip],
-            ),
-        ];
-        for (address, native) in effects {
+                native,
+            )
+        });
+        for (address, native) in console.into_iter().chain(chain) {
             let slot =
                 dense_effect_slot(ready.effect_base[strip], ready.rack_effects[strip], address)
                     .unwrap_or_else(|| panic!("{id} {address:?} has a dense slot"));
@@ -5593,10 +5609,10 @@ fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
             filed += 1;
         }
     }
-    assert_eq!(filed, 12);
+    assert_eq!(filed, 13);
     assert_eq!(
         ready.effect_controls.len(),
-        12,
+        13,
         "no producer slot beyond the strips'"
     );
     assert_eq!(ready.observation_present.len(), strips.len());
@@ -5893,7 +5909,8 @@ fn submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them() {
     let handle = crate::ffi::test_boot(document.as_bytes(), options);
     assert_ne!(handle, 0, "the submix session boots");
     let resources = crate::ffi::test_resources(handle).expect("resource report");
-    assert_eq!(resources.id_staging_bytes, canonical[1].len() as u64);
+    // A ceiling claim (#1210 NIT-4): staging holds at least the longest submix ID.
+    assert!(resources.id_staging_bytes >= canonical[1].len() as u64);
 
     assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 2);
     assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 3);

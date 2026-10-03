@@ -47,6 +47,9 @@ await controls.submit(
   (`[bus0 L, bus0 R, ..]`, `2 * submixCount` long) and `submixGrDb` (`submixCount` long), in
   `SessionMap.submixes` order.
 - An effect observation on a bus (`edit.submix(id).insert(..).observe(..)`) names the submix ID.
+  `observationMap()` lists a bus's bindings with `trackId` set to the submix ID, and both
+  `readObservations()` and the managed `subscribeObservations()` accept that selection: the
+  managed owner arms and disarms through `edit.strip(id)`, which resolves a track or a submix ID.
 
 ## Master designation
 
@@ -56,6 +59,11 @@ first, then submixes), or `0` for none. A mix bus can therefore be the master: w
 (`3 + 1`, plus one), and `masterGrDb` reads that bus's gain reduction. A value past every strip is
 refused at boot. A track master keeps its old value.
 
+- A designation other than `0` is refused at boot unless observation taps are reserved
+  (`liveControls.observationTaps > 0`), for a bus exactly as for a track.
+- `masterGrDb` is `null` until the designated strip's effect has published an observation, so
+  arm the master bus's limiter or compressor tap before reading it.
+
 ## Policy key
 
 The app still passes live-control options under the older `console:` policy key, against an older
@@ -63,7 +71,9 @@ SDK pin. This SDK reads only `liveControls` (`createEngine({ policy: { liveContr
 in the browser, `createOfflineEngine(doc, { liveControls: { .. } })` headless); `console:` was
 retired without an alias (`docs/handoffs/console-strip-2026-09-29/APP-LIVE-CONTROLS.md`), so an
 app that bumps to this SDK and keeps `console:` boots with **no** live controls attached, and
-`liveControls()` then refuses. Move the key with the bump:
+`liveControls()` then refuses. In TypeScript, an object literal that still carries `console:`
+fails to compile first (an excess-property error on the policy type), which is the symptom the app
+will see. Move the key with the bump:
 
 ```ts
 createEngine({ document, policy: { liveControls: { commandQueueRecords: 64, meterBlocks: 12 } } });

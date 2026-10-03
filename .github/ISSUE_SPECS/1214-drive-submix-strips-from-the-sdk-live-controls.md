@@ -241,6 +241,31 @@ at a submix index refuses with reason 12, `notSoloable`.
   #1213's (no engine change).
 - K2 push link and CI run: the root's, at the batch push.
 
+## Decision record (K2 follow-ups)
+
+- **Amendment A1 (verdict MINOR-1).** Authorized path added:
+  `sdk/src/core/observation-subscriptions.ts`. `LiveControlEdits.strip(id)` resolves a track, else a submix (strip IDs are unique across both),
+  and returns `StripEdits`, so it never offers `solo`. The managed observation owner arms and
+  disarms through it, so `subscribeObservations()` accepts a bus tap. New headless eval
+  (`capability-evals.mjs`, "a managed subscription to a bus tap arms it at the bus's strip index
+  and reads it ready"). Test value: red if the managed owner builds its edit with
+  `edit.track()`; the mutation (restore `edit.track`) turns it red with "no track 'bus'".
+  `live-controls-types.ts` adds that `strip()` has no `solo`. `APP-LIVE.md` documents it.
+- **The browser path pins the submix order** (verdict MINOR-2). Gate 4's stub host replies with
+  two submixes, `["aaa", "bus"]`, and requires index word 2 for `bus` and 1 for `aaa`. Test value:
+  red if the browser map reorders the host's list. Mutation M3 (`[...remoteMap.submixes].reverse()`)
+  turns it red. The worklet half is #1210's MINOR-1, recorded there.
+- **NITs:** NIT-3 applied (`LiveControlRack` and constructor docs, `sdk/README.md`); NIT-4 applied
+  (`APP-LIVE.md`: a master designation needs observation taps and reads `null` until its strip
+  publishes; the `console:` policy key fails as a TypeScript excess-property error first). NIT-1
+  (brand `SubmixEdits`) and NIT-2 (`stripIndex` visible at runtime) are not taken: type-only and
+  harmless, with the runtime ID separation intact.
+
+## Verdict
+
+- **Attempt 1** (`4df439f2c`): Sol PASS, no BLOCKER or MAJOR; two MINOR, four NIT, applied in the K2
+  follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1214-attempt1.md`.
+
 ## Dependencies
 
 - *Name submix strips in the browser session map and the SDK measurement* (#1210)

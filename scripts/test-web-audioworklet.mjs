@@ -2115,7 +2115,10 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
+// `submixIds` (#1209 MINOR-2, #1210 MINOR-1): the session's submix IDs in canonical order; the
+// meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
+// with no submix (the production case before K2) or with several (their order is observable).
+function createFakeExports(quantum, backend = 1, liveControlsAttached = true, submixIds = ["drums-bus"]) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -2151,16 +2154,15 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
-  // Issue #1210 D3: the submix IDs in canonical order, as many as the meter header's
-  // `submix_count` below; the worklet refuses construction when the two disagree.
-  const submixIds = ["drums-bus"];
+  // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
+  // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
   // frame count differ between rows, so a worklet that reads the wrong row/query is visible here.
   const sourceRows = [
     { id: "bass", channels: 1, frames: 96000n },
     { id: "drums", channels: 2, frames: 2048n },
   ];
-  // Issue #1209 D1: `3(T + S) + 3` -- a peak pair per strip (the tracks, then one submix), the
+  // Issue #1209 D1: `3(T + S) + 3` -- a peak pair per strip (the tracks, then the submixes), the
   // master pair, then one gain-reduction magnitude per strip and the master's.
   const submixCount = submixIds.length;
   const strips = trackIds.length + submixCount;
@@ -2731,8 +2733,8 @@ async function testProcessor() {
         },
       });
     };
-    const makeProcessor = () => {
-      const fake = createFakeExports(64);
+    const makeProcessor = (submixIds = undefined) => {
+      const fake = createFakeExports(64, 1, true, submixIds);
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
@@ -3165,6 +3167,29 @@ async function testProcessor() {
       assert.equal(processor.port.posts.length, quiet, "a released lease posts nothing");
     }
 
+    // #1209 MINOR-2: the frame decode with no submix (every session before K2, and today's
+    // production case) and with two. Red if the worklet refuses, or mis-slices, a frame whose
+    // submix section is empty: the default fake has one submix, so nothing else runs `S = 0`.
+    for (const submixIds of [[], ["aa-bus", "zz-bus"]]) {
+      const { processor, fake } = makeProcessor(submixIds);
+      const S = submixIds.length;
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      assert.equal(processor.port.posts.at(-1).message.result, 0);
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.tag, "miso.meter.v1", `S = ${S}: a frame is posted`);
+      assert.equal(frame.trackCount, 2);
+      assert.deepEqual([...frame.peaks], [0.5, 0.5, 0.5, 0.5, 0.625, 0.625], `S = ${S}: tracks, master`);
+      assert.deepEqual([...frame.trackGrDb], [6.5, 6.5], `S = ${S}: track gain reduction`);
+      assert.equal(frame.masterGrDb, 7.5, `S = ${S}: the master reading follows every strip's`);
+      assert.equal(frame.submixCount, S);
+      assert.deepEqual([...frame.submixPeaks], Array(2 * S).fill(0.75), `S = ${S}: bus peaks`);
+      assert.deepEqual([...frame.submixGrDb], Array(S).fill(2.25), `S = ${S}: bus gain reduction`);
+    }
+
     {
       // Issue #137 D3: a full telemetry window posts exactly one frame, and the frame is honest
       // about the resolution of the clock it actually found. The real process clock made the
@@ -3224,15 +3249,17 @@ async function testProcessor() {
     }
 
     {
-      // The session map answers from the identities read once at construction.
-      const { processor, fake } = makeProcessor();
+      // The session map answers from the identities read once at construction. Two submixes
+      // (#1210 MINOR-1, #1214 MINOR-2): the SDK indexes bus commands by this list's order, so red
+      // if the worklet enumerates or posts the submix IDs in any other order.
+      const { processor, fake } = makeProcessor(["aa-bus", "zz-bus"]);
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       const map = processor.port.posts.at(-1).message;
       assert.equal(map.tag, "miso.sessionmap.v1");
       assert.deepEqual(map.tracks, ["kick", "snare"]);
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
-      assert.deepEqual(map.submixes, fake.submixIds, "issue #1210: the enumerated submix order");
+      assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });

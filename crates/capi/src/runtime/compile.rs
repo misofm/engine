@@ -358,7 +358,8 @@ pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
         && all_limits_nonzero(limits)
 }
 
-/// Translate the frozen C ABI limits into the facade's caps, field for field.
+/// Translate the frozen C ABI limits into the facade's caps, field for field, except
+/// `maximum_submixes`, whose zero means `maximum_tracks` (#1206 D2).
 ///
 /// This is the only place the mapping is spelled. `AnyLaunchRate`: the C ABI compiles whatever
 /// launch rate the session declares (issue 032), unlike the browser host which is pinned to its

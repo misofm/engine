@@ -240,6 +240,27 @@ every console slot on every submix strip*, #1202).
   - 6: `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
 - No test superseded; no digest or oracle moved.
 
+## Decision record (K2 follow-ups)
+
+- **Zero tightens the bound for an existing caller** (verdict MINOR-1). The Product outcome's "zero
+  keeps today's behaviour" and D2's "today's meaning" are not literally true: from K1 (merged
+  `258e1008c`) until #1206 a C caller's submixes were not counted at all, only bounded by the byte
+  budgets. With a zero word, #1206 newly refuses a session with more submixes than
+  `maximum_tracks`, with `host.resource.count` -- a typed compile-time refusal, never a silent
+  drop or a misread, landing within days of K1 and before launch. `C_ABI_V1_QUALIFICATION.md`
+  now says so, and that a caller cannot probe whether a library honours the word (NIT-3).
+- **The `check-capi-abi.sh --self-test` header legs are vacuous** (verdict MINOR-2, pre-existing):
+  filed as the stateless tooling issue #1232, *Make the C ABI checker's header mutation legs reach
+  the compiler*. Gate 3's "`--self-test` ok" above proves nothing about header drift; the
+  `abi_smoke.c` offset pins are the real protection (the verdict's M4).
+- **NITs:** `prepare_caps`' doc says "field for field, except `maximum_submixes`" (NIT-1); the
+  header's `reserved[3]` carries `/* Must be zero in ABI V1. */`, a comment only (NIT-2).
+
+## Verdict
+
+- **Attempt 1** (`8f8c013e6`): Sol PASS, no BLOCKER or MAJOR; two MINOR, three NIT, applied in the
+  K2 follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1206-attempt1.md`.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

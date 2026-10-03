@@ -280,6 +280,19 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       }
       assert.ok(frame.submixPeaks.every((value) => value > 0), "every bus lane is metered");
       assert.ok(frame.peaks.every((value) => value > 0), "every track lane and the master");
+      // #1209 MINOR-1: values, not only shapes. The three tracks are identical copies of one
+      // source and nothing is armed, so bus-a (two tracks) peaks at twice bus-b (one), the master
+      // at bus-a + bus-b, and every gain-reduction word is 0. Red if the reader takes the master
+      // pair from a bus slot, or reads `trackGrDb` from the old `2T + 2` base (bus peaks as dB).
+      const close = (actual, expected) => Math.abs(actual - expected) <= Math.abs(expected) * 1e-5;
+      const master = trackCount * 2;
+      for (const lane of [0, 1]) {
+        assert.ok(close(frame.submixPeaks[lane], 2 * frame.submixPeaks[2 + lane]), `bus-a lane ${lane}`);
+        assert.ok(close(frame.peaks[master + lane],
+          frame.submixPeaks[lane] + frame.submixPeaks[2 + lane]), `master lane ${lane}`);
+      }
+      assert.ok(frame.trackGrDb.every((value) => value === 0), "no track effect is armed");
+      assert.ok(frame.submixGrDb.every((value) => value === 0), "no bus effect is armed");
     } finally {
       engine.dispose();
     }
@@ -406,6 +419,41 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       const [armed] = engine.readObservations(selection);
       assert.equal(armed.trackId, "bus");
       assert.notEqual(armed.status, "unarmed", "kind 7 at the bus's strip index armed its tap");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a managed subscription to a bus tap arms it at the bus's strip index and reads it ready", async () => {
+    // #1214 MINOR-1. The managed owner arms and disarms through `edit.strip(trackId)`. Red if it
+    // builds the edit with `edit.track()`: a bus is not a track, so the subscription throws
+    // "no track 'bus'" before anything is submitted.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");
+      assert.ok(binding);
+      const selection = {
+        trackId: "bus", rack: binding.rack, effectSlotId: "bus-comp", tapId: binding.tapIds[0],
+        channels: "both",
+      };
+      const subscription = await engine.subscribeObservations({ selections: [selection], windowBlocks: 1 });
+      for (let block = 0; block < 2; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 61 + block);
+        engine.render();
+        await subscription.pump();
+      }
+      const [row] = subscription.readLatest();
+      assert.equal(row.trackId, "bus");
+      assert.equal(row.effectSlotId, "bus-comp");
+      assert.equal(row.status, "ready");
+      await subscription.close();
+      assert.equal(engine.readObservations([selection])[0].status, "unarmed", "close disarms the bus tap");
     } finally {
       engine.dispose();
     }
