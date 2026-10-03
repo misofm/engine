@@ -25,22 +25,25 @@
 // native tone's, from the same table. Both feeds are stated in the record, because how a limiter
 // engages depends on them.
 //
-// Two documents ride along (#1085): the standing sixty-four-track console and the app shape, the
-// native rows `sixty_four_track_console` and `sixty_four_track_app_shape`, listed with their facts
-// in the same table. Each is booted from its checked-in fixture as written (its one source
-// stretched), checked to carry the layout and the bypass the table states, fed the same streamed
-// tone, and rendered with no control traffic. After the three arms are timed, the two documents
-// are timed alternated per observation, `miso_engine_web_v1_render` alone inside the clock, and
-// the record states each one's percentiles and digest under `documents`. They are the console
-// strip's browser baseline; no per-N browser rows exist, because that would be a second framework.
+// Three documents ride along (#1085, #1228): the standing sixty-four-track console, the app shape
+// and the bus-and-send console, the native rows `sixty_four_track_console`,
+// `sixty_four_track_app_shape` and `sixty_four_track_console_sends`, listed with their facts in the
+// same table. Each is booted from its checked-in fixture as written (its one source stretched) the
+// way every document boots, through host-core with live controls, so every route into a submix of
+// the sends document is a live route; each is checked to carry the layout and the bypass the table
+// states, fed the same streamed tone, and rendered with no control traffic. After the three arms
+// are timed, the three documents are timed alternated per observation,
+// `miso_engine_web_v1_render` alone inside the clock, and the record states each one's
+// percentiles and digest under `documents`. They are the console strip's browser baseline; no
+// per-N browser rows exist, because that would be a second framework.
 //
 // usage: node --no-liftoff web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json
 //        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json ROUND
 //
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
-// premises asserted on their digests; then the two documents over the same blocks, each rendering
+// premises asserted on their digests; then the three documents over the same blocks, each rendering
 // audible bits of its own. `run` asserts the same premises first, then times the three arms
-// alternated per observation, then the two documents alternated per observation, and prints one
+// alternated per observation, then the three documents alternated per observation, and prints one
 // JSON record for ROUND (`warmup`, `1` or `2`; the runner launches one process per round, as the
 // console runner does). Every assertion throws, so a broken premise exits non-zero before any
 // number is printed.
@@ -183,12 +186,14 @@ for (const control of table.controls) {
   }
 }
 
-// The two console-strip documents (#1085), as the native rows state them. Each fixture is checked
+// The three console-strip documents (#1085, #1228), as the native rows state them. Each fixture is checked
 // against the table's facts from its own JSON: every track's effects, section by section in strip
 // order, in the console vocabulary of `console_workload::Workload::strip_layout` (decision 12,
 // #1093: the session's `pre_insert` slots, the track's `inserts`, then the `post_insert` slots),
 // and which tracks bypass them.
-const DOCUMENT_KINDS = ["sixty_four_track_console", "sixty_four_track_app_shape"];
+const DOCUMENT_KINDS = [
+  "sixty_four_track_console", "sixty_four_track_app_shape", "sixty_four_track_console_sends",
+];
 const SHORT_NAMES = {
   "miso.parametric-eq": "eq", "miso.compressor": "compressor", "miso.true-peak-limiter": "limiter",
 };
@@ -228,7 +233,7 @@ function bypassCensus(document) {
   return { pattern: !any ? "none" : exact ? "index_mod_3_is_2" : "other", bypassed };
 }
 assert.deepEqual((table.documents ?? []).map((doc) => doc.workload_kind), DOCUMENT_KINDS,
-  "the table lists the two console-strip documents");
+  "the table lists the three console-strip documents");
 const DOCUMENTS = table.documents.map((doc) => {
   const loaded = loadDocument(doc.fixture_id);
   const document = loaded.fixture;
@@ -446,9 +451,18 @@ function armName(arm, effect) {
 }
 
 // One console-strip document (#1085): booted as written, the tone fed, the pre-roll rendered, and
-// no control traffic, ever.
+// no control traffic, ever. The engine must report one live route per route into a submix, and the
+// sends document must have some (#1228): live and static routes render the same bits, so no digest
+// would show a document booted without live controls, the native row's static path.
+const SENDS_KIND = "sixty_four_track_console_sends";
 function makeDocument({ doc, loaded }) {
   const engine = boot(loaded);
+  const submixRoutes = loaded.fixture.routes
+    .filter((route) => route.destination.kind === "submix_input").length;
+  assert.ok(doc.workload_kind !== SENDS_KIND || submixRoutes > 0,
+    `${doc.workload_kind}: routes into a submix`);
+  assert.equal(engine.e.miso_engine_web_v1_live_control_route_count(engine.handle), submixRoutes,
+    `${doc.workload_kind}: one live route per route into a submix`);
   const state = { doc, engine, audible: false };
   for (let i = 0; i < LEAD_BLOCKS; i++) feed(engine);
   for (let i = 0; i < PREROLL; i++) {
@@ -465,8 +479,17 @@ function absorbDocument(state, hash) {
   state.audible ||= output.some((word) => word !== 0);
 }
 
-// The documents' premises, over the preflight blocks: each renders audible bits, and the two
-// render different ones, or one session was booted twice.
+// Asserts every pair of documents rendered different bits, or one session was booted twice; a
+// failure names the pair.
+function assertDocumentsDistinct(digests, phase) {
+  DOCUMENT_KINDS.forEach((first, i) => DOCUMENT_KINDS.slice(i + 1).forEach((second) => {
+    assert.notEqual(digests[first], digests[second],
+      `${phase}: the documents ${first} and ${second} rendered the same bits`);
+  }));
+}
+
+// The documents' premises, over the preflight blocks: each renders audible bits, and every two
+// render different ones.
 function documentPreflight() {
   const states = DOCUMENTS.map(makeDocument);
   const hashes = states.map(() => createHash("sha256"));
@@ -481,8 +504,7 @@ function documentPreflight() {
     state.doc.workload_kind, hashes[index].digest("hex"),
   ]));
   for (const state of states) assert.ok(state.audible, `preflight ${state.doc.workload_kind}: silent`);
-  assert.notEqual(digests[DOCUMENT_KINDS[0]], digests[DOCUMENT_KINDS[1]],
-    "preflight: the two documents rendered the same bits");
+  assertDocumentsDistinct(digests, "preflight");
   return digests;
 }
 
@@ -581,7 +603,9 @@ for (let observation = 0; observation < OBSERVATIONS; observation++) {
 const loadEnd = readFileSync("/proc/loadavg", "utf8").trim();
 const documentDigests = documentHashes.map((hash) => hash.digest("hex"));
 for (const state of documents) assert.ok(state.audible, `run ${state.doc.workload_kind}: silent`);
-assert.notEqual(documentDigests[0], documentDigests[1], "run: the two documents rendered the same bits");
+assertDocumentsDistinct(Object.fromEntries(documents.map((state, index) => [
+  state.doc.workload_kind, documentDigests[index],
+])), "run");
 const digests = hashes.map((hash) => hash.digest("hex"));
 assert.equal(digests[0], digests[1], "run: restating the held values moved a rendered bit");
 assert.notEqual(digests[1], digests[2], "run: the automated arm rendered the restated arm's bits");
@@ -653,6 +677,6 @@ const record = {
   loadavg_start: loadStart,
   loadavg_end: loadEnd,
   descriptive_only: true,
-  statistical_method: "three arms alternated per observation, then the two documents alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
+  statistical_method: "three arms alternated per observation, then the three documents alternated per observation; one warmup launch and two measured launches; nearest-rank percentiles over per-block nanoseconds of miso_engine_web_v1_render alone; ramp delta is automated minus restated and collapse delta is restated minus quiet, per observation; descriptive only; no threshold",
 };
 process.stdout.write(`${JSON.stringify(record)}\n`);

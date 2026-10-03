@@ -1,16 +1,17 @@
 //! Prints the `console_mixing_automation` row's controls, resolved against the mono console, as
-//! one JSON object (issue #1003), with the two console-strip documents the browser arm also
-//! renders (issue #1085).
+//! one JSON object (issue #1003), with the three console-strip documents the browser arm also
+//! renders (issues #1085 and #1228).
 //!
 //! The browser arm (`scripts/web-mixing-automation-benchmark.mjs`) rides the shipped
 //! `host_web.wasm` with exactly these controls: the same tracks, rack slots, wire parameter ids,
 //! held bases and per-block values the native row pushes. It reads them from here rather than
 //! from a transcription, so the two arms cannot drift apart.
 //!
-//! The documents are the native rows `sixty_four_track_console` and `sixty_four_track_app_shape`:
-//! their fixture, track count, strip content and layout as the native rows state them, and the
-//! bypass census of the session the native row compiles. The browser arm boots each fixture as
-//! written, checks it carries that layout and that bypass, and times its render.
+//! The documents are the native rows `sixty_four_track_console`, `sixty_four_track_app_shape` and
+//! `sixty_four_track_console_sends`: their fixture, track count, strip content and layout as the
+//! native rows state them, and the bypass census of the session the native row compiles. The
+//! browser arm boots each fixture as written, checks it carries that layout and that bypass, and
+//! times its render.
 //!
 //! `cargo run --locked --release -p console-workload --example mixing_automation_controls`
 
@@ -22,11 +23,13 @@ use console_workload::{
     Workload,
 };
 
-/// The console-strip rows the browser arm renders as documents (issue #1085): the standing
-/// console and the app shape. No per-N browser rows: those would be a second framework.
-const DOCUMENTS: [Workload; 2] = [
+/// The console-strip rows the browser arm renders as documents (issues #1085 and #1228): the
+/// standing console, the app shape and the bus-and-send console. No per-N browser rows: those would
+/// be a second framework.
+const DOCUMENTS: [Workload; 3] = [
     Workload::SixtyFourTrackConsole,
     Workload::SixtyFourTrackAppShape,
+    Workload::SixtyFourTrackConsoleSends,
 ];
 
 fn main() {

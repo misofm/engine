@@ -2,7 +2,7 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- sixty records, both rounds,
+# mutated in turn and asserted red, so the aggregate's guarantees -- sixty-two records, both rounds,
 # one host, one admissibility state, the decomposition rows' pinned strip contents, every session
 # row's pinned source feed, the class-A statements that neither the stationary smoother nor a
 # meter nor an armed observation tap nor a restated parameter nor the mono collapse nor the
@@ -373,11 +373,25 @@ expect_accept "$session_app" 'the app-shape row'
 expect_accept "$session_floor_app" 'the app-shape row carrying an underived floor'
 expect_accept "$session_sparse" 'the sparse-activity row'
 
+# #1227: the bus-and-send row, the standing console's tracks as written feeding buses and sends
+# from its own committed fixture. It states the standing row's strip facts under its own kind and
+# fixture.
+sends_fixture="fixtures/session/v1/console-sixty-four-track-sends.json"
+session_sends=$(printf '%s' "$session" | jq -c --arg f "$sends_fixture" \
+    '.workload_kind = "sixty_four_track_console_sends" | .fixture_id = $f')
+expect_accept "$session_sends" 'the bus-and-send row'
+expect_reject "$(printf '%s' "$session_sends" | jq -c '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"')" \
+    'a bus-and-send row naming the standing fixture'
+expect_reject "$(printf '%s' "$session_sends" | jq -c '.synthetic_fixture = true')" \
+    'a bus-and-send row reported as derived in code'
+expect_reject "$(printf '%s' "$session" | jq -c --arg f "$sends_fixture" '.fixture_id = $f')" \
+    'a standing console row naming the bus-and-send fixture'
+
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
 for base in "$session" "$session_floor" "$session_ring" "$session_metered" "$session_app" \
-    "$session_sparse" "$hoist" "$meters" "$observation" "$placement" "$automation" "$mono" "$mixing"; do
+    "$session_sparse" "$session_sends" "$hoist" "$meters" "$observation" "$placement" "$automation" "$mono" "$mixing"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
         expect_reject "$(printf '%s' "$base" | jq -c "del(.\"$field\")")" "$kind without $field"
@@ -1180,6 +1194,7 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
   def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.json";
   def mono_fixture: "fixtures/session/v1/console-sixty-four-track-mono.json";
   def app_fixture: "fixtures/session/v1/console-sixty-four-track-app.json";
+  def sends_fixture: "fixtures/session/v1/console-sixty-four-track-sends.json";
   def intended_layout: "pre_insert:eq+compressor,post_insert:limiter";
   def sessions: [
     {kind: "nine_track_baseline", tracks: 9, synthetic: false, strip: "eq", layout: "pre_insert:eq",
@@ -1229,7 +1244,12 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
      extra: {meter_streams: 64, meter_tap: "post_matrix", meter_metrics: "sample_peak",
              meter_window_blocks: 12, meter_snapshots: 5312, meter_dropped_snapshots: 0,
              bank_route_folds: 64, bank_scatter_redirects: 0}},
-    # #1085: the five console-strip rows, emitted after the metered row. The sparse row renders
+    # #1227: the bus-and-send row, emitted after the metered row and before the console-strip rows,
+    # rendering bits of its own, never the standing row bits.
+    {kind: "sixty_four_track_console_sends", tracks: 64, synthetic: false,
+     strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
+     fixture: sends_fixture, digest: "6"},
+    # #1085: the five console-strip rows, emitted after the bus-and-send row. The sparse row renders
     # bits of its own, neither the standing nor the idle row bits.
     {kind: "ten_track_ragged_strip", tracks: 10, synthetic: true, strip: "eq+compressor+limiter",
      layout: intended_layout, signal: "tone", fixture: console_fixture, digest: "0"},
@@ -1271,33 +1291,34 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       ($mixing | .round = $round)
   ) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the sixty-two-record set'
 
-# Index map of the frozen emission order: 0-21 are round one's twenty-two session rows (15 is the
-# driver-fed gain-and-pan row, 16 the metered console row and 17-21 the five console-strip rows of
-# #1085), 22-23 its two hoist rows, 24 its meters row, 25 its observation row, 26 its placement
-# row-pair, 27 its automation-active row, 28 its mono row-pair and 29 its mixing-automation row;
-# 30-59 repeat for round two. #956 took two records out of the fifty before it (the plumbing row,
-# both rounds), #1003 added two back at the end of each round, and #1085 added ten after the
-# metered row.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'fifty-nine records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[27]]) | .[]')" 'sixty-one records'
+# Index map of the frozen emission order: 0-22 are round one's twenty-three session rows (15 is
+# the driver-fed gain-and-pan row, 16 the metered console row, 17 the bus-and-send row of #1227 and
+# 18-22 the five console-strip rows of #1085), 23-24 its two hoist rows, 25 its meters row, 26 its
+# observation row, 27 its placement row-pair, 28 its automation-active row, 29 its mono row-pair
+# and 30 its mixing-automation row; 31-61 repeat for round two. #956 took two records out of the
+# fifty before it (the plumbing row, both rounds), #1003 added two back at the end of each round,
+# #1085 added ten after the metered row, and #1227 two between the metered row and the
+# console-strip rows.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'sixty-one records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[27]]) | .[]')" 'sixty-three records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[30].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[31].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[30].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[31].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[54].meters_off_output_sha256 = $c | .[54].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[55].absent_output_sha256 = $c | .[55].unarmed_output_sha256 = $c | .[55].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[56].split_chains_output_sha256 = $c | .[56].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[56].meters_off_output_sha256 = $c | .[56].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[57].absent_output_sha256 = $c | .[57].unarmed_output_sha256 = $c | .[57].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[58].split_chains_output_sha256 = $c | .[58].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_automation")] | .[]')" 'a set with no automation-active row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[57].quiet_output_sha256 = $c | .[57].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].quiet_output_sha256 = $c | .[59].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
@@ -1313,16 +1334,16 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record
 # workload: the quiet and restated digests, the moving arm, the preflight and the collapse
 # counters all agree across them.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_mixing_automation")] | .[]')" 'a set with no mixing-automation row'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].quiet_output_sha256 = $c | .[59].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[59].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[61].quiet_output_sha256 = $c | .[61].restated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[61].automated_output_sha256 = $c | .[]')" 'a mixing row whose rounds rode different traffic'
 # #1011: a fresh digest. `$digest_c` is the base record's preflight `restated` digest, so that
 # edit is refused by the per-record A3 rule before the rounds are compared.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[59].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[59].quiet_bank_collapse_counters = [17024, 16] | .[59].restated_bank_collapse_counters = [6384, 16] | .[59].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[58].collapse_eligible_output_sha256 = $c | .[58].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg a "$digest_a" '.[61].preflight_output_sha256.automated_limiter_only = ($a[0:63] + "4") | .[]')" 'a mixing preflight whose rounds disagree'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].preflight_bank_collapse_counters.automated_compressor_only = [512, 8] | .[]')" 'a mixing preflight whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].restated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing row whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].automated_bank_collapse_counters = [2128, 8] | .[]')" 'a mixing automated arm whose rounds collapsed differently'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[61].quiet_bank_collapse_counters = [17024, 16] | .[61].restated_bank_collapse_counters = [6384, 16] | .[61].automated_bank_collapse_counters = [6384, 16] | .[]')" 'a mixing row whose rounds formed different cohorts'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[60].collapse_eligible_output_sha256 = $c | .[60].collapse_forced_off_output_sha256 = $c | .[]')" 'a mono pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_gain_pan_ring")) |= (.workload_kind = "sixty_four_track_plumbing_ring" | .strip_content = "plumbing" | .strip_layout = "plumbing") | .[]')" 'a set carrying the retired plumbing ring row in place of the gain-and-pan ring row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_gain_pan_only")] | .[]')" 'a set missing the gain-and-pan row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_mono")] | .[]')" 'a set missing the mono session row'
@@ -1363,6 +1384,15 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(
     'a sparse row whose rounds rendered different output'
 expect_aggregate_accept "$(printf '%s' "$records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_app_shape")).strip_layout = "pre_insert:eq+compressor" | .[]')" \
     'a run whose app shape reads the console spelling'
+# #1227: the bus-and-send row is required, and it never renders the standing console row's bits.
+# Each digest edit moves both rounds of the row together, so the rounds still agree and only the
+# bus-and-send rule can refuse it.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_sends")] | .[]')" \
+    'a set missing the bus-and-send row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console_sends")).output_sha256 = (first(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")).output_sha256) | .[]')" \
+    'a bus-and-send row that rendered the standing console row bits'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '(.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console_sends")).output_sha256 = $c | .[]')" \
+    'a bus-and-send row rendering bits of its own'
 
 # ---------------------------------------------------------------------------------------------
 # #184 at the aggregate: the isolate is a subtraction between two rows, so only a whole run has
@@ -1379,7 +1409,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
     "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
     "one_twenty_eight_track_stretch": 8.60,
     "sixty_four_track_gain_pan_only": 1.01, "sixty_four_track_gain_pan_ring": 0.98,
-    "sixty_four_track_console_metered": 4.80,
+    "sixty_four_track_console_metered": 4.80, "sixty_four_track_console_sends": 5.20,
     "sixty_four_track_console_mono": 4.38, "sixty_four_track_console_mono_dual": 4.38,
     "sixty_four_track_console_half_mono": 4.39,
     "ten_track_ragged_strip": 0.75, "thirteen_track_ragged_strip": 0.95,
@@ -1406,7 +1436,7 @@ floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_
                  / .isolated_cycles_per_lane_sample)
         else . end ]')
 
-expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the sixty-record set with floor accounting'
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the sixty-two-record set with floor accounting'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
 expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
 # The control row moving is the same defect seen from the other side: the subtraction stops being
@@ -1474,7 +1504,13 @@ web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" -
      fixture_id: "fixtures/session/v1/console-sixty-four-track-app.json", tracks: 64,
      strip_content: "eq+compressor", strip_layout: "inserts:eq+compressor", input_signal: "tone",
      bypass_pattern: "index_mod_3_is_2", bypassed_tracks: 21,
-     p50_ns: 190000, p95_ns: 205000, p99_ns: 219000, output_sha256: ($a[0:63] + "7")}],
+     p50_ns: 190000, p95_ns: 205000, p99_ns: 219000, output_sha256: ($a[0:63] + "7")},
+    {workload_kind: "sixty_four_track_console_sends",
+     fixture_id: "fixtures/session/v1/console-sixty-four-track-sends.json", tracks: 64,
+     strip_content: "eq+compressor+limiter",
+     strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone",
+     bypass_pattern: "none", bypassed_tracks: 0,
+     p50_ns: 352000, p95_ns: 371000, p99_ns: 389000, output_sha256: ($a[0:63] + "5")}],
   bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
   loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
   descriptive_only: true,
@@ -1563,14 +1599,23 @@ web_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.rest
 web_mutation '.preflight_output_sha256.restated_eq_only = "'"$digest_a"'"' 'a browser EQ restatement that moved a bit'
 web_mutation '.preflight_output_sha256.quiet = "'"$digest_a"'"' 'a browser preflight restatement that moved a bit'
 web_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a browser preflight arm the row does not run'
-# #1085: the console-strip documents. Each is the native row it names, with that row's facts; the
-# app shape reads either layout spelling, and neither document's digest may be the other's.
+# #1085, #1228: the console-strip documents. Each is the native row it names, with that row's facts;
+# the app shape reads either layout spelling, and no document's digest may be another's.
 web_document_mutation() { web_mutation "$1" "the documents: $2"; }
 web_document_mutation 'del(.documents)' 'a browser round without its documents'
 web_document_mutation '.documents = []' 'a browser round that timed no document'
 web_document_mutation '.documents |= .[0:1]' 'a browser round that timed the console alone'
 web_document_mutation '.documents |= reverse' 'documents in another order'
-web_document_mutation '.documents |= . + [.[0]]' 'a third document'
+web_document_mutation '.documents |= . + [.[0]]' 'a fourth document'
+web_document_mutation '.documents |= .[0:2]' 'a browser round without the bus-and-send document'
+web_document_mutation '.documents[2].workload_kind = "sixty_four_track_console"' 'the bus-and-send document labelled the standing console'
+web_document_mutation '.documents[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' 'the bus-and-send document booted from the standing fixture'
+web_document_mutation '.documents[2].bypass_pattern = "index_mod_3_is_2" | .documents[2].bypassed_tracks = 21' 'the bus-and-send document claiming the app bypass'
+web_document_mutation '.documents[2].strip_content = "eq+compressor"' 'the bus-and-send document without its limiter'
+web_document_mutation '.documents[2].strip_layout = "pre_insert:eq+compressor"' 'the bus-and-send document claiming the app layout'
+web_document_mutation '.documents[2].bypassed_tracks = 1' 'a bus-and-send document bypassing a track under no pattern'
+web_document_mutation '.documents[2].output_sha256 = .documents[0].output_sha256' 'the bus-and-send document rendering the standing console bits'
+web_document_mutation '.documents[2].output_sha256 = .documents[1].output_sha256' 'the bus-and-send document rendering the app-shape bits'
 web_document_mutation '.documents[0].workload_kind = "sixty_four_track_console_mono"' 'the mono console in place of the standing one'
 web_document_mutation '.documents[0].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' 'the standing console booted from the mono fixture'
 web_document_mutation '.documents[0].strip_layout = "simd1:eq+compressor,simd2:limiter"' 'the rack-token spelling'
@@ -1618,6 +1663,7 @@ web_round_mutation '.measurement_control = "controlled; loadavg 0.01; ceiling 0.
 web_round_mutation '.cpu_affinity = "30"' 'browser rounds on two CPUs'
 web_round_mutation '.documents[0].output_sha256 = "'"${digest_a:0:63}8"'"' 'browser rounds whose standing-console document rendered different bits'
 web_round_mutation '.documents[1].output_sha256 = "'"${digest_a:0:63}9"'"' 'browser rounds whose app-shape document rendered different bits'
+web_round_mutation '.documents[2].output_sha256 = "'"${digest_a:0:63}0"'"' 'browser rounds whose bus-and-send document rendered different bits'
 web_round_mutation '.documents[1].strip_layout = "pre_insert:eq+compressor"' 'browser rounds stating two app layouts'
 
 # ---------------------------------------------------------------------------------------------

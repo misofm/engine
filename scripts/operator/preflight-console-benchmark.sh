@@ -75,13 +75,15 @@ jq -n -S \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
     --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.json | awk '{print $1}')" \
     --arg mono_fixture_generator_sha256 "$(sha256sum scripts/derive-mono-console-fixture.py | awk '{print $1}')" \
+    --arg sends_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-sends.json | awk '{print $1}')" \
+    --arg sends_fixture_generator_sha256 "$(sha256sum scripts/derive-sends-console-fixture.py | awk '{print $1}')" \
     --arg runner_sha256 "$(sha256sum scripts/operator/run-console-benchmark.sh | awk '{print $1}')" \
     --arg record_validator_sha256 "$(sha256sum scripts/console-benchmark-record-validator.jq | awk '{print $1}')" \
     --arg aggregate_validator_sha256 "$(sha256sum scripts/console-benchmark-validator.jq | awk '{print $1}')" \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 60,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 62,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       floor_table_sha256: $floor_table_sha256,
@@ -89,7 +91,9 @@ jq -n -S \
       standing_fixture_sha256: $standing_fixture_sha256,
       fixture_generator_sha256: $fixture_generator_sha256,
       mono_fixture_sha256: $mono_fixture_sha256,
-      mono_fixture_generator_sha256: $mono_fixture_generator_sha256, runner_sha256: $runner_sha256,
+      mono_fixture_generator_sha256: $mono_fixture_generator_sha256,
+      sends_fixture_sha256: $sends_fixture_sha256,
+      sends_fixture_generator_sha256: $sends_fixture_generator_sha256, runner_sha256: $runner_sha256,
       record_validator_sha256: $record_validator_sha256,
       aggregate_validator_sha256: $aggregate_validator_sha256,
       validator_library_sha256: $library_sha256,

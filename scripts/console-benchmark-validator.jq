@@ -1,18 +1,20 @@
-# Aggregate validator: twenty-two session workloads (fifteen bound-feed rows, the driver-fed
-# gain/pan row, #928 and #956, the metered console row, #881, and the five console-strip rows,
-# #1085), two hoist workloads, one meters arm, one observation arm, one placement row-pair, one
-# automation-active row, one mono row-pair and one mixing-automation row (#1003), each in rounds one
-# and two -- sixty records. #956 retired the builtins-less plumbing row and re-based the driver-fed
-# row, two records fewer than the fifty before it; #1003's row brought the count back to fifty, and
-# #1085's five rows, emitted after the metered row, took it to sixty.
+# Aggregate validator: twenty-three session workloads (fifteen bound-feed rows, the driver-fed
+# gain/pan row, #928 and #956, the metered console row, #881, the bus-and-send row, #1227, and the
+# five console-strip rows, #1085), two hoist workloads, one meters arm, one observation arm, one
+# placement row-pair, one automation-active row, one mono row-pair and one mixing-automation row
+# (#1003), each in rounds one and two -- sixty-two records. #956 retired the builtins-less plumbing
+# row and re-based the driver-fed row, two records fewer than the fifty before it; #1003's row
+# brought the count back to fifty, #1085's five rows, emitted after the metered row, took it to
+# sixty, and #1227's bus-and-send row, emitted between the metered row and the console-strip rows,
+# to sixty-two.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 60 and
+(type == "array") and length == 62 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
   == ["nine_track_ragged_strip","sixty_four_track_console"] and
-([.[] | select(.record == "console_session")] | length) == 44 and
+([.[] | select(.record == "console_session")] | length) == 46 and
 ([.[] | select(.record == "console_hoist")] | length) == 4 and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
@@ -27,7 +29,7 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_mixing_automation") | .workload_kind] | unique)
   == ["sixty_four_track_console_mono_mixing_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 60 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 62 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
@@ -73,6 +75,14 @@ all(.[]; console_benchmark_record_valid_lib) and
        | {key: .workload_kind, value: .output_sha256}] | from_entries) as $triple |
  $triple.sixty_four_track_console_sparse != $triple.sixty_four_track_console and
  $triple.sixty_four_track_console_sparse != $triple.sixty_four_track_idle) and
+# #1227: the bus-and-send row is the standing console's tracks feeding buses and sends from its own
+# fixture. It never renders the standing row's bits: an equality means the fixture never reached
+# the plan, and the row would publish the standing console's cost under its own name.
+(([.[] | select(.record == "console_session" and .workload_kind == "sixty_four_track_console")
+       | .output_sha256] | unique) as $standing |
+ [.[] | select(.record == "console_session" and
+               .workload_kind == "sixty_four_track_console_sends")
+      | .output_sha256] | length == 2 and all(.[]; . as $digest | all($standing[]; . != $digest))) and
 ([.[] | .backend] | unique | length) == 1 and
 # Ragged versus full, and every decomposition subtraction, are the whole point of the fixture set,
 # so the per-track costs must be comparable numbers taken on one host in one run: same binary,

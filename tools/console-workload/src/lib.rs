@@ -136,6 +136,18 @@ const SIXTY_FOUR_TRACK_MONO: &str =
 /// the same bytes the native row renders.
 const SIXTY_FOUR_TRACK_APP: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-app.json");
+/// The bus-and-send fixture (issue #1227): the standing console's 64 tracks feeding eight
+/// processed submix strips, two effect returns and two sends per track.
+///
+/// Generated from the standing fixture by `scripts/derive-sends-console-fixture.py`, which keeps
+/// the source, the rate, the quantum, the console declaration and every track as written, and
+/// adds ten submixes (`bus-0`..`bus-7`, `fx-a`, `fx-b`, each with the standing strip and one
+/// insert), re-points each track's main route into its bus, and adds a pre-fader send into `fx-a`
+/// and a post-fader send into `fx-b` per track and a return per submix. A committed document
+/// rather than a strip edit, because every strip edit is a removal (`apply_strip`) and this one
+/// is an addition, and because the browser arm boots the same bytes the native row renders.
+const SIXTY_FOUR_TRACK_SENDS: &str =
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-sends.json");
 
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -360,6 +372,23 @@ pub enum Workload {
     ///
     /// Not in [`WORKLOADS`]: see [`METERED_WORKLOADS`].
     SixtyFourTrackConsoleMetered,
+    /// Buses and sends (issue #1227): the standing console's 64 tracks feeding eight processed
+    /// submix strips, with two effect returns and two sends per track.
+    ///
+    /// Track `chNN`'s main route feeds `bus-<NN div 8>`; every track also sends `pre_fader` into
+    /// `fx-a` (a delay) and `post_fader` into `fx-b` (an EQ); each of the ten submixes carries
+    /// the standing strip plus one insert and returns `post_pan` to the output. No route or strip
+    /// is muted, so every send is active, and there is no VCA (a VCA is baked into the faders at
+    /// preparation and adds no render work). The tracks are the standing console row's, as
+    /// written, so this row and [`Self::SixtyFourTrackConsole`] differ by the buses and sends
+    /// alone: both are prepared at [`PlanConfig::BASELINE`] with the bound feed, the shape the C
+    /// ABI prepares today (no live controls, no meters).
+    ///
+    /// The committed sends fixture as written (`scripts/derive-sends-console-fixture.py`), so the
+    /// browser arm can boot the same document.
+    ///
+    /// Not in [`WORKLOADS`]: see [`BUS_SEND_WORKLOADS`].
+    SixtyFourTrackConsoleSends,
     /// The standing strip at ten tracks (issue #1085): one full eight-lane bank and a remainder of
     /// two.
     ///
@@ -560,7 +589,20 @@ pub const DRIVER_FED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackGainPan
 /// pair.
 pub const METERED_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleMetered];
 
-/// The console-strip rows the native bench emits after [`METERED_WORKLOADS`] (issue #1085).
+/// The bus-and-send rows the native bench emits after [`METERED_WORKLOADS`] (issue #1227).
+///
+/// Kept out of [`WORKLOADS`] for the reason [`DRIVER_FED_WORKLOADS`] is: that array is the wasm
+/// console arm's address space, and a row appended there would change what that arm measures.
+/// The browser arm's bus-and-send session is that arm's own change.
+///
+/// The shape tests under `tests/` that state a law of every banked standing row (one folded route
+/// per track) do not iterate it: its tracks feed submixes, not the output. Its plan facts -- one
+/// route transform per route, a reduction per submix input and at the output, no compensated,
+/// muted or follow-zeroed route -- are derived from the fixture by this crate's own test of the
+/// row.
+pub const BUS_SEND_WORKLOADS: [Workload; 1] = [Workload::SixtyFourTrackConsoleSends];
+
+/// The console-strip rows the native bench emits after [`BUS_SEND_WORKLOADS`] (issue #1085).
 ///
 /// The shapes the console strip moves, frozen before any console slice lands so the same rows can
 /// be measured before and after: the strip at ten, thirteen and sixteen tracks (with the existing
@@ -575,12 +617,14 @@ pub const CONSOLE_STRIP_WORKLOADS: [Workload; 5] = [
 ];
 
 /// Every session row the native bench emits, in emission order: [`WORKLOADS`], then
-/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then [`CONSOLE_STRIP_WORKLOADS`].
+/// [`DRIVER_FED_WORKLOADS`], then [`METERED_WORKLOADS`], then [`BUS_SEND_WORKLOADS`], then
+/// [`CONSOLE_STRIP_WORKLOADS`].
 pub fn native_session_rows() -> impl Iterator<Item = Workload> {
     WORKLOADS
         .into_iter()
         .chain(DRIVER_FED_WORKLOADS)
         .chain(METERED_WORKLOADS)
+        .chain(BUS_SEND_WORKLOADS)
         .chain(CONSOLE_STRIP_WORKLOADS)
 }
 
@@ -680,6 +724,7 @@ impl Workload {
             Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
             Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
             Self::SixtyFourTrackConsoleMetered => "sixty_four_track_console_metered",
+            Self::SixtyFourTrackConsoleSends => "sixty_four_track_console_sends",
             Self::TenTrackRaggedStrip => "ten_track_ragged_strip",
             Self::ThirteenTrackRaggedStrip => "thirteen_track_ragged_strip",
             Self::SixteenTrackStrip => "sixteen_track_strip",
@@ -711,6 +756,9 @@ impl Workload {
                 "fixtures/session/v1/console-sixty-four-track-mono.json"
             }
             Self::SixtyFourTrackAppShape => "fixtures/session/v1/console-sixty-four-track-app.json",
+            Self::SixtyFourTrackConsoleSends => {
+                "fixtures/session/v1/console-sixty-four-track-sends.json"
+            }
             _ => "fixtures/session/v1/console-sixty-four-track-intended.json",
         }
     }
@@ -738,6 +786,8 @@ impl Workload {
                 // the idle row, is reported as derived: its session is the standing one, but what
                 // it renders is fed in code.
                 | Self::SixtyFourTrackAppShape
+                // The bus-and-send row is a committed fixture, rendered as written.
+                | Self::SixtyFourTrackConsoleSends
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -991,6 +1041,7 @@ fn console_model(workload: Workload) -> SessionModel {
         | Workload::SixtyFourTrackConsoleMonoDual
         | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
         Workload::SixtyFourTrackAppShape => SIXTY_FOUR_TRACK_APP,
+        Workload::SixtyFourTrackConsoleSends => SIXTY_FOUR_TRACK_SENDS,
         _ => SIXTY_FOUR_TRACK,
     };
     let mut model = parse_session_json(text).expect("frozen console session fixture");
@@ -2861,6 +2912,7 @@ mod tests {
         for workload in WORKLOADS
             .into_iter()
             .chain(DRIVER_FED_WORKLOADS)
+            .chain(BUS_SEND_WORKLOADS)
             .chain(CONSOLE_STRIP_WORKLOADS)
         {
             assert!(!workload.web_meters(), "{}", workload.kind());
@@ -2871,11 +2923,12 @@ mod tests {
             WORKLOADS.len()
                 + DRIVER_FED_WORKLOADS.len()
                 + METERED_WORKLOADS.len()
+                + BUS_SEND_WORKLOADS.len()
                 + CONSOLE_STRIP_WORKLOADS.len()
         );
         assert!(
             rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len()) == Some(&metered),
-            "the metered row is emitted after the driver-fed row, before the console-strip rows"
+            "the metered row is emitted after the driver-fed row, before the bus-and-send row"
         );
         let mut kinds: Vec<&str> = rows.iter().map(|workload| workload.kind()).collect();
         kinds.sort_unstable();
@@ -3064,6 +3117,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Issue #1227: the bus-and-send row.
+    // -----------------------------------------------------------------------------------------
+
+    /// Issue #1227: the bus-and-send row states the standing console row's track facts under its
+    /// own kind and fixture, renders that fixture as written, and is emitted after the metered
+    /// row and before the console-strip rows.
+    ///
+    /// Its unique catch is the parity the row's record cannot show: a non-removal strip edit
+    /// attached to the row (a `HalfMono`-style edit, which still compiles, renders and passes the
+    /// record validator, because `strip_content` is a separate wildcard) or a warmup (not a record
+    /// key). Dropping the row's `fixture_id` arm, leaving it out of `synthetic`'s list or chaining
+    /// [`BUS_SEND_WORKLOADS`] after [`CONSOLE_STRIP_WORKLOADS`] also fail here, and elsewhere.
+    #[test]
+    fn the_bus_send_row_states_its_facts_and_is_emitted_before_the_strip_rows() {
+        let console = Workload::SixtyFourTrackConsole;
+        let sends = Workload::SixtyFourTrackConsoleSends;
+        assert_eq!(sends.kind(), "sixty_four_track_console_sends");
+        assert_eq!(
+            stated_facts(sends),
+            (
+                64,
+                "fixtures/session/v1/console-sixty-four-track-sends.json",
+                false,
+                console.strip_content(),
+                console.strip_layout()
+            )
+        );
+        assert!(sends.strip() == Strip::AsWritten);
+        assert_eq!(sends.input(), InputSignal::Tone);
+        assert_eq!(sends.source_feed(), SourceFeed::Bound);
+        assert_eq!(sends.warmup_blocks(), console.warmup_blocks());
+        assert!(!sends.web_meters() && !sends.collapse_forced_off());
+        assert!(
+            BUS_SEND_WORKLOADS == [sends],
+            "the bus-and-send row is the only one"
+        );
+        assert!(!WORKLOADS.contains(&sends), "not a wasm-arm row");
+        assert!(!DRIVER_FED_WORKLOADS.contains(&sends));
+        let rows: Vec<Workload> = native_session_rows().collect();
+        assert!(
+            rows.get(WORKLOADS.len() + DRIVER_FED_WORKLOADS.len() + METERED_WORKLOADS.len())
+                == Some(&sends),
+            "the bus-and-send row is emitted after the metered row, before the console-strip rows"
+        );
+    }
+
+    /// Issue #1227 D6: the bus-and-send row's compiled plan carries what the fixture declares,
+    /// derived from D1 rather than pinned, and every send in it is active.
+    ///
+    /// Compiled through the calls `build_full` makes at [`PlanConfig::BASELINE`] (no meters, no
+    /// live controls, `Concurrent` builtins), on the precedent of
+    /// `the_driver_fed_rows_metadata_charge_grows_by_exactly_the_executor_tables`. The fold count
+    /// is printed for the baseline's report, not asserted (#1227 D6 says why).
+    ///
+    /// Red mutations: drop the row's `console_model` arm (it renders the intended fixture: 64
+    /// transforms, one reduction), mute one send or a track strip in the fixture (a `route-mute`
+    /// or `route-follow-zeroed` row), or give a submix's insert latency (a nonzero compensation).
+    /// A muted submix strip is not a route mute and its returns do not follow mutes, so it leaves
+    /// this test green; `scripts/check-console-fixtures.sh`'s witness that every submix fader is
+    /// unmuted holds it.
+    #[test]
+    fn the_bus_send_rows_plan_carries_every_route_unmuted_and_uncompensated() {
+        let workload = Workload::SixtyFourTrackConsoleSends;
+        let model = console_model(workload);
+        let session = compile_session(&model, compile_caps()).expect("compiled console session");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
+        let effects = prepare_native_session_effects(&session, &registry, effect_caps())
+            .expect("prepared console effects");
+        let builtins = builtins_compiler::prepare_session_builtins(&session, &[], builtin_caps())
+            .expect("prepared console builtins");
+        let Ok(artifact) = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: Backend::current(),
+            plan_id: PLAN_ID,
+            effects,
+            builtins,
+            caps: graph_caps(),
+        }) else {
+            panic!("bus-and-send console graph");
+        };
+        let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
+        let text = String::from_utf8(evidence.canonical_bytes).expect("canonical text is UTF-8");
+        let rows = |tag: &str| -> Vec<Vec<&str>> {
+            text.lines()
+                .map(|line| line.split('\t').collect::<Vec<_>>())
+                .filter(|fields| fields[0] == tag)
+                .collect()
+        };
+
+        // D1: 64 tracks, 8 buses of 64 / 8 tracks each, and two effect returns.
+        let tracks = 64_usize;
+        let buses = 8_usize;
+        let submixes = buses + 2;
+        // One transform per route: each track's main route into its bus (64), its pre-fader send
+        // into `fx-a` and its post-fader send into `fx-b` (2 x 64), and one return per submix (10).
+        let routes = tracks + 2 * tracks + submixes;
+        assert_eq!(routes, 202);
+        let transforms = rows("route-transform");
+        assert_eq!(transforms.len(), routes);
+        // A reduction at every node that sums two or more routes: each bus input (8 tracks),
+        // `fx-a`'s and `fx-b`'s inputs (64 sends each) and `main-out` (10 returns): 11.
+        let reductions: BTreeSet<&str> = rows("reduction").iter().map(|fields| fields[1]).collect();
+        assert_eq!(reductions.len(), submixes + 1);
+        assert_eq!(reductions.len(), 11);
+        // One timing row per route, none compensated: every effect but the limiter has latency 0,
+        // every strip (track and submix) carries the limiter slot exactly once, and every tap a
+        // route reads (`pre_fader`, `post_fader`, `post_pan`) lies after `post_insert`, so all
+        // contributions to a reduction arrive at the same sample.
+        let timings = rows("route-timing");
+        assert_eq!(timings.len(), routes);
+        let delayed: Vec<&Vec<&str>> = timings.iter().filter(|fields| fields[3] != "0").collect();
+        let delayed_route_edges = delayed.len();
+        assert_eq!(delayed_route_edges, 0, "compensated routes: {delayed:?}");
+        // No route and no track strip is muted, so no gate is sealed and every send is active.
+        assert!(rows("route-mute").is_empty());
+        assert!(rows("route-follow-zeroed").is_empty());
+
+        let runtime = SessionRuntime::new(workload);
+        let folds = runtime.bank_route_folds();
+        let route_transforms = transforms.len() as u64;
+        println!(
+            "bus_send_plan_facts route_transforms={route_transforms} reduction_nodes={} \
+             bank_route_folds={folds} route_ops_per_block={} delayed_route_edges={delayed_route_edges}",
+            reductions.len(),
+            route_transforms - folds,
+        );
     }
 
     // -----------------------------------------------------------------------------------------

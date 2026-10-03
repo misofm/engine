@@ -157,14 +157,27 @@
 //! `bank_collapse_counters`, because a collapse renders the bits a dual bank renders and nothing
 //! else can say whether it held.
 //!
+//! # The bus-and-send row (issue #1227)
+//!
+//! `sixty_four_track_console_sends` is the standing sixty-four-track console's tracks routed
+//! through eight processed buses and two effect returns, each track also sending pre- and
+//! post-fader, from its committed fixture
+//! (`fixtures/session/v1/console-sixty-four-track-sends.json`, derived by
+//! `scripts/derive-sends-console-fixture.py`). It is emitted after the metered row and is timed
+//! like every other session row, at [`PlanConfig::BASELINE`] with its sources bound: the
+//! plan the C ABI prepares for fan playback, with no live controls, so every route is static. It
+//! states no floor (`floor::floor_row` says why). Its digest is asserted in-run to differ from
+//! `sixty_four_track_console`'s (`SENDS_PAIR`), because a sends row that rendered the standing
+//! console's bits would not have compiled its own fixture.
+//!
 //! # The console-strip rows (issue #1085)
 //!
-//! Five session rows, emitted after the metered row, freeze the shapes the console strip
-//! (decision 12) changes before any of its slices lands, so the same rows can be timed on today's
-//! engine and on the console model: the standing strip at ten, thirteen and sixteen tracks (with
-//! the nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}); the app shape,
-//! whose every track carries EQ -> compressor with a third of them bypassed (B0 wrote it into
-//! `dynamic`; since #1093 it is the session's two `pre_insert` slots, with the same bits); and
+//! Five session rows, emitted after the bus-and-send row (#1227), freeze the shapes the console
+//! strip (decision 12) changes before any of its slices lands, so the same rows can be timed on
+//! today's engine and on the console model: the standing strip at ten, thirteen and sixteen tracks
+//! (with the nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}); the app
+//! shape, whose every track carries EQ -> compressor with a third of them bypassed (B0 wrote it
+//! into `dynamic`; since #1093 it is the session's two `pre_insert` slots, with the same bits); and
 //! sparse activity, the standing console with every odd track fed silence. They are timed exactly
 //! like every other session row. The app shape's record adds the bypass pattern it observed in its
 //! compiled session, and the sparse row's digest is asserted in-run to differ from both the
@@ -234,6 +247,15 @@ const SPARSE_TRIPLE: [Workload; 3] = [
     Workload::SixtyFourTrackConsoleSparse,
 ];
 
+/// The bus-and-send row and the standing console row whose tracks it carries (issue #1227): one
+/// set of tracks, feeding the output directly on one row and through buses and sends on the other.
+/// Their digests must differ, and the run asserts it before it emits either record: an equality
+/// means the sends fixture never reached the plan.
+const SENDS_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackConsoleSends,
+];
+
 pub(crate) fn main() {
     // #104 F4: prove the shared audited allocator is the one serving this process. A global
     // allocator registered by a dependency that is never named may not be linked at all, and a
@@ -261,9 +283,10 @@ pub(crate) fn main() {
     // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
-    // The standing rows, then the driver-fed rows (issue #928) and the metered row (issue #881),
-    // which `WORKLOADS` does not carry because the wasm arm addresses it by index. One list, so the
-    // floor subtraction below finds a control wherever it sits.
+    // Every `native_session_rows()` row: the standing rows, then the driver-fed rows (issue #928),
+    // the metered row (issue #881), the bus-and-send row (issue #1227) and the console-strip rows
+    // (issue #1085). `WORKLOADS` carries only the standing rows, because the wasm arm addresses
+    // them by index. One list, so the floor subtraction below finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
@@ -295,6 +318,13 @@ pub(crate) fn main() {
     assert!(
         sparse != active && sparse != idle,
         "the sparse-activity row rendered the all-active or the idle row's output"
+    );
+    // And the bus-and-send row's (issue #1227): its tracks feed buses and sends, so it does not
+    // render the standing console's bits. An equality means its fixture never reached the plan.
+    let [standing, sends] = SENDS_PAIR.map(digest_of);
+    assert!(
+        sends != standing,
+        "the bus-and-send row rendered the standing console row's output"
     );
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
@@ -2822,6 +2852,67 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// Issue #1227: the bus-and-send row, run short through the real subject, renders with no
+    /// error and no forbidden operation, prints the facts it is pinned on, and the record
+    /// validator pins them: refused as shortened, accepted at the frozen count, and refused at the
+    /// frozen count when it names the standing fixture instead of its own.
+    ///
+    /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
+    /// thousand (`cargo test -p bench the_bus_send_row -- --nocapture` prints the record). Its
+    /// timings are not to be read.
+    ///
+    /// Red mutations: drop the row's `session_kind_shape` branch or its `session_kinds` entry --
+    /// the frozen record is refused; point the row's `fixture_id` at the intended fixture -- the
+    /// record at the frozen count is refused.
+    #[test]
+    fn the_bus_send_row_prints_its_facts_and_the_validator_pins_them() {
+        let workload = Workload::SixtyFourTrackConsoleSends;
+        let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
+        assert_eq!(
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        assert!(measured.meters.is_none());
+        let record = measured.record(
+            workload,
+            1,
+            Backend::current(),
+            Metadata::gather(),
+            None,
+            None,
+        );
+        println!("{record}");
+        assert!(record.contains("\"workload_kind\":\"sixty_four_track_console_sends\","));
+        assert!(record.contains(
+            "\"fixture_id\":\"fixtures/session/v1/console-sixty-four-track-sends.json\","
+        ));
+        assert!(
+            !record.contains("\"bypass_pattern\":"),
+            "no bypass group on the bus-and-send row"
+        );
+        let frozen = ".observations = 1000";
+        assert!(
+            !record_validator_accepts(&record, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&record, frozen),
+            "the record at the frozen count"
+        );
+        assert!(
+            !record_validator_accepts(
+                &record,
+                &format!(
+                    "{frozen} | .fixture_id = \"{}\"",
+                    Workload::SixtyFourTrackConsole.fixture_id()
+                )
+            ),
+            "a bus-and-send record naming the standing fixture"
+        );
     }
 
     /// Issue #1085: the five console-strip rows, run short through the real subject, render with
