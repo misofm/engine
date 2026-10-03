@@ -6,11 +6,14 @@
 //!   sum two contributors fed distinct noise, one route muted, and render the scalar D3 oracle
 //!   bit for bit (the first input in route-ID order owns the store; a later one is added only when
 //!   active), while the muted route's op never mixes. A muted route that is its bus's sole, in-place
-//!   contributor leaves the bus exact `+0.0`.
+//!   contributor leaves the bus exact `+0.0`, and so does a bus, or the session output, whose every
+//!   contributor is muted. The host's output planes are pre-filled with [`HOST_SENTINEL`], so the
+//!   host-master form must store its `+0.0` itself.
 //! * **#1217 gate 2, the first input owns the store**, with `+0.0` when it is inactive.
 //! * **#1216 gate 3, mute is not structural.** Muting the route PDC delays leaves every inserted
 //!   delay, route timing and the output latency unchanged.
-//! * **#1217 gate 3, a muted delayed route stays active**, mixing `[+0.0; 4]` every block.
+//! * **#1217 gate 3, a muted delayed route stays active**, mixing `[+0.0; 4]` every block, and its
+//!   compensation line carries that zero mix's sign to the bus 486 frames later.
 //! * **#1216 gate 4, no folded muted lane.** A bus with a muted contributor declines the route fold
 //!   and renders the bits of the same plan bound with the fold declined.
 //! * **#1217 gate 5**: those sessions render without one allocator call after warm-up.
@@ -47,6 +50,9 @@ const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-fra
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 8;
 const FRAMES: usize = QUANTUM * BLOCKS;
+/// What every host output buffer holds before a render. The engine never pre-clears the host's
+/// planes (a block writes each plane once), so a sum that leaves a sample unwritten shows it.
+const HOST_SENTINEL: f32 = 7.0;
 
 fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
@@ -196,7 +202,7 @@ fn render(document: &str, feeds: &[(String, [Vec<f32>; 2])]) -> ([Vec<f32>; 2], 
     let mut out = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         submit(&mut prepared, feeds, block);
-        let mut samples = [0.0_f32; QUANTUM * 2];
+        let mut samples = [HOST_SENTINEL; QUANTUM * 2];
         prepared
             .plan
             .render(
@@ -516,6 +522,72 @@ fn an_inactive_in_place_sole_route_fills_its_bus_with_positive_zero() {
         BLOCKS as u64,
         "c-main mixes every block"
     );
+}
+
+/// `count` tracks route from their `input` taps by muted unity routes `r0..` into `sum`: bus `b`,
+/// whose `input` tap feeds the output by the unity route `b-main`, or the session output itself.
+fn every_contributor_muted(sum: Sum, count: usize) -> SessionModel {
+    let (mut model, source, track) = empty_session();
+    for index in 0..count {
+        let id = format!("t{index}");
+        add_track(&mut model, &source, &track, &id);
+        let destination = match sum {
+            Sum::Bus => into_bus("b"),
+            Sum::Output => RouteDestination::OutputInput {
+                output_id: sid("main-out"),
+            },
+        };
+        let mut into = route(&format!("r{index}"), input_tap(&id), destination);
+        into.mute = true;
+        model.routes.push(into);
+    }
+    if let Sum::Bus = sum {
+        model.routes.push(to_output("b-main", bus_input("b")));
+        model.submixes = vec![Submix::unity(sid("b"), &model.console)];
+    }
+    model
+}
+
+/// #1217 gate 1, every contributor muted. Two and nine (more than one reduction group) muted
+/// routes into bus `b`, and into the session output (the host-master form, whose planes hold
+/// [`HOST_SENTINEL`] before each block): the result is exact `+0.0` on both planes, and no muted
+/// route mixes. Every track is fed strictly negative samples, so a muted route that was mixed
+/// anyway would show `-0.0`.
+///
+/// Red if a destination whose every route input is inactive skips its sum instead of storing
+/// `+0.0`: the session output then keeps the host's sentinel.
+#[test]
+fn a_destination_whose_every_route_is_muted_renders_positive_zero() {
+    let mut draw = Draw::new(12_176);
+    for sum in [Sum::Bus, Sum::Output] {
+        for count in [2, 9] {
+            let model = every_contributor_muted(sum, count);
+            let feeds: Vec<(String, [Vec<f32>; 2])> = (0..count)
+                .map(|index| (format!("t{index}"), negative_planes(&mut draw)))
+                .collect();
+            let what = format!("{sum:?}, {count} muted routes");
+            let (actual, mixes) = render_counted(&document(&model), &feeds);
+            assert_all_bits(&actual, 0.0, &what);
+            for index in 0..count {
+                assert_eq!(
+                    mixes[route_index(&model, &format!("r{index}"))],
+                    0,
+                    "{what}: r{index} mixed"
+                );
+            }
+        }
+    }
+}
+
+/// Strictly negative samples in `[-1, -0.1]` on both planes, so a zero-coefficient mix of them is
+/// `-0.0`.
+fn negative_planes(draw: &mut Draw) -> Planes {
+    let mut plane = || {
+        (0..FRAMES)
+            .map(|_| signed(draw, true))
+            .collect::<Vec<f32>>()
+    };
+    [plane(), plane()]
 }
 
 // ---- #1217 gate 2 ---------------------------------------------------------------------------
@@ -887,6 +959,51 @@ fn delayed_session_checked(model: SessionModel) -> SessionModel {
     model
 }
 
+/// #1217 gate 3, the line's contents. In [`delayed_bus`] with both routes muted, `s-e` (undelayed)
+/// is inactive, while `d-e` (delayed) stays active and, first in route-ID order, owns `e`'s store.
+/// `d` is fed strictly negative samples, so `d-e`'s zero-coefficient mix is `-0.0` on both lanes,
+/// and `e`'s input is that mix through the 486-sample line alone: the line's initial `+0.0` for
+/// frames `< 486`, then `-0.0`. The output, `e-main`'s unity mix of it, carries the same bits.
+///
+/// Red if a delayed muted route goes inactive, on the audio itself (its line no longer carries its
+/// mix, so frame 486 on renders `+0.0`), if its line holds anything but this block's zero mix, or if
+/// the delay moves.
+#[test]
+fn a_muted_delayed_routes_line_carries_its_zero_mix() {
+    let mut model = delayed_session_checked(delayed_bus(true));
+    for route in &mut model.routes {
+        if route.id.as_str() == "s-e" {
+            route.mute = true;
+        }
+    }
+    let mut draw = Draw::new(12_177);
+    let feeds = vec![
+        ("d".to_owned(), negative_planes(&mut draw)),
+        ("s".to_owned(), planes(&mut draw, None)),
+    ];
+    let (actual, mixes) = render_counted(&document(&model), &feeds);
+    let expected: Vec<f32> = (0..FRAMES)
+        .map(|frame| if frame < LIMITER_LATENCY { 0.0 } else { -0.0 })
+        .collect();
+    for (plane, samples) in actual.iter().enumerate() {
+        assert_bits_equal(
+            samples,
+            &expected,
+            &format!("plane {plane}: e's input, d-e's delayed zero mix alone"),
+        );
+    }
+    assert_eq!(
+        mixes[route_index(&model, "d-e")],
+        BLOCKS as u64,
+        "the delayed muted route mixes every block"
+    );
+    assert_eq!(
+        mixes[route_index(&model, "s-e")],
+        0,
+        "the undelayed muted route never mixes"
+    );
+}
+
 // ---- #1217 gate 5 ---------------------------------------------------------------------------
 
 /// After block 0, every render of `document` allocates and frees nothing: the render audit and
@@ -921,7 +1038,7 @@ fn assert_renders_without_allocating(document: &str, feeds: &[(String, [Vec<f32>
                 )
                 .expect("source block");
         }
-        let mut pcm = [0.0_f32; QUANTUM * 2];
+        let mut pcm = [HOST_SENTINEL; QUANTUM * 2];
         audit::reset();
         let mark = bench_alloc::current_thread_counters();
         let (report, snapshot) = audit::in_render_scope(|| {

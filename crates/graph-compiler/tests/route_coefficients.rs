@@ -382,20 +382,64 @@ fn a_muted_route_seals_one_route_mute_row_after_its_transform() {
         muted_lines.remove(at);
         // A muted route also makes bind build the route-activity table, which the sealed
         // `estimate` row charges (#1217 D6; `route_activity.rs` holds the charge to what bind
-        // retains), so that row is set aside here.
-        let without_estimate = |lines: &[&str]| -> Vec<String> {
+        // retains). That row may differ only by exactly that charge, in the fields it enters.
+        let estimate_at = |lines: &[&str]| {
             lines
                 .iter()
-                .filter(|line| !line.starts_with("estimate\t"))
-                .map(|line| (*line).to_owned())
-                .collect()
+                .position(|line| line.starts_with("estimate\t"))
+                .expect("an estimate row")
         };
+        let (open_at, muted_at) = (estimate_at(&open_lines), estimate_at(&muted_lines));
+        assert_estimate_moves_by_the_route_activity_charge(
+            open_lines[open_at],
+            muted_lines[muted_at],
+            open_model.routes.len(),
+            &node,
+        );
+        muted_lines.remove(muted_at);
+        let mut open_rest = open_lines.clone();
+        open_rest.remove(open_at);
         assert_eq!(
-            without_estimate(&muted_lines),
-            without_estimate(&open_lines),
+            muted_lines, open_rest,
             "the gate row is the only difference outside the estimate ({node})"
         );
     }
+}
+
+/// The muted compile's `estimate` row equals the open one's but for #1217 D6's charge,
+/// `graph::route_activity_bound_bytes(routes, logical_nodes)`: `graph_metadata_bytes`,
+/// `incremental_plan_bytes` and `session_plus_plan_bytes` each grow by exactly the charge, and
+/// `largest_allocation_bytes` is the larger of the open one and the muted metadata bytes.
+fn assert_estimate_moves_by_the_route_activity_charge(
+    open: &str,
+    muted: &str,
+    routes: usize,
+    node: &str,
+) {
+    let fields = |row: &str| -> Vec<u64> {
+        row.split('\t')
+            .skip(1)
+            .map(|field| field.parse().expect("a numeric estimate field"))
+            .collect()
+    };
+    let (open, muted) = (fields(open), fields(muted));
+    assert_eq!(open.len(), 20, "the estimate row's field count");
+    // Field positions in the row (`canonical.rs`'s `estimate` writer).
+    const LOGICAL_NODES: usize = 0;
+    const GRAPH_METADATA: usize = 11;
+    const LARGEST_ALLOCATION: usize = 17;
+    const CHARGED: [usize; 3] = [GRAPH_METADATA, 18, 19];
+    let charge = graph::route_activity_bound_bytes(routes as u64, open[LOGICAL_NODES])
+        .expect("the charge fits u64");
+    let mut expected = open.clone();
+    for field in CHARGED {
+        expected[field] += charge;
+    }
+    expected[LARGEST_ALLOCATION] = open[LARGEST_ALLOCATION].max(expected[GRAPH_METADATA]);
+    assert_eq!(
+        muted, expected,
+        "the estimate moves by the route-activity charge ({charge} bytes) and nothing else ({node})"
+    );
 }
 
 /// #1218 D3: a following send's zeroed source lanes are in the sealed graph text. A send from a

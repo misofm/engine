@@ -467,7 +467,11 @@ fn reduce_run<L: Lane>(
 }
 
 /// One group of `N` consecutive inputs: one arena borrow, one pass over the output.
-#[inline]
+///
+/// Always inlined, as [`reduce_group_into`] is: with two callers ([`reduce_many`] and
+/// [`reduce_gated`]'s later runs) LLVM would otherwise outline an `f32x4` instantiation carrying
+/// [`accumulate_group`]'s scalar tail (issue #1217 attempt 2).
+#[inline(always)]
 fn reduce_group<L: Lane, const N: usize>(
     arena: &mut DisjointArena,
     plane: usize,
@@ -641,7 +645,11 @@ fn reduce_run_into<L: Lane>(
 }
 
 /// One group of `N` consecutive inputs into the host's plane: `N` shared reads, one pass.
-#[inline]
+///
+/// Always inlined: it has two callers ([`reduce_many_into`] and [`reduce_gated_into`]'s later
+/// runs), and an outlined `f32x4` instantiation would carry [`accumulate_group`]'s scalar tail,
+/// which `scripts/check-web-audioworklet.sh`'s kernel-shape rule refuses (issue #1217 attempt 2).
+#[inline(always)]
 fn reduce_group_into<L: Lane, const N: usize>(
     arena: &DisjointArena,
     plane: usize,
@@ -5702,7 +5710,13 @@ fn route_activity(
         let node = &spec.nodes[program.ops[op].node as usize].id;
         routes.binary_search_by(|(id, _)| id.cmp(node)).ok()
     };
-    let index = |value: usize| u32::try_from(value).expect("a route table index fits u32");
+    // Below the tag bit, so a route index is never read back as a tagged destination.
+    let index = |value: usize| {
+        u32::try_from(value)
+            .ok()
+            .filter(|value| value & ROUTE_DESTINATION == 0)
+            .expect("a route table index fits below the destination tag bit")
+    };
     let mut active = vec![true; routes.len()];
     let mut slots = vec![UNROUTED; units.len()];
     let mut destinations: Vec<(u32, u32)> = Vec::new();

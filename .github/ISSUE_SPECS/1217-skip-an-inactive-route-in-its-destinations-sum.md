@@ -298,6 +298,62 @@ non-constant signal per lane.
     `cargo fmt --check` and the workspace clippy (`-D warnings`) clean; test-debug-a (`--no-fail-fast`) passed 1,186 tests in 106 binaries, 0 failed, 9 ignored. Its first run failed only #1216 gate 5, which Deviation 3 then repaired.
     `run-aarch64-tests.sh debug` runs at the K3 push (CI `aarch64-debug`), since this host is x86.
 
+### Attempt 2 record (Sol verdict 1: FAIL on BLOCKER-1 only)
+
+- **BLOCKER-1, the required web kernel-shape gate.** Attempt 1 gave `reduce_group_into` a second
+  caller (`reduce_gated_into`'s `Add` arm), so LLVM outlined eight `reduce_group_into<f32x4, N>`
+  instantiations carrying `accumulate_group`'s scalar tail, which `check-web-audioworklet.sh`
+  refuses. It is now `#[inline(always)]`. The same cause had also outlined seven arena-form
+  `reduce_group<f32x4, N>` instantiations (`N = 2..8`, vector:scalar 2:1, so the gate passed
+  them), so `reduce_group` is `#[inline(always)]` too. The module's `4wide6f32x4` kernel set
+  (12 kernels, listed from `wasm-objdump -d` of the named twin) is now identical to the parent
+  `f48fe7c74`'s, and the boot budget's high-water gate passes.
+  Inlining moves no bit: `fresh-process-determinism.json` is `cmp`-identical to both
+  `f48fe7c74`'s and `0da034dba`'s (#1218), and every fixture gate below is green.
+- **MINOR-1.** `route_mute.rs` pre-fills every host output buffer (`render()` and gate 5's `pcm`)
+  with `HOST_SENTINEL = 7.0`; the engine never pre-clears host planes, so the host-master form's
+  `+0.0` store is now tested (1217-11). The optional case is added:
+  `a_destination_whose_every_route_is_muted_renders_positive_zero` (2 and 9 muted routes, into a
+  bus and the session output, strictly negative feeds).
+- **MINOR-2.** `a_muted_delayed_routes_line_carries_its_zero_mix` mutes `s-e` too and feeds `d`
+  strictly negative samples: `e`'s input is `+0.0` for frames `< 486` and `-0.0` from 486 on, on
+  both planes. 1217-7 is now red on the audio itself.
+- **NIT-1.** #1216 gate 5 (`route_coefficients.rs`) no longer sets the `estimate` row aside: it
+  requires the muted row to equal the open one but for `graph_metadata_bytes`,
+  `incremental_plan_bytes` and `session_plus_plan_bytes`, each grown by exactly
+  `graph::route_activity_bound_bytes(R, N)`, and `largest_allocation_bytes` as their max (1217-13).
+  #1218's `a_following_send_seals_one_route_follow_zeroed_row` keeps the attempt-1 form; tightening
+  it is #1218's.
+- **NIT-2.** `route_activity`'s `index` refuses (at bind) a value with the tag bit set, so a route
+  index can never be read back as a tagged destination.
+- **NIT-3.** The web chain and the cross-target matrix are in the gate list below.
+- **Tests and test value** (new in attempt 2):
+  - `an_inactive_route_is_neither_mixed_nor_read`, now over sentinel-filled host planes: also red if
+    the host-master form leaves an inactive first input's store unwritten (1217-11).
+  - `a_destination_whose_every_route_is_muted_renders_positive_zero`: red if a destination whose
+    every route input is inactive skips its sum instead of storing `+0.0` (1217-12, red in this
+    test alone).
+  - `a_muted_delayed_routes_line_carries_its_zero_mix`: red on audio if a delayed muted route goes
+    inactive, if its line holds anything but that block's zero mix, or if the delay moves (1217-7).
+  - `a_muted_route_seals_one_route_mute_row_after_its_transform`, tightened: red if the estimate
+    moves by anything but the route-activity charge (1217-13; gate 4's lower bound stays green).
+- **Gates (x86-64 AVX2, `0da034dba` plus this attempt).**
+  - Web chain (CI `artifact` + `artifact-gates`): `build-web-audioworklet.sh --named-twin` rc 0;
+    `check-web-audioworklet.sh` rc 0 (kernel shape `kernels=12`, boot budget high-water passed,
+    static/object checks passed; on `071c6c14a` it failed with eight kernel lines);
+    `check-browser-expected-resources.py --artifacts` rc 0; `test-web-audioworklet.sh` rc 0.
+  - Gate 6: release build rc 0; `check-graph-determinism.sh` 100/100, `cmp`-identical to
+    `f48fe7c74` and `0da034dba`; `graph_fixture -- --check`, `check-console-fixtures.sh`,
+    `check-builtins-fixtures.sh` rc 0; `audit capi` `allocations 0`, `total_violations 0`, digest
+    `ff6cdcb96cdcdad5`; `cargo test --release -p audit -p bench -p console-workload` 110 passed,
+    0 failed.
+  - Gate 7: test-debug-a (`--no-fail-fast`) 1,194 passed, 0 failed, 9 ignored, 106 binaries;
+    `check-`/`test-graph-policy.sh`, `check-`/`test-realtime-policy.sh`,
+    `check-workspace-policy.sh`, `check-cross-targets.sh` rc 0; `cargo fmt --check` and the
+    workspace clippy (`--all-features -D warnings`) clean, and clippy without features on `graph`,
+    `graph-compiler`, `host-core` and `capi` clean. `run-aarch64-tests.sh debug` runs at the K3
+    push (CI `aarch64-debug`).
+
 ## Dependencies
 
 - *Mute a route in the session* (#1216)
