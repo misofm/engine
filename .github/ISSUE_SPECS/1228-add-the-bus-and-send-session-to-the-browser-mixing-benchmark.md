@@ -176,6 +176,50 @@ boots and renders before anything is timed.
 - The `prepare` and `preflight` output.
 - The `test-console-benchmark.sh` summary line and the new cases.
 
+### Attempt 1 record (Terra, on `e7bd95f88`)
+
+Anchors had moved only by BM1's insertions in `test-console-benchmark.sh` (the browser part now
+starts at `:1454`); every one was found by its text. Nothing was timed and `run` was never invoked.
+
+- **D1-D4 as frozen.** `DOCUMENTS: [Workload; 3]` appends `SixtyFourTrackConsoleSends`;
+  `DOCUMENT_KINDS` appends `sixty_four_track_console_sends`; boot options unchanged (live controls,
+  64-record queue, no meters, taps or master). `prepare` checks `.documents | length == 3`.
+  `web_documents_valid`: `length == 3`, `.[0]`/`.[1]` untouched, a new `.[2]` clause, and
+  `(map(.output_sha256) | unique | length) == 3`. The `.mjs` checks every pair through one helper
+  (`assertDocumentsDistinct`, used by the document preflight and the run), each failure naming
+  the pair; the statistical method, the table assertion and the header comments say three.
+- **Controls table** (`cargo run ... --example mixing_automation_controls`): `.documents | length
+  == 3`; the third entry is `sixty_four_track_console_sends`, the sends fixture, 64 tracks,
+  `eq+compressor+limiter`, `pre_insert:eq+compressor,post_insert:limiter`, tone, `none`, 0.
+- **Harness preflight on the uncommitted tree** (module from `build-web-audioworklet.sh
+  --module-only`, `30d075d3...aeff4`): exit 0, `documents` = console `d913ad96...41b1`, app shape
+  `3dd8b2ff...d645`, sends `cf5aca93...7002`, each asserted audible. Gate 1 on the committed
+  checkpoint is recorded below.
+- **Gate 2.** `test-console-benchmark.sh`: `console benchmark validators: PASS (real
+  runner/workload/timing invocations: 0/0/0; browser runner on a stub harness, untimed)`. New
+  cases: the 9 D4 refusals, the relabelled `a fourth document`, and the cross-round sends-digest
+  case; the base round's third document carries digest suffix `5`.
+- **Gate 3.** Example `| jq -e '.documents | length == 3'` true; `cargo test --locked --release -p
+  audit -p bench -p console-workload` 113 passed, 0 failed; `cargo fmt --all -- --check`, workspace
+  clippy `-D warnings`, `check-workspace-policy.sh` and `test-workspace-policy.sh` pass.
+  `check-web-audioworklet.sh` and `test-web-audioworklet.sh` also pass. The Playwright browser
+  legs were not run: no browser harness, SDK or session file changed.
+- **Test value and mutations run** (each red, then restored):
+  - dropping the `.[2]` clause: the six fact refusals (kind, fixture, app bypass, content, layout,
+    a bypassed track) go red -- a round that names the wrong session under the sends name;
+  - `length >= 2` with no `.[2]` clause and a length-relative digest rule: `.documents |= .[0:2]`
+    also goes red -- a round that timed no sends document;
+  - `length >= 2` alone: `a fourth document` goes red;
+  - digests compared only against `.[0]`: `.documents[2] = .documents[1]`'s digest goes red; pairs
+    `(0,1),(1,2)` only: `.documents[2] = .documents[0]`'s goes red -- a pairwise rule that is not;
+  - round agreement over `.documents[0:2]` only: the new cross-round case goes red alone -- rounds
+    that disagree on the sends document's bits;
+  - harness: booting the sends entry from the standing fixture (same layout and census, so only
+    the distinctness check can see it) fails the preflight with `the documents
+    sixty_four_track_console and sixty_four_track_console_sends rendered the same bits`; with the
+    check cut back to the old `(0,1)` pair the same mutant exits 0. The run's use of the helper is
+    not exercised (it is timed).
+
 ## Dependencies
 
 - *Add a bus-and-send row to the native console benchmark* (#1227, BM1)

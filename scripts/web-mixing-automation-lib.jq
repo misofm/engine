@@ -17,23 +17,24 @@
 # * the protocol: two measured rounds after a warmup launch, which agree on every digest, on the
 #   module, and on the commit the module and the control table were prepared at, which must be the
 #   commit the rounds were run at;
-# * the console-strip documents (#1085): the standing console and the app shape, each booted from
-#   its fixture, stated with the facts its native row is pinned on, timed after the arms, and
-#   rendering audible bits of its own that both rounds agree on.
+# * the console-strip documents (#1085, #1228): the standing console, the app shape and the
+#   bus-and-send console, each booted from its fixture, stated with the facts its native row is
+#   pinned on, timed after the arms, and rendering audible bits of its own, distinct from every
+#   other document's, that both rounds agree on.
 include "console-benchmark-record-lib";
 
 def web_mixing_keys: ["arms","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","bank_collapse_counters_exported","bit_identity","candidate_commit","command_records_per_block","console_command_queue_records","controls","cpu_affinity","descriptive_only","documents","fixture_id","input_feed","input_signal","issue","loadavg_end","loadavg_start","measurement_control","module_matches_pin","module_sha256","native_input_feed","node_flags","node_version","observations","paired_collapse_delta_median_ns","paired_ramp_delta_median_ns","pairing","percentile_method","pinned_sha256","preflight_output_sha256","prepared_commit","preroll_blocks","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","records_admitted","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","sample_rate_hz","schema_version","source_frames","source_ring_frames","statistical_method","tracks","units","v8_version","workload_kind"];
 def web_feed_keys: ["amplitude","block_frames","continuous_across_blocks","delivery","radians_per_frame","track_phase_radians","waveform"];
 def commit_id: type == "string" and test("^[0-9a-f]{40}$");
 
-# #1085: one console-strip document's entry, and the two documents in the order the harness times
-# them: the native rows' kinds, fixtures and facts, as `session_kind_shape` and
+# #1085, #1228: one console-strip document's entry, and the three documents in the order the
+# harness times them: the native rows' kinds, fixtures and facts, as `session_kind_shape` and
 # `bypass_session_shape` pin them for the native records. The app shape's layout reads `inserts`
 # on today's racks and `pre_insert` once the app puts its EQ and compressor in the session console;
 # both are accepted for that document alone, as the native validator accepts them for its row.
 def web_document_keys: ["bypass_pattern","bypassed_tracks","fixture_id","input_signal","output_sha256","p50_ns","p95_ns","p99_ns","strip_content","strip_layout","tracks","workload_kind"];
 def web_documents_valid:
-  type == "array" and length == 2 and
+  type == "array" and length == 3 and
   all(.[]; type == "object" and (keys | sort) == web_document_keys and
     .tracks == 64 and .input_signal == "tone" and (.output_sha256 | sha256) and
     ([.p50_ns,.p95_ns,.p99_ns] | all(positive_integer)) and
@@ -45,7 +46,10 @@ def web_documents_valid:
     .strip_content == "eq+compressor" and
     (.strip_layout == "inserts:eq+compressor" or .strip_layout == "pre_insert:eq+compressor") and
     bypass_session_shape) and
-  .[0].output_sha256 != .[1].output_sha256;
+  (.[2] | .workload_kind == "sixty_four_track_console_sends" and .fixture_id == sends_console_fixture and
+    .strip_content == "eq+compressor+limiter" and .strip_layout == intended_layout and
+    .bypass_pattern == "none" and .bypassed_tracks == 0) and
+  (map(.output_sha256) | unique | length) == 3;
 
 # One named claim of a record. A claim that cannot be evaluated on this record (a field of the wrong
 # type) is a failed claim, not an error, so every claim is judged and every failure can be named.

@@ -1504,7 +1504,13 @@ web_round=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --arg c "$digest_c" -
      fixture_id: "fixtures/session/v1/console-sixty-four-track-app.json", tracks: 64,
      strip_content: "eq+compressor", strip_layout: "inserts:eq+compressor", input_signal: "tone",
      bypass_pattern: "index_mod_3_is_2", bypassed_tracks: 21,
-     p50_ns: 190000, p95_ns: 205000, p99_ns: 219000, output_sha256: ($a[0:63] + "7")}],
+     p50_ns: 190000, p95_ns: 205000, p99_ns: 219000, output_sha256: ($a[0:63] + "7")},
+    {workload_kind: "sixty_four_track_console_sends",
+     fixture_id: "fixtures/session/v1/console-sixty-four-track-sends.json", tracks: 64,
+     strip_content: "eq+compressor+limiter",
+     strip_layout: "pre_insert:eq+compressor,post_insert:limiter", input_signal: "tone",
+     bypass_pattern: "none", bypassed_tracks: 0,
+     p50_ns: 352000, p95_ns: 371000, p99_ns: 389000, output_sha256: ($a[0:63] + "5")}],
   bit_identity: "quiet == restated, asserted in-run", bank_collapse_counters_exported: false,
   loadavg_start: "9.52 7.22 7.64 8/1930 3836898", loadavg_end: "9.48 7.25 7.65 6/1921 3837039",
   descriptive_only: true,
@@ -1593,14 +1599,23 @@ web_mutation '.preflight_output_sha256.automated = .preflight_output_sha256.rest
 web_mutation '.preflight_output_sha256.restated_eq_only = "'"$digest_a"'"' 'a browser EQ restatement that moved a bit'
 web_mutation '.preflight_output_sha256.quiet = "'"$digest_a"'"' 'a browser preflight restatement that moved a bit'
 web_mutation '.preflight_output_sha256.extra = "'"$digest_a"'"' 'a browser preflight arm the row does not run'
-# #1085: the console-strip documents. Each is the native row it names, with that row's facts; the
-# app shape reads either layout spelling, and neither document's digest may be the other's.
+# #1085, #1228: the console-strip documents. Each is the native row it names, with that row's facts;
+# the app shape reads either layout spelling, and no document's digest may be another's.
 web_document_mutation() { web_mutation "$1" "the documents: $2"; }
 web_document_mutation 'del(.documents)' 'a browser round without its documents'
 web_document_mutation '.documents = []' 'a browser round that timed no document'
 web_document_mutation '.documents |= .[0:1]' 'a browser round that timed the console alone'
 web_document_mutation '.documents |= reverse' 'documents in another order'
-web_document_mutation '.documents |= . + [.[0]]' 'a third document'
+web_document_mutation '.documents |= . + [.[0]]' 'a fourth document'
+web_document_mutation '.documents |= .[0:2]' 'a browser round without the bus-and-send document'
+web_document_mutation '.documents[2].workload_kind = "sixty_four_track_console"' 'the bus-and-send document labelled the standing console'
+web_document_mutation '.documents[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' 'the bus-and-send document booted from the standing fixture'
+web_document_mutation '.documents[2].bypass_pattern = "index_mod_3_is_2" | .documents[2].bypassed_tracks = 21' 'the bus-and-send document claiming the app bypass'
+web_document_mutation '.documents[2].strip_content = "eq+compressor"' 'the bus-and-send document without its limiter'
+web_document_mutation '.documents[2].strip_layout = "pre_insert:eq+compressor"' 'the bus-and-send document claiming the app layout'
+web_document_mutation '.documents[2].bypassed_tracks = 1' 'a bus-and-send document bypassing a track under no pattern'
+web_document_mutation '.documents[2].output_sha256 = .documents[0].output_sha256' 'the bus-and-send document rendering the standing console bits'
+web_document_mutation '.documents[2].output_sha256 = .documents[1].output_sha256' 'the bus-and-send document rendering the app-shape bits'
 web_document_mutation '.documents[0].workload_kind = "sixty_four_track_console_mono"' 'the mono console in place of the standing one'
 web_document_mutation '.documents[0].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' 'the standing console booted from the mono fixture'
 web_document_mutation '.documents[0].strip_layout = "simd1:eq+compressor,simd2:limiter"' 'the rack-token spelling'
@@ -1648,6 +1663,7 @@ web_round_mutation '.measurement_control = "controlled; loadavg 0.01; ceiling 0.
 web_round_mutation '.cpu_affinity = "30"' 'browser rounds on two CPUs'
 web_round_mutation '.documents[0].output_sha256 = "'"${digest_a:0:63}8"'"' 'browser rounds whose standing-console document rendered different bits'
 web_round_mutation '.documents[1].output_sha256 = "'"${digest_a:0:63}9"'"' 'browser rounds whose app-shape document rendered different bits'
+web_round_mutation '.documents[2].output_sha256 = "'"${digest_a:0:63}0"'"' 'browser rounds whose bus-and-send document rendered different bits'
 web_round_mutation '.documents[1].strip_layout = "pre_insert:eq+compressor"' 'browser rounds stating two app layouts'
 
 # ---------------------------------------------------------------------------------------------
