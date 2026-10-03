@@ -3130,10 +3130,11 @@ fn expected_tails(
     session: &CompiledSession,
     sorted_controls: &[(&str, usize)],
 ) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
-    let mut values: Vec<(Box<str>, BuiltinTail)> =
-        Vec::with_capacity(session.normalized_model().strips().count());
-    for strip in session.normalized_model().strips() {
-        let parameters = strip_parameters(&strip, u32::MAX).map_err(|_| ())?;
+    let model = session.normalized_model();
+    let mut values: Vec<(Box<str>, BuiltinTail)> = Vec::with_capacity(model.strips().count());
+    for (strip, fader) in model.strips().zip(model.effective_strip_faders()) {
+        let parameters =
+            strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).map_err(|_| ())?;
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
         let tail = if sorted_controls
             .binary_search_by(|(control, _)| control.cmp(&strip.id.as_str()))
@@ -3358,8 +3359,10 @@ fn prepare_session_builtins_with_live_controls_and_policy(
             ));
         }
     }
+    // #1242 D2: the domain preflight checks each strip's own fader values, so a VCA's clamp
+    // never turns an out-of-domain member fader into an acceptance.
     for strip in session.normalized_model().strips() {
-        match strip_parameters(&strip, caps.maximum_smoothing_samples)
+        match strip_parameters(&strip, own_fader(&strip), caps.maximum_smoothing_samples)
             .and_then(|parameters| BuiltinChain::new(session.sample_rate().0, parameters))
         {
             Ok(_) => {}
@@ -3391,6 +3394,9 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         return Err(BuiltinDiagnosticSet::sorted(diagnostics));
     }
     let resources = resource_plan.expect("validated resource plan").report;
+    // #1242 D2: lowering bakes each strip's VCA-effective fader, computed once, here, before the
+    // phase-two allocation observation (strip `i` is entry `i`).
+    let effective_faders = session.normalized_model().effective_strip_faders();
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().strips().count();
@@ -3409,9 +3415,13 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     }
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, usize)> = Vec::with_capacity(controls.len());
-    for strip in session.normalized_model().strips() {
-        let parameters = strip_parameters(&strip, caps.maximum_smoothing_samples)
-            .expect("preflighted parameters");
+    for (strip, fader) in session.normalized_model().strips().zip(&effective_faders) {
+        let parameters = strip_parameters(
+            &strip,
+            (fader.db, fader.mute),
+            caps.maximum_smoothing_samples,
+        )
+        .expect("preflighted parameters");
         let chain = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted coefficients");
         let tail = chain.tail();
@@ -4731,8 +4741,21 @@ fn render_error(error: BuiltinParameterError) -> RenderError {
     }
 }
 
+/// The strip's own `[left, right]` fader dB and mutes, as the session declares them. The domain
+/// preflight checks these (#1242 D2), so a VCA's clamp never hides an out-of-domain member fader.
+fn own_fader(strip: &StripRef<'_>) -> ([f32; 2], [bool; 2]) {
+    (
+        [strip.fader.left_db, strip.fader.right_db],
+        [strip.fader.left_mute, strip.fader.right_mute],
+    )
+}
+
+/// The strip's lowered parameters, baking `fader_db` and `muted` (`[left, right]`) as its fader:
+/// the strip's own values for the domain preflight, its VCA-effective values
+/// (`SessionModel::effective_strip_faders`, #1242 D2) for lowering and the tail seal.
 fn strip_parameters(
     strip: &StripRef<'_>,
+    (fader_db, muted): ([f32; 2], [bool; 2]),
     maximum_smoothing: u32,
 ) -> Result<BuiltinParameters, BuiltinParameterError> {
     let left = ChannelParameters {
@@ -4740,16 +4763,16 @@ fn strip_parameters(
         trim_db: strip.builtins.left.trim_db,
         hpf_hz: strip.builtins.left.hpf_hz,
         lpf_hz: strip.builtins.left.lpf_hz,
-        fader_db: strip.fader.left_db,
-        muted: strip.fader.left_mute,
+        fader_db: fader_db[0],
+        muted: muted[0],
     };
     let right = ChannelParameters {
         polarity_invert: strip.builtins.right.polarity_invert,
         trim_db: strip.builtins.right.trim_db,
         hpf_hz: strip.builtins.right.hpf_hz,
         lpf_hz: strip.builtins.right.lpf_hz,
-        fader_db: strip.fader.right_db,
-        muted: strip.fader.right_mute,
+        fader_db: fader_db[1],
+        muted: muted[1],
     };
     let (matrix, smoothing_samples) = match *strip.matrix_or_pan {
         MatrixOrPan::Pan {
@@ -12211,7 +12234,8 @@ mod tests {
                     Some(accepted_report.engine_owned_retained_payload_bytes)
                 );
 
-                let parameters = strip_parameters(&model.strips().next().unwrap(), u32::MAX)
+                let strip = model.strips().next().unwrap();
+                let parameters = strip_parameters(&strip, own_fader(&strip), u32::MAX)
                     .expect("accepted class parameters");
                 let mut chain = BuiltinChain::new(rate, parameters).expect("accepted chain");
                 let target_result = chain.set_matrix_target(target);
@@ -12535,6 +12559,52 @@ mod tests {
                 .iter()
                 .any(|value| value.code == "builtin.control.unknown_track"),
             "{unknown:?}"
+        );
+    }
+
+    /// #1242 gate 7: a member fader outside the fader domain still refuses at its own path. Track
+    /// `vocal` sits at `fader.left_db = 24.5` in VCA `drums` at -6 dB, whose effective value
+    /// (18.5) is in domain; preparation refuses `builtin.gain.domain` at
+    /// `$.tracks[id=vocal].fader.left_db`, as it does with no VCA.
+    ///
+    /// Red if the domain preflight checks the clamped effective value, which would accept it.
+    #[test]
+    fn a_vca_member_fader_outside_its_domain_refuses_at_its_own_path() {
+        let document = include_str!("../../../fixtures/session/v1/canonical.json");
+        let mut model = parse_session_json(document).expect("parse");
+        model.tracks[0].fader.left_db = 24.5;
+        model.vcas = vec![session::Vca {
+            id: session::StableId::parse("drums").expect("stable ID"),
+            fader: session::DualMonoFader {
+                left_db: -6.0,
+                right_db: -6.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: vec![model.tracks[0].id.clone()],
+        }];
+        assert_eq!(model.effective_strip_faders()[0].db[0], 18.5);
+        let compiled = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("the session compiles");
+        let refused = prepare_session_builtins(&compiled, &[], caps())
+            .map(|_| ())
+            .expect_err("an out-of-domain member fader refuses");
+        assert_eq!(
+            refused,
+            BuiltinDiagnosticSet::sorted(vec![diag(
+                "builtin.gain.domain",
+                "$.tracks[id=vocal].fader.left_db",
+            )])
         );
     }
 }

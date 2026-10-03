@@ -110,7 +110,8 @@ pub struct SessionModel {
     pub tracks: Vec<Track>,
     /// Submixes, order-insensitive by stable ID.
     pub submixes: Vec<Submix>,
-    /// VCA groups, order-insensitive by stable ID (#1240). Control-only: inert until #1242.
+    /// VCA groups, order-insensitive by stable ID (#1240). Control-only: applied at preparation
+    /// through [`Self::effective_strip_faders`] (#1242).
     pub vcas: Vec<Vca>,
     /// Outputs, order-insensitive by stable ID.
     pub outputs: Vec<Output>,
@@ -757,7 +758,7 @@ impl Submix {
 /// member's own fader, and its per-lane mute mutes every reachable member. A member is a track, a
 /// submix or another VCA; membership is acyclic (`vca.cycle`) and one strip may sit in several
 /// VCAs. The canonical session stores each member's own value and each VCA's value, never an
-/// effective value. VCAs parse and validate here and are inert until preparation applies them
+/// effective value; preparation composes them through [`SessionModel::effective_strip_faders`]
 /// (#1242).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vca {

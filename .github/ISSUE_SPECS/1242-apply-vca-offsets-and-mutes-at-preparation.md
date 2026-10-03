@@ -274,6 +274,95 @@ No allocation gate: this slice adds no render-thread state; the composition runs
 - Each new test's name with its one-sentence test-value answer, and the mutation that turned it red.
 - Whether #1053 had landed, and therefore whether D4 was implemented or its spec rule confirmed.
 
+### Attempt 1 record (Terra)
+
+- **Base.** `7f106a6de` (#1240 attempt 1). Context anchors held (`strip_parameters` `:4734`, its
+  callers, the follow map `compile.rs:323-336`, host-web's seeding `:6282-6324`).
+- **Implementation.** D1: `crates/session/src/vca.rs` (`vca_effective_db`, `EffectiveStripFader`,
+  `SessionModel::vca_reach` -- an upward walk over a member-to-parent map with a visited set,
+  sorted by VCA ID -- and `effective_strip_faders`), re-exported from `lib.rs`. D2:
+  `strip_parameters` takes `([f32; 2], [bool; 2])`; the preflight passes `own_fader(&strip)`;
+  `expected_tails` and lowering pass `effective_strip_faders()` (lowering's copy is computed before
+  the phase-two allocation observation); the follow map zips `strips` with
+  `effective_strip_faders()`. D3: `StripMuteSeed.vca_mute`, `LiveControlSoloState.vca_mute` (no
+  shadow, fixed like `solo_safe`), `emitted` seeded `mutes || vca_mute`, `effective_mute` gains the
+  term, `vca_mute()` getter; host-web seeds `vca_mute` from the normalized model's
+  `effective_strip_faders()` before `try_new` and `LiveRouteState::try_new`. Docs: the
+  `SESSION_SCHEMA_V1.md` VCA paragraph states the rule; `BUILTINS_AND_METERING_V1.md` gains
+  "VCA groups (issue #1242)" after the solo admission rules and the VCA mute in "Sends follow mute".
+- **D4.** #1053 has **not** landed (`git grep live_builtin_delta` finds only specs). The VCA guard is
+  confirmed in #1053's spec (A2 D1 `:155-160`), #1225's D1 structural list (`:110-113`) and
+  #1226's D5 (`:75-80`). Gate 9 is not applicable.
+- **Deviations.**
+  1. `crates/session/src/model.rs` (outside the authorized paths): two doc comments only, which said
+     VCAs were inert until #1242.
+  2. Gate 5's browser half compares with `follow_lockstep` (#1224's per-track distinct feeds),
+     not `render_pair_and_compare`, whose `feed_and_render` feeds one constant to one source and
+     cannot carry a member claim (DESIGN section 7, VERIFY-2 M13). It also asserts the solo stages
+     exactly one fader record (on `bass`), so a redundant record for a VCA-muted strip is red even
+     at smoothing 0.
+  3. Gate 3's sealed-text half (`route-follow-zeroed` rows) is in `graph-compiler/tests/vca_follow.rs`;
+     the render half is in `host-core/tests/vca.rs`.
+- **Tests and test value** (each mutation applied in place, run red, reverted; runner in scratch):
+  - `session/tests/vca_composition.rs::vca_effective_db_sums_in_f64_in_order_and_clamps_once`
+    (gate 1): red if the sum accumulates in `f32`, runs in another order, clamps a member with no
+    VCA, or does not clamp. Mutations: `f32` accumulation -> RED; offsets reversed before the member
+    -> RED (crafted case); no early return -> RED; no clamp -> RED.
+  - `...::vca_reach_counts_a_diamond_once_and_includes_nested_parents_in_id_order` (gate 1): red if
+    a diamond's top VCA counts twice, a nested parent is missed, reach stays in declaration order,
+    or a submix is unreached. Mutations: visited check disabled -> RED; sort by index -> RED;
+    direct parents only -> RED.
+  - `...::vca_reach_terminates_on_a_cyclic_model` (gate 1): red if the walk has no visited set.
+    Mutation: visited check disabled -> RED (hangs; killed at 120 s).
+  - `builtins-compiler` `tests::a_vca_member_fader_outside_its_domain_refuses_at_its_own_path`
+    (gate 7): red if the preflight checks the clamped effective value. Mutation: preflight passes
+    the effective fader -> RED (accepted).
+  - `graph-compiler/tests/vca_follow.rs::a_vca_muted_member_seals_its_follow_zeroed_rows` (gate 3,
+    text; left-only and both lanes, a nested VCA reaching submix `grp`): red if route lowering reads
+    the member's own mute or reads the VCA mute for tracks only. Mutations: own mute -> RED; tracks
+    only -> RED.
+  - `host-core/tests/vca.rs::a_vca_forest_renders_the_bits_of_its_effective_faders` (gate 2; 32
+    seeds, 48 kHz, up to 8 VCAs four deep, up to 16 members, tracks and submixes, both lanes, the
+    whole domain; each strip probed alone through its own output route; the test's own top-down
+    reach and `f64` reference; asserts the seeds reach multi-VCA strips, clamped sums and submix
+    members): red if an offset reaches the wrong strip or lane, misses a submix or nested member, or
+    the builtins compiler bakes another value. Mutations: lowering bakes the own fader -> RED;
+    submixes unreached -> RED; lanes swapped -> RED.
+  - `...::a_post_fader_send_follows_the_vca_and_a_vca_mute_silences_a_follow_send` (gate 3, render;
+    8 seeds): red if the VCA lands after the sends or the follow map reads the own mute. Mutations:
+    lowering bakes the own fader -> RED; follow map own mute -> RED. Both-lanes case: route
+    activity built and `snare-verb` mix count 0; dropping the VCA leaks (asserted unequal).
+  - `...::a_vca_mutes_a_submix_member` (gate 4): red if VCA mute reaches tracks only. Mutation:
+    effective mute ignores the VCA for submixes -> RED.
+  - `host-core` `solo::tests::a_vca_mute_composes_under_every_solo_precedence_rule` (gate 5, all
+    128 combinations): red if solo clears a VCA mute, solo-safe exempts it, a VCA mute counts toward
+    `any_solo`, or `emitted` is seeded without it. Mutations: each of the four -> RED.
+  - `host-web` `tests::a_vca_muted_member_stays_muted_through_solo_and_an_explicit_unmute` (gate 5,
+    browser; smoothing 0): red if solo clears a VCA mute, solo-safe exempts `room`, kind 4 stages the
+    own intent, host-web seeds no VCA mute, or `emitted` is seeded without it. Mutations: each of the
+    five -> RED.
+  - `host-web` `tests::a_live_send_edit_keeps_a_vca_muted_column_zeroed` (gate 6; VCA mutes the left
+    lane): red if the live-send mirror is seeded from the own mute or host-web seeds no VCA mute.
+    Mutations: `LiveRouteState::try_new` reads `user_mute` -> RED; `vca_mute: [false; 2]` -> RED.
+  - No test was superseded; no digest or byte pin was added or moved.
+- **Gates** (on this commit's tree; the last two lint fixes are test-only and were re-run with
+  clippy, the touched tests and `check-cross-targets.sh`):
+  - Gates 1-7: the tests above, green.
+  - Gate 8: `cargo build --locked --release -p audit -p bench -p capi -p session-validator`,
+    `./target/release/audit capi`, `check-graph-determinism.sh` PASS 100/100 with
+    `target/issue6/fresh-process-determinism.json` byte-identical to the base's (`cmp`),
+    `graph_fixture -- --check`, `check-builtins-fixtures.sh`, `check-console-fixtures.sh`,
+    `cargo test --locked --release -p audit -p bench -p console-workload`: all exit 0, no re-pin.
+  - Gate 9: not applicable (#1053 has not landed).
+  - Gate 10: `npm ci`; fresh `build-web-audioworklet.sh --named-twin B A`;
+    `check-web-audioworklet.sh A B/...named.wasm`; `check-browser-expected-resources.py
+    --artifacts A` (no re-pin); `check-sdk-headless.sh A` (357 pass, 0 fail); the workspace
+    `cargo test` command (exit 0); `cargo fmt --all -- --check`; `cargo clippy --locked --workspace
+    --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc`; the session,
+    builtins, graph, host-core, realtime and workspace policy checks and self-tests;
+    `check-cross-targets.sh` PASS (no new `memset_pattern16` row). `run-aarch64-tests.sh debug`: at
+    batch push (CI's `aarch64-debug`; this host is x86-64).
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)

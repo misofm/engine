@@ -12978,3 +12978,181 @@ fn a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp() {
         "a later no-op lane record set the follow ramp a `Both` record owns"
     );
 }
+
+// Issue #1242: a VCA applies at preparation, and the browser's mute state starts from it. VCA `fx`
+// (-3 dB) holds `drums` and the solo-safe bus `room` of #1224's follow session; each track is fed
+// its own two-lane signal and every bus is a unity submix, so a comparison at the output is exact.
+// Strip order: `bass` 0, `drums` 1, `vocal` 2, `room` 3, `verb` 4; live sends in route-ID order:
+// `bass-room` 0, `drums-verb` 1.
+
+/// #1224's follow session with the own lane mutes `muted`, `drums-verb` at `send_gain_db`, and VCA
+/// `fx` at -3 dB with lane mutes `vca_mutes` over `drums` and `room`.
+fn vca_follow_host(
+    muted: &[(&str, [bool; 2])],
+    vca_mutes: [bool; 2],
+    send_gain_db: f32,
+) -> AudioWorkletEngineHost {
+    let document = follow_document(
+        &SOLO_FOLLOW_TRACKS,
+        &["verb", "room"],
+        &SOLO_FOLLOW_ROUTES,
+        muted,
+        None,
+    );
+    let mut model = parse_session_json(&document).expect("#1224 session parses");
+    model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "drums-verb")
+        .expect("drums-verb")
+        .gain_db = send_gain_db;
+    model.vcas = vec![session::Vca {
+        id: strip_id("fx"),
+        fader: session::DualMonoFader {
+            left_db: -3.0,
+            right_db: -3.0,
+            left_mute: vca_mutes[0],
+            right_mute: vca_mutes[1],
+        },
+        members: vec![strip_id("drums"), strip_id("room")],
+    }];
+    strip_boot(
+        &canonical_session_json(&model).expect("#1242 session canonicalizes"),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1242 gate 5, in the browser. With VCA `fx` muted, soloing its member `drums` beside
+/// `vocal` leaves `drums`, its following send and the solo-safe member `room` muted,
+/// bit-identically to a host booted with `bass` muted instead; un-soloing both, then explicitly
+/// un-muting `drums` (kind 4, `false`), leaves it muted, bit-identically to a host that received
+/// none of those commands.
+/// Every command has smoothing 0 (a kind 4 always stages a record, and a non-zero ramp on a
+/// settled lane can turn `+0.0` into `-0.0`, which is not this gate's claim).
+///
+/// Test value: red if solo clears a VCA mute (the soloed member is heard), if solo-safe exempts
+/// a submix from it (`room` opens), if an explicit un-mute stages the member's own intent rather
+/// than the composed mute, if host-web seeds the solo state without the VCA mute, or if `emitted`
+/// is seeded without it (the solo stages a redundant record for `drums`).
+#[test]
+fn a_vca_muted_member_stays_muted_through_solo_and_an_explicit_unmute() {
+    let mut live = vca_follow_host(&[], [true; 2], 0.0);
+    let mut soloed = vca_follow_host(&[("bass", [true; 2])], [true; 2], 0.0);
+    let mut untouched = vca_follow_host(&[], [true; 2], 0.0);
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "seeded mirror"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut soloed, &mut untouched],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "warm-up",
+    );
+    let room = follow_fader_room(&live);
+    stage_solo(&mut live, 0, SOLO_FOLLOW_DRUMS, true, 0);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, true, 0);
+    assert_eq!(live.submit_commands(2), RESULT_OK, "solo drums and vocal");
+    assert_eq!(follow_lanes(&live), [[true; 2], [true; 2]], "solo follow");
+    let mut owed = room.clone();
+    owed[0] -= 1;
+    assert_eq!(
+        follow_fader_room(&live),
+        owed,
+        "the solo stages one record, on `bass`, and none for the VCA-muted `drums` or `room`"
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut soloed],
+            &SOLO_FOLLOW_TRACKS,
+            1,
+            2,
+            true,
+            "soloed member vs booted muted rest"
+        ),
+        "the soloed vocal is audible"
+    );
+    stage_solo(&mut live, 0, SOLO_FOLLOW_DRUMS, false, 0);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, false, 0);
+    assert_eq!(
+        live.submit_commands(2),
+        RESULT_OK,
+        "un-solo drums and vocal"
+    );
+    stage_lane_mute(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, false, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-mute drums");
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "restored mirror"
+    );
+    for block in 1..3 {
+        follow_render(&mut untouched, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut untouched],
+            &SOLO_FOLLOW_TRACKS,
+            3,
+            3,
+            true,
+            "after un-solo and un-mute vs untouched"
+        ),
+        "bass and vocal are audible"
+    );
+}
+
+/// Issue #1242 gate 6. VCA `fx` mutes `drums`' left lane, so `drums-verb` (a pre-fader
+/// `follows_mute` send) is prepared with its left column zeroed. A kind 13 (`routeGainDb`) edit
+/// on that send, with smoothing 0 at a block boundary, renders bit-identically to a host booted
+/// from the session with the edited gain: the live mirror started at the prepared gate, so the
+/// zeroed column stays zeroed.
+///
+/// Test value: red if host-web seeds the VCA mute after the live-send mirror, or seeds the
+/// mirror from the member's own mute, so the first live send edit reopens a VCA-muted column.
+#[test]
+fn a_live_send_edit_keeps_a_vca_muted_column_zeroed() {
+    const GAIN_DB: f32 = -4.5;
+    let mut live = vca_follow_host(&[], [true, false], 0.0);
+    let mut fresh = vca_follow_host(&[], [true, false], GAIN_DB);
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true, false]],
+        "seeded mirror"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut fresh],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "before the edit",
+    );
+    stage_send(
+        &mut live,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        1,
+        0,
+        [GAIN_DB, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        live.submit_commands(1),
+        RESULT_OK,
+        "routeGainDb on drums-verb"
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut fresh],
+            &SOLO_FOLLOW_TRACKS,
+            1,
+            3,
+            true,
+            "edited live send vs fresh plan"
+        ),
+        "the mix is audible"
+    );
+}

@@ -831,8 +831,8 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// and `smoothing_samples` the engage/disengage fade -- the same declick window a mute takes.
 ///
 /// It moves no state of its own on the render thread. Admission composes
-/// `effective_mute = user_mute || (any_solo && !solo_safe && !my_solo)` over the live controls'
-/// [`host_core::LiveControlSoloState`] and emits the *existing*
+/// `effective_mute = user_mute || vca_mute || (any_solo && !solo_safe && !my_solo)` over the live
+/// controls' [`host_core::LiveControlSoloState`] and emits the *existing*
 /// `TrackFaderRecord::Mute` records into the *existing* per-strip fader queues, so this kind is
 /// on the `render` plane (it moves what the render thread reads) while adding nothing below
 /// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
@@ -6284,7 +6284,9 @@ fn compile_ready(
     // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
     // because that order is the addressing authority for every queue, meter and command index.
     // One seed per strip (issue #1213 D3): the tracks, soloable, then the submixes, solo-safe, each
-    // seeded from its own session fader mutes.
+    // seeded from its own session fader mutes. Issue #1242 D3: each also carries its VCA mute
+    // from the same composition the compilers baked (`effective_strip_faders`, in strip order),
+    // before the solo state and the live-send mirror are built from it.
     let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
     prepared_mutes
         .try_reserve_exact(strip_count)
@@ -6293,6 +6295,7 @@ fn compile_ready(
     if model.tracks.len() != track_count || model.submixes.len() != submixes.len() {
         return Err(fixed_diagnostic("web.live_controls.effects").into());
     }
+    let effective_faders = model.effective_strip_faders();
     let count = |effects: usize| -> Result<u32, Vec<u8>> {
         u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
     };
@@ -6309,6 +6312,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [track.fader.left_mute, track.fader.right_mute],
             solo_safe: false,
+            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
         });
     }
     for submix in &model.submixes {
@@ -6320,6 +6324,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [submix.fader.left_mute, submix.fader.right_mute],
             solo_safe: true,
+            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
         });
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
@@ -6404,7 +6409,8 @@ fn compile_ready(
     let solo = LiveControlSoloState::try_new(&prepared_mutes)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     // A following send's source lanes start at its source strip's effective mute; solo is never
-    // persisted, so at preparation that is the session fader mute the compiler folded in.
+    // persisted, so at preparation that is the session fader mute or VCA mute the compilers
+    // folded in (issue #1242 D3).
     let routes = if route_controls.is_empty() {
         LiveRouteState::empty()
     } else {

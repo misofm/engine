@@ -146,7 +146,7 @@ on the control plane and never from audio), the per-sample D11 linear declick wi
 semantics, and it is what makes snapshot and restore correct by construction: muting a soloed strip
 silences it, and clearing solo restores exactly the mutes the user had — *per lane*, because a
 lane's mute is a lane's mute and one record carries one bool. The host keeps a mirror of user-mute
-intent, initialized at preparation from the session's baked `fader.left_mute` / `fader.right_mute`,
+intent, initialized at preparation from the session's own `fader.left_mute` / `fader.right_mute`,
 because once solo exists the render side's flag holds the *effective* mute and there is no readback
 of it.
 
@@ -163,10 +163,33 @@ Two rules of the admission path are load-bearing rather than incidental:
   settled kernel, which fills the plane. For a negative input that is the difference between an
   exact `+0.0` and a `-0.0`, and it is digest visible.
 
+### VCA groups (issue #1242)
+
+A VCA mute composes into the same state, as a third term:
+
+```
+effective_mute(strip, lane) = user_mute || vca_mute || (any_solo && !solo_safe(strip) && !soloed(strip))
+```
+
+`vca_mute` is whether any VCA reaching the strip mutes the lane, from the composition preparation
+bakes (`session::SessionModel::effective_strip_faders`); the user mute stays the member's own
+intent, so the solo state is seeded with both and the emitted mirror with their OR, and seeding
+emits nothing. Precedence is fixed:
+
+- **Mute wins.** Solo never clears a user or VCA mute: a soloed member of a muted VCA stays muted,
+  and so do its following sends. An explicit unmute of a VCA-muted member records the intent but
+  stages the lane still muted.
+- **Solo-safe is not VCA-safe.** A submix is never solo-muted, but a VCA that reaches it mutes it.
+- **A VCA has no solo.** A VCA mute neither engages a solo nor counts toward `any_solo`.
+
+A VCA's offset is baked into each member's prepared fader gain; there is no live VCA move yet.
+
 ### Sends follow mute (issue #1224)
 
-A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, or
-solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own mute.
+A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, VCA
+mute, or solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own
+mute and its VCA mute. A plan prepared with a VCA-muted source zeroes the send's muted columns
+(#1242), and the live mirror starts from that same effective mute.
 Muting a track or a bus, or soloing another track, silences every such send from that strip through
 the same declicked ramp, in the same submission; unmuting or un-soloing reopens it. A soloed vocal
 therefore no longer carries a muted drum track's pre-fader reverb send.

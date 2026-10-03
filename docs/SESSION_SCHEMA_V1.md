@@ -74,8 +74,15 @@ several VCAs. Membership is acyclic: a VCA on a membership cycle among VCAs, a s
 is refused with `vca.cycle` at `$.vcas[<i>]`, once per VCA on the cycle in ascending declared index,
 while a diamond (one VCA reachable along two paths) is legal. Canonically `vcas` sorts by ID and each
 `members` list sorts by ID. The canonical session stores each VCA's own offset and each member's
-own fader, never an effective value. VCAs parse, validate and round-trip, and are inert at
-preparation until *Apply VCA offsets and mutes at preparation* (#1242) applies them. On the wire
+own fader, never an effective value. VCAs apply at preparation on every host (#1242): a strip's
+reach is the set of VCAs it is reachable from through membership, directly or through nested
+VCAs, each once even along several paths; its effective lane gain is
+`clamp(own_db + sum(offsets), -144, 24)`, summed in `f64` (its own value first, then the reaching
+VCAs' offsets in ascending VCA ID), clamped in `f64` and rounded once to `f32`, and exactly its own
+value with an empty reach; its effective lane mute is its own mute or any reaching VCA's mute. The
+prepared fader section bakes the effective values, so post-fader and post-pan sends follow a VCA,
+and a `follows_mute` route reads its source's effective mute. A member's own fader is still checked
+against its domain, unclamped (`builtin.gain.domain` at its own `fader.<lane>_db`). On the wire
 the VCA message carries `id` 1, `fader` 2 and the repeated `members` 3.
 
 The root field registry is `schema_version` 1, `session_id` 2, `revision` 3, `sample_rate_hz` 4,
