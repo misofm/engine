@@ -8,9 +8,10 @@
 //! from a transcription, so the two arms cannot drift apart.
 //!
 //! The documents are the native rows `sixty_four_track_console`, `sixty_four_track_app_shape` and
-//! `sixty_four_track_console_sends`: their fixture, track count, strip content and layout as the native rows state them, and the
-//! bypass census of the session the native row compiles. The browser arm boots each fixture as
-//! written, checks it carries that layout and that bypass, and times its render.
+//! `sixty_four_track_console_sends`: their fixture, track count, strip content and layout as the
+//! native rows state them, and the bypass census of the session the native row compiles. The
+//! browser arm boots each fixture as written, checks it carries that layout and that bypass, and
+//! times its render.
 //!
 //! `cargo run --locked --release -p console-workload --example mixing_automation_controls`
 

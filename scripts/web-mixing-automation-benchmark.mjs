@@ -32,9 +32,10 @@
 // way every document boots, through host-core with live controls, so every route into a submix of
 // the sends document is a live route; each is checked to carry the layout and the bypass the table
 // states, fed the same streamed tone, and rendered with no control traffic. After the three arms
-// are timed, the three documents are timed alternated per observation, `miso_engine_web_v1_render` alone inside the clock, and
-// the record states each one's percentiles and digest under `documents`. They are the console
-// strip's browser baseline; no per-N browser rows exist, because that would be a second framework.
+// are timed, the three documents are timed alternated per observation,
+// `miso_engine_web_v1_render` alone inside the clock, and the record states each one's
+// percentiles and digest under `documents`. They are the console strip's browser baseline; no
+// per-N browser rows exist, because that would be a second framework.
 //
 // usage: node --no-liftoff web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json
 //        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json ROUND
@@ -450,9 +451,18 @@ function armName(arm, effect) {
 }
 
 // One console-strip document (#1085): booted as written, the tone fed, the pre-roll rendered, and
-// no control traffic, ever.
+// no control traffic, ever. The engine must report one live route per route into a submix, and the
+// sends document must have some (#1228): live and static routes render the same bits, so no digest
+// would show a document booted without live controls, the native row's static path.
+const SENDS_KIND = "sixty_four_track_console_sends";
 function makeDocument({ doc, loaded }) {
   const engine = boot(loaded);
+  const submixRoutes = loaded.fixture.routes
+    .filter((route) => route.destination.kind === "submix_input").length;
+  assert.ok(doc.workload_kind !== SENDS_KIND || submixRoutes > 0,
+    `${doc.workload_kind}: routes into a submix`);
+  assert.equal(engine.e.miso_engine_web_v1_live_control_route_count(engine.handle), submixRoutes,
+    `${doc.workload_kind}: one live route per route into a submix`);
   const state = { doc, engine, audible: false };
   for (let i = 0; i < LEAD_BLOCKS; i++) feed(engine);
   for (let i = 0; i < PREROLL; i++) {

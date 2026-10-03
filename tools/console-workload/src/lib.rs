@@ -3127,9 +3127,11 @@ mod tests {
     /// own kind and fixture, renders that fixture as written, and is emitted after the metered
     /// row and before the console-strip rows.
     ///
-    /// Red mutations: drop the row's `fixture_id` arm (it would name the intended fixture), leave
-    /// it out of `synthetic`'s list, or chain [`BUS_SEND_WORKLOADS`] after
-    /// [`CONSOLE_STRIP_WORKLOADS`] -- each fails here.
+    /// Its unique catch is the parity the row's record cannot show: a non-removal strip edit
+    /// attached to the row (a `HalfMono`-style edit, which still compiles, renders and passes the
+    /// record validator, because `strip_content` is a separate wildcard) or a warmup (not a record
+    /// key). Dropping the row's `fixture_id` arm, leaving it out of `synthetic`'s list or chaining
+    /// [`BUS_SEND_WORKLOADS`] after [`CONSOLE_STRIP_WORKLOADS`] also fail here, and elsewhere.
     #[test]
     fn the_bus_send_row_states_its_facts_and_is_emitted_before_the_strip_rows() {
         let console = Workload::SixtyFourTrackConsole;
@@ -3173,8 +3175,11 @@ mod tests {
     /// is printed for the baseline's report, not asserted (#1227 D6 says why).
     ///
     /// Red mutations: drop the row's `console_model` arm (it renders the intended fixture: 64
-    /// transforms, one reduction), mute one send or strip in the fixture (a `route-mute` or
-    /// `route-follow-zeroed` row), or give a submix's insert latency (a nonzero compensation).
+    /// transforms, one reduction), mute one send or a track strip in the fixture (a `route-mute`
+    /// or `route-follow-zeroed` row), or give a submix's insert latency (a nonzero compensation).
+    /// A muted submix strip is not a route mute and its returns do not follow mutes, so it leaves
+    /// this test green; `scripts/check-console-fixtures.sh`'s witness that every submix fader is
+    /// unmuted holds it.
     #[test]
     fn the_bus_send_rows_plan_carries_every_route_unmuted_and_uncompensated() {
         let workload = Workload::SixtyFourTrackConsoleSends;
@@ -3224,9 +3229,10 @@ mod tests {
         // contributions to a reduction arrive at the same sample.
         let timings = rows("route-timing");
         assert_eq!(timings.len(), routes);
-        let delayed_route_edges = timings.iter().filter(|fields| fields[3] != "0").count();
-        assert_eq!(delayed_route_edges, 0, "{timings:?}");
-        // No route and no strip is muted, so no gate is sealed and every send is active.
+        let delayed: Vec<&Vec<&str>> = timings.iter().filter(|fields| fields[3] != "0").collect();
+        let delayed_route_edges = delayed.len();
+        assert_eq!(delayed_route_edges, 0, "compensated routes: {delayed:?}");
+        // No route and no track strip is muted, so no gate is sealed and every send is active.
         assert!(rows("route-mute").is_empty());
         assert!(rows("route-follow-zeroed").is_empty());
 

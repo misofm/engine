@@ -157,14 +157,27 @@
 //! `bank_collapse_counters`, because a collapse renders the bits a dual bank renders and nothing
 //! else can say whether it held.
 //!
+//! # The bus-and-send row (issue #1227)
+//!
+//! `sixty_four_track_console_sends` is the standing sixty-four-track console's tracks routed
+//! through eight processed buses and two effect returns, each track also sending pre- and
+//! post-fader, from its committed fixture
+//! (`fixtures/session/v1/console-sixty-four-track-sends.json`, derived by
+//! `scripts/derive-sends-console-fixture.py`). It is emitted after the metered row and is timed
+//! like every other session row, at [`PlanConfig::BASELINE`] with its sources bound: the
+//! plan the C ABI prepares for fan playback, with no live controls, so every route is static. It
+//! states no floor (`floor::floor_row` says why). Its digest is asserted in-run to differ from
+//! `sixty_four_track_console`'s (`SENDS_PAIR`), because a sends row that rendered the standing
+//! console's bits would not have compiled its own fixture.
+//!
 //! # The console-strip rows (issue #1085)
 //!
-//! Five session rows, emitted after the metered row, freeze the shapes the console strip
-//! (decision 12) changes before any of its slices lands, so the same rows can be timed on today's
-//! engine and on the console model: the standing strip at ten, thirteen and sixteen tracks (with
-//! the nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}); the app shape,
-//! whose every track carries EQ -> compressor with a third of them bypassed (B0 wrote it into
-//! `dynamic`; since #1093 it is the session's two `pre_insert` slots, with the same bits); and
+//! Five session rows, emitted after the bus-and-send row (#1227), freeze the shapes the console
+//! strip (decision 12) changes before any of its slices lands, so the same rows can be timed on
+//! today's engine and on the console model: the standing strip at ten, thirteen and sixteen tracks
+//! (with the nine- and sixty-four-track rows, the strip at N in {9, 10, 13, 16, 64}); the app
+//! shape, whose every track carries EQ -> compressor with a third of them bypassed (B0 wrote it
+//! into `dynamic`; since #1093 it is the session's two `pre_insert` slots, with the same bits); and
 //! sparse activity, the standing console with every odd track fed silence. They are timed exactly
 //! like every other session row. The app shape's record adds the bypass pattern it observed in its
 //! compiled session, and the sparse row's digest is asserted in-run to differ from both the
@@ -270,9 +283,10 @@ pub(crate) fn main() {
     // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
     // its order is unchanged.
     let clock = CoreClock::from_runner(metadata);
-    // The standing rows, then the driver-fed rows (issue #928) and the metered row (issue #881),
-    // which `WORKLOADS` does not carry because the wasm arm addresses it by index. One list, so the
-    // floor subtraction below finds a control wherever it sits.
+    // Every `native_session_rows()` row: the standing rows, then the driver-fed rows (issue #928),
+    // the metered row (issue #881), the bus-and-send row (issue #1227) and the console-strip rows
+    // (issue #1085). `WORKLOADS` carries only the standing rows, because the wasm arm addresses
+    // them by index. One list, so the floor subtraction below finds a control wherever it sits.
     let rows: Vec<Workload> = native_session_rows().collect();
     let sessions: Vec<SessionMeasurement> =
         rows.iter().copied().map(SessionMeasurement::run).collect();
