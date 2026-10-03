@@ -49,7 +49,8 @@ them.
   `--no-liftoff`, `cpu_affinity` 31, `module_sha256` `30d075d3…aeff4`, `module_matches_pin` false
   (this commit's build, not the release pin).
 - **Pre-run waits** (untimed, launching nothing, until the 1-minute loadavg < 0.45, cap 900 s):
-  - native: the wait hit its **900 s cap** (901 s; another project's process held a core);
+  - native: the wait hit its **900 s cap** (901 s; the cause of the load was not captured: the
+    one recorded fact is loadavg `1.13` at the cap);
     `/proc/loadavg` before the run `1.13 1.40 2.17` (19:04:13Z), after `1.74 1.58 2.17` (19:05:38Z);
   - V8: 501 s; before `0.44 1.01 1.66` (19:14:09Z), after `0.76 1.06 1.67` (19:14:20Z).
 - **Admissibility as the records state it:**
@@ -110,9 +111,11 @@ bus_send_plan_facts route_transforms=202 reduction_nodes=11 bank_route_folds=0 r
   `64 x bound, 16 x bank, 64 x route, 8 x bank, 1 x other, 64 x route, 1 x bank, 1 x other,
   64 x route, 8 x other, 2 x bank, 2 x other, 2 x bank, 10 x route, 1 x output`.
 - **Denominator:** the **profiled block time** is `net_total` = **165067.4 ns** (the profile's
-  `total` line: the sum of every graph phase's net time). Every share below and in the profile is
-  of it. (The profile's own probes-off p50, 165097 ns, is the untimed instrument's figure and is
-  never compared with the timed records.)
+  `total` line: the median over the three repeats of each repeat's sum of graph-phase net
+  times, so the printed per-line medians add to 165066.3 ns, not 165067.4 ns; no share moves at
+  two decimals). Every share below and in the profile is of it. (The profile's own probes-off
+  p50, 165097 ns, is the untimed instrument's figure and is never compared with the timed
+  records.)
 
 | share | lines read (profile, net ns) | net ns | of 165067.4 ns |
 |---|---|---|---|

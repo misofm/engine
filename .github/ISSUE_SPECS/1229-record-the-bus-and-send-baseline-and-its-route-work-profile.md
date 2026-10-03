@@ -347,6 +347,27 @@ measurement on a real host path).
   command redirected only stdout. The facts test ran in the batch worktree before timing (the same
   library code as the D1 commit), not inside the D1 worktree.
 
+### Verdict follow-up record (after the attempt 1 PASS verdict)
+
+No number changed, and nothing was timed or re-run.
+
+- **NIT-1.** `REPORT.md`'s denominator now says what `net_total` is: the median over the three
+  repeats of each repeat's sum of graph-phase net times, so the printed per-line medians add to
+  165066.3 ns, not 165067.4 ns. Every share is of the one figure and none moves.
+- **NIT-2.** `REPORT.md` no longer names a cause for the native wait hitting its cap: the cause was
+  not captured, and the one recorded fact is loadavg `1.13` at the 900 s cap.
+- **NIT-3.** The `flock` on both timed runs and the profile, and the profile's `taskset -c 31`, are
+  attested by the report plus indirect record evidence only (the waiver string, `cpu_affinity` 31,
+  the profile binary's single access), because the wait wrapper did not log its own command.
+- **NIT-4.** The probe correction leaves one probe per block uncorrected (the finish probe, about
+  33 ns, about 0.02 % of the profiled block time), which moves no share.
+
+## Verdict
+
+- **Attempt 1** (`d1d738e55` + `8808ff5a2`, records on `244a52a0c`): Sol PASS. No BLOCKER, MAJOR
+  or MINOR; four NITs, recorded above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1229-attempt1.md`.
+
 ## Dependencies
 
 - *Add the bus-and-send session to the browser mixing benchmark* (#1228, BM2), which itself follows *Add a
