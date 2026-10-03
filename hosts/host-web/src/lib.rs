@@ -6061,6 +6061,7 @@ fn prepare_caps(
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,
+        maximum_vcas: u64::MAX,
         maximum_sources: u64::MAX,
         maximum_routes: u64::MAX,
         maximum_effects: u64::MAX,

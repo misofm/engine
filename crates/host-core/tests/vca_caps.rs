@@ -1,26 +1,26 @@
-//! Issue #1206 D1: host preparation counts submix strips, reports the count, and refuses a session
-//! over the host's configured `maximum_submixes` with the shared count refusal.
+//! Issue #1243 D1: host preparation counts VCA groups, reports the count, and refuses a session
+//! over the host's configured `maximum_vcas` with the shared count refusal.
 //!
-//! The bound is the host's own resource, never `maximum_tracks`: every case below holds the track
-//! cap at the session's exact track count, so a submix counted against tracks would refuse the
-//! at-the-cap session too.
+//! The bound is the host's own resource, never `maximum_tracks` or `maximum_submixes`: every case
+//! below holds the track cap at the session's exact track count and the submix cap at zero, so a
+//! VCA counted against either would refuse the at-the-cap session too.
 
 use host_core::{HostPrepareCaps, HostShapePolicy, PrepareRejection, prepare_host_session};
-use session::{StableId, Submix, canonical_session_json, parse_session_json};
+use session::{DualMonoFader, StableId, Vca, canonical_session_json, parse_session_json};
 
 /// Three tracks, each routed to the main output.
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
 const TRACKS: u64 = 3;
 
-fn caps(maximum_submixes: u64) -> HostPrepareCaps {
+fn caps(maximum_vcas: u64) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::AnyLaunchRate,
         source_ring_frames: 1_024,
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: TRACKS,
-        maximum_submixes,
-        maximum_vcas: 100,
+        maximum_submixes: 0,
+        maximum_vcas,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -37,46 +37,56 @@ fn caps(maximum_submixes: u64) -> HostPrepareCaps {
     }
 }
 
-/// The fixture's three tracks plus `submixes` transparent, unrouted submix strips.
-fn session(submixes: usize) -> String {
+/// The fixture's three tracks plus `vcas` empty, unity VCA groups.
+fn session(vcas: usize) -> String {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
     assert_eq!(model.tracks.len() as u64, TRACKS);
-    for index in 0..submixes {
-        let id = StableId::parse(&format!("bus{index}")).expect("stable id");
-        model.submixes.push(Submix::unity(id, &model.console));
+    assert!(model.submixes.is_empty());
+    for index in 0..vcas {
+        model.vcas.push(Vca {
+            id: StableId::parse(&format!("vca{index}")).expect("stable id"),
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: Vec::new(),
+        });
     }
     canonical_session_json(&model).expect("canonical session")
 }
 
-/// Test value: turns red if submixes go uncounted (bounded only by byte budgets), are counted
-/// against `maximum_tracks` (the track cap here equals the track count, so any submix would
-/// refuse), or are missing from the report.
+/// Test value: turns red if VCAs go uncounted (bounded only by byte budgets), are counted against
+/// `maximum_tracks` (the track cap here equals the track count, and the cap of four exceeds it) or
+/// `maximum_submixes` (zero here), or are missing from the report.
 #[test]
-fn submixes_are_counted_capped_and_reported_apart_from_tracks() {
+fn vcas_are_counted_capped_and_reported_apart_from_tracks_and_submixes() {
     for cap in [1_u64, 4] {
         let document = session(cap as usize);
         let (_, prepared) = prepare_host_session(&document, &caps(cap)).unwrap_or_else(|failure| {
             panic!(
-                "{cap} submixes at the cap: {}",
+                "{cap} VCAs at the cap: {}",
                 String::from_utf8_lossy(failure.as_bytes())
             )
         });
-        assert_eq!(prepared.report.submix_count, cap);
+        assert_eq!(prepared.report.vca_count, cap);
         assert_eq!(prepared.report.track_count, TRACKS);
+        assert_eq!(prepared.report.submix_count, 0);
 
         let over = session(cap as usize + 1);
         let failure = prepare_host_session(&over, &caps(cap))
             .map(|_| ())
-            .expect_err("one submix over the cap");
+            .expect_err("one VCA over the cap");
         assert_eq!(failure.kind(), PrepareRejection::Resource);
         assert_eq!(failure.as_bytes(), b"host.resource.count\t$\n");
     }
 
-    // A zero cap is a real bound in host-core (the C ABI's zero rule lives in capi): no submix.
+    // A zero cap is a real bound in host-core (the C ABI's zero rule lives in capi): no VCA.
     let failure = prepare_host_session(&session(1), &caps(0))
         .map(|_| ())
-        .expect_err("a submix over a zero cap");
+        .expect_err("a VCA over a zero cap");
     assert_eq!(failure.as_bytes(), b"host.resource.count\t$\n");
-    let (_, prepared) = prepare_host_session(&session(0), &caps(0)).expect("no submix, zero cap");
-    assert_eq!(prepared.report.submix_count, 0);
+    let (_, prepared) = prepare_host_session(&session(0), &caps(0)).expect("no VCA, zero cap");
+    assert_eq!(prepared.report.vca_count, 0);
 }

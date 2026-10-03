@@ -94,6 +94,7 @@ fn caps() -> HostPrepareCaps {
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
         maximum_submixes: 100,
+        maximum_vcas: 100,
         maximum_sources: 100,
         maximum_routes: 400,
         maximum_effects: 400,

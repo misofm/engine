@@ -174,6 +174,60 @@ The bound is a configured resource, never a compiled maximum (`AGENTS.md`; DESIG
 - The list of updated `HostPrepareCaps` and `CompileLimits` literals.
 - Confirmation that no digest or oracle moved.
 
+### Attempt 1 record (Terra)
+
+- **D1** (`prepare.rs`): `HostPrepareCaps.maximum_vcas`, checked in the existing count `if` beside
+  `maximum_submixes` (same `host.resource.count`); `HostPrepareReport.vca_count` from
+  `model.vcas.len()`. **D2**: header and `CompileLimits` replace `reserved[3]` with
+  `maximum_vcas; reserved[2]` (header comment states the zero rule); `limits_are_valid` requires
+  `reserved == [0; 2]` and ignores the word; `prepare_caps` maps zero to `maximum_tracks`;
+  `all_limits_nonzero` unchanged; offset pins `maximum_submixes == 176`, `maximum_vcas == 184`,
+  `reserved == 192` in `abi.rs` and `abi_smoke.c` (size 208 pinned already). **D3**: host-web
+  `u64::MAX`. `check-capi-abi.sh` needed no edit (its self-test mutates the engine config's
+  `reserved[4]`). Qualification doc: the #1206 paragraph now names `maximum_vcas` at 184 and two
+  reserved words at 192..207; a new paragraph states the word, its zero rule and the unchanged size.
+- **Literals.** `HostPrepareCaps`: 25 = the 24 listed plus `host-core/tests/vca.rs` (#1242's file,
+  the anticipated addition). capi `prepare_caps` and `resource_lifecycle::host_caps` mirror the zero
+  rule; `submix_caps.rs` sets 100; every other literal copies its `maximum_submixes` value (100,
+  256 in `limiter_linked_session.rs`, `u64::MAX` in `response.rs` and host-web). `CompileLimits`
+  (`maximum_vcas: 0, reserved: [0; 2]`): `ffi.rs` test `limits()`, `runtime/tests.rs`,
+  `resource_lifecycle.rs` `limits()` and `submix_limits`, `tools/audit/src/capi.rs`.
+- **Deliverable 5.** The submix test's reserved loop is `0..2`; its comment says "the two remaining
+  reserved words". The VCA test repeats the reserved-word leg as gate 2 requires, with the named
+  word nonzero (only the renamed word is freed); its catch overlaps the submix loop by design.
+- **Tests and test value** (mutation each, reverted after; logs `/tmp/claude-1002/kv-1243/`):
+  - `host-core/tests/vca_caps.rs::vcas_are_counted_capped_and_reported_apart_from_tracks_and_submixes`
+    (3 tracks with `maximum_tracks = 3`, `maximum_submixes = 0`; caps 1 and 4 prepare at the cap,
+    report `vca_count`, and refuse one over with `host.resource.count\t$\n`; cap 0 refuses one VCA):
+    red if VCAs go uncounted, are counted against `maximum_tracks` or `maximum_submixes`, or are
+    missing from the report. Mutations: drop the VCA clause -> red; compare against
+    `maximum_tracks` -> red; against `maximum_submixes` -> red; `vca_count: 0` -> red.
+  - `capi/tests/resource_lifecycle.rs::maximum_vcas_bounds_vcas_and_zero_defers_to_maximum_tracks`
+    (2 tracks, 3 empty unity VCAs through `miso_engine_v1_compile_session`; word 0 refuses at 2
+    tracks, prepares at 3; word 3 prepares at 2 tracks; word 2 refuses at 2 and at 3 tracks;
+    `reserved[0]`/`[1]` nonzero -> `RESULT_INVALID_ARGUMENT`): red if the C bound ignores the
+    word, treats zero as "no VCAs" or "unbounded", reads `maximum_submixes`, or stops refusing a
+    remaining reserved word. Mutations: map to `maximum_tracks` -> red; zero -> 0 -> red; zero ->
+    `u64::MAX` -> red; map from `maximum_submixes` -> red; drop the reserved check -> red; check
+    only `reserved[0]` -> red.
+  - Layout pins. Mutations: header with `maximum_vcas` and `reserved` swapped ->
+    `check-capi-abi.sh` red (`abi_smoke.c` static assert at 184); Rust mirror swapped ->
+    `frozen_sizes_alignments_and_representative_offsets_match` red (`left: 200`).
+- **Gates** (x86-64 AVX2 host, tree = this commit):
+  - 1, 2: green (above).
+  - 3: `check-capi-abi.sh` ok (shared and static); `--self-test` ok (#1232: its header legs are not
+    relied on; the swap mutation above is the layout evidence).
+  - 4: release build of audit/bench/capi/session-validator ok; `audit capi`: allocations 0, locks 0,
+    syscalls 0, total violations 0, `pcm_digest` `ff6cdcb96cdcdad5` (the value #1206 recorded);
+    `cargo test --release -p audit -p bench -p console-workload` ok (110 passed);
+    `resource_lifecycle` passes with no oracle or budget edited.
+  - 5: workspace test command rc 0 (114 binaries, 1265 passed, 0 failed); `cargo fmt --check` ok;
+    clippy `--all-features -D warnings` clean; `cargo doc` `-D warnings` clean; host-core, realtime
+    and workspace `check-*`/`test-*` ok; `check-cross-targets.sh` PASS; web AudioWorklet
+    `--named-twin` build and `check-web-audioworklet.sh` ok.
+  - 6: `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
+- No test superseded; no digest or oracle moved.
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)

@@ -41,7 +41,8 @@ fn limits() -> CompileLimits {
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
         maximum_submixes: 0,
-        reserved: [0; 3],
+        maximum_vcas: 0,
+        reserved: [0; 2],
     }
 }
 
