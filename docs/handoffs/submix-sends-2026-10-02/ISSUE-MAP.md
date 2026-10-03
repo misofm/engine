@@ -3,14 +3,16 @@
 Filed on 2026-10-02 by *Record the submix, send and VCA ruling* (#1197), under decision 13
 (`docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`). The left column is the plan's slice
 label, which `DESIGN.md`, the `VERIFY`, `REVISION` and `APPLIED` documents in this folder, and the
-plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder is not committed
-except for the unfiled VCA drafts; each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
+plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder is not committed:
+the VCA drafts it held were removed when *VCA groups* (#1239) was filed (they stand at `8c6268967`);
+each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
 GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) were renamed in
 #1197's attempt 2 to the slug of their GitHub titles; their plan files keep the plan's names.
 A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes; the rows of
 #1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, the rows of
-#1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, and the rows of #1206-#1214 (closed by
-PR #1233) link it at `cfa086d4`, where each last stood.
+#1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, the rows of #1206-#1214 (closed by
+PR #1233) link it at `cfa086d4`, and the rows of #1215-#1224 (closed by PR #1238) link it at
+`6f1788f3`, where each last stood.
 
 The umbrella's app-facing documents -- `APP-SDK.md`, the session migration script and, later,
 `APP-LIVE.md` -- live in [`docs/handoffs/submix-strips-and-sends/`](../submix-strips-and-sends/),
@@ -38,16 +40,16 @@ the verdicts (`verdicts/`).
 | 15 | #1212 | Add the notSoloable command reason to every vocabulary spelling | [`1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1212-add-the-notsoloable-command-reason-to-every-vocabulary-spelling.md) (retired, closed) | `15-add-the-not-soloable-command-reason.md` |
 | 16 | #1213 | Address submix strips in browser live commands | [`1213-address-submix-strips-in-browser-live-commands.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1213-address-submix-strips-in-browser-live-commands.md) (retired, closed) | `16-address-submix-strips-in-browser-live-commands.md` |
 | 17 | #1214 | Drive submix strips from the SDK live controls | [`1214-drive-submix-strips-from-the-sdk-live-controls.md`](https://github.com/misofm/engine/blob/cfa086d4a8f86834212a21cf3a188cd02af8bd39/.github/ISSUE_SPECS/1214-drive-submix-strips-from-the-sdk-live-controls.md) (retired, closed) | `17-drive-submix-strips-from-the-sdk-live-controls.md` |
-| 18a | #1215 | Gate every route's coefficients through one function | `.github/ISSUE_SPECS/1215-gate-every-routes-coefficients-through-one-function.md` | `18a-gate-every-routes-coefficients-through-one-function.md` |
-| 18b | #1216 | Mute a route in the session | `.github/ISSUE_SPECS/1216-mute-a-route-in-the-session.md` | `18b-mute-a-route-in-the-session.md` |
-| 19 | #1217 | Skip an inactive route in its destination's sum | `.github/ISSUE_SPECS/1217-skip-an-inactive-route-in-its-destinations-sum.md` | `19-skip-an-inactive-route-in-its-destinations-sum.md` |
-| 20 | #1218 | Let a route into a submix follow its source strip's mute in the session | `.github/ISSUE_SPECS/1218-let-a-route-into-a-submix-follow-its-source-strips-mute-in-the-session.md` | `20-let-a-route-into-a-submix-follow-its-source-strips-mute-in-the-session.md` |
-| 21 | #1219 | Ramp a send's coefficients with the indexed ramp kernel | `.github/ISSUE_SPECS/1219-ramp-a-sends-coefficients-with-the-indexed-ramp-kernel.md` | `21-ramp-a-sends-coefficients-with-the-indexed-ramp-kernel.md` |
-| 22 | #1220 | Ramp live send coefficients on the render plane | `.github/ISSUE_SPECS/1220-ramp-live-send-coefficients-on-the-render-plane.md` | `22-ramp-live-send-coefficients-on-the-render-plane.md` |
-| 23 | #1221 | Produce live send records from host-core | `.github/ISSUE_SPECS/1221-produce-live-send-records-from-host-core.md` | `23-produce-live-send-records-from-host-core.md` |
-| 24 | #1222 | Admit live send commands in the browser | `.github/ISSUE_SPECS/1222-admit-live-send-commands-in-the-browser.md` | `24-admit-live-send-commands-in-the-browser.md` |
-| 25 | #1223 | Enumerate sends and drive them from the SDK | `.github/ISSUE_SPECS/1223-enumerate-sends-and-drive-them-from-the-sdk.md` | `25-enumerate-sends-and-drive-them-from-the-sdk.md` |
-| 26 | #1224 | Let a send follow its source strip's mute live in the browser | `.github/ISSUE_SPECS/1224-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md` | `26-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md` |
+| 18a | #1215 | Gate every route's coefficients through one function | [`1215-gate-every-routes-coefficients-through-one-function.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1215-gate-every-routes-coefficients-through-one-function.md) (retired, closed) | `18a-gate-every-routes-coefficients-through-one-function.md` |
+| 18b | #1216 | Mute a route in the session | [`1216-mute-a-route-in-the-session.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1216-mute-a-route-in-the-session.md) (retired, closed) | `18b-mute-a-route-in-the-session.md` |
+| 19 | #1217 | Skip an inactive route in its destination's sum | [`1217-skip-an-inactive-route-in-its-destinations-sum.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1217-skip-an-inactive-route-in-its-destinations-sum.md) (retired, closed) | `19-skip-an-inactive-route-in-its-destinations-sum.md` |
+| 20 | #1218 | Let a route into a submix follow its source strip's mute in the session | [`1218-let-a-route-into-a-submix-follow-its-source-strips-mute-in-the-session.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1218-let-a-route-into-a-submix-follow-its-source-strips-mute-in-the-session.md) (retired, closed) | `20-let-a-route-into-a-submix-follow-its-source-strips-mute-in-the-session.md` |
+| 21 | #1219 | Ramp a send's coefficients with the indexed ramp kernel | [`1219-ramp-a-sends-coefficients-with-the-indexed-ramp-kernel.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1219-ramp-a-sends-coefficients-with-the-indexed-ramp-kernel.md) (retired, closed) | `21-ramp-a-sends-coefficients-with-the-indexed-ramp-kernel.md` |
+| 22 | #1220 | Ramp live send coefficients on the render plane | [`1220-ramp-live-send-coefficients-on-the-render-plane.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1220-ramp-live-send-coefficients-on-the-render-plane.md) (retired, closed) | `22-ramp-live-send-coefficients-on-the-render-plane.md` |
+| 23 | #1221 | Produce live send records from host-core | [`1221-produce-live-send-records-from-host-core.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1221-produce-live-send-records-from-host-core.md) (retired, closed) | `23-produce-live-send-records-from-host-core.md` |
+| 24 | #1222 | Admit live send commands in the browser | [`1222-admit-live-send-commands-in-the-browser.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1222-admit-live-send-commands-in-the-browser.md) (retired, closed) | `24-admit-live-send-commands-in-the-browser.md` |
+| 25 | #1223 | Enumerate sends and drive them from the SDK | [`1223-enumerate-sends-and-drive-them-from-the-sdk.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1223-enumerate-sends-and-drive-them-from-the-sdk.md) (retired, closed) | `25-enumerate-sends-and-drive-them-from-the-sdk.md` |
+| 26 | #1224 | Let a send follow its source strip's mute live in the browser | [`1224-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1224-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md) (retired, closed) | `26-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md` |
 | 27 | #1225 | Deliver value-only send and submix-strip edits to the running C ABI plan | `.github/ISSUE_SPECS/1225-deliver-value-only-send-and-submix-strip-edits-to-the-running-c-abi-plan.md` | `27-deliver-value-only-send-and-submix-strip-edits-to-the-running-c-abi-plan.md` |
 | 28 | #1226 | Let C ABI sends follow their source strip's mute live | `.github/ISSUE_SPECS/1226-let-c-abi-sends-follow-their-source-strips-mute-live.md` | `28-let-c-abi-sends-follow-their-source-strips-mute-live.md` |
 | BM1 | #1227 | Add a bus-and-send row to the native console benchmark | `.github/ISSUE_SPECS/1227-add-a-bus-and-send-row-to-the-native-console-benchmark.md` | `BM1-add-a-bus-and-send-row-to-the-native-console-benchmark.md` |
@@ -56,22 +58,32 @@ the verdicts (`verdicts/`).
 
 BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196.
 
-## Not filed
+## VCA groups (filed 2026-10-03)
 
-| Draft | Title | Where |
-|---|---|---|
-| V0 | VCA groups | `issues/V0-vca-groups-umbrella.md` (this folder) |
-| V1 | Declare VCA groups in the session | `issues/V1-declare-vca-groups-in-the-session.md` (this folder) |
-| V2 | Apply VCA offsets and mutes at preparation | `issues/V2-apply-vca-offsets-and-mutes-at-preparation.md` (this folder) |
-| V3 | Ride VCA groups live in the browser | `issues/V3-ride-vca-groups-live-in-the-browser.md` (this folder) |
-| V4 | Enumerate VCA groups and drive them from the SDK | `issues/V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` (this folder) |
-| V5 | Deliver value-only VCA edits to the running C ABI plan | `issues/V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` (this folder) |
+Filed as its own umbrella once batch K3 was delivered (#1224), every anchor re-verified on the K3
+head `8c6268967`. The drafts' six files became nine issues: the grammar was split from its session
+edits (on the #1199/#1204 precedent), the caps from preparation (#1206), and the host-core
+composition from the browser's admission (#1221/#1222). Each spec is
+`.github/ISSUE_SPECS/<number>-*.md`.
 
-The root files the VCA umbrella when batch K3 closes (#1224's Sol PASS and the K3 push), and
-re-verifies the drafts' anchors then. V4 closes the VCA batch V1-V4, so its draft carries the
-deliverable that removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5); the
-filed V4 must keep it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are filed as *Bound route
-gain and matrix values* (#1237), and Q1's answer as *Let a strip override a console slot's link
-mode* (#1236). Both are standalone, outside #1196.
+| Label | Issue | Title | Draft |
+|---|---|---|---|
+| V0 | #1239 | VCA groups | `V0-vca-groups-umbrella.md` |
+| V1 | #1240 | Declare VCA groups in the session | `V1-declare-vca-groups-in-the-session.md` |
+| V2 | #1241 | Edit VCA groups through session transactions | `V1-declare-vca-groups-in-the-session.md` (its wire and edits) |
+| V3 | #1242 | Apply VCA offsets and mutes at preparation | `V2-apply-vca-offsets-and-mutes-at-preparation.md` |
+| V4 | #1243 | Count and cap VCA groups in host preparation and the C ABI | `V2-apply-vca-offsets-and-mutes-at-preparation.md` (its caps) |
+| V5 | #1244 | Compose live VCA moves in host-core | `V3-ride-vca-groups-live-in-the-browser.md` (its host-core state) |
+| V6 | #1245 | Ride VCA groups live in the browser | `V3-ride-vca-groups-live-in-the-browser.md` |
+| V7 | #1246 | Enumerate VCA groups and drive them from the SDK | `V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` |
+| V8 | #1247 | Deliver value-only VCA edits to the running C ABI plan | `V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` |
+
+#1240-#1246 are one batch, pushed once; #1246 closes it and carries the deliverable that removes the
+decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5). #1247 waits on #1053, #1225 and
+#1226. At filing, P13's VCA guard was widened to "every C ABI delta while the model declares a
+VCA" (a planner decision recorded in the ruling), and the specs of #1053, #1225 and #1226 were
+amended to carry it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are
+filed as *Bound route gain and matrix values* (#1237), and Q1's answer as *Let a strip override a
+console slot's link mode* (#1236). Both are standalone, outside #1196.
 
 The probe sources that `DESIGN.md` 3.2 and `VERIFY-1.md` name under `scratchpad/` were never committed.

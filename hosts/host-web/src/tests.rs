@@ -181,7 +181,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
             .longest_source_id_bytes
             .max(shape.longest_track_id_bytes)
             .max(shape.longest_submix_id_bytes)
-            .max(shape.longest_route_id_bytes),
+            .max(shape.longest_route_id_bytes)
+            .max(shape.longest_vca_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -928,7 +929,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3389,7 +3391,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3455,7 +3458,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             "{name}: exact owner slices, owner box and once-retained factory"
         );
         let decoded_count =
-            command_staging_count(shape.track_count as usize, 0).expect("decoded command count");
+            command_staging_count(shape.track_count as usize, 0, 0).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
         let input_shadow_bytes = if live_control_command_queue_records == 0 {
             0
@@ -12977,4 +12980,2507 @@ fn a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp() {
         difference, None,
         "a later no-op lane record set the follow ramp a `Both` record owns"
     );
+}
+
+// Issue #1242: a VCA applies at preparation, and the browser's mute state starts from it. VCA `fx`
+// (-3 dB) holds `drums` and the solo-safe bus `room` of #1224's follow session; each track is fed
+// its own two-lane signal and every bus is a unity submix, so a comparison at the output is exact.
+// Strip order: `bass` 0, `drums` 1, `vocal` 2, `room` 3, `verb` 4; live sends in route-ID order:
+// `bass-room` 0, `drums-verb` 1.
+
+/// #1224's follow session with the own lane mutes `muted`, `drums-verb` at `send_gain_db`, and VCA
+/// `fx` at -3 dB with lane mutes `vca_mutes` over `drums` and `room`.
+fn vca_follow_host(
+    muted: &[(&str, [bool; 2])],
+    vca_mutes: [bool; 2],
+    send_gain_db: f32,
+) -> AudioWorkletEngineHost {
+    let document = follow_document(
+        &SOLO_FOLLOW_TRACKS,
+        &["verb", "room"],
+        &SOLO_FOLLOW_ROUTES,
+        muted,
+        None,
+    );
+    let mut model = parse_session_json(&document).expect("#1224 session parses");
+    model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "drums-verb")
+        .expect("drums-verb")
+        .gain_db = send_gain_db;
+    model.vcas = vec![session::Vca {
+        id: strip_id("fx"),
+        fader: session::DualMonoFader {
+            left_db: -3.0,
+            right_db: -3.0,
+            left_mute: vca_mutes[0],
+            right_mute: vca_mutes[1],
+        },
+        members: vec![strip_id("drums"), strip_id("room")],
+    }];
+    strip_boot(
+        &canonical_session_json(&model).expect("#1242 session canonicalizes"),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1242 gate 5, in the browser. With VCA `fx` muted, soloing its member `drums` beside
+/// `vocal` leaves `drums`, its following send and the solo-safe member `room` muted,
+/// bit-identically to a host booted with `bass` muted instead; un-soloing both, then explicitly
+/// un-muting `drums` (kind 4, `false`), leaves it muted, bit-identically to a host that received
+/// none of those commands.
+/// Every command has smoothing 0 (a kind 4 always stages a record, and a non-zero ramp on a
+/// settled lane can turn `+0.0` into `-0.0`, which is not this gate's claim).
+///
+/// Test value: red if solo clears a VCA mute (the soloed member is heard), if solo-safe exempts
+/// a submix from it (`room` opens), if an explicit un-mute stages the member's own intent rather
+/// than the composed mute, if host-web seeds the solo state without the VCA mute, or if `emitted`
+/// is seeded without it (the solo stages a redundant record for `drums`).
+#[test]
+fn a_vca_muted_member_stays_muted_through_solo_and_an_explicit_unmute() {
+    let mut live = vca_follow_host(&[], [true; 2], 0.0);
+    let mut soloed = vca_follow_host(&[("bass", [true; 2])], [true; 2], 0.0);
+    let mut untouched = vca_follow_host(&[], [true; 2], 0.0);
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "seeded mirror"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut soloed, &mut untouched],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "warm-up",
+    );
+    let room = follow_fader_room(&live);
+    stage_solo(&mut live, 0, SOLO_FOLLOW_DRUMS, true, 0);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, true, 0);
+    assert_eq!(live.submit_commands(2), RESULT_OK, "solo drums and vocal");
+    assert_eq!(follow_lanes(&live), [[true; 2], [true; 2]], "solo follow");
+    let mut owed = room.clone();
+    owed[0] -= 1;
+    assert_eq!(
+        follow_fader_room(&live),
+        owed,
+        "the solo stages one record, on `bass`, and none for the VCA-muted `drums` or `room`"
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut soloed],
+            &SOLO_FOLLOW_TRACKS,
+            1,
+            2,
+            true,
+            "soloed member vs booted muted rest"
+        ),
+        "the soloed vocal is audible"
+    );
+    stage_solo(&mut live, 0, SOLO_FOLLOW_DRUMS, false, 0);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, false, 0);
+    assert_eq!(
+        live.submit_commands(2),
+        RESULT_OK,
+        "un-solo drums and vocal"
+    );
+    stage_lane_mute(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, false, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-mute drums");
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "restored mirror"
+    );
+    for block in 1..3 {
+        follow_render(&mut untouched, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut untouched],
+            &SOLO_FOLLOW_TRACKS,
+            3,
+            3,
+            true,
+            "after un-solo and un-mute vs untouched"
+        ),
+        "bass and vocal are audible"
+    );
+}
+
+/// Issue #1242 gate 6. VCA `fx` mutes `drums`' left lane, so `drums-verb` (a pre-fader
+/// `follows_mute` send) is prepared with its left column zeroed. A kind 13 (`routeGainDb`) edit
+/// on that send, with smoothing 0 at a block boundary, renders bit-identically to a host booted
+/// from the session with the edited gain: the live mirror started at the prepared gate, so the
+/// zeroed column stays zeroed.
+///
+/// Test value: red if host-web seeds the VCA mute after the live-send mirror, or seeds the
+/// mirror from the member's own mute, so the first live send edit reopens a VCA-muted column.
+#[test]
+fn a_live_send_edit_keeps_a_vca_muted_column_zeroed() {
+    const GAIN_DB: f32 = -4.5;
+    let mut live = vca_follow_host(&[], [true, false], 0.0);
+    let mut fresh = vca_follow_host(&[], [true, false], GAIN_DB);
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true, false]],
+        "seeded mirror"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut fresh],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "before the edit",
+    );
+    stage_send(
+        &mut live,
+        0,
+        COMMAND_ROUTE_GAIN_DB,
+        1,
+        0,
+        [GAIN_DB, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        live.submit_commands(1),
+        RESULT_OK,
+        "routeGainDb on drums-verb"
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut fresh],
+            &SOLO_FOLLOW_TRACKS,
+            1,
+            3,
+            true,
+            "edited live send vs fresh plan"
+        ),
+        "the mix is audible"
+    );
+}
+
+/// Issue #1242 attempt 2 (verdict MAJOR-1). VCA `fx` mutes one lane of `drums`; a kind 4 un-mute
+/// addressed to both lanes (`channel` 2) leaves the VCA-muted lane muted and the other open, so
+/// the strip, its following send `drums-verb` and the solo state's mirrors all stay where they
+/// were: bit-identical to a host that received nothing (the member's own mute was already
+/// `false`). Each lane mute is taken in turn. The same submission un-mutes `bass` (no VCA) on both
+/// lanes: `drums`' queue takes two records (the split) and `bass`' takes one.
+///
+/// Test value: red if a `Both` kind 4 stages one record from the first covered lane's effective
+/// mute, which re-opens a VCA-muted right lane, or silences an un-muted right lane while its
+/// follow send stays open; or if every `Both` kind 4 splits, doubling fader-queue use for every
+/// both-lanes mute.
+#[test]
+fn a_both_lane_unmute_keeps_a_one_lane_vca_mute() {
+    for vca_mutes in [[true, false], [false, true]] {
+        let mut live = vca_follow_host(&[], vca_mutes, 0.0);
+        let mut untouched = vca_follow_host(&[], vca_mutes, 0.0);
+        follow_lockstep(
+            &mut [&mut live, &mut untouched],
+            &SOLO_FOLLOW_TRACKS,
+            0,
+            1,
+            false,
+            "warm-up",
+        );
+        let room = follow_fader_room(&live);
+        stage_lane_mute(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, false, 0);
+        stage_lane_mute(&mut live, 1, 0, 2, false, 0);
+        assert_eq!(
+            live.submit_commands(2),
+            RESULT_OK,
+            "un-mute drums and bass, both lanes"
+        );
+        let after = follow_fader_room(&live);
+        assert_eq!(room[1] - after[1], 2, "split: two records on drums");
+        assert_eq!(room[0] - after[0], 1, "agree: one record on bass");
+        let solo = &live.ready.as_ref().expect("ready").solo;
+        let drums = SOLO_FOLLOW_DRUMS as usize;
+        for (lane, &vca_muted) in vca_mutes.iter().enumerate() {
+            assert_eq!(solo.effective_mute(drums, lane), vca_muted, "lane {lane}");
+            assert_eq!(solo.emitted_mute(drums, lane), vca_muted, "lane {lane}");
+        }
+        assert_eq!(
+            follow_lanes(&live),
+            [[false; 2], vca_mutes],
+            "vca {vca_mutes:?}: follow mirror"
+        );
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut untouched],
+                &SOLO_FOLLOW_TRACKS,
+                1,
+                3,
+                true,
+                &format!("vca {vca_mutes:?}: both-lane un-mute vs untouched"),
+            ),
+            "audible"
+        );
+    }
+}
+
+/// The top-down reach of `strip` in `vcas` (every VCA whose membership closure holds it), sorted by
+/// VCA ID: the randomized browser gate's own reference, independent of `SessionModel::vca_reach`.
+fn vca_reference_reach(vcas: &[session::Vca], strip: &str) -> Vec<usize> {
+    fn below<'a>(
+        vcas: &'a [session::Vca],
+        index: usize,
+        into: &mut std::collections::BTreeSet<&'a str>,
+    ) {
+        for member in &vcas[index].members {
+            if into.insert(member.as_str())
+                && let Some(nested) = vcas.iter().position(|vca| vca.id == *member)
+            {
+                below(vcas, nested, into);
+            }
+        }
+    }
+    let mut reach: Vec<usize> = (0..vcas.len())
+        .filter(|index| {
+            let mut closure = std::collections::BTreeSet::new();
+            below(vcas, *index, &mut closure);
+            closure.contains(strip)
+        })
+        .collect();
+    reach.sort_by(|left, right| vcas[*left].id.cmp(&vcas[*right].id));
+    reach
+}
+
+/// Seeds of the randomized browser VCA gate. Attempt 2 ran 1,500 seeds as evidence; this count
+/// keeps the debug suite near a second.
+const VCA_BROWSER_SEEDS: u64 = 48;
+
+/// Issue #1242 attempt 2 (verdict MAJOR-1 and MINOR-1), a randomized browser differential. Random
+/// VCA forests (one to four VCAs, nested, offsets across the domain, drawn lane mutes) over
+/// #1224's follow session, whose own faders and mutes are drawn too; then eight random batches of
+/// solo toggles and kind 4 edits on any lane selector, each at a smoothing drawn from {0, 64}. The
+/// VCA host renders, every block, bit-identically to a host booted with no VCA and every strip's
+/// fader written as its effective value (the test's own top-down reach and `f64` sum), which
+/// receives the same solos and, for each kind 4, the per-lane equivalent `on || vca_mute[lane]`,
+/// at the same smoothing.
+///
+/// Test value: red if a `Both` kind 4 on a one-lane VCA mute stages one lane's value for both, or
+/// if host-web seeds a strip's VCA mute (a submix's included) other than from the effective
+/// faders, so a later un-mute of a VCA-muted bus reopens it, or if the split records drop the
+/// command's window (a hard-switched lane where the reference ramps).
+#[test]
+fn a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute() {
+    fn chance(draw: &mut SendDraw, numerator: u64, denominator: u64) -> bool {
+        draw.below(denominator) < numerator
+    }
+    let names = ["bass", "drums", "vocal", "room", "verb"];
+    let (mut split_unmutes, mut submix_unmutes) = (0_u32, 0_u32);
+    for seed in 1..=VCA_BROWSER_SEEDS {
+        let mut draw = SendDraw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let document = follow_document(
+            &SOLO_FOLLOW_TRACKS,
+            &["verb", "room"],
+            &SOLO_FOLLOW_ROUTES,
+            &[],
+            None,
+        );
+        let mut model = parse_session_json(&document).expect("#1224 session parses");
+        let faders = model
+            .tracks
+            .iter_mut()
+            .map(|track| &mut track.fader)
+            .chain(model.submixes.iter_mut().map(|submix| &mut submix.fader));
+        for fader in faders {
+            fader.left_db = draw.uniform(-12.0, 6.0);
+            fader.right_db = draw.uniform(-12.0, 6.0);
+            fader.left_mute = chance(&mut draw, 1, 6);
+            fader.right_mute = chance(&mut draw, 1, 6);
+        }
+        let count = 1 + draw.below(4) as usize;
+        let levels: Vec<u64> = (0..count).map(|_| draw.below(3)).collect();
+        let vca_names: Vec<String> = (0..count).map(|i| format!("v{}", (i * 7) % 11)).collect();
+        model.vcas = (0..count)
+            .map(|i| {
+                let candidates = names.iter().map(|name| (*name).to_owned()).chain(
+                    (0..count)
+                        .filter(|other| levels[*other] > levels[i])
+                        .map(|other| vca_names[other].clone()),
+                );
+                let members: Vec<session::StableId> = candidates
+                    .filter(|_| chance(&mut draw, 1, 2))
+                    .map(|member| strip_id(&member))
+                    .collect();
+                let mut offset = || {
+                    if chance(&mut draw, 1, 4) {
+                        draw.uniform(-144.0, 24.0)
+                    } else {
+                        draw.uniform(-12.0, 12.0)
+                    }
+                };
+                let (left_db, right_db) = (offset(), offset());
+                session::Vca {
+                    id: strip_id(&vca_names[i]),
+                    fader: session::DualMonoFader {
+                        left_db,
+                        right_db,
+                        left_mute: chance(&mut draw, 1, 3),
+                        right_mute: chance(&mut draw, 1, 3),
+                    },
+                    members,
+                }
+            })
+            .collect();
+        // Strip order is the canonical one: tracks, then submixes, each sorted.
+        let canonical = parse_session_json(&canonical_session_json(&model).expect("canonical"))
+            .expect("canonical session parses");
+        let strip_ids: Vec<String> = canonical
+            .tracks
+            .iter()
+            .map(|track| track.id.as_str().to_owned())
+            .chain(canonical.submixes.iter().map(|s| s.id.as_str().to_owned()))
+            .collect();
+        let mut plain = canonical.clone();
+        plain.vcas.clear();
+        let mut vca_mute = Vec::new();
+        let faders = plain
+            .tracks
+            .iter_mut()
+            .map(|track| &mut track.fader)
+            .chain(plain.submixes.iter_mut().map(|submix| &mut submix.fader));
+        for (fader, strip) in faders.zip(&strip_ids) {
+            let reach = vca_reference_reach(&canonical.vcas, strip);
+            let lane = |l: usize| -> (f32, bool) {
+                let own = [fader.left_db, fader.right_db][l];
+                if reach.is_empty() {
+                    return (own, false);
+                }
+                let mut sum = f64::from(own);
+                let mut muted = false;
+                for index in &reach {
+                    let vca = &canonical.vcas[*index].fader;
+                    sum += f64::from([vca.left_db, vca.right_db][l]);
+                    muted |= [vca.left_mute, vca.right_mute][l];
+                }
+                (sum.clamp(-144.0, 24.0) as f32, muted)
+            };
+            let (left, right) = (lane(0), lane(1));
+            fader.left_db = left.0;
+            fader.right_db = right.0;
+            fader.left_mute |= left.1;
+            fader.right_mute |= right.1;
+            vca_mute.push([left.1, right.1]);
+        }
+        let mut live = strip_boot(
+            &canonical_session_json(&canonical).expect("canonical"),
+            strip_options(64, 0, 0),
+        );
+        let mut reference = strip_boot(
+            &canonical_session_json(&plain).expect("canonical"),
+            strip_options(64, 0, 0),
+        );
+        follow_lockstep(
+            &mut [&mut live, &mut reference],
+            &SOLO_FOLLOW_TRACKS,
+            0,
+            1,
+            true,
+            &format!("seed {seed}: boot"),
+        );
+        let mut log = Vec::new();
+        for block in 1..=8 {
+            let (mut a, mut b) = (0_usize, 0_usize);
+            for _ in 0..=draw.below(3) {
+                let smoothing = [0_u32, 64][draw.below(2) as usize];
+                if chance(&mut draw, 1, 2) {
+                    let track = draw.below(3) as u32;
+                    let on = chance(&mut draw, 1, 2);
+                    stage_solo(&mut live, a, track, on, smoothing);
+                    stage_solo(&mut reference, b, track, on, smoothing);
+                    (a, b) = (a + 1, b + 1);
+                    log.push(format!("solo {track} {on}"));
+                    continue;
+                }
+                let strip = draw.below(5) as usize;
+                let channel = draw.below(3) as u8;
+                let on = chance(&mut draw, 1, 2);
+                stage_lane_mute(&mut live, a, strip as u32, channel, on, smoothing);
+                a += 1;
+                let want = |lane: usize| on || vca_mute[strip][lane];
+                if !on && vca_mute[strip] != [false; 2] {
+                    split_unmutes += u32::from(channel == 2 && want(0) != want(1));
+                    submix_unmutes += u32::from(strip >= 3);
+                }
+                let lanes: &[(u8, bool)] = match channel {
+                    0 => &[(0, want(0))],
+                    1 => &[(1, want(1))],
+                    _ if want(0) == want(1) => &[(2, want(0))],
+                    _ => &[(0, want(0)), (1, want(1))],
+                };
+                for (lane, value) in lanes {
+                    stage_lane_mute(&mut reference, b, strip as u32, *lane, *value, smoothing);
+                    b += 1;
+                }
+                log.push(format!(
+                    "mute strip {strip} channel {channel} {on} (vca {:?})",
+                    vca_mute[strip]
+                ));
+            }
+            assert_eq!(
+                live.submit_commands(a as u32),
+                RESULT_OK,
+                "seed {seed}: live"
+            );
+            assert_eq!(
+                reference.submit_commands(b as u32),
+                RESULT_OK,
+                "seed {seed}: reference"
+            );
+            follow_lockstep(
+                &mut [&mut live, &mut reference],
+                &SOLO_FOLLOW_TRACKS,
+                block,
+                1,
+                true,
+                &format!("seed {seed}: after {log:?}"),
+            );
+        }
+    }
+    assert!(
+        split_unmutes > 0 && submix_unmutes > 0,
+        "the seeds reach a both-lane un-mute of a one-lane VCA mute ({split_unmutes}) and an \
+         un-mute of a VCA-muted submix ({submix_unmutes})"
+    );
+}
+
+// ---- Issue #1245: VCA groups ridden live in the browser ----
+//
+// Every session is #1224's follow session: three tracks each fed its own two-lane signal, two unity
+// submixes, and the pre-fader `follows_mute` sends `bass-room` and `drums-verb`, so a comparison
+// at the output is exact (no console slot, no stateful insert, identity input section). Strip
+// order: `bass` 0, `drums` 1, `vocal` 2, `room` 3, `verb` 4; live sends in route-ID order:
+// `bass-room` 0, `drums-verb` 1. VCA IDs are chosen in canonical order, so a row's position is
+// its VCA index.
+
+const VCA_BASS: u32 = 0;
+const VCA_STRIPS: [&str; 5] = ["bass", "drums", "vocal", "room", "verb"];
+
+/// One strip's own fader: `(id, [left, right] dB, [left, right] mute)`.
+type VcaStripRow<'a> = (&'a str, [f32; 2], [bool; 2]);
+/// One VCA: `(id, [left, right] offset dB, [left, right] mute, members)`.
+type VcaRow<'a> = (&'a str, [f32; 2], [bool; 2], &'a [&'a str]);
+
+fn vca_strip_fader<'m>(
+    model: &'m mut session::SessionModel,
+    id: &str,
+) -> &'m mut session::DualMonoFader {
+    if let Some(track) = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == id)
+    {
+        return &mut track.fader;
+    }
+    &mut model
+        .submixes
+        .iter_mut()
+        .find(|submix| submix.id.as_str() == id)
+        .expect("#1245 strip")
+        .fader
+}
+
+/// #1224's follow session with the own faders `strips` and the VCAs `vcas`.
+fn vca_ride_model(strips: &[VcaStripRow<'_>], vcas: &[VcaRow<'_>]) -> session::SessionModel {
+    let document = follow_document(
+        &SOLO_FOLLOW_TRACKS,
+        &["verb", "room"],
+        &SOLO_FOLLOW_ROUTES,
+        &[],
+        None,
+    );
+    let mut model = parse_session_json(&document).expect("#1224 session parses");
+    for (id, db, mute) in strips {
+        let fader = vca_strip_fader(&mut model, id);
+        (fader.left_db, fader.right_db) = (db[0], db[1]);
+        (fader.left_mute, fader.right_mute) = (mute[0], mute[1]);
+    }
+    model.vcas = vcas
+        .iter()
+        .map(|(id, db, mute, members)| session::Vca {
+            id: strip_id(id),
+            fader: session::DualMonoFader {
+                left_db: db[0],
+                right_db: db[1],
+                left_mute: mute[0],
+                right_mute: mute[1],
+            },
+            members: members.iter().map(|member| strip_id(member)).collect(),
+        })
+        .collect();
+    model
+}
+
+fn vca_ride_host(model: &session::SessionModel, queue_records: u64) -> AudioWorkletEngineHost {
+    strip_boot(
+        &canonical_session_json(model).expect("#1245 session canonicalizes"),
+        strip_options(queue_records, 0, 0),
+    )
+}
+
+/// Stage one VCA record (kind 16 or 17) at wire index `index`.
+fn stage_vca(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    kind: u32,
+    vca: u32,
+    channel: u8,
+    value: f32,
+    smoothing: u32,
+) {
+    stage_command(
+        host,
+        index,
+        kind,
+        255,
+        channel,
+        vca,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Stage one kind 3 (`faderDb`) record at wire index `index`.
+fn stage_fader_db(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    strip: u32,
+    channel: u8,
+    db: f32,
+    smoothing: u32,
+) {
+    stage_command(
+        host,
+        index,
+        COMMAND_FADER_DB,
+        255,
+        channel,
+        strip,
+        0,
+        0,
+        smoothing,
+        [db, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Render `blocks` blocks from `first` on every host; when `compare` names a host, require host 0's
+/// output bit-identical to it. Returns whether a compared block carried signal.
+fn vca_lockstep(
+    hosts: &mut [&mut AudioWorkletEngineHost],
+    compare: Option<usize>,
+    first: u64,
+    blocks: u64,
+    what: &str,
+) -> bool {
+    let mut audible = false;
+    for block in first..first + blocks {
+        let outputs: Vec<Vec<f32>> = hosts
+            .iter_mut()
+            .map(|host| follow_render(host, &SOLO_FOLLOW_TRACKS, block, None))
+            .collect();
+        if let Some(other) = compare {
+            if let Some((sample, x, y)) = first_bit_difference(&outputs[0], &outputs[other]) {
+                panic!("{what}: block {block} sample {sample}: {x} vs {y}");
+            }
+            audible |= outputs[0].iter().any(|sample| *sample != 0.0);
+        }
+    }
+    audible
+}
+
+/// The live VCA state's effective dB of every strip and lane, and its VCA mute.
+fn vca_mirror(host: &AudioWorkletEngineHost) -> Vec<([u32; 2], [bool; 2])> {
+    let vcas = &host.ready.as_ref().expect("ready").vcas;
+    (0..VCA_STRIPS.len())
+        .map(|strip| {
+            (
+                [
+                    vcas.effective_db(strip, 0).to_bits(),
+                    vcas.effective_db(strip, 1).to_bits(),
+                ],
+                vcas.vca_mute(strip),
+            )
+        })
+        .collect()
+}
+
+/// Every strip's effective and emitted lane mutes in the strip-mute owner.
+fn vca_solo_mirror(host: &AudioWorkletEngineHost) -> Vec<[bool; 4]> {
+    let solo = &host.ready.as_ref().expect("ready").solo;
+    (0..VCA_STRIPS.len())
+        .map(|strip| {
+            [
+                solo.effective_mute(strip, 0),
+                solo.effective_mute(strip, 1),
+                solo.emitted_mute(strip, 0),
+                solo.emitted_mute(strip, 1),
+            ]
+        })
+        .collect()
+}
+
+/// Everything a refused submission must leave as it was: every fader and send queue's room, the
+/// VCA state, the strip-mute owner and the send mirror.
+type VcaSnapshot = (
+    Vec<usize>,
+    Vec<usize>,
+    Vec<([u32; 2], [bool; 2])>,
+    Vec<[bool; 4]>,
+    Vec<SendValues>,
+    Vec<[bool; 2]>,
+);
+
+fn vca_snapshot(host: &AudioWorkletEngineHost) -> VcaSnapshot {
+    (
+        follow_fader_room(host),
+        send_queue_room(host),
+        vca_mirror(host),
+        vca_solo_mirror(host),
+        send_mirror(host),
+        follow_lanes(host),
+    )
+}
+
+/// Submit `count` staged records and require a whole refusal: `result`, `reason` and
+/// `rejected_index`, nothing pushed, and every mirror and transaction left as it was.
+fn assert_vca_refusal(
+    host: &mut AudioWorkletEngineHost,
+    count: u32,
+    result: u32,
+    reason: u32,
+    rejected_index: u32,
+    what: &str,
+) {
+    let before = vca_snapshot(host);
+    assert_eq!(host.submit_commands(count), result, "{what}: result");
+    let report = *host.command_report();
+    assert_eq!(report.reason, reason, "{what}: reason");
+    assert_eq!(
+        report.rejected_index, rejected_index,
+        "{what}: rejected index"
+    );
+    assert_eq!(report.admitted, 0, "{what}: admitted");
+    assert_eq!(vca_snapshot(host), before, "{what}: state moved");
+    let ready = host.ready.as_ref().expect("ready");
+    assert!(!ready.vcas.transaction_open(), "{what}: VCA transaction");
+}
+
+/// The reach of the randomized gate, so a generator change that stops reaching a case is red.
+#[derive(Debug, Default)]
+struct VcaRideReach {
+    vca_rides: u32,
+    nested_rides: u32,
+    submix_rides: u32,
+    one_lane_vca_mutes: u32,
+    member_moves: u32,
+    clamped_lanes: u32,
+    follow_moves: u32,
+    soloed_vca_muted: u32,
+}
+
+/// The test's own effective dB of `strip`'s `lane`: its own value plus every reaching VCA's
+/// offset, summed in `f64` and clamped, from its own top-down reach. Also whether it clamped.
+fn vca_reference_effective(model: &session::SessionModel, strip: &str, lane: usize) -> (f32, bool) {
+    let fader = model
+        .tracks
+        .iter()
+        .map(|track| (track.id.as_str(), &track.fader))
+        .chain(model.submixes.iter().map(|s| (s.id.as_str(), &s.fader)))
+        .find(|(id, _)| *id == strip)
+        .expect("strip")
+        .1;
+    let mut sum = f64::from([fader.left_db, fader.right_db][lane]);
+    let reach = vca_reference_reach(&model.vcas, strip);
+    for index in &reach {
+        let vca = &model.vcas[*index].fader;
+        sum += f64::from([vca.left_db, vca.right_db][lane]);
+    }
+    let clamped = sum.clamp(-144.0, 24.0);
+    (clamped as f32, !reach.is_empty() && clamped != sum)
+}
+
+/// Seeds of the randomized ride gate (#1245 gate 1).
+const VCA_RIDE_SEEDS: u64 = 8;
+
+/// Issue #1245 gate 1, and the settled-session differential. Random VCA forests (two to four
+/// VCAs, nested and overlapping, tracks and submixes as members, offsets across the domain) over
+/// #1224's follow session; then six random batches of VCA rides (one lane or both, values across
+/// the domain so members clamp, ramps up to 300 samples), one-lane and both-lane VCA mutes,
+/// member fader moves, one-lane member mutes and solos. After each batch's ramps settle, the live
+/// host renders bit-identically to a host freshly booted from the session the test edited itself
+/// (its own intent: VCA values, own faders and own mutes; solos re-sent at boot), and the two
+/// hosts' follow mirrors agree.
+///
+/// Test value: red if live admission emits to the wrong member, lane or slot, composes
+/// differently from preparation (order, reach, clamp), stores a clamped value as a member's own,
+/// drops a VCA mute from a member's mute or its following sends, or lets solo clear it.
+#[test]
+fn a_live_vca_ride_lands_on_a_fresh_plans_bits() {
+    fn chance(draw: &mut SendDraw, numerator: u64, denominator: u64) -> bool {
+        draw.below(denominator) < numerator
+    }
+    let mut reach = VcaRideReach::default();
+    for seed in 1..=VCA_RIDE_SEEDS {
+        let mut draw = SendDraw(seed.wrapping_mul(0xA24B_AED4_963E_E407));
+        let mut model = vca_ride_model(&[], &[]);
+        for strip in VCA_STRIPS {
+            let left_db = draw.uniform(-12.0, 6.0);
+            let right_db = draw.uniform(-12.0, 6.0);
+            let (left_mute, right_mute) = (chance(&mut draw, 1, 8), chance(&mut draw, 1, 8));
+            let fader = vca_strip_fader(&mut model, strip);
+            (fader.left_db, fader.right_db) = (left_db, right_db);
+            (fader.left_mute, fader.right_mute) = (left_mute, right_mute);
+        }
+        let ids = ["va", "vb", "vc", "vd"];
+        let count = 2 + draw.below(3) as usize;
+        let levels: Vec<u64> = (0..count).map(|_| draw.below(3)).collect();
+        model.vcas = (0..count)
+            .map(|i| {
+                let candidates: Vec<&str> = VCA_STRIPS
+                    .iter()
+                    .copied()
+                    .chain(
+                        (0..count)
+                            .filter(|j| levels[*j] > levels[i])
+                            .map(|j| ids[j]),
+                    )
+                    .collect();
+                let members = candidates
+                    .into_iter()
+                    .filter(|_| chance(&mut draw, 1, 2))
+                    .map(strip_id)
+                    .collect();
+                let mut offset = || {
+                    if chance(&mut draw, 1, 4) {
+                        draw.uniform(-144.0, 24.0)
+                    } else {
+                        draw.uniform(-12.0, 12.0)
+                    }
+                };
+                let (left_db, right_db) = (offset(), offset());
+                session::Vca {
+                    id: strip_id(ids[i]),
+                    fader: session::DualMonoFader {
+                        left_db,
+                        right_db,
+                        left_mute: chance(&mut draw, 1, 4),
+                        right_mute: chance(&mut draw, 1, 4),
+                    },
+                    members,
+                }
+            })
+            .collect();
+        let mut model = parse_session_json(&canonical_session_json(&model).expect("canonical"))
+            .expect("canonical session parses");
+        let nested: Vec<bool> = model
+            .vcas
+            .iter()
+            .map(|vca| {
+                vca.members
+                    .iter()
+                    .any(|member| ids.contains(&member.as_str()))
+                    || model
+                        .vcas
+                        .iter()
+                        .any(|other| other.members.contains(&vca.id))
+            })
+            .collect();
+        let mut live = vca_ride_host(&model, 64);
+        {
+            // Amendment A1: the boot-time pair count is the reach the live state builds.
+            let vcas = &live.ready.as_ref().expect("ready").vcas;
+            let pairs: usize = (0..vcas.vca_count())
+                .map(|vca| vcas.reached_by(vca).len())
+                .sum();
+            let shape = browser_vca_shape(&model).expect("within the bounds");
+            assert_eq!(shape.pairs, pairs as u64, "seed {seed}: reach pairs");
+        }
+        follow_render(&mut live, &SOLO_FOLLOW_TRACKS, 0, None);
+        let mut block = 1_u64;
+        let mut solos = [false; 3];
+        let mut log = Vec::new();
+        for _ in 0..6 {
+            let lanes_before = follow_lanes(&live);
+            let records = 1 + draw.below(5) as usize;
+            for index in 0..records {
+                let channel = draw.below(3) as u8;
+                let covers = |lane: usize| channel == 2 || usize::from(channel) == lane;
+                match draw.below(10) {
+                    0..=3 => {
+                        let vca = draw.below(model.vcas.len() as u64) as usize;
+                        let db = match draw.below(6) {
+                            0 => 24.0,
+                            1 => -144.0,
+                            2 | 3 => draw.uniform(-144.0, 24.0),
+                            _ => draw.uniform(-12.0, 12.0),
+                        };
+                        let smoothing = [0, 64, 200, 300][draw.below(4) as usize];
+                        stage_vca(
+                            &mut live,
+                            index,
+                            COMMAND_VCA_FADER_DB,
+                            vca as u32,
+                            channel,
+                            db,
+                            smoothing,
+                        );
+                        let fader = &mut model.vcas[vca].fader;
+                        if covers(0) {
+                            fader.left_db = db;
+                        }
+                        if covers(1) {
+                            fader.right_db = db;
+                        }
+                        reach.vca_rides += 1;
+                        reach.nested_rides += u32::from(nested[vca]);
+                        let id = model.vcas[vca].id.as_str().to_owned();
+                        reach.submix_rides += u32::from(["room", "verb"].iter().any(|bus| {
+                            vca_reference_reach(&model.vcas, bus)
+                                .iter()
+                                .any(|index| model.vcas[*index].id.as_str() == id)
+                        }));
+                        log.push(format!("vca {vca} ch {channel} {db} dB @{smoothing}"));
+                    }
+                    4 | 5 => {
+                        let vca = draw.below(model.vcas.len() as u64) as usize;
+                        let on = chance(&mut draw, 1, 2);
+                        let smoothing = [0, 64, 200, 300][draw.below(4) as usize];
+                        stage_vca(
+                            &mut live,
+                            index,
+                            COMMAND_VCA_MUTE,
+                            vca as u32,
+                            channel,
+                            if on { 1.0 } else { 0.0 },
+                            smoothing,
+                        );
+                        let fader = &mut model.vcas[vca].fader;
+                        if covers(0) {
+                            fader.left_mute = on;
+                        }
+                        if covers(1) {
+                            fader.right_mute = on;
+                        }
+                        reach.one_lane_vca_mutes += u32::from(channel != 2);
+                        log.push(format!("vca {vca} ch {channel} mute {on} @{smoothing}"));
+                    }
+                    6 | 7 => {
+                        let strip = draw.below(5) as usize;
+                        let db = if chance(&mut draw, 1, 4) {
+                            draw.uniform(-144.0, 24.0)
+                        } else {
+                            draw.uniform(-18.0, 12.0)
+                        };
+                        stage_fader_db(&mut live, index, strip as u32, channel, db, 0);
+                        let fader = vca_strip_fader(&mut model, VCA_STRIPS[strip]);
+                        if covers(0) {
+                            fader.left_db = db;
+                        }
+                        if covers(1) {
+                            fader.right_db = db;
+                        }
+                        reach.member_moves += u32::from(
+                            !vca_reference_reach(&model.vcas, VCA_STRIPS[strip]).is_empty(),
+                        );
+                        log.push(format!("strip {strip} ch {channel} {db} dB"));
+                    }
+                    8 => {
+                        let strip = draw.below(5) as usize;
+                        let on = chance(&mut draw, 1, 2);
+                        stage_lane_mute(&mut live, index, strip as u32, channel, on, 0);
+                        let fader = vca_strip_fader(&mut model, VCA_STRIPS[strip]);
+                        if covers(0) {
+                            fader.left_mute = on;
+                        }
+                        if covers(1) {
+                            fader.right_mute = on;
+                        }
+                        log.push(format!("strip {strip} ch {channel} mute {on}"));
+                    }
+                    _ => {
+                        let track = draw.below(3) as usize;
+                        let on = chance(&mut draw, 1, 2);
+                        stage_solo(&mut live, index, track as u32, on, 0);
+                        solos[track] = on;
+                        log.push(format!("solo {track} {on}"));
+                    }
+                }
+            }
+            assert_eq!(
+                live.submit_commands(records as u32),
+                RESULT_OK,
+                "seed {seed}: {log:?} (reason {})",
+                live.command_report().reason
+            );
+            // Every ramp is at most 300 samples, so three 128-frame blocks settle it.
+            for ramp in block..block + 3 {
+                follow_render(&mut live, &SOLO_FOLLOW_TRACKS, ramp, None);
+            }
+            let mut fresh = vca_ride_host(&model, 64);
+            follow_render(&mut fresh, &SOLO_FOLLOW_TRACKS, 0, None);
+            let soloed: Vec<usize> = (0..3).filter(|track| solos[*track]).collect();
+            for (index, track) in soloed.iter().enumerate() {
+                stage_solo(&mut fresh, index, *track as u32, true, 0);
+            }
+            if !soloed.is_empty() {
+                assert_eq!(fresh.submit_commands(soloed.len() as u32), RESULT_OK);
+            }
+            for history in 1..block + 3 {
+                follow_render(&mut fresh, &SOLO_FOLLOW_TRACKS, history, None);
+            }
+            assert_eq!(
+                follow_lanes(&live),
+                follow_lanes(&fresh),
+                "seed {seed}: follow mirrors after {log:?}"
+            );
+            vca_lockstep(
+                &mut [&mut live, &mut fresh],
+                Some(1),
+                block + 3,
+                2,
+                &format!("seed {seed}: live vs fresh after {log:?}"),
+            );
+            reach.follow_moves += u32::from(follow_lanes(&live) != lanes_before);
+            for strip in VCA_STRIPS {
+                for lane in 0..2 {
+                    reach.clamped_lanes +=
+                        u32::from(vca_reference_effective(&model, strip, lane).1);
+                }
+            }
+            let solo = &live.ready.as_ref().expect("ready").solo;
+            reach.soloed_vca_muted += (0..3)
+                .filter(|track| {
+                    solos[*track] && (solo.vca_mute(*track, 0) || solo.vca_mute(*track, 1))
+                })
+                .count() as u32;
+            block += 5;
+        }
+    }
+    assert!(
+        reach.vca_rides > 0
+            && reach.nested_rides > 0
+            && reach.submix_rides > 0
+            && reach.one_lane_vca_mutes > 0
+            && reach.member_moves > 0
+            && reach.clamped_lanes > 0
+            && reach.follow_moves > 0
+            && reach.soloed_vca_muted > 0,
+        "the seeds reach every case: {reach:?}"
+    );
+}
+
+/// Issue #1245 gate 2: a member's own move and a VCA move compose, each with smoothing 0 at a
+/// block boundary. `drums` and `bass` (own `[-2, -5]` dB) are in VCA `band`:
+///
+/// * `drums` -3 dB, then `band` -6 dB, then `drums` +2 dB land, after each step, on a host booted
+///   at that step's values; `bass` keeps its own balance throughout.
+/// * With `drums` at +20 dB, `band` to +24 dB clamps it to +24 dB (as a host booted there does),
+///   and `band` back to 0 dB returns it to +20 dB, bit-identical to an unedited host.
+/// * With `drums` own-muted and `band` muted, un-muting `band` leaves `drums` muted, as a host
+///   booted with only its own mute.
+///
+/// Test value: red if a member move overwrites the VCA term or the reverse, if the clamp is
+/// stored as the member's value, or if a VCA un-mute clears a member's own mute.
+#[test]
+fn a_member_move_and_a_vca_move_compose() {
+    const BAND: &[&str] = &["bass", "drums"];
+    let host = |drums: f32, band: f32| {
+        vca_ride_host(
+            &vca_ride_model(
+                &[
+                    ("drums", [drums; 2], [false; 2]),
+                    ("bass", [-2.0, -5.0], [false; 2]),
+                ],
+                &[("band", [band; 2], [false; 2], BAND)],
+            ),
+            16,
+        )
+    };
+    let drums = SOLO_FOLLOW_DRUMS;
+    let mut live = host(0.0, 0.0);
+    let mut steps = [host(-3.0, 0.0), host(-3.0, -6.0), host(2.0, -6.0)];
+    let [step1, step2, step3] = &mut steps;
+    vca_lockstep(&mut [&mut live, step1, step2, step3], None, 0, 1, "warm-up");
+    stage_fader_db(&mut live, 0, drums, 2, -3.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "drums -3 dB");
+    assert!(vca_lockstep(
+        &mut [&mut live, step1, step2, step3],
+        Some(1),
+        1,
+        2,
+        "drums -3 dB"
+    ));
+    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, -6.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "band -6 dB");
+    assert!(vca_lockstep(
+        &mut [&mut live, step1, step2, step3],
+        Some(2),
+        3,
+        2,
+        "band -6 dB"
+    ));
+    stage_fader_db(&mut live, 0, drums, 2, 2.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "drums +2 dB");
+    assert!(vca_lockstep(
+        &mut [&mut live, step1, step2, step3],
+        Some(3),
+        5,
+        2,
+        "drums +2 dB in band -6 dB"
+    ));
+
+    let mut live = host(20.0, 0.0);
+    let mut clamped = host(20.0, 24.0);
+    let mut unedited = host(20.0, 0.0);
+    vca_lockstep(
+        &mut [&mut live, &mut clamped, &mut unedited],
+        None,
+        0,
+        1,
+        "warm-up",
+    );
+    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, 24.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "band +24 dB");
+    let vcas = &live.ready.as_ref().expect("ready").vcas;
+    assert_eq!(vcas.effective_db(drums as usize, 0), 24.0, "drums clamps");
+    vca_lockstep(
+        &mut [&mut live, &mut clamped, &mut unedited],
+        Some(1),
+        1,
+        2,
+        "band +24 dB vs booted there",
+    );
+    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, 0.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "band 0 dB");
+    let vcas = &live.ready.as_ref().expect("ready").vcas;
+    assert_eq!(vcas.effective_db(drums as usize, 0), 20.0, "drums returns");
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut clamped, &mut unedited],
+        Some(2),
+        3,
+        2,
+        "band back to 0 dB vs unedited"
+    ));
+
+    let muted = |band_muted: bool| {
+        vca_ride_host(
+            &vca_ride_model(
+                &[("drums", [0.0; 2], [true; 2])],
+                &[("band", [-3.0; 2], [band_muted; 2], BAND)],
+            ),
+            16,
+        )
+    };
+    let mut live = muted(true);
+    let mut own_only = muted(false);
+    vca_lockstep(&mut [&mut live, &mut own_only], None, 0, 1, "warm-up");
+    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 0.0, 0);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-mute band");
+    let solo = &live.ready.as_ref().expect("ready").solo;
+    for lane in 0..2 {
+        assert!(
+            solo.effective_mute(drums as usize, lane),
+            "drums lane {lane}"
+        );
+        assert!(
+            !solo.effective_mute(VCA_BASS as usize, lane),
+            "bass lane {lane}"
+        );
+    }
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "follow mirror"
+    );
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut own_only],
+        Some(1),
+        1,
+        3,
+        "un-muted band vs drums' own mute only"
+    ));
+}
+
+/// Issue #1245 gate 3: no redundant record.
+///
+/// * `drums` and `bass` sit at -144 dB in VCA `band` (-10 dB), so both clamp at -144 dB. Riding
+///   `band` to -20 dB, 0 dB and -144 dB (both lanes, then the left alone), each with a 480-sample
+///   ramp, changes no member's effective value: no fader record is staged, and the output stays
+///   bit-identical to a twin that received nothing.
+/// * With `drums` and `bass` own-muted, muting `band` stages no mute and no send record, and the
+///   output stays bit-identical to the twin.
+///
+/// Test value: red if composition re-emits an unchanged target, which restarts a settled ramp and
+/// moves its bits.
+#[test]
+fn a_vca_move_that_changes_no_effective_value_stages_nothing() {
+    const BAND: &[&str] = &["bass", "drums"];
+    let clamped = vca_ride_model(
+        &[
+            ("drums", [-144.0; 2], [false; 2]),
+            ("bass", [-144.0; 2], [false; 2]),
+        ],
+        &[("band", [-10.0; 2], [false; 2], BAND)],
+    );
+    let mut live = vca_ride_host(&clamped, 16);
+    let mut twin = vca_ride_host(&clamped, 16);
+    vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
+    let rooms = (follow_fader_room(&live), send_queue_room(&live));
+    let mut block = 1;
+    for (channel, offset) in [(2, -20.0), (2, 0.0), (2, -144.0), (0, -3.0)] {
+        stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, channel, offset, 480);
+        assert_eq!(live.submit_commands(1), RESULT_OK, "band {offset} dB");
+        assert_eq!(
+            (follow_fader_room(&live), send_queue_room(&live)),
+            rooms,
+            "band {offset} dB stages nothing"
+        );
+        assert!(vca_lockstep(
+            &mut [&mut live, &mut twin],
+            Some(1),
+            block,
+            2,
+            &format!("band {offset} dB vs twin")
+        ));
+        block += 2;
+    }
+
+    let muted = vca_ride_model(
+        &[
+            ("drums", [0.0; 2], [true; 2]),
+            ("bass", [-3.0; 2], [true; 2]),
+        ],
+        &[("band", [-10.0; 2], [false; 2], BAND)],
+    );
+    let mut live = vca_ride_host(&muted, 16);
+    let mut twin = vca_ride_host(&muted, 16);
+    vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
+    let rooms = (follow_fader_room(&live), send_queue_room(&live));
+    for (channel, on) in [(2, true), (0, false), (2, false)] {
+        stage_vca(
+            &mut live,
+            0,
+            COMMAND_VCA_MUTE,
+            0,
+            channel,
+            if on { 1.0 } else { 0.0 },
+            480,
+        );
+        assert_eq!(live.submit_commands(1), RESULT_OK, "band mute {on}");
+        assert_eq!(
+            (follow_fader_room(&live), send_queue_room(&live)),
+            rooms,
+            "a VCA mute of user-muted members stages nothing"
+        );
+    }
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut twin],
+        Some(1),
+        1,
+        3,
+        "muted band over muted members vs twin"
+    ));
+}
+
+/// Issue #1245 gate 4: all or nothing, at queue depth 4.
+///
+/// * With `bass`'s fader queue full, a ride of VCA `band` (`bass`, `drums`) is typed backpressure
+///   at its wire index: nothing is pushed (not even `drums`' record) and the VCA, strip-mute and
+///   send mirrors are unchanged.
+/// * With `drums-verb`'s send queue full, a mute of `band`, whose follow records would land there,
+///   is refused the same way.
+///
+/// After a render drains the queues, the identical submission is admitted and renders
+/// bit-identically to a twin that never received the refused one.
+///
+/// Test value: red if any record is pushed, or a mirror commits, before every destination's room
+/// is checked.
+#[test]
+fn a_vca_batch_that_overfills_a_queue_is_refused_whole() {
+    let model = vca_ride_model(
+        &[("bass", [-2.0, -5.0], [false; 2])],
+        &[("band", [-3.0; 2], [false; 2], &["bass", "drums"])],
+    );
+    let mut live = vca_ride_host(&model, 4);
+    let mut twin = vca_ride_host(&model, 4);
+    vca_lockstep(&mut [&mut live, &mut twin], None, 0, 1, "warm-up");
+    for host in [&mut live, &mut twin] {
+        for index in 0..4 {
+            stage_fader_db(host, index, VCA_BASS, 2, -2.0 - index as f32, 0);
+        }
+        assert_eq!(
+            host.submit_commands(4),
+            RESULT_OK,
+            "fill bass's fader queue"
+        );
+    }
+    assert_eq!(follow_fader_room(&live)[VCA_BASS as usize], 0);
+    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, -9.0, 0);
+    assert_vca_refusal(
+        &mut live,
+        1,
+        RESULT_BACKPRESSURE,
+        COMMAND_REASON_BACKPRESSURE,
+        0,
+        "a ride into a full member queue",
+    );
+    vca_lockstep(
+        &mut [&mut live, &mut twin],
+        Some(1),
+        1,
+        1,
+        "after the refusal",
+    );
+    for host in [&mut live, &mut twin] {
+        stage_vca(host, 0, COMMAND_VCA_FADER_DB, 0, 2, -9.0, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "the identical ride");
+    }
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut twin],
+        Some(1),
+        2,
+        2,
+        "the admitted ride vs twin"
+    ));
+
+    for host in [&mut live, &mut twin] {
+        for index in 0..4 {
+            stage_send(
+                host,
+                index,
+                COMMAND_ROUTE_GAIN_DB,
+                1,
+                0,
+                [-1.0 - index as f32, 0.0, 0.0, 0.0],
+            );
+        }
+        assert_eq!(
+            host.submit_commands(4),
+            RESULT_OK,
+            "fill drums-verb's queue"
+        );
+    }
+    assert_eq!(send_queue_room(&live)[1], 0);
+    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
+    assert_vca_refusal(
+        &mut live,
+        1,
+        RESULT_BACKPRESSURE,
+        COMMAND_REASON_BACKPRESSURE,
+        0,
+        "a mute whose follow record meets a full send queue",
+    );
+    vca_lockstep(
+        &mut [&mut live, &mut twin],
+        Some(1),
+        4,
+        1,
+        "after the refusal",
+    );
+    for host in [&mut live, &mut twin] {
+        stage_vca(host, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "the identical mute");
+        assert_eq!(follow_lanes(host), [[true; 2], [true; 2]]);
+    }
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut twin],
+        Some(1),
+        5,
+        3,
+        "the admitted mute vs twin"
+    ));
+}
+
+/// Issue #1245 gate 5: a VCA mute flows to the members' following sends and survives solo. In
+/// #1224's follow fixture with `drums` and `bass` in VCA `band` (-3 dB): muting `band` silences
+/// both members and both pre-fader `follows_mute` sends, bit-identically to a host booted with
+/// `band` muted; soloing `vocal` (sent to both) and un-soloing it keeps them silent; un-muting
+/// `band` restores them bit-identically to an unedited host. Every gesture ramps 480 samples.
+///
+/// Test value: red if the VCA mute term does not reach the follow composition, if un-soloing
+/// clears it, or if the live path and preparation disagree about a VCA-muted member's send.
+#[test]
+fn a_vca_mute_silences_member_sends_and_survives_solo() {
+    let band = |muted: bool| {
+        vca_ride_host(
+            &vca_ride_model(&[], &[("band", [-3.0; 2], [muted; 2], &["bass", "drums"])]),
+            16,
+        )
+    };
+    let mut live = band(false);
+    let mut muted = band(true);
+    let mut open = band(false);
+    assert_eq!(follow_lanes(&muted), [[true; 2], [true; 2]], "prepared");
+    let hosts = |live: &mut AudioWorkletEngineHost,
+                 muted: &mut AudioWorkletEngineHost,
+                 open: &mut AudioWorkletEngineHost,
+                 compare: Option<usize>,
+                 first: u64,
+                 blocks: u64,
+                 what: &str| {
+        vca_lockstep(&mut [live, muted, open], compare, first, blocks, what)
+    };
+    hosts(&mut live, &mut muted, &mut open, None, 0, 1, "warm-up");
+    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "mute band");
+    assert_eq!(
+        follow_lanes(&live),
+        [[true; 2], [true; 2]],
+        "both sends follow"
+    );
+    hosts(&mut live, &mut muted, &mut open, None, 1, 4, "mute ramp");
+    assert!(hosts(
+        &mut live,
+        &mut muted,
+        &mut open,
+        Some(1),
+        5,
+        2,
+        "muted band vs booted muted"
+    ));
+    for (on, first) in [(true, 7), (false, 13)] {
+        for host in [&mut live, &mut muted] {
+            stage_solo(host, 0, SOLO_FOLLOW_VOCAL, on, 480);
+            assert_eq!(host.submit_commands(1), RESULT_OK, "solo vocal {on}");
+            assert_eq!(follow_lanes(host), [[true; 2], [true; 2]], "solo {on}");
+        }
+        hosts(
+            &mut live,
+            &mut muted,
+            &mut open,
+            None,
+            first,
+            4,
+            "solo ramp",
+        );
+        assert!(hosts(
+            &mut live,
+            &mut muted,
+            &mut open,
+            Some(1),
+            first + 4,
+            2,
+            &format!("solo vocal {on}: muted band vs booted muted")
+        ));
+    }
+    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 0.0, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-mute band");
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [false; 2]],
+        "both sends reopen"
+    );
+    hosts(
+        &mut live,
+        &mut muted,
+        &mut open,
+        None,
+        19,
+        4,
+        "un-mute ramp",
+    );
+    assert!(hosts(
+        &mut live,
+        &mut muted,
+        &mut open,
+        Some(2),
+        23,
+        3,
+        "un-muted band vs unedited"
+    ));
+}
+
+/// One VCA record shape: `(what, kind, rack, channel, effect, parameter, values, reason)`.
+type VcaShape = (&'static str, u32, u8, u8, u32, u32, [f32; 4], u32);
+
+/// Issue #1245 gate 6: addressing and shape.
+///
+/// * A VCA index at or past the VCA count -- and index 0 in a session without VCAs -- refuses
+///   `unknownVca` at its wire index and stages nothing, even behind a valid record.
+/// * A wrong `rack`, a nonzero `values[1..]`, a bad `channel`, or a nonzero `effect_index` or
+///   `parameter_id` is `malformed`; an offset of 24.5 or -144.5 dB, or a mute of 0.5, is `domain`;
+///   the domain edges are admitted.
+///
+/// (A host without live controls has no command staging to submit from, so its
+/// `unsupportedKind` arm, kept as the route kinds keep theirs, is not reachable from the wire.)
+///
+/// Test value: red if a VCA index is checked against another table, a bad index is refused with a
+/// reason that misnames it, or the shape rules differ from kinds 3 and 4's plus the route kinds'
+/// zero `effect_index` and `parameter_id`.
+#[test]
+fn vca_records_are_addressed_and_shape_checked() {
+    let model = vca_ride_model(&[], &[("band", [-3.0; 2], [false; 2], &["bass", "drums"])]);
+    let mut host = vca_ride_host(&model, 16);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    for kind in [COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE] {
+        for vca in [1_u32, 5, u32::MAX] {
+            stage_vca(&mut host, 0, kind, 0, 2, 1.0, 0);
+            stage_vca(&mut host, 1, kind, vca, 2, 1.0, 0);
+            assert_vca_refusal(
+                &mut host,
+                2,
+                RESULT_INVALID_ARGUMENT,
+                COMMAND_REASON_UNKNOWN_VCA,
+                1,
+                &format!("kind {kind} at VCA {vca}"),
+            );
+        }
+    }
+    let one = [1.0, 0.0, 0.0, 0.0];
+    let shapes: [VcaShape; 16] = [
+        (
+            "an inserts rack",
+            COMMAND_VCA_FADER_DB,
+            1,
+            2,
+            0,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "a console rack",
+            COMMAND_VCA_MUTE,
+            3,
+            2,
+            0,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "channel 3",
+            COMMAND_VCA_FADER_DB,
+            255,
+            3,
+            0,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "channel 255",
+            COMMAND_VCA_MUTE,
+            255,
+            255,
+            0,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "values[1]",
+            COMMAND_VCA_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            [1.0, 1.0, 0.0, 0.0],
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "values[3]",
+            COMMAND_VCA_MUTE,
+            255,
+            0,
+            0,
+            0,
+            [1.0, 0.0, 0.0, 1.0],
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "an effect word",
+            COMMAND_VCA_FADER_DB,
+            255,
+            2,
+            1,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "an effect word",
+            COMMAND_VCA_MUTE,
+            255,
+            2,
+            1,
+            0,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "a parameter word",
+            COMMAND_VCA_FADER_DB,
+            255,
+            1,
+            0,
+            1,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "a parameter word",
+            COMMAND_VCA_MUTE,
+            255,
+            1,
+            0,
+            1,
+            one,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            "24.5 dB",
+            COMMAND_VCA_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            [24.5, 0.0, 0.0, 0.0],
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            "-144.5 dB",
+            COMMAND_VCA_FADER_DB,
+            255,
+            0,
+            0,
+            0,
+            [-144.5, 0.0, 0.0, 0.0],
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            "a mute of 0.5",
+            COMMAND_VCA_MUTE,
+            255,
+            2,
+            0,
+            0,
+            [0.5, 0.0, 0.0, 0.0],
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            "a mute of 2",
+            COMMAND_VCA_MUTE,
+            255,
+            1,
+            0,
+            0,
+            [2.0, 0.0, 0.0, 0.0],
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            "a mute of -1",
+            COMMAND_VCA_MUTE,
+            255,
+            0,
+            0,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            "an offset with a mute's value word",
+            COMMAND_VCA_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            [0.0, 0.0, 1.0, 0.0],
+            COMMAND_REASON_MALFORMED,
+        ),
+    ];
+    for (what, kind, rack, channel, effect, parameter, values, reason) in shapes {
+        stage_vca(&mut host, 0, COMMAND_VCA_FADER_DB, 0, 2, -1.0, 0);
+        stage_command(
+            &mut host, 1, kind, rack, channel, 0, effect, parameter, 0, values,
+        );
+        assert_vca_refusal(&mut host, 2, RESULT_INVALID_ARGUMENT, reason, 1, what);
+    }
+    for (block, (kind, value)) in [
+        (COMMAND_VCA_FADER_DB, 24.0),
+        (COMMAND_VCA_FADER_DB, -144.0),
+        (COMMAND_VCA_MUTE, 1.0),
+        (COMMAND_VCA_MUTE, 0.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for channel in 0..3 {
+            stage_vca(&mut host, 0, kind, 0, channel, value, 0);
+            assert_eq!(
+                host.submit_commands(1),
+                RESULT_OK,
+                "kind {kind} {value} on channel {channel}"
+            );
+        }
+        follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1 + block as u64, None);
+    }
+
+    let mut bare = vca_ride_host(&vca_ride_model(&[], &[]), 16);
+    follow_render(&mut bare, &SOLO_FOLLOW_TRACKS, 0, None);
+    for kind in [COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE] {
+        stage_vca(&mut bare, 0, kind, 0, 2, 0.0, 0);
+        assert_vca_refusal(
+            &mut bare,
+            1,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_VCA,
+            0,
+            "a session without VCAs",
+        );
+    }
+}
+
+/// Issue #1245 gate 7 (D4): the decode staging holds a full batch and its VCA records. Eight
+/// tracks, each with a compressor insert and an own fader of `[-1, -4]` dB, all in VCA `all`:
+/// 254 `channel = both` threshold records (508 entries), one ride of `all` (sixteen fader records,
+/// both lanes of every member, which differ) and one solo of `t0` (seven coalesced mute records)
+/// need 531 entries, past the 528 that `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` holds.
+///
+/// Test value: red if the staging is not grown by the reached strips, so a full batch plus its
+/// VCA records is refused `malformed` by the staging bound.
+#[test]
+fn the_decode_staging_holds_a_full_batch_and_its_vca_records() {
+    const TRACKS: [&str; 8] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+    let ids: Vec<String> = TRACKS.iter().map(|track| format!("{track}-main")).collect();
+    let routes: Vec<FollowRoute<'_>> = ids
+        .iter()
+        .zip(TRACKS)
+        .map(|(id, track)| follow_main(id, track, false))
+        .collect();
+    let (_, _, _, compressor, _) = strip_base();
+    let document = follow_document(&TRACKS, &[], &routes, &[], None);
+    let mut model = parse_session_json(&document).expect("staging session");
+    for track in &mut model.tracks {
+        track.inserts.effects = vec![compressor.clone()];
+        (track.fader.left_db, track.fader.right_db) = (-1.0, -4.0);
+    }
+    model.vcas = vec![session::Vca {
+        id: strip_id("all"),
+        fader: session::DualMonoFader {
+            left_db: 0.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+        members: TRACKS.iter().map(|track| strip_id(track)).collect(),
+    }];
+    let document = canonical_session_json(&model).expect("staging session canonicalizes");
+    let mut host = strip_boot(&document, strip_options(128, 0, 0));
+    assert_eq!(
+        host.command_staging_entries(),
+        Some(MAXIMUM_COMMAND_RECORDS as usize * 2 + TRACKS.len() * 2 + TRACKS.len() * 2),
+    );
+    follow_render(&mut host, &TRACKS, 0, None);
+    let room = follow_fader_room(&host);
+    let records = MAXIMUM_COMMAND_RECORDS as usize;
+    for index in 0..records - 2 {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_PARAM,
+            1,
+            2,
+            (index % TRACKS.len()) as u32,
+            0,
+            1,
+            0,
+            [-12.0, 0.0, 0.0, 0.0],
+        );
+    }
+    stage_vca(&mut host, records - 2, COMMAND_VCA_FADER_DB, 0, 2, -6.0, 64);
+    stage_solo(&mut host, records - 1, 0, true, 64);
+    assert_eq!(
+        host.submit_commands(MAXIMUM_COMMAND_RECORDS),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason,
+    );
+    assert_eq!(host.command_report().admitted, MAXIMUM_COMMAND_RECORDS);
+    let owed: Vec<usize> = room
+        .iter()
+        .enumerate()
+        .map(|(strip, room)| room - if strip == 0 { 2 } else { 3 })
+        .collect();
+    assert_eq!(
+        follow_fader_room(&host),
+        owed,
+        "two fader and one mute record each"
+    );
+}
+
+/// Issue #1245 gate 8: VCA rides, member moves and VCA mutes with follow records admit, and the
+/// next block renders, allocating and freeing nothing.
+///
+/// Test value: red if VCA admission or its passes allocate on the audio thread.
+#[test]
+fn vca_rides_and_mutes_admit_and_render_without_allocating() {
+    let model = vca_ride_model(
+        &[("bass", [-2.0, -5.0], [false; 2])],
+        &[
+            ("band", [-3.0; 2], [false; 2], &["bass", "drums", "fx"]),
+            ("fx", [1.5; 2], [false; 2], &["room"]),
+        ],
+    );
+    let mut host = vca_ride_host(&model, 64);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    // Warm every path once outside the measurement.
+    stage_vca(&mut host, 0, COMMAND_VCA_FADER_DB, 0, 2, -9.0, 480);
+    stage_vca(&mut host, 1, COMMAND_VCA_MUTE, 0, 2, 1.0, 480);
+    stage_fader_db(&mut host, 2, SOLO_FOLLOW_DRUMS, 2, -1.0, 0);
+    assert_eq!(host.submit_commands(3), RESULT_OK);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
+    stage_vca(&mut host, 0, COMMAND_VCA_MUTE, 0, 2, 0.0, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    for (feed, id) in SOLO_FOLLOW_TRACKS.iter().enumerate() {
+        submit_strip_source(&mut host, id, 2, &strip_planes(feed as u64, 2));
+    }
+    stage_vca(&mut host, 0, COMMAND_VCA_FADER_DB, 1, 0, 6.0, 480);
+    stage_fader_db(&mut host, 1, SOLO_FOLLOW_DRUMS, 2, 3.0, 0);
+    stage_vca(&mut host, 2, COMMAND_VCA_MUTE, 0, 1, 1.0, 128);
+    stage_solo(&mut host, 3, SOLO_FOLLOW_VOCAL, true, 64);
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            (host.submit_commands(4), host.render_next())
+        });
+    assert_eq!(admission, RESULT_OK, "the VCA batch is admitted");
+    assert_eq!(render, RESULT_OK);
+    assert_eq!(follow_lanes(&host), [[true; 2], [true; 2]]);
+    assert_eq!(allocations, 0, "admission/render allocated");
+    assert_eq!(deallocations, 0, "admission/render freed");
+}
+
+/// Issue #1245 D4: the browser's exact retained budget charges the live VCA state. Against the
+/// same session without VCAs, a session with two nested VCAs over `bass`, `drums` and `room`
+/// retains exactly the document and ID-staging growth, the compiled model's growth, every byte of
+/// an independently built `LiveVcaState` (tables, mirrors and shadow) and two decoded-command
+/// entries per reached strip; the metadata row moves by all but the document rows. One byte below
+/// the exact total refuses.
+///
+/// Test value: red if the browser leaves the VCA state or the staging growth out of its exact
+/// retained report, so a budget that cannot hold them admits.
+#[test]
+fn the_exact_retained_budget_charges_the_vca_state() {
+    let with = canonical_session_json(&vca_ride_model(
+        &[],
+        &[
+            ("band", [-3.0; 2], [false; 2], &["bass", "drums", "fx"]),
+            ("fx", [1.5; 2], [false; 2], &["room"]),
+        ],
+    ))
+    .expect("VCA session canonicalizes");
+    let without =
+        canonical_session_json(&vca_ride_model(&[], &[])).expect("plain session canonicalizes");
+    let resources = |document: &str| *strip_boot(document, strip_options(16, 0, 0)).resources();
+    let (with_rows, without_rows) = (resources(&with), resources(&without));
+    let state = {
+        let parsed = parse_host_session(&with).expect("VCA session parse");
+        let compiled = compile_host_model(
+            &parsed,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("VCA session compile");
+        LiveVcaState::try_new(compiled.normalized_model()).expect("VCA state")
+    };
+    assert_eq!(state.reached_strip_count(), 3);
+    let vca = state.retained_bytes();
+    assert!(vca > 0);
+    let staging = 2 * 3 * size_of::<StagedCommand>() as u64;
+    let model = send_prepare_report(&with, 16).session_model_bytes
+        - send_prepare_report(&without, 16).session_model_bytes;
+    let document_rows = (with_rows.session_document_bytes - without_rows.session_document_bytes)
+        + (with_rows.id_staging_bytes - without_rows.id_staging_bytes);
+    assert_eq!(
+        with_rows.bridge_retained_bytes - without_rows.bridge_retained_bytes,
+        document_rows + model + vca + staging,
+        "the VCA state's whole retained share"
+    );
+    assert_eq!(
+        with_rows.bridge_metadata_bytes - without_rows.bridge_metadata_bytes,
+        model + vca + staging,
+        "the VCA state's whole metadata share"
+    );
+    assert!(with_rows.largest_bridge_allocation_bytes >= state.largest_allocation_bytes());
+
+    let exact = exact_retained_report_total(&with_rows);
+    let budget = |maximum_memory_bytes: u64| {
+        AudioWorkletEngineHost::boot(
+            with.as_bytes(),
+            WebBootOptions {
+                maximum_memory_bytes,
+                ..strip_options(16, 0, 0)
+            },
+        )
+    };
+    assert!(
+        budget(exact).is_ok(),
+        "the exact retained total is admitted"
+    );
+    let refused = budget(exact - 1)
+        .err()
+        .expect("one byte below the exact retained total refuses");
+    assert_eq!(refused.result(), RESULT_REFUSED_BUDGET);
+}
+
+/// A session of `tracks` tracks (each with its own source and a main route) and a chain of `chain`
+/// VCAs: `v000` holds the first `chained` tracks and each next VCA holds the one before it, so each
+/// of them is reached by every VCA (`chained * chain` pairs); the last VCA of the chain also holds
+/// the remaining tracks directly (one pair each). `extra` more VCAs, after the chain in ID order,
+/// each hold track `t000` alone.
+fn vca_bound_document(tracks: usize, chain: usize, chained: usize, extra: usize) -> String {
+    let names: Vec<String> = (0..tracks).map(|track| format!("t{track:03}")).collect();
+    let ids: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mains: Vec<String> = names.iter().map(|track| format!("{track}-main")).collect();
+    let routes: Vec<FollowRoute<'_>> = mains
+        .iter()
+        .zip(&ids)
+        .map(|(id, track)| follow_main(id, track, false))
+        .collect();
+    let mut model = parse_session_json(&follow_document(&ids, &[], &routes, &[], None))
+        .expect("bound session parses");
+    let fader = session::DualMonoFader {
+        left_db: -0.5,
+        right_db: -0.5,
+        left_mute: false,
+        right_mute: false,
+    };
+    model.vcas = (0..chain)
+        .map(|index| session::Vca {
+            id: strip_id(&format!("v{index:03}")),
+            fader: fader.clone(),
+            members: {
+                let mut members: Vec<session::StableId> = if index == 0 {
+                    ids[..chained].iter().map(|track| strip_id(track)).collect()
+                } else {
+                    vec![strip_id(&format!("v{:03}", index - 1))]
+                };
+                if index + 1 == chain {
+                    members.extend(ids[chained..].iter().map(|track| strip_id(track)));
+                }
+                members
+            },
+        })
+        .chain((0..extra).map(|index| session::Vca {
+            id: strip_id(&format!("w{index:03}")),
+            fader: fader.clone(),
+            members: vec![strip_id("t000")],
+        }))
+        .collect();
+    canonical_session_json(&model).expect("bound session canonicalizes")
+}
+
+/// Issue #1245 amendment A1: the browser bounds per-command VCA work at boot.
+///
+/// * 64 tracks under a chain of 256 VCAs is exactly [`MAXIMUM_BROWSER_VCA_REACH_PAIRS`] (16,384)
+///   pairs, every track reached by [`MAXIMUM_BROWSER_VCAS`] VCAs: it boots, and the worst batch
+///   for it -- a ride and a mute of the top VCA (every pair recomposed, every strip's mute and
+///   follow records) and 254 member moves on two tracks every VCA reaches -- is admitted and
+///   renders. Its release-mode time is
+///   `a_vca_batch_at_the_bound_fits_a_quantum_in_release`'s.
+/// * One pair more (a 65th track held by the top VCA alone) is refused `web.vca.reach_pairs`, and
+///   257 VCAs (each holding one track) `web.vca.maximum_vcas`, both `RESULT_REFUSED_BUDGET`,
+///   before any table is built; 256 VCAs boot.
+///
+/// The boot projection of the VCA state's retained bytes equals what the state keeps, and its
+/// transient projection covers the reach lists construction holds.
+///
+/// Test value: red if the bound is not enforced, counts pairs differently from the reach the
+/// live state builds, mis-projects the state's bytes, or if the worst batch at the bound is
+/// refused.
+#[test]
+fn the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound() {
+    let refusal = |document: &str| {
+        AudioWorkletEngineHost::boot(document.as_bytes(), strip_options(256, 0, 0))
+            .err()
+            .expect("past the bound refuses")
+    };
+    for (document, code) in [
+        (vca_bound_document(65, 256, 64, 0), "web.vca.reach_pairs"),
+        (vca_bound_document(4, 0, 0, 257), "web.vca.maximum_vcas"),
+    ] {
+        let refused = refusal(&document);
+        assert_eq!(
+            refused.result(),
+            RESULT_REFUSED_BUDGET,
+            "{code}: {}",
+            String::from_utf8_lossy(refused.diagnostic())
+        );
+        assert_eq!(
+            refused.diagnostic(),
+            fixed_diagnostic(code).as_slice(),
+            "{code}"
+        );
+    }
+    let fits = vca_bound_document(4, 0, 0, 256);
+    assert!(
+        AudioWorkletEngineHost::boot(fits.as_bytes(), strip_options(256, 0, 0)).is_ok(),
+        "256 VCAs boot"
+    );
+
+    let document = vca_bound_document(64, 256, 64, 0);
+    let parsed = parse_session_json(&document).expect("bound session parses");
+    let shape = browser_vca_shape(&parsed).expect("at the bound");
+    assert_eq!(shape.pairs, MAXIMUM_BROWSER_VCA_REACH_PAIRS);
+    let mut host = strip_boot(&document, strip_options(256, 0, 0));
+    {
+        let vcas = &host.ready.as_ref().expect("ready").vcas;
+        let pairs: usize = (0..vcas.vca_count())
+            .map(|vca| vcas.reached_by(vca).len())
+            .sum();
+        assert_eq!(pairs as u64, shape.pairs, "the live state's pairs");
+        // The boot projection charges exactly what the state keeps, and at least the reach lists
+        // its construction holds twice over.
+        assert_eq!(shape.retained_bytes(), Some(vcas.retained_bytes()));
+        let lists: u64 = parsed
+            .vca_reach()
+            .iter()
+            .map(|list| (size_of::<Vec<usize>>() + list.capacity() * size_of::<usize>()) as u64)
+            .sum();
+        let faders = 64 * size_of::<session::EffectiveStripFader>() as u64;
+        assert!(shape.transient_bytes().expect("projection") >= 2 * lists + faders);
+    }
+    let elapsed = vca_worst_batch_at_the_bound(&mut host);
+    eprintln!("#1245 A1: a worst batch at the VCA bound admitted in {elapsed:?}");
+}
+
+/// Admit the worst batch for [`vca_bound_document`]`(64, 256, 64, 0)` on a booted `host` -- a ride
+/// and a mute of the top VCA, then 254 member moves on the two tracks every VCA reaches -- and
+/// render a block on either side. Returns the admission's wall time.
+fn vca_worst_batch_at_the_bound(host: &mut AudioWorkletEngineHost) -> std::time::Duration {
+    let tracks: Vec<String> = (0..64).map(|track| format!("t{track:03}")).collect();
+    let ids: Vec<&str> = tracks.iter().map(String::as_str).collect();
+    follow_render(host, &ids, 0, None);
+    let top = 255;
+    stage_vca(host, 0, COMMAND_VCA_FADER_DB, top, 0, -7.0, 128);
+    stage_vca(host, 1, COMMAND_VCA_MUTE, top, 2, 1.0, 128);
+    for index in 2..MAXIMUM_COMMAND_RECORDS as usize {
+        stage_fader_db(
+            host,
+            index,
+            (index % 2) as u32,
+            (index % 3) as u8,
+            -(index as f32) / 32.0,
+            0,
+        );
+    }
+    let started = std::time::Instant::now();
+    let result = host.submit_commands(MAXIMUM_COMMAND_RECORDS);
+    let elapsed = started.elapsed();
+    assert_eq!(result, RESULT_OK, "reason {}", host.command_report().reason);
+    follow_render(host, &ids, 1, None);
+    elapsed
+}
+
+/// Release-mode half of the bound test above (issue #1245 amendment A1): the worst batch at the
+/// VCA bound is admitted in less than one 128-frame quantum at 48 kHz (2.67 ms) in the shipped
+/// profile. A debug build is several times slower, so this runs only in release, nightly,
+/// `--ignored` (the `maximum_document_dense_invalid_boot_finishes_under_one_second_in_release`
+/// convention).
+///
+/// Test value: red if a batch at the bound costs the worklet a quantum or more, which no per-PR
+/// test measures.
+#[test]
+#[ignore = "release-mode budget; runs nightly"]
+fn a_vca_batch_at_the_bound_fits_a_quantum_in_release() {
+    let document = vca_bound_document(64, 256, 64, 0);
+    let mut host = strip_boot(&document, strip_options(256, 0, 0));
+    let elapsed = vca_worst_batch_at_the_bound(&mut host);
+    let quantum = std::time::Duration::from_secs_f64(128.0 / 48_000.0);
+    assert!(elapsed < quantum, "{elapsed:?} is not under one quantum");
+}
+
+/// Issue #1245 D3 (amendment A1): a kind 4 after a kind 17 in the same batch composes with the
+/// new VCA mute. `band` holds `drums` alone; one batch mutes `band` over 480 samples and then
+/// sends `drums` an explicit un-mute with smoothing 0. `drums` is already VCA-muted when the kind
+/// 4 composes, so its record carries `muted` and snaps it (and its following send) muted at once:
+/// the first block after the batch is bit-identical to a host booted with `band` muted.
+///
+/// Test value: red if the strip-mute owner's VCA term is not refreshed before a later kind 4 in
+/// the batch composes, so the coalesced record ramps the member over the VCA's window instead.
+#[test]
+fn a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it() {
+    let band = |muted: bool| {
+        vca_ride_host(
+            &vca_ride_model(&[], &[("band", [0.0; 2], [muted; 2], &["drums"])]),
+            16,
+        )
+    };
+    let mut live = band(false);
+    let mut muted = band(true);
+    vca_lockstep(&mut [&mut live, &mut muted], None, 0, 1, "warm-up");
+    stage_vca(&mut live, 0, COMMAND_VCA_MUTE, 0, 2, 1.0, 480);
+    stage_lane_mute(&mut live, 1, SOLO_FOLLOW_DRUMS, 2, false, 0);
+    assert_eq!(
+        live.submit_commands(2),
+        RESULT_OK,
+        "mute band, then un-mute drums"
+    );
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [true; 2]],
+        "drums-verb follows"
+    );
+    assert!(vca_lockstep(
+        &mut [&mut live, &mut muted],
+        Some(1),
+        1,
+        3,
+        "the batch's first block vs booted muted"
+    ));
+}
+
+/// The test's own effective mute of `strip`'s `lane` with no solo: its own mute or any reaching
+/// VCA's, from its own top-down reach.
+fn vca_reference_mute(model: &session::SessionModel, strip: usize, lane: usize) -> bool {
+    let id = VCA_STRIPS[strip];
+    let own = model
+        .tracks
+        .iter()
+        .map(|track| (track.id.as_str(), &track.fader))
+        .chain(model.submixes.iter().map(|s| (s.id.as_str(), &s.fader)))
+        .find(|(candidate, _)| *candidate == id)
+        .expect("strip")
+        .1;
+    [own.left_mute, own.right_mute][lane]
+        || vca_reference_reach(&model.vcas, id).iter().any(|index| {
+            let vca = &model.vcas[*index].fader;
+            [vca.left_mute, vca.right_mute][lane]
+        })
+}
+
+/// A random VCA forest for the ramp differential: two to six VCAs over four levels (nested, with
+/// diamonds), tracks and submixes as members, offsets that include both domain edges, drawn lane
+/// mutes; own faders drawn across the domain.
+fn vca_ramp_model(draw: &mut SendDraw) -> session::SessionModel {
+    let mut model = vca_ride_model(&[], &[]);
+    for strip in VCA_STRIPS {
+        let mut own = || {
+            if draw.below(6) == 0 {
+                draw.uniform(-144.0, 24.0)
+            } else {
+                draw.uniform(-12.0, 6.0)
+            }
+        };
+        let (left_db, right_db) = (own(), own());
+        let (left_mute, right_mute) = (draw.below(8) == 0, draw.below(8) == 0);
+        let fader = vca_strip_fader(&mut model, strip);
+        (fader.left_db, fader.right_db) = (left_db, right_db);
+        (fader.left_mute, fader.right_mute) = (left_mute, right_mute);
+    }
+    let ids = ["va", "vb", "vc", "vd", "ve", "vf"];
+    let count = 2 + draw.below(5) as usize;
+    let levels: Vec<u64> = (0..count).map(|_| draw.below(4)).collect();
+    model.vcas = (0..count)
+        .map(|i| {
+            let mut members: Vec<session::StableId> = Vec::new();
+            for strip in VCA_STRIPS {
+                if draw.below(5) < 2 {
+                    members.push(strip_id(strip));
+                }
+            }
+            for j in 0..count {
+                if levels[j] > levels[i] && draw.below(2) == 0 {
+                    members.push(strip_id(ids[j]));
+                }
+            }
+            let mut offset = || match draw.below(8) {
+                0 => 24.0,
+                1 => -144.0,
+                2 => draw.uniform(-144.0, 24.0),
+                _ => draw.uniform(-12.0, 12.0),
+            };
+            let (left_db, right_db) = (offset(), offset());
+            session::Vca {
+                id: strip_id(ids[i]),
+                fader: session::DualMonoFader {
+                    left_db,
+                    right_db,
+                    left_mute: draw.below(5) == 0,
+                    right_mute: draw.below(5) == 0,
+                },
+                members,
+            }
+        })
+        .collect();
+    parse_session_json(&canonical_session_json(&model).expect("canonical"))
+        .expect("canonical session parses")
+}
+
+/// Seeds of the VCA ramp differential: 40 seeds take about a second in debug.
+const VCA_RAMP_SEEDS: u64 = 8;
+
+/// Issue #1245 (verdict MINOR-1, the verifier's probe `sol_probe_ramps_match_direct_member_moves`):
+/// every record a VCA ride or mute derives carries the gesture's window. Random VCA forests
+/// ([`vca_ramp_model`]); six batches each of a ride (one lane or both, ramp 64 to 500 samples), a
+/// mute (one lane or both, its own ramp from the same set), or both. The reference is a VCA-free
+/// host whose own faders and mutes are the live host's effective values; for every lane whose
+/// effective value a batch changed it is told directly a kind 3 at the ride's ramp, or a kind 4 at
+/// the mute's ramp. Every block from the batch through the ramp, not only settled blocks, is
+/// bit-identical, and the two hosts' follow mirrors agree.
+///
+/// Test value: red if the VCA fader pass stages its members' records without the ride's ramp, or
+/// if a kind 17 leaves the coalesced mute window unset (members and their following sends then
+/// hard-switch, an audible click), which every settled or ramp-0 test misses.
+#[test]
+fn a_vca_ride_and_mute_ramp_as_direct_member_moves() {
+    let mut checked = 0;
+    for seed in 1..=VCA_RAMP_SEEDS {
+        let mut draw = SendDraw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xBEEF);
+        let model = vca_ramp_model(&mut draw);
+        let mut live = vca_ride_host(&model, 256);
+        let effective = |model: &session::SessionModel, strip: usize| {
+            (
+                [0, 1].map(|lane| vca_reference_effective(model, VCA_STRIPS[strip], lane).0),
+                [0, 1].map(|lane| vca_reference_mute(model, strip, lane)),
+            )
+        };
+        let mut flat = model.clone();
+        for (strip, id) in VCA_STRIPS.iter().enumerate() {
+            let (db, mute) = effective(&model, strip);
+            let fader = vca_strip_fader(&mut flat, id);
+            (fader.left_db, fader.right_db) = (db[0], db[1]);
+            (fader.left_mute, fader.right_mute) = (mute[0], mute[1]);
+        }
+        flat.vcas = Vec::new();
+        let mut reference = vca_ride_host(&flat, 256);
+        vca_lockstep(
+            &mut [&mut live, &mut reference],
+            Some(1),
+            0,
+            1,
+            &format!("seed {seed}: boot"),
+        );
+        let mut block = 1_u64;
+        let mut current = model;
+        for step in 0..6 {
+            let before: Vec<([f32; 2], [bool; 2])> = (0..VCA_STRIPS.len())
+                .map(|strip| effective(&current, strip))
+                .collect();
+            let ride_ramp = [64_u32, 200, 300, 500][draw.below(4) as usize];
+            let mute_ramp = [64_u32, 200, 300, 500][draw.below(4) as usize];
+            let mut records = 0;
+            let kinds = draw.below(3); // 0 a ride, 1 a mute, 2 both
+            if kinds != 1 {
+                let vca = draw.below(current.vcas.len() as u64) as usize;
+                let channel = draw.below(3) as u8;
+                let db = draw.uniform(-24.0, 12.0);
+                stage_vca(
+                    &mut live,
+                    records,
+                    COMMAND_VCA_FADER_DB,
+                    vca as u32,
+                    channel,
+                    db,
+                    ride_ramp,
+                );
+                records += 1;
+                let fader = &mut current.vcas[vca].fader;
+                if channel != 1 {
+                    fader.left_db = db;
+                }
+                if channel != 0 {
+                    fader.right_db = db;
+                }
+            }
+            if kinds != 0 {
+                let vca = draw.below(current.vcas.len() as u64) as usize;
+                let channel = draw.below(3) as u8;
+                let on = draw.below(2) == 0;
+                let value = if on { 1.0 } else { 0.0 };
+                stage_vca(
+                    &mut live,
+                    records,
+                    COMMAND_VCA_MUTE,
+                    vca as u32,
+                    channel,
+                    value,
+                    mute_ramp,
+                );
+                records += 1;
+                let fader = &mut current.vcas[vca].fader;
+                if channel != 1 {
+                    fader.left_mute = on;
+                }
+                if channel != 0 {
+                    fader.right_mute = on;
+                }
+            }
+            assert_eq!(
+                live.submit_commands(records as u32),
+                RESULT_OK,
+                "seed {seed} step {step}"
+            );
+            // The same changes, told directly: per changed lane, a kind 3 at the ride's ramp,
+            // then a kind 4 at the mute's ramp.
+            let mut direct = 0;
+            for (strip, (was_db, _)) in before.iter().enumerate() {
+                let (db, _) = effective(&current, strip);
+                let changed = [db[0] != was_db[0], db[1] != was_db[1]];
+                if changed == [true, true] && db[0] == db[1] {
+                    stage_fader_db(&mut reference, direct, strip as u32, 2, db[0], ride_ramp);
+                    direct += 1;
+                    continue;
+                }
+                for lane in 0..2 {
+                    if changed[lane] {
+                        let channel = lane as u8;
+                        stage_fader_db(
+                            &mut reference,
+                            direct,
+                            strip as u32,
+                            channel,
+                            db[lane],
+                            ride_ramp,
+                        );
+                        direct += 1;
+                    }
+                }
+            }
+            for (strip, (_, was_mute)) in before.iter().enumerate() {
+                let (_, mute) = effective(&current, strip);
+                let changed = [mute[0] != was_mute[0], mute[1] != was_mute[1]];
+                if changed == [true, true] && mute[0] == mute[1] {
+                    stage_lane_mute(&mut reference, direct, strip as u32, 2, mute[0], mute_ramp);
+                    direct += 1;
+                    continue;
+                }
+                for lane in 0..2 {
+                    if changed[lane] {
+                        let channel = lane as u8;
+                        stage_lane_mute(
+                            &mut reference,
+                            direct,
+                            strip as u32,
+                            channel,
+                            mute[lane],
+                            mute_ramp,
+                        );
+                        direct += 1;
+                    }
+                }
+            }
+            if direct > 0 {
+                assert_eq!(
+                    reference.submit_commands(direct as u32),
+                    RESULT_OK,
+                    "seed {seed} step {step}: direct"
+                );
+                checked += 1;
+            }
+            assert_eq!(
+                follow_lanes(&live),
+                follow_lanes(&reference),
+                "seed {seed} step {step}: follow"
+            );
+            vca_lockstep(
+                &mut [&mut live, &mut reference],
+                Some(1),
+                block,
+                6,
+                &format!("seed {seed} step {step} (ride @{ride_ramp}, mute @{mute_ramp})"),
+            );
+            block += 6;
+        }
+    }
+    assert!(
+        checked >= VCA_RAMP_SEEDS as usize * 2,
+        "the seeds reach batches that move a member ({checked})"
+    );
+}
+
+/// Issue #1245 (verdict MINOR-1, the verifier's probe
+/// `sol_probe_split_member_move_and_last_ride_ramp`). `band` holds `drums` with offsets
+/// `[-6, +3]` dB over its own `[0, 0]`: a both-lanes kind 3 on `drums` to -2 dB with a 300-sample
+/// ramp splits into effective `[-8, +1]`, and renders, through its ramp, as a VCA-free host told
+/// the two lane moves directly at the same ramp. Then two rides of `band` in one batch (ramps 64,
+/// then 400) take the last ride's ramp, as D3 says.
+///
+/// Test value: red if a split member move's two records drop the command's window, or if the VCA
+/// fader pass takes the first ride's ramp instead of the last's.
+#[test]
+fn a_split_member_move_ramps_and_the_last_ride_sets_the_window() {
+    let live_model = vca_ride_model(
+        &[("drums", [0.0; 2], [false; 2])],
+        &[("band", [-6.0, 3.0], [false; 2], &["drums"])],
+    );
+    let flat = vca_ride_model(&[("drums", [-6.0, 3.0], [false; 2])], &[]);
+    let mut live = vca_ride_host(&live_model, 16);
+    let mut reference = vca_ride_host(&flat, 16);
+    vca_lockstep(&mut [&mut live, &mut reference], Some(1), 0, 1, "boot");
+    stage_fader_db(&mut live, 0, SOLO_FOLLOW_DRUMS, 2, -2.0, 300);
+    assert_eq!(live.submit_commands(1), RESULT_OK);
+    stage_fader_db(&mut reference, 0, SOLO_FOLLOW_DRUMS, 0, -8.0, 300);
+    stage_fader_db(&mut reference, 1, SOLO_FOLLOW_DRUMS, 1, 1.0, 300);
+    assert_eq!(reference.submit_commands(2), RESULT_OK);
+    vca_lockstep(
+        &mut [&mut live, &mut reference],
+        Some(1),
+        1,
+        4,
+        "split member move ramp",
+    );
+    stage_vca(&mut live, 0, COMMAND_VCA_FADER_DB, 0, 2, -3.0, 64);
+    stage_vca(&mut live, 1, COMMAND_VCA_FADER_DB, 0, 2, 2.0, 400);
+    assert_eq!(live.submit_commands(2), RESULT_OK);
+    // Effective: own -2 dB + 2 dB = 0 dB on both lanes.
+    stage_fader_db(&mut reference, 0, SOLO_FOLLOW_DRUMS, 2, 0.0, 400);
+    assert_eq!(reference.submit_commands(1), RESULT_OK);
+    vca_lockstep(
+        &mut [&mut live, &mut reference],
+        Some(1),
+        5,
+        5,
+        "two rides: the last ramp",
+    );
+}
+
+/// Issue #1245 D3 (verdict MINOR-2, the verifier's probe
+/// `sol_probe_long_vca_mute_ramp_refuses_at_first_coalesced_index`): a kind 17 whose ramp exceeds
+/// `INDEXED_RAMP_LENGTH_MAXIMUM` and moves a following send (`band` holds `drums`, which
+/// `drums-verb` follows) refuses the whole submission `domain` at the coalesced record's wire
+/// index: the batch's first kind 9 or 17 record. Behind a fader move that is the long kind 17
+/// itself (1); behind a solo, the solo (0); behind an earlier short kind 17, the earlier one (2).
+/// Nothing moves.
+///
+/// Test value: red if a kind 17 does not set the coalesced record's wire index (the refusal then
+/// names index 0 whatever the batch), or if an overlong VCA mute ramp is admitted.
+#[test]
+fn a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index() {
+    let model = vca_ride_model(&[], &[("band", [0.0; 2], [false; 2], &["drums"])]);
+    let mut live = vca_ride_host(&model, 16);
+    follow_render(&mut live, &SOLO_FOLLOW_TRACKS, 0, None);
+    let too_long = lane::kernels::INDEXED_RAMP_LENGTH_MAXIMUM + 1;
+    stage_fader_db(&mut live, 0, VCA_BASS, 2, -1.0, 0);
+    stage_vca(&mut live, 1, COMMAND_VCA_MUTE, 0, 2, 1.0, too_long);
+    stage_fader_db(&mut live, 2, VCA_BASS, 2, -2.0, 0);
+    assert_vca_refusal(
+        &mut live,
+        3,
+        RESULT_INVALID_ARGUMENT,
+        COMMAND_REASON_DOMAIN,
+        1,
+        "long VCA mute ramp",
+    );
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 0);
+    stage_fader_db(&mut live, 1, VCA_BASS, 2, -1.0, 0);
+    stage_vca(&mut live, 2, COMMAND_VCA_MUTE, 0, 2, 1.0, too_long);
+    assert_vca_refusal(
+        &mut live,
+        3,
+        RESULT_INVALID_ARGUMENT,
+        COMMAND_REASON_DOMAIN,
+        0,
+        "solo, then a long VCA mute ramp",
+    );
+    stage_fader_db(&mut live, 0, VCA_BASS, 2, -1.0, 0);
+    stage_fader_db(&mut live, 1, VCA_BASS, 2, -2.0, 0);
+    stage_vca(&mut live, 2, COMMAND_VCA_MUTE, 0, 2, 1.0, 64);
+    stage_vca(&mut live, 3, COMMAND_VCA_MUTE, 0, 2, 1.0, too_long);
+    assert_vca_refusal(
+        &mut live,
+        4,
+        RESULT_INVALID_ARGUMENT,
+        COMMAND_REASON_DOMAIN,
+        2,
+        "the first kind 17's index",
+    );
+}
+
+// ---- Issue #1246: VCA groups enumerated for the SDK ----
+
+/// Issue #1246 gate 3 and D1: the VCA exports enumerate the session's VCAs in the order a VCA
+/// kind's index word reads, through ID staging sized for the longest VCA ID.
+///
+/// Three VCAs, listed in the model out of canonical order: a 73-byte `zz-` VCA, longer than every
+/// source, track, submix and route ID, that lists `vocal` and the nested `aa`; `mm` over `drums`;
+/// and `aa` over `bass`. The host boots the canonical document, which sorts them (`aa`, `mm`,
+/// `zz-`), so the order this test checks is the canonical one; independence from a document's
+/// declaration order is the SDK eval's (`vcaDocument()` boots a non-canonical document). The three
+/// reach distinct strip sets, so a kind 16 at exported index `i` must move exactly the strips of
+/// the VCA the export names at `i`.
+///
+/// Test value: red if the staging capacity ignores VCA IDs (the long ID's copy overruns the
+/// buffer and traps), if the export enumerates any order other than the live VCA state's (the
+/// index admission bounds and composes by), or if it answers without live controls.
+#[test]
+fn live_vca_ids_enumerate_in_vca_index_order_through_staging_sized_for_them() {
+    let long = format!("zz-{}", "x".repeat(70));
+    let rows: [VcaRow<'_>; 3] = [
+        (long.as_str(), [0.0; 2], [false; 2], &["vocal", "aa"]),
+        ("mm", [0.0; 2], [false; 2], &["drums"]),
+        ("aa", [0.0; 2], [false; 2], &["bass"]),
+    ];
+    let model = vca_ride_model(&[], &rows);
+    let document = canonical_session_json(&model).expect("long VCA session canonicalizes");
+    let canonical = ["aa", "mm", long.as_str()];
+
+    let handle = crate::ffi::test_boot(document.as_bytes(), strip_options(16, 0, 0));
+    assert_ne!(handle, 0, "the long-VCA session boots");
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, long.len() as u64);
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 3);
+    for (index, expected) in canonical.iter().enumerate() {
+        let length = miso_engine_web_v1_live_control_vca_id(handle, index as u32);
+        assert_eq!(length, expected.len() as u32, "VCA {index}");
+        assert_eq!(
+            crate::ffi::test_read_source_id(handle, length).expect("staged VCA ID"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, u32::MAX), 0);
+    assert_eq!(
+        miso_engine_web_v1_live_control_vca_count(handle.wrapping_add(1)),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 0);
+
+    // Exported VCA `i` is the VCA a kind 16 at index `i` rides: its members' effective faders, and
+    // nobody else's, move. Strip order: `bass` 0, `drums` 1, `vocal` 2, `room` 3, `verb` 4.
+    let reached: [&[usize]; 3] = [&[0], &[1], &[0, 2]];
+    for (index, strips) in reached.iter().enumerate() {
+        let mut host = vca_ride_host(&model, 16);
+        assert_eq!(host.live_control_vca_count(), 3);
+        let length = host.copy_live_control_vca_id(index as u32) as usize;
+        let staged = &host.buffers.as_ref().expect("buffers").source_id[..length];
+        assert_eq!(staged, canonical[index].as_bytes(), "VCA {index}");
+        let before = vca_mirror(&host);
+        stage_vca(&mut host, 0, COMMAND_VCA_FADER_DB, index as u32, 2, -6.0, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "ride VCA {index}");
+        let after = vca_mirror(&host);
+        let moved: Vec<usize> = (0..VCA_STRIPS.len())
+            .filter(|strip| before[*strip] != after[*strip])
+            .collect();
+        assert_eq!(moved, *strips, "VCA {index} ({}) moved", canonical[index]);
+    }
+
+    // Without live controls the VCA kinds are refused, so no VCA is enumerated.
+    let handle = crate::ffi::test_boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames: STRIP_QUANTUM * 4,
+            ..boot_options(STRIP_QUANTUM)
+        },
+    );
+    assert_ne!(
+        handle, 0,
+        "the long-VCA session boots without live controls"
+    );
+    assert_eq!(miso_engine_web_v1_live_control_vca_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_live_control_vca_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }

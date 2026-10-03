@@ -141,6 +141,12 @@ pub fn compile_session(
         .submixes
         .sort_by(|left, right| left.id.cmp(&right.id));
     normalized
+        .vcas
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    for vca in &mut normalized.vcas {
+        vca.members.sort();
+    }
+    normalized
         .outputs
         .sort_by(|left, right| left.id.cmp(&right.id));
     normalized

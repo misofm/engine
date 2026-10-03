@@ -260,6 +260,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --release -p host-web --lib -- --ignored --exact tests::maximum_document_dense_invalid_boot_finishes_under_one_second_in_release
+          cargo test --locked --release -p host-web --lib -- --ignored --exact tests::a_vca_batch_at_the_bound_fits_a_quantum_in_release
           cargo test --locked --release -p host-core --test effect_observation -- --ignored --exact observation_cost_classes_are_separated_from_a_computed_scan_in_release
           cargo test --locked --release -p host-core --test prepare -- --ignored --exact dense_refusal_diagnostics_finish_under_one_second_in_release
           cargo test --locked --release --config profile.release.overflow-checks=true -p graph-compiler --test scale -- --ignored --exact compiles_and_binds_65_537_tracks_with_builtins

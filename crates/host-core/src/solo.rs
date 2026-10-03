@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! effective_mute(strip, lane) = user_mute(strip, lane)
+//!     || vca_mute(strip, lane)
 //!     || (any_solo && !solo_safe(strip) && !solo(strip))
 //! ```
 //!
@@ -23,6 +24,16 @@
 //! A send that follows its source strip's mute reads it too, handed to
 //! [`crate::LiveRouteMuteFollow::delta`] as a function (issue #1224).
 //!
+//! # VCA mute
+//!
+//! A strip's VCA mute (issue #1242 D3) is whether any VCA reaching it mutes the lane, as
+//! `session::SessionModel::effective_strip_faders` composed it at preparation. Mute wins: solo
+//! never clears it, solo-safe is not VCA-safe (a VCA-muted submix stays muted), and a VCA has no
+//! solo, so it never counts toward `any_solo`. It is kept apart from the user mute, which stays
+//! the member's own intent. A live VCA mute move sets it through
+//! [`LiveControlSoloState::set_vca_mute`] with `crate::LiveVcaState::vca_mute` (issue #1244 D2),
+//! and it is transactional like the user mute.
+//!
 //! # One mute owner per strip
 //!
 //! The state is sized per strip (issue #1211 D2, DESIGN P7): the session's tracks, then its
@@ -36,7 +47,7 @@
 //!
 //! Once solo exists, the render side's `muted` flag holds the **effective** mute, and there is no
 //! host readback of it. So the host keeps [`LiveControlSoloState::user_mute`] -- the user's
-//! *intent*, initialized at preparation from the compiled session's baked fader mutes and updated
+//! *intent*, initialized at preparation from the compiled session's own fader mutes and updated
 //! on every admitted mute command. Un-soloing restores exactly that set, which is what makes
 //! snapshot/restore correct by construction: solo and user mute never overwrite each other.
 //!
@@ -78,8 +89,8 @@ use builtins::BuiltinLaneSelector;
 /// Whether a lane selector addresses one lane index.
 ///
 /// `BuiltinLaneSelector::covers` is private to its own crate; this is the same two-line rule and
-/// is exercised by every test in this module.
-const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
+/// is exercised by every test in this module and the VCA module.
+pub(crate) const fn covers(lanes: BuiltinLaneSelector, lane: usize) -> bool {
     matches!(
         (lanes, lane),
         (BuiltinLaneSelector::Left, 0)
@@ -104,6 +115,9 @@ pub struct StripMuteSeed {
     /// Whether the strip is solo-safe: never soloable and never solo-muted. Tracks are not; every
     /// submix is.
     pub solo_safe: bool,
+    /// `[left, right]`: whether any VCA reaching the strip mutes the lane (issue #1242 D3),
+    /// `session::EffectiveStripFader::vca_mute` of the compiled session.
+    pub vca_mute: [bool; 2],
 }
 
 /// Solo-in-place live-control state for one prepared session.
@@ -115,6 +129,8 @@ pub struct StripMuteSeed {
 pub struct LiveControlSoloState {
     /// Fixed at construction; no transaction ever changes it, so it has no shadow.
     solo_safe: Box<[bool]>,
+    /// Seeded at preparation (issue #1242 D3), moved by [`Self::set_vca_mute`] (issue #1244 D2).
+    vca_mute: Box<[[bool; 2]]>,
     solo: Box<[bool]>,
     user_mute: Box<[[bool; 2]]>,
     emitted: Box<[[bool; 2]]>,
@@ -122,6 +138,7 @@ pub struct LiveControlSoloState {
     solo_shadow: Box<[bool]>,
     user_mute_shadow: Box<[[bool; 2]]>,
     emitted_shadow: Box<[[bool; 2]]>,
+    vca_mute_shadow: Box<[[bool; 2]]>,
     solo_count_shadow: u32,
     open: bool,
 }
@@ -130,25 +147,35 @@ impl LiveControlSoloState {
     /// Allocate live-control solo state for a session with one seed per strip.
     ///
     /// `seeds[s].mutes` is `[left_mute, right_mute]` of strip `s` as the compiled session declares
-    /// it -- the same words the prepared fader section bakes -- and `seeds[s].solo_safe` says
-    /// whether the strip may be soloed (a track) or never (a submix). Solo starts disengaged, so the
-    /// effective mute at preparation *is* the user mute, and the emitted mirror starts equal to it:
-    /// the render plane has already been told exactly this much.
+    /// it -- the member's own intent -- `seeds[s].vca_mute` is the lanes a reaching VCA mutes, and
+    /// `seeds[s].solo_safe` says whether the strip may be soloed (a track) or never (a submix).
+    /// Solo starts disengaged, so the effective mute at preparation is `mutes || vca_mute` -- the
+    /// words the prepared fader section bakes -- and the emitted mirror starts equal to it: the
+    /// render plane has already been told exactly this much.
     ///
     /// # Errors
     ///
-    /// Returns the allocator's own error when any of the seven arrays cannot be reserved. Every
+    /// Returns the allocator's own error when any of the nine arrays cannot be reserved. Every
     /// allocation here happens at preparation; none of them can happen again later.
     pub fn try_new(seeds: &[StripMuteSeed]) -> Result<Self, TryReserveError> {
         let solo_safe = try_boxed_map(seeds, |seed| seed.solo_safe)?;
+        let vca_mute = try_boxed_map(seeds, |seed| seed.vca_mute)?;
+        let vca_mute_shadow = try_boxed_map(seeds, |seed| seed.vca_mute)?;
         let solo = try_boxed(seeds.len(), false)?;
         let solo_shadow = try_boxed(seeds.len(), false)?;
         let user_mute = try_boxed_map(seeds, |seed| seed.mutes)?;
         let user_mute_shadow = try_boxed_map(seeds, |seed| seed.mutes)?;
-        let emitted = try_boxed_map(seeds, |seed| seed.mutes)?;
-        let emitted_shadow = try_boxed_map(seeds, |seed| seed.mutes)?;
+        let prepared = |seed: &StripMuteSeed| {
+            [
+                seed.mutes[0] || seed.vca_mute[0],
+                seed.mutes[1] || seed.vca_mute[1],
+            ]
+        };
+        let emitted = try_boxed_map(seeds, prepared)?;
+        let emitted_shadow = try_boxed_map(seeds, prepared)?;
         Ok(Self {
             solo_safe,
+            vca_mute,
             solo,
             user_mute,
             emitted,
@@ -156,6 +183,7 @@ impl LiveControlSoloState {
             solo_shadow,
             user_mute_shadow,
             emitted_shadow,
+            vca_mute_shadow,
             solo_count_shadow: 0,
             open: false,
         })
@@ -203,6 +231,17 @@ impl LiveControlSoloState {
             .unwrap_or(false)
     }
 
+    /// Whether a VCA reaching the strip mutes the lane (issue #1242 D3). `false` for an index these
+    /// live controls have no strip for.
+    #[must_use]
+    pub fn vca_mute(&self, strip: usize, lane: usize) -> bool {
+        self.vca_mute
+            .get(strip)
+            .and_then(|lanes| lanes.get(lane))
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// The effective mute the render plane was last told, per lane.
     #[must_use]
     pub fn emitted_mute(&self, strip: usize, lane: usize) -> bool {
@@ -213,11 +252,13 @@ impl LiveControlSoloState {
             .unwrap_or(false)
     }
 
-    /// `user_mute || (any_solo && !solo_safe && !soloed)` -- the effective-mute composition, and
-    /// the **one** place it is written. Every host that needs an effective mute calls this.
+    /// `user_mute || vca_mute || (any_solo && !solo_safe && !soloed)` -- the effective-mute
+    /// composition, and the **one** place it is written. Every host that needs an effective mute
+    /// calls this. Solo never clears a user or VCA mute.
     #[must_use]
     pub fn effective_mute(&self, strip: usize, lane: usize) -> bool {
         self.user_mute(strip, lane)
+            || self.vca_mute(strip, lane)
             || (self.any_solo() && !self.solo_safe(strip) && !self.solo(strip))
     }
 
@@ -260,6 +301,19 @@ impl LiveControlSoloState {
                 self.user_mute[strip][lane] = muted;
             }
         }
+        true
+    }
+
+    /// Set one strip's VCA mute term, `[left, right]`: whether any VCA reaching it mutes the lane
+    /// now (`crate::LiveVcaState::vca_mute`, issue #1244 D2). `false`, changing nothing, for an
+    /// unknown strip. Like a user mute it is transactional, and [`Self::strip_delta`] then owes
+    /// exactly the lanes whose effective mute it changed.
+    pub fn set_vca_mute(&mut self, strip: usize, lanes: [bool; 2]) -> bool {
+        if strip >= self.vca_mute.len() {
+            return false;
+        }
+        self.shadow();
+        self.vca_mute[strip] = lanes;
         true
     }
 
@@ -312,6 +366,7 @@ impl LiveControlSoloState {
         self.solo.copy_from_slice(&self.solo_shadow);
         self.user_mute.copy_from_slice(&self.user_mute_shadow);
         self.emitted.copy_from_slice(&self.emitted_shadow);
+        self.vca_mute.copy_from_slice(&self.vca_mute_shadow);
         self.solo_count = self.solo_count_shadow;
         self.open = false;
     }
@@ -324,6 +379,7 @@ impl LiveControlSoloState {
         self.solo_shadow.copy_from_slice(&self.solo);
         self.user_mute_shadow.copy_from_slice(&self.user_mute);
         self.emitted_shadow.copy_from_slice(&self.emitted);
+        self.vca_mute_shadow.copy_from_slice(&self.vca_mute);
         self.solo_count_shadow = self.solo_count;
         self.open = true;
     }
@@ -356,7 +412,7 @@ mod tests {
             .iter()
             .map(|&mutes| StripMuteSeed {
                 mutes,
-                solo_safe: false,
+                ..StripMuteSeed::default()
             })
             .collect();
         LiveControlSoloState::try_new(&seeds).expect("solo state")
@@ -509,11 +565,12 @@ mod tests {
     fn strips() -> LiveControlSoloState {
         let track = |mutes| StripMuteSeed {
             mutes,
-            solo_safe: false,
+            ..StripMuteSeed::default()
         };
         let submix = |mutes| StripMuteSeed {
             mutes,
             solo_safe: true,
+            ..StripMuteSeed::default()
         };
         LiveControlSoloState::try_new(&[
             track([false; 2]),
@@ -627,5 +684,76 @@ mod tests {
         assert!(!solo.set_solo(2, true));
         assert!(!solo.set_user_mute(7, BuiltinLaneSelector::Both, true));
         assert!(!solo.any_solo());
+    }
+
+    /// Issue #1242 gate 5, the composition. Over every combination of the subject strip's per-lane
+    /// user mute, per-lane VCA mute, solo-safety, its own solo and another track's solo:
+    /// `effective_mute` is `user || vca || (any_solo && !solo_safe && !solo)`, a VCA mute never
+    /// counts toward `any_solo`, seeding owes no record (the emitted mirror starts at
+    /// `user || vca`), and no solo transition ever owes a record for a VCA-muted lane.
+    ///
+    /// Red if solo clears a VCA mute, if solo-safe exempts a strip from it, if a VCA mute engages
+    /// `any_solo`, or if `emitted` is seeded without the VCA mute (the first solo toggle would
+    /// emit a redundant mute for a VCA-muted strip).
+    #[test]
+    fn a_vca_mute_composes_under_every_solo_precedence_rule() {
+        let lanes = [[false, false], [true, false], [false, true], [true, true]];
+        for user in lanes {
+            for vca in lanes {
+                for solo_safe in [false, true] {
+                    for own_solo in [false, true] {
+                        for other_solo in [false, true] {
+                            let what = format!(
+                                "user {user:?}, vca {vca:?}, safe {solo_safe}, solo {own_solo}, \
+                                 other {other_solo}"
+                            );
+                            let mut solo = LiveControlSoloState::try_new(&[
+                                StripMuteSeed {
+                                    mutes: user,
+                                    solo_safe,
+                                    vca_mute: vca,
+                                },
+                                StripMuteSeed::default(),
+                            ])
+                            .expect("solo state");
+                            for strip in 0..2 {
+                                assert_eq!(solo.strip_delta(strip), [None, None], "{what}");
+                            }
+                            for lane in 0..2 {
+                                assert_eq!(solo.vca_mute(0, lane), vca[lane], "{what}");
+                                assert_eq!(solo.user_mute(0, lane), user[lane], "{what}");
+                                assert_eq!(
+                                    solo.emitted_mute(0, lane),
+                                    user[lane] || vca[lane],
+                                    "{what}"
+                                );
+                            }
+                            let soloed = own_solo && solo.set_solo(0, true);
+                            assert_eq!(soloed, own_solo && !solo_safe, "{what}");
+                            if other_solo {
+                                assert!(solo.set_solo(1, true));
+                            }
+                            let any_solo = soloed || other_solo;
+                            assert_eq!(solo.any_solo(), any_solo, "{what}");
+                            for lane in 0..2 {
+                                assert_eq!(
+                                    solo.effective_mute(0, lane),
+                                    user[lane] || vca[lane] || (any_solo && !solo_safe && !soloed),
+                                    "{what}, lane {lane}"
+                                );
+                            }
+                            for (lanes, _) in solo.strip_delta(0).into_iter().flatten() {
+                                for (lane, vca_muted) in vca.into_iter().enumerate() {
+                                    assert!(
+                                        !(covers(lanes, lane) && vca_muted),
+                                        "{what}: a record for VCA-muted lane {lane}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

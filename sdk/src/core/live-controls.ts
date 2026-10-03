@@ -433,6 +433,7 @@ export class LiveControlEdits {
   readonly #tracks: ReadonlyMap<string, number>;
   readonly #submixes: ReadonlyMap<string, number>;
   readonly #routes: ReadonlyMap<string, number>;
+  readonly #vcas: ReadonlyMap<string, number>;
   readonly #layout: LiveControlLayout | undefined;
 
   constructor(map: SessionMap, session?: SessionLike) {
@@ -442,6 +443,9 @@ export class LiveControlEdits {
     // Issue #1223 D4: a send's index is its position in the engine's own enumeration, never a
     // sort of the session's routes here.
     this.#routes = new Map(map.routes.map((id, index) => [id, index] as const));
+    // Issue #1246 D4: a VCA's index is its position in the engine's own enumeration, never a sort
+    // of the session's VCAs here.
+    this.#vcas = new Map(map.vcas.map((id, index) => [id, index] as const));
     this.#layout = session === undefined ? undefined : layoutOf(session, map);
   }
 
@@ -505,6 +509,23 @@ export class LiveControlEdits {
       );
     }
     return new RouteEdits(index);
+  }
+
+  /**
+   * A VCA's live edits, by its VCA ID (issue #1246 D4): its per-lane fader offset and mute. An ID
+   * the engine did not enumerate -- every ID without live controls -- is refused as the engine
+   * would refuse its index, with `unknownVca`.
+   */
+  vca(vcaId: string): VcaEdits {
+    const index = this.#vcas.get(vcaId);
+    if (index === undefined) {
+      throw new MisoUsageError(
+        `the compiled session has no VCA '${vcaId}'; expected one of `
+          + `${[...this.#vcas.keys()].join(", ") || "none"}`,
+        "unknownVca",
+      );
+    }
+    return new VcaEdits(index);
   }
 }
 
@@ -767,6 +788,39 @@ export class RouteEdits {
         finite(matrix.rl, "matrix.rl"),
         finite(matrix.rr, "matrix.rr"),
       ),
+    });
+  }
+}
+
+/**
+ * A VCA's live edits (issue #1246 D4): its per-lane fader offset and mute, built exactly as a
+ * strip's `faderDb` and `mute` are, over an optional lane and `smoothingSamples`. `vcaIndex` is
+ * the VCA's position in `SessionMap.vcas`; `LiveControlEdits.vca(id)` computes it. The record's
+ * `rack` is not applicable (`255`). A VCA has no audio path: the engine adds the offset to every
+ * member's own fader, and its mute mutes every member.
+ */
+export class VcaEdits {
+  readonly #vcaIndex: number;
+
+  constructor(vcaIndex: number) {
+    this.#vcaIndex = u32(vcaIndex, "vcaIndex");
+  }
+
+  /** The VCA's offset in dB, in the builtin fader's own domain. */
+  faderDb(db: number, options: LaneOptions = {}): LaneEdit {
+    return trackEdit("vcaFaderDb", this.#vcaIndex, {
+      channel: lane(options),
+      smoothingSamples: smoothing(options),
+      values: values(builtinNumber("fader_db", db)),
+    });
+  }
+
+  /** `true` mutes every member on the selected lanes, `false` lifts the VCA's mute. */
+  mute(enabled: boolean, options: LaneOptions = {}): LaneEdit {
+    return trackEdit("vcaMute", this.#vcaIndex, {
+      channel: lane(options),
+      smoothingSamples: smoothing(options),
+      values: values(enabled ? 1 : 0),
     });
   }
 }

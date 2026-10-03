@@ -109,11 +109,12 @@ describe("issue 322 -- shared semantic live controls", () => {
       assert.equal(unsubscribe.appliedAtSample, 128n);
 
       // The send kinds are built by `RouteEdits` and admitted by live Wasm in the issue 1223
-      // evals below; this session has no send.
+      // evals below, and the VCA kinds by `VcaEdits` in the issue 1246 evals; this session has
+      // neither a send nor a VCA.
       const kindNames = [
         "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
         "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-        "routeGainDb", "routeMute", "routeMatrix",
+        "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
       ];
       assert.deepEqual(
         [...ABI_LAYOUT.constants.wireCommandKinds.map((row) => row.name)].sort(),
@@ -140,7 +141,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("unknown tracks and numeric domains refuse before transport", async () => {
     let calls = 0;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
       () => {
         calls += 1;
         throw new Error("must not be called");
@@ -264,6 +265,7 @@ describe("issue 322 -- shared semantic live controls", () => {
           metersAttached: false,
           submixes: [],
           routes: [],
+          vcas: [],
         };
       },
       async command(value) {
@@ -370,7 +372,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("a torn acknowledgement is rejected after, never before, transport answers", async () => {
     let answered = false;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
       async () => {
         answered = true;
         return {
@@ -606,7 +608,7 @@ describe("issue 1214 -- live controls drive submix strips", () => {
       // The layout is held to the compiled strips: a map that lacks the session's submixes is
       // refused rather than resolving bus IDs the engine never compiled.
       assert.throws(
-        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [] }, built),
+        () => new LiveControlEdits({ tracks: ["kick"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] }, built),
         /declares tracks kick and submixes drums, verb, but the engine compiled tracks kick and submixes none/,
       );
     } finally {
@@ -780,6 +782,207 @@ describe("issue 1223 -- live controls drive sends", () => {
     } finally {
       live.dispose();
       booted.dispose();
+    }
+  });
+});
+
+/**
+ * Issue #1246: tracks `kick`, `snare` and `vox`, each on its own source; `kick` and `snare` feed
+ * the unity bus `bus` (no console slot, no insert, an identity input section), and `vox` and
+ * `bus` feed the output. Three VCAs: `drums` over `kick` and `snare`, `fx` over `vox`, and `band`
+ * over both VCAs. The builder writes them in canonical VCA-ID order, `band`, `drums`, `fx`.
+ */
+function vcaSession({ drums = {}, fx = {} } = {}) {
+  let built = session({ id: "vca.live", sampleRateHz: 48_000, revision: 1 });
+  const ids = ["kick", "snare", "vox"];
+  for (const id of ids) {
+    built = built.source(`s-${id}`, {
+      channels: 2, bitDepth: 24, frames: 4_800, content: `blake3:${"0".repeat(64)}`,
+    });
+  }
+  for (const id of ids) built = built.track(id, { source: `s-${id}` });
+  built = built
+    .submix("bus")
+    .output("out")
+    .vca("drums", { members: ["kick", "snare"], fader: drums })
+    .vca("fx", { members: ["vox"], fader: fx })
+    .vca("band", { members: ["drums", "fx"] });
+  for (const id of ["kick", "snare"]) {
+    built = built.route({
+      id: `${id}-bus`,
+      source: { kind: "track", trackId: id, tap: "post_pan" },
+      destination: { kind: "submix_input", submixId: "bus" },
+    });
+  }
+  built = built
+    .route({
+      id: "vox-out",
+      source: { kind: "track", trackId: "vox", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    })
+    .route({
+      id: "bus-out",
+      source: { kind: "submix", submixId: "bus", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+    });
+  return built;
+}
+
+/**
+ * `vcaSession()`'s canonical document with its VCAs declared out of VCA-ID order -- `drums`, `fx`,
+ * `band`, the order a member-first author writes them -- which puts `drums` at 0 where the
+ * engine's canonical order puts it at 1, and `band` at 2 where the engine puts it at 0.
+ */
+function vcaDocument() {
+  const model = JSON.parse(JSON.stringify(vcaSession().toJSON()));
+  const byId = new Map(model.vcas.map((vca) => [vca.id, vca]));
+  model.vcas = ["drums", "fx", "band"].map((id) => byId.get(id));
+  return `${JSON.stringify(model, null, 2)}\n`;
+}
+
+describe("issue 1246 -- live controls drive VCA groups", () => {
+  test("a VCA edit encodes its kind at the engine's VCA index, over both transports", async () => {
+    // Gate 1. Red if the SDK indexes a VCA by its own order of the session (the declaration puts
+    // `drums` at 0), if the engine's export or either session map loses or reorders the VCA list,
+    // or if a VCA record's kind, rack, channel or value words are written otherwise.
+    const document = vcaDocument();
+    assert.deepEqual(JSON.parse(document).vcas.map((vca) => vca.id), ["drums", "fx", "band"],
+      "the document declares the VCAs in an order the index must not follow");
+    const engine = await createOfflineEngine(document, {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    let request;
+    const host = {
+      async sessionMap() {
+        return { tag: "miso.sessionmap.v1", requestId: 1, result: 0, ...engine.sessionMap() };
+      },
+      async command(value) {
+        request = value;
+        const records = encodeBrowserCommands(value.commands);
+        const report = engine.submitCommands(records, value.commands.length);
+        return {
+          tag: "miso.ack.v1",
+          requestId: 2,
+          result: report.result,
+          reason: report.reason,
+          rejectedIndex: report.rejectedIndex,
+          admitted: report.admitted,
+          appliedAtSample: report.appliedAtSample,
+          records,
+        };
+      },
+    };
+    try {
+      assert.deepEqual(engine.sessionMap().vcas, ["band", "drums", "fx"]);
+      for (const controls of [engine.liveControls(), await createBrowserLiveControls(host)]) {
+        const drums = controls.edit.vca("drums");
+        const edits = [
+          drums.faderDb(-6),
+          drums.mute(true, { channel: "left", smoothingSamples: 32 }),
+          controls.edit.vca("band").faderDb(1.5, { channel: "right", smoothingSamples: 64 }),
+        ];
+        assert.deepEqual(edits.map((edit) => edit.kind), ["vcaFaderDb", "vcaMute", "vcaFaderDb"]);
+        assert.deepEqual(edits.map((edit) => edit.trackIndex), [1, 1, 0]);
+        const report = await controls.submit(...edits);
+        assert.equal(report.ok, true, report.reasonName);
+        assert.equal(report.admitted, 3);
+      }
+      const common = { rack: 255, effectIndex: 0, parameterId: 0 };
+      assert.deepEqual(request, {
+        commands: [
+          { kind: 16, ...common, channel: 2, trackIndex: 1, smoothingSamples: 0, values: [-6, 0, 0, 0] },
+          { kind: 17, ...common, channel: 0, trackIndex: 1, smoothingSamples: 32, values: [1, 0, 0, 0] },
+          { kind: 16, ...common, channel: 1, trackIndex: 0, smoothingSamples: 64, values: [1.5, 0, 0, 0] },
+        ],
+      });
+    } finally {
+      engine.dispose();
+    }
+
+    // Without VCAs, and without live controls, the engine enumerates none.
+    for (const [document, liveControls] of [
+      [sendSession(), { commandQueueRecords: 64 }],
+      [vcaSession(), undefined],
+    ]) {
+      const other = await createOfflineEngine(document, { asset, liveControls });
+      try {
+        assert.deepEqual(other.sessionMap().vcas, []);
+      } finally {
+        other.dispose();
+      }
+    }
+  });
+
+  test("an unknown VCA ID refuses with unknownVca before any record is built", async () => {
+    // Gate 1. Red if the SDK hands an ID it cannot place -- a typo, a member strip's ID -- to some
+    // index instead of refusing, or refuses it under a reason other than the engine's.
+    const engine = await createOfflineEngine(vcaSession(), {
+      asset,
+      liveControls: { commandQueueRecords: 64 },
+    });
+    try {
+      const unknownVca = (pattern) => (error) =>
+        error instanceof MisoUsageError && error.diagnosticCode === "unknownVca"
+          && pattern.test(error.message);
+      const listed = /no VCA '[^']+'; expected one of band, drums, fx/;
+      for (const edits of [engine.liveControls().edit, new LiveControlEdits(engine.sessionMap())]) {
+        assert.throws(() => edits.vca("nope"), unknownVca(listed));
+        assert.throws(() => edits.vca("kick"), unknownVca(listed));
+        assert.throws(() => edits.vca("bus"), unknownVca(listed));
+        assert.equal(edits.vca("fx").mute(false).trackIndex, 2);
+      }
+    } finally {
+      engine.dispose();
+    }
+    const none = new LiveControlEdits({ tracks: [], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] });
+    assert.throws(() => none.vca("drums"), (error) =>
+      error instanceof MisoUsageError && error.diagnosticCode === "unknownVca"
+        && /expected one of none/.test(error.message));
+  });
+
+  test("a live VCA fader and mute equal the session booted at those values from the edit's block on", async () => {
+    // Gate 2, through the shipped module. Red if the VCA export, the session map or the encoding
+    // disagrees with the engine about which VCA an index names, which kind a record is, which
+    // lane it selects, or the offset word.
+    const options = { asset, liveControls: { commandQueueRecords: 64 } };
+    for (const [what, edit, edited] of [
+      ["fader", (controls) => controls.edit.vca("drums").faderDb(-6, { smoothingSamples: 0 }),
+        { drums: { leftDb: -6, rightDb: -6 } }],
+      ["left-lane mute", (controls) => controls.edit.vca("fx").mute(true, { channel: "left" }),
+        { fx: { leftMute: true } }],
+    ]) {
+      const live = await createOfflineEngine(vcaSession(), options);
+      const booted = await createOfflineEngine(vcaSession(edited), options);
+      try {
+        const boundary = 4;
+        const quantum = live.shape().quantumFrames;
+        let differedBefore = false;
+        for (let block = 0; block < boundary; block += 1) {
+          feedDistinct(live, block);
+          feedDistinct(booted, block);
+          const [a, b] = [live.render(), booted.render()];
+          differedBefore ||= a.left.some((sample, index) => sample !== b.left[index]);
+        }
+        assert.ok(differedBefore, `${what}: the VCA must be audible, or the comparison proves nothing`);
+
+        const controls = live.liveControls();
+        const report = await controls.submit(edit(controls));
+        assert.equal(report.ok, true, `${what}: ${report.reasonName}`);
+        assert.equal(report.appliedAtSample, BigInt(boundary * quantum));
+        for (let block = boundary; block < boundary + 4; block += 1) {
+          feedDistinct(live, block);
+          feedDistinct(booted, block);
+          const [a, b] = [live.render(), booted.render()];
+          assert.ok(a.left.some((sample) => sample !== 0), `${what}: the mix carries signal`);
+          assert.ok(a.right.some((sample) => sample !== 0), `${what}: the right lane carries signal`);
+          assert.deepEqual([...a.left], [...b.left], `${what}: left block ${block}`);
+          assert.deepEqual([...a.right], [...b.right], `${what}: right block ${block}`);
+        }
+      } finally {
+        live.dispose();
+        booted.dispose();
+      }
     }
   });
 });

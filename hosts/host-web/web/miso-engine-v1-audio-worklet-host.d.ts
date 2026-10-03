@@ -17,11 +17,11 @@
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
 // every declared kind live, so the honest summary is now short: `MisoCommandKind.Pan`,
 // `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
-// `.PolarityInvert`, `.InputFilters`, `.RouteGainDb`, `.RouteMute` and `.RouteMatrix` are all
-// **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
-// (issue 143), on the observation plane rather than the render one -- they move the
-// `miso.observe.v1` subscription map, not anything rendered. All fifteen are in the metadata JSON's
-// `commandKinds`, each with the `plane` it applies on.
+// `.PolarityInvert`, `.InputFilters`, `.RouteGainDb`, `.RouteMute`, `.RouteMatrix`,
+// `.VcaFaderDb` and `.VcaMute` are all **applied**. So are `.ObserveSubscribe` and
+// `.ObserveUnsubscribe` (issue 143), on the observation plane rather than the render one -- they
+// move the `miso.observe.v1` subscription map, not anything rendered. All seventeen are in the
+// metadata JSON's `commandKinds`, each with the `plane` it applies on.
 //
 // * `matrix_ll/lr/rl/rr`, `fader_db`, `mute` and -- since issue 210 phase 3 -- `trim_db` and
 //   `polarity_invert` declare `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing
@@ -294,6 +294,22 @@ export const enum MisoCommandKind {
   /// Retarget one live send's 2x2 matrix over `smoothingSamples`: `values` are `ll, lr, rl, rr`.
   /// Applied (issue 1222). Addressed and shaped as `RouteGainDb`.
   RouteMatrix = 15,
+  /// Ride one VCA's per-lane dB offset over `smoothingSamples`. Applied (issue 1245).
+  ///
+  /// `trackIndex` is a **VCA index**: the VCA's position in the session's `vcas`, in canonical
+  /// VCA-ID order, which is `sessionMap().vcas` (issue 1246), refused
+  /// `MisoCommandReason.UnknownVca` at or past the VCA count. `rack` is `255`, `channel` is `0`
+  /// left, `1` right or `2` both, `effectIndex` and `parameterId` are `0`, `values[0]` is the
+  /// offset in `[-144, 24]` dB and `values[1..]` are `0`. Every member's effective fader -- its
+  /// own value plus every reaching VCA's offset, clamped to the fader domain -- follows through
+  /// its own declicked fader ramp; a member keeps its own balance, and its own `FaderDb` moves
+  /// still land on top of the VCA.
+  VcaFaderDb = 16,
+  /// Mute (`values[0]` exactly `1`) or un-mute (exactly `0`) one VCA's lanes over
+  /// `smoothingSamples`. Applied (issue 1245). Addressed and shaped as `VcaFaderDb`. A VCA mute
+  /// mutes every member, a submix included; solo never clears it, un-muting the VCA never clears a
+  /// member's own mute, and a member's `follows_mute` sends follow it.
+  VcaMute = 17,
 }
 
 /// Frozen typed reasons a live-control submission was refused (issue 137 D1).
@@ -337,6 +353,9 @@ export const enum MisoCommandReason {
   /// A send kind's `trackIndex` is not a live route of this plan: it is at or past the number of
   /// routes into submixes, `sessionMap().routes.length`.
   UnknownRoute = 13,
+  /// A VCA kind's `trackIndex` is not a VCA of this session: it is at or past the number of VCAs,
+  /// `sessionMap().vcas.length` (every index, in a session without VCAs).
+  UnknownVca = 14,
 }
 
 /// One live-control command. `255` means "not applicable to this kind".
@@ -357,18 +376,19 @@ export interface MisoCommand {
   /// `sessionMap().submixes[i - tracks.length]` (issue 1213). `Solo` addresses tracks only; at a
   /// submix it is refused `MisoCommandReason.NotSoloable`. For `RouteGainDb`, `RouteMute` and
   /// `RouteMatrix` it is a live-route index instead (issue 1222), refused
-  /// `MisoCommandReason.UnknownRoute` past the last live route.
+  /// `MisoCommandReason.UnknownRoute` past the last live route; for `VcaFaderDb` and `VcaMute` a
+  /// VCA index (issue 1245), refused `MisoCommandReason.UnknownVca` past the last VCA.
   trackIndex: number;
   /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
   parameterId: number;
   /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb`,
-  /// `PolarityInvert` and the three route kinds; the observation kinds read it as a window length
-  /// in render blocks, and it is ignored by the rest.
+  /// `PolarityInvert`, the three route kinds and the two VCA kinds; the observation kinds read it
+  /// as a window length in render blocks, and it is ignored by the rest.
   smoothingSamples: number;
   /// `Pan`: `[left, right, 0, 0]`. `Matrix` and `RouteMatrix`: `[ll, lr, rl, rr]`. `Mute`,
-  /// `Solo`, `PolarityInvert` and `RouteMute`: `[0|1, 0, 0, 0]` exactly. Everything else:
-  /// `[value, 0, 0, 0]`.
+  /// `Solo`, `PolarityInvert`, `RouteMute` and `VcaMute`: `[0|1, 0, 0, 0]` exactly. Everything
+  /// else: `[value, 0, 0, 0]`.
   values: [number, number, number, number];
 }
 
@@ -433,6 +453,9 @@ export interface MisoSessionMap {
   /// kind's (`RouteGainDb`, `RouteMute`, `RouteMatrix`) `trackIndex` `i` addresses `routes[i]`.
   /// A route into the output is not live and is not listed.
   readonly routes: readonly string[];
+  /// The VCAs (issue 1246), in canonical VCA-ID order. A VCA kind's (`VcaFaderDb`, `VcaMute`)
+  /// `trackIndex` `i` addresses `vcas[i]`. Empty without VCAs and without live controls.
+  readonly vcas: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
@@ -916,13 +939,13 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track, submix, live route and source order (issues 137
-  /// D1, 207, 1210, 1223).
+  /// Read the compiled session's canonical track, submix, live route, VCA and source order (issues
+  /// 137 D1, 207, 1210, 1223, 1246).
   ///
-  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, and `routes` the
-  /// live-route order a send kind's `trackIndex` addresses; `sources` is what
-  /// `submitSource`/`seekSource` feed, with the channel count and region every submission has to
-  /// agree with.
+  /// `tracks` then `submixes` is the strip order `trackIndex` addresses, `routes` the live-route
+  /// order a send kind's `trackIndex` addresses and `vcas` the VCA order a VCA kind's addresses;
+  /// `sources` is what `submitSource`/`seekSource` feed, with the channel count and region every
+  /// submission has to agree with.
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(

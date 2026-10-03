@@ -936,7 +936,7 @@ describe("issue #1097 -- live controls address console slots by slot ID and inse
   test("withSession() on live controls built without the booted document refuses rather than trusts", () => {
     // Red mutation: skip the check when the booted document is absent -> any builder is accepted.
     const controls = new EngineLiveControls(
-      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [], routes: [] },
+      { tracks: ["a", "b"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] },
       () => assert.fail("nothing is submitted"),
     );
     assert.throws(() => controls.withSession(addressedStrip()), /constructed without it/);
@@ -1344,6 +1344,40 @@ describe("issue #1218 -- a send that follows its source's mute, through the SDK"
         ["t-verb", true],
         ["verb-echo", true],
         ["verb-out", false],
+      ],
+    );
+  });
+});
+
+describe("issue #1240 -- VCA groups, through the SDK", () => {
+  test("nested VCAs declared out of ID order are the engine's canonical JSON, byte for byte", async () => {
+    // Gate 4 (writer parity). Red mutations: write `vcas` after `outputs` in `session-json.ts`'s
+    // `ROOT_KEYS`, swap a VCA's `fader` and `members` in its key order, skip the member sort in
+    // `normalize`, or drop `members` -> the engine re-serializes the document differently, or
+    // refuses it (`schema.missing_field`) and prints nothing.
+    const built = session({ id: "console.vcas", sampleRateHz: 48_000, revision: 1 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 48_000, content: CONTENT })
+      .track("snare", { source: "stem" })
+      .track("kick", { source: "stem" })
+      .track("vox", { source: "stem" })
+      .submix("verb")
+      .output("out")
+      .route({
+        id: "kick-out",
+        source: { kind: "track", trackId: "kick", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .vca("zz-drums", { fader: { leftDb: -6, rightDb: -6 }, members: ["snare", "kick"] })
+      .vca("mm-idle", { members: [] })
+      .vca("aa-all", { fader: { rightMute: true }, members: ["zz-drums", "vox", "verb", "kick"] });
+    const text = built.toJson();
+    assert.equal(await engineCanonical("vca-forest", text), text);
+    assert.deepEqual(
+      built.toJSON().vcas.map((row) => [row.id, row.members]),
+      [
+        ["aa-all", ["kick", "verb", "vox", "zz-drums"]],
+        ["mm-idle", []],
+        ["zz-drums", ["kick", "snare"]],
       ],
     );
   });

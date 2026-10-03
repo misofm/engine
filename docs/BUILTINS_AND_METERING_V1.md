@@ -146,7 +146,7 @@ on the control plane and never from audio), the per-sample D11 linear declick wi
 semantics, and it is what makes snapshot and restore correct by construction: muting a soloed strip
 silences it, and clearing solo restores exactly the mutes the user had — *per lane*, because a
 lane's mute is a lane's mute and one record carries one bool. The host keeps a mirror of user-mute
-intent, initialized at preparation from the session's baked `fader.left_mute` / `fader.right_mute`,
+intent, initialized at preparation from the session's own `fader.left_mute` / `fader.right_mute`,
 because once solo exists the render side's flag holds the *effective* mute and there is no readback
 of it.
 
@@ -163,10 +163,77 @@ Two rules of the admission path are load-bearing rather than incidental:
   settled kernel, which fills the plane. For a negative input that is the difference between an
   exact `+0.0` and a `-0.0`, and it is digest visible.
 
+### VCA groups (issue #1242)
+
+A VCA mute composes into the same state, as a third term:
+
+```
+effective_mute(strip, lane) = user_mute || vca_mute || (any_solo && !solo_safe(strip) && !soloed(strip))
+```
+
+`vca_mute` is whether any VCA reaching the strip mutes the lane, from the composition preparation
+bakes (`session::SessionModel::effective_strip_faders`); the user mute stays the member's own
+intent, so the solo state is seeded with both and the emitted mirror with their OR, and seeding
+emits nothing. Precedence is fixed:
+
+- **Mute wins.** Solo never clears a user or VCA mute: a soloed member of a muted VCA stays muted,
+  and so do its following sends. An explicit unmute of a VCA-muted member records the intent but
+  stages the lane still muted. A both-lanes kind 4 on a strip whose VCA mutes one lane composes to
+  two lane values, so it stages one `Left` and one `Right` record and needs two slots in that
+  strip's fader queue: at a queue depth of 1 it is refused whole as typed backpressure (a caller
+  can send the lanes separately), as the other two-record lowerings are.
+- **Solo-safe is not VCA-safe.** A submix is never solo-muted, but a VCA that reaches it mutes it.
+- **A VCA has no solo.** A VCA mute neither engages a solo nor counts toward `any_solo`.
+
+A VCA's offset is baked into each member's prepared fader gain.
+
+### Live VCA groups (issue #1245)
+
+The browser rides and mutes a VCA live with two command kinds, 16 `vcaFaderDb` and 17 `vcaMute`.
+Their index word is a **VCA index** (the VCA's position in the session's `vcas`, canonical VCA-ID
+order), refused `unknownVca` (reason 14) at or past the VCA count; their shape is `faderDb`'s and
+`mute`'s plus a zero `effect_index` and `parameter_id`. A VCA has no audio path and no render code:
+admission composes every move through `host_core::LiveVcaState`, the live copy of the composition
+preparation bakes, into the records the members already take.
+
+- **A ride** moves the VCA's offset and stages nothing itself. After the batch, one VCA fader pass
+  stages, for every strip a VCA reaches, a `TrackFaderRecord::FaderDb` on the member's own fader
+  queue for each lane whose effective value
+  `clamp(own + sum of the reaching VCAs' offsets, -144, 24)` changed, with the last ride's ramp, so
+  every member follows through its existing declicked fader ramp, together. A member pushed past
+  +24 dB clamps there and returns to its own balance when the VCA comes back: the state keeps the
+  member's own value, never the clamped one.
+- **A member's own `faderDb`** on a reached strip moves its own value and stages its effective
+  value, so it lands on top of the VCA and keeps its balance. It always stages, like a `faderDb` on
+  a strip no VCA reaches: a member clamped before and after the move re-stages its unchanged
+  clamped target, which moves no bit. A strip no VCA reaches lowers exactly as before.
+- **A mute** sets the VCA's mute term in the one strip-mute owner, so the solo coalescing pass emits
+  every member's changed lanes and the follow pass every following send's, with the last kind 9 or
+  17 record's ramp. Mute wins over solo, a solo-safe submix is muted too, and un-muting a VCA leaves
+  a member's own mute on. A kind 4 later in the same batch composes with the new VCA mute.
+- **Never a redundant record**, for the digest reason above: a ride that changes no member's
+  effective value (every member clamped at -144 dB) and a mute of already-muted members stage
+  nothing.
+- **All or nothing.** VCA fader records, then strip mute records, then follow records are staged and
+  room-checked together before any push; a full member or send queue refuses the whole submission
+  as typed backpressure, and the VCA state rolls back with the solo state and the send mirror. The
+  decode staging grows by two entries per strip a VCA reaches, and the bridge's exact retained
+  report charges the VCA state.
+- **Bounded per-command work** (amendment A1, a planner decision subject to owner review). A batch's
+  VCA work grows with the (strip, reaching VCA) pairs, and it runs on the AudioWorklet thread, so a
+  browser session may declare at most 256 VCAs and 16,384 pairs; past either it is refused at boot
+  (`web.vca.maximum_vcas`, `web.vca.reach_pairs`, `RESULT_REFUSED_BUDGET`) before any VCA table is
+  built, and the VCA state's retained bytes and construction transient are projected against the
+  memory budget. At the bound, the worst batch (a ride and a mute of a VCA reaching every pair plus
+  254 member moves) admits in about 0.15 ms native and 0.18 ms (median) in the shipped simd128
+  module under V8, against a 2.67 ms quantum.
+
 ### Sends follow mute (issue #1224)
 
-A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, or
-solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own mute.
+A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, VCA
+mute, or solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own
+mute and its VCA mute. A plan prepared with a VCA-muted source zeroes the send's muted columns
+(#1242), and the live mirror starts from that same effective mute.
 Muting a track or a bus, or soloing another track, silences every such send from that strip through
 the same declicked ramp, in the same submission; unmuting or un-soloing reopens it. A soloed vocal
 therefore no longer carries a muted drum track's pre-fader reverb send.

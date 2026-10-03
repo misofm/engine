@@ -108,6 +108,18 @@ export const CATALOG = deepFreeze(
       "name": "routeMatrix",
       "applied": true,
       "plane": "render"
+    },
+    {
+      "value": 16,
+      "name": "vcaFaderDb",
+      "applied": true,
+      "plane": "render"
+    },
+    {
+      "value": 17,
+      "name": "vcaMute",
+      "applied": true,
+      "plane": "render"
     }
   ],
   "commandReasons": [
@@ -166,6 +178,10 @@ export const CATALOG = deepFreeze(
     {
       "value": 13,
       "name": "unknownRoute"
+    },
+    {
+      "value": 14,
+      "name": "unknownVca"
     }
   ],
   "observationVocabularies": {

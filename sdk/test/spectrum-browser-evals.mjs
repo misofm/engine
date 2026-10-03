@@ -346,7 +346,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   let residentArmed = false;
   const host = hostWithCapture({
     async sessionMap() {
-      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [] };
+      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [], routes: [], vcas: [] };
     },
     async observationMap() {
       return {

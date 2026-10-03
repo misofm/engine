@@ -134,8 +134,13 @@ pub struct CompileLimits {
     /// submixes" and never "unbounded" -- which is what every caller written before this word was
     /// named already passes. It occupies the former `reserved[0]`; the layout is unchanged.
     pub maximum_submixes: u64,
+    /// Maximum session VCA groups (#1243). Zero means "use `maximum_tracks`" -- never "no VCAs" and
+    /// never "unbounded" -- which is what every caller written before this word was named already
+    /// passes. It occupies `reserved[1]` of the original `reserved[4]` (offset 184); the layout is
+    /// unchanged.
+    pub maximum_vcas: u64,
     /// Must be zero in ABI V1.
-    pub reserved: [u64; 3],
+    pub reserved: [u64; 2],
 }
 
 /// Caller-owned byte output using query/retry semantics.
@@ -456,7 +461,8 @@ mod tests {
         assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
         assert_eq!(offset_of!(CompileLimits, maximum_submixes), 176);
-        assert_eq!(offset_of!(CompileLimits, reserved), 184);
+        assert_eq!(offset_of!(CompileLimits, maximum_vcas), 184);
+        assert_eq!(offset_of!(CompileLimits, reserved), 192);
         assert_eq!(offset_of!(BytesOut, data), 8);
         assert_eq!(offset_of!(BytesOut, required_bytes), 24);
         assert_eq!(offset_of!(SourceChunk, planes), 24);

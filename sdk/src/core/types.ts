@@ -153,6 +153,17 @@ export interface TrackSpec {
 export type SubmixSpec = Omit<TrackSpec, "source">;
 
 /**
+ * A VCA group (#1240): a control-only fader with no audio path. `fader` is a per-lane dB offset in
+ * `[-144, 24]` that adds to every reachable member's own fader, and its mute mutes every reachable
+ * member; it defaults to 0 dB unmuted on both lanes. `members` names already-declared tracks,
+ * submixes and VCAs, each once; VCAs nest and overlap, and membership is acyclic.
+ */
+export interface VcaSpec {
+  readonly fader?: FaderSpec;
+  readonly members: readonly string[];
+}
+
+/**
  * The native effects a console slot may name (owner decision 12, "Eligibility").
  *
  * Every console slot always banks, so it must be an effect whose bank kernel the console can rely

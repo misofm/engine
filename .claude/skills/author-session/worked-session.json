@@ -326,6 +326,7 @@
       }
     }
   ],
+  "vcas": [],
   "outputs": [
     {
       "id": "main-out"

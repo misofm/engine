@@ -13,6 +13,9 @@ enum GraphEntity<'a> {
     Track(&'a Track),
     Submix(&'a Submix),
     Output,
+    /// A VCA group (#1240), by its declared index in `vcas`. It is never a route endpoint, a
+    /// sidechain source or an automation target; only a VCA's `members` accept it.
+    Vca(usize),
 }
 struct Index<'a> {
     sources: HashMap<&'a str, &'a Source>,
@@ -72,7 +75,8 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
         .tracks
         .len()
         .saturating_add(session.submixes.len())
-        .saturating_add(session.outputs.len());
+        .saturating_add(session.outputs.len())
+        .saturating_add(session.vcas.len());
     let mut graph = HashMap::with_capacity(graph_capacity);
     let tracks_path = root.key("tracks");
     for (position, track) in session.tracks.iter().enumerate() {
@@ -99,6 +103,19 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
             .is_some()
         {
             duplicate(&mut diagnostics, &outputs_path.index(position).key("id"));
+        }
+    }
+    // VCA IDs join the namespace (#1240 D2). They are indexed after every other entity, so a
+    // collision is reported at the VCA and never displaces the strip or output it shadows.
+    let vcas_path = root.key("vcas");
+    for (position, vca) in session.vcas.iter().enumerate() {
+        match graph.entry(vca.id.as_str()) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                duplicate(&mut diagnostics, &vcas_path.index(position).key("id"));
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(GraphEntity::Vca(position));
+            }
         }
     }
 
@@ -133,6 +150,7 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
     validate_console(session, &root, &mut diagnostics);
     validate_tracks(session, &index, &root, &mut diagnostics, &mut local);
     validate_submixes(session, &index, &root, &mut diagnostics, &mut local);
+    validate_vcas(session, &index, &root, &mut diagnostics);
     validate_routes(session, &index, &root, &mut diagnostics);
     validate_automation(session, &index, &root, &mut diagnostics);
 
@@ -543,6 +561,128 @@ fn validate_params(
             &parameter_path.key("value"),
         );
     }
+}
+
+/// A VCA's members, offset range and acyclicity (#1240 D2).
+fn validate_vcas(
+    session: &SessionModel,
+    index: &Index<'_>,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let vcas_path = root.key("vcas");
+    // Resolvable VCA-to-VCA membership edges, by declared index.
+    let mut edges: Vec<Vec<usize>> = Vec::with_capacity(session.vcas.len());
+    let mut seen = HashSet::new();
+    for (position, vca) in session.vcas.iter().enumerate() {
+        let path = vcas_path.index(position);
+        let fader_path = path.key("fader");
+        for (field, value) in [
+            ("left_db", vca.fader.left_db),
+            ("right_db", vca.fader.right_db),
+        ] {
+            validate_finite_range(diagnostics, value, -144.0, 24.0, &fader_path.key(field));
+        }
+        let members_path = path.key("members");
+        let mut nested = Vec::new();
+        seen.clear();
+        for (member_position, member) in vca.members.iter().enumerate() {
+            let member_path = members_path.index(member_position);
+            if !seen.insert(member.as_str()) {
+                error(
+                    diagnostics,
+                    DiagnosticCode::DuplicateId,
+                    &member_path,
+                    "VCA member is repeated",
+                );
+                continue;
+            }
+            match index.graph.get(member.as_str()) {
+                Some(GraphEntity::Track(_) | GraphEntity::Submix(_)) => {}
+                Some(GraphEntity::Vca(target)) => nested.push(*target),
+                Some(GraphEntity::Output) | None => error(
+                    diagnostics,
+                    DiagnosticCode::MissingEntityReference,
+                    &member_path,
+                    "VCA member must be a declared track, submix or VCA",
+                ),
+            }
+        }
+        edges.push(nested);
+    }
+    for (position, on_cycle) in vcas_on_cycles(&edges).into_iter().enumerate() {
+        if on_cycle {
+            error(
+                diagnostics,
+                DiagnosticCode::VcaCycle,
+                &vcas_path.index(position),
+                "VCA membership must be acyclic",
+            );
+        }
+    }
+}
+
+/// Whether each node lies on a cycle (a self-edge included): Tarjan's strongly connected
+/// components, iterative so a deep VCA chain cannot exhaust the stack. A node is on a cycle exactly
+/// when its component has more than one node or it has an edge to itself, so a diamond is not one.
+fn vcas_on_cycles(edges: &[Vec<usize>]) -> Vec<bool> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut on_cycle = vec![false; count];
+    let mut next = 0;
+    // `(node, next edge to follow)`, the explicit recursion stack.
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    for start in 0..count {
+        if order[start] != UNVISITED {
+            continue;
+        }
+        order[start] = next;
+        low[start] = next;
+        next += 1;
+        stack.push(start);
+        on_stack[start] = true;
+        frames.push((start, 0));
+        while let Some(frame) = frames.last_mut() {
+            let node = frame.0;
+            if let Some(&target) = edges[node].get(frame.1) {
+                frame.1 += 1;
+                if target == node {
+                    on_cycle[node] = true;
+                } else if order[target] == UNVISITED {
+                    order[target] = next;
+                    low[target] = next;
+                    next += 1;
+                    stack.push(target);
+                    on_stack[target] = true;
+                    frames.push((target, 0));
+                } else if on_stack[target] {
+                    low[node] = low[node].min(order[target]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let root = stack
+                    .iter()
+                    .rposition(|&member| member == node)
+                    .expect("component root is on the stack");
+                let cyclic = stack.len() - root > 1;
+                for &member in &stack[root..] {
+                    on_stack[member] = false;
+                    on_cycle[member] |= cyclic;
+                }
+                stack.truncate(root);
+            }
+        }
+    }
+    on_cycle
 }
 
 fn validate_routes(
