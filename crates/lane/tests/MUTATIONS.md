@@ -471,3 +471,31 @@ EPYC 7313P, rustc 1.97.1, `x86-64-v3`. The same rows are also red on the EQ's ga
 Re-run on attempt 2 (the `bool` fold), each alone in a scratch copy, release: 999-M1 and 999-M2 red on
 gate 1 at the same first case and message as above, and on the EQ gates as recorded in
 `crates/parametric-eq/tests/MUTATIONS.md`.
+
+## Issue #1219 — the indexed ramp (`route_mix_ramp_block`, `IndexedRamp`)
+
+`tests/route_ramp.rs`: gate 1 is `the_kernel_is_the_indexed_ramp_law_at_every_width` and
+`a_retarget_starts_from_the_exact_current_coefficients`, gate 2
+`an_overflowing_difference_is_a_step_to_the_target`, gate 3 `a_settled_ramp_is_the_static_mix`.
+Driver: one mutation at a time as an exact-text replacement in `src/kernels.rs` of a scratch copy
+of the tree, then `cargo test --locked -p lane --test route_ramp` (debug), restored between rows.
+M1 cannot change a native bit, so it was read on a scratch `cdylib` that calls
+`route_mix_ramp_block::<Simd4>`, built for `wasm32-unknown-unknown` with `+simd128` and the
+workspace's release profile, through `scripts/check-web-audioworklet-callgraph.py --kernel-shape`
+(rule 3). Host AMD EPYC 7313P, rustc 1.97.1, `x86-64-v3`.
+
+| # | mutation | gates red (first failure) | result |
+|---|---|---|---|
+| 1219-M1 | the ramp tail inlined into the generic body (`#[inline(always)]` on `route_mix_ramp_tail`) | rule 3 on the probe: `FAIL kernel ...route_mix_ramp_block...4wide6f32x4...: vector=22 scalar=42` (unmutated: 22/0). The native gates cannot see it. | RED (probe), GREEN (native) |
+| 1219-M1b | the settled tail inlined (`#[inline(always)]` on `route_mix_settled_tail`) | probe reads 22/18: still passes rule 3, one edit from failing it, which is why that tail is outlined too | GREEN (recorded) |
+| 1219-M2 | the settled frames mix `fma(length, step, start)` instead of `target` | gate 1 (`width 1, length 37, 128 frames from position 0, block 0: left frame 37`, `0x3ed5947d` against `0x3ed5947c`; at length 0, `+0.0` against `-0.0`), retarget, gate 3 (`case 2, length 3830`) | RED |
+| 1219-M3a | `k` off by one in the vector body (`position as f32 - 1.0`) | gate 1 (`width 1, length 37 ... left frame 0`), retarget | RED |
+| 1219-M3b | `k` off by one in the outlined tail (`first = position + vectored`) | gate 1 (`width 4, length 37, 128 frames from position 34 ... left frame 0`), retarget | RED |
+| 1219-M4 | the snap one frame late (`ramping = length - position`) | gate 1 (`width 1, length 37 ... right frame 36`, one ulp), retarget | RED |
+| 1219-M5 | `IndexedRamp::new` without its non-finite branch | gate 2 alone (`coefficients_at(0)`) | RED |
+| 1219-M6 | `coefficients_at(0)` computed (`fma(0, step, start)`) instead of returning `start` | retarget alone (`coefficients_at(0)[3]`: the `-0.0` start word) | RED |
+| 1219-M7 | `coefficients_at` fused (`index.mul_add(step, start)`) | retarget alone (`coefficients_at(4799)[0]`) | RED |
+| 1219-M8 | every frame of a vector takes the vector's first `k` (`index = splat(position + 1)`) | gate 1 at width 4 only (`width 4, length 37 ... left frame 1`), retarget | RED |
+| 1219-M9 | the ramp body swaps the left plane's coefficient roles (`ll.fma(r, lr * l)`) | gate 1, retarget | RED |
+| 1219-M10 | the settled coefficients computed in `f64` and rounded once | gate 1, retarget, gate 3 (`case 2, length 3830 ... left frame 0`) | RED |
+| 1219-M11 | the settled frames re-implemented as a private loop, and `mix2x2_block` then flushing its outputs (two edits: a static mix that drifts from the ramp's settled path) | gate 3 alone (`case 2, length 3830 ... left frame 3`, `-0.0` against `mix2x2_block`'s `+0.0`) | RED |

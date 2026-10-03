@@ -176,6 +176,69 @@ No allocation gate: the kernel takes borrowed planes and allocates nothing by co
 - The `MUTATIONS.md` rows with their observed red results (at least: tail inlined into the generic
   body; settled coefficients computed instead of assigned; `k` off by one).
 
+### Attempt 1 record (Terra)
+
+- **D1, D2** (`crates/lane/src/kernels.rs`, after `mix2x2_block`): `INDEXED_RAMP_LENGTH_MAXIMUM`,
+  `IndexedRamp { start, step, target, length }` with `settled`, `new` (step for `length == 0` or a
+  non-finite `round(target - start)` in any coefficient: `settled(target)`, so no step is NaN or
+  infinite) and `coefficients_at`, and `#[inline(never)] route_mix_ramp_block<L>`. The vector body
+  forms `k0 + [1..WIDTH]` from `splat(position) + FRAME_INDEX_OFFSETS` (a 16-entry iota, read to
+  `L::WIDTH`) and advances it by `splat(WIDTH)`; each coefficient is `index.fma(step, start)`, then
+  `mix2x2_block`'s order. Partial ramp vectors go to the non-generic `#[inline(never)]`
+  `route_mix_ramp_tail`. Doc comments state the law and why it is not D11.
+- **Deviation (bits unchanged):** the settled frames are not one `mix2x2_block::<L>` call. Its
+  whole vectors run `mix2x2_block::<L>` on `ramp.target`, and its last `< WIDTH` frames run
+  `mix2x2_block::<f32>` through the outlined non-generic `route_mix_settled_tail`. That is the same
+  arithmetic `mix2x2_block::<L>` runs inline. The reason was measured on a scratch `cdylib` that
+  calls `route_mix_ramp_block::<Simd4>`, built for `wasm32` `+simd128` with the release profile and
+  read by `check-web-audioworklet-callgraph.py --kernel-shape`. With `mix2x2_block::<L>` inline, the
+  `f32x4` instantiation is **22 vector / 18 scalar**: it passes rule 3, but one edit away from
+  failing. Outlined, it is **22 / 0**. `mix2x2_block` itself is untouched.
+- **Tests** (`crates/lane/tests/route_ramp.rs`, `f32`, `Simd4`, `Simd8` via `lane::each_lane!`). The
+  oracle is plain `f32` arithmetic built from `(start, target, length)` alone. NaNs are folded with
+  `dsp_reference::class_a::same`.
+  - `the_kernel_is_the_indexed_ramp_law_at_every_width` (gate 1). It covers lengths {0, 1, 37, 4800,
+    2^22}, two coefficient sets (`-0.0` target, a still coefficient), blocks 128/125/1, and start
+    positions 0 and `length - {1..300}`, so the snap falls at every vector and block offset. Blocks
+    then run with the saturating advance until two settled blocks. The planes carry ±0,
+    subnormals, ±inf, NaN payloads and -1e38. *Test value: it is red if the frame index, the outlined
+    tail, the snap frame, the rounding or mix order drifts, or if coefficients depend on the width.
+    No other kernel ramps by frame index.*
+  - `a_retarget_starts_from_the_exact_current_coefficients` (gate 1, retarget). It checks
+    `coefficients_at(p)` against the oracle's `c(p)` for p in {0, 1, 2, 1037, 4799, 4800}, then the
+    retargeted ramp at every width. *Test value: it is red if `coefficients_at` stops being the
+    kernel's `c(k)`: `c(0)` computed rather than `start`, or a fused or reordered rounding. M6 and
+    M7 are red here alone.*
+  - `an_overflowing_difference_is_a_step_to_the_target` (gate 2). *Test value: it is red if an
+    overflowing `target - start` gives an infinite step and a NaN coefficient. M5 is red here alone.*
+  - `a_settled_ramp_is_the_static_mix` (gate 3). It runs 64 random ramps (`settled` among them) with
+    three blocks at `position == length`, checks the saturation, and compares with `mix2x2_block`
+    itself. *Test value: it is red if a settled route's bits drift from the static mix a freshly
+    prepared plan runs, even when kernel and oracle agree. M11, a private settled loop plus a changed
+    `mix2x2_block`, is red here alone.*
+- **Mutations:** `crates/lane/tests/MUTATIONS.md`, rows 1219-M1 to M11, each run against the final
+  tree.
+  - Red: M2 (settled computed), M3a/M3b (`k` off by one in the body/tail), M4, M5, M6, M7, M8, M9,
+    M10, M11.
+  - M1 (ramp tail inlined): **GREEN natively**, as expected, because bits cannot move. **RED on the
+    probe's rule 3** at `vector=22 scalar=42`.
+  - M1b (settled tail inlined) reads 22/18, which is recorded as the reason for the deviation above.
+- **Gates** at the commit's tree (x86-64-v3, AMD EPYC 7313P, rustc 1.97.1):
+  - test-debug-b (DESIGN 7) exit 0: 146 `test result: ok` lines, 0 failures.
+  - `check-lane-policy.sh` ok; `test-lane-policy.sh` exit 0.
+  - `check-unfused-seal.sh` ok (8 registered audit calls); `--self-test` 57/57.
+  - `cargo fmt --all -- --check` exit 0.
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` exit 0.
+  - Browser:
+    - `build-web-audioworklet.sh --named-twin` exit 0, module `1900ef1b...` (no caller yet, so the
+      kernel is not linked).
+    - `check-web-audioworklet.sh` exit 0, kernel shape `f32x4_arith=9350 kernels=12`.
+    - `check-browser-expected-resources.py --artifacts` exit 0.
+    - `test-web-audioworklet.sh` exit 0.
+  - `run-aarch64-tests.sh debug`: no arm64 host and no aarch64-linux target or qemu here, so it runs
+    **at batch push** (CI `aarch64-debug`). `Simd4` already runs natively on x86 in every gate
+    above.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

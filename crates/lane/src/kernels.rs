@@ -1054,3 +1054,231 @@ pub fn mix2x2_block<L: Lane>(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
         *right = <f32 as Lane>::fma(rr, old_right, <f32 as Lane>::mul(rl, old_left));
     }
 }
+
+/// The longest [`IndexedRamp`] in frames: `2^22`.
+///
+/// Two facts rest on it. A frame index `k <= 2^22` converts to `f32` exactly, so `c(k)` is a
+/// function of the integer index and not of a rounded one; and the indexed law cannot pass its
+/// target before the snap while `(length - 1) * 3u < 1`, `u = 2^-24` the unit roundoff, which holds
+/// up to about `2^22.4` (the submix design's VERIFY-2). A caller refuses a longer length before a
+/// ramp exists.
+pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
+
+/// The **indexed ramp** of a 2x2 route mix's four coefficients `[ll, lr, rl, rr]`.
+///
+/// The law, per coefficient, for the frame at ramp index `k`:
+///
+/// ```text
+/// c(0) = start
+/// c(k) = round(round(k * step) + start)    for 1 <= k < length,  as Lane::fma(k, step, start)
+/// c(k) = target                            for k >= length,      assigned, never computed
+/// step = round(round(target - start) / length)                   once, in `new`
+/// ```
+///
+/// `k` is an integer `<= 2^22` ([`INDEXED_RAMP_LENGTH_MAXIMUM`]), converted to `f32` exactly, and
+/// `Lane::fma` rounds twice on every target. `length == 0` is a step: every `k` yields `target`.
+///
+/// # Why it is not D11
+///
+/// D11, the law of the faders, matrices and effects ([`ramp_block`] and
+/// `builtins::gain_mute_ramp_block`), carries `current = current + step` from frame to frame, so a
+/// D11 coefficient's bits depend on the frame's history. Here `c(k)` is a pure function of `k`:
+/// the ramp vectorises over frames, any later fused or folded traversal can compute a frame's
+/// coefficients in any order, the snap frame is decided by `k` rather than by a running value, and
+/// a settled ramp is `target` exactly, so a route that has ramped and settled mixes the bits a
+/// freshly prepared plan mixes. D11 is unchanged and stays the law everywhere else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndexedRamp {
+    /// `c(0)`: the coefficients the ramp starts from.
+    pub start: [f32; 4],
+    /// The per-frame increment, `round(round(target - start) / length)`; zero for a step.
+    pub step: [f32; 4],
+    /// The coefficients from `k = length` onward, exactly.
+    pub target: [f32; 4],
+    /// The ramp's length in frames, at most [`INDEXED_RAMP_LENGTH_MAXIMUM`]; zero for a step.
+    pub length: u32,
+}
+
+impl IndexedRamp {
+    /// A settled ramp: every index yields `target`.
+    #[must_use]
+    pub const fn settled(target: [f32; 4]) -> Self {
+        Self {
+            start: target,
+            step: [0.0; 4],
+            target,
+            length: 0,
+        }
+    }
+
+    /// A ramp from `start` to `target` over `length` frames.
+    ///
+    /// `length == 0` is a step to `target`. So is a ramp whose `round(target - start)` is not
+    /// finite for any of the four coefficients: the decision is taken here, once per ramp, never
+    /// in the per-frame body, so no `step` is ever NaN or infinite.
+    ///
+    /// `length` must not exceed [`INDEXED_RAMP_LENGTH_MAXIMUM`]; the caller refuses a longer one
+    /// before a ramp exists (debug-asserted here).
+    #[must_use]
+    pub fn new(start: [f32; 4], target: [f32; 4], length: u32) -> Self {
+        debug_assert!(length <= INDEXED_RAMP_LENGTH_MAXIMUM);
+        if length == 0 {
+            return Self::settled(target);
+        }
+        let mut difference = [0.0; 4];
+        for ((difference, start), target) in difference.iter_mut().zip(start).zip(target) {
+            *difference = <f32 as Lane>::sub(target, start);
+        }
+        if !difference.iter().all(|difference| difference.is_finite()) {
+            return Self::settled(target);
+        }
+        // Exact: `length <= 2^22 < 2^24`.
+        let frames = length as f32;
+        Self {
+            start,
+            step: difference.map(|difference| <f32 as Lane>::div(difference, frames)),
+            target,
+            length,
+        }
+    }
+
+    /// `c(k)`, exactly as [`route_mix_ramp_block`] computes it for frame index `k`.
+    #[must_use]
+    pub fn coefficients_at(&self, k: u32) -> [f32; 4] {
+        if k >= self.length {
+            return self.target;
+        }
+        if k == 0 {
+            return self.start;
+        }
+        // Exact: `k < length <= 2^22`.
+        let index = k as f32;
+        let mut coefficients = [0.0; 4];
+        for ((coefficient, step), start) in coefficients.iter_mut().zip(self.step).zip(self.start) {
+            *coefficient = <f32 as Lane>::fma(index, step, start);
+        }
+        coefficients
+    }
+}
+
+/// `1, 2, ..., 16`: the frame-index offsets of one vector's frames, `L::WIDTH` of them.
+///
+/// Sixteen covers every lane width the crate may grow; the kernel reads the first `L::WIDTH`.
+const FRAME_INDEX_OFFSETS: [f32; 16] = [
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+];
+
+/// The 2x2 route mix of [`mix2x2_block`] over one planar stereo block, in place, with the four
+/// coefficients ramping by the [`IndexedRamp`] law.
+///
+/// Frame `f` (0-based) of the block takes ramp index `k = position + f + 1`. The block splits by
+/// frame count, decided from `position` and `ramp.length` before any loop:
+///
+/// 1. the frames with `k < length` run the ramp body, vectorised over frames: a frame-index vector
+///    `k0 + [1, ..., L::WIDTH]` (exact: every value is an integer below `2^24`) yields each frame's
+///    coefficients with one `fma` each, and the frame is mixed in [`mix2x2_block`]'s frozen order:
+///
+///    ```text
+///    c   = fma(k, step, start)            per coefficient
+///    l'  = fma(c_lr, r, c_ll * l)
+///    r'  = fma(c_rr, r, c_rl * l)
+///    ```
+///
+/// 2. the ramp frames that do not fill a whole vector run the same arithmetic in a non-generic,
+///    outlined `f32` function, so no scalar body is unrolled into a vector instantiation (the
+///    browser's kernel-shape rule; the #926 lesson);
+/// 3. the frames with `k >= length` are [`mix2x2_block`] with `ramp.target`, unchanged: settled
+///    coefficients are assigned, never computed. Its whole vectors run at `L` and its last frames
+///    in an outlined `f32` call, which is what `mix2x2_block::<L>` does inline.
+///
+/// `c(k)` is a pure function of `k`, so the result does not depend on the width. The caller
+/// advances `position` by the block's length and saturates it at `ramp.length`; a `position` at or
+/// past `length` renders [`mix2x2_block`] with the target.
+///
+/// `#[inline(never)]` keeps every instantiation a named function.
+#[inline(never)]
+pub fn route_mix_ramp_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    ramp: &IndexedRamp,
+    position: u32,
+) {
+    debug_assert_eq!(left.len(), right.len());
+    debug_assert!(ramp.length <= INDEXED_RAMP_LENGTH_MAXIMUM);
+    let count = left.len();
+    let right = &mut right[..count];
+    // `k = position + f + 1 < length` holds for the first `length - position - 1` frames.
+    let ramping = ramp.length.saturating_sub(position).saturating_sub(1);
+    let ramping = core::cmp::min(count, ramping as usize);
+    let vectored = ramping - ramping % L::WIDTH;
+    let (left_ramp, left_settled) = left.split_at_mut(ramping);
+    let (right_ramp, right_settled) = right.split_at_mut(ramping);
+    let (left_vectors, left_tail) = left_ramp.split_at_mut(vectored);
+    let (right_vectors, right_tail) = right_ramp.split_at_mut(vectored);
+
+    let step = ramp.step.map(L::splat);
+    let start = ramp.start.map(L::splat);
+    let advance = L::splat(L::WIDTH as f32);
+    // Exact: `position < length <= 2^22` whenever a frame ramps.
+    let mut index = L::splat(position as f32).add(L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]));
+    for (left, right) in left_vectors
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right_vectors.chunks_exact_mut(L::WIDTH))
+    {
+        let ll = index.fma(step[0], start[0]);
+        let lr = index.fma(step[1], start[1]);
+        let rl = index.fma(step[2], start[2]);
+        let rr = index.fma(step[3], start[3]);
+        let old_left = L::load(left);
+        let old_right = L::load(right);
+        lr.fma(old_right, ll.mul(old_left)).store(left);
+        rr.fma(old_right, rl.mul(old_left)).store(right);
+        index = index.add(advance);
+    }
+    if !left_tail.is_empty() {
+        // `vectored < ramping < length`, so the sum stays below `2^22`.
+        route_mix_ramp_tail(left_tail, right_tail, ramp, position + vectored as u32 + 1);
+    }
+    let settled = left_settled.len();
+    let settled_vectored = settled - settled % L::WIDTH;
+    let (left_vectors, left_tail) = left_settled.split_at_mut(settled_vectored);
+    let (right_vectors, right_tail) = right_settled.split_at_mut(settled_vectored);
+    mix2x2_block::<L>(left_vectors, right_vectors, ramp.target);
+    if !left_tail.is_empty() {
+        route_mix_settled_tail(left_tail, right_tail, ramp.target);
+    }
+}
+
+/// The settled frames of [`route_mix_ramp_block`] that do not fill a vector: [`mix2x2_block`] at
+/// `f32`, which is exactly the tail `mix2x2_block::<L>` finishes with.
+///
+/// Outlined for the same reason as [`route_mix_ramp_tail`]: inlined, `mix2x2_block`'s `f32` tail
+/// unrolls into the four-lane instantiation as 18 scalar operations beside its 22 vector ones
+/// (measured on a `wasm32` `simd128` build), one edit away from the browser's kernel-shape rule.
+#[inline(never)]
+fn route_mix_settled_tail(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
+    mix2x2_block::<f32>(left, right, c);
+}
+
+/// The ramp frames of [`route_mix_ramp_block`] that do not fill a vector: the same arithmetic at
+/// `f32`, frame `f` at ramp index `first + f`.
+///
+/// Non-generic and never inlined, so the browser's four-lane kernel instantiation carries no
+/// scalar ramp body (the #926 lesson).
+#[inline(never)]
+fn route_mix_ramp_tail(left: &mut [f32], right: &mut [f32], ramp: &IndexedRamp, first: u32) {
+    let [step_ll, step_lr, step_rl, step_rr] = ramp.step;
+    let [start_ll, start_lr, start_rl, start_rr] = ramp.start;
+    for ((left, right), k) in left.iter_mut().zip(right.iter_mut()).zip(first..) {
+        // Exact: `k < length <= 2^22`.
+        let index = k as f32;
+        let ll = <f32 as Lane>::fma(index, step_ll, start_ll);
+        let lr = <f32 as Lane>::fma(index, step_lr, start_lr);
+        let rl = <f32 as Lane>::fma(index, step_rl, start_rl);
+        let rr = <f32 as Lane>::fma(index, step_rr, start_rr);
+        let old_left = *left;
+        let old_right = *right;
+        *left = <f32 as Lane>::fma(lr, old_right, <f32 as Lane>::mul(ll, old_left));
+        *right = <f32 as Lane>::fma(rr, old_right, <f32 as Lane>::mul(rl, old_left));
+    }
+}
