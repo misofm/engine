@@ -162,7 +162,7 @@ test("resident and response handles share one owner poll, timer, and epoch", asy
   };
   const observationLiveControls = {
     edit: {
-      track: () => ({
+      strip: () => ({
         effect: () => ({ observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }) }),
       }),
     },

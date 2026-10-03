@@ -191,14 +191,20 @@ export function validateObservationSelections(selections: readonly ObservationSe
   });
 }
 
-/** Enrich the numeric owner map with canonical track IDs from the same current owner. */
+/**
+ * Enrich the numeric owner map with canonical strip IDs from the same current owner.
+ *
+ * `strips` is the strip order (issue #1210 D5): the tracks, then the submixes, each in canonical
+ * order. A binding's `trackIndex` is a strip index, so a bus effect's binding names its submix
+ * (the `trackId` field keeps its spelling, P17).
+ */
 export function enrichObservationMap(
-  tracks: readonly string[],
+  strips: readonly string[],
   raw: readonly RawObservationBinding[],
 ): ObservationMap {
   const bindings = raw.map((binding, index) => {
     if (!Number.isSafeInteger(binding.trackIndex) || binding.trackIndex < 0
-        || binding.trackIndex >= tracks.length || typeof tracks[binding.trackIndex] !== "string"
+        || binding.trackIndex >= strips.length || typeof strips[binding.trackIndex] !== "string"
         || !Number.isSafeInteger(binding.effectIndex) || binding.effectIndex < 0
         || !RACK_NAMES.some((name) => RACK_VALUES[name] === binding.rack)
         || typeof binding.effectSlotId !== "string"
@@ -214,7 +220,7 @@ export function enrichObservationMap(
       });
     }
     return Object.freeze({
-      trackId: tracks[binding.trackIndex]!,
+      trackId: strips[binding.trackIndex]!,
       rack: rackName(binding.rack),
       effectIndex: binding.effectIndex,
       effectSlotId: binding.effectSlotId,
@@ -225,10 +231,14 @@ export function enrichObservationMap(
   return Object.freeze({ bindings: Object.freeze(bindings) });
 }
 
-/** Replace the placeholder track index in resolved addresses using the current track map. */
+/**
+ * Replace the placeholder track index in resolved addresses using the current strip map: the
+ * tracks, then the submixes (issue #1210 D5), so a selection naming a submix resolves to its strip
+ * index.
+ */
 export function resolveObservationAddressesWithTracks(
   map: ObservationMap,
-  tracks: readonly string[],
+  strips: readonly string[],
   selections: readonly ObservationSelection[],
 ): readonly ObservationAddress[] {
   validateObservationSelections(selections);
@@ -244,7 +254,7 @@ export function resolveObservationAddressesWithTracks(
         diagnostics: [{ code: "sdk.observation.selection", path: selection.effectSlotId }],
       });
     }
-    const trackIndex = tracks.indexOf(selection.trackId);
+    const trackIndex = strips.indexOf(selection.trackId);
     if (trackIndex < 0) {
       throw new MisoEngineError("the selected observation track is unavailable in the current owner", {
         phase: "output",
@@ -280,7 +290,7 @@ function descriptorFor(nativeEffectId: string, tapId: number): ObservationDescri
 /** Decode copied rows into owned public values while preserving the owner's raw units and timing. */
 export function decodeObservationRows(
   map: ObservationMap,
-  tracks: readonly string[],
+  strips: readonly string[],
   selections: readonly ObservationSelection[],
   addresses: readonly ObservationAddress[],
   rows: readonly RawObservationRow[],
@@ -353,7 +363,7 @@ export function decodeObservationRows(
       });
     }
     return Object.freeze({
-      trackId: tracks[address.trackIndex] ?? selection.trackId,
+      trackId: strips[address.trackIndex] ?? selection.trackId,
       rack: selection.rack,
       effectSlotId: binding.effectSlotId,
       tapId: selection.tapId,

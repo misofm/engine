@@ -327,9 +327,9 @@ def self_test() -> int:
             "a Rust reason is bumped without the other five spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;",
-                "pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;\n"
-                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 12;",
+                "pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;",
+                "pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;\n"
+                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 13;",
             ),
         ),
         (
@@ -337,7 +337,7 @@ def self_test() -> int:
             mutate(
                 RUST_CONSTANTS,
                 "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;",
-                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 12;",
+                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 13;",
             ),
         ),
         # The shipped #151 defect itself, in each of the five downstream spellings.
@@ -345,7 +345,7 @@ def self_test() -> int:
             "the host JS table stops at wrongState",
             mutate(
                 HOST_JS,
-                '  "unknownTap",\n  "observationUnbound",\n',
+                '  "unknownTap",\n  "observationUnbound",\n  "notSoloable",\n',
                 "",
             ),
         ),
@@ -362,7 +362,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "reason < COMMAND_REASONS.length;",
-                "reason <= 11;",
+                "reason <= 12;",
             ),
         ),
         (
@@ -410,7 +410,7 @@ def self_test() -> int:
             mutate(
                 WORKLET_JS,
                 "const COMMAND_REASON_UNSUPPORTED_KIND = 7;",
-                "const COMMAND_REASON_UNSUPPORTED_KIND = 12;",
+                "const COMMAND_REASON_UNSUPPORTED_KIND = 13;",
             ),
         ),
         (
@@ -425,7 +425,7 @@ def self_test() -> int:
             "the schema gate's list stops at wrongState",
             mutate(
                 SCHEMA_GATE,
-                '"wrongState", "unknownTap", "observationUnbound",',
+                '"wrongState", "unknownTap", "observationUnbound",\n    "notSoloable",',
                 '"wrongState",',
             ),
         ),

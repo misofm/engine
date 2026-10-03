@@ -73,6 +73,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -113,8 +114,8 @@ fn prepare_with_live_controls(document: &str) -> Host {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), TRACKS);
-    assert_eq!(handles.track_controls.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
+    assert_eq!(handles.strip_controls.len(), TRACKS);
     Host {
         prepared,
         handles: Some(handles),
@@ -209,7 +210,7 @@ fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
     host.handles
         .as_mut()
         .expect("live controls")
-        .track_controls
+        .strip_controls
         .get_mut(track)
         .expect("a control channel for the addressed track")
         .input

@@ -252,6 +252,7 @@ async function createSpectrumBrowser(query: typeof SPECTRUM_QUERIES[number]) {
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(SPECTRUM_FRAMES) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new OfflineAudioContext(2, SPECTRUM_FRAMES, 48_000);
@@ -369,6 +370,7 @@ async function createContinuousSpectrumBrowser(
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(frames) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = live
@@ -424,6 +426,7 @@ async function createSpectrumCollectionBrowser() {
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(frames) }],
       tracks: ["track-a", "track-b"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new AudioContext({ sampleRate: 48_000, latencyHint: "interactive" });
@@ -1081,6 +1084,7 @@ async function createTrackResponseSubscriptionBrowser(stats: { queries: number; 
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
@@ -1353,6 +1357,7 @@ async function createResidentObservationBrowser(): Promise<Awaited<ReturnType<ty
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
@@ -1525,6 +1530,7 @@ async function runSdkObservationQualification(): Promise<Record<string, unknown>
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(OBSERVATION_FRAMES) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, 48_000);
@@ -1750,6 +1756,7 @@ async function renderLiveBypass(
       backend: "simd128" as const,
       sources: [{ id: "live-control-source", channels: 2, frames: BigInt(LIVE_BYPASS_FRAMES) }],
       tracks: ["track"],
+      submixes: [],
     }),
     createContext: () => {
       const context = new OfflineAudioContext(2, LIVE_BYPASS_FRAMES, 48_000);

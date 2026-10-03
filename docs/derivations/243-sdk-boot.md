@@ -131,7 +131,8 @@ proof.
 ## 6. Structure byte totals are tiled, not asserted
 
 `check-abi-layout-v1.py` does not carry the structures' field lists. It carries their byte totals
-(`bootOptions` 64, `status` 80, `resourceReport` 224, `meterHeader` 64, `commandReport` 48) and
+(`bootOptions` 64, `status` 80, `resourceReport` 224, `meterHeader` 64 -- 72 since #1209 appended
+`submixCount` -- and `commandReport` 48) and
 requires each structure's rows to *tile* that total: every row starts exactly where the previous
 row's declared width ended, and the final row ends exactly at `bytes`. A renamed row, a dropped
 row, a widened row, or a hole all move the sum.

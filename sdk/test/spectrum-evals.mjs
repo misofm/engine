@@ -630,7 +630,7 @@ test("managed spectrum anchors asynchronous reads to native cadence", async (t) 
       })),
       liveControls: () => ({
         edit: {
-          track: () => ({
+          strip: () => ({
             effect: () => ({ observe: (_tap, armed) => ({ kind: armed ? "observeSubscribe" : "observeUnsubscribe" }) }),
           }),
         },

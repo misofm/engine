@@ -129,7 +129,10 @@ typedef struct miso_engine_v1_compile_limits {
     uint64_t maximum_control_frame_bytes;
     uint64_t maximum_replay_bytes;
     uint64_t maximum_replay_entries;
-    uint64_t reserved[4];
+    /* Maximum session submix strips. Zero means "use maximum_tracks"; it never means
+       "no submixes" or "unbounded". Formerly reserved[0]; the layout is unchanged. */
+    uint64_t maximum_submixes;
+    uint64_t reserved[3]; /* Must be zero in ABI V1. */
 } miso_engine_v1_compile_limits;
 
 typedef struct miso_engine_v1_bytes_out {

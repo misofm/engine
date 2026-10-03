@@ -115,6 +115,7 @@ async function testMainRealm() {
   let held = null;
   let readyMutation = null;
   let statusMutation = null;
+  let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
   let mixedSuccess = false;
@@ -186,7 +187,9 @@ async function testMainRealm() {
               { id: "drums", channels: 2, frames: 2048n },
             ],
             metersAttached: true,
+            submixes: ["aaa-bus", "zzz-bus"],
           };
+          if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
@@ -1350,6 +1353,30 @@ async function testMainRealm() {
     statusMutation = null;
     await schemaHost.dispose();
 
+    // Issue #1210 gate 3: the session map's submix list is part of the exact field set. A reply
+    // without it, or with an entry that is not a nonempty string, fails the whole host; the
+    // well-formed reply is delivered with its canonical order intact.
+    for (const [what, mutation] of [
+      ["no submix list", ({ submixes: _dropped, ...rest }) => rest],
+      ["a submix list that is not an array", (map) => ({ ...map, submixes: "aaa-bus" })],
+      ["a non-string submix", (map) => ({ ...map, submixes: ["aaa-bus", 7] })],
+      ["an empty submix ID", (map) => ({ ...map, submixes: ["aaa-bus", ""] })],
+    ]) {
+      const mapHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      sessionMapMutation = mutation;
+      await errorResult(mapHost.sessionMap(), 255).catch((error) => {
+        throw new Error(`the host accepted a session map with ${what}`, { cause: error });
+      });
+      sessionMapMutation = null;
+      await mapHost.dispose();
+    }
+
     const planeHost = await createMisoAudioWorkletHost({
       context,
       document: new Uint8Array(),
@@ -1488,6 +1515,7 @@ async function testMainRealm() {
       { id: "drums", channels: 2, frames: 2048n },
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
+    assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
 
     const pan = {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
@@ -1687,6 +1715,9 @@ async function testMainRealm() {
         peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
         trackGrDb: new Float32Array([6.5, 0]), masterGrDb: 6.5,
         firstSample: 512n, endSample: 768n,
+        // Issue #1209 gate 3: the 15-field frame with one bus is delivered with its bus section.
+        submixCount: 1, submixPeaks: new Float32Array([0.875, 0.9375]),
+        submixGrDb: new Float32Array([1.25]),
       },
     });
     node.port.onmessage({
@@ -1698,6 +1729,9 @@ async function testMainRealm() {
     });
     assert.equal(meterFrames.length, 1);
     assert.deepEqual([...meterFrames[0].peaks], [0.125, 0.25, 0.375, 0.5, 0.625, 0.75]);
+    assert.equal(meterFrames[0].submixCount, 1);
+    assert.deepEqual([...meterFrames[0].submixPeaks], [0.875, 0.9375]);
+    assert.deepEqual([...meterFrames[0].submixGrDb], [1.25]);
     assert.equal(Object.isFrozen(meterFrames[0]), true);
 
     // Issue #143 E4: the frame as an **app** reads it.
@@ -1721,7 +1755,8 @@ async function testMainRealm() {
     assert.equal(meterFrames[0].endSample - meterFrames[0].firstSample, 256n);
 
     // Every shape rule is a hard failure, not a silent skip. Each entry is one red mutation of
-    // one rule in the `miso.meter.v1` branch of `#receive`.
+    // one rule in the `miso.meter.v1` branch of `#receive`. `MISSING` removes the field.
+    const MISSING = Symbol("missing");
     for (const broken of [
       { generation: 0n },
       { generation: 1 },
@@ -1739,6 +1774,23 @@ async function testMainRealm() {
       { firstSample: 512 },
       { endSample: 256n },
       { endSample: 512n },
+      // Issue #1209 gate 3: the bus section's shape rules, against a one-bus base frame.
+      { submixGrDb: MISSING },
+      { submixPeaks: MISSING },
+      { submixCount: MISSING },
+      { submixPeaks: new Float32Array(1) },
+      { submixPeaks: new Float32Array(4) },
+      { submixCount: 2 },
+      { submixCount: -1, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0) },
+      { submixCount: 1.5 },
+      { submixPeaks: [0, 0] },
+      { submixPeaks: new Float32Array([-0.5, 0]) },
+      { submixPeaks: new Float32Array([0, Number.POSITIVE_INFINITY]) },
+      { submixGrDb: new Float32Array(0) },
+      { submixGrDb: new Float32Array([-1]) },
+      { submixGrDb: new Float32Array([Number.NaN]) },
+      { submixGrDb: [0] },
+      { unexpected: 0 },
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
@@ -1748,14 +1800,17 @@ async function testMainRealm() {
         workletModuleUrl: "processor.js",
       });
       const rejected = rejecting.status();
-      FakeNode.latest.port.onmessage({
-        data: {
-          tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-          windows: 1, trackCount: 2,
-          peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
-          firstSample: 512n, endSample: 768n, ...broken,
-        },
-      });
+      const data = {
+        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
+        windows: 1, trackCount: 2,
+        peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
+        firstSample: 512n, endSample: 768n, submixCount: 1,
+        submixPeaks: new Float32Array(2), submixGrDb: new Float32Array(1), ...broken,
+      };
+      for (const [key, value] of Object.entries(broken)) {
+        if (value === MISSING) delete data[key];
+      }
+      FakeNode.latest.port.onmessage({ data });
       await errorResult(rejected, 255);
     }
     assert.equal(telemetryFrames.length, 1);
@@ -1790,6 +1845,37 @@ async function testMainRealm() {
     });
     assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
     assert.equal(unsubscribed.bindings[0].trackIndex, 0);
+    // Issue #1213 (attempt 2, verdict MAJOR-1): a bus tap's binding. `frameSlot` is the strip
+    // index, so it resolves into `trackGrDb` below `trackCount` and into
+    // `submixGrDb[frameSlot - trackCount]` from there; for bus `0` that is the frame's
+    // `submixGrDb[0]`. Red if `observe()` reports a bus `frameSlot` the documented mapping does not
+    // land on the bus's entry, or if the mapping is read as a plain `trackGrDb` index (the
+    // pre-#1213 contract), where a bus slot falls past the end.
+    {
+      const frameReading = (frame, frameSlot) => frameSlot < frame.trackCount
+        ? frame.trackGrDb[frameSlot]
+        : frame.submixGrDb[frameSlot - frame.trackCount];
+      const busSubscription = {
+        trackIndex: map.tracks.length, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0,
+      };
+      const busAck = await liveControlHost.observe({
+        subscriptions: [{ ...busSubscription, armed: true }],
+      });
+      assert.equal(busAck.result, 0);
+      const busBinding = busAck.bindings.find(
+        (binding) => binding.trackIndex === map.tracks.length,
+      );
+      assert.equal(busBinding.frameSlot, map.tracks.length, "a bus's frameSlot is its strip index");
+      assert.equal(meterFrames[0].trackCount, map.tracks.length);
+      assert.equal(frameReading(meterFrames[0], busBinding.frameSlot), meterFrames[0].submixGrDb[0],
+        "the documented mapping lands on the bus's submixGrDb entry");
+      assert.equal(frameReading(meterFrames[0], busAck.bindings[0].frameSlot),
+        meterFrames[0].trackGrDb[0], "and a track's frameSlot still indexes trackGrDb");
+      const busOff = await liveControlHost.observe({
+        subscriptions: [{ ...busSubscription, armed: false }],
+      });
+      assert.deepEqual(busOff.bindings, unsubscribed.bindings, "the bus binding disarms");
+    }
     for (const broken of [
       // The retired `simd1`/`simd2` codes (`0`, `2`) and an unallocated one are refused (#1096).
       { trackIndex: -1 }, { rack: 0 }, { rack: 2 }, { rack: 4 }, { tapId: 0 }, { armed: "yes" },
@@ -1826,6 +1912,9 @@ async function testMainRealm() {
       // The tap is declared and correctly addressed; this preparation bound no observation
       // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
       { reason: 11, result: 7, what: "a session that bound no observation capacity" },
+      // Issue #1212: reason 12 (`notSoloable`) is in the host's vocabulary before anything emits
+      // it, so the kind-9 solo refusal #1213 adds is a typed refusal, never the sticky 255.
+      { reason: 12, result: 1, what: "a strip that cannot be soloed" },
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
@@ -1867,6 +1956,7 @@ async function testMainRealm() {
           peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
           trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
           firstSample: 1024n, endSample: 1280n,
+          submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
         },
       });
       assert.equal(
@@ -1902,6 +1992,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 768n, endSample: 1024n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     assert.equal(meterFrames.length, framesAtRelease, "a released lease receives nothing");
@@ -1916,6 +2007,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(4), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 0n, endSample: 0n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     await errorResult(doomed, 255);
@@ -2006,6 +2098,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
         firstSample: 0n, endSample: 256n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
@@ -2022,7 +2115,10 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
+// `submixIds` (#1209 MINOR-2, #1210 MINOR-1): the session's submix IDs in canonical order; the
+// meter header's `submix_count` and the frame layout follow it, so a caller can run the worklet
+// with no submix (the production case before K2) or with several (their order is observable).
+function createFakeExports(quantum, backend = 1, liveControlsAttached = true, submixIds = ["drums-bus"]) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
@@ -2058,17 +2154,22 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
+  // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
+  // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
   // frame count differ between rows, so a worklet that reads the wrong row/query is visible here.
   const sourceRows = [
     { id: "bass", channels: 1, frames: 96000n },
     { id: "drums", channels: 2, frames: 2048n },
   ];
-  // Issue #143 D5: `3T + 3` -- the frozen `2T + 2` peak section, then one gain-reduction magnitude
-  // per track and the master's.
-  const meterFrameFloats = trackIds.length * 3 + 3;
-  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 64);
-  meterHeader.setUint32(0, 64, true);
+  // Issue #1209 D1: `3(T + S) + 3` -- a peak pair per strip (the tracks, then the submixes), the
+  // master pair, then one gain-reduction magnitude per strip and the master's.
+  const submixCount = submixIds.length;
+  const strips = trackIds.length + submixCount;
+  const meterFrameFloats = strips * 3 + 3;
+  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 72);
+  meterHeader.setUint32(0, 72, true);
+  meterHeader.setUint32(64, submixCount, true);
   meterHeader.setUint32(4, 0x00010000, true);
   meterHeader.setUint32(8, trackIds.length, true);
   meterHeader.setUint32(40, 1, true);
@@ -2180,17 +2281,32 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
     miso_engine_web_v1_meter_poll: () => {
       if (calls.meterWindows === 0) return 0;
       calls.meterWindows -= 1;
-      // Issue #143: the two sections carry **different** values, so a worklet that read the peak
+      // Issue #143: the sections carry **different** values, so a worklet that read the peak
       // view where the gain-reduction view belongs (or the reverse) is visible here rather than
-      // hidden by a uniform fill.
+      // hidden by a uniform fill. Issue #1209: so do the submix sections and the master pair,
+      // which follows the submix peaks, so a worklet that reads the master after the tracks or
+      // a bus from a track's slot is visible too.
       const frame = new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats);
-      frame.fill(0.5, 0, trackIds.length * 2 + 2);
-      frame.fill(6.5, trackIds.length * 2 + 2);
+      const tracks = trackIds.length;
+      frame.fill(0.5, 0, tracks * 2);
+      frame.fill(0.75, tracks * 2, strips * 2);
+      frame.fill(0.625, strips * 2, strips * 2 + 2);
+      frame.fill(6.5, strips * 2 + 2, strips * 2 + 2 + tracks);
+      frame.fill(2.25, strips * 2 + 2 + tracks, strips * 3 + 2);
+      frame[strips * 3 + 2] = 7.5;
       return 1;
     },
     miso_engine_web_v1_live_control_track_count: () => trackIds.length,
     miso_engine_web_v1_live_control_track_id: (_handle, index) => {
       const id = trackIds[index];
+      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
+      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
+      return id.length;
+    },
+    miso_engine_web_v1_live_control_submix_count: () => submixIds.length,
+    miso_engine_web_v1_live_control_submix_id: (_handle, index) => {
+      const id = submixIds[index];
+      if (id === undefined) return 0;
       const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
       return id.length;
@@ -2240,7 +2356,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
       return 0;
     },
   };
-  return { exports, calls, trackIds, sourceRows, meterFrameFloats, meterHeader };
+  return { exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader };
 }
 
 function createTelemetryClock(elapsedMsByBlock) {
@@ -2617,8 +2733,8 @@ async function testProcessor() {
         },
       });
     };
-    const makeProcessor = () => {
-      const fake = createFakeExports(64);
+    const makeProcessor = (submixIds = undefined) => {
+      const fake = createFakeExports(64, 1, true, submixIds);
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
         tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
@@ -2626,6 +2742,29 @@ async function testProcessor() {
       });
       return { processor, fake };
     };
+
+    // Issue #1213 D5a (attempt 2, verdict MINOR-3): the worklet's eq-config refusal classifier
+    // bounds the index by every strip -- this processor has 2 tracks and 1 submix -- so a bad rack
+    // or effect at the bus index `T + 0` reports that, and only `T + S` is an unknown track.
+    // Red mutation: revert the classifier to `message.trackIndex >= this.trackCount` -> the bus
+    // assertions fail with `2` (unknownTrack).
+    {
+      const { processor, fake } = makeProcessor();
+      fake.exports.miso_engine_web_v1_eq_target_config_copy = () => 1;
+      fake.exports.miso_engine_web_v1_input_filters_config_copy = () => 1;
+      const classify = (trackIndex, rack) => {
+        processor.port.posts.length = 0;
+        processor.receiveEqTargetConfig({ requestId: 7, trackIndex, rack, effectIndex: 9 });
+        const reply = processor.port.posts.at(-1).message;
+        assert.equal(reply.tag, "miso.eq-target-config.v1");
+        assert.equal(reply.result, 1);
+        return reply.reason;
+      };
+      assert.equal(classify(1, 1), 4, "a track's missing insert is unknownEffect");
+      assert.equal(classify(2, 1), 4, "the bus (T + 0) missing insert is unknownEffect");
+      assert.equal(classify(2, 0), 3, "the bus with a retired rack is unknownRack");
+      assert.equal(classify(3, 1), 2, "T + S is unknownTrack");
+    }
 
     const explicitHopOptions = (spectrumHopFrames) => ({
       ...limits,
@@ -2990,12 +3129,16 @@ async function testProcessor() {
       assert.equal(frame.lossCount, 0);
       assert.equal(frame.windows, 1);
       assert.equal(frame.trackCount, 2);
-      assert.equal(frame.peaks.length, 6);
-      assert(frame.peaks.every((value) => value === 0.5));
+      // Issue #1209 D4: `peaks` keeps its `2T + 2` shape, the master pair read from after the bus.
+      assert.deepEqual([...frame.peaks], [0.5, 0.5, 0.5, 0.5, 0.625, 0.625]);
       // Issue #143: the gain-reduction section is its own view, its own length, and its own value.
       assert.equal(frame.trackGrDb.length, 2);
       assert(frame.trackGrDb.every((value) => value === 6.5));
-      assert.equal(frame.masterGrDb, 6.5, "the header says the master reading is present");
+      assert.equal(frame.masterGrDb, 7.5, "the header says the master reading is present");
+      // Issue #1209 D4: the bus section, appended.
+      assert.equal(frame.submixCount, 1);
+      assert.deepEqual([...frame.submixPeaks], [0.75, 0.75]);
+      assert.deepEqual([...frame.submixGrDb], [2.25]);
       assert.equal(frame.firstSample, 512n);
       assert.equal(frame.endSample, 768n);
 
@@ -3022,6 +3165,29 @@ async function testProcessor() {
       const quiet = processor.port.posts.length;
       assert.equal(processor.process([], [[left, right]]), true);
       assert.equal(processor.port.posts.length, quiet, "a released lease posts nothing");
+    }
+
+    // #1209 MINOR-2: the frame decode with no submix (every session before K2, and today's
+    // production case) and with two. Red if the worklet refuses, or mis-slices, a frame whose
+    // submix section is empty: the default fake has one submix, so nothing else runs `S = 0`.
+    for (const submixIds of [[], ["aa-bus", "zz-bus"]]) {
+      const { processor, fake } = makeProcessor(submixIds);
+      const S = submixIds.length;
+      const left = new Float32Array(64);
+      const right = new Float32Array(64);
+      processor.receive({ tag: "miso.meters.v1", requestId: 1, enabled: true });
+      assert.equal(processor.port.posts.at(-1).message.result, 0);
+      fake.calls.meterWindows = 1;
+      assert.equal(processor.process([], [[left, right]]), true);
+      const frame = processor.port.posts.at(-1).message;
+      assert.equal(frame.tag, "miso.meter.v1", `S = ${S}: a frame is posted`);
+      assert.equal(frame.trackCount, 2);
+      assert.deepEqual([...frame.peaks], [0.5, 0.5, 0.5, 0.5, 0.625, 0.625], `S = ${S}: tracks, master`);
+      assert.deepEqual([...frame.trackGrDb], [6.5, 6.5], `S = ${S}: track gain reduction`);
+      assert.equal(frame.masterGrDb, 7.5, `S = ${S}: the master reading follows every strip's`);
+      assert.equal(frame.submixCount, S);
+      assert.deepEqual([...frame.submixPeaks], Array(2 * S).fill(0.75), `S = ${S}: bus peaks`);
+      assert.deepEqual([...frame.submixGrDb], Array(S).fill(2.25), `S = ${S}: bus gain reduction`);
     }
 
     {
@@ -3083,14 +3249,17 @@ async function testProcessor() {
     }
 
     {
-      // The session map answers from the identities read once at construction.
-      const { processor, fake } = makeProcessor();
+      // The session map answers from the identities read once at construction. Two submixes
+      // (#1210 MINOR-1, #1214 MINOR-2): the SDK indexes bus commands by this list's order, so red
+      // if the worklet enumerates or posts the submix IDs in any other order.
+      const { processor, fake } = makeProcessor(["aa-bus", "zz-bus"]);
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 1 });
       const map = processor.port.posts.at(-1).message;
       assert.equal(map.tag, "miso.sessionmap.v1");
       assert.deepEqual(map.tracks, ["kick", "snare"]);
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
+      assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "issue #1210: the enumerated submix order");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
@@ -3109,6 +3278,17 @@ async function testProcessor() {
         ["an empty source ID", (e) => { e.miso_engine_web_v1_source_id = () => 0; }],
         ["a source ID longer than staging",
           (e) => { e.miso_engine_web_v1_source_id = () => 65; }],
+        // Issue #1210 D3: the submix IDs are read under the track IDs' rules, and the meter
+        // header's submix count must be the enumerated count.
+        ["an empty submix ID", (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 0; }],
+        ["a submix ID longer than staging",
+          (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 65; }],
+        ["a submix count the meter header disagrees with",
+          (e) => {
+            const read = e.miso_engine_web_v1_live_control_submix_id;
+            e.miso_engine_web_v1_live_control_submix_count = () => 2;
+            e.miso_engine_web_v1_live_control_submix_id = (handle) => read(handle, 0);
+          }],
       ]) {
         const fake = createFakeExports(64);
         mutate(fake.exports);

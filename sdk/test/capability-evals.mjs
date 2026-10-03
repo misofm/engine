@@ -52,6 +52,89 @@ function compressorDocument() {
   });
 }
 
+/** Issue #1209 gate 2: tracks `t0`, `t1`, `t2`; `t0` and `t1` feed `bus-a`, `t2` feeds `bus-b`. */
+function busDocument() {
+  const document = JSON.parse(sessionDocument());
+  const [track] = document.tracks;
+  const [route] = document.routes;
+  document.tracks = ["t0", "t1", "t2"].map((id) => ({ ...structuredClone(track), id }));
+  document.submixes = ["bus-a", "bus-b"].map((id) => ({
+    id,
+    builtins: structuredClone(track.builtins),
+    console: [],
+    inserts: { effects: [] },
+    fader: structuredClone(track.fader),
+    pan: structuredClone(track.pan),
+  }));
+  const feed = (id, trackId, submixId) => ({
+    ...structuredClone(route),
+    id,
+    source: { kind: "track", track_id: trackId, tap: "post_pan" },
+    destination: { kind: "submix_input", submix_id: submixId },
+  });
+  const out = (id, submixId) => ({
+    ...structuredClone(route),
+    id,
+    source: { kind: "submix", submix_id: submixId, tap: "post_pan" },
+  });
+  document.routes = [
+    feed("t0-a", "t0", "bus-a"), feed("t1-a", "t1", "bus-a"), feed("t2-b", "t2", "bus-b"),
+    out("a-main", "bus-a"), out("b-main", "bus-b"),
+  ];
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+/**
+ * Issue #1210 gate 2(a): tracks `t0`, `t1`, `t2`; the submixes are declared out of canonical order.
+ * `zz-bus` (declared first) sums `t0` and `t1` behind a -40 dB fader; `aa-bus` carries `t2` alone
+ * at unity, so its lanes peak well above `zz-bus`'s whatever the source block holds.
+ */
+function namedBusDocument() {
+  const document = JSON.parse(busDocument());
+  const [quiet, loud] = document.submixes;
+  quiet.id = "zz-bus";
+  quiet.fader = { ...quiet.fader, left_db: -40.0, right_db: -40.0 };
+  loud.id = "aa-bus";
+  document.submixes = [quiet, loud];
+  for (const route of document.routes) {
+    for (const end of [route.source, route.destination]) {
+      if (end.submix_id === "bus-a") end.submix_id = "zz-bus";
+      else if (end.submix_id === "bus-b") end.submix_id = "aa-bus";
+    }
+  }
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+/**
+ * Issue #1210 gate 4: track `t` (compressor insert `comp`) feeds `bus`, which carries its own
+ * compressor insert `bus-comp` and feeds the output.
+ */
+function busObservationDocument() {
+  const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
+  assert.ok(compressor);
+  const insert = (id) => effectEntry(id, compressor.id, compressor.parameters.map((row) => ({
+    id: row.id, unit: row.unitName, value: row.default, channel: "both",
+  })));
+  const document = JSON.parse(sessionDocument({ effects: { inserts: [insert("comp")] } }));
+  const [track] = document.tracks;
+  const [route] = document.routes;
+  document.submixes = [{
+    id: "bus",
+    builtins: structuredClone(track.builtins),
+    console: [],
+    inserts: { effects: [insert("bus-comp")] },
+    fader: structuredClone(track.fader),
+    pan: structuredClone(track.pan),
+  }];
+  document.routes = [
+    { ...structuredClone(route), id: "t-bus",
+      destination: { kind: "submix_input", submix_id: "bus" } },
+    { ...structuredClone(route), id: "bus-main",
+      source: { kind: "submix", submix_id: "bus", tap: "post_pan" } },
+  ];
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
 describe("issue 321 -- complete headless ABI capability parity", () => {
   test("status and sessionMap expose the compiled addressing authority", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
@@ -70,6 +153,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.deepEqual(map.tracks, ["t"]);
       assert.deepEqual(map.sources, [{ id: "s", channels: 2, frames: 4_800n }]);
       assert.equal(map.metersAttached, false);
+      assert.deepEqual(map.submixes, [], "issue #1210: a session without submixes");
     } finally {
       engine.dispose();
     }
@@ -157,6 +241,292 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
 
       assert.deepEqual(engine.meters(false), { ok: true, result: 0, code: "ok" });
       assert.equal(engine.pollMeters(), undefined);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a frame with submixes keeps the track shape and carries every bus", async () => {
+    // Issue #1209 gate 2: `T = 3`, `S = 2` through the shipped module. Red if the headless reader
+    // keeps the `3T + 3` shape check and refuses a frame with buses, or drops its submix sections.
+    const meterBlocks = 2;
+    const engine = await createOfflineEngine(busDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        meterBlocks,
+        observationTaps: 0,
+        masterTrackPlusOne: 0,
+      },
+    });
+    try {
+      assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
+      for (let block = 0; block < meterBlocks; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
+        engine.render();
+      }
+      const frame = engine.pollMeters();
+      assert.ok(frame);
+      const trackCount = engine.shape().tracks.length;
+      assert.equal(frame.trackCount, trackCount);
+      assert.equal(trackCount, 3);
+      assert.equal(frame.peaks.length, trackCount * 2 + 2, "2T + 2 peak words");
+      assert.equal(frame.trackGrDb.length, trackCount, "T gain-reduction words");
+      assert.equal(frame.submixCount, 2);
+      assert.equal(frame.submixPeaks.length, frame.submixCount * 2, "2S bus peak words");
+      assert.equal(frame.submixGrDb.length, frame.submixCount, "S bus gain-reduction words");
+      for (const values of [frame.peaks, frame.trackGrDb, frame.submixPeaks, frame.submixGrDb]) {
+        assert.ok(values.every((value) => Number.isFinite(value) && value >= 0), String(values));
+      }
+      assert.ok(frame.submixPeaks.every((value) => value > 0), "every bus lane is metered");
+      assert.ok(frame.peaks.every((value) => value > 0), "every track lane and the master");
+      // #1209 MINOR-1: values, not only shapes. The three tracks are identical copies of one
+      // source and nothing is armed, so bus-a (two tracks) peaks at twice bus-b (one), the master
+      // at bus-a + bus-b, and every gain-reduction word is 0. Red if the reader takes the master
+      // pair from a bus slot, or reads `trackGrDb` from the old `2T + 2` base (bus peaks as dB).
+      const close = (actual, expected) => Math.abs(actual - expected) <= Math.abs(expected) * 1e-5;
+      const master = trackCount * 2;
+      for (const lane of [0, 1]) {
+        assert.ok(close(frame.submixPeaks[lane], 2 * frame.submixPeaks[2 + lane]), `bus-a lane ${lane}`);
+        assert.ok(close(frame.peaks[master + lane],
+          frame.submixPeaks[lane] + frame.submixPeaks[2 + lane]), `master lane ${lane}`);
+      }
+      assert.ok(frame.trackGrDb.every((value) => value === 0), "no track effect is armed");
+      assert.ok(frame.submixGrDb.every((value) => value === 0), "no bus effect is armed");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("the session map names every submix in the frame's bus order", async () => {
+    // Issue #1210 gate 2(a). Red if the shipped enumeration orders submixes other than the frame
+    // does (the quiet bus's pair would sit where the map says the loud bus is), or if `shape()`
+    // does not read the submix exports at all.
+    const meterBlocks = 2;
+    const engine = await createOfflineEngine(namedBusDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        meterBlocks,
+        observationTaps: 0,
+        masterTrackPlusOne: 0,
+      },
+    });
+    try {
+      const map = engine.sessionMap();
+      assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "canonical order, not declaration order");
+      assert.deepEqual(engine.shape().submixes, map.submixes);
+      assert.deepEqual(map.tracks, ["t0", "t1", "t2"]);
+      assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
+      for (let block = 0; block < meterBlocks; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
+        engine.render();
+      }
+      const frame = engine.pollMeters();
+      assert.ok(frame);
+      assert.equal(frame.submixCount, map.submixes.length);
+      const pair = (id) => {
+        const index = map.submixes.indexOf(id);
+        return [frame.submixPeaks[index * 2], frame.submixPeaks[index * 2 + 1]];
+      };
+      const [loud, quiet] = [pair("aa-bus"), pair("zz-bus")];
+      for (const lane of [0, 1]) {
+        assert.ok(quiet[lane] > 0, "the quiet bus is metered");
+        assert.ok(loud[lane] > 10 * quiet[lane], `lane ${lane}: ${loud} vs ${quiet}`);
+      }
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a bus effect's observation names its submix and a track tap still reads", async () => {
+    // Issue #1210 gate 4. Red if the SDK enriches or resolves observation bindings against the
+    // tracks only: the bus binding's strip index is past the track list, so the map throws
+    // `sdk.observation.map` and every read, the track's own included, fails with it.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const map = engine.observationMap();
+      const owners = map.bindings.map((binding) => [binding.trackId, binding.effectSlotId]);
+      assert.deepEqual(owners.filter(([trackId]) => trackId === "bus"), [["bus", "bus-comp"]]);
+      assert.deepEqual(owners.filter(([trackId]) => trackId === "t"), [["t", "comp"]]);
+      const read = (trackId, effectSlotId) => {
+        const binding = map.bindings.find((row) => row.trackId === trackId
+          && row.effectSlotId === effectSlotId);
+        assert.ok(binding);
+        return engine.readObservations([{
+          trackId, rack: binding.rack, effectSlotId, tapId: binding.tapIds[0], channels: "both",
+        }]);
+      };
+      const [track] = read("t", "comp");
+      assert.equal(track.trackId, "t");
+      assert.equal(track.status, "unarmed");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a selected read of a bus tap names the bus, unarmed and then armed at its strip index", async () => {
+    // Issue #1213 (K2 verdict requirement (a)). The SDK resolves a bus tap to its strip index
+    // `T + j`, and host-web must resolve that index per strip -- tracks, then submixes. Red if the
+    // host looks the index up among the tracks only: the read then fails with `invalidArgument`.
+    // The arm is kind 7 at the bus's strip index through the shipped module.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const map = engine.sessionMap();
+      const busIndex = map.tracks.length + map.submixes.indexOf("bus");
+      assert.equal(busIndex, 1, "strip order: the track, then the bus");
+      const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");
+      assert.ok(binding);
+      const selection = [{
+        trackId: "bus", rack: binding.rack, effectSlotId: "bus-comp", tapId: binding.tapIds[0],
+        channels: "both",
+      }];
+      const [unarmed] = engine.readObservations(selection);
+      assert.equal(unarmed.trackId, "bus");
+      assert.equal(unarmed.effectSlotId, "bus-comp");
+      assert.equal(unarmed.status, "unarmed");
+
+      const writer = new LiveControlWriter({
+        submit: (records, count) => engine.submitCommands(records, count),
+      });
+      writer.stage({
+        kind: "observeSubscribe",
+        trackIndex: busIndex,
+        rack: binding.rack === "console" ? 3 : 1,
+        channel: 255,
+        effectIndex: 0,
+        parameterId: binding.tapIds[0],
+        smoothingSamples: 1,
+        values: [0, 0, 0, 0],
+      });
+      assert.equal((await writer.flush()).admitted, 1);
+      for (let block = 0; block < 4; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 41 + block);
+        engine.render();
+      }
+      const [armed] = engine.readObservations(selection);
+      assert.equal(armed.trackId, "bus");
+      assert.notEqual(armed.status, "unarmed", "kind 7 at the bus's strip index armed its tap");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a managed subscription to a bus tap arms it at the bus's strip index and reads it ready", async () => {
+    // #1214 MINOR-1. The managed owner arms and disarms through `edit.strip(trackId)`. Red if it
+    // builds the edit with `edit.track()`: a bus is not a track, so the subscription throws
+    // "no track 'bus'" before anything is submitted.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");
+      assert.ok(binding);
+      const selection = {
+        trackId: "bus", rack: binding.rack, effectSlotId: "bus-comp", tapId: binding.tapIds[0],
+        channels: "both",
+      };
+      const subscription = await engine.subscribeObservations({ selections: [selection], windowBlocks: 1 });
+      for (let block = 0; block < 2; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 61 + block);
+        engine.render();
+        await subscription.pump();
+      }
+      const [row] = subscription.readLatest();
+      assert.equal(row.trackId, "bus");
+      assert.equal(row.effectSlotId, "bus-comp");
+      assert.equal(row.status, "ready");
+      await subscription.close();
+      assert.equal(engine.readObservations([selection])[0].status, "unarmed", "close disarms the bus tap");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a bad effect at a bus index is an unknown effect, and only past every strip an unknown track", async () => {
+    // Issue #1213 D5a. The prepared path classifies a refused configuration copy itself; the
+    // index is a strip index, so the bound is `T + S`. Red if the classifier compares against the
+    // track count: the bus's missing insert would then report `unknownTrack`.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
+    });
+    try {
+      const refusal = async (trackIndex) => {
+        const writer = new LiveControlWriter({
+          submit: (records, count) => engine.submitCommands(records, count),
+        });
+        writer.stage({
+          kind: "effectParam",
+          trackIndex,
+          rack: 1, // inserts
+          channel: 2,
+          effectIndex: 7,
+          parameterId: 1,
+          smoothingSamples: 0,
+          values: [-20, 0, 0, 0],
+        });
+        // The writer turns a caller-error refusal into a usage error that names the reason.
+        let reason;
+        await assert.rejects(writer.flush(), (error) => {
+          reason = /refused a batch for (\w+) at record 0/.exec(error.message)?.[1];
+          return error instanceof MisoUsageError && reason !== undefined;
+        });
+        return reason;
+      };
+      assert.equal(await refusal(1), "unknownEffect", "the bus at strip index T + 0");
+      assert.equal(await refusal(2), "unknownTrack", "one past the last strip");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a solo at a bus index is refused notSoloable with invalidArgument through the shipped module", async () => {
+    // Issue #1213 D4 (and #1212 NIT-2): reason 12 and result 1 together, end to end, from the
+    // real admission rather than a mocked reply. Red if a bus can be soloed, if the refusal
+    // reports another reason, or if reason 12 maps to another result.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
+    });
+    try {
+      let report;
+      const writer = new LiveControlWriter({
+        submit: (records, count) => (report = engine.submitCommands(records, count)),
+      });
+      writer.stage({
+        kind: "solo",
+        trackIndex: 1, // the bus: one track, then the submix
+        rack: 255,
+        channel: 255,
+        effectIndex: 0,
+        parameterId: 0,
+        smoothingSamples: 0,
+        values: [1, 0, 0, 0],
+      });
+      await assert.rejects(writer.flush(), MisoUsageError);
+      assert.equal(report.reason, 12);
+      assert.equal(report.reasonName, "notSoloable");
+      assert.equal(report.result, 1);
+      assert.equal(report.code, "invalidArgument");
+      assert.equal(report.rejectedIndex, 0);
+      assert.equal(report.admitted, 0);
     } finally {
       engine.dispose();
     }

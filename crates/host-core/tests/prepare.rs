@@ -25,6 +25,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -60,12 +61,12 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     };
     let meters = [
         HostMeterRequest {
-            track_id: "eq7".into(),
+            strip_id: "eq7".into(),
             tap: MeterTap::Input,
             metrics: MeterMetricSet::COUNTS,
         },
         HostMeterRequest {
-            track_id: "eq1".into(),
+            strip_id: "eq1".into(),
             tap: MeterTap::PostFader,
             metrics: MeterMetricSet::SAMPLE_PEAK,
         },
@@ -88,7 +89,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     assert_eq!(handles.meters[1].tap, MeterTap::PostFader);
 
     let invalid = [HostMeterRequest {
-        track_id: "eq1".into(),
+        strip_id: "eq1".into(),
         tap: MeterTap::PostFader,
         metrics: MeterMetricSet::from_bits_retain(0x80),
     }];
@@ -702,18 +703,17 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         .map(|track| track.id.as_str().to_owned())
         .collect();
     assert_eq!(
-        handles
-            .tracks
+        handles.strips[..handles.track_count]
             .iter()
             .map(|value| value.to_string())
             .collect::<Vec<_>>(),
         expected,
         "live-control track order is the canonical normalized order"
     );
-    assert_eq!(handles.track_controls.len(), expected.len());
+    assert_eq!(handles.strip_controls.len(), expected.len());
     assert_eq!(handles.meters.len(), expected.len());
     for (index, track) in expected.iter().enumerate() {
-        assert_eq!(&*handles.track_controls[index].track_id, track.as_str());
+        assert_eq!(&*handles.strip_controls[index].track_id, track.as_str());
         assert_eq!(&*handles.meters[index].track_id, track.as_str());
     }
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
@@ -728,7 +728,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         },
         smoothing_samples: 0,
     };
-    let producer = &mut handles.track_controls[0].producer;
+    let producer = &mut handles.strip_controls[0].producer;
     for _ in 0..4 {
         producer
             .try_push(record)
@@ -755,9 +755,9 @@ fn no_live_control_request_attaches_nothing_and_charges_nothing() {
         &HostLiveControlRequest::default(),
     )
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
-    assert!(handles.track_controls.is_empty());
+    assert!(handles.strip_controls.is_empty());
     assert!(handles.meters.is_empty());
-    assert_eq!(handles.tracks.len(), 9);
+    assert_eq!(handles.strips.len(), 9);
     assert_eq!(plain.report.builtin_meter_payload_bytes, 0);
     let baseline = prepare_host_runtime(&compiled, &caps())
         .unwrap_or_else(|failure| {

@@ -74,6 +74,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -130,7 +131,7 @@ fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
     (
         session,
         Console {
@@ -890,7 +891,7 @@ fn seam_side_live_control_traffic_leaves_every_lane_eligible() {
 
     let control = console
         .handles
-        .track_controls
+        .strip_controls
         .iter_mut()
         .find(|producer| producer.track_id.as_ref() == "eq3")
         .expect("a control channel for the addressed track");

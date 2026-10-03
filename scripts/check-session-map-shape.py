@@ -425,9 +425,21 @@ def self_test() -> None:
             "the host's acknowledgement validator does not expect the source list",
             mutate(
                 HOST_JS,
-                '["tag", "requestId", "result", "tracks", "sources", "metersAttached"]',
-                '["tag", "requestId", "result", "tracks", "metersAttached"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]',
+                '["tag", "requestId", "result", "tracks", "metersAttached", "submixes"]',
             ),
+        ),
+        (
+            "the host's acknowledgement validator does not expect the submix list (issue #1210)",
+            mutate(
+                HOST_JS,
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]',
+                '["tag", "requestId", "result", "tracks", "sources", "metersAttached"]',
+            ),
+        ),
+        (
+            "the worklet posts no submix list while the host and .d.ts expect one (issue #1210)",
+            mutate(WORKLET_JS, "        submixes: [...this.submixIds],\n", ""),
         ),
         (
             "the host validates a stale per-source field set",

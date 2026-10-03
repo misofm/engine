@@ -57,6 +57,8 @@ export const ABI_LAYOUT = deepFreeze(
     "miso_engine_web_v1_eq_target_result_ptr",
     "miso_engine_web_v1_input_filters_config_copy",
     "miso_engine_web_v1_input_filters_prepare",
+    "miso_engine_web_v1_live_control_submix_count",
+    "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
     "miso_engine_web_v1_meter_header_ptr",
@@ -415,7 +417,7 @@ export const ABI_LAYOUT = deepFreeze(
       ]
     },
     "meterHeader": {
-      "bytes": 64,
+      "bytes": 72,
       "fields": [
         {
           "name": "structSize",
@@ -466,6 +468,16 @@ export const ABI_LAYOUT = deepFreeze(
           "name": "reserved",
           "offset": 48,
           "type": "u64[2]"
+        },
+        {
+          "name": "submixCount",
+          "offset": 64,
+          "type": "u32"
+        },
+        {
+          "name": "reservedPad",
+          "offset": 68,
+          "type": "u32"
         }
       ]
     },
@@ -2170,6 +2182,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 11,
         "name": "observationUnbound"
+      },
+      {
+        "value": 12,
+        "name": "notSoloable"
       }
     ],
     "racks": [

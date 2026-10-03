@@ -96,6 +96,14 @@ builder
 
 Routes form an acyclic graph; a cycle through buses is refused when the graph compiles at boot.
 
+## Automation on a submix
+
+The session grammar accepts an automation target whose `entity_id` names a submix, but the SDK's
+`.automation()` builder and `enginectl session build` still resolve a target against the tracks
+only, so neither can yet author automation on a bus. Stored automation renders nothing yet
+(#1058), so nothing audible is missing today. To store one anyway, write the target into the
+session JSON directly. The gap is recorded under #1196's known gaps.
+
 ## Saved documents
 
 A document saved before K1 is refused twice: a bare `{ "id": .. }` submix (`schema.missing_field`)

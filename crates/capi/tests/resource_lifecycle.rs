@@ -183,7 +183,8 @@ fn limits() -> CompileLimits {
         maximum_control_frame_bytes: 4_096,
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
-        reserved: [0; 4],
+        maximum_submixes: 0,
+        reserved: [0; 3],
     }
 }
 
@@ -469,6 +470,11 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: limits.maximum_automation_spans_per_block,
         maximum_tracks: limits.maximum_tracks,
+        maximum_submixes: if limits.maximum_submixes == 0 {
+            limits.maximum_tracks
+        } else {
+            limits.maximum_submixes
+        },
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
         maximum_effects: limits.maximum_effects,
@@ -1767,4 +1773,171 @@ fn control_calls_racing_plan_swapping_renders_never_wedge_replacement() {
 #[test]
 fn resource_queries_racing_plan_swaps_always_find_the_published_row() {
     race_plan_swaps(200, 2);
+}
+
+// Issue #1206 D2: a C ABI caller bounds submix strips through `maximum_submixes`, the word of the
+// compile limits that was `reserved[0]`. Zero means "use `maximum_tracks`" -- what every caller
+// written before the word was named passes -- and the three remaining reserved words still refuse
+// when nonzero. It lives here, not in a file of its own, because this file is the C ABI's
+// approved owner of exported-C `unsafe` calls (`scripts/check-realtime-policy.sh`).
+
+const SUBMIX_FIXTURE: &str =
+    include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
+
+/// Two tracks routed to the main output, plus three transparent, unrouted submix strips.
+fn two_track_three_submix_session() -> String {
+    let mut model = session::parse_session_json(SUBMIX_FIXTURE).expect("fixture parses");
+    model.tracks.truncate(2);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| match &route.source {
+        session::RouteSource::Track { track_id, .. } => kept.contains(track_id),
+        _ => true,
+    });
+    for index in 0..3 {
+        let id = StableId::parse(&format!("bus{index}")).expect("stable id");
+        model
+            .submixes
+            .push(session::Submix::unity(id, &model.console));
+    }
+    session::canonical_session_json(&model).expect("canonical session")
+}
+
+fn submix_limits(maximum_tracks: u64, maximum_submixes: u64) -> CompileLimits {
+    CompileLimits {
+        struct_size: COMPILE_LIMITS_SIZE,
+        source_ring_frames: 1_024,
+        maximum_automation_spans_per_block: 128,
+        reserved0: 0,
+        maximum_document_bytes: 1_000_000,
+        maximum_diagnostic_bytes: 4_096,
+        maximum_tracks,
+        maximum_sources: 100,
+        maximum_routes: 100,
+        maximum_effects: 100,
+        maximum_graph_session_plus_plan_bytes: 1_000_000_000,
+        maximum_source_total_bytes: 100_000_000,
+        maximum_source_overhead_bytes: 100_000_000,
+        maximum_effect_state_bytes: 1_000_000_000,
+        maximum_effect_scratch_bytes: 1_000_000_000,
+        maximum_builtin_retained_bytes: 1_000_000_000,
+        maximum_capi_retained_bytes: 100_000_000,
+        maximum_named_allocation_bytes: 1_000_000_000,
+        maximum_meter_streams: 1,
+        maximum_meter_items: 1,
+        maximum_meter_bytes: 1,
+        maximum_control_frame_bytes: 4_096,
+        maximum_replay_bytes: 8_192,
+        maximum_replay_entries: 16,
+        maximum_submixes,
+        reserved: [0; 3],
+    }
+}
+
+/// One `miso_engine_v1_compile_session`: the result code and the diagnostic bytes. Every handle it
+/// publishes is destroyed before it returns.
+fn compile_result_c(document: &str, compile_limits: &CompileLimits) -> (u32, Vec<u8>) {
+    let config = EngineConfig {
+        struct_size: ENGINE_CONFIG_SIZE,
+        abi_version: ABI_VERSION,
+        reserved: [0; 4],
+    };
+    let mut engine = ptr::null_mut();
+    let mut session = ptr::null_mut();
+    let mut plan = ptr::null_mut();
+    let mut storage = [0_u8; 4_096];
+    let mut diagnostics = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: storage.as_mut_ptr(),
+        capacity_bytes: storage.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: Every descriptor and output location stays live for each call, and every handle
+    // published here is destroyed exactly once before the engine.
+    unsafe {
+        assert_eq!(
+            miso_engine_v1_engine_create(&config, &mut engine),
+            RESULT_OK
+        );
+        let result = miso_engine_v1_compile_session(
+            engine,
+            document.as_ptr(),
+            document.len() as u64,
+            compile_limits,
+            &mut diagnostics,
+            &mut session,
+            &mut plan,
+        );
+        assert_eq!(session.is_null(), result != RESULT_OK);
+        assert_eq!(plan.is_null(), result != RESULT_OK);
+        if result == RESULT_OK {
+            miso_engine_v1_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
+        }
+        miso_engine_v1_engine_destroy(engine);
+        let written = usize::try_from(diagnostics.required_bytes)
+            .unwrap_or(storage.len())
+            .min(storage.len());
+        (result, storage[..written].to_vec())
+    }
+}
+
+fn assert_prepares(document: &str, compile_limits: &CompileLimits, case: &str) {
+    let (result, diagnostics) = compile_result_c(document, compile_limits);
+    assert_eq!(
+        result,
+        RESULT_OK,
+        "{case}: {}",
+        String::from_utf8_lossy(&diagnostics)
+    );
+}
+
+fn assert_count_refusal(document: &str, compile_limits: &CompileLimits, case: &str) {
+    let (result, diagnostics) = compile_result_c(document, compile_limits);
+    assert_eq!(result, RESULT_COMPILE_REJECTED, "{case}");
+    assert_eq!(diagnostics, b"host.resource.count\t$\n", "{case}");
+}
+
+/// Test value: turns red if the C bound ignores the new word, treats zero as "no submixes" (or as
+/// unbounded), or stops refusing the remaining reserved words.
+#[test]
+fn maximum_submixes_bounds_submixes_and_zero_defers_to_maximum_tracks() {
+    let document = two_track_three_submix_session();
+
+    // Zero: the submix bound is `maximum_tracks`.
+    assert_count_refusal(
+        &document,
+        &submix_limits(2, 0),
+        "zero word, three submixes over two tracks",
+    );
+    assert_prepares(
+        &document,
+        &submix_limits(3, 0),
+        "zero word, three submixes within three tracks",
+    );
+
+    // Nonzero: the word is the bound, whatever `maximum_tracks` is.
+    assert_prepares(
+        &document,
+        &submix_limits(2, 3),
+        "three submixes at a cap of three",
+    );
+    assert_count_refusal(
+        &document,
+        &submix_limits(2, 2),
+        "three submixes over a cap of two",
+    );
+    assert_count_refusal(
+        &document,
+        &submix_limits(3, 2),
+        "the word overrides a larger track cap",
+    );
+
+    // The three remaining reserved words still refuse, each on its own.
+    for word in 0..3 {
+        let mut nonzero = submix_limits(2, 3);
+        nonzero.reserved[word] = 1;
+        let (result, _) = compile_result_c(&document, &nonzero);
+        assert_eq!(result, RESULT_INVALID_ARGUMENT, "reserved[{word}]");
+    }
 }

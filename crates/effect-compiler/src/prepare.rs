@@ -633,10 +633,10 @@ fn prepare_with_console_eligibility(
 /// entry. A producer must be dropped before the plan that owns its consumer, which is why
 /// `PreparedHost`'s field order puts the plan first.
 pub struct EffectControlProducer {
-    /// Session-stable track identity this channel addresses.
+    /// Session-stable identity of the strip (a track or a submix) this channel addresses.
     pub track_id: Box<str>,
-    /// The instance's live address within its track: a console slot by its slot index, an insert
-    /// by its index (decision 12, issue #1096).
+    /// The instance's live address within its strip (a track or a submix): a console slot by its
+    /// slot index, an insert by its index (decision 12, issue #1096).
     ///
     /// This is the `(rack, effect_index)` the `miso.command.v1` wire addresses. It is derived from
     /// the normalized session model here rather than from `EffectPreparedSession::entries`, which
@@ -1459,10 +1459,6 @@ mod owner_tests {
 /// `effect.control.prepare` if a bounded queue cannot be built, and
 /// `effect.control.capacity` if an effect declares a zero automation capacity, which no launch
 /// effect does and which would leave the channel unable to deliver anything.
-///
-/// K1 interim (decision 13, P16): bus effects get no live channel until *List every strip in the
-/// live-control handles and file bus effects in the browser* (#1207) files them in the browser and
-/// removes this rule.
 pub fn attach_effect_live_controls(
     prepared: &mut EffectPreparedSession,
     depth: NonZeroUsize,
@@ -1471,9 +1467,6 @@ pub fn attach_effect_live_controls(
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
-        if !track_owned(&prepared.session, &entry.track_id) {
-            continue;
-        }
         let path = format!("{}.effects[id={}]", entry.strip_path, entry.effect_id);
         let Some(capacity) = NonZeroUsize::new(entry.metadata.automation_capacity as usize) else {
             diagnostics.push(EffectDiagnostic {
@@ -1548,9 +1541,9 @@ pub fn attach_effect_live_controls(
 /// subscription and the parameter commands it correlates with address the same instance through
 /// the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
 pub struct EffectObservationHandle {
-    /// Normalized track identity this instance belongs to.
+    /// Normalized identity of the strip (a track or a submix) this instance belongs to.
     pub track_id: Box<str>,
-    /// The instance's live address within its track (issue #1096).
+    /// The instance's live address within its strip, a track or a submix (issue #1096).
     pub address: LiveEffectAddress,
     /// The instance's session-declared identifier.
     pub effect_id: Box<str>,
@@ -1583,10 +1576,6 @@ pub struct EffectObservationHandle {
 ///
 /// `effect.observation.prepare` if an instance cannot be located in the declared order, and
 /// `effect.observation.taps` if an effect declares more taps than the request's cap allows.
-///
-/// K1 interim (decision 13, P16): bus effects get no live channel until *List every strip in the
-/// live-control handles and file bus effects in the browser* (#1207) files them in the browser and
-/// removes this rule.
 pub fn attach_effect_observation(
     prepared: &mut EffectPreparedSession,
     maximum_taps: u32,
@@ -1596,9 +1585,6 @@ pub fn attach_effect_observation(
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
-        if !track_owned(&prepared.session, &entry.track_id) {
-            continue;
-        }
         let descriptor = entry.factory.descriptor();
         if descriptor.observations.is_empty() {
             continue;
@@ -1651,18 +1637,6 @@ pub fn attach_effect_observation(
     } else {
         Err(EffectDiagnosticSet::sorted(diagnostics))
     }
-}
-
-/// Whether `owner` is a track of the session (#1200 D6, the K1 live-control interim).
-///
-/// A binary search of the normalized model's `tracks`, which are sorted by ID; never of
-/// `strips()`, whose concatenation is not sorted. Removed with the rule it serves by #1207.
-fn track_owned(session: &CompiledSession, owner: &str) -> bool {
-    session
-        .normalized_model()
-        .tracks
-        .binary_search_by(|track| track.id.as_str().cmp(owner))
-        .is_ok()
 }
 
 /// The live address of every lowered instance, from the normalized model (issue #1096).

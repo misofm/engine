@@ -838,7 +838,8 @@ export class ObservationSubscriptionOwner {
     // `effect` and tap names come from the generated catalog after map validation. The live
     // controls' generic type cannot express a runtime catalog row, so this is the one narrow cast
     // at the seam.
-    return liveControls.edit.track(entry.selection.trackId)
+    // A binding's `trackId` names its strip, a track or a submix (#1214 MINOR-1).
+    return liveControls.edit.strip(entry.selection.trackId)
       .effect(entry.selection.rack, entry.binding.effectIndex, entry.binding.nativeEffectId as never)
       .observe(tapName(entry.binding, entry.selection.tapId) as never, armed, windowBlocks);
   }

@@ -43,6 +43,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -107,7 +108,7 @@ fn prepare_from(document: &str, leg: Leg) -> Session {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
         "the cohort planner bound at least one homogeneous bank on this host"
@@ -177,7 +178,7 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
 
 /// The reader for one track's compressor tap, in whichever rack the fixture declared it.
 fn reader(handles: &HostLiveControlHandles, track: usize) -> &engine::realtime::ObservationReader {
-    let id = handles.tracks[track].as_ref();
+    let id = handles.strips[track].as_ref();
     let handle = handles
         .effect_observations
         .iter()

@@ -137,6 +137,68 @@ No earlier K2 slice touches the reason vocabulary.
 - The re-anchored mutation list, with each mutation's observed red result and the rule that fired.
 - The regenerated asset diff (one reason row).
 
+### Attempt 1 record (Terra)
+
+- **D1.** `COMMAND_REASON_NOT_SOLOABLE: u32 = 12` after reason 11 (`host-web/src/lib.rs`, found by
+  symbol at `:984`; the doc says why it is not `MALFORMED`/`UNKNOWN_TRACK`); `"notSoloable"`
+  appended to the host JS `COMMAND_REASONS`; `NotSoloable = 12` with the D1 doc line in the host
+  `.d.ts` and its mirror (`cmp` identical); a row in both generators (`lib.rs`, `abi_layout.rs`,
+  with their imports); `"notSoloable"` appended to both schema-gate lists. Regenerated: both
+  `sdk/assets/*.json`, `sdk/src/generated/{abi,catalog}.ts` (one reason row each; `provenance.ts`
+  unchanged), and both self-test fixtures, which are byte-identical to the generator's `--print` /
+  `--print-abi-layout` output.
+- **D2, re-anchored mutations and the rule each fires** (printed by wrapping `validate`):
+  - FUTURE_TAP, now inserted after `NOT_SOLOABLE = 12` as `= 13` (the in-memory self-test and the
+    on-disk copy in `test-web-audioworklet.sh`) -> `host JS table disagrees with the Rust host
+    constants` (authority ends `(12, notSoloable), (13, futureTap)`): the drift rule.
+  - `UNKNOWN_TAP` renumbered to 13 -> `the Rust reason constants are not contiguous from 0`.
+  - worklet `COMMAND_REASON_UNSUPPORTED_KIND = 13` -> `the worklet JS names reasons the Rust host
+    constants do not: [(13, 'unsupportedKind')]`.
+  - metadata `commandReasons[12]` value 13 -> `command reason values`.
+  - **Also re-anchored (not named in D2; same file, same reason):** "the host JS table stops at
+    wrongState" and "the schema gate's list stops at wrongState" now remove `notSoloable` too, so
+    they still truncate at `wrongState` as named. "The host JS bound stops deriving from the
+    table" now writes `reason <= 12`, the literal that behaves like the 13-entry table. All three
+    still fire the rules they fired before.
+  - The self-test totals are unchanged: 20 reason mutations, 22 abi-layout mutations, and the
+    metadata self-test passes.
+  - `MUTATIONS.md`: the drift row names `= 13` after reason 12; the self-test rows name
+    `reason <= 12` and "renumber reason 12 to `13`".
+- **Reasons-loop row** `{ reason: 12, result: 1, what: "a strip that cannot be soloed" }`. Test
+  value: it goes red if the host's reason vocabulary or refusal validator rejects reason 12, so
+  #1213's refusal would kill the host. Mutation: drop `"notSoloable"` from the host JS table ->
+  `node scripts/test-web-audioworklet.mjs` goes red with
+  `{ tag: 'miso.error.v1', requestId: 286, result: 255 }` (the sticky signature).
+- **Kind-vocabulary collision** (`COMMAND_SOLO_MODE = 12` vs `INPUT_FILTERS = 12` in
+  `check-command-kind-vocabulary.py`): this file is not in this slice's authorized paths.
+  DESIGN.md:839 assigns it to slice 24 (#1222), which moves it to 16. Left untouched here.
+- **Gates** (all rc 0):
+  - `check-command-reason-vocabulary.py --self-test` (20 red mutations) and the bare run
+    (spellings agree).
+  - `check-parameter-metadata-v1.py --self-test`; `check-abi-layout-v1.py --self-test`
+    (22 caught).
+  - `test-web-audioworklet.sh`: every stage passes, including the reason gates.
+  - `build-web-audioworklet.sh --named-twin <B> <A>` (shipped module `19d19812…`); both schema
+    gates on `<A>`; `check-web-audioworklet.sh <A> <B>/…named.wasm`; `check-sdk-generated.sh <A>`
+    (assets and generated code current); `check-sdk-types.sh` (the mirror pin passes).
+  - `cargo test --locked -p parameter-metadata` (5 + 5 pass, including the fixture-current test).
+  - The DESIGN section 7 workspace test command: 103 test binaries, 1162 tests, 0 failed.
+  - `cargo fmt --all -- --check`; `cargo clippy … -D warnings`; `check-workspace-policy.sh`;
+    `test-workspace-policy.sh`.
+  - `cargo fmt` rewrapped the two generator `use` lists after the build and web gates ran. The
+    change is whitespace only. Clippy, the workspace tests and the policy gates ran on the final
+    tree.
+
+## Decision record (K2 follow-ups)
+
+- **NIT-1:** the `MUTATIONS.md` vocabulary self-test row says twenty mutations (the self-test's
+  own count). **NIT-2** landed in #1213 (A1e). **NIT-3:** host-web's constant pin lists reason 12.
+
+## Verdict
+
+- **Attempt 1** (`047a503d6`): Sol PASS, NITs only, applied in the K2 follow-up commit as above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1212-attempt1.md`.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

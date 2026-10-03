@@ -590,8 +590,11 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
     const measurementFeeds = createMeasurementFeeds(
       host,
       shape.tracks,
+      shape.submixes,
       policy.liveControls !== undefined,
     );
+    // Issue #1210 D5: observation bindings carry strip indices, the tracks then the submixes.
+    const strips = (): readonly string[] => [...shape.tracks, ...shape.submixes];
     let observationSubscriptions: ObservationSubscriptionOwner | undefined;
     const observationMap = async (): Promise<ObservationMap> => {
       const reply = await host.observationMap();
@@ -602,14 +605,14 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
           result: reply.result,
         });
       }
-      return enrichObservationMap(shape.tracks, reply.bindings as readonly RawObservationBinding[]);
+      return enrichObservationMap(strips(), reply.bindings as readonly RawObservationBinding[]);
     };
     const readObservations = async (
       selections: readonly ObservationSelection[],
     ): Promise<readonly ObservationReadResult[]> => {
       validateObservationSelections(selections);
       const map = await observationMap();
-      const addresses = resolveObservationAddressesWithTracks(map, shape.tracks, selections);
+      const addresses = resolveObservationAddressesWithTracks(map, strips(), selections);
       const reply = await host.readObservations({ selections: [...addresses] });
       if (reply.result !== constantValue("resultCodes", "ok")) {
         throw new MisoEngineError("the browser host refused the selected observation read", {
@@ -620,7 +623,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       }
       return decodeObservationRows(
         map,
-        shape.tracks,
+        strips(),
         selections,
         addresses,
         reply.rows as readonly RawObservationRow[],

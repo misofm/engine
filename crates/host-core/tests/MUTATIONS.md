@@ -356,3 +356,23 @@ collapses (its two lanes read different source channels) while carrying identica
 so it is a genuine never-collapsed run of the same audio rather than a second run of the same path.
 `the_stereo_arm_is_a_never_collapsed_oracle` asserts both halves of that — the mono arm collapses,
 the stereo arm does not, and uncommanded they agree.
+
+## Issue #1211 — one mute owner and live-control producers per strip
+
+Driver: `cargo test -p host-core --lib solo`, `cargo test -p host-core --test strip_controls
+--test strip_handles` and `cargo test -p host-core --test randomized`, one mutation at a time, tree
+restored between rows. Delivery host: x86_64 AVX2+FMA.
+
+| Row | Mutation | Red |
+| --- | --- | --- |
+| 1211-M1 | delete the solo-safe guard in `LiveControlSoloState::set_solo` | `a_solo_safe_strip_cannot_be_soloed` (a bus accepts a solo) and `rollback_restores_every_strip_including_the_solo_safe_ones` (the bus solo is no longer refused) |
+| 1211-M2 | drop `!self.solo_safe(strip)` from `effective_mute` | `a_solo_safe_strip_keeps_its_user_mute_through_every_solo_transition` (the bus is solo-muted) |
+| 1211-M3 | `rollback` restores `user_mute` only for entries that are not solo-safe | `rollback_restores_every_strip_including_the_solo_safe_ones` |
+| 1211-M4 | the guard bumps `solo_count` for a refused bus solo before returning | `a_solo_safe_strip_cannot_be_soloed` (`any_solo` counts a solo-safe entry) |
+| 1211-M5 | build the control requests from `live_control_tracks` (the track prefix) again | `a_bus_fader_record_renders_as_the_session_with_that_fader` (three producers) and `handles_list_tracks_then_submixes_and_file_bus_effects` (`left: ["t0", "t1", "t2"]`) |
+| 1211-M6 | sort `strip_controls` by ID instead of by `canonical_index` | `a_bus_fader_record_renders_as_the_session_with_that_fader` (the bus producer is no longer at strip index 3) |
+| 1211-M7 | `live_records` draws over `handles.track_count` instead of `strip_controls.len()` | `randomized_consoles_render_the_same_bits_armed_dual_and_serialized` (`bus_live_records: 0`) |
+
+`a_bus_fader_record_renders_as_the_session_with_that_fader` also goes red when its own push is
+moved to `strip_controls[2]` (a track's lane): the fader reaches `t2` alone and the output
+differs from the twin's from the commanded block on.

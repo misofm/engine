@@ -33,6 +33,11 @@ export interface MeterUpdate {
   readonly endSample: bigint;
   readonly tracks: ReadonlyMap<string, TrackMeter>;
   readonly master: MasterMeter;
+  /**
+   * One reading per submix strip, keyed by submix ID in canonical order (issue #1210 D4). Empty for
+   * a session without submixes.
+   */
+  readonly submixes: ReadonlyMap<string, TrackMeter>;
 }
 
 /** One copied render-time telemetry window. */
@@ -200,7 +205,11 @@ function createHostFeed<Frame, Update>(options: {
   };
 }
 
-function meterProjection(frame: MisoMeterFrame, trackIds: readonly string[]): MeterUpdate {
+export function meterProjection(
+  frame: MisoMeterFrame,
+  trackIds: readonly string[],
+  submixIds: readonly string[],
+): MeterUpdate {
   if (frame.trackCount !== trackIds.length
       || frame.peaks.length !== trackIds.length * 2 + 2
       || frame.trackGrDb.length !== trackIds.length) {
@@ -211,6 +220,18 @@ function meterProjection(frame: MisoMeterFrame, trackIds: readonly string[]): Me
       diagnostics: [{ code: "sdk.meter.track_count", path: "trackCount" }],
     });
   }
+  // Issue #1210 D4: the frame's submix sections follow the session map's canonical submix order,
+  // so a frame for another submix list would key every bus reading by the wrong ID.
+  if (frame.submixCount !== submixIds.length
+      || frame.submixPeaks.length !== submixIds.length * 2
+      || frame.submixGrDb.length !== submixIds.length) {
+    throw new MisoEngineError("the browser host returned a meter frame for a different session shape", {
+      phase: "output",
+      code: "abiMismatch",
+      result: constantValue("resultCodes", "abiMismatch"),
+      diagnostics: [{ code: "sdk.meter.submix_count", path: "submixCount" }],
+    });
+  }
   const tracks = new Map<string, TrackMeter>();
   for (let index = 0; index < trackIds.length; index += 1) {
     const peakLeft = frame.peaks[index * 2]!;
@@ -219,6 +240,14 @@ function meterProjection(frame: MisoMeterFrame, trackIds: readonly string[]): Me
       peakLeft,
       peakRight,
       gainReductionDb: frame.trackGrDb[index]!,
+    }));
+  }
+  const submixes = new Map<string, TrackMeter>();
+  for (let index = 0; index < submixIds.length; index += 1) {
+    submixes.set(submixIds[index]!, Object.freeze({
+      peakLeft: frame.submixPeaks[index * 2]!,
+      peakRight: frame.submixPeaks[index * 2 + 1]!,
+      gainReductionDb: frame.submixGrDb[index]!,
     }));
   }
   const masterOffset = trackIds.length * 2;
@@ -236,6 +265,7 @@ function meterProjection(frame: MisoMeterFrame, trackIds: readonly string[]): Me
       peakRight: frame.peaks[masterOffset + 1]!,
       gainReductionDb: frame.masterGrDb,
     }),
+    submixes: submixes as ReadonlyMap<string, TrackMeter>,
   });
 }
 
@@ -262,13 +292,14 @@ export interface BrowserMeasurementFeeds {
 export function createMeasurementFeeds(
   host: Pick<MisoAudioWorkletHost, "meters" | "telemetry">,
   trackIds: readonly string[],
+  submixIds: readonly string[],
   available: boolean,
 ): BrowserMeasurementFeeds {
   const meters = createHostFeed<MisoMeterFrame, MeterUpdate>({
     name: "meters",
     available,
     lease: (onFrame) => host.meters({ enabled: onFrame !== null, onFrame }),
-    project: (frame) => meterProjection(frame, trackIds),
+    project: (frame) => meterProjection(frame, trackIds, submixIds),
   });
   const telemetry = createHostFeed<MisoTelemetryFrame, TelemetryUpdate>({
     name: "telemetry",

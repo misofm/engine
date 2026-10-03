@@ -129,10 +129,10 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | gate | mutation | observed red |
 |---|---|---|
 | `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 12;` to `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | eighteen in-memory mutations across all six spellings: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 11`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 13;` after reason 12 (`NOT_SOLOABLE`, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 12`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `12` | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 12 to `13` (issue #1212; it renumbered reason 11 to `12` before reason 12 existed) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -161,10 +161,10 @@ was performed on the working tree, run, and reverted; every one was observed red
 | gate | mutation | observed red |
 |---|---|---|
 | `tests::solo_is_bit_identically_mute_on_the_complement` (P1-1) | drop `&& !self.solo(track)` from `LiveControlSoloState::effective_mute`, so the gate silences everything | the soloed tracks silence with the rest and the first commanded block differs from the explicit-mute arm |
-| `tests::un_solo_restores_the_exact_per_lane_user_mute_set` (P1-2) | restore from the gate alone — `track_delta` composes `any_solo && !solo(track)` instead of `effective_mute` | the session's baked `left_mute` comes back unmuted and every block after the settle differs from the never-soloed arm |
+| `tests::un_solo_restores_the_exact_per_lane_user_mute_set` (P1-2) | restore from the gate alone — `strip_delta` composes `any_solo && !solo(track)` instead of `effective_mute` | the session's baked `left_mute` comes back unmuted and every block after the settle differs from the never-soloed arm |
 | `tests::mute_and_solo_are_separate_states` (P1-4) | make `set_solo` clear that track's `user_mute` | a repeated solo engage un-mutes the track it re-engages, and the host mirror reads `[false, false]` where the user set `[true, true]` |
 | `tests::a_refused_solo_submission_leaves_the_live_controls_untouched` (P1-5) | delete the `ready.solo.rollback()` on `admit_commands`'s refusal path | the refused engage sticks in host state; the refused host and the untouched host diverge on the retry |
-| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `LiveControlSoloState::track_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
+| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `LiveControlSoloState::strip_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
 | `tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect` (the coalescing pin) | run the net-emission pass once per solo record rather than once per submission, and drop its `record_emitted` sync — per-command fan-out | a 256-record batch of alternating toggles fans out a gate record per track per transition and is refused instead of admitted |
 | `tests::live_controls_that_never_solo_render_what_they_always_did` (the class-A OFF gate) | route `mute` through the coalesced net emission instead of staging its own record | the redundant re-mute of a settled-muted lane stages nothing, the plane stays `+0.0`, and the pinned `-0.0` ramp block is gone — a digest change on a path no solo command touched |
 | `tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition` (the sizing correction) | size `command_decoded` `2 * MAXIMUM_COMMAND_RECORDS` again, without the `2 * track_count` term | 255 `channel = both` effect-parameter records (510 spans) plus one solo record on a four-track console need 513 entries; the batch is refused `malformed` by the staging bound |
@@ -325,3 +325,66 @@ the correct pin made it pass again.
 | Target | Mutation | Observed failure |
 |---|---|---|
 | the digest pin | hand-edit `miso-engine-v1-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=e3a8ba31…`; exit 1, output directory left empty |
+
+## Issue #1207 — every strip in the live-control handles; bus effects filed in the browser
+
+Each mutation was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (segment-aware lookup, D2) | make `strip_index` one binary search over the concatenation `tracks ++ submixes` | `aaa-bus` sorts before `t0`, so its producer is never found and the boot refuses with `web.live_controls.effects` (both #1207 tests panic at boot) |
+| `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (per-strip effect tables, D3/D5) | put the K1 interim back: skip every prepared entry whose owner is not a track in `attach_effect_live_controls` and `attach_effect_observation` | the boot succeeds but `aaa-bus`'s console slot 0 has no filed producer at `dense_effect_slot(effect_base[2], rack_effects[2], ..)` |
+| `tests::a_bus_session_admits_and_renders_without_allocating` (gate 4) | allocate a copy of `effect_base` inside `ReadyOwnership::effect_slot` | `admission/render allocated`: the measured submission plus `render_next` counts one allocation |
+
+## Issue #1209 — submix strips in the browser meter frame
+
+Each mutation was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (frame section, D1) | write the master pair at `2T` (after the tracks) instead of `2(T + S)` | `aaa-bus 0.773352 is t0 + t1` fails: the bus's slot holds the master |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (frame size, D1) | size the frame `3T + 3` | `3(T + S) + 3 words`: 12 where 18 was required |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (meters, D3) | request meters for the tracks only | `every bus is metered`: the bus slots stay zero |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (gain base, D5) | `gain_base = 2T + 2` | `every bus is metered`: the bus peak words are zeroed as gain-reduction words |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (header field, D2) | leave `submix_count` at 0 | `submix_count == 2` fails |
+| `tests::bus_meters_render_and_poll_without_allocating` (gate 5) | allocate a `submixes.len()`-byte buffer per published window in `poll_meters` | `render/poll allocated` |
+| `tests::bus_meters_render_and_poll_without_allocating` (gate 5) | box each folded gain-reduction value in the poll | `render/poll allocated` |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | drop the `submixPeaks.length === 2 * submixCount` rule | the `submixPeaks` length-1/length-4 frames are accepted: `expected rejection` |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | keep the 12-field exact-field list | the one-bus frame fails the host and is never delivered |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | drop the finite non-negative rule for `submixGrDb` | the `-1` and `NaN` frames are accepted: `expected rejection` |
+| `test-web-audioworklet.mjs` worklet meter frame (D1/D4) | build the master peak view at `2T` | `peaks` carries the bus value `0.75` where the master's `0.625` was required |
+| `test-web-audioworklet.mjs` worklet meter frame (D4) | do not copy the bus peak view into `submixPeaks` | `submixPeaks` reads `[0, 0]` |
+| `test-web-audioworklet.mjs` worklet meter frame (D4) | read the master gain word at `3T + 2` | `masterGrDb` reads a bus word, not `7.5` |
+| `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | size the headless reader's frame `3T + 3` | `sdk.meter.frame` refusal: the frame with buses is rejected |
+| `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | return an empty `submixPeaks` | `2S bus peak words` fails |
+| `tests::submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them` (#1210 D2) | drop `.max(shape.longest_submix_id_bytes)` from the ID-staging projection | `id_staging_bytes` is 14, not the 63-byte submix ID (the copy past it would trap) |
+| `tests::submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them` (#1210 D1) | answer `_submix_id` from `ready.submixes` reversed | submix 0 is the 63-byte `zz-` ID, not `a-bus` |
+| `test-web-audioworklet.mjs` main-realm session map (#1210 gate 3) | drop `"submixes"` from the host's `sessionMap` expected fields | the well-formed map with `submixes` fails the host with 255 |
+| `test-web-audioworklet.mjs` main-realm session map (#1210 gate 3) | drop the nonempty-string rule for `submixes` entries | `the host accepted a session map with a non-string submix` |
+| `test-web-audioworklet.mjs` worklet session map (#1210 D3) | stop posting `submixes` in the `miso.sessionmap.v1` reply | `the enumerated submix order` assertion fails |
+| `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
+| `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |
+| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, the moved bound) | compare the generic guard against `ready.tracks.len()` | the bus pan (index `T`) is refused `unknownTrack`: `pan (smoothing 0) at strip 3`, result 1 |
+| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, a band spelling) | `push` keeps `let tracks = self.tracks.len()` | the bus fader record misses its queue: result 255 |
+| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, `queue_count`) | size the queues `3T + effects` | the bus compressor's threshold record finds no queue: result 7 |
+| `tests::live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (#1213 gate 1, per-strip shadows) | build `input_filter_shadows` from the tracks only | the bus's input-filter configuration copy is unsupported (7) |
+| `tests::a_bus_mute_command_equals_the_bus_booted_muted`, `tests::a_bus_can_be_unmuted_while_a_track_is_soloed` (#1213, per-strip solo state) | seed the solo state per track only | kind 4 at the bus index is refused `unknownTrack` (no mute owner) |
+| `tests::soloing_a_track_keeps_its_bus_and_return_audible` (#1213 gate 2) | seed the submixes `solo_safe: false` | soloing `a` solo-mutes `drums` and `verb`: block 1 differs from explicit mutes |
+| `tests::a_solo_at_a_bus_index_refuses_not_soloable_and_stages_nothing` (#1213 gate 2, reason 12) | delete the `solo_safe` check before `set_solo` | the refusal reports reason 2 (`unknownTrack`), not 12 |
+| `tests::a_bus_can_be_unmuted_while_a_track_is_soloed` (#1213 gate 3, the deleted inline composition) | restore `muted \|\| (any_solo && !solo(track))` in kind 4 | the unmute stages `muted: true` and `drums` stays silent: block 4 differs |
+| `tests::a_bus_record_ahead_of_a_bad_track_record_is_never_pushed` (#1213 gate 4) | push a bus fader record during pass one | strip 3's fader queue holds a record after the refusal |
+| `tests::overfilling_a_bus_queue_is_typed_backpressure_with_no_push` (#1213 gate 4) | skip the room check for bus fader slots | the push fails half-way: result 255 instead of backpressure |
+| `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word`, `tests::a_bus_limiter_can_be_the_designated_master` (#1213 gates 5, 6) | restore #1207's GR-fold skip of strip indices `>= T` | the bus word stays `0` and `master_gr_present` is `0` |
+| `tests::a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (#1213, K2 verdict (a)) | `observation_selection_for_address` looks up `ready.tracks` only | the selected read at the bus's strip index is `InvalidSelection` |
+| `capability-evals.mjs` bus selected read (#1213, K2 verdict (a), `check-sdk-headless.sh`) | the same tracks-only lookup, artifact rebuilt | `readObservations` fails with `invalidArgument` |
+| `capability-evals.mjs` bus refusal classifier (#1213 D5a, `check-sdk-headless.sh`) | the SDK classifier compares against the track count | the bus's missing insert reports `unknownTrack` |
+| `tests::bus_edits_and_a_bus_observation_admit_and_render_without_allocating` (#1213 gate 7) | allocate a `submixes.len()`-capacity `Vec` in admission | `admission/render allocated` (1) |
+| `capability-evals.mjs` bus solo refusal (#1213 D4, #1212 NIT-2, `check-sdk-headless.sh`) | delete the `solo_safe` check before `set_solo`, artifact rebuilt | the shipped admission reports reason 2, not 12 |
+| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 MINOR-1) | spell `prepared_queue_address`'s Eq base `ready.tracks.len() * 3` | the bus EQ edit misses its owner: `submit_prepared_commands` is not `RESULT_OK` |
+| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 MINOR-1) | spell the admission's EQ owner marker `queue_slot: ready.tracks.len() * 3 + effect` | the same: the prepared submission at the bus is refused |
+| `tests::a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` (#1213 gate 1, prepared EQ; attempt 2 verdict MINOR-A) | stage the bus's band-1 gain at -6 dB while the reference track's stays -12 dB | the render comparison fails at block 2, sample 1 (band 1 is enabled, so the edit is audible) |
+| `tests::a_single_lane_bus_mute_equals_the_bus_booted_with_that_lane_muted` (#1213 gate 2, kind 4 lane; attempt 2 MINOR-2) | kind 4 reads `let lane = 0_usize` | the right-lane mute stages `muted: false`: the bus's right lane stays audible against the booted twin |
+| `test-web-audioworklet.mjs` worklet eq-config classifier (#1213 D5a; attempt 2 MINOR-3) | compare `message.trackIndex >= this.trackCount` | the bus's missing insert reports `2` (`unknownTrack`), not `4` |
+| `test-web-audioworklet.mjs` bus `observe()` binding (#1213, attempt 2 MAJOR-1) | the host reports `frameSlot: 0` or `Math.min(trackIndex, 1)` for a bus; or the mapping is read as a plain `trackGrDb` index | `frameSlot` is not `T`; the old-contract read is `undefined`, not `submixGrDb[0]` |

@@ -46,10 +46,11 @@
 //
 // ## Addressing is session-stable and string-free
 //
-// A command names a track by its index in the compiled session's canonical normalized track order,
-// which `sessionMap()` returns, plus a rack, an effect index and a numeric parameter ID. No string
-// crosses the command path. The identity mapping is `sessionMap()` for the session and the
-// build-time metadata JSON for the effect vocabulary.
+// A command names a strip by its strip index -- the compiled session's canonical normalized tracks
+// first, then its submixes in canonical order (issue 1213), both of which `sessionMap()` returns --
+// plus a rack, an effect index and a numeric parameter ID. No string crosses the command path. The
+// identity mapping is `sessionMap()` for the session and the build-time metadata JSON for the
+// effect vocabulary.
 //
 // ## One batch is one transaction
 //
@@ -99,11 +100,12 @@
 // ## What a frame costs the render callback
 //
 // One `postMessage` per window, not per block. The body is a frozen object allocated at
-// construction whose two arrays are a `Float32Array` of `2 * trackCount + 2` peaks and one of
-// `trackCount` gain-reduction magnitudes, both allocated at construction and overwritten in place;
-// nothing is transferred, so the caller keeps no ownership obligation. The single allocation left
-// is the structured clone `postMessage` performs, which is `4 * (3 * trackCount + 2)` bytes plus a
-// handful of small numbers -- 392 bytes for a 32-track console. That cost has not been separately benchmarked in a browser; the telemetry
+// construction whose four arrays are a `Float32Array` of `2 * trackCount + 2` peaks, one of
+// `trackCount` gain-reduction magnitudes, and the buses' `2 * submixCount` peaks and
+// `submixCount` magnitudes, all allocated at construction and overwritten in place; nothing is
+// transferred, so the caller keeps no ownership obligation. The single allocation left is the
+// structured clone `postMessage` performs, which is `4 * (3 * (trackCount + submixCount) + 2)`
+// bytes plus a handful of small numbers -- 392 bytes for a 32-track console with no buses. That cost has not been separately benchmarked in a browser; the telemetry
 // lease measures the render export, not the post around it.
 //
 // # Exactly one artifact
@@ -285,7 +287,8 @@ export const enum MisoCommandReason {
   None = 0,
   /// Unknown kind, nonzero reserved word, non-finite value, or a field set for the wrong kind.
   Malformed = 1,
-  /// `trackIndex` is not a track of the compiled session.
+  /// `trackIndex` is not a strip of the compiled session: it is at or past `tracks.length +
+  /// submixes.length` of `sessionMap()`. The spelling is kept (issue 1213, DESIGN P17).
   UnknownTrack = 2,
   /// `rack` is not an effect rack (`1` inserts or `3` console) on an effect-addressed kind. The
   /// retired `simd1` (`0`) and `simd2` (`2`) codes are refused with it only on the raw export
@@ -314,6 +317,8 @@ export const enum MisoCommandReason {
   /// Prepare with `liveControlObservationTaps` set. Retrying will not help, which is why this is
   /// its own reason and not `Backpressure`.
   ObservationUnbound = 11,
+  /// The addressed strip is solo-safe: a submix is never soloed.
+  NotSoloable = 12,
 }
 
 /// One live-control command. `255` means "not applicable to this kind".
@@ -330,7 +335,9 @@ export interface MisoCommand {
   rack: number;
   /// `0` left, `1` right, `2` both, `255` for a kind with no lane.
   channel: number;
-  /// Index into the canonical track order `sessionMap()` returns.
+  /// Strip index: `i < tracks.length` is `sessionMap().tracks[i]`, and from there submix
+  /// `sessionMap().submixes[i - tracks.length]` (issue 1213). `Solo` addresses tracks only; at a
+  /// submix it is refused `MisoCommandReason.NotSoloable`.
   trackIndex: number;
   /// A console slot's index in the session's slot order, or an insert's index.
   effectIndex: number;
@@ -386,7 +393,8 @@ export interface MisoSessionMap {
   readonly tag: "miso.sessionmap.v1";
   readonly requestId: number;
   readonly result: number;
-  /// Canonical normalized track order. `trackIndex` indexes this.
+  /// Canonical normalized track order. A `trackIndex` below `tracks.length` indexes this; from
+  /// `tracks.length` on it names a submix (see `submixes`).
   readonly tracks: string[];
   /// Canonical normalized source order (issue 207).
   ///
@@ -397,10 +405,14 @@ export interface MisoSessionMap {
   readonly sources: MisoSessionSource[];
   /// Whether preparation bound meter observers at all.
   readonly metersAttached: boolean;
+  /// Canonical normalized submix order (issue 1210): submix `j` is strip `tracks.length + j`, and
+  /// the meter frame's submix sections (`submixPeaks`, `submixGrDb`) follow this order.
+  readonly submixes: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */
 export interface MisoObservationAddress {
+  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
   readonly trackIndex: number;
   /** `1` inserts or `3` console, addressed as `MisoCommand` addresses an effect. */
   readonly rack: number;
@@ -412,6 +424,7 @@ export interface MisoObservationAddress {
 
 /** One resident observation binding, in the prepared owner's stable map order. */
 export interface MisoObservationMapBinding {
+  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
   readonly trackIndex: number;
   /** `1` inserts or `3` console. */
   readonly rack: number;
@@ -593,9 +606,9 @@ export interface MisoMeterFrame {
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   readonly trackGrDb: Float32Array;
-  /// The designated master track's own folded reading, or `null` (issue 143 D6).
+  /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///
-  /// `null` -- never `0` -- when no track was designated or the designated track published no
+  /// `null` -- never `0` -- when no strip was designated or the designated strip published no
   /// window, because `0` would be indistinguishable from "the master is not reducing".
   readonly masterGrDb: number | null;
   /// Absolute sample the reported window opened at, inclusive.
@@ -608,6 +621,15 @@ export interface MisoMeterFrame {
   readonly firstSample: bigint;
   /// Absolute sample the reported window closed at, exclusive.
   readonly endSample: bigint;
+  /// Submix strips (buses) this frame carries, in canonical submix order (issue 1209).
+  readonly submixCount: number;
+  /// `[bus0 L, bus0 R, .., busM L, busM R]` post-matrix peak magnitudes, `2 * submixCount` long,
+  /// timestamped by `firstSample`/`endSample` exactly as `peaks` is.
+  readonly submixPeaks: Float32Array;
+  /// Gain reduction per bus, in non-negative decibels, `submixCount` long; every entry finite. It
+  /// follows `trackGrDb`'s rules: positional, `0` for "not reducing" or "no observed effect",
+  /// independently aged.
+  readonly submixGrDb: Float32Array;
 }
 
 /// One arm/disarm request for a single declared observation tap (issues 143, 151).
@@ -616,7 +638,8 @@ export interface MisoMeterFrame {
 /// unknown field with `RESULT_INVALID_ARGUMENT` (1) before anything reaches the port, so an
 /// optional-looking extra property is a local refusal rather than a field the engine ignores.
 export interface MisoObservationSubscription {
-  /// Index into the canonical track order `sessionMap()` returns.
+  /// Strip index, as `MisoCommand.trackIndex`: tracks first, then submixes (issue 1213), so a
+  /// bus effect's tap is armed at `tracks.length + j`.
   trackIndex: number;
   /// `1` inserts or `3` console, as `MisoCommand` addresses an effect. There is no `255` here:
   /// a tap always names a rack.
@@ -654,7 +677,9 @@ export interface MisoObservationBinding {
   readonly effectIndex: number;
   /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
   readonly tapId: number;
-  /// Index into `MisoMeterFrame.trackGrDb` this tap folds into.
+  /// The strip index of the gain-reduction entry this tap folds into, equal to `trackIndex`
+  /// (issue 1213). Below `MisoMeterFrame.trackCount` it indexes `trackGrDb`; from there it is
+  /// `submixGrDb[frameSlot - trackCount]`.
   readonly frameSlot: number;
   /// Render blocks per published window, as it is actually in force.
   readonly windowBlocks: number;
@@ -726,11 +751,13 @@ export interface MisoWebBootOptions {
   /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`,
   /// because a subscription rides the effect's own command queue.
   liveControlObservationTaps: bigint;
-  /// The designated master track **plus one**, or `0n` for none (issue 143).
+  /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
+  /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
+  /// `masterGrDb` (issue 1213).
   ///
-  /// V1 has no structural master bus -- submixes and outputs carry no effect racks -- so
-  /// `masterGrDb` is a designation rather than a discovery. Plus one because zero has to keep
-  /// meaning "unset". Requires `liveControlObservationTaps !== 0n`.
+  /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
+  /// Plus one because zero has to keep meaning "unset". Requires
+  /// `liveControlObservationTaps !== 0n`.
   liveControlMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;
@@ -864,10 +891,12 @@ export interface MisoAudioWorkletHost {
   readSpectrumStream(buffer: ArrayBuffer): Promise<MisoSpectrumStreamReadReply>;
   /// Stop the continuously scheduled spectrum boundary.
   stopSpectrumStream(): Promise<MisoSpectrumStreamStartReply>;
-  /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
+  /// Read the compiled session's canonical track, submix and source order (issues 137 D1, 207,
+  /// 1210).
   ///
-  /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,
-  /// with the channel count and region every submission has to agree with.
+  /// `tracks` then `submixes` is the strip order `trackIndex` addresses; `sources` is what
+  /// `submitSource`/`seekSource` feed, with the channel count and region every submission has to
+  /// agree with.
   sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(

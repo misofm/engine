@@ -61,6 +61,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -164,7 +165,7 @@ fn prepare(document: &str) -> (PreparedHost, HostLiveControlHandles) {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), 8);
+    assert_eq!(handles.strips.len(), 8);
     assert_eq!(handles.effect_controls.len(), 8 * ADDRESSES.len());
     // The eight identical chains bank, so a live bypass here is a lane of a bank, not a node.
     assert!(

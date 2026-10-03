@@ -34,6 +34,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -74,7 +75,7 @@ fn prepare() -> Console {
         prepare_host_session_with_live_controls(SESSION, &caps(), &live_controls()).unwrap_or_else(
             |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
         );
-    assert_eq!(handles.tracks.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
     assert_eq!(
         handles.effect_controls.len(),
         TRACKS,
@@ -176,7 +177,7 @@ fn a_banked_effect_applies_each_lanes_own_command_and_no_others() {
     let after_commanded = render(&mut commanded, 4);
 
     for track in 0..TRACKS {
-        let id = commanded.handles.tracks[track].as_ref();
+        let id = commanded.handles.strips[track].as_ref();
         if id == "eq2" {
             assert_ne!(
                 after_control[track], after_commanded[track],
@@ -208,7 +209,7 @@ fn two_lanes_of_one_bank_take_two_different_commands() {
     let both_peaks = render(&mut both, 4);
 
     for track in 0..TRACKS {
-        let id = both.handles.tracks[track].as_ref();
+        let id = both.handles.strips[track].as_ref();
         let expected = match id {
             "eq1" => &low_peaks[track],
             "eq5" => &high_peaks[track],

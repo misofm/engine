@@ -22,6 +22,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -426,7 +427,7 @@ fn live_control_and_meter_preparation_keeps_spectrum_in_one_transaction() {
         },
     )
     .expect("live controls, meters and spectrum prepare together");
-    assert_eq!(handles.track_controls.len(), 9);
+    assert_eq!(handles.strip_controls.len(), 9);
     assert_eq!(handles.meters.len(), 9);
     assert_eq!(
         host.report.spectrum_capture_retained_bytes,

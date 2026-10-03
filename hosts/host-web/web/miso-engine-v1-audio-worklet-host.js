@@ -233,6 +233,7 @@ const COMMAND_REASONS = Object.freeze([
   "wrongState",
   "unknownTap",
   "observationUnbound",
+  "notSoloable",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.
@@ -894,10 +895,13 @@ class MisoAudioWorkletHost {
       // Every rule below is a shape rule the app is entitled to rely on without checking:
       // `trackGrDb` is exactly `trackCount` long, every entry is a finite non-negative magnitude,
       // `masterGrDb` is a finite number or `null` -- never `0` standing in for absence -- and the
-      // window is half-open and non-empty.
+      // window is half-open and non-empty. Issue #1209 D4: the buses ride three appended fields,
+      // `submixPeaks` a pair per bus and `submixGrDb` one magnitude per bus, every value finite
+      // and non-negative.
       if (!hasExactFields(message, [
         "tag", "sequence", "generation", "validity", "lossCount", "windows", "trackCount", "peaks",
-        "trackGrDb", "masterGrDb", "firstSample", "endSample",
+        "trackGrDb", "masterGrDb", "firstSample", "endSample", "submixCount", "submixPeaks",
+        "submixGrDb",
       ])
           || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
           || typeof message.generation !== "bigint" || message.generation <= 0n
@@ -917,7 +921,14 @@ class MisoAudioWorkletHost {
             || (typeof message.masterGrDb === "number" && Number.isFinite(message.masterGrDb)
               && message.masterGrDb >= 0))
           || typeof message.firstSample !== "bigint" || typeof message.endSample !== "bigint"
-          || message.firstSample < 0n || message.endSample <= message.firstSample) {
+          || message.firstSample < 0n || message.endSample <= message.firstSample
+          || !Number.isSafeInteger(message.submixCount) || message.submixCount < 0
+          || !(message.submixPeaks instanceof Float32Array)
+          || message.submixPeaks.length !== message.submixCount * 2
+          || !message.submixPeaks.every((value) => Number.isFinite(value) && value >= 0)
+          || !(message.submixGrDb instanceof Float32Array)
+          || message.submixGrDb.length !== message.submixCount
+          || !message.submixGrDb.every((value) => Number.isFinite(value) && value >= 0)) {
         this.#fail(webError(255, this.#oldestRequestId()));
         return;
       }
@@ -977,7 +988,7 @@ class MisoAudioWorkletHost {
         : pending.response === "eqConfig"
           ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1048,6 +1059,10 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
+      // Issue #1210 D3: the submix IDs in canonical order, the order of the meter frame's submix
+      // sections.
+      && Array.isArray(message.submixes)
+      && message.submixes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
@@ -1332,7 +1347,8 @@ class MisoAudioWorkletHost {
             rack: subscription.rack,
             effectIndex: subscription.effectIndex,
             tapId: subscription.tapId,
-            // The frame carries one gain-reduction slot per track, so the slot is the track.
+            // The frame carries one gain-reduction entry per strip (trackGrDb, then submixGrDb),
+            // so the slot is the strip index (issue #1213).
             frameSlot: subscription.trackIndex,
             windowBlocks: subscription.windowBlocks === 0
               ? Number(this.#liveControlMeterBlocks)
@@ -1357,7 +1373,8 @@ class MisoAudioWorkletHost {
     });
   }
 
-  /// Read the compiled session's canonical track order (issue #137 D1).
+  /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
+  /// and its canonical submix order (issue #1210 D3).
   ///
   /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
   /// sends a string on the command path.

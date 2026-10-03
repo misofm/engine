@@ -242,7 +242,7 @@ cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$vocabulary_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$vocabulary_dir/tools/parameter-metadata/src/"
-sed 's/^pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 12;/' \
+sed 's/^pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;/&\npub const COMMAND_REASON_FUTURE_TAP: u32 = 13;/' \
   "$repo_root/hosts/host-web/src/lib.rs" \
   >"$vocabulary_dir/hosts/host-web/src/lib.rs"
 if diff -q "$repo_root/hosts/host-web/src/lib.rs" \

@@ -58,6 +58,7 @@ fn caps() -> HostPrepareCaps {
         maximum_source_channels: None,
         maximum_automation_spans_per_block: 128,
         maximum_tracks: 100,
+        maximum_submixes: 100,
         maximum_sources: 100,
         maximum_routes: 100,
         maximum_effects: 100,
@@ -290,7 +291,7 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
     let mut planes = [Vec::new(), Vec::new()];
     for block in 0..BLOCKS {
         if let Some(write) = live.filter(|write| write.block == block) {
-            handles.track_controls[write.track]
+            handles.strip_controls[write.track]
                 .input
                 .try_push(write.record)
                 .expect("bounded queue room");

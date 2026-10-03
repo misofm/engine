@@ -145,7 +145,7 @@ pub use response::{
     generate_response_grid, prepare_response_preview, query_response_snapshot_into,
 };
 pub use shape::{HostSessionShape, compiled_session_shape};
-pub use solo::{LiveControlMuteDelta, LiveControlSoloState};
+pub use solo::{LiveControlMuteDelta, LiveControlSoloState, StripMuteSeed};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,

@@ -1,7 +1,8 @@
 const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 // Issue #143 D5: the fixed structure carrying the sample window an `f32` frame cannot hold.
-const METER_HEADER_BYTES = 64;
+// Issue #1209 D2 appended `submix_count` at 64 and its pad at 68.
+const METER_HEADER_BYTES = 72;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
@@ -610,6 +611,24 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
       this.trackIds.push(id);
     }
+    // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
+    // sections), read through the same staging exactly as the track IDs are. Preparation sizes
+    // that staging for the longest source, track or submix ID, so the capacity check below is a
+    // corrupt-artifact check, not a limit a valid session can reach.
+    const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
+    if (!u32(submixCount)) return false;
+    this.submixIds = [];
+    for (let index = 0; index < submixCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_live_control_submix_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      this.submixIds.push(id);
+    }
 
     // Issue #207: source introspection, read once here for the same reason the track identities
     // are -- the construction path is the one that may allocate, and `process()` never touches
@@ -718,33 +737,54 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.metersAttached = init.options.liveControlMeterBlocks !== 0n;
     this.observationAttached = init.options.liveControlObservationTaps !== 0n;
     if (this.metersAttached) {
-      // Issue #143 D5: the frame is `3T + 3` words -- the peak section exactly where it was, then
-      // one non-negative gain-reduction magnitude per track and the master's.
-      if (!u32(framePointer) || framePointer === 0
-          || frameCapacity !== (this.trackCount * 3 + 3) * 4) return false;
+      // Issue #1209 D1: the frame is `3(T + S) + 3` words -- a peak pair per strip (the tracks,
+      // then the submixes), the master pair, then one non-negative gain-reduction magnitude per
+      // strip in the same order and the master's. The header says how many submixes it holds.
       const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
       if (!u32(headerPointer) || headerPointer === 0) return false;
-      this.meterView = new Float32Array(this.memoryBuffer, framePointer, frameCapacity / 4);
-      // Two fixed views over the one buffer, built here and never again: the frozen render-callback
-      // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
-      // allocation. The peak view is byte-for-byte the `2T + 2` region it always was.
-      this.meterPeakView = new Float32Array(
-        this.memoryBuffer,
-        framePointer,
-        this.trackCount * 2 + 2,
-      );
-      this.meterGainView = new Float32Array(
-        this.memoryBuffer,
-        framePointer + (this.trackCount * 2 + 2) * 4,
-        this.trackCount,
-      );
-      this.meterMasterGainIndex = this.trackCount * 3 + 2;
       this.meterHeaderView = new DataView(this.memoryBuffer, headerPointer, METER_HEADER_BYTES);
       if (this.meterHeaderView.getUint32(0, true) !== METER_HEADER_BYTES
           || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION
           || this.meterHeaderView.getUint32(8, true) !== this.trackCount) {
         return false;
       }
+      this.submixCount = this.meterHeaderView.getUint32(64, true);
+      // Issue #1210 D3: the frame's submix sections are the enumerated submixes, in their order.
+      if (this.submixCount !== this.submixIds.length) return false;
+      const strips = this.trackCount + this.submixCount;
+      if (!u32(framePointer) || framePointer === 0
+          || frameCapacity !== (strips * 3 + 3) * 4) return false;
+      this.meterView = new Float32Array(this.memoryBuffer, framePointer, frameCapacity / 4);
+      // Fixed views over the one buffer, built here and never again: the frozen render-callback
+      // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
+      // allocation. With buses the master pair no longer follows the tracks, so the message's
+      // `2T + 2` peaks are assembled from the track view and the master view.
+      this.meterTrackPeakView = new Float32Array(
+        this.memoryBuffer,
+        framePointer,
+        this.trackCount * 2,
+      );
+      this.meterSubmixPeakView = new Float32Array(
+        this.memoryBuffer,
+        framePointer + this.trackCount * 2 * 4,
+        this.submixCount * 2,
+      );
+      this.meterMasterPeakView = new Float32Array(
+        this.memoryBuffer,
+        framePointer + strips * 2 * 4,
+        2,
+      );
+      this.meterGainView = new Float32Array(
+        this.memoryBuffer,
+        framePointer + (strips * 2 + 2) * 4,
+        this.trackCount,
+      );
+      this.meterSubmixGainView = new Float32Array(
+        this.memoryBuffer,
+        framePointer + (strips * 2 + 2 + this.trackCount) * 4,
+        this.submixCount,
+      );
+      this.meterMasterGainIndex = strips * 3 + 2;
       this.meterMessage = {
         tag: "miso.meter.v1",
         sequence: 0,
@@ -753,7 +793,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         lossCount: 0,
         windows: 0,
         trackCount: this.trackCount,
-        // The frozen `2T + 2` peak view, unmoved: an existing reader indexes it exactly as before.
+        // The frozen `2T + 2` track and master peaks: an existing reader indexes it exactly as
+        // before, whatever the submix count.
         peaks: new Float32Array(this.trackCount * 2 + 2),
         // Issue #143: one non-negative decibel magnitude per track. Positional and always finite;
         // `0` deliberately conflates "not reducing" with "no observed effect", because the array
@@ -762,6 +803,11 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         masterGrDb: null,
         firstSample: 0n,
         endSample: 0n,
+        // Issue #1209 D4: the buses, appended. `submixPeaks` is `[bus0 L, bus0 R, ..]`, and
+        // `submixGrDb` one non-negative decibel magnitude per bus, in canonical submix order.
+        submixCount: this.submixCount,
+        submixPeaks: new Float32Array(this.submixCount * 2),
+        submixGrDb: new Float32Array(this.submixCount),
       };
     }
     this.telemetryMessage = {
@@ -955,6 +1001,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
           frames: source.frames,
         })),
         metersAttached: this.metersAttached === true,
+        submixes: [...this.submixIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {
@@ -1525,7 +1572,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     let reason = 0;
     if (result === RESULT_INVALID_ARGUMENT) {
-      reason = message.trackIndex >= this.trackCount
+      // Issue #1213 D5a: the index is a strip index, tracks first, then submixes, so only an
+      // index past every strip is an unknown track; a bad rack or effect on a bus is not.
+      reason = message.trackIndex >= this.trackCount + this.submixIds.length
         ? COMMAND_REASON_UNKNOWN_TRACK
         : !effectRack(message.rack)
           ? COMMAND_REASON_UNKNOWN_RACK
@@ -1683,10 +1732,13 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     this.meterMessage.validity = Number(metadata & 0xffffffffn);
     this.meterMessage.lossCount = Number(metadata >> 32n);
     this.meterMessage.windows = windows;
-    this.meterMessage.peaks.set(this.meterPeakView);
+    this.meterMessage.peaks.set(this.meterTrackPeakView);
+    this.meterMessage.peaks.set(this.meterMasterPeakView, this.trackCount * 2);
+    this.meterMessage.submixPeaks.set(this.meterSubmixPeakView);
     // Issue #143 D5: the gain-reduction section rides the same post. There is no second message
     // and no second clock -- the pinned-occurrence rule does not move.
     this.meterMessage.trackGrDb.set(this.meterGainView);
+    this.meterMessage.submixGrDb.set(this.meterSubmixGainView);
     this.meterMessage.masterGrDb = this.meterHeaderView.getUint32(44, true) === 1
       ? this.meterView[this.meterMasterGainIndex]
       : null;

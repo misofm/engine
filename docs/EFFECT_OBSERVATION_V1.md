@@ -121,16 +121,21 @@ an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
 subscription map — `{ trackIndex, rack, effectIndex, tapId, frameSlot, windowBlocks }` — which is
 the only place that can express it.
+`frameSlot` is the strip index (issue #1213): below `trackCount` it indexes `trackGrDb`, and from
+there a bus's reading is `submixGrDb[frameSlot - trackCount]`.
 
 Several armed taps on one track fold max-magnitude into the one slot, on the control plane. Each
 tap keeps its own cell.
 
-`masterGrDb` is `null`, never `0`, when no track was designated or the designated track published
+`masterGrDb` is `null`, never `0`, when no strip was designated or the designated strip published
 no window: `0` would be indistinguishable from "the master is not reducing".
 
-V1 has no structural master bus — submixes and outputs carry no effect racks — so the master
-reading is a **designation** (`live_control_master_track_plus_one`), not a discovery. The successor
-is effect racks on submixes.
+V1 has no structural master bus, so the master reading is a **designation**
+(`live_control_master_track_plus_one`), not a discovery. The word is the designated strip index
+plus one, tracks first, then submixes (issue #1213): `T + j + 1` designates submix `j`, so a mix bus
+whose limiter is observed reports its gain reduction as `masterGrDb`. A command's `trackIndex` is the
+same strip index, so kind 7 at `T + j` arms a bus effect's tap and its reading folds into
+`submixGrDb[j]`.
 
 ## Plan replacement drops subscriptions
 

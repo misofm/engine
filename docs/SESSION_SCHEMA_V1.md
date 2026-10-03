@@ -175,8 +175,8 @@ and a `console` target may name a submix: it addresses that submix's entry for t
 A submix's target is as inert as a track's. `builtins`, since issue #178 (ruled by #210's D2), is
 the strip's own fixed section. The strip is a chassis rather than a rack of instances, so it has
 no `effect_id` to identify; the key is required all the same (V1 has no optional fields) and
-carries the fixed validated literal `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
-`blockTarget`: `polarity_invert` (1), `trim_db` (2), `hpf_hz` (3), `lpf_hz` (4),
+carries the fixed validated literal `"strip"`. Its `parameter_id` is a builtin parameter ABI id,
+restricted to the rows that declare `blockTarget`: `polarity_invert` (1), `trim_db` (2), `hpf_hz` (3), `lpf_hz` (4),
 `fader_db` (5), `mute` (6), the four `matrix_*` coefficients (7-10), and `pan` (12).
 That is **eleven** rows; `BUILTIN_AUTOMATION_TARGETS` in
 `crates/session/src/validate.rs` is the authority. Issue #808 adds the two filter

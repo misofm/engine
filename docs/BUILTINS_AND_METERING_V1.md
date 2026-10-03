@@ -97,16 +97,25 @@ samples the meter can see; a compressor's gain reduction is state only the compr
 reaches the live controls through a separate mechanism with its own declared menu, cost classes and
 conflating transport. `docs/EFFECT_OBSERVATION_V1.md` is that mechanism in full.
 
-What belongs here is where the two meet: **one frame, one timeline**. Gain reduction rides the
-existing `miso.meter.v1` post rather than a second message, so the pinned-occurrence rule for the
-render callback is unchanged, and the window a gain-reduction value describes is the *same* meter
-window the peak beside it describes — the observation window length is derived from
-`live_control_meter_blocks`, not configured separately.
+What belongs here is where the two meet: **one frame**. Gain reduction rides the existing
+`miso.meter.v1` post rather than a second message, so the pinned-occurrence rule for the render
+callback is unchanged. It does **not** share the peak window: the header's
+`first_sample`/`end_sample` timestamp only the peaks, and each gain-reduction word is the latest
+fold of its effect's own observation window, aged independently of the peak window.
 
-The frame is `3 * trackCount + 3` `f32` words: the frozen `2T + 2` peak section exactly where it
-was, then one **non-negative decibel magnitude** per track and the designated master's. The sample
-window rides a fixed `WebMeterHeader` structure, because a `u64` does not survive an `f32` and
-splitting one across two lanes would put a decoding rule in the app that nothing could check.
+The frame is `3 * (trackCount + submixCount) + 3` `f32` words (issue #1209): one peak pair per
+strip -- the tracks, then the submix strips in canonical submix order -- the master pair, then one
+**non-negative decibel magnitude** per strip in the same order and the designated master's. With no
+submixes every word is where it was before submixes existed. The sample window and the submix count
+ride a fixed 72-byte `WebMeterHeader` structure (`submix_count` at offset 64), because a `u64` does
+not survive an `f32` and splitting one across two lanes would put a decoding rule in the app that
+nothing could check. With meters on, host-web meters every strip at `PostMatrix`.
+
+The `miso.meter.v1` message keeps its track fields unchanged -- `peaks` is the `2T + 2` track and
+master peaks, `trackGrDb` the `T` track magnitudes, `masterGrDb` the master's or `null` -- and
+appends `submixCount`, `submixPeaks` (`[bus0 L, bus0 R, ..]`, `2S` words) and `submixGrDb` (`S`
+non-negative magnitudes). Bus names are not in the frame; they are positional in canonical submix
+order.
 
 A session that asks for no observation capacity allocates none of it, renders byte-identical audio,
 and reports `observation_retained_bytes == 0` — walked over the built runtime, not derived from the
@@ -120,8 +129,12 @@ by a bounded per-track queue of mute records. Solo-in-place adds a state machine
 `LiveControlSoloState` in `host-core` — which composes
 
 ```
-effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)
+effective_mute(strip, lane) = user_mute || (any_solo && !solo_safe(strip) && !soloed(strip))
 ```
+
+Submixes are solo-safe: a submix is never soloed (a solo at its strip index refuses with
+`notSoloable`) and never solo-muted, so a soloed track stays audible through every bus and return it
+feeds (issue #1213).
 
 and emits the *existing* mute records into the *existing* queues. The render thread cannot tell a
 solo-derived mute from a user mute, so every property the mute path already has is inherited

@@ -231,6 +231,100 @@ and the gain-reduction fold skips strip indices `>= T` (that slice's D4) until t
 - The ARTIFACT CHANGED report.
 - The regenerated layout diff (header 64 to 72, the two new header fields).
 
+### Attempt 1 record (Terra)
+
+- **D1/D5** (`host-web/src/lib.rs`, anchors moved by #1207/#1208, found by symbol):
+  `boxed_zero_meter_frame(strip_count)`; `poll_meters` uses `meter_count = meters.len()`,
+  `strips = T + S`, master at `2(T + S)`, `gain_base = 2(T + S) + 2`, master GR at
+  `gain_base + strips`; #1207's `track >= tracks` skip removed (only `u32::MAX` skipped). Field
+  and function docs rewritten to `3(T + S) + 3`. **D2**: `WebMeterHeader` appends
+  `submix_count: u32` (64) and `reserved_pad: u32` (68), 72 bytes, set from the ready submixes;
+  no `ABI_VERSION` bump. **D3**: meters requested for `model.tracks` then `model.submixes` (the
+  order of host-core's strip list; selected meters keep caller order). `ffi.rs` needed no change.
+- **D4**: worklet reads `submix_count` from the header before the frame-capacity check
+  (`(3(T + S) + 3) * 4`), builds five fixed views at construction (track peaks, bus peaks, master
+  pair, track GR, bus GR; master GR index `3(T + S) + 2`); `peaks` is assembled with two `set`s
+  (offset form, no view per block); `submixCount`/`submixPeaks`/`submixGrDb` appended. Host
+  validator: exactly 15 fields, length and finite-non-negative rules for both bus arrays. Typings
+  and cost note updated; `sdk/src/browser/shipped-host.d.ts` is a byte copy. SDK `MeterFrame`
+  gains the three fields; `pollMeters` sizes by the header's `submixCount` and reads the master at
+  `2(T + S)`.
+- **Layout**: `meter_header_fields() -> [Field; 12]`; `check-abi-layout-v1.py` `meterHeader: 72`;
+  regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`
+  (`node codegen/assets.mjs && node codegen/generate.mjs`); the self-test fixture is again a byte
+  copy of the asset. Diff: `"bytes": 64` -> `72`, plus `submixCount` (64, u32) and `reservedPad`
+  (68, u32). Host-web pins (`tests.rs`) 72/64/68.
+- **Harnesses**: every `miso.meter.v1` post in `test-web-audioworklet.mjs` carries the three
+  fields; its processor stub now carries one submix (header 72, `submix_count` 1, a distinct value
+  per section: tracks 0.5, bus 0.75, master 0.625, track GR 6.5, bus GR 2.25, master GR 7.5), so
+  the worklet's S > 0 decode is exercised; `direct-oracle.mjs` header 72 and `submix_count == 0`.
+  `qualification/*` read existing fields only: unchanged. Docs: `BUILTINS_AND_METERING_V1.md`
+  frame shape, message fields, and the correction (GR is aged independently of the peak window).
+- **Tests and test value** (each mutation applied, run, reverted; rows in
+  `hosts/host-web/MUTATIONS.md`):
+  - `host-web tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (gate 1;
+    T = 3, S = 2, effect-free tracks with distinct fader pairs over one `(0.5, 0.25)` source; an
+    S = 0 twin gives today's words): track words bit-equal to the twin's, each bus pair equal to
+    its feeders' sum, master equal to the twin's master and to the bus sum (rel. 1e-6), every GR
+    word +0.0, `submix_count == 2`, `struct_size == 72`. Red if a writer still assumes `3T + 3`,
+    bus peaks land in the master's slots, or a bus is unmetered. Mutations: master at `2T`, frame
+    `3T + 3`, track-only meters, `gain_base = 2T + 2`, `submix_count` 0 -> all red.
+  - `host-web tests::bus_meters_render_and_poll_without_allocating` (gate 5; also closes #1207
+    verdict MINOR-2): on #1207's bus-effect session (buses with console slots and a compressor
+    insert, a meter on every strip, `t0`'s compressor tap armed), a window-closing `render_next`
+    plus `poll_meters` under `measured` reports 0/0, the poll publishes one window and sets the
+    gain-reduction validity bit. Red if the widened poll, its GR fold or the per-strip meters
+    allocate per window (#1207's gate 4 never measured the poll). Mutations: a
+    `submixes.len()`-sized `vec!` per window (allocates only when S > 0) -> red; boxing each folded
+    GR value -> red.
+  - `capability-evals.mjs` "a frame with submixes keeps the track shape and carries every bus"
+    (gate 2, via `check-sdk-headless.sh`): structural only. Red if the headless reader keeps the
+    old shape or drops the bus sections. Mutations: `strips = trackCount` -> red; empty
+    `submixPeaks` -> red.
+  - `test-web-audioworklet.mjs` (gate 3): a 15-field one-bus frame is delivered with its bus
+    values; 16 new broken variants (missing `submixGrDb`/`submixPeaks`/`submixCount`, length
+    mismatches, non-integer/negative count, plain arrays, negative/infinite/NaN values, an extra
+    field) each fail the host with 255. Red if the validator accepts a malformed bus section or
+    refuses the new fields. Mutations: drop the length rule, 12-field list, drop the GR value
+    rule -> red. Worklet decode (modified existing assertions): master view at `2T`, bus peaks not
+    copied, master GR at `3T + 2` -> red.
+- **Gate 4**: no S = 0 frame test changed except the `gain_reduction` helper, which now reads
+  `submix_count` (S = 0 there); all existing frame, parity and digest tests pass unchanged, and
+  `check-browser-expected-resources.py` reproduces every pinned digest.
+- **Gates** (x86_64 AVX2 host; A = `target/ci/k2-1209-artifacts`, B = `target/ci/k2-1209-named`):
+  `--self-test` ok (22 mutations); `build-web-audioworklet.sh --named-twin` ok;
+  `check-abi-layout-v1.py <A>/...layout.json` ok; `check-web-audioworklet.sh <A> <B>/...named.wasm`
+  ok; `check-browser-expected-resources.py --artifacts` ok (32 red mutations);
+  `test-web-audioworklet.sh` ok; `check-sdk-generated.sh` ok; `check-sdk-types.sh` ok (needs
+  `sdk/node_modules`, copied from the primary checkout, identical lockfile); `check-sdk-headless.sh`
+  ok. Workspace test command rc 0 (102 binaries, 1157 passed, 0 failed);
+  `cargo test -p parameter-metadata` ok; `check-/test-realtime-policy.sh` ok; `cargo fmt --check`
+  ok; workspace clippy `-D warnings` clean; `cargo doc -p host-web` `-D warnings` clean.
+- **ARTIFACT CHANGED**: shipped module `f5d36ba0...00ad0` (2 693 332 B) against #1207's recorded
+  `0a6e44c9...`; the bytes move because the frame, header and poll changed. No re-pin (not a
+  release change); CI's `artifact-identity` line is the authority.
+
+## Decision record (K2 follow-ups)
+
+- **Gate 2 checks values** (verdict MINOR-1). The headless frame test now requires bus-a = 2 x
+  bus-b and master = bus-a + bus-b per lane (relative 1e-5), and every `trackGrDb` and
+  `submixGrDb` word 0. Test value: red if the SDK reader takes the master pair from a bus slot or
+  reads `trackGrDb` from the old `2T + 2` base. Mutations S1 (master from bus-a's slot) and S2
+  (`trackGrDb` at `2T + 2`) each turn it red.
+- **The worklet runs `S = 0` again** (verdict MINOR-2). `createFakeExports` takes `submixIds`
+  (default one bus), and a new processor block decodes a meter frame with no submix and with two.
+  Test value: red if the worklet refuses or mis-slices a frame whose submix section is empty.
+  Mutation W0 (refuse `submixCount === 0`) turns it red.
+- **NIT 1:** #1213 gate 5 under R2 (A1c there). **NIT 2:** `243-sdk-boot.md` notes the 72-byte
+  header. **NIT 3** (`reservedPad` unchecked) is not taken: optional, and it would add an SDK
+  refusal for no present defect. **INFO 1** is noted.
+
+## Verdict
+
+- **Attempt 1** (`7f6e148f6`): Sol PASS, no BLOCKER or MAJOR; two MINOR, applied in the K2 follow-up
+  commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1209-attempt1.md`; the verifier's
+  probe is `docs/handoffs/submix-sends-2026-10-02/verdicts/1209-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Meter any boundary of a submix strip and designate a master strip in host-core* (#1208)

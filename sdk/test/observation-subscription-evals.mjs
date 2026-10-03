@@ -73,7 +73,7 @@ function injectedOwner() {
   };
   const liveControls = {
     edit: {
-      track: () => ({
+      strip: () => ({
         effect: () => ({
           observe: (_tap, on) => ({ kind: on ? "observeSubscribe" : "observeUnsubscribe" }),
         }),

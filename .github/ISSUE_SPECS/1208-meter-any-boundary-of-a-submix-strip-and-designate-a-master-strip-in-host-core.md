@@ -79,6 +79,8 @@ built over every strip. After batch K1 the builtins compiler's `known_tracks` se
   strips; a bus whose strip carries a limiter can now be designated.
 - **D4. host-web** compiles against D1 (the field rename at `lib.rs:5720`) and changes no behaviour.
   *Carry submix strips in the browser meter frame* (#1209) requests bus meters.
+  *Consequence (verdict MINOR 1):* a browser boot naming a bus as master now prepares where it
+  refused, with `masterGrDb` `null` until #1213 (its gate 6); #1213 completes it, and K2 ships both.
 
 ## Deliverables
 
@@ -169,6 +171,72 @@ built over every strip. After batch K1 the builtins compiler's `known_tracks` se
 - The output of every gate command above, from the PR's head commit.
 - Each new test's name with its one-sentence test-value answer.
 - Any digest or canonical-text re-pin, listed with its reason (none expected).
+
+### Attempt 1 record (Terra)
+
+- **D1** (`host-core/src/prepare.rs`): `HostMeterRequest.track_id` -> `strip_id` (any strip); the
+  selected-meter map reads it; `canonical_index` was already over every strip (#1207), so rule 1
+  needed no code change, only the gate; rules 2 and 3 untouched; default meters stay
+  `strips[..track_count]`. Docs on `strip_id`, `handles.meters` and the ordering comment updated.
+- **D2**: codes unchanged. **Deliverable 2**: not needed; K1 already validates meters against
+  `normalized_model().strips()` (`builtins-compiler/src/lib.rs:3326-3335`), so that crate is
+  untouched and its policy pair was not run.
+- **D3**: master validated against `live_control_strips.len()`; request and handle docs rewritten
+  (strip index, tracks first; the stopgap widened, not retired; P17 spellings kept).
+- **D4**: host-web field rename at `lib.rs:5747` only (anchor moved from `:5720`). Consequence, not
+  a code change: a browser boot naming a bus index as master now prepares instead of refusing; its
+  `masterGrDb` stays absent because #1207's GR fold skips strip indices `>= T` (until #1209/#1213).
+- **Deviation (gate 1 strip):** the spec's strip has no console slots, but then `post_input` =
+  `insert_send` and `insert_return` = `pre_fader` by construction, contradicting "every tap
+  differs". Even seeds use the spec's no-console strip (the two coinciding pairs are exempted from
+  the distinctness check); odd seeds add a live latency-free EQ in each console section (as #1203's
+  tap gates), so all seven boundaries differ pairwise.
+- **Tests** (`crates/host-core/tests/strip_meters.rs`; each mutation applied, run, reverted):
+  - `a_bus_meter_reports_the_words_of_the_same_meter_on_a_track_fed_its_sum` (gate 1, 16 seeds,
+    seven bus meters selected in a drawn order, every snapshot word compared per window, NaN
+    folded): red if a bus meter observes the wrong stage or lane, is refused, or returns at
+    another position. Mutations: bus `PostFader` observer attached at `PostSimd2PreFader` -> red
+    (seed 0); bus observer with lanes swapped -> red; meter known-set track-only in the builtins
+    compiler -> red (prepare refused); `canonical_index` over tracks only -> red.
+  - `selected_strip_meters_keep_the_callers_order_and_an_unknown_strip_is_refused` (gate 2):
+    red if rule 1's canonical order is track-only or selected meters are re-sorted. Mutations:
+    `canonical_index` over tracks -> red (`host.meter.order`); unconditional sort of `meters` ->
+    red (gate 1 stays green there: its meters share one strip); known-set track-only -> red.
+  - `the_last_submix_can_be_designated_master_and_one_past_it_is_refused` (gate 3, T=3, S=2):
+    red if the master is validated against tracks only or anything larger than the strips.
+    Mutations: `< live_control_tracks.len()` -> red; `<= strips.len()` -> red.
+  - `seven_bus_meters_render_without_allocating` (gate 4, seven bus meters, desk console): red if a
+    bus meter's observer allocates per block. Mutation: `Box::new` in `MeterObserver::observe` ->
+    red (the realtime audit aborts the process in render scope).
+- **Gates** (x86_64 AVX2 host, this commit's tree):
+  - 1-4: the four tests above pass.
+  - 5: no existing host-core or host-web meter/master test changed beyond the field rename
+    (`tests/prepare.rs` three literals); all pass in the workspace run.
+  - 6: DESIGN section 7 workspace test command rc 0 (102 test binaries, 1155 passed, 0 failed);
+    `check-/test-host-core-policy.sh`, `check-/test-realtime-policy.sh`,
+    `check-/test-workspace-policy.sh` all ok; `cargo fmt --all -- --check` ok; workspace clippy
+    `--all-targets --all-features -D warnings` clean; `cargo doc` with `-D warnings` clean.
+  - 7: `run-aarch64-tests.sh debug`: no arm64 host; at the K2 push (CI `aarch64-debug`).
+- No digest, oracle or canonical text re-pinned; no test superseded.
+
+## Decision record (K2 follow-ups)
+
+- **D4's consequence** (verdict MINOR 1). D4 changes no host-web *code*, but a browser boot naming
+  a bus as master (`live_control_master_track_plus_one` in `T + 1 ..= T + S`) now prepares where
+  it used to refuse. Until #1213 its `masterGrDb` stayed `null`; #1213 completes it (gate 6,
+  `a_bus_limiter_can_be_the_designated_master`), so K2 ships #1208 and #1213 together and needs no
+  interim track-only bound.
+- **NIT 1:** `meter_period_frames`/`meter_queue_depth` say per meter, `meter_tap` the default
+  per-track set, and the meter handle comment says request order (canonical track order for the
+  default set). **NIT 2** belonged to #1213. **NIT 3:** #1209's gate 2 now relates bus sample
+  peaks to each other and to the master (#1209 verdict MINOR-1).
+
+## Verdict
+
+- **Attempt 1** (`60d3289b3`): Sol PASS, no BLOCKER or MAJOR; one MINOR, three NIT, applied in the
+  K2 follow-up commit as above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1208-attempt1.md`;
+  the verifier's probe is
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1208-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

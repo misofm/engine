@@ -3966,10 +3966,30 @@ pub extern "C" fn miso_engine_web_v1_live_control_track_count(handle: u32) -> u3
 /// Copy one canonical track ID into the ID staging buffer; returns its byte length.
 ///
 /// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
-/// preparation already sized for the longest source or track ID in the session.
+/// preparation already sized for the longest source, track or submix ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_live_control_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_live_control_track_id(index))
+}
+
+/// Return the number of submixes in canonical order, or zero before compilation (issue #1210 D1).
+///
+/// Submix `j` is strip `track_count + j`, and the meter frame's submix sections follow this order.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_live_control_submix_count(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.live_control_submixes().len()).unwrap_or(0)
+    })
+}
+
+/// Copy one canonical submix ID into the ID staging buffer; returns its byte length (issue #1210
+/// D1).
+///
+/// Zero means "no such submix". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
+/// preparation sized for the longest source, track or submix ID in the session.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_live_control_submix_id(handle: u32, index: u32) -> u32 {
+    with_host_mut(handle, 0, |host| host.copy_live_control_submix_id(index))
 }
 
 /// Return the number of prepared resident observation effects in the current owner map.
@@ -4032,7 +4052,7 @@ pub extern "C" fn miso_engine_web_v1_observation_native_effect_id(handle: u32, i
     copy_observation_id(handle, index, true)
 }
 
-/// Return one bound observation effect's track index, or zero when out of range.
+/// One bound observation effect's strip index (tracks, then submixes), or zero when out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_observation_track_index(handle: u32, index: u32) -> u32 {
     with_host(handle, 0, |host| {
