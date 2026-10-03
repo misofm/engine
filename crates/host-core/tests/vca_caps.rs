@@ -40,18 +40,36 @@ fn caps(maximum_vcas: u64) -> HostPrepareCaps {
     }
 }
 
-/// The fixture's three tracks plus `vcas` empty, unity VCA groups.
+/// The fixture's three tracks plus `vcas` unity VCA groups in a chain: `vca0` holds every track
+/// and each later `vca{i}` holds `vca{i-1}`, so every VCA but the first is nested, and the
+/// membership-edge count (`tracks + vcas - 1`) differs from the VCA count.
 fn session(vcas: usize) -> String {
     let ids: Vec<String> = (0..vcas).map(|index| format!("vca{index}")).collect();
-    session_with(&ids)
+    vca_session(&ids, |model, index| {
+        if index == 0 {
+            model.tracks.iter().map(|track| track.id.clone()).collect()
+        } else {
+            vec![StableId::parse(&format!("vca{}", index - 1)).expect("stable id")]
+        }
+    })
 }
 
 /// The fixture's three tracks plus one empty, unity VCA group per ID.
 fn session_with(ids: &[String]) -> String {
+    vca_session(ids, |_, _| Vec::new())
+}
+
+/// The fixture's three tracks plus one unity VCA group per ID, the `index`th holding
+/// `members(model, index)`.
+fn vca_session(
+    ids: &[String],
+    members: impl Fn(&session::SessionModel, usize) -> Vec<StableId>,
+) -> String {
     let mut model = parse_session_json(FIXTURE).expect("fixture parses");
     assert_eq!(model.tracks.len() as u64, TRACKS);
     assert!(model.submixes.is_empty());
-    for id in ids {
+    for (index, id) in ids.iter().enumerate() {
+        let members = members(&model, index);
         model.vcas.push(Vca {
             id: StableId::parse(id).expect("stable id"),
             fader: DualMonoFader {
@@ -60,15 +78,16 @@ fn session_with(ids: &[String]) -> String {
                 left_mute: false,
                 right_mute: false,
             },
-            members: Vec::new(),
+            members,
         });
     }
     canonical_session_json(&model).expect("canonical session")
 }
 
-/// Test value: turns red if VCAs go uncounted (bounded only by byte budgets), are counted against
-/// `maximum_tracks` (the track cap here equals the track count, and the cap of four exceeds it) or
-/// `maximum_submixes` (zero here), or are missing from the report.
+/// Test value: turns red if VCAs go uncounted (bounded only by byte budgets), nested VCAs go
+/// uncounted (only top-level groups counted), membership edges are counted for groups, VCAs are
+/// counted against `maximum_tracks` (the track cap here equals the track count, and the cap of
+/// four exceeds it) or `maximum_submixes` (zero here), or the count is missing from the report.
 #[test]
 fn vcas_are_counted_capped_and_reported_apart_from_tracks_and_submixes() {
     for cap in [1_u64, 4] {

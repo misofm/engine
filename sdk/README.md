@@ -331,8 +331,8 @@ and `inserts`. A `submixes` entry is a bare ID, which is a transparent strip, or
 `{ id, builtins?, console?, inserts?, fader?, pan? }`, a submix strip with a track's strip keys.
 A `vcas` entry is `{ id, fader?, members }`: a VCA group whose members are tracks, submixes and
 other VCAs. The CLI declares the VCAs after every track and submix, and each nested VCA before a
-VCA that lists it, so the request may list them in any order; a membership cycle is refused
-(`reference.missing_entity`).
+VCA that lists it, so the request may list them in any order; a membership cycle, a self-member
+included, is refused with the engine's code (`vca.cycle`).
 A route or sidechain source is `{ kind: "track", trackId, tap }` or
 `{ kind: "submix", submixId, tap }`, at any of the seven taps; the retired `submix_output` is
 refused. The CLI validates with the packaged engine before publishing

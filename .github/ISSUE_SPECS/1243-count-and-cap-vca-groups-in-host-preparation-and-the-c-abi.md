@@ -228,6 +228,27 @@ The bound is a configured resource, never a compiled maximum (`AGENTS.md`; DESIG
   - 6: `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
 - No test superseded; no digest or oracle moved.
 
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`):
+
+- **MINOR-1.** `crates/host-core/tests/vca_caps.rs`'s `session(n)` chains its VCAs: `vca0` holds
+  every track and each `vca{i}` holds `vca{i-1}`, so every VCA but the first is nested and the
+  membership-edge count differs from the VCA count (`session_with` keeps empty VCAs for the
+  #1246 shape test). Test value: red if host preparation counts only top-level VCAs or counts
+  membership edges as groups. Mutations M8 (roots only) and M1 (the sum of `members.len()`): both
+  RED in `vcas_are_counted_capped_and_reported_apart_from_tracks_and_submixes`.
+- **NIT-1.** The header and `abi.rs` say `maximum_vcas` is the former `reserved[1]` of the original
+  `reserved[4]` (offset 184).
+- **NIT-2.** The 128-column comment in `crates/capi/tests/resource_lifecycle.rs` is rewrapped.
+- **NIT-3**: accepted as is (gate 2 mandates the loop). **INFO-1** is carried by #1244's corrected
+  size record and #1245's bounds.
+
+## Verdict
+
+- **Attempt 1** (`4ce7767fc`): Sol PASS. One MINOR, three NITs and one INFO; the MINOR and NITs 1-2
+  are applied above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1243-attempt1.md`.
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)

@@ -547,12 +547,17 @@ process.stdout.write = function () {
       ],
     );
 
-    // A membership cycle in the request is the builder's forward-reference refusal, with the
-    // engine's code, never a hang.
-    const cyclic = request({ vcas: [{ id: "a", members: ["b"] }, { id: "b", members: ["a"] }] });
-    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(cyclic));
-    failure(refused, 3, "request.shape");
-    assert.deepEqual(JSON.parse(refused.stderr.toString("utf8")).diagnostics?.map((row) => row.code), ["reference.missing_entity"]);
+    // A membership cycle in the request, a self-member included, is refused with the engine's
+    // own code, `vca.cycle`, never a hang and never a misleading missing-member refusal. Red
+    // mutation: `membersFirst` without its open-entry check -> `reference.missing_entity`.
+    for (const vcas of [
+      [{ id: "a", members: ["b"] }, { id: "b", members: ["a"] }],
+      [{ id: "a", members: ["a"] }],
+    ]) {
+      const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request({ vcas })));
+      failure(refused, 3, "request.shape");
+      assert.deepEqual(JSON.parse(refused.stderr.toString("utf8")).diagnostics?.map((row) => row.code), ["vca.cycle"]);
+    }
   });
 
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {

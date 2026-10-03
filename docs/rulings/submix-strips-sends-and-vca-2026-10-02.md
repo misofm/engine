@@ -215,6 +215,34 @@ Ruling:
   - The question DESIGN 8.2 held back as its own "Q5" (a class-B change of bus-sum order, only if
     a measurement shows D9's route order blocks folding) is still not asked; it is unrelated to the
     owner's Q5 above.
+- **VCA batch questions (#1240-#1246), recorded on 2026-10-03 as planner decisions, subject to owner
+  review.** They are the owner questions the VCA batch raised. No VCA slice waits on an answer:
+  each slice implements the decision as written until the owner rules otherwise. Q5 above stays
+  open and is not one of them.
+  - **V-Q1, the widened C ABI interim guard.** Recorded at (a) above: until #1247, every C ABI
+    delta while the pre- or post-commit model declares a VCA is structural (a replacement plan),
+    not only a fader field of a VCA member. The narrow guard would let #1225's live route records
+    or #1226's follow mirror, which read raw committed mutes, reopen a VCA-muted member's following
+    send. The cost is a structural replacement for every edit of a VCA session on the C ABI until
+    #1247 lands. The specs of #1053, #1225 and #1226 carry it.
+  - **V-Q2, no `vcas` metadata family** (#1246 D5). The parameter metadata gains no per-VCA family
+    and its top-level keys do not change: a VCA fader's domain is the builtins' `fader_db` row (-144
+    to +24 dB), which the metadata already publishes and the SDK's `vca(id, { fader })` and
+    `VcaEdits.faderDb` read. Sends set the precedent: K3 added no `routes` family.
+  - **V-Q3, the browser's VCA bounds** (#1245 amendment A1, from the #1244 verdict's MINOR-1). A
+    count of VCAs does not bound the per-command work: in a chain where one VCA holds every strip
+    and each later VCA holds the one before, every strip reaches every VCA. Under the browser's
+    only other bound, the 1 MiB document, that reached 6.26 M (strip, VCA) pairs, about 48 MiB on
+    wasm32 and 10.6 ms natively per VCA move, four 128-frame quanta at 48 kHz (#1244 verdict). The
+    browser therefore refuses at boot, before any per-pair table exists, a session with more than
+    256 VCAs (`web.vca.maximum_vcas`) or more than 16,384 (strip, VCA) reach pairs
+    (`web.vca.reach_pairs`), both `RESULT_REFUSED_BUDGET`, and charges the live VCA state's exact
+    retained bytes to the boot budget. At the bound the worst batch (a ride and a mute of the top
+    VCA plus 254 member moves) measured 0.15 ms natively, and in the shipped simd128 module under
+    V8 0.18 ms median and 0.39 ms p99, against a 2.67 ms quantum (the #1245 record, reproduced by
+    its verdict). The numbers are the planner's: a higher bound trades worklet headroom for larger
+    VCA trees. The C ABI caps VCAs at preparation through `maximum_vcas` (#1243) and has no live
+    VCA state until #1247, which sizes its own bound.
 - **Performance.** The bus-and-send benchmark rows and their baseline are three standalone
   successor issues, outside the umbrella: *Add a bus-and-send row to the native console benchmark*
   (#1227), *Add the bus-and-send session to the browser mixing benchmark* (#1228) and *Record the

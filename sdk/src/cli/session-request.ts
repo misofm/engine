@@ -398,23 +398,36 @@ function vca(value: unknown, path: string): { id: string; spec: VcaSpec } {
 
 /**
  * The request's VCAs reordered so every nested VCA precedes a VCA that lists it, otherwise in
- * request order. A membership cycle is left as listed, so the builder refuses its forward
- * reference with `reference.missing_entity`.
+ * request order. A membership cycle (a self-member included) is refused here with the engine's
+ * code, `vca.cycle`, at the request path of the VCA the walk reaches twice.
  */
-function membersFirst<T extends { readonly id: string; readonly spec: VcaSpec }>(vcas: readonly T[]): T[] {
+function membersFirst<T extends { readonly id: string; readonly path: string; readonly spec: VcaSpec }>(
+  vcas: readonly T[],
+): T[] {
   // The first entry with an ID is the one a member resolves to; a repeated ID is still declared,
   // so the builder refuses it with `id.duplicate`.
   const byId = new Map<string, T>();
   for (const entry of vcas) if (!byId.has(entry.id)) byId.set(entry.id, entry);
   const seen = new Set<T>();
+  const open = new Set<T>();
   const ordered: T[] = [];
   const visit = (entry: T): void => {
     if (seen.has(entry)) return;
     seen.add(entry);
+    open.add(entry);
     for (const member of entry.spec.members) {
       const nested = byId.get(member);
-      if (nested !== undefined) visit(nested);
+      if (nested === undefined) continue;
+      if (open.has(nested)) {
+        throw new MisoUsageError(
+          `${nested.path}: VCA '${nested.id}' is on a membership cycle (it is reached again through `
+            + `'${entry.id}'); a VCA may not contain itself`,
+          "vca.cycle",
+        );
+      }
+      visit(nested);
     }
+    open.delete(entry);
     ordered.push(entry);
   };
   vcas.forEach(visit);
@@ -527,7 +540,11 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   }
   // VCAs follow every track and submix they may group, and are declared members first: a request
   // may list a VCA before the nested VCAs it names, which the builder alone would refuse.
-  for (const decoded of membersFirst(optionalArray(root, "vcas").map((value, index) => vca(value, `$.vcas[${index}]`)))) {
+  const vcas = optionalArray(root, "vcas").map((value, index) => {
+    const path = `$.vcas[${index}]`;
+    return { ...vca(value, path), path };
+  });
+  for (const decoded of membersFirst(vcas)) {
     builder = builder.vca(decoded.id, decoded.spec);
   }
   for (const [index, value] of optionalArray(root, "routes").entries()) {

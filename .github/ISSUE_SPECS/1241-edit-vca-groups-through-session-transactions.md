@@ -239,6 +239,29 @@ An agent edits VCAs with session transactions, like every other session entity:
     `memset_pattern16` row). `run-aarch64-tests.sh debug`: at batch push (CI's `aarch64-debug`;
     this host is x86-64). The browser session shape did not change, so no browser leg was run.
 
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`), in `crates/protocol/tests/vca_edits.rs`'s `vca_refusals_commit_nothing`:
+
+- **MINOR-1.** A row upserts `grp` over `[a, bus, x]`, removes routes `a-bus` and `bus-out`, then
+  submix `bus`: `reference.missing_entity` at `$.vcas[0].members[1]`, revision and snapshot
+  unchanged. Test value: red if `RemoveSubmix` cascades into the VCA member lists that name it,
+  which no other test sees. Mutation ME (`RemoveSubmix` prunes the submix from every VCA's
+  `members`): RED at this row.
+- **MINOR-2.** A row sends `0702` on `grp` with `left_db` +30 dB: `numeric.out_of_schema_range` at
+  `$.vcas[0].fader.left_db`. Test value: red if `0702` clamps an out-of-domain offset and commits
+  it with an OK ack instead of refusing it. Mutation MF (`0702` clamps both lanes to
+  `[-144, 24]`): RED at this row.
+- **NIT-2.** `docs/CONTROL_PROTOCOL_REGISTRY.md`'s `0700`-`0702` row says one `0700` carries at most
+  1,022 members under the default `max_tlv_count` (1,024 per message: `id`, `fader`, then one per
+  member), the `SetTrackEffectOrder` bound.
+- **NIT-1** and **NIT-3**: not applied (pre-existing corpus coverage; coverage breadth).
+
+## Verdict
+
+- **Attempt 1** (`210bd252f`): Sol PASS. Two MINORs and three NITs; both MINORs and NIT-2 are
+  applied above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1241-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1241-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)

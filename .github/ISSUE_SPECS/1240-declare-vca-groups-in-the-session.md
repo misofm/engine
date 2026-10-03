@@ -452,6 +452,30 @@ A session document can declare VCA groups: `vcas: [{ id, fader, members }]`.
     `check-cross-targets.sh` PASS (no `session` memset row). `run-aarch64-tests.sh debug`: at batch
     push (CI's `aarch64-debug`; this host is x86-64).
 
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`):
+
+- **MINOR-1.** Already applied by #1241 as its A1: `crates/session/tests/vca.rs`'s
+  `compile_session_normalizes_vcas_and_members_by_id` is the verifier's test, red when
+  `compile_session` stops sorting `vcas` or a `members` list (the #1241 verdict reproduced it).
+  Nothing further.
+- **NIT-2.** `enginectl` refuses a request's membership cycle, a self-member included, with the
+  engine's code `vca.cycle` at the request path of the VCA its walk reaches twice
+  (`membersFirst` in `sdk/src/cli/session-request.ts` tracks the open entries); `sdk/README.md`
+  says so, and `sdk/test/enginectl-cli.mjs` checks a two-VCA cycle and a self-member. This amends
+  D3's "the builder refuses a forward reference" for a cycle only. Test value: red if the CLI
+  answers a cycle with the misleading `reference.missing_entity` again. Mutation (the walk never
+  marks an entry open, so it behaves as attempt 1's): `sdk-package.sh check` RED, `enginectl
+  session build` gets `reference.missing_entity` for `vca.cycle`.
+- **NIT-1** (the 1 KiB-per-member estimate), **NIT-3** and **NIT-4**: not applied. NIT-1 is a loose
+  bound no test pins and harmless at real sizes; NIT-4 is true at the batch push.
+
+## Verdict
+
+- **Attempt 1** (`7f106a6de`): Sol PASS. One MINOR and four NITs; the MINOR is applied (by #1241's
+  A1) and NIT-2 above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1240-attempt1.md`.
+
 ## Dependencies
 
 - *VCA groups* (#1239) filed.

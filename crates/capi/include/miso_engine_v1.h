@@ -133,7 +133,8 @@ typedef struct miso_engine_v1_compile_limits {
        "no submixes" or "unbounded". Formerly reserved[0]; the layout is unchanged. */
     uint64_t maximum_submixes;
     /* Maximum session VCA groups. Zero means "use maximum_tracks"; it never means
-       "no VCAs" or "unbounded". Formerly reserved[0]; the layout is unchanged. */
+       "no VCAs" or "unbounded". Formerly reserved[1] of the original reserved[4]
+       (offset 184); the layout is unchanged. */
     uint64_t maximum_vcas;
     uint64_t reserved[2]; /* Must be zero in ABI V1. */
 } miso_engine_v1_compile_limits;

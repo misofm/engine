@@ -271,9 +271,44 @@ No render code and no host wiring change here.
   - Because `solo.rs` is on the browser's command path: `build-web-audioworklet.sh --named-twin`
     and `check-web-audioworklet.sh` ok (callgraph included); `check-browser-expected-resources.py
     --artifacts` ok, no re-pin.
-- **For #1245** (INFO-1 of the #1243 verdict): the state keeps about `2 x usize` per (strip,
-  reaching VCA) pair plus `O(strips + VCAs)` mirrors; at the measured 1 MiB worst case (~1.7 M
-  pairs) that is ~14 MiB on wasm32, which `retained_bytes` reports for the host to charge.
+- **For #1245** (INFO-1 of the #1243 verdict, corrected by this slice's verdict MINOR-1): the state
+  keeps about `2 x usize` per (strip, reaching VCA) pair plus `O(strips + VCAs)` mirrors, which
+  `retained_bytes` reports for the host to charge. The browser's only document bound is the raw
+  byte length (1 MiB), and whitespace-free JSON is accepted, so its worst case is a chain of 1,292
+  submixes under 4,842 VCAs: **6.26 M pairs**, about 48 MiB retained on wasm32 (95.6 MiB native),
+  1.9 s in `try_new`, and **10.6 ms natively per VCA dB move** (3.6 ms per mute), about four
+  128-frame quanta. (~1.7 M pairs, ~13 MiB and 2.9 ms per move is the canonical, indented JSON
+  case, still over a quantum.) #1245's bounds (256 VCAs, 16,384 pairs) cap it in the browser.
+
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`):
+
+- **MINOR-1, step 1.** The "For #1245" bullet above and `crates/host-core/src/vca.rs`'s `# Size`
+  doc state the verdict's measured worst case (the raw-byte bound, whitespace-free JSON: 6.26 M
+  pairs, ~48 MiB on wasm32, 10.6 ms per VCA dB move; canonical JSON: 1.73 M, ~13 MiB, 2.9 ms) and
+  that #1245's boot bounds (256 VCAs, 16,384 pairs) now cap it in the browser. **Step 2** was
+  #1245's amendment A1.
+- **NIT-2.** `set_vca_db` and `set_member_db` say the value must be finite and in -144 to +24 dB
+  and that the host validates it; a new "Preconditions" doc section says what a non-finite or
+  out-of-domain value does. `effective_db`'s doc says an unreached strip returns the value
+  preparation baked, never a later own move.
+- **NIT-3, taken (a deviation from D1's "seeded from `effective_strip_faders()`").** `try_new` seeds
+  the emitted mirror with `vca_effective_db` over each strip's own value and its flattened reach's
+  offsets, in the same ascending VCA-ID order, instead of a second `vca_reach()` inside
+  `effective_strip_faders()`: the same function over the same values in the same order, so the
+  same bits, for half the construction time and transient. `a_live_recompute_equals_preparation`
+  still compares every live value with `effective_strip_faders()`. Mutation (the mirror seeded from
+  the own values): RED in `a_composition_never_owes_a_redundant_record` and
+  `an_unchanged_effective_value_owes_no_record_and_the_delta_shape_follows_the_lanes`. host-web's
+  transient projection, which charged two reach results, now over-counts by one (#1245 record).
+- **NIT-1** (`record_emitted_db` without its shadow, unreachable through D3): not applied.
+
+## Verdict
+
+- **Attempt 1** (`1db0aacc3`): Sol PASS. One MINOR, three NITs and two INFOs; the MINOR and NITs 2-3
+  are applied above, and the INFOs went to #1245. `docs/handoffs/submix-sends-2026-10-02/verdicts/1244-attempt1.md`; probes
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1244-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

@@ -1784,8 +1784,9 @@ fn resource_queries_racing_plan_swaps_always_find_the_published_row() {
 // Issue #1206 D2: a C ABI caller bounds submix strips through `maximum_submixes`, the word of the
 // compile limits that was `reserved[0]`. Zero means "use `maximum_tracks`" -- what every caller
 // written before the word was named passes -- and the two remaining reserved words (#1243 named
-// `maximum_vcas` after it) still refuse when nonzero. It lives here, not in a file of its own, because this file is the C ABI's
-// approved owner of exported-C `unsafe` calls (`scripts/check-realtime-policy.sh`).
+// `maximum_vcas` after it) still refuse when nonzero. It lives here, not in a file of its own,
+// because this file is the C ABI's approved owner of exported-C `unsafe` calls
+// (`scripts/check-realtime-policy.sh`).
 
 const SUBMIX_FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/observation-frame-shape.json");

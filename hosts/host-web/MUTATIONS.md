@@ -473,6 +473,8 @@ Each row was applied, its test run red, and the tree restored. "Audio" rows ran 
 | #1242 attempt 2 (verdict MAJOR-1, probe P1): `tests::a_both_lane_unmute_keeps_a_one_lane_vca_mute` | the `COMMAND_MUTE` arm stages one record from the first covered lane's effective mute (attempt 1) | RED: the `emitted` mirror; with that assertion removed, the render differs at block 1 sample 128 |
 | #1242 attempt 2 (verdict MAJOR-1, probe P2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | the same attempt-1 `COMMAND_MUTE` arm | RED |
 | #1242 attempt 2 (verdict MINOR-1, M2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | host-web seeds submixes with `vca_mute: [false; 2]` | RED (seed 5); the other three #1242 host-web tests stay green |
+| #1242 attempt 2 verdict MINOR-1 (M3), VCA follow-ups: P2 draws each record's smoothing from {0, 64} | the split `Both` kind 4 records are staged at `smoothing_samples: 0` | RED in `a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` only |
+| #1242 attempt 2 verdict MINOR-1 (M6), VCA follow-ups: P1 counts `drums`' and `bass`' queue records | every `Both` kind 4 splits (the `left != right` guard dropped) | RED in `a_both_lane_unmute_keeps_a_one_lane_vca_mute` only (two records on `bass`, not one) |
 
 ## Issue #1245 — browser live VCA groups
 
@@ -496,12 +498,17 @@ tree restored (driver and log: the #1245 attempt 1 record).
 | `tests::the_decode_staging_holds_a_full_batch_and_its_vca_records` (gate 7) | `command_staging_count` adds `vca_reached_strips * 0` | gate 7 (the length pin; with it removed, `malformed`) and the retained-budget test |
 | `tests::vca_rides_and_mutes_admit_and_render_without_allocating` (gate 8) | allocate an 8-byte `Vec` per VCA fader record | gate 8 only |
 | `tests::the_exact_retained_budget_charges_the_vca_state` (D4) | leave the VCA state out of the bridge rows | this test only |
-| `tests::the_browser_bounds_vca_reach_and_a_batch_at_the_bound_fits_a_quantum` (amendment A1) | the reach-pair bound is not enforced | this test only: 16,385 pairs boot |
+| `tests::the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound` (amendment A1; renamed in the VCA follow-ups, which moved its timing half to the ignored `..._fits_a_quantum_in_release`) | the reach-pair bound is not enforced | this test only: 16,385 pairs boot |
 | the bound test | the VCA count bound is 512, not 256 | this test only: 257 VCAs boot |
 | gate 1 and the bound test | the boot-time pair count ignores nesting (a VCA's ancestors are not passed to its VCA members) | both: the boot count disagrees with the live state's reach |
 | `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` | the "added last" mutations re-anchored past kind 17: the JS set `[1 … 17]` stops at 16 or gains an undecoded 18, the literal `<= 17`, the schema gate's list and the `.d.ts` enum drop `vcaMute` | every one refused (32 red mutations) |
 | `check-command-reason-vocabulary.py --self-test` | re-anchored past reason 14: `FUTURE_TAP = 15`, `UNKNOWN_TAP` renumbered to 15, the worklet's `UNSUPPORTED_KIND = 15`, `reason <= 14`, the JS table and the schema gate's list truncated | every one refused (20 red mutations) |
 | `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindsAwaitingSdk` | `the semantic methods cover the generated command vocabulary exactly` |
+| #1245 verdict MINOR-1 (S1), VCA follow-ups: `tests::a_vca_ride_and_mute_ramp_as_direct_member_moves` | the VCA fader pass stages its member records at `smoothing_samples: 0` | RED in this test and `a_split_member_move_ramps_and_the_last_ride_sets_the_window` |
+| #1245 verdict MINOR-1 (S2) | kind 17 does not set `coalesce_smoothing` | RED in `a_vca_ride_and_mute_ramp_as_direct_member_moves` and `a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` |
+| #1245 verdict MINOR-1 (S3): `tests::a_split_member_move_ramps_and_the_last_ride_sets_the_window` | the split kind 3 records on a member are staged at `smoothing_samples: 0` | RED in this test only |
+| #1245 verdict MINOR-1 (S23) | the VCA fader pass takes the first ride's ramp, not the last's | RED in `a_split_member_move_ramps_and_the_last_ride_sets_the_window` only |
+| #1245 verdict MINOR-2 (S12): `tests::a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` | kind 17 does not set `coalesce_first_wire_index` | RED in this test only (the refusal names index 0) |
 
 
 ## Issue #1246 — VCA enumeration and the SDK's VCA edits
@@ -517,6 +524,7 @@ module; E1 rebuilt the module with the mutation.
 | the same test (D1, the count) | `_vca_count` reads the model's VCA count, not the live VCA state's | the host without live controls answers 3, not 0 |
 | the same test (D1, the bound) | `_vca_id` drops its live-state bound | the host without live controls copies VCA 0 |
 | `test-web-audioworklet.mjs` (the processor's session map) | the worklet posts `[...this.vcaIds].sort()` | `issue #1246: the enumerated VCA order` |
+| `test-web-audioworklet.mjs` (the processor's session map; #1246 verdict m1: the stub enumerates three VCAs beside two routes) | the worklet reads `vcaCount` from `miso_engine_web_v1_live_control_route_count` (the route block it was cloned beside) | `issue #1246: the enumerated VCA order` (two VCAs delivered, not three) |
 | `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `vcas.every(...)` check | `the host accepted a session map with a non-string VCA` |
 | `test-web-audioworklet.mjs` (the host's acknowledgement validator) | drop the `Array.isArray(message.vcas)` check | the "no VCA list" reply throws inside the validator instead of failing the host |
 | `test-web-audioworklet.mjs` (worklet construction) | read a VCA ID without the empty-length check | `an empty VCA ID must fail initialization` |

@@ -282,15 +282,17 @@ enum Refusal {
 ///
 /// - `0701` and `0702` at an unknown ID, and the strip edits `0203`, `020f`, `0210` and `0211` at
 ///   the VCA ID `grp`, are `session.edit.not_found`;
-/// - removing member track `x` without rewriting `grp`, or a nested VCA its parent still lists,
-///   is `reference.missing_entity` at the member path; a `0700` that closes a cycle is `vca.cycle` on both VCAs; a `0700` reusing a
-///   track's ID is `id.duplicate`;
+/// - removing member track `x` or member submix `bus` without rewriting `grp`, or a nested VCA its
+///   parent still lists, is `reference.missing_entity` at the member path; a `0700` that closes a
+///   cycle is `vca.cycle` on both VCAs; a `0700` reusing a track's ID is `id.duplicate`;
+/// - a `0702` past the fader domain (+30 dB) is `numeric.out_of_schema_range` at its lane;
 ///
 /// and the revision and snapshot are unchanged after each. Removing `x` while the same
 /// transaction rewrites `grp` without it commits.
 ///
 /// Red if a strip edit reaches a VCA, if `0701`/`0702` at an unknown ID is skipped silently, if
-/// `0701` cascades into its parents' member lists, or if a VCA edit commits without the
+/// `0701`, `RemoveTrack` or `RemoveSubmix` cascades into the member lists that name it, if `0702`
+/// clamps an out-of-domain offset instead of refusing it, or if a VCA edit commits without the
 /// transaction's final validation (a dangling member, a cycle or a collision committed, or the
 /// opening edit committed alone).
 #[test]
@@ -405,6 +407,32 @@ fn vca_refusals_commit_nothing() {
                 vca: vca("a", unity(), &["x"]),
             }],
             Refusal::Validation(&[("id.duplicate", "$.vcas[1].id")]),
+        ),
+        (
+            "remove member submix bus without rewriting grp",
+            vec![
+                SessionEdit::UpsertVca {
+                    vca: vca("grp", unity(), &["a", "bus", "x"]),
+                },
+                SessionEdit::RemoveRoute {
+                    route_id: id("a-bus"),
+                },
+                SessionEdit::RemoveRoute {
+                    route_id: id("bus-out"),
+                },
+                SessionEdit::RemoveSubmix {
+                    submix_id: id("bus"),
+                },
+            ],
+            Refusal::Validation(&[("reference.missing_entity", "$.vcas[0].members[1]")]),
+        ),
+        (
+            "0702 past the fader domain",
+            vec![SessionEdit::SetVcaFader {
+                vca_id: id("grp"),
+                fader: fader(30.0, 0.0, false, false),
+            }],
+            Refusal::Validation(&[("numeric.out_of_schema_range", "$.vcas[0].fader.left_db")]),
         ),
     ];
     for (name, tail, refusal) in cases {

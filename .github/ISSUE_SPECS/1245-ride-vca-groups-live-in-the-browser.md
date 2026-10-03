@@ -407,6 +407,49 @@ four 2.67 ms quanta. This slice therefore also bounds per-command VCA work in th
 - **Timing** (A1b): native release 0.153 ms; wasm (node 22.23.2) median 0.18 ms, p99 0.39 ms; the
   scratch scripts are `/tmp/claude-1002/kv-1245/wasm/`.
 
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`), in `hosts/host-web/src/tests.rs` unless stated. Each mutation was applied alone to
+`hosts/host-web/src/lib.rs`, the whole host-web lib suite run, and the file restored;
+`hosts/host-web/MUTATIONS.md` has a row for each.
+
+- **MINOR-1.** The verifier's probes are committed as tests:
+  - `a_vca_ride_and_mute_ramp_as_direct_member_moves` (from `sol_probe_ramps_match_direct_member_moves`,
+    8 seeds, reach asserted): random VCA forests; each batch a ride, a mute or both at ramps of 64
+    to 500 samples; every block through the ramp is bit-identical to a VCA-free host told each
+    changed lane directly at the same ramp. Test value: red if a VCA ride's member records or a
+    VCA mute's coalesced records drop the gesture's window (a click). S1 (the VCA fader pass at
+    ramp 0) and S2 (kind 17 leaves the coalesced ramp unset): RED.
+  - `a_split_member_move_ramps_and_the_last_ride_sets_the_window` (from
+    `sol_probe_split_member_move_and_last_ride_ramp`). Test value: red if a split member move drops
+    its window or the VCA fader pass takes the first ride's ramp. S3 (the split records at ramp 0)
+    and S23 (the first ride's ramp): RED, S1 too.
+- **MINOR-2.** `a_long_vca_mute_ramp_refuses_at_the_first_coalesced_index` (from
+  `sol_probe_long_vca_mute_ramp_refuses_at_first_coalesced_index`). Test value: red if a kind 17
+  does not set the coalesced record's wire index, or an overlong VCA mute ramp is admitted. S12
+  (kind 17 leaves `coalesce_first_wire_index`): RED in this test only; S2 also turns it red.
+- **NIT-1.** The bound test is renamed `the_browser_bounds_vca_reach_and_admits_a_worst_batch_at_the_bound`
+  and keeps the admission; its timing half is `a_vca_batch_at_the_bound_fits_a_quantum_in_release`,
+  `#[ignore = "release-mode budget; runs nightly"]`, wired into `nightly.yml`'s release-mode
+  wall-clock step beside `maximum_document_dense_invalid_boot_finishes_under_one_second_in_release`.
+  It passes in release on this host.
+- **NIT-2.** `BrowserVcaShape::transient_bytes`' doc now says the projection over-counts (`try_new`
+  holds one reach result, and since #1244's NIT-3 no second one inside `effective_strip_faders`)
+  and that at these bounds it is never the binding refusal (the exact retained check or
+  preparation's resource limit refuses first; the verifier's bisection). The check stays as a
+  defensive pre-check; its formula is unchanged.
+- **NIT-3, the choice recorded.** A member's own kind 3 always stages its effective value, like kind
+  3 on an unreached strip: a member clamped before and after the move re-stages its unchanged
+  target, which the verifier's probe rendered bit-identical to a fresh plan through and after the
+  ramp. `docs/BUILTINS_AND_METERING_V1.md` says so.
+- **Owner question.** The bounds (256 VCAs, 16,384 pairs) are recorded in decision 13 as planner
+  decision V-Q3, subject to owner review.
+
+## Verdict
+
+- **Attempt 1** (`86c050075`): Sol PASS. Two MINORs, three NITs and two INFOs; all MINORs and NITs
+  are applied above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1245-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1245-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Compose live VCA moves in host-core* (#1244)

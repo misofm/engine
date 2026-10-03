@@ -2172,8 +2172,10 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true, su
   // or otherwise reorders the engine's enumeration (the order send commands index) is visible.
   const routeIds = ["zz-send", "aa-send"];
   // Issue #1246 D3: the VCA IDs, deliberately not in sorted order, so a worklet that sorts or
-  // otherwise reorders the engine's enumeration (the order VCA commands index) is visible.
-  const vcaIds = ["zz-vca", "aa-vca"];
+  // otherwise reorders the engine's enumeration (the order VCA commands index) is visible. There
+  // are three, one more than the routes, so a worklet that reads the VCA count from another
+  // export (the route count it was cloned beside) is visible too.
+  const vcaIds = ["zz-vca", "mm-vca", "aa-vca"];
   // Issue #1210 D3: `submixIds` (a parameter) are the submix IDs in canonical order, as many as
   // the meter header's `submix_count` below; the worklet refuses construction when the two disagree.
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and

@@ -6345,9 +6345,13 @@ impl BrowserVcaShape {
     }
 
     /// A conservative bound on the transient bytes [`LiveVcaState::try_new`] holds beyond what it
-    /// keeps: two `vca_reach()` results alive at once (its own and the one inside
-    /// `effective_strip_faders`), each a per-strip list with doubled capacity plus its parent
-    /// index, the effective faders, and the inverse table's cursor.
+    /// keeps. `try_new` holds one `vca_reach()` result (a per-strip list with up to doubled
+    /// capacity, plus its parent index) and the inverse table's cursor, and drops the reach lists
+    /// before it seeds the emitted mirror from the flattened tables. This charges two reach
+    /// results and the effective faders, so it over-counts. At the browser's bounds (256 VCAs,
+    /// 16,384 pairs) it is never the binding refusal: the exact retained-budget check, or
+    /// preparation's own resource limit, refuses a smaller budget first (the #1245 verdict's
+    /// NIT-2); it stays as a defensive pre-check before any per-pair table is built.
     fn transient_bytes(self) -> Option<u64> {
         if self.vcas == 0 {
             return Some(0);

@@ -86,8 +86,11 @@ surface, and removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence.
   compilation or without live controls) and `miso_engine_web_v1_live_control_vca_id(handle, index)
   -> u32` (copies the ID into the ID staging buffer and returns its byte length; zero for no such
   VCA) enumerate the VCAs in canonical VCA-ID order, the index word of kinds 16 and 17.
-  `ReadyOwnership` keeps the normalized model's VCA IDs in a list built at boot beside `submixes`;
-  `_vca_count` is its length and `_vca_id` copies from it. Both names are inserted in sorted
+  `_vca_count` is the live VCA state's count (`ready.vcas.vca_count()`, the bound admission refuses
+  a VCA index against, so it is 0 without live controls), and `_vca_id(i)` copies
+  `ready.session.normalized_model().vcas[i].id` from the retained normalized model that state was
+  built from; no VCA-ID list is copied. (Amended after attempt 1, whose deviation 1 this is: the
+  frozen text had `ReadyOwnership` keep a list built at boot.) Both names are inserted in sorted
   position, right after `miso_engine_web_v1_live_control_track_id`, in every export list in the
   Context (123 names in `check-web-audioworklet.sh`, `[&str; 122]` in `abi_layout.rs`).
 - **D2. ID staging.** `HostSessionShape` gains `longest_vca_id_bytes`, and every staging size takes
@@ -327,6 +330,28 @@ Base `86c050075` (#1245's head). Anchors re-found by symbol.
 - Regenerated layout diff: `sdk/assets/miso-engine-v1-abi-layout.json` and
   `sdk/src/generated/abi.ts` each gain exactly `miso_engine_web_v1_live_control_vca_count` and
   `miso_engine_web_v1_live_control_vca_id`.
+
+### VCA follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`):
+
+- **m1.** `scripts/test-web-audioworklet.mjs`'s stub enumerates three VCAs (`zz-vca`, `mm-vca`,
+  `aa-vca`) beside its two routes. Test value: red if the worklet reads the VCA count from another
+  export (the route count it was cloned beside), which every gate missed while the stub had as many
+  VCAs as routes. Mutation (the worklet's `vcaCount` read from
+  `miso_engine_web_v1_live_control_route_count`): RED at `issue #1246: the enumerated VCA order`;
+  green on the unmutated worklet. A `hosts/host-web/MUTATIONS.md` row records it.
+- **n1.** The native enumeration test's doc says the model lists the VCAs out of canonical order and
+  the booted canonical document sorts them; declaration-order independence is the SDK eval's.
+- **n2.** D1 is amended to the accepted deviation 1 (IDs read from the retained normalized model; no
+  list copied).
+- **n3.** Not applied: a non-ASCII stub mutation for every enumerated ID reader (tracks, submixes,
+  routes and VCAs share the gap) is pre-existing and a candidate successor.
+
+## Verdict
+
+- **Attempt 1** (`5248f94c4`): Sol PASS. One MINOR and three NITs; m1, n1 and n2 are applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1246-attempt1.md`.
 
 ## Dependencies
 

@@ -136,7 +136,8 @@ pub struct CompileLimits {
     pub maximum_submixes: u64,
     /// Maximum session VCA groups (#1243). Zero means "use `maximum_tracks`" -- never "no VCAs" and
     /// never "unbounded" -- which is what every caller written before this word was named already
-    /// passes. It occupies the former `reserved[0]`; the layout is unchanged.
+    /// passes. It occupies `reserved[1]` of the original `reserved[4]` (offset 184); the layout is
+    /// unchanged.
     pub maximum_vcas: u64,
     /// Must be zero in ABI V1.
     pub reserved: [u64; 2],

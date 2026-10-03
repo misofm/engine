@@ -46,9 +46,26 @@
 //! # Size
 //!
 //! The reach tables hold one entry per (strip, reaching VCA) pair, twice (forward and inverse), so
-//! they grow as strips times nesting depth. The #1243 verdict measured the browser's worst case at
-//! about 1.7 M pairs for a 1 MiB document of chained VCAs; [`LiveVcaState::retained_bytes`] is
-//! what a host charges for it.
+//! they grow as strips times nesting depth; [`LiveVcaState::retained_bytes`] is what a host charges
+//! for them. A VCA dB move recomposes every pair of every strip the VCA reaches, so its cost grows
+//! the same way. A count of VCAs does not bound the pairs: a chain where `v0` holds every strip and
+//! each `v{i}` holds `v{i-1}` makes every strip reach every VCA. The #1244 verdict measured that
+//! worst case under the browser's only document bound, its raw byte length (1 MiB; whitespace-free
+//! JSON is accepted): 1,292 submixes under 4,842 chained VCAs is 6.26 M pairs, 95.6 MiB retained
+//! natively (about 48 MiB on wasm32), 1.9 s to build, and 10.6 ms natively per VCA dB move (3.6 ms
+//! per mute) -- four 128-frame quanta at 48 kHz. In canonical (indented) JSON the same shape fits
+//! only 684 submixes under 2,527 VCAs: 1.73 M pairs, about 13 MiB on wasm32 and 2.9 ms per move,
+//! still more than a quantum. The browser therefore bounds the pairs at boot (#1245: at most 256
+//! VCAs and 16,384 pairs, refused `web.vca.maximum_vcas` and `web.vca.reach_pairs`), where the
+//! worst batch measured 0.15 ms natively. The C ABI caps VCAs and tracks at preparation
+//! (`maximum_vcas`, `maximum_tracks`, #1243) and keeps no live VCA state until #1247.
+//!
+//! # Preconditions
+//!
+//! The setters take what the host has validated: an offset or own value finite and inside the
+//! fader domain, -144 to +24 dB. They neither validate nor refuse it. A non-finite value is kept,
+//! and its lanes then owe a record forever (`NaN != NaN`), and an out-of-domain value is clamped
+//! only in the composition.
 
 use std::collections::TryReserveError;
 
@@ -153,10 +170,20 @@ impl LiveVcaState {
                 .strips()
                 .map(|strip| [strip.fader.left_db, strip.fader.right_db]),
         )?;
-        // What the prepared fader bakes: the render plane has already been told exactly this.
-        let effective = model.effective_strip_faders();
-        let emitted_db = try_boxed(strip_count, effective.iter().map(|fader| fader.db))?;
-        drop(effective);
+        // What the prepared fader bakes, which the render plane has already been told:
+        // `effective_strip_faders`' composition -- `vca_effective_db` over the strip's own value
+        // and its reach's offsets in ascending VCA-ID order -- read from the flattened tables
+        // instead of a second `vca_reach()` (the #1244 verdict's NIT-3). The same function over
+        // the same values in the same order gives the same bits.
+        let emitted_db = try_boxed(
+            strip_count,
+            own_db.iter().enumerate().map(|(strip, own)| {
+                let vcas = &reach[reach_start[strip]..reach_start[strip + 1]];
+                [0, 1].map(|lane| {
+                    vca_effective_db(own[lane], vcas.iter().map(|&vca| vca_db[vca][lane]))
+                })
+            }),
+        )?;
         let vca_db_shadow = try_boxed(vca_count, vca_db.iter().copied())?;
         let vca_mute_shadow = try_boxed(vca_count, vca_mute.iter().copied())?;
         let own_db_shadow = try_boxed(strip_count, own_db.iter().copied())?;
@@ -226,6 +253,8 @@ impl LiveVcaState {
     }
 
     /// Set the covered lanes of one VCA's offset. `false`, changing nothing, for an unknown VCA.
+    /// `db` must be finite and in -144 to +24 dB: the host validates it before calling (see
+    /// "Preconditions" in the module documentation).
     pub fn set_vca_db(&mut self, vca: usize, lanes: BuiltinLaneSelector, db: f32) -> bool {
         if vca >= self.vca_db.len() {
             return false;
@@ -247,6 +276,8 @@ impl LiveVcaState {
 
     /// Set the covered lanes of a reached strip's own fader value. `false`, changing nothing, for
     /// a strip no VCA reaches: its own value is its effective one, which the host stages as is.
+    /// `db` must be finite and in -144 to +24 dB: the host validates it before calling (see
+    /// "Preconditions" in the module documentation).
     pub fn set_member_db(&mut self, strip: usize, lanes: BuiltinLaneSelector, db: f32) -> bool {
         if !self.reaches(strip) {
             return false;
@@ -258,7 +289,8 @@ impl LiveVcaState {
 
     /// The effective dB of one lane of a reached strip: [`vca_effective_db`] of its own value and
     /// its reach's offsets, in ascending VCA-ID order. For a strip no VCA reaches it is the value
-    /// preparation baked, and `0.0` for an index the plan has no strip or lane for.
+    /// preparation baked, never a later own move of that strip (which this state does not see),
+    /// and `0.0` for an index the plan has no strip or lane for.
     #[must_use]
     pub fn effective_db(&self, strip: usize, lane: usize) -> f32 {
         let Some(own) = self.own_db.get(strip).and_then(|own| own.get(lane)) else {

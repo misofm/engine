@@ -178,7 +178,10 @@ emits nothing. Precedence is fixed:
 
 - **Mute wins.** Solo never clears a user or VCA mute: a soloed member of a muted VCA stays muted,
   and so do its following sends. An explicit unmute of a VCA-muted member records the intent but
-  stages the lane still muted.
+  stages the lane still muted. A both-lanes kind 4 on a strip whose VCA mutes one lane composes to
+  two lane values, so it stages one `Left` and one `Right` record and needs two slots in that
+  strip's fader queue: at a queue depth of 1 it is refused whole as typed backpressure (a caller
+  can send the lanes separately), as the other two-record lowerings are.
 - **Solo-safe is not VCA-safe.** A submix is never solo-muted, but a VCA that reaches it mutes it.
 - **A VCA has no solo.** A VCA mute neither engages a solo nor counts toward `any_solo`.
 
@@ -201,8 +204,9 @@ preparation bakes, into the records the members already take.
   +24 dB clamps there and returns to its own balance when the VCA comes back: the state keeps the
   member's own value, never the clamped one.
 - **A member's own `faderDb`** on a reached strip moves its own value and stages its effective
-  value, so it lands on top of the VCA and keeps its balance. A strip no VCA reaches lowers exactly
-  as before.
+  value, so it lands on top of the VCA and keeps its balance. It always stages, like a `faderDb` on
+  a strip no VCA reaches: a member clamped before and after the move re-stages its unchanged
+  clamped target, which moves no bit. A strip no VCA reaches lowers exactly as before.
 - **A mute** sets the VCA's mute term in the one strip-mute owner, so the solo coalescing pass emits
   every member's changed lanes and the follow pass every following send's, with the last kind 9 or
   17 record's ramp. Mute wins over solo, a solo-safe submix is muted too, and un-muting a VCA leaves

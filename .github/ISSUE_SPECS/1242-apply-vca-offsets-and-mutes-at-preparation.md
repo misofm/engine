@@ -413,6 +413,30 @@ No allocation gate: this slice adds no render-thread state; the composition runs
   Gate 8 was not re-run: a session without VCAs stages exactly the record attempt 1 staged.
   `run-aarch64-tests.sh debug`: at batch push.
 
+### VCA follow-up record (after the attempt 2 PASS verdict)
+
+Applied in the VCA batch follow-up commit (on `5248f94c4`, branch `codex/batch-vca`), in `hosts/host-web/src/tests.rs`:
+
+- **MINOR-1, P2.** `a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` draws each
+  record's smoothing from {0, 64}, solos included, on both hosts. Test value: red if the split
+  `Both` kind 4 records drop the command's window (an audible hard switch where the reference
+  ramps). Mutation M3 (split records staged at smoothing 0): RED in this test only.
+- **MINOR-1, P1.** `a_both_lane_unmute_keeps_a_one_lane_vca_mute` stages a second `channel` 2
+  un-mute on `bass` (no VCA) in the same submission and asserts `drums`' fader queue lost two slots
+  and `bass`' one. Test value: red if every `Both` kind 4 splits, doubling fader-queue use for
+  every both-lanes mute (and refusing it at queue depth 1), which renders identically. Mutation M6
+  (the `left != right` guard dropped): RED in this test only.
+- **NIT.** `docs/BUILTINS_AND_METERING_V1.md`'s "VCA groups" paragraph says the split needs two
+  fader-queue slots, so at depth 1 it is refused whole as backpressure.
+
+## Verdict
+
+- **Attempt 1** (`250b72e94`): Sol FAIL on MAJOR-1 (a both-lanes kind 4 staged one lane's effective
+  mute for both lanes when a VCA mutes one lane), MINOR-1 and two NITs.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1242-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1242-attempt1-verifier-scratch.rs`.
+- **Attempt 2** (`d5dce7b05`): Sol PASS. One MINOR and one NIT, applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1242-attempt2.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1242-attempt2-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Declare VCA groups in the session* (#1240)
