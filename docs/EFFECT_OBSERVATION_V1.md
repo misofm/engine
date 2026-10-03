@@ -127,7 +127,7 @@ there a bus's reading is `submixGrDb[frameSlot - trackCount]`.
 Several armed taps on one track fold max-magnitude into the one slot, on the control plane. Each
 tap keeps its own cell.
 
-`masterGrDb` is `null`, never `0`, when no track was designated or the designated track published
+`masterGrDb` is `null`, never `0`, when no strip was designated or the designated strip published
 no window: `0` would be indistinguishable from "the master is not reducing".
 
 V1 has no structural master bus, so the master reading is a **designation**

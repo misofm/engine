@@ -392,13 +392,41 @@ Docs and tests only; no engine logic changed. **Authorized path added (A2):**
 - **ARTIFACT UNCHANGED:** shipped module `7d6c0a8b...0f90b` (2 695 834 B), the same as attempt 1.
   The Rust doc edits keep `lib.rs`'s line count, so no panic-location line moves.
 
+### K2 follow-up record (after the attempt 2 PASS verdict)
+
+Applies the verdict's non-blocking MINOR-A and NITs A to C; no engine logic changed.
+
+- **MINOR-A.** `a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track` now declares
+  `band-1-enabled = 1` (parameter 1, both, linear), so the -12 dB band-1 gain edit is audible and
+  the render comparison discriminates. Green; staging the bus's gain at -6 dB while the reference
+  track's stays -12 dB turns it red (block 2, sample 1), restored. Its test-value line and a new
+  `hosts/host-web/MUTATIONS.md` row record that mutation.
+- **NIT-A.** The 132-column `admit_commands` doc line in `hosts/host-web/src/lib.rs` is wrapped.
+  **ARTIFACT CHANGED:** the shipped module moves from `7d6c0a8b...0f90b` to
+  `f08c5433ca6e31c253ebb121fbab8d36f763ac28bae9f6410258bbc727ba00de` (2 695 834 B, size
+  unchanged) through panic-location bytes only. No per-change module pin exists since #1061; the
+  committed `.sha256` is a release fingerprint, re-pinned at release.
+- **NIT-B.** The 158-column addressing line in the worklet `.d.ts` is rewrapped; its mirror
+  `sdk/src/browser/shipped-host.d.ts` stays byte-identical (`cmp`, `check-sdk-generated.sh`).
+- **NIT-C.** `MisoMeterFrame.masterGrDb` (`.d.ts`, mirror and `docs/EFFECT_OBSERVATION_V1.md`)
+  says strip, not track; `MisoObservationAddress.trackIndex` and
+  `MisoObservationMapBinding.trackIndex` are documented as strip indices.
+- **Gates** (x86_64 AVX2), all rc 0: `cargo test -p host-web --lib` (141 passed, 0 failed, 1
+  ignored); `build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`;
+  `check-browser-expected-resources.py --artifacts`; `test-web-audioworklet.sh`;
+  `check-sdk-generated.sh`; `check-sdk-types.sh`; `check-sdk-headless.sh` (347 pass, 0 fail);
+  `sdk-package.sh check`; `cargo fmt --check`; workspace clippy `-D warnings`; `check-`/`test-`
+  realtime, host-core and workspace policy.
+
 ## Verdict
 
 - **Attempt 1** (`e4a6269fe`, follow-up `c13ac5e1d`): Sol FAIL. MAJOR-1: `observe()` reports a bus
   binding's `frameSlot` past `trackGrDb`; MINOR-1 to MINOR-4 and NITs.
   `docs/handoffs/submix-sends-2026-10-02/verdicts/1213-attempt1.md`; the verifier's probes are
   `docs/handoffs/submix-sends-2026-10-02/verdicts/1213-attempt1-verifier-scratch.rs`.
-- **Attempt 2** (`89ba1b233`): verdict pending.
+- **Attempt 2** (`89ba1b233`): Sol PASS. No BLOCKER or MAJOR; MINOR-A and NITs A to C,
+  non-blocking, applied in the K2 follow-up above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1213-attempt2.md`.
 
 ## Dependencies
 

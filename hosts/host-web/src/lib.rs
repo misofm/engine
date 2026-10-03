@@ -4303,7 +4303,8 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
 /// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
 /// phase 1; per strip since issue #1213), which is why `command_decoded` is
-/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` long and why the room counted is per lowered record rather than per wire record.
+/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` long and why the room counted is per lowered
+/// record rather than per wire record.
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///

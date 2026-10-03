@@ -48,8 +48,9 @@
 //
 // A command names a strip by its strip index -- the compiled session's canonical normalized tracks
 // first, then its submixes in canonical order (issue 1213), both of which `sessionMap()` returns --
-// plus a rack, an effect index and a numeric parameter ID. No string crosses the command path. The identity mapping is `sessionMap()` for the session and the
-// build-time metadata JSON for the effect vocabulary.
+// plus a rack, an effect index and a numeric parameter ID. No string crosses the command path. The
+// identity mapping is `sessionMap()` for the session and the build-time metadata JSON for the
+// effect vocabulary.
 //
 // ## One batch is one transaction
 //
@@ -411,6 +412,7 @@ export interface MisoSessionMap {
 
 /** Numeric current-owner address used by the additive selected-observation request. */
 export interface MisoObservationAddress {
+  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
   readonly trackIndex: number;
   /** `1` inserts or `3` console, addressed as `MisoCommand` addresses an effect. */
   readonly rack: number;
@@ -422,6 +424,7 @@ export interface MisoObservationAddress {
 
 /** One resident observation binding, in the prepared owner's stable map order. */
 export interface MisoObservationMapBinding {
+  /// Strip index: the compiled session's tracks first, then its submixes (issue 1213).
   readonly trackIndex: number;
   /** `1` inserts or `3` console. */
   readonly rack: number;
@@ -603,9 +606,9 @@ export interface MisoMeterFrame {
   /// track fold max-magnitude into the one slot, on the control plane. Each value is the latest
   /// available independently aged effect fold; this frame carries no GR sequence or sample span.
   readonly trackGrDb: Float32Array;
-  /// The designated master track's own folded reading, or `null` (issue 143 D6).
+  /// The designated master strip's own folded reading, or `null` (issue 143 D6).
   ///
-  /// `null` -- never `0` -- when no track was designated or the designated track published no
+  /// `null` -- never `0` -- when no strip was designated or the designated strip published no
   /// window, because `0` would be indistinguishable from "the master is not reducing".
   readonly masterGrDb: number | null;
   /// Absolute sample the reported window opened at, inclusive.

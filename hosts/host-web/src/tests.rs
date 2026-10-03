@@ -9693,7 +9693,9 @@ fn live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track() {
 ///
 /// Test value: red if the prepared-owner EQ path spells its queue base or its admission owner
 /// marker with the track count instead of the strip count (`prepared_queue_address`'s Eq band, the
-/// admission's EQ `queue_slot`), which gate 1's compressor insert never exercises.
+/// admission's EQ `queue_slot`), which gate 1's compressor insert never exercises, or if the
+/// admitted bus edit lands with a value other than the reference track's (band 1 is enabled, so
+/// the -12 dB gain edit is audible).
 #[test]
 fn a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track() {
     let (_, _, _, mut eq, _) = strip_base();
@@ -9701,7 +9703,14 @@ fn a_prepared_eq_edit_on_a_bus_equals_the_same_edit_on_a_track() {
     eq.identity = session::EffectIdentity::Native {
         effect_id: strip_id("miso.parametric-eq"),
     };
-    eq.params = Vec::new();
+    // `band-1-enabled` defaults off, which would leave the band-1 gain edit inaudible and the
+    // render comparison vacuous.
+    eq.params = vec![session::EffectParam {
+        parameter_id: 1,
+        channel: session::ParameterChannel::Both,
+        unit: session::ParameterUnit::Linear,
+        value: 1.0,
+    }];
     let (bus, reference) = strip_pair_documents(Some(eq));
     let mut a = strip_boot(&bus, strip_options(64, 0, 0));
     let mut b = strip_boot(&reference, strip_options(64, 0, 0));
