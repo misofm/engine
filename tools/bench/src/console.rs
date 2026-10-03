@@ -234,6 +234,15 @@ const SPARSE_TRIPLE: [Workload; 3] = [
     Workload::SixtyFourTrackConsoleSparse,
 ];
 
+/// The bus-and-send row and the standing console row whose tracks it carries (issue #1227): one
+/// set of tracks, feeding the output directly on one row and through buses and sends on the other.
+/// Their digests must differ, and the run asserts it before it emits either record: an equality
+/// means the sends fixture never reached the plan.
+const SENDS_PAIR: [Workload; 2] = [
+    Workload::SixtyFourTrackConsole,
+    Workload::SixtyFourTrackConsoleSends,
+];
+
 pub(crate) fn main() {
     // #104 F4: prove the shared audited allocator is the one serving this process. A global
     // allocator registered by a dependency that is never named may not be linked at all, and a
@@ -295,6 +304,13 @@ pub(crate) fn main() {
     assert!(
         sparse != active && sparse != idle,
         "the sparse-activity row rendered the all-active or the idle row's output"
+    );
+    // And the bus-and-send row's (issue #1227): its tracks feed buses and sends, so it does not
+    // render the standing console's bits. An equality means its fixture never reached the plan.
+    let [standing, sends] = SENDS_PAIR.map(digest_of);
+    assert!(
+        sends != standing,
+        "the bus-and-send row rendered the standing console row's output"
     );
     for (workload, session) in rows.iter().zip(&sessions) {
         let control = floor::floor_row(*workload)
@@ -2822,6 +2838,67 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// Issue #1227: the bus-and-send row, run short through the real subject, renders with no
+    /// error and no forbidden operation, prints the facts it is pinned on, and the record
+    /// validator pins them: refused as shortened, accepted at the frozen count, and refused at the
+    /// frozen count when it names the standing fixture instead of its own.
+    ///
+    /// The same `SessionMeasurement` the runner's run takes, over eight timed blocks instead of a
+    /// thousand (`cargo test -p bench the_bus_send_row -- --nocapture` prints the record). Its
+    /// timings are not to be read.
+    ///
+    /// Red mutations: drop the row's `session_kind_shape` branch or its `session_kinds` entry --
+    /// the frozen record is refused; point the row's `fixture_id` at the intended fixture -- the
+    /// record at the frozen count is refused.
+    #[test]
+    fn the_bus_send_row_prints_its_facts_and_the_validator_pins_them() {
+        let workload = Workload::SixtyFourTrackConsoleSends;
+        let measured = SessionMeasurement::run_for(workload, SHORT_RUN_OBSERVATIONS);
+        assert_eq!(measured.render_errors, 0);
+        assert_eq!(
+            measured.audit.total(),
+            0,
+            "a forbidden operation on the render path"
+        );
+        assert!(measured.meters.is_none());
+        let record = measured.record(
+            workload,
+            1,
+            Backend::current(),
+            Metadata::gather(),
+            None,
+            None,
+        );
+        println!("{record}");
+        assert!(record.contains("\"workload_kind\":\"sixty_four_track_console_sends\","));
+        assert!(record.contains(
+            "\"fixture_id\":\"fixtures/session/v1/console-sixty-four-track-sends.json\","
+        ));
+        assert!(
+            !record.contains("\"bypass_pattern\":"),
+            "no bypass group on the bus-and-send row"
+        );
+        let frozen = ".observations = 1000";
+        assert!(
+            !record_validator_accepts(&record, "."),
+            "a shortened run must not pass for the frozen one"
+        );
+        assert!(
+            record_validator_accepts(&record, frozen),
+            "the record at the frozen count"
+        );
+        assert!(
+            !record_validator_accepts(
+                &record,
+                &format!(
+                    "{frozen} | .fixture_id = \"{}\"",
+                    Workload::SixtyFourTrackConsole.fixture_id()
+                )
+            ),
+            "a bus-and-send record naming the standing fixture"
+        );
     }
 
     /// Issue #1085: the five console-strip rows, run short through the real subject, render with

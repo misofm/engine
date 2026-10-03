@@ -150,6 +150,9 @@ def floor_pins:
     # and names no control rather than isolating the meters against a floor nobody derived.
     "sixty_four_track_console_metered":
       [null, 1, "none", "not_derived"],
+    # The bus-and-send row (#1227): no inventory exists for a bus or a send.
+    "sixty_four_track_console_sends":
+      [null, 1, "none", "not_derived"],
     # The five console-strip rows (#1085). A remainder's width factor depends on whether it renders
     # per node or as a padded bank, which is what the console strip changes (the nine-track factor
     # holds for a remainder of one only, where the two cost the same); the app shape's bypassed
@@ -205,11 +208,12 @@ def floor_shape:
    end);
 
 
-# The twenty-two session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission order),
-# the driver-fed gain/pan row the bench emits after them (#928 and #956, `DRIVER_FED_WORKLOADS`),
-# the metered console row (#881, `METERED_WORKLOADS`), and the five console-strip rows it emits
-# last (#1085, `CONSOLE_STRIP_WORKLOADS`).
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
+# The twenty-three session workloads, sorted: `WORKLOADS`'s fifteen (append-only, in emission
+# order), the driver-fed gain/pan row the bench emits after them (#928 and #956,
+# `DRIVER_FED_WORKLOADS`), the metered console row (#881, `METERED_WORKLOADS`), the bus-and-send
+# row (#1227, `BUS_SEND_WORKLOADS`), and the five console-strip rows it emits last (#1085,
+# `CONSOLE_STRIP_WORKLOADS`).
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixteen_track_strip","sixty_four_track_app_shape","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_half_mono","sixty_four_track_console_legacy","sixty_four_track_console_metered","sixty_four_track_console_mono","sixty_four_track_console_mono_dual","sixty_four_track_console_sends","sixty_four_track_console_sparse","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_gain_pan_only","sixty_four_track_gain_pan_ring","sixty_four_track_idle","ten_track_ragged_strip","thirteen_track_ragged_strip"];
 
 # #928: how a session row's track inputs reach the graph. `bound` is a `FrozenGraphSource`
 # processor per track input, dispatched once per track per block; `played_planes` is a prepared
@@ -270,6 +274,9 @@ def bypass_session_shape:
 def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
 # #1085: the app shape, derived from the standing fixture by `scripts/derive-app-console-fixture.py`.
 def app_console_fixture: "fixtures/session/v1/console-sixty-four-track-app.json";
+# #1227: the bus-and-send session, derived from the standing fixture by
+# `scripts/derive-sends-console-fixture.py`.
+def sends_console_fixture: "fixtures/session/v1/console-sixty-four-track-sends.json";
 # #1085: `strip_layout` names the chain in decision 12's console vocabulary, through its lowering
 # (`simd1` -> `pre_insert`, `dynamic` -> `inserts`, `simd2` -> `post_insert`), so one spelling pins
 # a row on today's per-track racks and on the console model. This is the intended strip's.
@@ -318,6 +325,16 @@ def session_kind_shape:
     .strip_content == "eq+compressor+limiter" and
     .strip_layout == "pre_insert:eq+compressor,post_insert:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
+  # The bus-and-send row (#1227): the standing console's tracks as written, feeding eight
+  # processed buses and two effect returns from its committed fixture. Its tracks' strip is the
+  # standing one, so it states the standing row's strip facts; the buses, the returns and the
+  # sends are what its fixture adds, and naming that fixture is what tells it apart from the
+  # standing row (the aggregate holds its digest apart from that row's too).
+  elif .workload_kind == "sixty_four_track_console_sends" then
+    .tracks == 64 and .synthetic_fixture == false and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == intended_layout and .input_signal == "tone" and
+    .fixture_id == sends_console_fixture
   elif .workload_kind == "one_twenty_eight_track_stretch" then
     .tracks == 128 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and

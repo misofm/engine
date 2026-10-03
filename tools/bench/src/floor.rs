@@ -151,11 +151,16 @@ impl FloorRow {
 /// inventory, but it is one of the strip-at-N set and is read with it, on measured cost alone.
 /// H5's figures stay arithmetic until S4 reports, so these rows state no floor and name no
 /// control.
+///
+/// `sixty_four_track_console_sends` (issue #1227) is absent because no inventory exists for a bus
+/// or a send: its tracks carry the standing strip, but its submix strips, inserts and route mixes
+/// are arithmetic the rulings have never counted, so it states no floor and names no control.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
     let full = 1.0_f64;
     Some(match workload {
         Workload::NineTrackBaseline
         | Workload::SixtyFourTrackConsoleMetered
+        | Workload::SixtyFourTrackConsoleSends
         | Workload::TenTrackRaggedStrip
         | Workload::ThirteenTrackRaggedStrip
         | Workload::SixteenTrackStrip
@@ -363,15 +368,18 @@ mod tests {
         BANK_WIDTH, BUILTINS_IDENTITY_LANE_OPS, COMPRESSOR_LANE_OPS, EQ_LANE_OPS, LIMITER_LANE_OPS,
         OPS_PER_CYCLE, floor_row, lane_samples_per_block,
     };
-    use console_workload::{CONSOLE_STRIP_WORKLOADS, Workload, native_session_rows};
+    use console_workload::{
+        BUS_SEND_WORKLOADS, CONSOLE_STRIP_WORKLOADS, Workload, native_session_rows,
+    };
 
     /// The rows the table states no floor for: the uninventoried nine-track fixture, the metered
-    /// row, and the console-strip rows (issue #1085).
+    /// row, the bus-and-send row (issue #1227) and the console-strip rows (issue #1085).
     fn underived(workload: Workload) -> bool {
         matches!(
             workload,
             Workload::NineTrackBaseline | Workload::SixtyFourTrackConsoleMetered
-        ) || CONSOLE_STRIP_WORKLOADS.contains(&workload)
+        ) || BUS_SEND_WORKLOADS.contains(&workload)
+            || CONSOLE_STRIP_WORKLOADS.contains(&workload)
     }
 
     fn rust_floor_table() -> String {

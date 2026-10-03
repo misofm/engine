@@ -36,6 +36,8 @@ python3 -I -B scripts/derive-mono-console-fixture.py "${validator_args[@]}" >"$t
 cmp "$tmp_dir/mono.json" fixtures/session/v1/console-sixty-four-track-mono.json
 python3 -I -B scripts/derive-app-console-fixture.py "${validator_args[@]}" >"$tmp_dir/app.json"
 cmp "$tmp_dir/app.json" fixtures/session/v1/console-sixty-four-track-app.json
+python3 -I -B scripts/derive-sends-console-fixture.py "${validator_args[@]}" >"$tmp_dir/sends.json"
+cmp "$tmp_dir/sends.json" fixtures/session/v1/console-sixty-four-track-sends.json
 
 python3 -I -B - <<'PY'
 import json
@@ -45,6 +47,7 @@ root = Path("fixtures/session/v1")
 intended = json.loads((root / "console-sixty-four-track-intended.json").read_text())
 mono = json.loads((root / "console-sixty-four-track-mono.json").read_text())
 app = json.loads((root / "console-sixty-four-track-app.json").read_text())
+sends = json.loads((root / "console-sixty-four-track-sends.json").read_text())
 assert intended["session_id"] == "console-sixty-four-track-intended"
 assert mono["session_id"] == "console-sixty-four-track-mono"
 assert intended["sample_rate_hz"] == mono["sample_rate_hz"] == 48000
@@ -90,6 +93,46 @@ for index, (track, standing) in enumerate(zip(app["tracks"], intended["tracks"])
     rest = lambda t: {k: v for k, v in t.items() if k != "console"}
     assert rest(track) == rest(standing)
 assert sum(e["bypass"] for t in app["tracks"] for e in t["console"]) == 2 * 21
+# #1227: the bus-and-send shape. The intended fixture's rate, quantum, source, console and tracks;
+# ten submix strips, each carrying every console slot in slot order (none bypassed) and exactly
+# one insert; 64 main routes into the eight buses, a pre-fader send into `fx-a` and a post-fader
+# send into `fx-b` per track, and ten returns into `main-out`; no muted route, `follows_mute`
+# exactly on the routes into a submix, no VCA and no automation.
+assert sends["session_id"] == "console-sixty-four-track-sends"
+for key in ("sample_rate_hz", "quantum_frames", "sources", "console", "tracks"):
+    assert sends[key] == intended[key], key
+buses = [f"bus-{k}" for k in range(8)]
+assert [s["id"] for s in sends["submixes"]] == buses + ["fx-a", "fx-b"]
+console_slots = [s["slot"] for s in intended["console"]["pre_insert"] + intended["console"]["post_insert"]]
+expected_insert = dict({b: ("miso.compressor", "maximum") for b in buses},
+                       **{"fx-a": ("miso.delay", "dual_mono"),
+                          "fx-b": ("miso.parametric-eq", "dual_mono")})
+for strip in sends["submixes"]:
+    assert [e["slot"] for e in strip["console"]] == console_slots
+    assert not any(e["bypass"] for e in strip["console"])
+    effects = strip["inserts"]["effects"]
+    assert len(effects) == 1 and not effects[0]["bypass"]
+    assert (effects[0]["identity"]["effect_id"], effects[0]["link_mode"]) == expected_insert[strip["id"]]
+    assert not strip["fader"]["left_mute"] and not strip["fader"]["right_mute"]
+routes = sends["routes"]
+assert len(routes) == 202
+def kinds(tap, destination):
+    return sorted((r["source"].get("track_id") or r["source"]["submix_id"],
+                   r["destination"].get("submix_id") or r["destination"]["output_id"])
+                  for r in routes
+                  if r["source"]["tap"] == tap and (r["destination"].get("submix_id")
+                                                    or r["destination"]["output_id"]) in destination)
+tracks = [f"ch{i:02d}" for i in range(64)]
+assert kinds("post_pan", buses) == [(t, f"bus-{i // 8}") for i, t in enumerate(tracks)]
+assert kinds("pre_fader", ["fx-a"]) == [(t, "fx-a") for t in tracks]
+assert kinds("post_fader", ["fx-b"]) == [(t, "fx-b") for t in tracks]
+assert kinds("post_pan", ["main-out"]) == sorted((s, "main-out") for s in buses + ["fx-a", "fx-b"])
+assert all(r["source"]["kind"] == "track" for r in routes if r["destination"]["kind"] == "submix_input")
+assert all(r["source"]["kind"] == "submix" for r in routes if r["destination"]["kind"] == "output_input")
+assert not any(r["mute"] for r in routes)
+assert [r["follows_mute"] for r in routes] == [r["destination"]["kind"] == "submix_input" for r in routes]
+assert sum(r["follows_mute"] for r in routes) == 192
+assert sends["vcas"] == [] and sends["automation"] == []
 PY
 
-printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono/app witnesses)\n'
+printf 'console session fixtures: ok (canonical regeneration and 64-track intended/mono/app/sends witnesses)\n'

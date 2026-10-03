@@ -403,6 +403,63 @@ Today no benchmark row has a single submix, so the cost of what the umbrella shi
 - The short-run record printed by the record test.
 - The preflight JSON.
 
+### Attempt 1 record (Terra, on `f4cb3dc34`)
+
+Anchors had moved by the brief's own spec commit only; every one was found by symbol (the test
+module now starts at `lib.rs:2350`, the metered-row test at `:2897`, `STRIP_ROWS` at `:3125`).
+
+- **Fixture diff against the intended fixture** (computed over the parsed documents): only
+  `session_id`, `submixes` and `routes` differ. The 64 `chNN-main` routes change in
+  `destination` (into `bus-<NN div 8>`) and `follows_mute` (now `true`, D1's route flags) and in
+  nothing else; 138 routes are added (128 sends, 10 returns) and none removed. The fixture is the
+  validator's canonical output; `check-console-fixtures.sh` regenerates it byte for byte.
+- **Facts test** (`the_bus_send_rows_plan_carries_every_route_unmuted_and_uncompensated`) printed
+  `bus_send_plan_facts route_transforms=202 reduction_nodes=11 bank_route_folds=0
+  route_ops_per_block=202 delayed_route_edges=0`. Derivations, as asserted: transforms
+  `64 + 2 x 64 + 10 = 202` (one per route); reductions `10 + 1 = 11` (each submix input sums 8 or
+  64 routes, `main-out` sums 10); 202 timing rows, none compensated (only the limiter has latency
+  and every strip carries it once, every tap read lies after `post_insert`); no `route-mute` and no
+  `route-follow-zeroed` row (nothing muted). Folds are printed, not asserted.
+- **Short-run record** (`the_bus_send_row_prints_its_facts_and_the_validator_pins_them`, 8
+  observations, timings not to be read): `workload_kind sixty_four_track_console_sends`, `tracks
+  64`, `synthetic_fixture false`, `strip_content eq+compressor+limiter`, `strip_layout
+  pre_insert:eq+compressor,post_insert:limiter`, `input_signal tone`, `source_feed bound`,
+  `fixture_id fixtures/session/v1/console-sixty-four-track-sends.json`, `render_errors 0`,
+  `render_total_forbidden_operations 0`, no meter or bypass group; refused as shortened, accepted
+  at `.observations = 1000`, refused there when it names the intended fixture.
+- **Preflight** (`--step bus-send-preflight`): PASS, `workload_launches: 0`,
+  `records_required: 62`, `sends_fixture_sha256:
+  22904bc6d889a4e5224b1470066028f60fba07062a18ae78c66f279e3c8c4712`,
+  `sends_fixture_generator_sha256:
+  faef2d6c003e77e6822540149cba418e69b84813166c4a9b257ceb00a6a8e4b7` (on the uncommitted tree over
+  `f4cb3dc34`); `artifacts/steps/bus-send-preflight/` was not created. No timed step was run.
+- **Gates.** 1: release build; `check-console-fixtures.sh target/release/session_validator` ok;
+  `cargo test --locked -p session-validator` ok (fixture in the five-stage corpus). 2: `cargo test
+  --locked --release -p audit -p bench -p console-workload` 113 passed, 0 failed (floor parity,
+  facts, short-run, `every_standing_workload_folds_one_route_per_track` and the strip-row tests
+  included); `test-console-benchmark.sh` PASS; preflight PASS. 4: `check-bench-policy`,
+  `test-bench-policy`, `check-conformance-boundaries`, `check-workspace-policy`,
+  `test-workspace-policy`, `cargo fmt --all -- --check` and workspace clippy `-D warnings` all
+  pass. Every positional mutation was checked to land on its intended record (`.[31]` round-two
+  session 0, `.[56..61]` round two's meters, observation, placement, automation, mono and mixing
+  records; `.[17]` is the sends row).
+- **Test value and mutations run** (each red, then restored):
+  - row facts test: chaining `BUS_SEND_WORKLOADS` after the strip rows turns it red (a row emitted
+    in the wrong position, which would also shift every positional record);
+  - facts test: dropping the `console_model` arm (renders the intended fixture), muting
+    `ch05-fx-a`, and muting `ch03`'s left fader (a follow-zeroed send) each turn it red; no other
+    test compiles this row;
+  - short-run record test: pointing the shape branch at the intended fixture, and dropping the
+    row's `fixture_id` arm, each turn it red (a record the validator refuses, or one naming the
+    wrong fixture, otherwise found only in the timed run);
+  - aggregate D5 rule: removing it makes the suite's "a bus-and-send row that rendered the
+    standing console row bits" case fail;
+  - fixture witnesses: deriving the `fx-b` sends from `pre_fader` fails the `post_fader` witness.
+- **Deviations.** The record-validator single-record section also gains three refusals beside
+  `session_sends` (the sends kind naming the standing fixture, reported as synthetic, and the
+  standing kind naming the sends fixture), within the native part. `scripts/check-cross-targets.sh`
+  was not run: it builds no touched crate.
+
 ## Dependencies
 
 - None open. Batch K3 (*Let a send follow its source strip's mute live in the browser*, #1224) and
