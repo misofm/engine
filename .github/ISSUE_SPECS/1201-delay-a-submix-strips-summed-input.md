@@ -148,6 +148,97 @@ that plugin-delay compensation never compensates.
 - The gate-2 mutation run's output.
 - Confirmation that no digest moved for sessions without a submix delay.
 
+### Attempt 1 record (Terra)
+
+- **Sites** (anchors moved after #1200; found by symbol). D1: `compile.rs` `track_delays` now
+  iterates `model.strips()` (tracks, then submixes), keyed by `track_node(strip.id, Input)`; the
+  estimate charge is unchanged code over the same vector; comment rewritten. D2: `NodeKind::SumDelay
+  { line, channels_agree }`; `node_kind` lowers a remaining `track_delays` entry to it after the
+  route branch, before `Identity`, with a new `TrackDelayLine` in the same line vector; the
+  source-input `TrackDelay` branch is untouched. D3: `execute_op`'s kind match runs
+  `track_delays[line].process` on the reduced output, after staging and the D9 reduction; no early
+  return. D4: nothing added to latency, timing or inserted delays. D5: the witness answers
+  `designed(channels_agree)` in its own arm (the `TrackDelay` arm is unchanged). `PreparedTrackDelay`
+  docs say "strip". `SESSION_SCHEMA_V1.md`: the interim sentence is replaced, and the lane-key
+  paragraph says a submix's delay delays its sum, uncompensated.
+- **Gates** (x86-64 AVX2 host, native 8-lane):
+  - 1: `host-core/tests/submix_strip.rs::a_bus_delay_shifts_its_summed_input_and_pdc_never_sees_it`
+    green. Impulses at samples 3 (0.25) and 10 (0.5) on `t0`, `t1`; the left plane is bit-identical
+    to the undelayed session's left shifted by 37, the right plane bit-identical to the undelayed
+    right, the left peak is the right peak + 37, and `output_latency` and `inserted_delays` equal
+    the undelayed artifact's.
+  - 2: `graph/src/lib.rs::tests::a_bus_delay_runs_on_the_sum_after_the_reduction` green (3 bound
+    inputs through identity routes `r1`, `r2`, `r0` into the bus `Input`, delay 5, quantum 4, 16
+    blocks; scalar oracle `(a + b) + c` in route-ID order, then shift; the test also asserts the
+    fixture's bits tell route-ID order from track order).
+  - 3: `a_folded_bus_still_delays_its_sum` green: `bank_route_folds()` 8 with the 7-sample delay and
+    8 without; output bit-identical to the fold-declined bind (0 folds) and to the undelayed output
+    shifted by 7, both planes.
+  - 4: `a_delayed_bus_renders_without_allocating` green (gate 1's session; render audit and
+    thread-scoped counters exact zero after block 0). The #1200 gate-8 body became the shared
+    `assert_renders_without_allocating`; the PDC test's artifact pipeline became `graph_artifact`.
+  - 5: release build of audit/bench/capi/session-validator ok; `check-graph-determinism.sh` PASS
+    100/100; `graph_fixture --check` clean; `check-console-fixtures.sh` ok;
+    `check-builtins-fixtures.sh` ok (50 files); `trace-graph-audit.sh` PASS (1,000,000 blocks);
+    `graph-compiler/tests/track_delay.rs` 8/8 unchanged. So no digest of a session without a submix
+    delay moved.
+  - 6: test-debug-a workspace command rc 0 (98 binaries, 1129 passed); `cargo fmt --check`; workspace
+    clippy `-D warnings` clean; graph, realtime and workspace `check-*`/`test-*` policy pairs ok.
+    Also `cargo test --release -p audit -p bench -p console-workload` ok (110 passed).
+    `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
+- **Mutation runs** (each reverted after):
+  - Gate 2 (ledger row 1201-2): the `SumDelay` line in the early-return path, before the
+    reduction -> `a_bus_delay_runs_on_the_sum_after_the_reduction` red: `lane 0 sample 5: 0 !=
+    5398.029`.
+  - D1 tracks-only (`.filter(StripKind::Track)`) -> gate 1 red (`sample 3: 0.25 != 0.0`) and gate 3
+    red.
+  - Fold master's kind replaced by `Identity` at bind -> gate 3 red (`the folded bus against the
+    reduction: sample 0`); gate 1 also red, because its two-track bus folds too.
+  - A delayed bus treated as a source by both planning metadata impls (declines the fold) -> gate 3
+    red only (`the delay costs the bus no fold`, 0 != 8); gate 1 stays green, its bits unchanged.
+  - A `Vec` allocated in the `SumDelay` arm -> gate 4 red (the test process aborts under the render
+    audit); #1200's gate 8 stays green (no bus delay).
+- **Test value.**
+  - Gate 1: red if a submix's delay is not lowered, delays one contributor rather than the sum,
+    delays the wrong lane, or is charged to PDC; no existing test delays a sum.
+  - Gate 2: red if the arm processes the bus buffer before the reduction writes it (or the
+    reduction runs after the line); no other test reaches a delayed reduction at the graph level.
+  - Gate 3: red if a delayed bus loses the route fold, or a fold master skips its kind; nothing
+    else checks fold counts on a delayed bus.
+  - Gate 4: red if the bus line is sized or grown on the render thread.
+- **Deviations.**
+  - The D5 witness arm has no new test: a bus is never collapse-eligible, so no rendered behavior
+    can tell its answer; the non-goal keeps the `TrackDelay` witness test unchanged.
+  - A bind-time `debug_assert!` that every delay entry is consumed was tried and dropped: harness
+    tests in `graph-compiler/tests/bank_levels.rs` bind delayed track inputs to processors (not a
+    source set), so their entries were never consumed before this slice either. Gate 1 covers the
+    hazard for a submix.
+  - A delay entry on a node that is neither a source input nor bound now delays that node's sum
+    instead of being dropped. Only a harness reaches such a track input; the workspace and fixture
+    gates are green.
+
+## Decision record
+
+- **Delay lines compose** (verdict MINOR-1). The K1 follow-up commit adopts the verifier's test
+  as `delayed_tracks_into_two_delayed_buses_each_keep_their_own_line` (`submix_strip.rs`): `t0`
+  delayed 11/0 into a bus delayed 37/5, beside `t1` into a second bus delayed 13/0. Test value: red
+  if delay lines alias across the `TrackDelay` and `SumDelay` arms or across two buses, or if a
+  track's delay and its bus's delay fail to add. Mutation C (`SumDelay` always processes line 0)
+  turns it, and only it, red across graph, graph-compiler and host-core (`--all-targets`).
+- **The D5 witness arm stays untested** (verdict MINOR-2), as the recorded deviation says: it feeds
+  only the evidence counters, and a bus is never collapsed, so no product bit depends on it.
+- **Schema prose** (verdict NIT-1): `SESSION_SCHEMA_V1.md` now says only the next paragraph's
+  `delay_samples` rules apply to a submix, and that the live trim, polarity and HPF/LPF commands
+  address tracks only until #1213.
+- **`graph-compiler/src/estimate.rs`** (verdict NIT-2) says "every delayed strip".
+- **#1203's tap gate** now gives its strip delays of 37/5, so the bus delay is covered at the
+  `input` tap and every tap after it (#1203 verdict NIT-1).
+
+## Verdict
+
+- **Attempt 1** (`84d26a1d`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1201-attempt1.md`; the
+  verifier's scratch test is `docs/handoffs/submix-sends-2026-10-02/verdicts/1201-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Render a submix strip on its summed input* (#1200)

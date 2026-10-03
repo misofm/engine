@@ -74,15 +74,14 @@ pub(crate) fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPo
     ports.dedup();
     ports
 }
+/// Every summing node with more than one main input: an output, and a submix strip's `Input`
+/// stage (#1200 D3), which took the bare `Submix` node's place. A track's `Input` has no main
+/// input -- its audio is its source binding, and a route can target only a submix or an output --
+/// so admitting every `Input` stage records exactly the submix sums.
 pub(crate) fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<ReductionRecord> {
     let mut contributions_by_node: BTreeMap<_, Vec<_>> = nodes
         .iter()
-        .filter(|node| {
-            matches!(
-                node.id,
-                GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-            )
-        })
+        .filter(|node| is_summing_node(&node.id))
         .map(|node| (&node.id, Vec::new()))
         .collect();
     for edge in edges {
@@ -103,6 +102,18 @@ pub(crate) fn reduction_records(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec
             })
         })
         .collect()
+}
+/// Whether `node` is one the canonical text and the estimate count reductions on (#1200 D3).
+pub(crate) fn is_summing_node(node: &GraphNodeId) -> bool {
+    matches!(
+        node,
+        GraphNodeId::Submix { .. }
+            | GraphNodeId::Output { .. }
+            | GraphNodeId::TrackStage {
+                stage: TrackStage::Input,
+                ..
+            }
+    )
 }
 pub(crate) fn add_node(
     nodes: &mut Vec<GraphNode>,
@@ -176,16 +187,16 @@ pub(crate) fn track_node(track: &str, stage: TrackStage) -> GraphNodeId {
 pub(crate) fn route_source_node(source: &RouteSource) -> GraphNodeId {
     match source {
         RouteSource::Track { track_id, tap } => track_node(track_id.as_str(), stage(*tap)),
-        RouteSource::SubmixOutput { submix_id } => GraphNodeId::Submix {
-            submix_id: gid(submix_id.as_str()),
-        },
+        // #1203 D3: a submix strip offers the seven taps a track does, at the same stages.
+        RouteSource::Submix { submix_id, tap } => track_node(submix_id.as_str(), stage(*tap)),
     }
 }
 pub(crate) fn route_destination_node(destination: &RouteDestination) -> GraphNodeId {
     match destination {
-        RouteDestination::SubmixInput { submix_id } => GraphNodeId::Submix {
-            submix_id: gid(submix_id.as_str()),
-        },
+        // #1200 D1: the submix strip's `Input` stage, which sums its route inputs.
+        RouteDestination::SubmixInput { submix_id } => {
+            track_node(submix_id.as_str(), TrackStage::Input)
+        }
         RouteDestination::OutputInput { output_id } => GraphNodeId::Output {
             output_id: gid(output_id.as_str()),
         },

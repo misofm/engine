@@ -251,7 +251,7 @@ fn all_opcode_edits_64() -> Vec<SessionEdit> {
             matrix_or_pan: track.matrix_or_pan.clone(),
         },
         SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
+            submix: Submix::unity(id("drums"), &session.console),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -761,8 +761,9 @@ fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         LinkMode::Average,
         Vec::new(),
         SidechainDeclaration::Routed(Sidechain {
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: id("drums"),
+                tap: SendTap::PostPan,
             },
             port_id: id("key"),
         }),
@@ -1197,21 +1198,126 @@ fn every_send_tap_tag_is_typed_and_canonical() {
         SendTap::PostFader,
         SendTap::PostPan,
     ] {
-        let source = RouteSource::Track {
-            track_id: id("vocal"),
-            tap,
-        };
-        let limits = ProtocolCodec::default().limits();
-        let mut count = CountSink::new(limits);
-        tx_route_source(&mut count, &source).expect("size route source");
-        let mut encoded = vec![0; count.written()];
-        let mut writer = SliceSink::new(&mut encoded, limits);
-        tx_route_source(&mut writer, &source).expect("encode route source");
-        assert_eq!(
-            parse_route_source(Message::nested(&encoded).expect("nested route source")),
-            Ok(source)
-        );
+        // #1203 D2: a submix source carries the same seven tap codes as a track source.
+        for source in [
+            RouteSource::Track {
+                track_id: id("vocal"),
+                tap,
+            },
+            RouteSource::Submix {
+                submix_id: id("drums"),
+                tap,
+            },
+        ] {
+            let encoded = nested_bytes(&|sink| tx_route_source(sink, &source));
+            assert_eq!(
+                parse_route_source(Message::nested(&encoded).expect("nested route source")),
+                Ok(source)
+            );
+        }
     }
+}
+
+/// #1203 D2: tag 2 (a submix source) requires `TAP` (field 3), in each of the three shapes that
+/// share the route-source spec: a route's source, a routed sidechain's source and a
+/// `SetRouteSource` value. Each container decodes with the tapped source and refuses the same
+/// container with the tap left out, so the refusal is the missing tap and nothing else.
+///
+/// Red if any of the three decoders reads a tapless submix source (for example, defaulting it to
+/// the strip's end, as `submix_output` meant), or if only the route's shape enforces the tap.
+#[test]
+fn a_tapless_submix_source_is_refused_in_every_shape_that_carries_one() {
+    let session = parse_session_json(include_str!(
+        "../../../../fixtures/session/v1/canonical.json"
+    ))
+    .expect("fixture");
+    let route = session.routes[0].clone();
+    let source = RouteSource::Submix {
+        submix_id: id("drums"),
+        tap: SendTap::PreFader,
+    };
+    let tapped = nested_bytes(&|sink| tx_route_source(sink, &source));
+    let tapless = raw_message(vec![
+        (1, WIRE_U8, true, vec![2]),
+        (2, WIRE_UTF8, true, b"drums".to_vec()),
+    ]);
+    let destination = nested_bytes(&|sink| tx_route_destination(sink, &route.destination));
+    let matrix = nested_bytes(&|sink| tx_channel_matrix(sink, &route.channel_matrix));
+    let route_message = |source: &[u8]| {
+        raw_message(vec![
+            (1, WIRE_UTF8, true, route.id.as_str().as_bytes().to_vec()),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+            (3, WIRE_MESSAGE, true, destination.clone()),
+            (4, WIRE_MESSAGE, true, matrix.clone()),
+            (5, WIRE_F32, true, route.gain_db.to_le_bytes().to_vec()),
+        ])
+    };
+    let sidechain_message = |source: &[u8]| {
+        raw_message(vec![
+            (1, WIRE_U8, true, vec![2]),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+            (3, WIRE_UTF8, true, b"key".to_vec()),
+        ])
+    };
+    let edit_message = |source: &[u8]| {
+        let payload = raw_message(vec![
+            (1, WIRE_UTF8, true, route.id.as_str().as_bytes().to_vec()),
+            (2, WIRE_MESSAGE, true, source.to_vec()),
+        ]);
+        raw_message(vec![
+            (
+                1,
+                schema::Wire::U16.raw(),
+                true,
+                crate::SessionEditOpcode::SetRouteSource
+                    .raw()
+                    .to_le_bytes()
+                    .to_vec(),
+            ),
+            (2, WIRE_MESSAGE, true, payload),
+        ])
+    };
+
+    let parse_route_bytes = |bytes: Vec<u8>| parse_route(Message::nested(&bytes).expect("route"));
+    let parse_sidechain_bytes =
+        |bytes: Vec<u8>| parse_sidechain(Message::nested(&bytes).expect("sidechain"));
+    let parse_edit_bytes = |bytes: Vec<u8>| parse_edit(Message::nested(&bytes).expect("edit"));
+    assert_eq!(
+        parse_route_bytes(route_message(&tapped)),
+        Ok(Route {
+            source: source.clone(),
+            ..route.clone()
+        })
+    );
+    assert_eq!(
+        parse_sidechain_bytes(sidechain_message(&tapped)),
+        Ok(SidechainDeclaration::Routed(Sidechain {
+            source: source.clone(),
+            port_id: id("key"),
+        }))
+    );
+    assert_eq!(
+        parse_edit_bytes(edit_message(&tapped)),
+        Ok(SessionEdit::SetRouteSource {
+            route_id: route.id.clone(),
+            source: source.clone(),
+        })
+    );
+    assert_eq!(
+        parse_route_bytes(route_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless route source"
+    );
+    assert_eq!(
+        parse_sidechain_bytes(sidechain_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless sidechain source"
+    );
+    assert_eq!(
+        parse_edit_bytes(edit_message(&tapless)),
+        Err(DecodeError::InvalidTlv),
+        "a tapless SetRouteSource value"
+    );
 }
 
 #[test]
@@ -1254,7 +1360,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
     };
     let edits = vec![
         SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
+            submix: Submix::unity(id("drums"), &session.console),
         },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
@@ -1280,8 +1386,9 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
         },
         SessionEdit::SetRouteSource {
             route_id: route.id.clone(),
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: id("drums"),
+                tap: SendTap::PostPan,
             },
         },
         SessionEdit::SetRouteDestination {
@@ -1415,4 +1522,175 @@ fn every_byte_of_transaction_golden_truncates() {
 
 fn hex(bytes: &[u8]) -> String {
     engine::hex_lower(bytes)
+}
+
+/// A deterministic splitmix64 stream for the submix-strip draw below.
+struct Draw(u64);
+
+impl Draw {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+    fn bit(&mut self) -> bool {
+        self.next() & 1 == 1
+    }
+    /// Any finite `f32`, signed zeros and subnormals included.
+    fn f32(&mut self) -> f32 {
+        loop {
+            let value = f32::from_bits(self.next() as u32);
+            if value.is_finite() {
+                return value;
+            }
+        }
+    }
+    fn u32(&mut self) -> u32 {
+        self.next() as u32
+    }
+}
+
+fn random_submix(draw: &mut Draw, index: usize) -> Submix {
+    let lane = |draw: &mut Draw| ChannelBuiltins {
+        polarity_invert: draw.bit(),
+        trim_db: draw.f32(),
+        hpf_hz: draw.f32(),
+        lpf_hz: draw.f32(),
+        delay_samples: draw.u32(),
+    };
+    let builtins = DualMonoBuiltins {
+        left: lane(draw),
+        right: lane(draw),
+    };
+    let qualities = [
+        EffectQuality::Draft,
+        EffectQuality::Normal,
+        EffectQuality::High,
+    ];
+    let links = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average];
+    let channels = [
+        ParameterChannel::Left,
+        ParameterChannel::Right,
+        ParameterChannel::Both,
+    ];
+    let units = [
+        ParameterUnit::Db,
+        ParameterUnit::Hz,
+        ParameterUnit::Milliseconds,
+        ParameterUnit::Samples,
+        ParameterUnit::Linear,
+        ParameterUnit::Ratio,
+    ];
+    let effects = (0..draw.below(3))
+        .map(|effect| {
+            let params = (0..draw.below(3))
+                .map(|param| EffectParam {
+                    parameter_id: param as u32 * 2 + draw.below(2) as u32,
+                    channel: channels[draw.below(3) as usize],
+                    unit: units[draw.below(6) as usize],
+                    value: draw.f32(),
+                })
+                .collect();
+            Effect {
+                id: id(&format!("fx-{effect}")),
+                identity: EffectIdentity::Native {
+                    effect_id: id("miso.parametric-eq"),
+                },
+                quality: qualities[draw.below(3) as usize],
+                bypass: draw.bit(),
+                link_mode: links[draw.below(3) as usize],
+                params,
+                sidechain: SidechainDeclaration::None,
+            }
+        })
+        .collect();
+    let fader = DualMonoFader {
+        left_db: draw.f32(),
+        right_db: draw.f32(),
+        left_mute: draw.bit(),
+        right_mute: draw.bit(),
+    };
+    // Field 3 (#1202): zero to three console entries, so a draw may repeat the field.
+    let console = (0..draw.below(4))
+        .map(|entry| ConsoleEntry {
+            slot: id(&format!("slot-{entry}")),
+            bypass: draw.bit(),
+            params: (0..draw.below(3))
+                .map(|param| EffectParam {
+                    parameter_id: param as u32 * 2 + draw.below(2) as u32,
+                    channel: channels[draw.below(3) as usize],
+                    unit: units[draw.below(6) as usize],
+                    value: draw.f32(),
+                })
+                .collect(),
+        })
+        .collect();
+    let matrix_or_pan = if draw.bit() {
+        MatrixOrPan::Pan {
+            left: draw.f32(),
+            right: draw.f32(),
+            smoothing_samples: draw.u32(),
+        }
+    } else {
+        MatrixOrPan::Matrix {
+            ll: draw.f32(),
+            lr: draw.f32(),
+            rl: draw.f32(),
+            rr: draw.f32(),
+            smoothing_samples: draw.u32(),
+        }
+    };
+    Submix {
+        id: id(&format!("bus-{index}")),
+        builtins,
+        console,
+        inserts: Rack { effects },
+        fader,
+        matrix_or_pan,
+    }
+}
+
+/// #1199 gate 3: a random submix strip, pan in some draws and matrix in others, survives
+/// `UpsertSubmix` encode and decode with every field intact, and re-encodes to the same bytes.
+/// #1202: the strip carries zero to three console entries (field 3).
+///
+/// Red if `tx_submix`/`parse_submix` drops or mis-encodes a strip field asymmetrically, swaps pan
+/// and matrix, misreads the shared tag (the track's `matrix_or_pan` round trips cannot see the
+/// submix codec), or drops, reorders or truncates the repeated console entries. A renumbering made
+/// on both sides round-trips; field numbers are pinned by `COMPLETE_SCHEMA_HASH`.
+#[test]
+fn random_submix_strips_round_trip_losslessly() {
+    let mut draw = Draw(0x1199_0000_05ab_0001);
+    let mut pans = 0;
+    let mut matrices = 0;
+    let mut repeated_console = 0;
+    for index in 0..64 {
+        let submix = random_submix(&mut draw, index);
+        match submix.matrix_or_pan {
+            MatrixOrPan::Pan { .. } => pans += 1,
+            MatrixOrPan::Matrix { .. } => matrices += 1,
+        }
+        if submix.console.len() > 1 {
+            repeated_console += 1;
+        }
+        let edits = vec![SessionEdit::UpsertSubmix {
+            submix: submix.clone(),
+        }];
+        let bytes = encode(&edits);
+        let decoded = ProtocolCodec::default()
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("submix strip decodes");
+        let [SessionEdit::UpsertSubmix { submix: back }] = decoded.edits.as_slice() else {
+            panic!("one upsert submix");
+        };
+        assert_eq!(back, &submix, "draw {index}");
+        assert_eq!(encode(&decoded.edits), bytes, "draw {index} re-encodes");
+    }
+    assert!(pans > 0 && matrices > 0, "both variants drawn");
+    assert!(repeated_console > 0, "a repeated console field drawn");
 }

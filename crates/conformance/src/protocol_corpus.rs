@@ -4,7 +4,7 @@ use protocol::*;
 
 use session::{
     Console, ConsoleEntry, ConsoleSlot, EffectIdentity, EffectQuality, LinkMode, Output, RackName,
-    SessionModel, StableId, Submix,
+    RouteSource, SendTap, SessionModel, StableId, Submix,
 };
 
 /// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
@@ -49,6 +49,23 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             quality: EffectQuality::High,
             link_mode: LinkMode::Maximum,
         }],
+    };
+    // #1199: a non-trivial submix strip -- non-default trim, an insert, a muted lane and a
+    // matrix -- so the corpus encodes every submix field (1, 2, 4, 5 and tagged 6). #1202: it
+    // carries an entry for both console slots, one live with the effect's parameters and one
+    // bypassed, so the corpus repeats submix field 3.
+    let mut submix = Submix::unity(id("drums"), &console);
+    submix.builtins.left.trim_db = -3.0;
+    submix.console[0].bypass = false;
+    submix.console[0].params = effect.params.clone();
+    submix.inserts.effects.push(effect.clone());
+    submix.fader.right_mute = true;
+    submix.matrix_or_pan = session::MatrixOrPan::Matrix {
+        ll: 0.75,
+        lr: 0.25,
+        rl: -0.25,
+        rr: 0.5,
+        smoothing_samples: 16,
     };
     let mut track_console = track.console.clone();
     track_console.push(ConsoleEntry {
@@ -178,9 +195,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             track_id: track_id.clone(),
             console: track_console,
         },
-        SessionEdit::UpsertSubmix {
-            submix: Submix { id: id("drums") },
-        },
+        SessionEdit::UpsertSubmix { submix },
         SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
         },
@@ -196,9 +211,14 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::RemoveRoute {
             route_id: route.id.clone(),
         },
+        // #1203 D5: a tapped submix source, so the hash covers tag 2's required tap. A codec
+        // value; the corpus is not a session a store applies.
         SessionEdit::SetRouteSource {
             route_id: route.id.clone(),
-            source: route.source.clone(),
+            source: RouteSource::Submix {
+                submix_id: id("drums"),
+                tap: SendTap::PreFader,
+            },
         },
         SessionEdit::SetRouteDestination {
             route_id: route.id.clone(),
@@ -663,7 +683,14 @@ pub enum ConformanceDecoder {
 /// Issue #1094 repinned it from `af1b9b71a0a31727`: the transaction appends `SetConsole`
 /// (`0x0007`) and `SetTrackConsole` (`0x0211`), 41 edits, one per allocated opcode. The frame count
 /// stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0xebf2_8262_1550_d44a;
+/// Issue #1199 repinned it from `ebf282621550d44a`: the submix message carries the strip in submix
+/// fields 2, 4, 5, 6 (builtins, inserts, fader, tagged pan or matrix), and `UpsertSubmix` encodes a
+/// non-trivial one.
+/// Issue #1202 repinned it from `ca48855fd3a756b7`: the submix message carries its console entries
+/// in submix field 3, and `UpsertSubmix` encodes two (one live, one bypassed).
+/// Issue #1203 repinned it from `c0f6ecedbf50920a`: a tag-2 route source carries a required tap,
+/// and the corpus's `SetRouteSource` value is a tapped submix source.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xa1dc_c56f_2e4a_48f9;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

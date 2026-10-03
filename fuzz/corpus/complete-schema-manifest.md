@@ -7,7 +7,7 @@ schemas. Optional/boundary values are represented by the transaction's nested fi
 transport position, empty valid pages, and the typed backpressure variant.
 
 The canonical sequence is FNV-1a-64 over each stable frame label followed by its frame bytes:
-`ebf282621550d44a`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
+`a1dcc56f2e4a48f9`, pinned once as `COMPLETE_SCHEMA_HASH`. Native mutation, each typed fuzz
 decoder, and scalar/simd128 Wasm execution all consume this same public fixture source.
 
 Issue #787 re-pinned this value after the transaction's two same-length source-identity spellings
@@ -17,6 +17,9 @@ inserts in field 7 and a console entry in field 11 and no longer the retired fie
 the rack-addressed edits spell the `inserts` code. Issue #1094 re-pinned it from
 `af1b9b71a0a31727`: the transaction appends `SetConsole` (`0x0007`) and `SetTrackConsole`
 (`0x0211`), so it carries 41 edits; the frame count is unchanged.
+Issues #1199, #1202 and #1203 re-pinned it in turn from `ebf282621550d44a`, through
+`ca48855fd3a756b7` and `c0f6ecedbf50920a`: the submix message carries its strip in fields 2, 4, 5
+and 6 and its console entries in field 3, and a tag-2 route source carries a required tap.
 
 The value stood at `88a8ee6a6d9e4acc` here until #274. It was correct until `b454b230`, and the
 two re-pins that followed (`b454b230`, then #241's `04d291dd`) did not reach this file or the

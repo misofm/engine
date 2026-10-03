@@ -428,20 +428,27 @@ mod tests {
 
         let submix_id = StableId::parse("submix").expect("stable ID");
         let output_id = StableId::parse("output").expect("stable ID");
-        assert_eq!(
-            route_source_node(&RouteSource::SubmixOutput {
-                submix_id: submix_id.clone(),
-            }),
-            GraphNodeId::Submix {
-                submix_id: gid(submix_id.as_str()),
-            }
-        );
+        // #1200 D1 and #1203 D3: a submix is a strip. Each of its taps is the track tap's stage
+        // and its input the strip's summing `Input` stage.
+        for (tap, expected_stage) in expected_stages {
+            assert_eq!(
+                route_source_node(&RouteSource::Submix {
+                    submix_id: submix_id.clone(),
+                    tap,
+                }),
+                GraphNodeId::TrackStage {
+                    track_id: gid(submix_id.as_str()),
+                    stage: expected_stage,
+                }
+            );
+        }
         assert_eq!(
             route_destination_node(&RouteDestination::SubmixInput {
                 submix_id: submix_id.clone(),
             }),
-            GraphNodeId::Submix {
-                submix_id: gid(submix_id.as_str()),
+            GraphNodeId::TrackStage {
+                track_id: gid(submix_id.as_str()),
+                stage: TrackStage::Input,
             }
         );
         assert_eq!(
@@ -2180,12 +2187,14 @@ mod tests {
         model.automation.clear();
         identity_builtins(&mut model);
         model.submixes = vec![
-            Submix {
-                id: StableId::parse("a-submix").expect("submix id"),
-            },
-            Submix {
-                id: StableId::parse("z-submix").expect("submix id"),
-            },
+            Submix::unity(
+                StableId::parse("a-submix").expect("submix id"),
+                &model.console,
+            ),
+            Submix::unity(
+                StableId::parse("z-submix").expect("submix id"),
+                &model.console,
+            ),
         ];
         let base_route = model.routes[0].clone();
         let mut to_a = base_route.clone();
@@ -2200,13 +2209,15 @@ mod tests {
         };
         let mut z_downstream = base_route.clone();
         z_downstream.id = StableId::parse("z-downstream").expect("route id");
-        z_downstream.source = RouteSource::SubmixOutput {
+        z_downstream.source = RouteSource::Submix {
             submix_id: StableId::parse("a-submix").expect("submix id"),
+            tap: SendTap::PostPan,
         };
         let mut a_downstream = base_route;
         a_downstream.id = StableId::parse("a-downstream").expect("route id");
-        a_downstream.source = RouteSource::SubmixOutput {
+        a_downstream.source = RouteSource::Submix {
             submix_id: StableId::parse("z-submix").expect("submix id"),
+            tap: SendTap::PostPan,
         };
         model.routes = vec![to_a, to_z, z_downstream, a_downstream];
         let session = compile_session(
@@ -2423,14 +2434,29 @@ mod tests {
             "track:vocal:post-matrix",
             "route:to-a-submix",
             "route:to-z-submix",
-            "submix:a-submix",
-            "submix:z-submix",
+            "track:a-submix:input",
+            "track:z-submix:input",
+            "track:a-submix:post-input-builtins",
+            "track:z-submix:post-input-builtins",
+            "track:a-submix:post-simd1",
+            "track:z-submix:post-simd1",
+            "track:a-submix:post-dynamic",
+            "track:z-submix:post-dynamic",
+            "track:a-submix:post-simd2-pre-fader",
+            "track:z-submix:post-simd2-pre-fader",
+            "track:a-submix:post-fader",
+            "track:z-submix:post-fader",
+            "track:a-submix:post-matrix",
+            "track:z-submix:post-matrix",
             "route:a-downstream",
             "route:z-downstream",
             "output:main-out",
         ];
         // #241 re-pin: this graph identity commits the canonical session source shape; its
         // schedule, dependency levels, and rendered PCM remain independently fixed below.
+        // #1200 re-pin: a submix lowers to a strip, so the `submix:` nodes became
+        // `track:<id>:<stage>` chains; the rendered PCM below did not move (both submixes are
+        // transparent and the impulse is finite and never `-0.0`).
         reverse_fixture_identity_contract(
             baseline.graph(),
             baseline.report(),
@@ -2438,7 +2464,7 @@ mod tests {
             &baseline.graph().dependency_levels,
             &GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes,
             &expected_schedule,
-            "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
+            "f5e310c7c527680261b4dfc37aa003e3ea0b6abd6d8e399ae58b6c3cdbc6ac5e",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
@@ -2469,26 +2495,71 @@ mod tests {
             ),
             (
                 8,
-                vec!["submix:a-submix".to_owned(), "submix:z-submix".to_owned()],
+                vec![
+                    "track:a-submix:input".to_owned(),
+                    "track:z-submix:input".to_owned(),
+                ],
             ),
             (
                 9,
+                vec![
+                    "track:a-submix:post-input-builtins".to_owned(),
+                    "track:z-submix:post-input-builtins".to_owned(),
+                ],
+            ),
+            (
+                10,
+                vec![
+                    "track:a-submix:post-simd1".to_owned(),
+                    "track:z-submix:post-simd1".to_owned(),
+                ],
+            ),
+            (
+                11,
+                vec![
+                    "track:a-submix:post-dynamic".to_owned(),
+                    "track:z-submix:post-dynamic".to_owned(),
+                ],
+            ),
+            (
+                12,
+                vec![
+                    "track:a-submix:post-simd2-pre-fader".to_owned(),
+                    "track:z-submix:post-simd2-pre-fader".to_owned(),
+                ],
+            ),
+            (
+                13,
+                vec![
+                    "track:a-submix:post-fader".to_owned(),
+                    "track:z-submix:post-fader".to_owned(),
+                ],
+            ),
+            (
+                14,
+                vec![
+                    "track:a-submix:post-matrix".to_owned(),
+                    "track:z-submix:post-matrix".to_owned(),
+                ],
+            ),
+            (
+                15,
                 vec![
                     "route:a-downstream".to_owned(),
                     "route:z-downstream".to_owned(),
                 ],
             ),
-            (10, vec!["output:main-out".to_owned()]),
+            (16, vec!["output:main-out".to_owned()]),
         ];
         assert_eq!(level_transcript, expected_levels);
 
-        // A level-major schedule with two members of level 9 swapped: the pre-#99 pop-order
+        // A level-major schedule with two members of level 15 swapped: the pre-#99 pop-order
         // output. It must fail the contract, and it must hash differently.
         let baseline_canonical =
             GraphCompiler::evidence(baseline.graph(), baseline.report()).canonical_bytes;
         let mut legacy_schedule = baseline.graph().sequential_schedule.clone();
-        legacy_schedule.swap(11, 12);
-        legacy_schedule.swap(10, 11);
+        legacy_schedule.swap(23, 24);
+        legacy_schedule.swap(22, 23);
         assert_eq!(
             legacy_schedule.iter().map(node_text).collect::<Vec<_>>(),
             [
@@ -2501,9 +2572,21 @@ mod tests {
                 "track:vocal:post-matrix",
                 "route:to-a-submix",
                 "route:to-z-submix",
-                "submix:a-submix",
+                "track:a-submix:input",
+                "track:z-submix:input",
+                "track:a-submix:post-input-builtins",
+                "track:z-submix:post-input-builtins",
+                "track:a-submix:post-simd1",
+                "track:z-submix:post-simd1",
+                "track:a-submix:post-dynamic",
+                "track:z-submix:post-dynamic",
+                "track:a-submix:post-simd2-pre-fader",
+                "track:z-submix:post-simd2-pre-fader",
+                "track:a-submix:post-fader",
+                "track:z-submix:post-fader",
+                "track:a-submix:post-matrix",
                 "route:z-downstream",
-                "submix:z-submix",
+                "track:z-submix:post-matrix",
                 "route:a-downstream",
                 "output:main-out",
             ]
@@ -2525,10 +2608,10 @@ mod tests {
         assert_ne!(legacy_canonical, baseline_canonical);
         assert_eq!(
             GraphCompiler::sha256(baseline.graph(), baseline.report()),
-            "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3"
+            "f5e310c7c527680261b4dfc37aa003e3ea0b6abd6d8e399ae58b6c3cdbc6ac5e"
         );
         let mut reversed = baseline.graph().dependency_levels.clone();
-        reversed[9].nodes.reverse();
+        reversed[15].nodes.reverse();
         assert_eq!(
             dependency_level_contract(
                 baseline.graph(),
@@ -2538,7 +2621,7 @@ mod tests {
             Err("member order")
         );
         let mut omitted = baseline.graph().dependency_levels.clone();
-        omitted[9].nodes.pop();
+        omitted[15].nodes.pop();
         assert_eq!(
             dependency_level_contract(
                 baseline.graph(),
@@ -2548,8 +2631,8 @@ mod tests {
             Err("level membership")
         );
         let mut duplicate = baseline.graph().dependency_levels.clone();
-        let duplicate_node = duplicate[9].nodes[0].clone();
-        duplicate[10].nodes.insert(0, duplicate_node);
+        let duplicate_node = duplicate[15].nodes[0].clone();
+        duplicate[16].nodes.insert(0, duplicate_node);
         assert_eq!(
             dependency_level_contract(
                 baseline.graph(),
@@ -2566,7 +2649,7 @@ mod tests {
                 &baseline.graph().dependency_levels,
                 &baseline_canonical,
                 &expected_schedule,
-                "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
+                "f5e310c7c527680261b4dfc37aa003e3ea0b6abd6d8e399ae58b6c3cdbc6ac5e",
             ),
             Err("schedule level order")
         );
@@ -2580,7 +2663,7 @@ mod tests {
                 &baseline.graph().dependency_levels,
                 &canonical_corruption,
                 &expected_schedule,
-                "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
+                "f5e310c7c527680261b4dfc37aa003e3ea0b6abd6d8e399ae58b6c3cdbc6ac5e",
             ),
             Err("canonical identity")
         );
@@ -15108,9 +15191,11 @@ mod tests {
             buffer_assignments(&flattened, &report.spec.edges)
         );
 
+        // The pre-#99 pop order: a submix strip's end, then the route it feeds, before the other
+        // submix strip's end (positions moved when submixes became strips, #1200).
         let mut old_kahn = flattened.clone();
-        old_kahn.swap(11, 12);
-        old_kahn.swap(10, 11);
+        old_kahn.swap(23, 24);
+        old_kahn.swap(22, 23);
         assert_ne!(old_kahn, flattened);
         assert_ne!(
             buffer_assignments(&old_kahn, &report.spec.edges),

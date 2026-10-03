@@ -15,6 +15,12 @@
 //!   drops exactly one window (from
 //!   `builtins::real_meter_tap_plans_use_the_compiled_seven_taps_and_preserve_full_queue_state`).
 //!
+//! And one claim of #1200's (gate 4): a bus sum stays in the sealed canonical text once a submix
+//! lowers to a strip.
+//!
+//! And one of #1203's (gate 5): a loop closed through a bus tap is a `graph.cycle`, reported at its
+//! first route; a loop closed by a bus insert's own sidechain is reported at that sidechain.
+//!
 //! The mixed session is compiled at both SIMD widths explicitly, so its expectations do not
 //! depend on the development host.
 
@@ -30,8 +36,8 @@ use effect_compiler::{
 use effect_contract::{NativeEffectFactory, NativeEffectRegistry};
 use engine::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderError, RenderIo, RenderTime};
 use graph::{
-    GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
-    GraphRuntimeProcessor, TrackStage,
+    GraphBindingBlock, GraphCompileCaps, GraphEdgeId, GraphNodeBinding, GraphNodeId,
+    GraphRuntimeBindings, GraphRuntimeProcessor, StableGraphId, TrackStage,
 };
 use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
@@ -386,9 +392,7 @@ fn representative_console() -> SessionModel {
     let route_template = model.routes.pop().expect("seed route");
     model.automation.clear();
     model.submixes = (0..32)
-        .map(|index| Submix {
-            id: stable(&format!("submix-{index:02}")),
-        })
+        .map(|index| Submix::unity(stable(&format!("submix-{index:02}")), &model.console))
         .collect();
     model.tracks = (0..256)
         .map(|index| {
@@ -442,8 +446,9 @@ fn representative_console() -> SessionModel {
     for index in 0..32 {
         model.routes.push(Route {
             id: stable(&format!("submix-route-{index:02}")),
-            source: RouteSource::SubmixOutput {
+            source: RouteSource::Submix {
                 submix_id: stable(&format!("submix-{index:02}")),
+                tap: SendTap::PostPan,
             },
             destination: RouteDestination::OutputInput {
                 output_id: model.outputs[0].id.clone(),
@@ -489,11 +494,102 @@ fn representative_console_compiles_with_builtins_and_reports_its_shape() {
     assert_eq!(estimate.routes, 1_024);
     assert_eq!(estimate.effects, 64);
     assert!(estimate.builtin_bank_count > 0);
-    // Every track's post-input, fader and matrix stages are builtin bank members.
-    assert_eq!(artifact.graph().builtin_bank_members().count(), 3 * 256);
+    // Every strip's post-input, fader and matrix stages are builtin bank members: the 256
+    // tracks' and, since a submix lowers to a strip (#1200), the 32 submixes'.
+    assert_eq!(
+        artifact.graph().builtin_bank_members().count(),
+        3 * (256 + 32)
+    );
     let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
     assert!(!evidence.canonical_bytes.is_empty());
     assert!(!evidence.dot.is_empty());
+}
+
+/// #1200 gate 4: a bus that three routes feed keeps its sum in the canonical text and in
+/// `GraphCompiler::reductions`, now recorded on the submix strip's `Input` stage: exactly one
+/// reduction, whose three contributions are the three route-destination edges in route-ID order.
+#[test]
+fn a_three_input_bus_keeps_one_reduction_on_its_input_stage() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    model.tracks[0].inserts.effects.clear();
+    model.submixes = vec![Submix::unity(stable("bus"), &model.console)];
+    let template = model.routes[0].clone();
+    let output = model.outputs[0].id.clone();
+    let track = model.tracks[0].id.clone();
+    let mut routes: Vec<Route> = [
+        ("in-a", SendTap::Input),
+        ("in-b", SendTap::PreFader),
+        ("in-c", SendTap::PostPan),
+    ]
+    .into_iter()
+    .map(|(id, tap)| Route {
+        id: stable(id),
+        source: RouteSource::Track {
+            track_id: track.clone(),
+            tap,
+        },
+        destination: RouteDestination::SubmixInput {
+            submix_id: stable("bus"),
+        },
+        ..template.clone()
+    })
+    .collect();
+    routes.push(Route {
+        id: stable("out"),
+        source: RouteSource::Submix {
+            submix_id: stable("bus"),
+            tap: SendTap::PostPan,
+        },
+        destination: RouteDestination::OutputInput { output_id: output },
+        ..template
+    });
+    model.routes = routes;
+    let session = compile_session(&model, compile_caps()).expect("bus session");
+    let artifact = compile(&session, &[], Backend::current());
+
+    let bus_input = GraphNodeId::TrackStage {
+        track_id: StableGraphId::parse("bus").expect("graph id"),
+        stage: TrackStage::Input,
+    };
+    let reductions = GraphCompiler::reductions(artifact.graph());
+    assert_eq!(
+        reductions.len(),
+        1,
+        "the output has one input: only the bus sums"
+    );
+    assert_eq!(reductions[0].node, bus_input);
+    assert_eq!(
+        reductions[0].contributions,
+        ["in-a", "in-b", "in-c"]
+            .map(|route| GraphEdgeId::RouteDestination {
+                route_id: StableGraphId::parse(route).expect("graph id"),
+            })
+            .to_vec()
+    );
+    assert_eq!(artifact.report().semantic_estimate.reductions, 1);
+
+    let evidence = GraphCompiler::evidence(artifact.graph(), artifact.report());
+    let text = String::from_utf8(evidence.canonical_bytes).expect("canonical text is UTF-8");
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("reduction\t"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        3,
+        "one reduction, one row per contribution: {rows:?}"
+    );
+    for (rank, row) in rows.iter().enumerate() {
+        assert!(
+            row.starts_with(&format!("reduction\ttrack:bus:input\t{rank}\t")),
+            "row {rank}: {row}"
+        );
+    }
+    assert!(
+        !text.lines().any(|line| line.contains("submix:")),
+        "a session submix no longer compiles to a graph `Submix` node"
+    );
 }
 
 /// The canonical session with the conformance delay in each of track `vocal`'s three lowered
@@ -598,4 +694,141 @@ fn seven_meter_taps_bind_in_tap_order_and_a_full_queue_drops_one_window() {
         assert_eq!(window.reset_generation, 7);
         assert_eq!(window.cumulative_dropped_snapshots, 0);
     }
+}
+
+/// #1203 gate 5: bus `a`'s `pre_fader` feeds bus `b`, and `b`'s `post_pan` feeds `a`. No route
+/// leaves `a`'s end, yet the two routes close a loop through `a`'s tap: the compile refuses with
+/// one `graph.cycle` whose primary path is a route, whose witness names both routes and runs
+/// through `a`'s pre-fader stage, not through `a`'s end.
+#[test]
+fn a_loop_through_a_bus_tap_is_a_graph_cycle() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    model.tracks[0].inserts.effects.clear();
+    model.submixes = vec![
+        Submix::unity(stable("a"), &model.console),
+        Submix::unity(stable("b"), &model.console),
+    ];
+    let template = model.routes[0].clone();
+    let bus_route = |id: &str, from: &str, tap: SendTap, to: &str| Route {
+        id: stable(id),
+        source: RouteSource::Submix {
+            submix_id: stable(from),
+            tap,
+        },
+        destination: RouteDestination::SubmixInput {
+            submix_id: stable(to),
+        },
+        ..template.clone()
+    };
+    model
+        .routes
+        .push(bus_route("ab", "a", SendTap::PreFader, "b"));
+    model
+        .routes
+        .push(bus_route("ba", "b", SendTap::PostPan, "a"));
+    let session =
+        compile_session(&model, compile_caps()).expect("the session layer has no cycle check");
+    let effects = prepared_effects(&session);
+    let builtins =
+        prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
+    let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 1203,
+        effects,
+        builtins,
+        caps: graph_caps(),
+    })
+    .err()
+    .expect("a loop through a tap refuses");
+    let diagnostics = failure.diagnostics.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let cycle = &diagnostics[0];
+    assert_eq!(cycle.code, "graph.cycle");
+    // The witness starts on a strip chain edge, whose sealed path is the bare `$.submixes`; the
+    // primary path, the only one a host shows, is the witness's first route edge.
+    assert_eq!(cycle.path, "$.routes[id=ab].source", "{cycle:?}");
+    let routes: Vec<&str> = cycle
+        .cycle_edge_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| path.starts_with("$.routes"))
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            "$.routes[id=ab].source",
+            "$.routes[id=ab].destination",
+            "$.routes[id=ba].source",
+            "$.routes[id=ba].destination",
+        ],
+        "the witness names both routes: {:?}",
+        cycle.cycle_edge_paths
+    );
+    let stage = |bus: &str, stage| GraphNodeId::TrackStage {
+        track_id: StableGraphId::parse(bus).expect("graph id"),
+        stage,
+    };
+    assert!(
+        cycle
+            .cycle
+            .contains(&stage("a", TrackStage::PostSimd2PreFader))
+    );
+    assert!(!cycle.cycle.contains(&stage("a", TrackStage::PostMatrix)));
+}
+
+/// A bus insert keyed from its own `post_fader` closes a loop with no route in it. The cycle's
+/// primary path, the only one a host shows, names the keyed insert's sidechain at its session
+/// position, not a strip chain edge (`$.submixes`) or the internal rack spelling (`simd2`).
+///
+/// Red if the primary path stops preferring an author-wired edge, or spells a sidechain edge by
+/// its sealed strip-level path, which does not say which insert is keyed (#1205 verdict NIT-5).
+#[test]
+fn a_bus_insert_keyed_from_its_own_fader_names_its_sidechain() {
+    let mut model = parse_session_json(SESSION).expect("canonical session");
+    model.automation.clear();
+    let mut keyed = model.tracks[0].inserts.effects[0].clone();
+    model.tracks[0].inserts.effects.clear();
+    keyed.id = stable("k");
+    keyed.identity = EffectIdentity::Native {
+        effect_id: stable("conformance.delay"),
+    };
+    keyed.params = vec![EffectParam {
+        parameter_id: 1,
+        channel: ParameterChannel::Both,
+        unit: ParameterUnit::Linear,
+        value: 0.5,
+    }];
+    keyed.sidechain = SidechainDeclaration::Routed(Sidechain {
+        source: RouteSource::Submix {
+            submix_id: stable("a"),
+            tap: SendTap::PostFader,
+        },
+        port_id: stable("sidechain-in"),
+    });
+    let mut bus = Submix::unity(stable("a"), &model.console);
+    bus.inserts.effects = vec![keyed];
+    model.submixes = vec![bus];
+    let session =
+        compile_session(&model, compile_caps()).expect("the session layer has no cycle check");
+    let effects = prepared_effects(&session);
+    let builtins =
+        prepare_session_builtins(&effects.session, &[], builtin_caps()).expect("builtins");
+    let failure = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+        dispatch: Backend::current(),
+        plan_id: 1205,
+        effects,
+        builtins,
+        caps: graph_caps(),
+    })
+    .err()
+    .expect("a self-keyed loop refuses");
+    let diagnostics = failure.diagnostics.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].code, "graph.cycle");
+    assert_eq!(
+        diagnostics[0].path, "$.submixes[id=a].inserts.effects[id=k].sidechain",
+        "{:?}",
+        diagnostics[0]
+    );
 }

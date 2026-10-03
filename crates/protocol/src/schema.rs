@@ -834,7 +834,7 @@ pub(crate) mod session {
         };
         pub(crate) static SUBMIX: MessageSpec = MessageSpec {
             name: "RouteSourceSubmix",
-            fields: &[TAG, ID],
+            fields: &[TAG, ID, TAP],
         };
         pub(crate) static KNOWN: MessageSpec = MessageSpec {
             name: "RouteSourceKnownFields",
@@ -1011,9 +1011,18 @@ pub(crate) mod session {
     pub(crate) mod submix {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        // #1199: the submix strip reuses the track's field specs. Field 3 is `console`, the
+        // repeated console entry of the track's field 11 (#1202 D1); pan and matrix share the
+        // one tagged field 6, as the track's 10.
+        pub(crate) const BUILTINS: FieldSpec = FieldSpec::msg(2, true, false, &builtins::SPEC);
+        pub(crate) const CONSOLE: FieldSpec = FieldSpec::msg(3, true, true, &console_entry::SPEC);
+        pub(crate) const INSERTS: FieldSpec = FieldSpec::msg(4, true, false, &rack::SPEC);
+        pub(crate) const FADER: FieldSpec = FieldSpec::msg(5, true, false, &fader::SPEC);
+        pub(crate) const MATRIX_OR_PAN: FieldSpec =
+            FieldSpec::msg(6, true, false, &matrix_or_pan::KNOWN);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Submix",
-            fields: &[ID],
+            fields: &[ID, BUILTINS, CONSOLE, INSERTS, FADER, MATRIX_OR_PAN],
         };
     }
     pub(crate) mod output {

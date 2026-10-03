@@ -1281,9 +1281,28 @@ fn parse_matrix_or_pan(
 }
 
 fn parse_submix(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Submix> {
-    parser.keys(table, &["id"], &path);
+    parser.keys(
+        table,
+        &[
+            "id", "builtins", "console", "inserts", "fader", "pan", "matrix",
+        ],
+        &path,
+    );
+    // The strip's values reuse the track's sub-parsers verbatim (#1199 D2), its console entries
+    // included (#1202 D1).
+    let id = parser.id(table, "id", &path);
+    let builtins = parse_record(parser, table, "builtins", &path, parse_builtins);
+    let console = parse_list(parser, table, "console", &path, parse_console_entry);
+    let inserts = parse_record(parser, table, "inserts", &path, parse_rack);
+    let fader = parse_record(parser, table, "fader", &path, parse_fader);
+    let matrix_or_pan = parse_matrix_or_pan(parser, table, &path);
     Some(Submix {
-        id: parser.id(table, "id", &path)?,
+        id: id?,
+        builtins: builtins?,
+        console: console?,
+        inserts: inserts?,
+        fader: fader?,
+        matrix_or_pan: matrix_or_pan?,
     })
 }
 
@@ -1333,17 +1352,16 @@ fn parse_route_source(
                 tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
-        "submix_output" => {
-            for key in ["track_id", "tap"] {
-                parser.reject_key(
-                    table,
-                    key,
-                    path.key(key),
-                    "submix_output source cannot contain track fields",
-                );
-            }
-            Some(RouteSource::SubmixOutput {
+        "submix" => {
+            parser.reject_key(
+                table,
+                "track_id",
+                path.key("track_id"),
+                "submix source cannot contain track_id",
+            );
+            Some(RouteSource::Submix {
                 submix_id: parser.id(table, "submix_id", &path)?,
+                tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
         _ => {
@@ -1352,7 +1370,7 @@ fn parse_route_source(
                 "kind",
                 &path,
                 DiagnosticCode::InvalidEnum,
-                "expected track or submix_output",
+                "expected track or submix",
             );
             None
         }

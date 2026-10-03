@@ -159,7 +159,6 @@ fn with_console(model: &mut session::SessionModel) {
 #[test]
 fn full_tagged_surface_round_trips_without_field_loss() {
     let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
-    model.submixes.push(session::Submix { id: id("mix") });
     model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
         ll: 1.25,
         lr: -0.25,
@@ -168,6 +167,10 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         smoothing_samples: 32,
     };
     with_console(&mut model);
+    // After the console is declared, so the bus carries an entry for every slot (#1202 D4).
+    model
+        .submixes
+        .push(session::Submix::unity(id("mix"), &model.console));
     model.tracks[0].inserts.effects.insert(
         0,
         Effect {
@@ -193,8 +196,9 @@ fn full_tagged_surface_round_trips_without_field_loss() {
     };
     model.routes.push(Route {
         id: id("mix-to-main"),
-        source: RouteSource::SubmixOutput {
+        source: RouteSource::Submix {
             submix_id: id("mix"),
+            tap: SendTap::PostPan,
         },
         destination: RouteDestination::OutputInput {
             output_id: id("main-out"),
@@ -207,6 +211,15 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         },
         gain_db: 0.0,
     });
+    // A submix tap other than `post_pan` (#1203 verdict NIT-4): a writer that flattens every
+    // submix tap to the strip's end loses it here.
+    let mut pre_fader = model.routes.last().expect("the bus route").clone();
+    pre_fader.id = id("mix-pre-fader");
+    pre_fader.source = RouteSource::Submix {
+        submix_id: id("mix"),
+        tap: SendTap::PreFader,
+    };
+    model.routes.push(pre_fader);
     model.automation[0].target.channel = ParameterChannel::Both;
     let mut console_automation = model.automation[0].clone();
     console_automation.id = id("desk-eq-gain");
@@ -249,7 +262,19 @@ fn full_tagged_surface_round_trips_without_field_loss() {
         reparsed
             .routes
             .iter()
-            .any(|route| matches!(route.source, RouteSource::SubmixOutput { .. }))
+            .any(|route| matches!(route.source, RouteSource::Submix { .. }))
+    );
+    assert_eq!(
+        reparsed
+            .routes
+            .iter()
+            .find(|route| route.id == id("mix-pre-fader"))
+            .map(|route| &route.source),
+        Some(&RouteSource::Submix {
+            submix_id: id("mix"),
+            tap: SendTap::PreFader,
+        }),
+        "a submix's `pre_fader` tap survives"
     );
     assert_eq!(
         canonical_session_json(&reparsed).expect("stable"),

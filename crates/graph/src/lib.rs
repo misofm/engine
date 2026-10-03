@@ -2206,9 +2206,12 @@ pub struct PreparedRoute {
     pub transform: RouteTransform,
 }
 
-/// One track's declared input-side time alignment (#210 phase 2).
+/// One strip's declared input-side time alignment (#210 phase 2; submixes since #1201).
 ///
-/// Emitted by the compiler **only** for a track that declared a nonzero delay on at least one lane,
+/// On a track it delays the source (`runtime::NodeKind::TrackDelay`); on a submix it delays the
+/// summed input, after the reduction (`runtime::NodeKind::SumDelay`).
+///
+/// Emitted by the compiler **only** for a strip that declared a nonzero delay on at least one lane,
 /// so an undelayed session carries an empty vector and lowers to exactly the program it lowered to
 /// before this feature existed.
 ///
@@ -2219,7 +2222,7 @@ pub struct PreparedRoute {
 /// It sits beside `PreparedRoute`, which is already spelled that way.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedTrackDelay {
-    /// The `TrackStage::Input` node this delay is applied at.
+    /// The `TrackStage::Input` node this delay is applied at: a track's or a submix's.
     pub node: GraphNodeId,
     /// `builtins.left.delay_samples`.
     pub left_samples: u32,
@@ -5125,6 +5128,218 @@ mod tests {
         assert!(
             nontrivial >= 10,
             "the corpus must contain output fan-ins past the balanced/left-to-right divergence"
+        );
+    }
+
+    /// A bound track input that plays a fixed planar sequence, one quantum per block.
+    struct PlaneSource {
+        left: Vec<f32>,
+        right: Vec<f32>,
+        cursor: usize,
+    }
+    impl GraphRuntimeProcessor for PlaneSource {
+        fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+            let frames = block.left.len();
+            block
+                .left
+                .copy_from_slice(&self.left[self.cursor..self.cursor + frames]);
+            block
+                .right
+                .copy_from_slice(&self.right[self.cursor..self.cursor + frames]);
+            self.cursor += frames;
+            Ok(())
+        }
+    }
+
+    /// Issue #1201 gate 2: a submix's delay runs on its D9 sum, after the reduction.
+    ///
+    /// Three bound track inputs each reach the bus `Input` through an identity route; the route
+    /// IDs are a permutation of the tracks, so route-ID order is not track order. The bus `Input`
+    /// carries a 5-sample delay on both lanes and feeds the output alone. The oracle sums the three
+    /// planes left to right in route-ID order, then shifts the sum by 5 samples; the 4-frame
+    /// quantum makes the delay span two blocks. The planes mix magnitudes so that the sum's order
+    /// shows in its bits, which the test checks rather than assumes.
+    #[test]
+    fn a_bus_delay_runs_on_the_sum_after_the_reduction() {
+        const FRAMES: usize = 4;
+        const BLOCKS: u64 = 16;
+        const DELAY: usize = 5;
+        let total = FRAMES * BLOCKS as usize;
+        let node = |track: &str, stage: TrackStage| GraphNodeId::TrackStage {
+            track_id: StableGraphId::parse(track).expect("strip ID"),
+            stage,
+        };
+        let bus = node("bus", TrackStage::Input);
+        let output = GraphNodeId::Output {
+            output_id: StableGraphId::parse("main").expect("output ID"),
+        };
+        let envelope = RenderEnvelope {
+            sample_rate: engine::SampleRateHz(48_000),
+            quantum: QuantumFrames(FRAMES as u32),
+            output_channels: core::num::NonZeroUsize::new(2).expect("two"),
+        };
+        let port = |node: &GraphNodeId, kind: GraphPortKind| GraphPortId {
+            node: node.clone(),
+            kind,
+            effect_port: None,
+        };
+        // (track, route, scale): t0 enters the sum second, t1 third and t2 first.
+        let wiring = [
+            ("t0", "r1", 1.0_f32),
+            ("t1", "r2", 3.0e3),
+            ("t2", "r0", -2.9e3),
+        ];
+        let mut state = 0x1201_u32;
+        let mut plane = |scale: f32| -> Vec<f32> {
+            (0..total)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let value = f32::from(((state >> 16) & 0xffff) as i16) / 3_276.8;
+                    if value == 0.0 { scale } else { value * scale }
+                })
+                .collect()
+        };
+        let planes: Vec<[Vec<f32>; 2]> = wiring
+            .iter()
+            .map(|(_, _, scale)| [plane(*scale), plane(*scale * 0.75)])
+            .collect();
+
+        let mut nodes = vec![bus.clone(), output.clone()];
+        let mut edges = vec![GraphEdge {
+            id: GraphEdgeId::TrackMain {
+                target: output.clone(),
+            },
+            source: port(&bus, GraphPortKind::MainOutput),
+            destination: port(&output, GraphPortKind::MainInput),
+            path: "$.bus.main".to_owned(),
+        }];
+        let mut routes = Vec::new();
+        let mut bindings = vec![GraphNodeBinding::new(output.clone(), Box::new(Noop))];
+        let mut required = vec![output.clone()];
+        for ((track, route, _), [left, right]) in wiring.iter().zip(&planes) {
+            let input = node(track, TrackStage::Input);
+            let route_id = StableGraphId::parse(route).expect("route ID");
+            let route_node = GraphNodeId::Route {
+                route_id: route_id.clone(),
+            };
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: route_id.clone(),
+                },
+                source: port(&input, GraphPortKind::MainOutput),
+                destination: port(&route_node, GraphPortKind::MainInput),
+                path: "$.route.source".to_owned(),
+            });
+            edges.push(GraphEdge {
+                id: GraphEdgeId::RouteDestination { route_id },
+                source: port(&route_node, GraphPortKind::MainOutput),
+                destination: port(&bus, GraphPortKind::MainInput),
+                path: "$.route.destination".to_owned(),
+            });
+            routes.push(PreparedRoute {
+                node: route_node.clone(),
+                transform: RouteTransform {
+                    gain: 1.0,
+                    ll: 1.0,
+                    lr: 0.0,
+                    rl: 0.0,
+                    rr: 1.0,
+                },
+            });
+            bindings.push(GraphNodeBinding::new(
+                input.clone(),
+                Box::new(PlaneSource {
+                    left: left.clone(),
+                    right: right.clone(),
+                    cursor: 0,
+                }),
+            ));
+            required.push(input.clone());
+            nodes.push(input);
+            nodes.push(route_node);
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        nodes.sort();
+        let levels = levels_for(&nodes, &edges);
+        let schedule: Vec<GraphNodeId> = levels
+            .iter()
+            .flat_map(|level| level.nodes.iter().cloned())
+            .collect();
+        let plan = PreparedGraphPlan::new(PreparedGraphPlanParts {
+            plan_id: 1_201,
+            spec: GraphSpec {
+                nodes: sorted_nodes(
+                    nodes
+                        .into_iter()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                ),
+                ports: Vec::new(),
+                edges,
+            },
+            sequential_schedule: schedule,
+            dependency_levels: levels,
+            route_timings: Vec::new(),
+            inserted_delays: Vec::new(),
+            buffer_assignments: Vec::new(),
+            estimate: empty_estimate(),
+            envelope,
+            required_bindings: required,
+            routes,
+            track_delays: vec![PreparedTrackDelay {
+                node: bus,
+                left_samples: DELAY as u32,
+                right_samples: DELAY as u32,
+            }],
+            effects: Vec::new(),
+            effect_controls: Vec::new(),
+            effect_observations: Vec::new(),
+            banks: Vec::new(),
+            builtin_banks: Vec::new(),
+            observers: Vec::new(),
+        });
+        let mut render = plan
+            .bind(GraphRuntimeBindings {
+                envelope,
+                nodes: bindings,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        let bits = render_blocks(&mut render, FRAMES, BLOCKS);
+
+        // The scalar oracle: the D9 sum in route-ID order (r0, r1, r2), then the delay.
+        let by_route = |order: [usize; 3], lane: usize, frame: usize| {
+            let [first, second, third] = order.map(|track| planes[track][lane][frame]);
+            (first + second) + third
+        };
+        let route_order = [2, 0, 1];
+        let mut order_shows = false;
+        for block in 0..BLOCKS as usize {
+            for lane in 0..2 {
+                for frame in 0..FRAMES {
+                    let at = block * FRAMES + frame;
+                    let want = at.checked_sub(DELAY).map_or(0.0_f32, |source| {
+                        let sum = by_route(route_order, lane, source);
+                        order_shows |= sum.to_bits() != by_route([0, 1, 2], lane, source).to_bits();
+                        sum
+                    });
+                    let got = bits[block * FRAMES * 2 + lane * FRAMES + frame];
+                    assert_eq!(
+                        got,
+                        want.to_bits(),
+                        "lane {lane} sample {at}: {} != {want}",
+                        f32::from_bits(got)
+                    );
+                }
+            }
+        }
+        assert!(
+            order_shows,
+            "the fixture must tell route-ID order from track order"
         );
     }
 

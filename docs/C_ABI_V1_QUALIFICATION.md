@@ -56,6 +56,11 @@ The accepted Rust exported-C regressions supply the complete 11-command, six-eve
 replacement, retirement/reclaim, source-preserving/source-changing, failure, replay, and lifecycle
 matrix without copying protocol semantics into the qualification consumer.
 
+Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
+strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
+structural, compiling and swapping a replacement plan, until *Deliver value-only send and
+submix-strip edits to the running C ABI plan* (#1225) lands.
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and

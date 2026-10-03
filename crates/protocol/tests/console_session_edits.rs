@@ -6,8 +6,8 @@
 //!   track's entry for the slot named by `effect_id`.
 //! - Every structural or declaration edit addressed at `console` is refused with
 //!   `SessionEditError::ConsoleSlotFixed`: a track cannot add, remove or reorder a slot.
-//! - A transaction that changes the slot set without rewriting every track's entries refuses whole
-//!   and commits nothing.
+//! - A transaction that changes the slot set without rewriting every strip's entries -- every
+//!   track's and, since #1202, every submix's -- refuses whole and commits nothing.
 //!
 //! The base session has two tracks and one `pre_insert` slot, `eq`. Track `a` also carries an
 //! insert whose ID is `eq`, so an edit routed to the wrong place changes a value these tests read.
@@ -18,7 +18,7 @@ use protocol::{
 };
 use session::{
     CompileCaps, Console, ConsoleEntry, ConsoleSlot, EffectIdentity, EffectParam, EffectQuality,
-    LinkMode, ParameterChannel, ParameterUnit, RackName, SessionModel, StableId,
+    LinkMode, ParameterChannel, ParameterUnit, RackName, SessionModel, StableId, Submix,
     canonical_session_json, parse_session_json,
 };
 
@@ -709,6 +709,79 @@ fn a_slot_set_change_that_skips_a_track_refuses_whole() {
             case.name
         );
     }
+}
+
+/// #1202 gate 5 (D5). A submix carries every slot too, so a transaction that changes the slot set
+/// must rewrite every **strip**: the tracks through `SetTrackConsole` and the submix through
+/// `UpsertSubmix`. Adding a slot while rewriting both tracks but not the submix refuses whole with
+/// the submix's `console.entry_missing` -- nothing is committed and the revision does not advance
+/// -- and the same transaction that also rewrites the submix commits.
+///
+/// Red if the store validates only tracks' entries after a slot-set change, committing a submix
+/// with no entry for a declared slot.
+#[test]
+fn a_slot_set_change_that_skips_a_submix_refuses_whole() {
+    let comp = || {
+        slot(
+            "comp",
+            "miso.compressor",
+            EffectQuality::Normal,
+            LinkMode::Maximum,
+        )
+    };
+    let comp_entry = || entry("comp", false, Vec::new());
+    let mut start = base();
+    start
+        .submixes
+        .push(Submix::unity(id("bus"), &start.console));
+    let mut store = SessionStore::new(start, caps()).expect("a unity bus compiles");
+    let revision = store.revision();
+    let snapshot = store.canonical_snapshot().to_owned();
+    let model = store.compiled().normalized_model().clone();
+
+    let console = Console {
+        pre_insert: vec![eq_slot(), comp()],
+        post_insert: Vec::new(),
+    };
+    let mut edits = vec![SessionEdit::SetConsole {
+        console: console.clone(),
+    }];
+    for track in ["a", "b"] {
+        edits.push(SessionEdit::SetTrackConsole {
+            track_id: id(track),
+            console: vec![eq_entry(), comp_entry()],
+        });
+    }
+    let skipped = through_the_wire(&edits);
+    let error = store
+        .apply_transaction(ExpectedRevision::Exact(revision), &skipped)
+        .expect_err("a slot set change that skips the submix");
+    let codes = refusal_codes(&error, skipped.len());
+    assert_eq!(
+        codes,
+        [(
+            "console.entry_missing".to_owned(),
+            "$.submixes[0].console".to_owned()
+        )],
+        "only the submix is refused, for its missing entry"
+    );
+    assert_eq!(store.revision(), revision);
+    assert_eq!(store.canonical_snapshot(), snapshot);
+    assert_eq!(store.compiled().normalized_model(), &model);
+
+    let mut bus = Submix::unity(id("bus"), &console);
+    bus.console[1] = comp_entry();
+    edits.push(SessionEdit::UpsertSubmix {
+        submix: bus.clone(),
+    });
+    let whole = through_the_wire(&edits);
+    let commit = store
+        .apply_transaction(ExpectedRevision::Exact(revision), &whole)
+        .expect("the transaction that rewrites every strip commits");
+    assert_eq!(commit.revision.0, revision.0 + 1);
+    let committed = store.compiled().normalized_model();
+    assert_eq!(committed.console, console);
+    assert_eq!(committed.submixes, [bus]);
 }
 
 /// `SetTrackConsole` edits a track's knobs; it cannot change the slot set. An entry array that

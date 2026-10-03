@@ -103,7 +103,8 @@ pub struct SessionModel {
     pub output_profile: OutputProfile,
     /// Sources, order-insensitive by stable ID.
     pub sources: Vec<Source>,
-    /// The session-level console: every track carries every slot, in this order (decision 12).
+    /// The session-level console: every strip, track or submix, carries every slot, in this order
+    /// (decision 12, #1202).
     pub console: Console,
     /// Tracks, order-insensitive by stable ID.
     pub tracks: Vec<Track>,
@@ -242,10 +243,10 @@ pub struct Track {
 
 /// The session-level console (owner decision 12).
 ///
-/// Each slot is declared once, and every track carries every slot with only its own `bypass` and
-/// `params`. `pre_insert` runs before a track's inserts and `post_insert` after them. Either list
-/// may be empty. Slot IDs are unique across both lists, because a console address names the slot
-/// and not its section.
+/// Each slot is declared once, and every strip (every track and every submix, #1202) carries every
+/// slot with only its own `bypass` and `params`. `pre_insert` runs before a strip's inserts and
+/// `post_insert` after them. Either list may be empty. Slot IDs are unique across both lists,
+/// because a console address names the slot and not its section.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Console {
     /// Slots between the input section and the inserts, in chain order.
@@ -276,7 +277,7 @@ pub struct ConsoleSlot {
     pub link_mode: LinkMode,
 }
 
-/// One track's knobs for one console slot. It carries no effect fields.
+/// One strip's knobs for one console slot. It carries no effect fields.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConsoleEntry {
     /// The declared slot this entry configures.
@@ -328,11 +329,12 @@ impl LoweredRacks<'_> {
 /// One strip: the chain after a source, borrowed from the session.
 ///
 /// A strip is the input section, the console slots, the inserts, the fader and mute, and the pan
-/// or matrix. Today only tracks are strips; the compilers iterate [`SessionModel::strips`] wherever
-/// strip semantics apply, so a later strip kind is one new [`StripKind`] variant.
+/// or matrix. Tracks and submixes are strips (#1200 D0); the compilers iterate
+/// [`SessionModel::strips`] wherever strip semantics apply, so a later strip kind is one new
+/// [`StripKind`] variant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StripRef<'a> {
-    /// Stable strip identity (the track ID for a track).
+    /// Stable strip identity (the track ID for a track, the submix ID for a submix).
     pub id: &'a StableId,
     /// What owns this strip.
     pub kind: StripKind<'a>,
@@ -350,12 +352,14 @@ pub struct StripRef<'a> {
 
 /// The owner of a [`StripRef`].
 ///
-/// Deliberately exhaustive: *Render a submix strip on its summed input* adds `Submix`, and every
-/// match on this enum must then fail to compile until it handles the new variant.
+/// Deliberately exhaustive: a later strip kind is a new variant, and every match on this enum
+/// must then fail to compile until it handles it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StripKind<'a> {
     /// A track's strip, whose input is the track's source.
     Track(&'a Track),
+    /// A submix's strip, whose input is the sum of the routes that target it, in route-ID order.
+    Submix(&'a Submix),
 }
 
 impl<'a> StripRef<'a> {
@@ -371,31 +375,49 @@ impl<'a> StripRef<'a> {
             matrix_or_pan: &track.matrix_or_pan,
         }
     }
+
+    /// The strip of one submix, with its console entries (#1202).
+    fn submix(submix: &'a Submix) -> Self {
+        Self {
+            id: &submix.id,
+            kind: StripKind::Submix(submix),
+            builtins: &submix.builtins,
+            console: &submix.console,
+            inserts: &submix.inserts,
+            fader: &submix.fader,
+            matrix_or_pan: &submix.matrix_or_pan,
+        }
+    }
 }
 
 impl StripRef<'_> {
-    /// The compilers' path prefix: `$.tracks[id=<id>]` for a track (later `$.submixes[id=<id>]`).
-    /// Session validation's index paths never use it.
+    /// The compilers' path prefix: `$.tracks[id=<id>]` for a track, `$.submixes[id=<id>]` for a
+    /// submix. Session validation's index paths never use it.
     #[must_use]
     pub fn path_prefix(&self) -> String {
         format!("{}[id={}]", self.collection_path(), self.id.as_str())
     }
 
-    /// The sealed collection path of the strip's chain edges: `"$.tracks"` for a track (later
-    /// `"$.submixes"`), exactly the literal the four chain-edge sites write today.
+    /// The sealed collection path of the strip's chain edges: `"$.tracks"` for a track,
+    /// `"$.submixes"` for a submix.
     #[must_use]
     pub fn collection_path(&self) -> &'static str {
         match self.kind {
             StripKind::Track(_) => "$.tracks",
+            StripKind::Submix(_) => "$.submixes",
         }
     }
 }
 
 impl SessionModel {
-    /// Every strip, in model order: `tracks`, then (later) `submixes`. On a normalized model that
-    /// is canonical ID order within each segment.
+    /// Every strip, in model order: `tracks`, then `submixes`. On a normalized model that is
+    /// canonical ID order within each segment; the concatenation is **not** sorted, so it is never
+    /// binary-searched.
     pub fn strips(&self) -> impl Iterator<Item = StripRef<'_>> {
-        self.tracks.iter().map(StripRef::track)
+        self.tracks
+            .iter()
+            .map(StripRef::track)
+            .chain(self.submixes.iter().map(StripRef::submix))
     }
 
     /// Lower one track's console entries and inserts to the three internal racks.
@@ -652,11 +674,79 @@ pub enum MatrixOrPan {
     },
 }
 
-/// A named mix entity. Its graph behavior is deferred to issue 006.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A submix strip (decision 13, #1199): a strip whose input is the sum of the routes that target
+/// it. Its values carry the track's grammar, validation and canonical spelling verbatim.
+///
+/// The graph compiler lowers it through [`SessionModel::strips`] to the same stage chain a track
+/// lowers to (#1200): its `Input` stage sums the routes that name it, in route-ID order, its
+/// `delay_samples` delays that sum (#1201), and the strip then runs on it. Like a track, it carries
+/// every session console slot (#1202), and its console lanes bank with the tracks' (decision 12).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Submix {
     /// Stable submix identity.
     pub id: StableId,
+    /// Independent left/right fixed input processors.
+    pub builtins: DualMonoBuiltins,
+    /// This submix's knobs for every session console slot, in exactly the session's slot order:
+    /// `console.pre_insert`, then `console.post_insert` (decision 12, #1202).
+    pub console: Vec<ConsoleEntry>,
+    /// Per-submix ordered inserts.
+    pub inserts: Rack,
+    /// Independent left/right fader and mute declaration.
+    pub fader: DualMonoFader,
+    /// Explicit pan or cross-channel matrix; no implicit stereo operation exists.
+    pub matrix_or_pan: MatrixOrPan,
+}
+
+impl Submix {
+    /// A transparent strip: identity input section (no polarity inversion, 0 dB trim, both
+    /// filters off, no delay), one bypassed entry with no parameters for every slot of `console`,
+    /// in slot order, no inserts, an unmuted 0 dB fader and the identity matrix with no smoothing
+    /// (#1199 D5, #1202 D4).
+    ///
+    /// A bypassed console entry is transparent, and its latency is still paid (decision 12): the
+    /// strip is not `bypass: false` with default parameters, which would run every console slot.
+    #[must_use]
+    pub fn unity(id: StableId, console: &Console) -> Self {
+        let lane = ChannelBuiltins {
+            polarity_invert: false,
+            trim_db: 0.0,
+            hpf_hz: 0.0,
+            lpf_hz: 0.0,
+            delay_samples: 0,
+        };
+        Self {
+            id,
+            builtins: DualMonoBuiltins {
+                left: lane.clone(),
+                right: lane,
+            },
+            console: console
+                .slots()
+                .map(|slot| ConsoleEntry {
+                    slot: slot.slot.clone(),
+                    bypass: true,
+                    params: Vec::new(),
+                })
+                .collect(),
+            inserts: Rack {
+                effects: Vec::new(),
+            },
+            fader: DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            matrix_or_pan: MatrixOrPan::Matrix {
+                ll: 1.0,
+                lr: 0.0,
+                rl: 0.0,
+                rr: 1.0,
+                smoothing_samples: 0,
+            },
+        }
+    }
 }
 
 /// A named PCM output entity.
@@ -691,10 +781,12 @@ pub enum RouteSource {
         /// Explicit point in the track chain.
         tap: SendTap,
     },
-    /// The output of a declared submix.
-    SubmixOutput {
+    /// A named submix strip boundary; a bus offers the same seven taps a track does.
+    Submix {
         /// Declared submix identity.
         submix_id: StableId,
+        /// Explicit point in the submix strip.
+        tap: SendTap,
     },
 }
 

@@ -169,6 +169,103 @@ without re-upserting the whole submix. No opcode is added.
   `docs/CONTROL_PROTOCOL_SEMANTICS.md`: after the replacement boundary the rendered bus level matches
   a plan compiled directly from the edited session at 48 kHz. Attach the run's output.
 
+### Attempt 1 record (Terra)
+
+- **Sites.** `crates/protocol/src/model.rs`: private `StripMut` (`builtins`, `console`, `inserts`,
+  `fader`, `matrix_or_pan`) and `strip_mut(session, id)`, which destructures `SessionModel` into
+  `tracks` and `submixes`, searches tracks first, then submixes, else `NotFound` (D4). `0203`,
+  `020f`, `0210` and `0211` call it directly; `rack_mut`'s `Inserts` arm and `knobs_mut`'s console
+  branch call it, so `0204`-`020e` follow. `rack_mut` still refuses `Builtins` (`NotFound`) and
+  `Console` (`ConsoleSlotFixed`) before any lookup. `track_mut` is left only for `0202` (D2).
+  Variant/field names unchanged; every `0203`-`0211` ID field documents "Existing strip: a track ID
+  or a submix ID, tracks first (#1204)"; the `SetConsole` doc names submix rewrites. No change to
+  `controller.rs` was needed: the edit-error strings are unchanged. Docs: registry table rows say
+  "strip ID", a *Strip addressing (#1204)* block records D1-D4, and the console-addressing bullets
+  say "strip"; `C_ABI_V1_QUALIFICATION.md` has the one line (structural until #1225).
+- **No hash move.** `complete_all_opcode_fixture` and `crates/conformance` are untouched;
+  `check-protocol-wasm-parity.sh` passes with the existing hash.
+- **Tests** (`crates/protocol/tests/submix_strip_edits.rs`, every transaction sent through the
+  wire codec first; track `a` carries a strip identical to `bus`'s):
+  - `every_strip_opcode_edits_a_submix` (gate 1): one edit per opcode `0203`-`0211` (asserted to
+    be exactly that range in order) on submix `bus` -- `020a`/`020d` on the console entry, `0205`
+    an insert, `020e` an insert parameter -- commits revision 8 whose canonical snapshot equals the
+    base model with only `bus` changed. *Red if any strip opcode still resolves through the track
+    lookup or lands on a track's strip; every earlier edit test addresses a track.*
+  - `strip_refusals_are_the_tracks` (gate 2): after a valid `020f` on track `a`, `0202` on `bus` and
+    `020f` on `main-out` answer `Edit { operation_index: 1, NotFound }` and `0205` with rack
+    `console` on `bus` answers `ConsoleSlotFixed`; revision and snapshot unchanged. (The store
+    error maps one-to-one to `session.edit.not_found` / `console_slot_fixed` in
+    `controller.rs`.) *Red if source assignment reaches a submix, an output ID is treated as (or
+    silently skipped as) a strip, or a submix's console slots become structurally editable.*
+  - `a_strip_id_resolves_tracks_before_submixes` (gate 3): `0300 x`, `020f x -6`, `0201 x` commits
+    submix `x` at 0 dB; the mirror order commits it at -6 dB. *Red if `strip_mut` searches submixes
+    first, or only tracks.*
+- **Red on revert.** With `model.rs` at `6a4d729d9`, gates 1 and 3 are red; gate 2 is green there
+  by design (it pins refusals the old code also gave). Its unique catches are M5, M7 and the
+  verifier's MB (`strip_mut` falls back to a submix for an unmatched ID). M6 is not unique: it also
+  reddens `console_structural_and_declaration_edits_refuse_with_a_typed_status` and
+  `controller::tests::retired_and_console_refused_codes_meet_their_conformance_rows`, so the
+  `0205`-console row duplicates existing coverage and stays because the spec's gate 2 names it
+  (verdict MINOR-1; the M runs above used `--test submix_strip_edits` alone).
+- **Mutations** (scratch driver, one at a time, `cargo test -p protocol --test
+  submix_strip_edits`, file restored; all RED):
+  - M1 `strip_mut` searches submixes first -> gate 3.
+  - M2 `strip_mut` resolves tracks only -> gates 1 and 3.
+  - M3 `knobs_mut`'s console branch resolves tracks only -> gate 1 (`020a`).
+  - M4 `rack_mut`'s `Inserts` arm resolves tracks only -> gate 1.
+  - M5 `020f` skips an unresolved strip silently (`if let Ok`) -> gate 2.
+  - M6 `rack_mut`'s `Console` arm returns the strip's inserts -> gate 2.
+  - M7 `0202` skips an unknown track silently -> gate 2.
+  - M8 `020f` resolves through `track_mut` -> gates 1 and 3.
+- **Gates** (x86-64 AVX2 host, head of this commit's tree):
+  - `cargo test --locked -p protocol --features protocol/test-support`: rc 0, 141 passed.
+  - test-debug-b (with conformance) rc 0, 787 passed; `conformance_fixtures --check` ok; hash
+    unchanged.
+  - `check-protocol-wasm-parity.sh`: `issue-005 Wasm golden parity: ok (simd128)`.
+  - `check-protocol-control-policy.sh`: ok; `test-protocol-control-policy.sh`: mutation tests ok.
+  - test-debug-a workspace command: rc 0, 99 binaries, 1143 passed.
+  - `cargo fmt --all -- --check` clean; workspace clippy `--all-targets --all-features -D warnings`
+    clean.
+- **C ABI round trip** (PR evidence; a scratch test appended to `capi/src/runtime/tests.rs`, run,
+  then removed). Session: the nine-track fixture cut to `eq0` -> `bus` (`Submix::unity`) ->
+  `main-out`, 48 kHz, 1 kHz sine (L 0.5, R -0.25). Blocks 0-1 rendered through `test_render` on the
+  original plan (bit-identical to a direct unedited plan). Then:
+
+  ```text
+  miso_engine_v1_submit_command(SESSION_TRANSACTION_APPLY [020f bus -6 dB]) -> result 0, Success at revision 43
+  miso_engine_v1_dequeue_event(reliable) -> SessionCommitted at revision 43
+  miso_engine_v1_dequeue_event(reliable) -> result 0, 0 bytes: lane drained
+  block 2 (replacement boundary): C rms 0.000000, edited direct rms 0.000000, bitwise true
+  block 3: C rms 0.086838, edited direct rms 0.086838, unedited direct rms 0.173265; C==edited bitwise true (max |diff| 0e0); C vs unedited -6.000 dB
+  block 4: C rms 0.091071, edited direct rms 0.091071, unedited direct rms 0.181711; C==edited bitwise true (max |diff| 0e0); C vs unedited -6.000 dB
+  block 5: C rms 0.087106, edited direct rms 0.087106, unedited direct rms 0.173800; C==edited bitwise true (max |diff| 0e0); C vs unedited -6.000 dB
+  block 6: C rms 0.087123, edited direct rms 0.087123, unedited direct rms 0.173833; C==edited bitwise true (max |diff| 0e0); C vs unedited -6.000 dB
+  block 7: C rms 0.090479, edited direct rms 0.090479, unedited direct rms 0.180529; C==edited bitwise true (max |diff| 0e0); C vs unedited -6.000 dB
+  ```
+
+  Block 2 is silent on both sides because the frozen structural source policy resets source state
+  at the replacement boundary (`ResetAtReplacementBoundary`); the host then seeks generation 2 at
+  frame 384 and resubmits, and the directly compiled edited plan (pre-rolled with two silent
+  blocks, the same seek and submissions) matches bit for bit.
+
+## Decision record
+
+- **Gate 2's test-value line** (verdict MINOR-1) is corrected in the record above.
+- **Doc comments** (verdict NIT-1): `SessionEditError::NotFound` names a strip (a track or a
+  submix), `ConsoleSlotFixed` says "a strip", and `SetTrackConsole`'s opcode doc says it belongs to
+  the strip family and addresses a submix. Comments only.
+- **The registry's D2 line** (verdict NIT-2) now states its two by-design exceptions: rack
+  `console` structural edits answer `console_slot_fixed` first (D3), and a submix upserted under an
+  output's ID in the same transaction is resolved and then refused at final validation as a
+  duplicate ID.
+- **Output-ID coverage** (verdict NIT-3) stays at the minimum; the verifier's 15-opcode scratch
+  found no unique catch.
+
+## Verdict
+
+- **Attempt 1** (`7f767ae0`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1204-attempt1.md`; the
+  verifier's scratch tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1204-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Tap a submix strip at any of the seven send points* (#1203)

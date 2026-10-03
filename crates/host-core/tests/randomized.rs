@@ -323,7 +323,7 @@ fn route(id: &str, source: RouteSource, destination: RouteDestination, gain_db: 
 /// which splits it into chains. The collapse must arm only the chain that gathers the track input;
 /// armed on a later one it copies a left plane the asymmetric stage made differ over the right.
 #[allow(clippy::too_many_lines)]
-fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, bool) {
+fn generate(seed: u64, draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, bool) {
     let mut model = parse_session_json(BANK).expect("the bank fixture");
     model.sample_rate_hz = draw.pick(&[44_100, 48_000, 48_000, 88_200, 96_000]);
     let mut strip = model.tracks[0].clone();
@@ -371,13 +371,11 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
         output_id: sid("main-out"),
     };
     for submix in 0..submixes {
-        model.submixes.push(Submix {
-            id: sid(&format!("bus{submix}")),
-        });
         model.routes.push(route(
             &format!("bus{submix}-main"),
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: sid(&format!("bus{submix}")),
+                tap: SendTap::PostPan,
             },
             main_out(),
             0.0,
@@ -505,7 +503,60 @@ fn generate(draw: &mut Draw, registry: &NativeEffectRegistry) -> (SessionModel, 
         }
     }
     place(&mut model, chains);
+    // The bus strips are drawn from their own stream, so every other draw -- the tracks, routes,
+    // console, live records and sources of every seed -- is the one it was before buses carried
+    // strips (#1202).
+    let mut bus_draw = Draw::new(seed ^ 0x1202_0000_0000_0000);
+    for submix in 0..submixes {
+        let bus = bus_strip(
+            &mut bus_draw,
+            registry,
+            &model,
+            &template,
+            &links,
+            &format!("bus{submix}"),
+        );
+        model.submixes.push(bus);
+    }
     (model, hazard)
+}
+
+/// A bus strip (#1202): every session console slot, each entry with a random bypass and a third
+/// of its parameters drawn (each channel apart), and up to two random inserts.
+fn bus_strip(
+    draw: &mut Draw,
+    registry: &NativeEffectRegistry,
+    model: &SessionModel,
+    template: &Effect,
+    links: &[u64; KINDS.len()],
+    id: &str,
+) -> Submix {
+    let mut bus = Submix::unity(sid(id), &model.console);
+    for (entry, slot) in bus.console.iter_mut().zip(model.console.slots()) {
+        let kind = KINDS
+            .iter()
+            .position(|kind| {
+                matches!(&slot.identity, EffectIdentity::Native { effect_id }
+                if effect_id.as_str() == *kind)
+            })
+            .expect("a console slot names a launch effect");
+        entry.bypass = draw.chance(1, 3);
+        entry.params = effect(draw, registry, template, (kind, links[kind]), id, false).params;
+    }
+    bus.inserts.effects = (0..draw.below(3))
+        .map(|slot| {
+            let kind = draw.below(KINDS.len());
+            effect(
+                draw,
+                registry,
+                template,
+                (kind, links[kind]),
+                &format!("bus-fx{slot}"),
+                false,
+            )
+        })
+        .collect();
+    bus
 }
 
 /// One prepared console: the host, its live handles, and the rendered output so far.
@@ -667,12 +718,17 @@ struct Reach {
     refused: u64,
     armed_collapse_blocks: u64,
     live_records: u64,
+    /// Console entries declared on a bus that at least one route feeds (#1202): the model's
+    /// entries, a proxy for the lanes the compiled plan banks. A fed bus's `Input` stage sums a
+    /// route from a track chain, so its console slots sit at dependency level 1 or more, after
+    /// every contributor's chain.
+    bus_console_entries: u64,
 }
 
 #[allow(clippy::too_many_lines)]
 fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
     let mut draw = Draw::new(seed);
-    let (model, hazard) = generate(&mut draw, registry);
+    let (model, hazard) = generate(seed, &mut draw, registry);
     let document = canonical_session_json(&model).expect("the generated console canonicalizes");
     let caps = caps();
     // An internal meter tap splits every strip into chains at that boundary.
@@ -731,6 +787,17 @@ fn probe(seed: u64, registry: &NativeEffectRegistry, reach: &mut Reach) {
     })
     .collect();
     reach.consoles += 1;
+    reach.bus_console_entries += model
+        .submixes
+        .iter()
+        .filter(|bus| {
+            model.routes.iter().any(|route| {
+                matches!(&route.destination, RouteDestination::SubmixInput { submix_id }
+                    if *submix_id == bus.id)
+            })
+        })
+        .map(|bus| bus.console.len() as u64)
+        .sum::<u64>();
     let rate = model.sample_rate_hz;
     let source_channels = 2;
     for block in 0..BLOCKS {
@@ -839,6 +906,10 @@ fn randomized_consoles_render_the_same_bits_armed_dual_and_serialized() {
          {reach:?}"
     );
     assert!(reach.live_records > 0, "{reach:?}");
+    assert!(
+        reach.bus_console_entries > 0,
+        "the generator must render console entries on a fed bus: {reach:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

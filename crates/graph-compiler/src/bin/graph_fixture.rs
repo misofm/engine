@@ -211,6 +211,8 @@ fn generated() -> Vec<(String, Vec<u8>)> {
         ("v1/direct-route.dot".to_owned(), evidence.dot.into_bytes()),
         (
             "v1/invalid-scc-diagnostics.json".to_owned(),
+            // A graph-level fixture: `Submix` remains a graph-crate node, and no session compiles
+            // to it since a submix lowers to a strip (#1200 D7).
             concat!(
                 "{\"schema\":1,\"diagnostics\":[",
                 "{\"code\":\"graph.cycle\",\"path\":\"$.routes[id=ab]\",",

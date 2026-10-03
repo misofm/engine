@@ -114,6 +114,16 @@ compressor. Its lanes bank with the same bank programs, padded, at the bus's dep
      slot-set paragraph (`:93`).
    - `docs/session-v1.schema.json`.
 
+7. **Amendment (#1199 verdict MINOR-2, added at attempt 1).** Session automation-target
+   validation looks a `console` target on a submix up in that submix's console entries
+   (`submix.console`), not an empty list, so a console target naming a submix's slot is accepted
+   and one naming an absent slot is refused at `target.effect_id`. Flip the #1199 test's console
+   assertion (`crates/session/tests/submix_strip.rs`, `automation_target_may_name_a_submix`)
+   accordingly, and say in `docs/SESSION_SCHEMA_V1.md` (the automation-target paragraph) that a
+   console automation target may name a submix. Authorized: `crates/session/src/validate.rs`,
+   `crates/session/tests/submix_strip.rs` and `docs/SESSION_SCHEMA_V1.md` (all already inside
+   the paths below).
+
 ## Authorized paths
 
 - `crates/session/**`
@@ -239,6 +249,132 @@ compressor. Its lanes bank with the same bank programs, padded, at the bus's dep
 - Bank-group counts per width, and which widths compiled.
 - Re-pins with reasons.
 - Generator reach counts.
+
+### Attempt 1 record (Terra)
+
+- **Sites.** Session: `Submix.console` (field between `builtins` and `inserts`), parsed with the
+  track's `parse_console_entry`, walked as field 3 (`visit.rs`, so the writer and the estimate
+  follow); `StripRef::submix` lends `&submix.console`, so `lower_strip`, effect preparation, the
+  builtins compiler and the bank binder needed no change; `validate_console_entries` takes the
+  entry slice and runs per strip (`$.submixes[<i>].console[..]`; messages now say "strip");
+  `compile_session` sorts submix entry params; `Submix::unity(id, &Console)` (D4: one bypassed,
+  parameterless entry per slot). Protocol: `submix::CONSOLE = msg(3, true, true, console_entry)`,
+  emitted between fields 2 and 4. Graph-compiler `src/`: doc comments only (`banks.rs`). D5 needs
+  no code: the store already validates the final candidate.
+- **Amendment D7 (MINOR-2)** implemented: a `console` automation target on a submix searches
+  `submix.console`.
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `0xca48_855f_d3a7_56b7` -> `0xc0f6_eced_bf50_920a`, reason
+  "the submix message carries its console entries in field 3; `UpsertSubmix` encodes two (one
+  live, one bypassed)", at its four sites. Writer corpus regenerated (one line: the full-surface
+  submix `mix` gains entries for `desk-eq`, live with params declared out of order, and
+  `desk-limit`, bypassed). `worked-session.json`'s `band` gains three bypassed entries;
+  `validate --canonical` reproduces it byte for byte.
+- **Migrated `Submix::unity` sites:** `session/tests/{canonical_schema,submix_strip}.rs`,
+  `protocol/src/session_wire/tests.rs` (2), `conformance/src/protocol_corpus.rs` (now built after
+  the console), `graph-compiler/src/lib.rs` (2), `graph-compiler/tests/{bank_levels,compile_shapes}.rs`,
+  `host-core/tests/{collapse_arming,randomized,submix_strip}.rs`, `host-web/src/tests.rs`.
+- **Gate 2 bank groups** (x86-64 AVX2 host; `(slot, class, level) -> [lanes, banks]` at `Simd8`):
+  1 bus: tracks `eq@2, comp@3, limiter@6` `[4,1]`, bus `@13/14/17` `[1,1]`; 3 buses `[3,1]`; 5
+  buses `[5,1]`; 9 buses `[9,2]`; 3 chained buses at levels 13/24/35 (eq) etc., `[1,1]` each.
+  Compiled: `Scalar` yes, `Simd8` (native) yes, `Simd4` refused with exactly
+  `console.slot.unbanked` (foreign width, `compiled_at`) for all five; every compiled width
+  rendered the scalar bits. 4-lane native: at batch push (no arm64 host).
+- **Reach.** host-core differential, 12 seeds: `consoles 12, refused 0, armed_collapse_blocks
+  54, live_records 162, bus_console_entries 11` (entries on a fed bus, so level >= 1). Bank-levels
+  probe, seeds 0..64: compile refusals 0, foreign refusals `[0, 11, 0]`, rendered 38 (was the
+  misaligned-only set), `[rendered seeds, lanes]` with a bus console lane at level >= 1 `[4, 15]`.
+  Both generators draw bus strips from a second, seed-derived stream, so every other draw (tracks,
+  routes, console, live records, sources) is unchanged from the parent.
+- **Gates** (x86-64 AVX2): 1-8 green (`host-core/tests/submix_strip.rs` 11 tests; gate 1 over
+  seeds `0..32`, 24 blocks so the 96 kHz output (`2 L = 1932`) is audible; gate 2
+  `bank_levels.rs::every_console_group_binds_when_buses_carry_the_console`; gate 4
+  `session/tests/submix_strip.rs::submix_console_entries_are_refused_with_the_tracks_codes_at_index_paths`;
+  gate 5 `console_session_edits.rs::a_slot_set_change_that_skips_a_submix_refuses_whole`; gate 7
+  host-core gate 5 extended and host-web boot test extended; gate 8 is #1200's
+  `a_processed_bus_renders_without_allocating`, whose session is now gate 1's console session).
+  Gate 9: test-debug-a workspace command rc 0 (98 binaries, 1133 passed); test-debug-b rc 0;
+  `conformance_fixtures --check` ok; `check-protocol-wasm-parity.sh` `ok (simd128)`; release build
+  ok; `check-graph-determinism.sh` PASS 100/100; `graph_fixture --check` clean;
+  `check-console-fixtures.sh` ok; `check-builtins-fixtures.sh` ok (50 files) -- so no digest of a
+  session without submix console entries moved; `cargo fmt --check`; workspace clippy `-D
+  warnings` clean; the five policy pairs ok; `check-realtime-policy.sh` ok.
+  `run-aarch64-tests.sh debug`: at batch push.
+- **Mutations** (each reverted):
+  - `StripRef::submix` lends `&[]` -> gate 1 red; bank-levels probe red (no bus console lane).
+  - Bus pre-insert entries lowered with params cleared -> gate 1 red.
+  - Bypassed bus `post_insert` entries dropped at lowering -> gates 1 and 3 red.
+  - Bus console chains not bank candidates -> gate 2 red (lane count); `pads` false above level
+    10 -> gate 2 red (`console.slot.unbanked` at the native width).
+  - Submix console validation skipped -> gate 4 and gate 5 red; reported at the track path ->
+    gate 4 red.
+  - Visit order console after inserts -> key-order test red; submix entry params not sorted ->
+    canonicalization test red; `unity` with `bypass: false` -> unity test red; MINOR-2 reverted
+    -> automation test red; `tx_submix` emits only the first entry -> codec round trip red.
+  - `track_owned` true for `bus` -> host-core gate 5/7 and host-web boot red.
+  - A `Vec` allocated in `LiveControlEffectBankStage::process_inner` -> gate 8 aborts under the
+    render audit.
+- **Test value.**
+  - Gate 1 `a_bus_renders_the_bits_of_a_track_fed_its_sum` (rewritten): red if a bus console entry
+    is bound to another lane's parameters or its bypass is lost from the bank shunt (verdict
+    mutation E7). Banked and per-node renders are bit-identical by design, so a bus lane dropped
+    from its bank is not a bit difference; since the K1 follow-up's no-fallback guard it refuses
+    the compile instead, which is what turns gate 1 red for it (verdict MINOR-3).
+  - Gate 2: red if bus console lanes are not banked at the build's width, are grouped across
+    levels, or are padded wrongly; no test banked a lane after level 0's chains.
+  - Gate 3 `a_bypassed_bus_console_slot_keeps_its_latency`: red if a bypassed bus slot drops its
+    latency and misaligns the direct path.
+  - Gate 4: red if submix entries escape the track rules or report a track path.
+  - Gate 5: red if the store validates only tracks' entries after a slot-set change.
+  - Gate 6 (generators): the `bank_levels` probe is the generator that carries the scalar oracle,
+    and it turns red if a bus console lane at level >= 1 diverges from the scalar plan on a
+    generated topology. The host-core randomized differential compares its armed, dual and
+    serialized arms, which treat a stereo bus lane identically, so it is judged by reach: both
+    generators assert a nonzero bus-console reach (verdict MINOR-3).
+  - Gate 7: red if a bus console slot gets a live channel during K1.
+  - Gate 8: red if a bus console bank allocates on the render thread.
+  - Session: key order (red if `console` leaves D1's position or entries leave slot order),
+    canonicalization (red if submix entry params stay in declared order), unity (red if D4's
+    bypassed default becomes live or drops a slot), automation (red if MINOR-2 regresses), codec
+    (red if field 3 drops, reorders or truncates entries).
+- **Deviations.**
+  - Gate 1 replaced the console-free gate 1 rather than adding a second variant; the console-free
+    bus is still rendered by #1200 gates 2, 3 and #1201's tests.
+  - Gate 7's host-core half asserts every track-owned effect (console and insert) has a live
+    channel and none is a bus's; observations exclude the EQ, which publishes none.
+  - The gate-7 mutation (`track_owned`) is not console-specific; it is #1200's D6 hook, which bus
+    console slots now also pass through.
+  - The JSON-grammar refusal list gained a "missing console" case.
+
+## Decision record
+
+- **The no-fallback guard sees every prepared console entry** (verdict MINOR-1). The K1 follow-up
+  commit adds `banks::uncollected_console_slot`, called after `unbanked_console_slot`: it takes the
+  console population from the prepared entries (`effects.entries` mapped through `ids`), not from
+  the strip walk that builds `chains`, and refuses a console node no collected chain holds with
+  `console.slot.unbanked` at the same path spelling (a prepared entry without a node, or a node
+  without a level, is `graph.internal.invariant`). Mutation E1 (the walk skips submix console
+  racks) now refuses the compile: 9 `submix_strip` tests, `collapse_arming`'s two submix-send
+  tests, both randomized differentials and `bank_levels`' gate 2 and mixed-group test go red. Before
+  the guard only gate 2's lane count saw it. Valid sessions are unchanged: every gate below is
+  green.
+- **A console group holding a track lane and a bus lane** (verdict MINOR-2) is now
+  `bank_levels.rs::a_bus_console_lane_shares_a_group_with_a_track_lane_at_its_level`: one bus plus
+  a fifth track whose soft-clip inserts lift its `post_insert` limiter to the bus limiter's level.
+  Test value: red if the planner keeps bus lanes out of track groups at a shared (slot, class,
+  level), by a key or class split by strip kind or a bus seeded into another pool; gate 2 cannot
+  see that, because no track lane sits at a bus's level there. Mutation: a submix chain's cohort
+  class forced to the mono pool turns it red (`no console group held a track lane and a bus
+  lane`), the only red test across graph-compiler and host-core (`--all-targets`).
+- **Two test-value sentences** (verdict MINOR-3) are corrected in the record above.
+- **NITs.** The 140-character `banks.rs` doc line is rewrapped; `SESSION_SCHEMA_V1.md`'s
+  automation-target paragraph is reflowed; the estimate's overflow paths are strip-neutral (#1200
+  NIT-1); `Reach::bus_console_entries` says "declared on a fed bus". `run-aarch64-tests.sh debug`
+  runs in CI's `aarch64-debug` at the batch push.
+
+## Verdict
+
+- **Attempt 1** (`b0c7e29f`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1202-attempt1.md`; the
+  verifier's scratch patch and tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1202-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

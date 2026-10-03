@@ -13,13 +13,13 @@ sniffing, or TOML translation. Unknown keys reject.
 
 1. Read `docs/SESSION_SCHEMA_V1.md` end to end, especially "Session console and inserts".
 2. Start from the worked session beside this file, `.claude/skills/author-session/worked-session.json`:
-   a two-track strip with both console sections, a per-track insert, a keyed insert, a submix and a
-   console automation target. It passes all five validator stages and is canonical. For more,
-   copy structure from `fixtures/session/v1/`: `canonical-minimal.json` (empty console),
-   `console-sixty-four-track-intended.json` (the production strip: EQ -> compressor, then a
-   limiter) and `console-sixty-four-track-app.json` (the app's EQ -> compressor with unselected
-   tracks bypassed). `fixtures/session/v1/canonical.json` is a schema example with an unregistered
-   effect ID and deliberately fails effect preparation.
+   a two-track strip with both console sections, a per-track insert, a keyed insert, a transparent
+   submix strip read at its `post_pan` tap, and a console automation target. It passes all five
+   validator stages and is canonical. For more, copy structure from `fixtures/session/v1/`:
+   `canonical-minimal.json` (empty console), `console-sixty-four-track-intended.json` (the
+   production strip: EQ -> compressor, then a limiter) and `console-sixty-four-track-app.json`
+   (the app's EQ -> compressor with unselected tracks bypassed). `fixtures/session/v1/canonical.json`
+   is a schema example with an unregistered effect ID and deliberately fails effect preparation.
 3. Generate parameter metadata rather than guessing effect IDs, parameter IDs, units, domains, or
    defaults:
 
@@ -36,8 +36,10 @@ decimal JSON strings: no sign, whitespace, leading zero except `"0"`, or value a
 
 ## The console strip and inserts
 
-The chain is `input -> input section (polarity, trim, HPF/LPF) -> console.pre_insert -> inserts ->
-console.post_insert -> fader/mute -> pan/matrix -> routes`.
+A strip is a track or a submix. The chain of every strip is `input -> input section (polarity,
+trim, HPF/LPF) -> console.pre_insert -> inserts -> console.post_insert -> fader/mute -> pan/matrix
+-> routes`; a track's input is its source, and a submix's input is the sum of the routes that
+target it.
 
 - **The session console** is declared once, at the root, between `sources` and `tracks`:
   `"console": { "pre_insert": [...], "post_insert": [...] }`. Each slot is exactly
@@ -47,11 +49,11 @@ console.post_insert -> fader/mute -> pan/matrix -> routes`.
   `miso.gate-expander`, `miso.soft-clip`, `miso.transient-shaper`, `miso.true-peak-limiter`.
   The delay, the multiband compressor, third-party (`cid`) effects and anything keyed by a
   sidechain are inserts.
-- **Every track carries every slot**: its `console` array holds exactly one
-  `{ "slot", "bypass", "params" }` entry per slot, in slot order (`pre_insert`, then
-  `post_insert`). An entry carries only the track's knobs; a bypassed entry still runs (and still
-  pays its latency). A track cannot add, drop or reorder a slot.
-- **`inserts`** is `{ "effects": [...] }`: the track's own full effect declarations, in chain
+- **Every strip carries every slot**: every track's and every submix's `console` array holds
+  exactly one `{ "slot", "bypass", "params" }` entry per slot, in slot order (`pre_insert`, then
+  `post_insert`). An entry carries only the strip's knobs; a bypassed entry still runs (and still
+  pays its latency). A strip cannot add, drop or reorder a slot.
+- **`inserts`** is `{ "effects": [...] }`: the strip's own full effect declarations, in chain
   order, with `sidechain` (normally `{"kind":"none"}`; a keyed effect uses
   `{"kind":"routed","source":{...},"port_id":"sidechain-in"}`). It may be empty. An insert ID may
   equal a slot ID; they live in different racks.
@@ -63,10 +65,17 @@ console.post_insert -> fader/mute -> pan/matrix -> routes`.
 - A source has exactly `id`, `content`, `channels`, `bit_depth`, and `frames`. `content` is
   `blake3:` plus 64 lowercase hex digits; `frames` is a nonzero decimal string; `bit_depth` is
   `16`, `24`, or `"32f"`.
-- A submix and output are respectively `{"id":"buss"}` and `{"id":"main-out"}`.
+- An output is `{"id":"main-out"}`.
 - A track is `id`, `source_id`, `left_source_channel`, `right_source_channel`, `builtins`,
   `console`, `inserts`, `fader`, then either `pan` with `left`, `right`, `smoothing_samples`, or
   `matrix` with `ll`, `lr`, `rl`, `rr`, `smoothing_samples`; never both.
+- A submix is a track's strip without the source fields: `id`, `builtins`, `console`, `inserts`,
+  `fader`, then `pan` or `matrix`, in that order, every key required, each with the track's
+  grammar and codes. A bare `{"id":"buss"}` is refused (`schema.missing_field`).
+- A route `source` is `{"kind":"track","track_id","tap"}` or `{"kind":"submix","submix_id","tap"}`;
+  `destination` is `{"kind":"submix_input","submix_id"}` or `{"kind":"output_input","output_id"}`.
+  A routed sidechain's `source` has the same two shapes. The retired `submix_output` source is
+  `schema.invalid_enum`.
 - A route `channel_matrix` has `ll`, `lr`, `rl`, `rr` and no smoothing field.
 - `fader` contains `left_db`, `right_db`, `left_mute`, `right_mute`. Solo is live monitoring state
   and never appears in a session document.
@@ -84,18 +93,55 @@ Closed tokens:
 - unit: `db`, `hz`, `milliseconds`, `samples`, `linear`, `ratio`
 - automation shape: `step`, `linear`, `exponential`
 - automation rack: `console`, `inserts`, `builtins`
-- tap, in signal order: `input`, `post_input`, `insert_send` (after `pre_insert`),
-  `insert_return` (after the inserts), `pre_fader` (after `post_insert`), `post_fader`,
-  `post_pan`. The retired spellings (`post_input_builtins`, `post_simd1`, `post_dynamic`,
+- tap, in signal order, the same seven on a track and a submix: `input`, `post_input`,
+  `insert_send` (after `pre_insert`), `insert_return` (after the inserts), `pre_fader` (after
+  `post_insert`), `post_fader`, `post_pan`. A pre-fader tap is not gated by the fader mute. The
+  retired spellings (`post_input_builtins`, `post_simd1`, `post_dynamic`,
   `post_simd2_pre_fader`, `post_matrix`) are `schema.invalid_enum`.
 
-Automation targets contain `entity_id`, `rack`, `effect_id`, `parameter_id`, `channel`. For
-`rack: "console"`, `effect_id` is the slot ID; for `rack: "inserts"`, the insert's ID; either must
-name a parameter/channel pair already declared on that track's entry or insert. For
+Automation targets contain `entity_id`, `rack`, `effect_id`, `parameter_id`, `channel`.
+`entity_id` names a strip: a track or a submix. For `rack: "console"`, `effect_id` is the slot ID;
+for `rack: "inserts"`, the insert's ID; either must name a parameter/channel pair already declared
+on that strip's (the track's or the submix's) entry or insert. The engine accepts a submix target;
+the SDK's `.automation()` builder and `enginectl`'s target still take a `trackId` only, so author
+a submix target in the JSON itself. For
 `rack: "builtins"`, `effect_id` is `"strip"`; IDs 1 polarity, 2 trim, 3 HPF, 4 LPF, 5 fader,
 6 mute and 12 pan accept left/right/both, while matrix IDs 7-10 accept `both` only. Delay (11) is
 prepared-only and cannot be automated. Stored automation is inert today: it authors and
 round-trips, and renders nothing.
+
+## Buses: submix strips and their taps
+
+- **A bus is a submix strip.** Route tracks (or other submixes) to `submix_input`, and route the
+  bus onward from one of its seven taps, usually `post_pan` (the old `submix_output`) or
+  `post_fader`. A submix's input is the sum of its routes, in route-ID order, and it then runs its
+  whole strip on that sum. Routes form an acyclic graph: a cycle through buses parses and
+  validates, and is refused when the graph compiles at boot.
+- **A return is a submix with an effect insert.** For a reverb or delay send, route each track's
+  `post_fader` (or `pre_fader`) tap to a `verb` submix whose `inserts` hold the effect (for example
+  `miso.delay`), and route `verb` at `post_pan` to the output. The send level is the route's
+  `gain_db`.
+- **The bus-compressor hazard.** A console slot's `link_mode` is session-level, and every bus
+  carries every console slot. A console compressor declared `dual_mono` for the tracks therefore
+  runs unlinked on every stereo bus, and moves the stereo image under asymmetric material. On a
+  bus, bypass the console compressor's entry, and for bus glue put a linked compressor
+  (`link_mode` `maximum` or `average`) in the bus's `inserts`.
+- **Latency grows with bus depth.** Every strip pays the latency of every latent console slot,
+  bypassed or not, and plugin-delay compensation aligns the rest of the graph to it. Each level of
+  bus nesting therefore adds the console's latency again: with a console `miso.true-peak-limiter`,
+  486 samples per level at 48 kHz. Keep latent effects off the console when buses nest deeply.
+- **The transparent strip.** A submix whose input section is identity (no polarity, 0 dB trim,
+  both filters `0.0`, zero delay), with every console entry `bypass: true` and `params: []`, no
+  inserts, a 0 dB unmuted fader and the identity `matrix` (`ll` and `rr` `1.0`, `lr` and `rl`
+  `0.0`, `smoothing_samples` `0`) passes its sum through unchanged apart from that latency and
+  the input section's sanitizing (a `-0.0` sample becomes `+0.0`). This is what the SDK's
+  spec-less `submix(id)` writes; the worked session's `band` is one.
+- **Migrating a document saved before submix strips.** Such a document is refused twice: a bare
+  `{"id":..}` submix and a `submix_output` source. Give each bare submix the transparent strip, and
+  rewrite each `submix_output` source (on a route or a routed sidechain) to
+  `{"kind":"submix","submix_id":..,"tap":"post_pan"}`, which is the same point.
+  `docs/handoffs/submix-strips-and-sends/migrate-submix-strips.py FILE` does both mechanically
+  (`--check` reports without writing); then validate with `--canonical`.
 
 ## Semantic cautions
 
@@ -119,22 +165,25 @@ round-trips, and renders nothing.
 
 | Defect | Code | Stage |
 | --- | --- | --- |
-| A track without an entry for a declared slot | `console.entry_missing` | typed-model |
+| A track or submix without an entry for a declared slot | `console.entry_missing` | typed-model |
 | An entry out of slot order | `console.entry_order` | typed-model |
 | A repeated entry, or a slot ID repeated across sections | `id.duplicate` | typed-model |
 | An entry naming no declared slot | `reference.missing_entity` | typed-model |
-| `identity`/`quality`/`link_mode`/`sidechain`/`id` on an entry; `sidechain`/`bypass`/`params` on a slot; `simd1`/`dynamic`/`simd2` on a track | `schema.unknown_field` | typed-model |
+| `identity`/`quality`/`link_mode`/`sidechain`/`id` on an entry; `sidechain`/`bypass`/`params` on a slot; `simd1`/`dynamic`/`simd2` on a track; `source_id` on a submix | `schema.unknown_field` | typed-model |
 | A `cid` slot | `console.slot_not_native` | typed-model |
 | A slot effect off the eligibility list | `console.slot.ineligible_effect` | prepare-effects |
 
 ## Author through the SDK instead
 
 The TypeScript builder (`sdk/src/core/session.ts`, `session().console({ preInsert, postInsert })`
-then `.track(id, { source, console: [...entries], inserts: [...] })`) and
-`enginectl session build` write the canonical bytes and refuse, before boot and with the same
-code, every defect above that they can express. They cannot express a `cid` slot, because a slot
-names a native effect ID, so `console.slot_not_native` comes only from the engine. Their document
-still goes through the validator below.
+then `.track(id, { source, console: [...entries], inserts: [...] })` and
+`.submix(id, { builtins, console: [...entries], inserts, fader, pan })`, with route and sidechain
+sources `{ kind: "submix", submixId, tap }`) and `enginectl session build` write the canonical
+bytes. A `.submix(id, spec)` follows `.console()` as a track does; `.submix(id)` with no spec is the
+transparent strip, with one bypassed entry per declared slot. They also refuse, before boot and
+with the same code, every defect above that they can express. They cannot express a `cid` slot,
+because a slot names a native effect ID, so `console.slot_not_native` comes only from the engine.
+Their document still goes through the validator below.
 
 ## Validate and canonicalize
 

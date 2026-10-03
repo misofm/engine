@@ -1,8 +1,9 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
-    AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
-    MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource,
-    SESSION_SCHEMA_VERSION_V1, SessionModel, Source, Track,
+    AutomationShape, AutomationTarget, ConsoleEntry, Diagnostic, DiagnosticCode, DiagnosticSet,
+    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit, Rack,
+    RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source,
+    Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -10,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy)]
 enum GraphEntity<'a> {
     Track(&'a Track),
-    Submix,
+    Submix(&'a Submix),
     Output,
 }
 struct Index<'a> {
@@ -85,7 +86,7 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
     let submixes_path = root.key("submixes");
     for (position, submix) in session.submixes.iter().enumerate() {
         if graph
-            .insert(submix.id.as_str(), GraphEntity::Submix)
+            .insert(submix.id.as_str(), GraphEntity::Submix(submix))
             .is_some()
         {
             duplicate(&mut diagnostics, &submixes_path.index(position).key("id"));
@@ -131,6 +132,7 @@ pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticS
     validate_sources(session, &root, &mut diagnostics);
     validate_console(session, &root, &mut diagnostics);
     validate_tracks(session, &index, &root, &mut diagnostics, &mut local);
+    validate_submixes(session, &index, &root, &mut diagnostics, &mut local);
     validate_routes(session, &index, &root, &mut diagnostics);
     validate_automation(session, &index, &root, &mut diagnostics);
 
@@ -228,15 +230,16 @@ fn validate_console(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mu
     }
 }
 
-/// One track's console entries against the session's slots: exactly one entry per slot, in slot
-/// order (`pre_insert`, then `post_insert`), each carrying valid params.
+/// One strip's console entries against the session's slots: exactly one entry per slot, in slot
+/// order (`pre_insert`, then `post_insert`), each carrying valid params. It runs for every strip,
+/// track or submix, at the strip's index path (#1202 D2).
 ///
-/// `declared` is the session's slot IDs, built once for every track, so a track costs one lookup
+/// `declared` is the session's slot IDs, built once for every strip, so a strip costs one lookup
 /// per entry and per slot rather than a scan of the other side (#1093 verdict L3).
 fn validate_console_entries<'a>(
     session: &SessionModel,
     declared: &HashSet<&str>,
-    track: &'a Track,
+    entries: &'a [ConsoleEntry],
     path: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
     local: &mut LocalUniqueness<'a>,
@@ -244,7 +247,7 @@ fn validate_console_entries<'a>(
     let console_path = path.key("console");
     local.effect_ids.clear();
     let mut expected = session.console.slots();
-    for (position, entry) in track.console.iter().enumerate() {
+    for (position, entry) in entries.iter().enumerate() {
         let entry_path = console_path.index(position);
         let slot_path = entry_path.key("slot");
         let expected_slot = expected.next();
@@ -260,7 +263,7 @@ fn validate_console_entries<'a>(
                 diagnostics,
                 DiagnosticCode::DuplicateId,
                 &slot_path,
-                "console entry repeats a slot; a track carries each slot exactly once",
+                "console entry repeats a slot; a strip carries each slot exactly once",
             );
         } else if expected_slot.is_none_or(|slot| slot.slot != entry.slot) {
             error(
@@ -280,7 +283,7 @@ fn validate_console_entries<'a>(
                 diagnostics,
                 DiagnosticCode::ConsoleEntryMissing,
                 &console_path,
-                "track console has no entry for a declared slot; every track carries every slot",
+                "strip console has no entry for a declared slot; every strip carries every slot",
             );
         }
     }
@@ -294,11 +297,7 @@ fn validate_tracks<'a>(
     local: &mut LocalUniqueness<'a>,
 ) {
     let tracks_path = root.key("tracks");
-    let declared: HashSet<&str> = session
-        .console
-        .slots()
-        .map(|slot| slot.slot.as_str())
-        .collect();
+    let declared = declared_slots(session);
     for (position, track) in session.tracks.iter().enumerate() {
         let path = tracks_path.index(position);
         let source = index.sources.get(track.source_id.as_str()).copied();
@@ -326,57 +325,141 @@ fn validate_tracks<'a>(
             }
         }
 
-        for (channel, values) in [
-            ("left", &track.builtins.left),
-            ("right", &track.builtins.right),
-        ] {
-            let builtins_path = path.key("builtins");
-            let channel_path = builtins_path.key(channel);
-            validate_finite(diagnostics, values.trim_db, &channel_path.key("trim_db"));
-            validate_nonnegative_finite(diagnostics, values.hpf_hz, &channel_path.key("hpf_hz"));
-            validate_nonnegative_finite(diagnostics, values.lpf_hz, &channel_path.key("lpf_hz"));
-            // A flat integer domain, checked here alongside the finite checks. The upper bound is
-            // the schema's, not the DSP's: it is what bounds the ring allocation a hostile
-            // session can demand, which is why it is stage-2 schema work rather than issue-007
-            // Nyquist work.
-            if values.delay_samples > crate::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM {
-                error(
-                    diagnostics,
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    &channel_path.key("delay_samples"),
-                    "builtin delay_samples exceeds the schema maximum of 48000",
-                );
-            }
-        }
-        let fader_path = path.key("fader");
-        validate_finite(diagnostics, track.fader.left_db, &fader_path.key("left_db"));
-        validate_finite(
-            diagnostics,
-            track.fader.right_db,
-            &fader_path.key("right_db"),
-        );
-        match track.matrix_or_pan {
-            MatrixOrPan::Pan { left, right, .. } => {
-                let pan_path = path.key("pan");
-                validate_finite_range(diagnostics, left, -1.0, 1.0, &pan_path.key("left"));
-                validate_finite_range(diagnostics, right, -1.0, 1.0, &pan_path.key("right"));
-            }
-            MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
-                let matrix_path = path.key("matrix");
-                for (field, value) in [("ll", ll), ("lr", lr), ("rl", rl), ("rr", rr)] {
-                    validate_finite(diagnostics, value, &matrix_path.key(field));
-                }
-            }
-        }
-        validate_console_entries(session, &declared, track, &path, diagnostics, local);
-        validate_rack(
+        validate_strip(
             diagnostics,
             index,
-            &track.inserts,
-            &path.key("inserts"),
+            &path,
+            StripValues {
+                builtins: &track.builtins,
+                inserts: &track.inserts,
+                fader: &track.fader,
+                matrix_or_pan: &track.matrix_or_pan,
+            },
+            local,
+        );
+        validate_console_entries(
+            session,
+            &declared,
+            &track.console,
+            &path,
+            diagnostics,
             local,
         );
     }
+}
+
+/// The session's console slot IDs, for [`validate_console_entries`].
+fn declared_slots(session: &SessionModel) -> HashSet<&str> {
+    session
+        .console
+        .slots()
+        .map(|slot| slot.slot.as_str())
+        .collect()
+}
+
+/// Every submix strip, at its index path, with the track's strip rules (#1199 D3) and the track's
+/// console-entry rules (#1202 D2).
+fn validate_submixes<'a>(
+    session: &'a SessionModel,
+    index: &Index<'_>,
+    root: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+    local: &mut LocalUniqueness<'a>,
+) {
+    let submixes_path = root.key("submixes");
+    let declared = declared_slots(session);
+    for (position, submix) in session.submixes.iter().enumerate() {
+        let path = submixes_path.index(position);
+        validate_strip(
+            diagnostics,
+            index,
+            &path,
+            StripValues {
+                builtins: &submix.builtins,
+                inserts: &submix.inserts,
+                fader: &submix.fader,
+                matrix_or_pan: &submix.matrix_or_pan,
+            },
+            local,
+        );
+        validate_console_entries(
+            session,
+            &declared,
+            &submix.console,
+            &path,
+            diagnostics,
+            local,
+        );
+    }
+}
+
+/// The strip half every strip shares: its input section, fader, pan or matrix, and inserts.
+struct StripValues<'a> {
+    builtins: &'a DualMonoBuiltins,
+    inserts: &'a Rack,
+    fader: &'a DualMonoFader,
+    matrix_or_pan: &'a MatrixOrPan,
+}
+
+/// Validate one strip's values at `path`, the strip's index path (`$.tracks[<i>]` or
+/// `$.submixes[<i>]`). The source half of a track and every strip's console entries are
+/// validated by the caller.
+fn validate_strip<'a>(
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &Index<'_>,
+    path: &PathRef<'_>,
+    strip: StripValues<'a>,
+    local: &mut LocalUniqueness<'a>,
+) {
+    for (channel, values) in [
+        ("left", &strip.builtins.left),
+        ("right", &strip.builtins.right),
+    ] {
+        let builtins_path = path.key("builtins");
+        let channel_path = builtins_path.key(channel);
+        validate_finite(diagnostics, values.trim_db, &channel_path.key("trim_db"));
+        validate_nonnegative_finite(diagnostics, values.hpf_hz, &channel_path.key("hpf_hz"));
+        validate_nonnegative_finite(diagnostics, values.lpf_hz, &channel_path.key("lpf_hz"));
+        // A flat integer domain, checked here alongside the finite checks. The upper bound is
+        // the schema's, not the DSP's: it is what bounds the ring allocation a hostile
+        // session can demand, which is why it is stage-2 schema work rather than issue-007
+        // Nyquist work.
+        if values.delay_samples > crate::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM {
+            error(
+                diagnostics,
+                DiagnosticCode::NumericOutOfSchemaRange,
+                &channel_path.key("delay_samples"),
+                "builtin delay_samples exceeds the schema maximum of 48000",
+            );
+        }
+    }
+    let fader_path = path.key("fader");
+    validate_finite(diagnostics, strip.fader.left_db, &fader_path.key("left_db"));
+    validate_finite(
+        diagnostics,
+        strip.fader.right_db,
+        &fader_path.key("right_db"),
+    );
+    match *strip.matrix_or_pan {
+        MatrixOrPan::Pan { left, right, .. } => {
+            let pan_path = path.key("pan");
+            validate_finite_range(diagnostics, left, -1.0, 1.0, &pan_path.key("left"));
+            validate_finite_range(diagnostics, right, -1.0, 1.0, &pan_path.key("right"));
+        }
+        MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
+            let matrix_path = path.key("matrix");
+            for (field, value) in [("ll", ll), ("lr", lr), ("rl", rl), ("rr", rr)] {
+                validate_finite(diagnostics, value, &matrix_path.key(field));
+            }
+        }
+    }
+    validate_rack(
+        diagnostics,
+        index,
+        strip.inserts,
+        &path.key("inserts"),
+        local,
+    );
 }
 
 fn validate_rack<'a>(
@@ -505,10 +588,10 @@ fn validate_route_source(
             ),
             "track_id",
         ),
-        RouteSource::SubmixOutput { submix_id } => (
+        RouteSource::Submix { submix_id, .. } => (
             matches!(
                 index.graph.get(submix_id.as_str()),
-                Some(GraphEntity::Submix)
+                Some(GraphEntity::Submix(_))
             ),
             "submix_id",
         ),
@@ -533,7 +616,7 @@ fn validate_route_destination(
         RouteDestination::SubmixInput { submix_id } => (
             matches!(
                 index.graph.get(submix_id.as_str()),
-                Some(GraphEntity::Submix)
+                Some(GraphEntity::Submix(_))
             ),
             "submix_id",
         ),
@@ -671,24 +754,26 @@ fn validate_automation(
             );
         }
 
-        let track = match index.graph.get(automation.target.entity_id.as_str()) {
-            Some(GraphEntity::Track(track)) => Some(*track),
+        // A target may name a track or (inert until #1058) a submix strip (#1199 D6), and a
+        // console target on either names that strip's entry for the slot (#1202).
+        let strip = match index.graph.get(automation.target.entity_id.as_str()) {
+            Some(GraphEntity::Track(track)) => Some((&track.inserts, track.console.as_slice())),
+            Some(GraphEntity::Submix(submix)) => Some((&submix.inserts, submix.console.as_slice())),
             _ => {
                 error(
                     diagnostics,
                     DiagnosticCode::MissingEntityReference,
                     &path.key("target").key("entity_id"),
-                    "automation target must be a declared track",
+                    "automation target must be a declared track or submix",
                 );
                 None
             }
         };
-        if let Some(track) = track {
+        if let Some((inserts, console)) = strip {
             // Rack size is resource-bounded; this is one of two intentional local searches.
             let params = match automation.target.rack {
                 RackName::Inserts => Some(
-                    track
-                        .inserts
+                    inserts
                         .effects
                         .iter()
                         .find(|effect| effect.id == automation.target.effect_id)
@@ -696,8 +781,7 @@ fn validate_automation(
                 ),
                 // A console slot is addressed by its slot ID, in either section (decision 12).
                 RackName::Console => Some(
-                    track
-                        .console
+                    console
                         .iter()
                         .find(|entry| entry.slot == automation.target.effect_id)
                         .map(|entry| entry.params.as_slice()),

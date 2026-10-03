@@ -216,6 +216,143 @@ A route or a sidechain can leave a submix strip at any of the seven taps a track
   `SetRouteSource` value is a tapped submix source").
 - Any other re-pin, with its reason.
 
+### Attempt 1 record (Terra)
+
+- **Sites.** Session: `RouteSource::Submix { submix_id, tap }` (`model.rs`); `parse_route_source`
+  accepts `submix` with a required `tap` (closed token, `schema.invalid_enum`) and refuses
+  `track_id` on it; `submix_output` falls to the unknown-kind arm ("expected track or submix");
+  the visit walk writes `kind, submix_id, tap` (wire tag 2, field keys unchanged: `TAP` is 3);
+  `validate_route_source` unchanged in substance. Protocol: `route_source::SUBMIX = [TAG, ID, TAP]`;
+  `tx_route_source` emits the tap; the decoder reads it with `one_spec!` (missing -> `InvalidTlv`).
+  Graph compiler: `route_source_node` maps `{ submix, tap }` to `track_node(id, stage(tap))` for
+  routes and sidechain edges alike (one call site each, unchanged). Docs: `SESSION_SCHEMA_V1.md`
+  routes paragraph, the registry's nested route-source row, `session-v1.schema.json`.
+- **Re-pin.** `COMPLETE_SCHEMA_HASH` `0xc0f6_eced_bf50_920a` -> `0xa1dc_c56f_2e4a_48f9`, reason "a
+  tag-2 route source carries a required tap; the corpus's `SetRouteSource` value is a tapped
+  submix source" (`RouteSource::Submix { drums, PreFader }`, D5), at its four sites
+  (`protocol_corpus.rs` with one doc sentence, `check-protocol-wasm-parity.sh` x2,
+  `CONTROL_PROTOCOL_CONFORMANCE.md:3`, the fuzz manifest). No other re-pin: the writer corpus
+  regenerated to a one-line diff (the full-surface `mix-to-main` source becomes
+  `{ kind: submix, submix_id: mix, tap: post_pan }`); `worked-session.json`'s `band-main` moved the
+  same way, and `session_validator validate --canonical` reproduces it byte for byte.
+- **Migration list** (all `tap: PostPan`): `graph-compiler/src/lib.rs` (2 routes in the
+  level-major coloring test; the route-helper test now maps all seven submix taps),
+  `graph-compiler/tests/{bank_levels.rs (3), compile_shapes.rs (2)}`,
+  `host-core/tests/{collapse_arming,randomized,submix_strip}.rs`, `host-web/src/tests.rs` (the K1
+  boot test's route source), `protocol/src/session_wire/tests.rs` (2), `session/src/canonical.rs`,
+  `session/tests/{canonical_schema,diagnostic_parity (4),invalid_matrix (5)}.rs`.
+  `submix_strip.rs`'s gate-1 contributor/sum code moved unchanged into `drawn_contributors`, shared
+  with the new tap gates (same draw order).
+- **Gates** (x86-64 AVX2 host, native 8-lane):
+  - 1 `host-core/tests/submix_strip.rs::a_bus_tap_renders_the_bits_of_the_same_tap_on_a_track_fed_its_sum`:
+    seeds `0..8` (`run_seeds`, replayable), rate drawn per seed, all seven taps bit-identical, and
+    the oracle's seven renders pairwise different every seed.
+  - 2 `a_sidechain_keyed_by_a_bus_tap_reads_that_tap` green; the oracle keyed from `post_pan`
+    instead renders other bits (asserted).
+  - 3 `a_tap_before_a_bus_limiter_is_compensated_by_the_limiters_latency`: output latency 972, one
+    inserted delay, on `bus-return`, of 486; the impulse peaks at 972 on both planes, summed.
+  - 4 `session/tests/invalid_matrix.rs::submix_source_spellings_refuse_at_their_index_paths`
+    (8 cases + 2 controls) and `protocol/src/session_wire/tests.rs::a_tapless_submix_source_is_refused_in_every_shape_that_carries_one`.
+  - 5 `graph-compiler/tests/compile_shapes.rs::a_loop_through_a_bus_tap_is_a_graph_cycle`.
+  - 6 `a_tapped_bus_renders_without_allocating` (seven sessions, render audit and thread-scoped
+    counters exact zero after block 0).
+  - 7: test-debug-a command rc 0 (98 binaries, 1140 passed); test-debug-b rc 0 (787 passed);
+    `conformance_fixtures --check` ok; `check-protocol-wasm-parity.sh` `ok (simd128)` with the new
+    hash; release build of audit/bench/capi/session-validator ok; `check-graph-determinism.sh` PASS
+    100/100; `graph_fixture --check` clean; `check-console-fixtures.sh` ok;
+    `check-builtins-fixtures.sh` ok (50 files) -- so no digest of a session without a submix tap
+    moved; `cargo fmt --check`; workspace clippy `-D warnings` clean; the four policy pairs ok;
+    `check-realtime-policy.sh` ok. `run-aarch64-tests.sh debug`: at batch push (no arm64 host).
+- **Mutations** (each reverted):
+  - `route_source_node` maps every submix source to `PostMatrix` -> gates 1, 2, 3 red (gate 3:
+    no inserted delay) and gate 5 red (the witness runs through `a`'s end).
+  - Submix `insert_return` mapped to the pre-fader stage -> gate 1 red at `tap InsertReturn`, gate
+    3 red.
+  - Sidechain edges only map a submix source to `PostMatrix` -> gate 2 red alone.
+  - Cycle witnesses computed without route edges that leave a mid-strip stage -> gate 5 red (the
+    compile panics on the unscheduled cycle).
+  - JSON `"submix" | "submix_output"` alias -> gate 4 (session) red at `$.routes[0].source.kind`;
+    a submix source given `tap: PostPan` regardless -> red at `$.routes[0].source.tap`.
+  - Wire decoder defaulting a missing tag-2 tap to `PostPan` -> gate 4 (wire) red on the route
+    shape; also making `SUBMIX` `[TAG, ID]` -> red.
+  - Encoder writing tap 7 for every submix source -> `every_send_tap_tag_is_typed_and_canonical`
+    and gate 4 (wire) red.
+  - A `Vec` allocated in the graph runtime's `Route` arm -> gate 6 aborts under the render audit.
+    The mutation is not tap-specific (it also reddens the existing allocation tests); gate 6's
+    uniqueness is coverage: no other allocation test routes from a bus stage before its end.
+- **Test value.**
+  - Gate 1: red if any submix tap maps to the wrong stage of the strip; no existing test taps a
+    processed bus.
+  - Gate 2: red if a sidechain from a bus tap reads another stage (the bus's end, as before).
+  - Gate 3: the PDC pin for bus sends. Its mapping defect (arrival taken from the strip's end) is
+    shared: every such mutation also reddens gates 1, 2 and 5, and `pdc.rs` has no strip-specific
+    code a unique defect could live in (verdict NIT-2).
+  - Gate 4 (session): red if `submix_output` is read as an alias or a tapless submix source gets
+    a default tap, for a route or a sidechain source.
+  - Gate 4 (wire): red if any of the route, sidechain or `SetRouteSource` decoders accepts a
+    tapless tag-2 source.
+  - Gate 5: red if a tap edge is left out of cycle detection or a tap is wired from the strip's
+    end.
+  - Gate 6: red if a mid-strip bus tap allocates on the render thread. The defect is not
+    tap-specific (the mutation also reddens the existing allocation tests); the spec mandates the
+    gate, and its value is coverage of a bus routed from a stage before its end (verdict NIT-2).
+  - `every_send_tap_tag_is_typed_and_canonical` (extended to submix sources): red if the codec
+    drops or rewrites a submix source's tap code.
+  - `route_helpers_map_every_typed_variant_to_its_graph_node` (rewritten submix half): red if a
+    submix tap maps to a stage other than the track tap's.
+- **Deviations.**
+  - Gate 1's console declares two latency-free EQ slots, `desk-eq` (`pre_insert`) and `desk-tone`
+    (`post_insert`), not one: with an empty `post_insert` section `insert_return` and `pre_fader`
+    would be the same audio, and the gate requires every tap to differ.
+  - Gate 1 uses fixed strip parameters (compressor defaults, EQ bells at fixed gains) with drawn
+    contributors, sums and rate, so the "every tap differs" assertion cannot fail by a draw.
+  - Gate 5's diagnostic `path` is the witness's first edge, a strip edge spelled `$.submixes`; the
+    routes are named in `cycle_edge_paths` (`$.routes[id=ab].source` etc.), which the test pins.
+    The graph compiler's choice of primary path is unchanged. (Superseded by the K1 follow-up:
+    the primary path is now the first route edge, and gate 5 asserts it; see the decision record.)
+  - The gate-4 refusal cases live in a new `invalid_matrix.rs` test rather than an existing
+    category test, whose names pin their case counts.
+
+## Decision record
+
+- **Gate 5 pins what a host shows** (verdict MINOR-1, #1200's MINOR-1). The K1 follow-up commit
+  makes a cycle's primary `path` the witness's first route or sidechain edge
+  (`schedule::cycle_primary_path`) and tightens gate 5 to `assert_eq!(cycle.path,
+  "$.routes[id=ab].source")`. A sidechain edge is re-spelled at its insert's session position, so
+  a bus insert keyed from its own `post_fader` reports
+  `$.submixes[id=a].inserts.effects[id=k].sidechain`, no longer the retired rack spelling
+  `$.submixes[id=bus].simd2.effects[id=...]` (#1205 verdict NIT-5);
+  `compile_shapes.rs::a_bus_insert_keyed_from_its_own_fader_names_its_sidechain` pins it. Only the
+  diagnostic moved: no fixture or digest pins a compiled cycle path (the SCC fixture is a
+  graph-level literal whose primary path is already a route). Mutations: the old first-edge rule
+  turns both tests red (`$.submixes`); a sidechain left in its sealed spelling turns the second red
+  (`$.submixes[id=a].sidechain`).
+- **D4 has a test** (verdict MINOR-2): `submix_strip.rs::a_muted_bus_still_feeds_its_pre_fader_tap`
+  (adopted from the verifier's scratch, 4 seeds). Each of `pre_fader`, `post_fader` and `post_pan`
+  on a muted bus renders the bits of the same tap of a muted track fed the sum, and only
+  `pre_fader` is audible. Test value: red if a muted strip's upstream is elided or zeroed, for a
+  bus or a track (a skip-on-silence optimization that treats a muted fader as a silent strip), or
+  if the mute stops gating the post-fader taps; no other test mutes a strip with a pre-fader send.
+  Mutation: the input section's trim coefficient zeroed on a muted lane turns it, and only it, red
+  across host-core, builtins and builtins-compiler (`--all-targets`).
+- **The bus delay at the `input` tap** (verdict NIT-1): `tap_strip()` now delays 37 left and 5
+  right, so gate 1 covers the delay at all seven taps; every tap still differs.
+- **Test-value sentences** for gates 3 and 6 (verdict NIT-2) are corrected in the record above.
+- **A submix source carrying `track_id`** (verdict NIT-3): gate 4's session test refuses it with
+  `schema.unknown_field` at `<path>.track_id`, and the mirror `submix_id` on a track source, for a
+  route and a sidechain (12 cases). Mutation M3 (drop the submix arm's `reject_key("track_id")`)
+  turns it, and only it, red in the session crate.
+- **A non-`post_pan` submix tap round-trips in the session crate** (verdict NIT-4):
+  `canonical_schema.rs`'s full-surface model adds a `mix` route from `pre_fader` and asserts it
+  reparses. Mutation M5 (the writer spells every submix tap `post_pan`) turns it, and only it, red
+  in the session crate. The writer corpus (`canonical.rs`) is unchanged.
+- **The 4-lane run** (verdict NIT-5) is CI's `aarch64-debug` at the batch push.
+
+## Verdict
+
+- **Attempt 1** (`6a4d729d`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1203-attempt1.md`; the
+  verifier's scratch tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1203-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Carry every console slot on every submix strip* (#1202)

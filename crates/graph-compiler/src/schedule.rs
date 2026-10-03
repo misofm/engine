@@ -86,6 +86,36 @@ pub(crate) fn cycle_witness(
 ) -> Option<(Vec<GraphNodeId>, Vec<String>)> {
     cycle_witnesses(nodes, edges).into_iter().next()
 }
+/// A cycle's host-visible path: the first route or sidechain edge of its witness, else its first
+/// edge. A host shows only this path, so it names an edge an author wired: a witness can start on
+/// a strip's chain edge, whose sealed path is the bare collection (`$.submixes`) or an effect path
+/// in the internal rack spelling (`simd2`), and neither names the loop (#1200 and #1203 verdict
+/// MINOR-1, #1205 verdict NIT-5).
+///
+/// `edge_paths[i]` is the edge from `witness[i]` to `witness[i + 1]`. A route edge's path is its
+/// route's. A sidechain edge's sealed path is its strip's (`<strip>.sidechain`), so it is
+/// re-spelled to name the keyed effect at its session position: an insert,
+/// `<strip>.inserts.effects[id=<effect>].sidechain` (a console slot has no sidechain).
+pub(crate) fn cycle_primary_path(witness: &[GraphNodeId], edge_paths: &[String]) -> String {
+    for (index, path) in edge_paths.iter().enumerate() {
+        if path.starts_with("$.routes[") {
+            return path.clone();
+        }
+        if let Some(strip) = path.strip_suffix(".sidechain") {
+            return match witness.get(index + 1) {
+                Some(GraphNodeId::Effect(effect)) if effect.rack == RackId::Dynamic => format!(
+                    "{strip}.inserts.effects[id={}].sidechain",
+                    effect.effect_id.as_str()
+                ),
+                _ => path.clone(),
+            };
+        }
+    }
+    edge_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "$".to_owned())
+}
 pub(crate) fn cycle_witnesses(
     nodes: &[GraphNode],
     edges: &[GraphEdge],

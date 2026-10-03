@@ -759,13 +759,14 @@ fn tx_route_source(sink: &mut dyn Sink, value: &RouteSource) -> Result<(), Encod
             tx_id(sink, schema::session::route_source::ID, track_id)?;
             tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
-        RouteSource::SubmixOutput { submix_id } => {
+        RouteSource::Submix { submix_id, tap } => {
             tx_start_message(
                 sink,
                 schema::session::route_source::SUBMIX.field_count(&[])?,
             )?;
             tx_u8(sink, schema::session::route_source::TAG, 2)?;
-            tx_id(sink, schema::session::route_source::ID, submix_id)
+            tx_id(sink, schema::session::route_source::ID, submix_id)?;
+            tx_u8(sink, schema::session::route_source::TAP, enum_tap(*tap))
         }
     }
 }
@@ -989,8 +990,29 @@ fn tx_track(sink: &mut dyn Sink, value: &session::Track) -> Result<(), EncodeErr
     Ok(())
 }
 fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::submix::SPEC.field_count(&[])?)?;
-    tx_id(sink, schema::session::submix::ID, &value.id)
+    tx_start_message(
+        sink,
+        schema::session::submix::SPEC
+            .field_count(&[(schema::session::submix::CONSOLE, value.console.len())])?,
+    )?;
+    tx_id(sink, schema::session::submix::ID, &value.id)?;
+    tx_message(sink, schema::session::submix::BUILTINS, |v| {
+        tx_builtins(v, &value.builtins)
+    })?;
+    for entry in &value.console {
+        tx_message(sink, schema::session::submix::CONSOLE, |v| {
+            tx_console_entry(v, entry)
+        })?;
+    }
+    tx_message(sink, schema::session::submix::INSERTS, |v| {
+        tx_rack(v, &value.inserts)
+    })?;
+    tx_message(sink, schema::session::submix::FADER, |v| {
+        tx_fader(v, &value.fader)
+    })?;
+    tx_message(sink, schema::session::submix::MATRIX_OR_PAN, |v| {
+        tx_matrix_or_pan(v, &value.matrix_or_pan)
+    })
 }
 fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::output::SPEC.field_count(&[])?)?;
@@ -1535,8 +1557,12 @@ fn parse_route_source(message: Message<'_>) -> Result<RouteSource, DecodeError> 
                 schema::session::route_source::TAP
             )?)?)?,
         }),
-        2 => Ok(RouteSource::SubmixOutput {
+        2 => Ok(RouteSource::Submix {
             submix_id: stable_id(one_spec!(message, schema::session::route_source::ID)?)?,
+            tap: parse_tap(read_u8_exact(one_spec!(
+                message,
+                schema::session::route_source::TAP
+            )?)?)?,
         }),
         _ => Err(DecodeError::InvalidTlv),
     }
@@ -1659,6 +1685,21 @@ fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
     let message = message.schema_spec(&schema::session::submix::SPEC)?;
     Ok(Submix {
         id: stable_id(one_spec!(message, schema::session::submix::ID)?)?,
+        builtins: parse_builtins(
+            message.nested_value(one_spec!(message, schema::session::submix::BUILTINS)?)?,
+        )?,
+        console: values_spec!(message, schema::session::submix::CONSOLE)?
+            .map(|value| parse_console_entry(message.nested_value(value)?))
+            .collect::<Result<Vec<_>, _>>()?,
+        inserts: parse_rack_message(
+            message.nested_value(one_spec!(message, schema::session::submix::INSERTS)?)?,
+        )?,
+        fader: parse_fader(
+            message.nested_value(one_spec!(message, schema::session::submix::FADER)?)?,
+        )?,
+        matrix_or_pan: parse_matrix_or_pan(
+            message.nested_value(one_spec!(message, schema::session::submix::MATRIX_OR_PAN)?)?,
+        )?,
     })
 }
 fn parse_output(message: Message<'_>) -> Result<Output, DecodeError> {

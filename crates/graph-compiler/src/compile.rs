@@ -23,7 +23,7 @@ use crate::ids::{
     sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
-use crate::schedule::{buffer_assignments, cycle_witnesses, topo};
+use crate::schedule::{buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.
@@ -303,19 +303,10 @@ impl GraphCompiler {
                 strip.collection_path().to_owned(),
             );
         }
-        for submix in &model.submixes {
-            let id = GraphNodeId::Submix {
-                submix_id: gid(submix.id.as_str()),
-            };
-            add_node(
-                &mut nodes,
-                &mut node_latency,
-                &mut node_tail,
-                id,
-                LatencySamples(0),
-                TailSamples::Finite(0),
-            );
-        }
+        // #1200 D1: a submix is a strip above, keyed by its own ID (tracks, submixes and outputs
+        // share one ID namespace). Its `Input` stage has no source binding; the route edges that
+        // name it are its inputs, reduced in D9 edge order. `GraphNodeId::Submix` is no longer
+        // emitted, though the graph crate keeps the variant.
         for output in &model.outputs {
             let id = GraphNodeId::Output {
                 output_id: gid(output.id.as_str()),
@@ -398,7 +389,7 @@ impl GraphCompiler {
         for cycle in cycle_witnesses(&nodes, &edges) {
             diagnostics.push(GraphDiagnostic {
                 code: "graph.cycle",
-                path: cycle.1.first().cloned().unwrap_or_else(|| "$".to_owned()),
+                path: cycle_primary_path(&cycle.0, &cycle.1),
                 cycle: cycle.0,
                 cycle_edge_paths: cycle.1,
             });
@@ -463,22 +454,25 @@ impl GraphCompiler {
             Ok(value) => value,
             Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
         };
-        // Source semantics: tracks only. The `TrackDelay` arm runs on a source input; a submix's
-        // delay is a separate arm (*Delay a submix strip's summed input*, #1201).
-        // Issue #210 phase 2. Only tracks that actually declared a delay appear, in normalized
-        // track order: an undelayed session produces an empty vector, and every downstream
-        // consumer -- the estimate term, the lowering, the runtime's line vector -- is then
-        // exactly what it was before this feature existed.
+        // Every strip, in `strips()` order: tracks, then submixes (#1201 D1). The entry is keyed
+        // by the strip's `Input` node either way, and the runtime tells the two apart by what
+        // that node is. A track's `Input` is a source input, so its entry lowers to the
+        // `TrackDelay` arm, which delays the source in place. A submix's `Input` has no source and
+        // reduces the routes that target it, so its entry lowers to the `SumDelay` arm, which
+        // delays that sum after the reduction. Neither is latency, and PDC compensates neither.
+        // Issue #210 phase 2. Only strips that actually declared a delay appear: an undelayed
+        // session produces an empty vector, and every downstream consumer -- the estimate term,
+        // the lowering, the runtime's line vector -- is then exactly what it was before this
+        // feature existed.
         let track_delays: Vec<PreparedTrackDelay> = model
-            .tracks
-            .iter()
-            .filter(|track| {
-                track.builtins.left.delay_samples != 0 || track.builtins.right.delay_samples != 0
+            .strips()
+            .filter(|strip| {
+                strip.builtins.left.delay_samples != 0 || strip.builtins.right.delay_samples != 0
             })
-            .map(|track| PreparedTrackDelay {
-                node: track_node(track.id.as_str(), TrackStage::Input),
-                left_samples: track.builtins.left.delay_samples,
-                right_samples: track.builtins.right.delay_samples,
+            .map(|strip| PreparedTrackDelay {
+                node: track_node(strip.id.as_str(), TrackStage::Input),
+                left_samples: strip.builtins.left.delay_samples,
+                right_samples: strip.builtins.right.delay_samples,
             })
             .collect();
         let Some(track_delay_bytes) = track_delays.iter().try_fold(0_u64, |total, delay| {
@@ -798,12 +792,21 @@ impl GraphCompiler {
             nodes,
             edges,
         };
-        // The nodes the host must bind: `Input`, the session output, and the three builtin
-        // stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- each a compiler-owned
-        // binding the builtins artifact fills with a bank member or a scalar owner and keeps as
-        // an op. The builtins-less entry left the three builtin stages out of this set, which
-        // `program::lower` read to elide them as aliases (issue #925). Issue #959 deleted that
-        // entry and issue #958 reverted the elision, so `program::lower` no longer reads this set.
+        // The nodes the host must bind: a track's `Input` (its source), the session output, and
+        // the three builtin stages -- `PostInputBuiltins`, `PostFader`, `PostMatrix` -- each a
+        // compiler-owned binding the builtins artifact fills with a bank member or a scalar owner
+        // and keeps as an op. The builtins-less entry left the three builtin stages out of this
+        // set, which `program::lower` read to elide them as aliases (issue #925). Issue #959
+        // deleted that entry and issue #958 reverted the elision, so `program::lower` no longer
+        // reads this set.
+        //
+        // #1200 D2: a submix's `Input` has no source, so it is not required; unbound, it lowers to
+        // the identity reduction of its route inputs.
+        let submix_inputs: BTreeSet<GraphNodeId> = model
+            .submixes
+            .iter()
+            .map(|submix| track_node(submix.id.as_str(), TrackStage::Input))
+            .collect();
         let required_bindings = schedule
             .iter()
             .filter(|node| {
@@ -816,7 +819,7 @@ impl GraphCompiler {
                             | TrackStage::PostMatrix,
                         ..
                     } | GraphNodeId::Output { .. }
-                )
+                ) && !submix_inputs.contains(*node)
             })
             .cloned()
             .collect();

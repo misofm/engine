@@ -537,6 +537,95 @@ fn source_identity_and_shape_category_has_21_distinct_cases() {
     assert_eq!(count, 21);
 }
 
+/// #1203 D1: a submix source is `{ kind = "submix", submix_id, tap }` for a route and a sidechain
+/// alike. The retired `submix_output` is an unknown token at its index path, with or without a
+/// tap, and never an alias of the strip's end; a submix source without a tap, or with an
+/// unallocated one, refuses at its `tap`. The control case spells the new shape correctly and is
+/// refused only for its undeclared submix, so each refusal is the spelling and nothing else.
+///
+/// Red if the retired spelling is silently read as `post_pan`, if a tapless submix source is
+/// given a default tap, if a sidechain source parses submix sources differently from a route, or
+/// if either source arm silently drops the other arm's ID key (`track_id` on a submix source,
+/// `submix_id` on a track source; #1203 verdict NIT-3).
+#[test]
+fn submix_source_spellings_refuse_at_their_index_paths() {
+    const ROUTE: &str = "source = { kind = \"track\", track_id = \"vocal\", tap = \"post_pan\" }";
+    const SIDECHAIN: &str = "sidechain = { kind = \"none\" }";
+    let route = |source: &str| replaced(ROUTE, &format!("source = {source}"));
+    let sidechain = |source: &str| {
+        replaced(
+            SIDECHAIN,
+            &format!("sidechain = {{ kind = \"routed\", source = {source}, port_id = \"key\" }}"),
+        )
+    };
+    let route_path = "$.routes[0].source";
+    let sidechain_path = "$.tracks[0].inserts.effects[0].sidechain.source";
+    let mut count = 0;
+    type Shape<'a> = (&'a dyn Fn(&str) -> String, &'a str);
+    let shapes: [Shape<'_>; 2] = [(&route, route_path), (&sidechain, sidechain_path)];
+    for (document, path) in shapes {
+        for retired in [
+            "{ kind = \"submix_output\", submix_id = \"bus\" }",
+            "{ kind = \"submix_output\", submix_id = \"bus\", tap = \"post_pan\" }",
+        ] {
+            parse_case(
+                &mut count,
+                &document(retired),
+                DiagnosticCode::InvalidEnum,
+                &format!("{path}.kind"),
+            );
+        }
+        parse_case(
+            &mut count,
+            &document("{ kind = \"submix\", submix_id = \"bus\" }"),
+            DiagnosticCode::MissingField,
+            &format!("{path}.tap"),
+        );
+        parse_case(
+            &mut count,
+            &document("{ kind = \"submix\", submix_id = \"bus\", tap = \"post_mix\" }"),
+            DiagnosticCode::InvalidEnum,
+            &format!("{path}.tap"),
+        );
+        // Each arm refuses the other arm's ID key, so a stray key is never dropped.
+        parse_case(
+            &mut count,
+            &document(
+                "{ kind = \"submix\", submix_id = \"bus\", tap = \"pre_fader\", \
+                 track_id = \"vocal\" }",
+            ),
+            DiagnosticCode::UnknownField,
+            &format!("{path}.track_id"),
+        );
+        parse_case(
+            &mut count,
+            &document(
+                "{ kind = \"track\", track_id = \"vocal\", tap = \"pre_fader\", \
+                 submix_id = \"bus\" }",
+            ),
+            DiagnosticCode::UnknownField,
+            &format!("{path}.submix_id"),
+        );
+        let control = parse_session_json(&document(
+            "{ kind = \"submix\", submix_id = \"bus\", tap = \"pre_fader\" }",
+        ))
+        .expect_err("the control names an undeclared submix");
+        assert_eq!(
+            control
+                .diagnostics()
+                .iter()
+                .map(|item| (item.code, item.path.to_string()))
+                .collect::<Vec<_>>(),
+            vec![(
+                DiagnosticCode::MissingEntityReference,
+                format!("{path}.submix_id")
+            )],
+            "a well-formed submix source parses"
+        );
+    }
+    assert_eq!(count, 12);
+}
+
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {
     let mut effect = template.clone();
     effect.sidechain = SidechainDeclaration::Routed(Sidechain {
@@ -594,8 +683,9 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
     model_case(
         &mut count,
         |s| {
-            s.routes[0].source = RouteSource::SubmixOutput {
+            s.routes[0].source = RouteSource::Submix {
                 submix_id: id("missing-mix-a"),
+                tap: SendTap::PostPan,
             }
         },
         DiagnosticCode::MissingEntityReference,
@@ -606,8 +696,9 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
         |s| {
             let mut r = s.routes[0].clone();
             r.id = id("route-b");
-            r.source = RouteSource::SubmixOutput {
+            r.source = RouteSource::Submix {
                 submix_id: id("missing-mix-b"),
+                tap: SendTap::PostPan,
             };
             s.routes.push(r);
         },
@@ -687,22 +778,25 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
         ),
         (
             0,
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: id("missing-d"),
+                tap: SendTap::PostPan,
             },
             "$.tracks[0].inserts.effects[0].sidechain.source.submix_id",
         ),
         (
             1,
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: id("missing-e"),
+                tap: SendTap::PostPan,
             },
             "$.tracks[0].inserts.effects[1].sidechain.source.submix_id",
         ),
         (
             2,
-            RouteSource::SubmixOutput {
+            RouteSource::Submix {
                 submix_id: id("missing-f"),
+                tap: SendTap::PostPan,
             },
             "$.tracks[0].inserts.effects[2].sidechain.source.submix_id",
         ),

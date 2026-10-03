@@ -274,7 +274,56 @@
   ],
   "submixes": [
     {
-      "id": "band"
+      "id": "band",
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 0.0,
+          "lpf_hz": 0.0,
+          "delay_samples": 0
+        }
+      },
+      "console": [
+        {
+          "slot": "eq",
+          "bypass": true,
+          "params": []
+        },
+        {
+          "slot": "comp",
+          "bypass": true,
+          "params": []
+        },
+        {
+          "slot": "limiter",
+          "bypass": true,
+          "params": []
+        }
+      ],
+      "inserts": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0,
+        "smoothing_samples": 0
+      }
     }
   ],
   "outputs": [
@@ -286,8 +335,9 @@
     {
       "id": "band-main",
       "source": {
-        "kind": "submix_output",
-        "submix_id": "band"
+        "kind": "submix",
+        "submix_id": "band",
+        "tap": "post_pan"
       },
       "destination": {
         "kind": "output_input",

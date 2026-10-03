@@ -300,6 +300,131 @@ New test file `crates/host-core/tests/submix_strip.rs`. host-core is in the
 - The `bank_route_folds()` counts of gate 1's and gate 2's sessions on this branch, and of the same
   bus shapes on the base commit (bare submixes), so a lost bus fold on a real path is visible.
 
+### Attempt 1 record (Terra)
+
+- **Sites.** D0 in `session/src/model.rs` (`StripKind::Submix`, `StripRef::submix` with an empty
+  console section, `strips()` = tracks then submixes, `$.submixes` paths). D1-D3 and D5 in
+  `graph-compiler/src/{compile.rs,ids.rs,estimate.rs}`: no `Submix` node is emitted;
+  `SubmixInput -> track:<id>:input`, `SubmixOutput -> track:<id>:post-matrix`; `required_bindings`
+  drops submix `Input`s; reductions and the estimate count `Input` stages beside `Submix | Output`
+  (`is_summing_node`; a track `Input` never has a main input). D4 in `builtins-compiler`
+  (`from_session` seeds each submix `symmetric_except(SOURCE)`, i.e. `Stereo`;
+  `session_structural_symmetry` untouched). D6 in `effect-compiler/src/prepare.rs` (`track_owned`,
+  binary search of `tracks`; both attach functions skip, doc comments as specified). D7 comment in
+  `graph_fixture.rs`. Builtins, effect preparation and the session estimate needed no edit: they
+  already iterate `strips()`. host-core `src/` unchanged. Docs: `SESSION_SCHEMA_V1.md`.
+- **Re-pins** (reason for each: "submix lowers to a strip; `submix:` nodes become
+  `track:<id>:<stage>` chains; audio moves only where the identity input section turns `-0.0` into
+  `+0.0`, or where D7 sanitizes a non-finite or `>= 1e30` value to `+0.0`"):
+  - `compile_reverse_route_submix_fixture` identity `14d73acd...07c3` -> `f5e310c7...ac5e` (four
+    sites), expected schedule (26 items) and levels (17), the legacy swaps `(11,12),(10,11)` ->
+    `(23,24),(22,23)`, the level mutations `9/10` -> `15/16`; its rendered PCM did not move.
+  - `level_major_compiler_coloring_matches_independent_live_intervals`: old Kahn swaps moved the
+    same way, so they stay a valid non-level-major order rather than an invalid one.
+  - `route_helpers_map_every_typed_variant_to_its_graph_node`: submix route ends map to the strip.
+  - `compile_shapes.rs`: `3 * 256` -> `3 * (256 + 32)` builtin bank members.
+  - Not needed: `bank_levels.rs`, `collapse_arming.rs`, `randomized.rs` stayed green unchanged (no
+    digest of a submix session); no graph fixture contains a submix (`graph_fixture --check` clean,
+    nothing regenerated).
+- **Gates** (x86-64 AVX2 host, native 8-lane):
+  - 1-3, 5, 8: `crates/host-core/tests/submix_strip.rs`, 7 tests green. Gate 1 runs seeds `0..32`
+    (`run_seeds`, replayable), rate drawn per seed from the four launch rates, quantum 128, 8 blocks;
+    all 32 bit-identical (NaN-folded). 4-lane: at batch push (no arm64 host).
+  - 4: `compile_shapes.rs::a_three_input_bus_keeps_one_reduction_on_its_input_stage` green.
+  - 6: `host-web` `live_controlled_boot_of_a_bus_with_an_effect_renders` green.
+  - 7: release build of audit/bench/capi/session-validator; `check-graph-determinism.sh` PASS
+    100/100; `graph_fixture --check` clean; `check-console-fixtures.sh` ok;
+    `check-builtins-fixtures.sh` ok (50 files); `trace-graph-audit.sh` PASS (1,000,000 blocks).
+    So no digest of a submix-free session moved.
+  - 9: test-debug-a workspace command (98 binaries, all ok); `cargo test --release -p audit -p bench
+    -p console-workload` ok; `cargo fmt --check`; workspace clippy `-D warnings` clean; the five
+    policy checks and their `test-*` twins ok; `run-aarch64-tests.sh debug`: at batch push.
+- **Mutation runs** (each reverted after):
+  - Gate 3 (required): submix IDs added to host-core's eligible set (`mono_source.extend(...)`) ->
+    `a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent` red: "right sample 0 is
+    -1.20308: the bus was collapsed". Gate 1 stayed green (stereo sources), as expected.
+  - D6 off (`track_owned` always true) -> gate 5 red ("a bus effect got a live channel:
+    [("bus","glue"),("bus","tone"),("t0","comp")]") and gate 6 red (boot refused
+    `web.live_controls.effects`).
+  - `is_summing_node` without the `Input` arm -> gate 4 red (0 reductions).
+  - `SubmixOutput` mapped to `PostFader` (bus pan skipped) -> gate 1 red at seed 0.
+  - Bus inserts counted twice in the session estimate -> gate 1's estimate test red (2 != 1).
+  - Bus effect latency forced to 0 -> gate 2 red (output latency 0 != 486).
+  - Gate 1's oracle summed in reverse route-ID order -> red at seed 0 by one ulp, so the oracle
+    discriminates summation order.
+- **`bank_route_folds()`** (seeds 0..32 of gate 1's session A, then gate 2's session), identical on
+  this branch and on the base `27892bcc` (bare submixes):
+  `[0,3,0,3,0,3,0,0,0,0,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3]` and `0`. No bus fold lost.
+- **Test value.**
+  - `a_bus_renders_the_bits_of_a_track_fed_its_sum`: red if a bus's builtins, inserts, fader or
+    pan are bound to the wrong lane, run out of order or skipped, or the bus sums other than in
+    route-ID order; no existing test renders a processed bus.
+  - `a_bus_insert_is_charged_once_in_the_session_estimate`: red if a bus insert is charged zero
+    times or twice in the session estimate (hand count of vectors, strings and canonical items).
+  - `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are` (#1199 verdict MINOR-1):
+    red if submix inserts drop out of the canonical preflight bound, which refuses a valid session
+    with `capacity.arithmetic_overflow` at `$.canonical` (checked: with the estimate restricted to
+    tracks, both its estimate-equality half and its compile half go red, the latter with exactly
+    that diagnostic).
+  - `a_bus_limiters_latency_is_compensated_on_the_direct_edge`: red if bus-strip effect latency is
+    left out of arrival times (one 486-sample delay on `t0-direct`, both planes peak at 486).
+  - `a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent`: red if a bus enters the
+    collapse eligibility set and copies its left lane over its right. Not unique (verdict MINOR-2):
+    the same mutation also turns `collapse_arming`'s two submix-send tests and `randomized` red,
+    because they route mono tracks into a unity submix, which this slice made a banked strip. It
+    stays as the named pin for a *processed* bus, which the spec mandates.
+  - `no_bus_effect_gets_a_live_channel_or_an_observation_handle`: red if the attach functions give a
+    bus effect a producer or an observation handle.
+  - `a_processed_bus_renders_without_allocating`: red if a bus strip's lowering leaves an allocating
+    path on the render thread (thread-scoped counters and the render audit, exact zero after block
+    0).
+  - `a_three_input_bus_keeps_one_reduction_on_its_input_stage`: red if reductions still key on
+    `Submix` nodes, dropping every bus sum from the sealed text.
+  - `live_controlled_boot_of_a_bus_with_an_effect_renders`: red if the K1 push breaks a
+    live-controlled browser boot of any bus session with an effect.
+- **Deviations.**
+  - Gate 5 adds one compressor to session A's first track, so the "track-owned producers are all
+    present" half is not vacuous (session A's tracks are transparent); it asserts exactly
+    `[("t0","comp")]` for controls and observations.
+  - Gate 6's source is 16 quanta long, so the eighth rendered block is not the region's last.
+  - Gate 2 builds the graph artifact in the test through the same public pipeline host-core uses
+    (effects, builtins, `compile_with_builtins`), because `PreparedHost` exposes no inserted delays;
+    the impulse render goes through host-core.
+  - The session estimate's diagnostic paths for insert counts still read `$.tracks` (overflow
+    paths only; unchanged text). The K1 follow-up commit renamed them (verdict NIT-1).
+
+## Decision record
+
+- **A bus cycle's primary path names a route** (verdict MINOR-1, shared with #1203's MINOR-1).
+  `compile.rs` took the witness's first edge as `path`; the witness now often starts on a strip
+  chain edge whose sealed path is the bare `$.submixes`, and a host shows only `code` and `path`.
+  The K1 follow-up commit adds `schedule::cycle_primary_path`: the first route or sidechain edge
+  in witness order, a sidechain re-spelled at its insert's session position
+  (`<strip>.inserts.effects[id=<k>].sidechain`), else the first edge. Only the diagnostic moves; the
+  sealed edge paths, the graph fixtures and their digests do not (the SCC fixture is a graph-level
+  literal). #1203's gate 5 now asserts `$.routes[id=ab].source`, and
+  `a_bus_insert_keyed_from_its_own_fader_names_its_sidechain` pins the sidechain spelling.
+- **Gate 3's test value** (verdict MINOR-2) is corrected in the record above: option (a).
+- **A nested bus is rendered** (verdict MINOR-3). The K1 follow-up commit adopts the verifier's
+  oracle as `a_bus_into_a_bus_renders_the_bits_of_two_tracks_fed_their_sums` (16 seeds). Test
+  value: red if a bus whose input is another bus's output reads that bus at a stage other than
+  its end, is scheduled or banked before its source bus finishes, or sums its inputs out of
+  route-ID order. Mutation: a submix-to-submix route reads its source bus's `PostFader` stage
+  (other routes unchanged); this test is the only red one across host-core and graph-compiler
+  (`--all-targets`, test-support features).
+- **Overflow paths** (verdict NIT-1): `estimate_session_resources` reports the all-strip sums at
+  the aggregate `$.strips` (as the entity sum is at `$.entities`) and each strip's vectors at its
+  own collection (`$.tracks.*` or `$.submixes.*`). No test or consumer pins those paths.
+- **Stale doc comments** (verdict NIT-2) on `effect_controls`, `effect_observations`, the
+  `prepare.rs` attach comment, `upstream_of_seam` and `PlanUnitEligibility::lane_tracks` now say
+  what K1 does. The K1 follow-up commit changes comments only there.
+- **The estimate hand count** (verdict NIT-3) stays as the spec asked.
+
+## Verdict
+
+- **Attempt 1** (`ea951253`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1200-attempt1.md`; the
+  verifier's scratch tests are `docs/handoffs/submix-sends-2026-10-02/verdicts/1200-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Declare the submix strip in the session grammar and wire* (#1199)

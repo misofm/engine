@@ -676,3 +676,12 @@ for 957-5 and 957-5b the dead claim test's mode table and in-place counters made
 | 957-4 | as above | `graph/src/runtime.rs` `source_plane_table` | `cargo test -p graph --lib`; bits-only | RED, 1 of 108: the dead claim test (`dead: true, 1 frames: the mode table`). Bits-only: GREEN (108 of 108), for 957-4's corrected reason. |
 | 957-5 | the gather ignores `source_lanes`: `SourceGather::claim` serves any lane the table's claim (`if lane >= 8 {`, 918-5's form) | `graph/src/runtime.rs` `SourceGather::claim` | `cargo test -p graph --lib`; bits-only | RED, 2 of 108: the dead claim test at the bits (`dead: true, 1 frames, redirects bound, block 0 (Full): the master is the copy arm's`), and #918's gate 1 (918-5's failure). Bits-only: the same two, the same block. Attempt 1's one-stage dead claim test stayed GREEN under this row (Sol's verdict). |
 | 957-5b | the leak limited to the dead claim: an unmarked lane is served the table's claim only when that claim is 6, the dead claim's index | `graph/src/runtime.rs` `SourceGather::claim` | `cargo test -p graph --lib`; bits-only | RED, 2 of 108: the dead claim test at the bits (`1 frames, block 0 (Full)`), and #918's gate 1 at its `W8 x 8` scalar-fader shape, whose claim 6 is live. Bits-only: the same. |
+
+## Issue #1201 -- a submix's delay runs on its summed input
+
+Applied to the attempt-1 tree of *Delay a submix strip's summed input*, `crates/graph/src` restored
+after the run. x86-64 AVX2 host, debug profile.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 1201-2 | the `SumDelay` line runs in `execute_op`'s early-return path, before the reduction, and returns (the `TrackDelay` position) | `graph/src/runtime.rs` `execute_op` | `cargo test -p graph --lib a_bus_delay_runs_on_the_sum_after_the_reduction` | RED: `lane 0 sample 5: 0 != 5398.029` -- the reduction never writes the bus buffer, so the delayed sum is never there. |

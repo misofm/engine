@@ -37,7 +37,8 @@ export type AutomationRack = Rack | "builtins";
 export type Channel = "left" | "right" | "both";
 
 /**
- * The seven track taps a route or a routed sidechain may read from, in signal order.
+ * The seven strip taps a route or a routed sidechain may read from, in signal order. A track and a
+ * submix strip carry the same seven.
  *
  * Decision 12 renamed them in place, with wire codes 1-7 unchanged: `post_input` follows the
  * input section, `insert_send` follows `console.pre_insert`, `insert_return` follows the inserts,
@@ -142,6 +143,16 @@ export interface TrackSpec {
 }
 
 /**
+ * A submix strip: a track's strip without its source fields (owner decision 13).
+ *
+ * Every field follows the track's rules and defaults, and `console` is checked against the session
+ * console exactly as a track's is, so a submix with a spec follows `console()`. A submix declared
+ * with no spec at all is the transparent strip instead: the identity input section, no inserts, a
+ * 0 dB unmuted fader, the identity matrix and every console slot bypassed. Its latency is still paid.
+ */
+export type SubmixSpec = Omit<TrackSpec, "source">;
+
+/**
  * The native effects a console slot may name (owner decision 12, "Eligibility").
  *
  * Every console slot always banks, so it must be an effect whose bank kernel the console can rely
@@ -192,9 +203,14 @@ export interface ConsoleEntrySpec<E extends EffectId = EffectId> {
   readonly channel?: Channel;
 }
 
+/**
+ * Where a route or a routed sidechain reads: one of a track's or a submix's seven taps.
+ *
+ * The retired `submix_output` source is refused at runtime; it was the submix's `post_pan` tap.
+ */
 export type RouteSource =
   | Readonly<{ kind: "track"; trackId: string; tap: SendTap }>
-  | Readonly<{ kind: "submix_output"; submixId: string }>;
+  | Readonly<{ kind: "submix"; submixId: string; tap: SendTap }>;
 
 export type RouteDestination =
   | Readonly<{ kind: "submix_input"; submixId: string }>

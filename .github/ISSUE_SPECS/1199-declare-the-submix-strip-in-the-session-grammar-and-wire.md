@@ -244,6 +244,87 @@ grammar and the codec only.
 - The list of migrated construction sites.
 - Whether #1053 had landed, and so whether D8 was implemented here.
 
+### Attempt 1 record (Terra)
+
+- **Hash.** `COMPLETE_SCHEMA_HASH` re-pinned `0xebf2_8262_1550_d44a` -> `0xca48_855f_d3a7_56b7`, reason
+  "submix fields 2, 4, 5, 6", at its four sites (`protocol_corpus.rs` with one doc sentence,
+  `check-protocol-wasm-parity.sh` x2, `CONTROL_PROTOCOL_CONFORMANCE.md:3`, the fuzz manifest). The
+  corpus `UpsertSubmix` carries `trim_db -3.0` left, the fixture's insert, a muted right lane and a
+  matrix with smoothing 16.
+- **Writer corpus.** Regenerated; the one-line diff is the full-surface document's submix `mix`,
+  now `id, builtins, inserts, fader, pan` with every input-section field off identity, one native
+  insert whose two params were declared out of order (written sorted), `right_mute: true` and a pan.
+  `worked-session.json`'s `band` gained the transparent strip; `session-validator validate
+  --canonical` reproduces the file byte for byte.
+- **Migrated construction sites** (all to `Submix::unity(id)` unless noted):
+  `graph-compiler/src/lib.rs` (2), `graph-compiler/tests/bank_levels.rs`, `compile_shapes.rs`,
+  `host-core/tests/collapse_arming.rs`, `randomized.rs`, `protocol/src/session_wire/tests.rs` (2),
+  `session/tests/canonical_schema.rs`; explicit strips at `conformance/src/protocol_corpus.rs` and
+  `session/src/canonical.rs`; the decoders `session_wire.rs` and `parse.rs` read the strip.
+- **#1053 had not landed** (no `live_builtin_delta` in the tree): D8 changed nothing in capi or
+  host-core; gate 7 not applicable.
+- **Anchors moved** (K0): `Submix` is at `model.rs:655`, `COMPLETE_SCHEMA_HASH` at
+  `protocol_corpus.rs:679`; intended sites found by symbol.
+- **Gates, all green on this tree:** gate 4 DSP/conformance command (rc 0) and
+  `check-protocol-wasm-parity.sh` (`ok (simd128)`); gate 5 release build of
+  audit/bench/capi/session-validator, `check-graph-determinism.sh` (100/100),
+  `graph_fixture --check`, `check-console-fixtures.sh`, `check-builtins-fixtures.sh` (50 files), so
+  no digest of a submix-free session moved; gate 6 test-debug-a workspace command (97 binaries,
+  1116 passed), `cargo fmt --check`, workspace clippy `-D warnings`, the three policy checks and
+  their `test-*` twins.
+- **Test value.**
+  - `session/tests/submix_strip.rs::submix_strip_is_refused_with_the_tracks_codes_at_index_paths`
+    (gate 1, parse half; nine cases, each also applied to `tracks[0]` and required to yield the
+    identical diagnostic set modulo the prefix): red if a submix key is not parsed with the track's
+    sub-parser and code, or a path is a track or `[id=..]` path. A JSON document cannot spell a
+    non-finite number, so the JSON "non-finite fader" case is `1e39`
+    (`schema.numeric_not_f32_representable`, the track's code); the NaN case is the model half's.
+  - `submix_strip_validation_reports_index_paths` (gate 1, validation half: NaN fader, pan 1.5,
+    infinite matrix, negative HPF, duplicate insert ID): red if `validate_submixes` is skipped
+    (checked: disabling the call turns it and the parse-half test red) or reports a different path.
+  - `submix_strip_round_trips_canonically_in_key_order` (gate 2, pan and matrix): red if the writer
+    orders submix keys other than D2 or drops a field.
+  - `compile_session_canonicalizes_submix_insert_parameters`: red if `compile_session` leaves
+    submix insert params in declared order.
+  - `automation_target_may_name_a_submix` (D6): red if a target naming a submix insert is refused
+    or a submix target's effect lookup is not checked.
+  - `unity_submix_is_transparent_and_valid` (D5): red if `Submix::unity` stops being the identity
+    strip (a muted lane or a zero `rr` would silently gate every migrated submix once #1200
+    renders it).
+  - `protocol/src/session_wire/tests.rs::random_submix_strips_round_trip_losslessly` (gate 3, 64
+    draws, both variants asserted drawn): red if the submix codec drops or mis-encodes a field
+    asymmetrically, swaps pan and matrix, or misreads the tag. A renumbering made on both sides
+    round-trips and stays green here; field numbers are pinned by `COMPLETE_SCHEMA_HASH` (verdict
+    NIT-1, mutation M5).
+- **Deviations.**
+  - The automation-target diagnostic message changed from "must be a declared track" to "must be
+    a declared track or submix" (code and path unchanged). A console target on a submix finds no
+    entry until #1202 and is refused at `target.effect_id`, as a track's absent slot is.
+  - Per D4 the estimate still charges a submix only as `size_of::<Submix>()`; its insert `Vec`s
+    and params are charged with the strip lowering in #1200.
+  - Verdict MINOR-1 (a submix with heavy inserts refused at compile with
+    `capacity.arithmetic_overflow` at `$.canonical`) was closed by #1200's D0, which charges submix
+    inserts through `strips()`; `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are`
+    pins it.
+
+## Decision record
+
+- **Heavy bus inserts were refused until #1200** (verdict MINOR-1). The record's estimate
+  deviation says so: #1200's D0 charges submix inserts through `strips()`, and
+  `heavy_bus_inserts_compile_and_are_estimated_as_track_inserts_are` pins it.
+- **The submix console automation arm** (verdict MINOR-2) was delegated to #1202, which reads
+  `submix.console` and flips the assertion.
+- **Test-value wording** (verdict NIT-1): the round-trip test's doc comment and the record's line
+  now say "mis-encodes asymmetrically"; the hash owns field numbers. K1 follow-up commit.
+- **The fuzz manifest's hash history** (verdict NIT-2) gained one sentence tracing
+  `ebf282621550d44a` through #1199, #1202 and #1203 to the current value. K1 follow-up commit.
+- **Track diagnostic order at the 64 cap** (verdict NIT-3): `DiagnosticSet` sorts, so only which
+  diagnostics survive the cap of a pathological track can differ. No change.
+
+## Verdict
+
+- **Attempt 1** (`27892bcc`): Sol PASS, no BLOCKER or MAJOR. `docs/handoffs/submix-sends-2026-10-02/verdicts/1199-attempt1.md`.
+
 ## Dependencies
 
 - *Iterate session strips, not tracks, wherever strip semantics apply* (#1198)

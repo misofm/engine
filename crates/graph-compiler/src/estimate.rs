@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::canonical::node_text_len;
+use crate::ids::is_summing_node;
 use crate::pdc::TimingResult;
 use effect_contract::{BypassShunt, EffectControlLane, ObservationLane, PreparedAutomationSpan};
 
@@ -22,7 +23,8 @@ pub(crate) fn resource_estimate(
     buffers: &[BufferAssignment],
     timing: &TimingResult,
     effects: &[EffectPreparedEntry],
-    // `sum(delay_samples) * 4` over both lanes of every delayed track (#210 phase 2).
+    // `sum(delay_samples) * 4` over both lanes of every delayed strip, track or submix (#210
+    // phase 2, #1201).
     track_delay_bytes: u64,
     track_delays: &[PreparedTrackDelay],
 ) -> Option<GraphResourceEstimate> {
@@ -42,12 +44,7 @@ pub(crate) fn resource_estimate(
     let reductions = count(
         nodes
             .iter()
-            .filter(|node| {
-                matches!(
-                    node.id,
-                    GraphNodeId::Submix { .. } | GraphNodeId::Output { .. }
-                ) && input_counts[&node.id] > 1
-            })
+            .filter(|node| is_summing_node(&node.id) && input_counts[&node.id] > 1)
             .count(),
     )?;
     let routes = count(

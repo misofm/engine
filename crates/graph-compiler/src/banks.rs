@@ -48,9 +48,10 @@ pub(crate) fn banks_are_permitted(identity: &session::EffectIdentity) -> bool {
 /// Whether a graph rack holds a console section (decision 12, "Class A by lowering").
 ///
 /// After S1a (#1093) the two SIMD racks hold exactly the session's console slots: `pre_insert`
-/// lowers to [`RackLocation::Simd1`], `post_insert` to [`RackLocation::Simd2`], and a track's
+/// lowers to [`RackLocation::Simd1`], `post_insert` to [`RackLocation::Simd2`], and a strip's
 /// inserts to [`RackLocation::Dynamic`]. No session reaches either SIMD rack any other way
-/// (`session::SessionModel::lower_track`), so a chain or a group in one of them is a console one.
+/// (`session::SessionModel::lower_strip`), so a chain or a group in one of them is a console one.
+/// A submix's console chains (#1202) are console chains like a track's.
 pub(crate) const fn is_console_rack(rack: RackLocation) -> bool {
     matches!(rack, RackLocation::Simd1 | RackLocation::Simd2)
 }
@@ -96,14 +97,14 @@ pub(crate) const fn pads(group: &BankGroup<RackChainId>) -> bool {
 /// **Console slots always bank** (S2, #1098; decision 12). Every console group is padded, and on a
 /// vector backend a console slot that is not bound fails the compile with `console.slot.unbanked`
 /// ([`unbanked_console_slot`]) rather than rendering per node. There is no silent fallback. For a
-/// valid session that is unreachable: every track carries every slot in one order, so a console
-/// rack's chains share one program, a console slot has no sidechain, and every effect on the
-/// console eligibility list binds padded requests. A console group is formed per (rack, pool class,
-/// dependency level of the chain's first slot), so each console slot binds
-/// `sum over (pool class, level) of ceil(n / W)` banks. Differing insert counts put `post_insert`
-/// at several levels, one group per level, and a cohort whose `post_insert` banks do not line up
-/// with its `pre_insert` ones pays a planar/AoSoA round trip where the chain cannot fuse (H2). That
-/// cost is recorded in #1098's evidence, not fixed here.
+/// valid session that is unreachable: every strip -- every track and, since #1202, every submix --
+/// carries every slot in one order, so a console rack's chains share one program, a console slot
+/// has no sidechain, and every effect on the console eligibility list binds padded requests. A
+/// console group is formed per (rack, pool class, dependency level of the chain's first slot), so
+/// each console slot binds `sum over (pool class, level) of ceil(n / W)` banks. Differing insert
+/// counts put `post_insert` at several levels, one group per level, and a cohort whose
+/// `post_insert` banks do not line up with its `pre_insert` ones pays a planar/AoSoA round trip
+/// where the chain cannot fuse (H2). That cost is recorded in #1098's evidence, not fixed here.
 ///
 /// A padded slot binds the group's members on its active lanes and a clone of its first member's
 /// request on every padded lane (issue #1088). The group's `active_mask` travels to the factory and
@@ -416,6 +417,14 @@ pub(crate) fn bind_rack_banks_indexed(
     {
         return Err(diagnostic);
     }
+    // The same guarantee for a console entry the strip walk above never collected (#1202 verdict
+    // MINOR-1): the population comes from preparation, not from `chains`, so a walk that skips a
+    // strip's console fails the compile instead of rendering that strip's slots per node.
+    if let Some(diagnostic) =
+        uncollected_console_slot(effects, ids, &chains, &level_by_node, classes)
+    {
+        return Err(diagnostic);
+    }
     Ok((
         banks,
         GraphRackBankReport {
@@ -526,6 +535,54 @@ fn unbanked_console_slot(
             node.effect_id.as_str()
         ),
     ))
+}
+
+/// The diagnostic for the first prepared console entry, in preparation order, that no collected
+/// chain holds, or `None` when the strip walk collected every one.
+///
+/// [`unbanked_console_slot`] sees only the chains the walk collected, so a walk that skipped a
+/// strip's console racks would leave those slots per node with no refusal. This takes the console
+/// population from the prepared entries instead and refuses a missing one with the same
+/// `console.slot.unbanked` spelling. A prepared entry with no node, or a node with no level, is
+/// `graph.internal.invariant`.
+fn uncollected_console_slot(
+    effects: &EffectPreparedSession,
+    ids: &[Option<EffectNodeId>],
+    chains: &BTreeMap<RackChainId, Vec<EffectNodeId>>,
+    level_by_node: &BTreeMap<&EffectNodeId, u64>,
+    classes: &SessionPoolClasses,
+) -> Option<GraphDiagnostic> {
+    let collected: BTreeSet<&EffectNodeId> = chains.values().flatten().collect();
+    for (index, entry) in effects.entries.iter().enumerate() {
+        if !is_console_rack(rack_location(crate::ids::rack_id(entry.rack))) {
+            continue;
+        }
+        let Some(node) = ids.get(index).and_then(Option::as_ref) else {
+            return Some(diag("graph.internal.invariant", "$.effects"));
+        };
+        if collected.contains(node) {
+            continue;
+        }
+        let section = match node.rack {
+            RackId::Simd1 => "pre_insert",
+            _ => "post_insert",
+        };
+        let pool = match classes.class_of(node.track_id.as_str()) {
+            CohortPoolClass::MonoSymmetricAtPrepare => "mono",
+            CohortPoolClass::Stereo => "stereo",
+        };
+        let Some(level) = level_by_node.get(node) else {
+            return Some(diag("graph.internal.invariant", "$.effects"));
+        };
+        return Some(diag(
+            "console.slot.unbanked",
+            &format!(
+                "$.console.{section}[slot={}].bank[pool={pool},level={level}]",
+                node.effect_id.as_str()
+            ),
+        ));
+    }
+    None
 }
 
 /// The banks bound from one plan group's slots, each with its report entry, in slot order.
