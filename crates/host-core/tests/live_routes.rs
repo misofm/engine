@@ -11,9 +11,9 @@
 //! latency, which bounds every route's compensation delay.
 
 use core::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
+use bench_support::producer::render_while_producing;
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use dsp_reference::randomized::{Draw, first_difference};
 use effect_compiler::{EffectCompileCaps, launch_native_effect_registry};
@@ -923,7 +923,8 @@ fn live_send_lanes_are_charged_against_the_graph_cap() {
 /// Gate 7. A producer thread calls `set` on both live sends of gate 2's session while this thread
 /// renders, and every block applies at least one record; after the first block, every render
 /// allocates and frees nothing on the render thread (`bench_support::alloc`'s thread-scoped
-/// counters).
+/// counters). Each block waits for a queued record, not for the producer's progress
+/// (`bench_support::producer`, issue #1250).
 ///
 /// Test value: red if host-core's attachment leaves any lane state to be built on the render
 /// thread.
@@ -939,7 +940,7 @@ fn live_sends_render_without_allocating() {
     let blocks = 48;
     let feeds = feeds(&mut draw, &["a", "c", "e", "f"], blocks * QUANTUM);
     let mut live = Live::new(&two_buses(48_000, &sends), &feeds, Some(DEPTH));
-    let mut producers = core::mem::take(&mut live.handles.route_controls);
+    let producers = core::mem::take(&mut live.handles.route_controls);
     assert_eq!(producers.len(), 4);
     let edits: Vec<(Values, [bool; 2], u32)> = (0..32)
         .map(|index| {
@@ -950,32 +951,24 @@ fn live_sends_render_without_allocating() {
             )
         })
         .collect();
-    let done = AtomicBool::new(false);
-    let pushed = AtomicUsize::new(0);
+    let mut index = 0;
     assert_installed();
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut index = 0;
-            while !done.load(Ordering::Acquire) {
-                for producer in &mut producers {
-                    let (values, lanes, length) = edits[index % edits.len()];
-                    if producer
-                        .set(values.gain_db, values.matrix, values.mute, lanes, length)
-                        .is_ok()
-                    {
-                        pushed.fetch_add(1, Ordering::Release);
-                    }
-                    index += 1;
+    render_while_producing(
+        blocks,
+        producers,
+        |producers| {
+            for producer in producers.iter_mut() {
+                let (values, lanes, length) = edits[index % edits.len()];
+                // A full queue refuses the edit, and still holds records for the next block.
+                match producer.set(values.gain_db, values.matrix, values.mute, lanes, length) {
+                    Ok(()) | Err(RouteControlError::Full) => {}
+                    Err(refused) => panic!("an in-domain edit was refused: {refused:?}"),
                 }
-                std::thread::yield_now();
+                index += 1;
             }
-        });
-        let mut seen = 0;
-        for block in 0..blocks {
-            while pushed.load(Ordering::Acquire) == seen {
-                std::thread::yield_now();
-            }
-            seen = pushed.load(Ordering::Acquire);
+        },
+        |producers| producers.iter().any(|producer| producer.free() < DEPTH),
+        |block| {
             live.submit();
             let before: u64 = drained().iter().sum();
             let mark = current_thread_counters();
@@ -990,7 +983,6 @@ fn live_sends_render_without_allocating() {
                     "block {block}: the render thread allocated or freed"
                 );
             }
-        }
-        done.store(true, Ordering::Release);
-    });
+        },
+    );
 }

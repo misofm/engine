@@ -15,9 +15,9 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bench_support::alloc::{assert_installed, current_thread_counters, current_thread_delta_since};
+use bench_support::producer::render_while_producing;
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
@@ -1084,8 +1084,10 @@ fn the_drain_is_bounded_and_lossless() {
 // ---- Gate 6 -----------------------------------------------------------------------------------
 
 /// Gate 6. A producer thread pushes records to every live route of gate 1's session while this
-/// thread renders, and every block applies at least one of them; after the first block, every render allocates and frees nothing on the render
-/// thread (`bench_support::alloc`'s thread-scoped counters).
+/// thread renders, and every block applies at least one of them; after the first block, every
+/// render allocates and frees nothing on the render thread (`bench_support::alloc`'s
+/// thread-scoped counters). Each block waits for a queued record, not for the producer's progress
+/// (`bench_support::producer`, issue #1250).
 ///
 /// Test value: red if the drain, a record's application or the activity write allocates or frees
 /// on the render thread.
@@ -1096,36 +1098,27 @@ fn live_routes_render_without_allocating() {
     let blocks = 64;
     let feeds = mixed_feeds(blocks * QUANTUM);
     let mut live = Bound::new(&model, &feeds, true);
-    let mut producers = core::mem::take(&mut live.producers);
+    let producers = core::mem::take(&mut live.producers);
     let records: Vec<RouteControlRecord> = (0..32)
         .map(|index| {
             rng.values(index % 3 == 0)
                 .record(LENGTHS[index % LENGTHS.len()])
         })
         .collect();
-    let done = AtomicBool::new(false);
-    let pushed = AtomicUsize::new(0);
+    let mut index = 0;
     assert_installed();
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut index = 0;
-            while !done.load(Ordering::Acquire) {
-                for producer in &mut producers {
-                    if producer.try_push(records[index % records.len()]).is_ok() {
-                        pushed.fetch_add(1, Ordering::Release);
-                    }
-                    index += 1;
-                }
-                std::thread::yield_now();
+    render_while_producing(
+        blocks,
+        producers,
+        |producers| {
+            for producer in producers.iter_mut() {
+                // A full queue refuses the record, and still holds records for the next block.
+                let _full = producer.try_push(records[index % records.len()]);
+                index += 1;
             }
-        });
-        let mut seen = 0;
-        for block in 0..blocks {
-            // Every block drains at least one record the other thread pushed since the last one.
-            while pushed.load(Ordering::Acquire) == seen {
-                std::thread::yield_now();
-            }
-            seen = pushed.load(Ordering::Acquire);
+        },
+        |producers| producers.iter().any(|producer| producer.free() < DEPTH),
+        |block| {
             let before: u64 = graph::test_only_route_drained_counts().iter().sum();
             let mark = current_thread_counters();
             live.render_in_place();
@@ -1139,9 +1132,8 @@ fn live_routes_render_without_allocating() {
                     "block {block}: the render thread allocated or freed"
                 );
             }
-        }
-        done.store(true, Ordering::Release);
-    });
+        },
+    );
 }
 
 // ---- Gate 7 -----------------------------------------------------------------------------------

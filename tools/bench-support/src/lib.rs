@@ -16,6 +16,7 @@ pub mod alloc;
 pub mod digest;
 pub mod json;
 pub mod metadata;
+pub mod producer;
 pub mod stats;
 pub mod sysinfo;
 pub mod timing;
