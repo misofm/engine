@@ -1036,10 +1036,13 @@ pub enum GraphRouteControlError {
 /// D8): stated so a caller can check [`route_control_resources`] from first principles.
 pub const LIVE_ROUTE_OWNER_BYTES: usize = runtime::live_route_owner_bytes();
 
-/// What attaching route controls and binding the plan add, exactly (issue #1220 D8).
+/// What attaching route controls and binding the plan add (issue #1220 D8): an upper bound on
+/// what the attached artifact retains before bind and on what the bound plan retains.
 ///
 /// Every field is in bytes except `routes`. `total_bytes` is the sum of the five byte fields and
-/// `largest_allocation_bytes` the largest single allocation among them.
+/// `largest_allocation_bytes` the largest single allocation among them. Every field but
+/// `activity_bytes` is the exact size of what it names; `activity_bytes` is
+/// `route_activity_bound_bytes`, an upper bound.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RouteControlResources {
     /// Live routes: one queue, one lane, one binding, one owner and one producer each.
@@ -1052,7 +1055,9 @@ pub struct RouteControlResources {
     pub owner_bytes: u64,
     /// The producer table: one [`GraphRouteControlProducer`] per route.
     pub producer_table_bytes: u64,
-    /// The route IDs' bytes.
+    /// The route IDs' bytes, twice: the producer's `route_id`, and the plan's
+    /// [`GraphRouteControlBinding`] node ID (held until bind) -- a second heap copy (#1220 verdict
+    /// MINOR-1).
     pub route_id_bytes: u64,
     /// The route-activity table, with its per-unit route indices, when the compile-time estimate
     /// did not already charge it (no prepared route's gate silences); `0` otherwise.
@@ -1061,8 +1066,9 @@ pub struct RouteControlResources {
     pub largest_allocation_bytes: u64,
 }
 
-/// The exact resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and
-/// of the bind that consumes its lanes (issue #1220 D8). Saturating; empty for no producers.
+/// The resources of one [`PreparedGraphPlan::attach_route_controls`] call's `producers` and of the
+/// bind that consumes its lanes (issue #1220 D8): an upper bound on both the attached and the bound
+/// state ([`RouteControlResources`]). Saturating; empty for no producers.
 #[must_use]
 pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> RouteControlResources {
     let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
@@ -1085,7 +1091,9 @@ pub fn route_control_resources(producers: &[GraphRouteControlProducer]) -> Route
         });
         queue_bytes = queue_bytes.saturating_add(total);
         largest = largest.max(single);
-        route_id_bytes = route_id_bytes.saturating_add(count(producer.route_id.len()));
+        // The producer's copy and the binding's node-ID copy.
+        route_id_bytes =
+            route_id_bytes.saturating_add(count(producer.route_id.len()).saturating_mul(2));
         largest = largest.max(count(producer.route_id.len()));
     }
     let lane = count(core::mem::size_of::<RouteControlLane>());

@@ -980,8 +980,10 @@ fn a_settled_live_edit_equals_a_fresh_plan() {
 ///   settled mute is audible there, with a fresh unmuted plan's bits;
 /// * `RouteControlRecord::new` refuses `length = 2^22 + 1` and a mute with a nonzero target.
 ///
-/// Test value: red if the drain is unbounded, drops or reorders a record, or is skipped while the
-/// route is inactive.
+/// Test value: red if the drain drops or reorders a record, or is skipped while the route is
+/// inactive. It cannot see an unbounded drain (single-threaded, that applies exactly what a bounded
+/// one does); the bound is structural: the drain loops over `available_at_entry()`, at most the
+/// queue's capacity (#1220 verdict MINOR-2).
 #[test]
 fn the_drain_is_bounded_and_lossless() {
     let blocks = 8;
@@ -1282,7 +1284,8 @@ fn route_control_resources_cover_the_allocation() {
         let owner = (core::mem::size_of::<RouteControlLane>()
             + core::mem::size_of::<GraphRouteControlBinding>()
             + LIVE_ROUTE_OWNER_BYTES) as u64;
-        let ids: u64 = producers.iter().map(|p| p.route_id.len() as u64).sum();
+        // The producer's copy and the binding's node-ID copy (#1220 verdict MINOR-1).
+        let ids: u64 = producers.iter().map(|p| 2 * p.route_id.len() as u64).sum();
         let table = routes * core::mem::size_of::<GraphRouteControlProducer>() as u64;
         let artifact = compile(&model);
         let nodes = artifact.graph().spec.nodes.len() as u64;
@@ -1318,6 +1321,56 @@ fn route_control_resources_cover_the_allocation() {
             resources.total_bytes
         );
     }
+}
+
+/// Gate 8, the attached state (#1220 verdict MINOR-1). Between the attach and the bind the plan
+/// holds each live route's [`GraphRouteControlBinding`], whose node ID is a second heap copy of the
+/// route ID; the charge must cover that state too, which only long route IDs make visible. A muted
+/// route (whose activity table the compile-time estimate already charged, so the attach adds none)
+/// and 127-byte route IDs: what the attach alone retains is within the charge.
+///
+/// Test value: red if the charge counts each route ID once, leaving the binding's copy out of the
+/// number host-core admits while it holds the attached artifact (gate 8 above measures only after
+/// bind, which frees the bindings).
+#[test]
+fn route_control_resources_cover_the_attached_state() {
+    let feeds = two_feeds(QUANTUM);
+    let mut model = two_into_bus(R0, Values { mute: true, ..R1 });
+    let long = [
+        format!("r{}", "a".repeat(126)),
+        format!("r{}", "b".repeat(126)),
+    ];
+    for (route, id) in model.routes.iter_mut().zip(&long) {
+        assert_eq!(id.len(), 127);
+        route.id = sid(id);
+    }
+    assert_installed();
+    let mut artifact = compile(&model);
+    let mark = current_thread_counters();
+    let producers = artifact
+        .attach_route_live_controls(NonZeroUsize::new(DEPTH).expect("depth"))
+        .expect("attach");
+    let window = current_thread_delta_since(mark);
+    let attached = window
+        .requested_bytes
+        .checked_sub(window.released_bytes)
+        .expect("the attach frees nothing it did not allocate");
+    let resources = route_control_resources(&producers);
+    assert_eq!(producers.len(), 2);
+    assert_eq!(
+        resources.activity_bytes, 0,
+        "the muted plan's table is pre-charged"
+    );
+    assert!(
+        resources.total_bytes >= attached,
+        "the charge {} covers the {attached} bytes the attach retains",
+        resources.total_bytes
+    );
+    let bindings = bindings(&artifact, &feeds);
+    let bound = artifact
+        .into_bound(bindings)
+        .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+    drop(bound);
 }
 
 /// D7: a second attach is refused, and a plan with no route into a submix attaches no lane.

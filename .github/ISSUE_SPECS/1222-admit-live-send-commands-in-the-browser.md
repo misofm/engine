@@ -439,6 +439,42 @@ field.
 - **No re-pin.** `check-browser-expected-resources` is unchanged (none of its sessions has a send
   under live controls). The module digest is not a per-change pin (#1061).
 
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`), in `hosts/host-web/src/tests.rs`. Each mutation was applied alone to
+`hosts/host-web/src/lib.rs`, the host-web lib suite run, and the file restored.
+
+- **MINOR-1/2 (probes 1 and 2).** New `a_following_sends_seeded_source_lanes_land_on_a_fresh_plans_bits`:
+  following pre-fader sends from sources with all four lane-mute combinations and a bus with one
+  muted lane, run without effects and with an insert on every track (`E > 0`), edited live; each
+  send's queue room drops by exactly its own records and the output settles on a fresh plan's
+  bits. Test value: red if a send record is built without the mirror's `source_lane_muted`; no other
+  test edits a send whose source lanes start muted.
+- **MINOR-2/3 (probes 3 and 4)**, folded into gate 2's
+  `a_refused_send_batch_pushes_nothing_and_keeps_the_mirror`: a send record plus an effect record
+  whose queue is full push neither (refused at index 1); and an admitted gain, then a refused
+  batch, keeps the admitted mirror, and a further edit lands on fresh-plan bits.
+- **MINOR-4.** `the_exact_retained_budget_charges_the_send_lanes` adds an absolute check (fix
+  (a)): the send document against a twin with one send removed, at one depth, differs in
+  `bridge_retained_bytes` by exactly the document and ID-staging rows, one staged command, the
+  session-model bytes, the route-control resources and `2 * size_of::<LiveRoute>()`.
+- **MINOR-5.** The solo paragraph is back on `into_solo_request`; `into_route_edit` keeps its own.
+- **Mutations.** V1 (mirror seeded with `|_, _| false`): RED in the new test and #1224's
+  `a_one_lane_mute_follows_into_its_own_source_column`. V8 (record built with `[false; 2]`): RED in
+  the new test only. V2 (send band without the effect offset): RED in the new test, gate 2 and
+  #1224's `a_delayed_send_follows_like_an_explicit_send_mute`. V6 (mirror not committed): RED in
+  gate 2 and #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows`. V3 (only queue bytes
+  charged) and V4 (mirror and shadow dropped): RED in the budget test. Probes 2-4 have no unique
+  catch over #1224's tests, so they are folded rather than added as separate tests.
+- **Root ratification.** The out-of-path `#[inline(always)]` on the two `free()` accessors is
+  ratified; *Anchor the worklet callgraph checker's C allocator names* (#1234) removes them.
+- **NIT-1 to NIT-3.** Not applied (optional).
+
+## Verdict
+
+- **Attempt 1** (`466f0ab63`): Sol PASS. Five MINORs and three NITs; the MINORs are applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1222-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1222-attempt1-verifier-scratch.rs`.
+
 ## Dependencies
 
 - *Produce live send records from host-core* (#1221)

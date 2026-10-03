@@ -261,7 +261,10 @@ Answers the attempt 1 FAIL verdict (`submix-verdicts/1219-attempt1.md`).
   normal step and states the subnormal case: when `|target - start| < length * 2^-126` the step is
   subnormal, its rounding error absolute (up to `2^-150`), and `c(k)` can pass the target by at most
   `(length - 1) * 2^-150`, under `2^-128` absolute; monotone, inaudible, and the snap still assigns
-  `target`. #1220's "Live routes" section in `docs/BUILTINS_AND_METERING_V1.md` should carry the same
+  `target`. (Superseded by verdict 2 MINOR-A, applied in the K3 follow-ups: the sum's rounding onto
+  the target's grid can double the step's excess, so the bound is below `(length - 1) * 2^-149` and
+  never more than `2^-128`, which is reached at `length = 2^22`; monotone only for `k < length`, and
+  the snap steps back by the overshoot.) #1220's "Live routes" section in `docs/BUILTINS_AND_METERING_V1.md` should carry the same
   qualifier (outside this issue's paths).
 - **NIT-3 fixed.** Gate 3's tautological `position` saturation assertion is deleted, and gate 3's
   text above no longer claims to test saturation.
@@ -280,6 +283,23 @@ Answers the attempt 1 FAIL verdict (`submix-verdicts/1219-attempt1.md`).
     traps=5 trap_owners=[render_inner]`, `f32x4_arith=9350 kernels=12`);
     `check-browser-expected-resources.py --artifacts` exit 0; `test-web-audioworklet.sh` exit 0.
   - `run-aarch64-tests.sh debug`: no arm64 host; CI `aarch64-debug` at batch push.
+
+### K3 follow-up record (after the attempt 2 PASS verdict)
+
+- **MINOR-A.** The `INDEXED_RAMP_LENGTH_MAXIMUM` doc (`crates/lane/src/kernels.rs`) carries the
+  verdict's replacement text: with a subnormal step the overshoot is below `(length - 1) * 2^-149`
+  and never more than `2^-128`, monotone only for `k < length`, and the snap steps back
+  (the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`)). `docs/BUILTINS_AND_METERING_V1.md` carries the same bound since #1220. The attempt-2
+  record above is annotated.
+- **NIT-A** (nothing in CI saw M12 or M13 until #1220 linked the kernel): #1220 linked it, and the
+  K3 follow-up adds a `KERNEL_ROSTER` row for `route_mix_ramp_block<f32x4>` (#1220 NIT-1).
+
+## Verdict
+
+- **Attempt 1** (`cdde008f2`): Sol FAIL. MAJOR-1: bounds-check traps in the `#[inline(never)]` ramp
+  kernel; MINOR-1. `docs/handoffs/submix-sends-2026-10-02/verdicts/1219-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1219-attempt1-verifier-scratch.rs`.
+- **Attempt 2** (`0268a1c74`): Sol PASS. MINOR-A (applied above) and NITs.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1219-attempt2.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1219-attempt2-verifier-scratch.rs`.
 
 ## Dependencies
 

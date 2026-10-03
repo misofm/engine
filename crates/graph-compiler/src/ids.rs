@@ -303,6 +303,24 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
     })
 }
 
+/// The unfolded transform of a route whose values are in domain: `route_transform`'s checks, then
+/// every coefficient of the open fold finite. It backs [`route_coefficients`] and the compiler's
+/// lowering, so both refuse exactly the same values and the transform is derived once.
+pub(crate) fn route_values(
+    gain_db: f32,
+    matrix: [f32; 4],
+) -> Result<RouteTransform, RouteValueError> {
+    let transform = route_transform(gain_db, matrix).ok_or(RouteValueError::Domain)?;
+    if gated_route_coefficients(&transform, RouteGate::OPEN)
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        Ok(transform)
+    } else {
+        Err(RouteValueError::Domain)
+    }
+}
+
 /// Why [`route_coefficients`] refused a route's values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteValueError {
@@ -315,7 +333,7 @@ pub enum RouteValueError {
 /// and the ones a live producer pushes (DESIGN 5.7, issue #1215).
 ///
 /// `matrix` is `[ll, lr, rl, rr]`; `source_lane_muted[lane]` zeroes the column that source lane
-/// feeds. The values are checked as the compiler checks a route ([`route_transform`]), and refused
+/// feeds. The values are checked as the compiler checks a route (`route_transform`), and refused
 /// with [`RouteValueError::Domain`] when any folded product is not finite (a finite gain times a
 /// finite coefficient can overflow: +700 dB with `ll = 1e10`). That check is of the open fold, so
 /// whether values are in domain never depends on the gate. The coefficients themselves are
@@ -326,13 +344,7 @@ pub fn route_coefficients(
     mute: bool,
     source_lane_muted: [bool; 2],
 ) -> Result<[f32; 4], RouteValueError> {
-    let transform = route_transform(gain_db, matrix).ok_or(RouteValueError::Domain)?;
-    if !gated_route_coefficients(&transform, RouteGate::OPEN)
-        .into_iter()
-        .all(f32::is_finite)
-    {
-        return Err(RouteValueError::Domain);
-    }
+    let transform = route_values(gain_db, matrix)?;
     Ok(gated_route_coefficients(
         &transform,
         RouteGate {

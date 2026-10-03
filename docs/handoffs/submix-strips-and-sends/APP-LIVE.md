@@ -71,6 +71,10 @@ await controls.submit(
 - `SessionMap.routes` (from `OfflineEngine.sessionMap()`, and the browser host's
   `miso.sessionmap.v1` reply) lists the live routes in canonical (sorted) route-ID order, as the
   engine enumerates them. The SDK takes a send's index from that list and never from the session.
+  `MisoSessionMap`/`SessionMap` gained a **required** `routes` (`[]` with no send), as K2 gave it a
+  required `submixes`: a test fake of `sessionMap()` must return both, or live-control construction
+  throws a `TypeError` even in an app that never uses sends (a map built `as MisoSessionMap` hides
+  the omission from TypeScript).
 - Only routes into submixes are live. A route into the output, and every route's `follows_mute`,
   stay structural: they change only through the session. `edit.route(id)` throws
   `MisoUsageError` (`diagnosticCode` `unknownRoute`) for any ID not in `SessionMap.routes`; for an

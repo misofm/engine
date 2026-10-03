@@ -89,8 +89,10 @@ model; none of the anchors below moved in substance. Re-read line numbers before
 
     It runs today's `route_transform` checks, then `gated_route_coefficients` with
     `RouteGate { mute, follow_zeroed: source_lane_muted }`, and returns `Domain` if `route_transform`
-    refuses **or** any folded coefficient is not finite (VERIFY-2 MINOR 3: a finite gain times a
-    finite coefficient can overflow, for example +700 dB with `ll = 1e10`).
+    refuses **or** any coefficient of the **open** fold
+    (`gated_route_coefficients(&transform, RouteGate::OPEN)`) is not finite, so domain validity never
+    depends on the gate (VERIFY-2 MINOR 3: a finite gain times a finite coefficient can overflow, for
+    example +700 dB with `ll = 1e10`; #1215 MINOR-1).
   - The compiler's route lowering calls `route_coefficients(gain_db, matrix, false, [false; 2])` for
     its domain check and keeps `route_transform`'s unfolded transform plus `RouteGate::OPEN` in
     `PreparedRoute`. A `Domain` refusal is `graph.gain.non_finite` at `$.routes[id=<id>].gain_db`, as
@@ -235,6 +237,29 @@ No allocation gate: this slice adds no render-thread state.
 - **No bit moved (one-time, vs base `f77b6159a`):** the determinism JSON and the `audit capi`
   output are byte-identical. The graph and builtins fixture digests pass unchanged, and every
   existing `route_folds` count assertion passes unedited.
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1.** D1 above, #1216's D2 copy and `DESIGN.md` 5.7 now say the domain check is of the
+  **open** fold (`gated_route_coefficients(&transform, RouteGate::OPEN)`), so domain validity never
+  depends on the gate.
+- **MINOR-2.** Defended by #1216's gates 1 and 4; the #1216 verifier ran "the runtime ignores the
+  gate" red under both.
+- **NIT-1.** `route_coefficients.rs`'s comment says the +700 dB unit matrix folds to `1.0e35`.
+- **NIT-2.** A crate-private `route_values(gain_db, matrix)` (`crates/graph-compiler/src/ids.rs`)
+  returns the unfolded transform after the domain check; it backs `route_coefficients` and the
+  lowering, which no longer derives the transform twice. One check, so the two paths still cannot
+  drift; `route_coefficients.rs` gate 2 and the workspace tests are green.
+- **NIT-3.** `const fn` accepted as is; no change.
+- **INFO** (subnormal folded coefficient accepted): carried to owner question Q2, answered on
+  2026-10-03 and filed as *Bound route gain and matrix values* (#1237), which flushes it to `+0.0`.
+
+## Verdict
+
+- **Attempt 1** (`6701cd55e`): Sol PASS. Two MINORs and three NITs, non-blocking, applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1215-attempt1.md`.
 
 ## Dependencies
 

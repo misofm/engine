@@ -649,8 +649,9 @@ pub fn route_coefficients(gain_db: f32, matrix: [f32; 4], mute: bool,
   `gated_route_coefficients(&transform, gate)`, and `plain_route_gains` (the fold's source of
   constants) declines any route whose gate is not `OPEN`.
 - `route_coefficients` runs today's `route_transform` checks, then `gated_route_coefficients` with
-  `RouteGate { mute, follow_zeroed: source_lane_muted }`, and refuses (`Domain`) a folded coefficient
-  that is not finite. The compiler's lowering and every live producer call it, so domain checks and
+  `RouteGate { mute, follow_zeroed: source_lane_muted }`, and refuses (`Domain`) when any coefficient
+  of the **open** fold (`gated_route_coefficients(&transform, RouteGate::OPEN)`) is not finite, so
+  domain validity never depends on the gate (#1215 MINOR-1). The compiler's lowering and every live producer call it, so domain checks and
   bits cannot drift.
 - `PreparedRoute` gains `gate: RouteGate`; the runtime binds `gated_route_coefficients(&transform,
   gate)`. The canonical text adds a `route-mute` row (slice 18b) and a `route-follow-zeroed` row
@@ -1312,6 +1313,8 @@ Each item names its trigger. None is filed by slice 00.
 - **O10. Class-B bus-sum order.** **Trigger:** Q5.
 - **O11. Bound route values to the fader and matrix domains, and publish their live metadata**
   (the former slice 26; VERIFY-2 section 4). **Trigger:** the owner answers Q2 "yes".
+  **Filed** on 2026-10-03, after the owner agreed to Q2, as *Bound route gain and matrix values*
+  (#1237), with subnormal folded coefficients flushed to `+0.0`; the metadata half stays deferred.
   - Session validation refuses `numeric.out_of_schema_range` (through `validate_finite_range`,
     `crates/session/src/validate.rs:830-849`) for a route `gain_db` outside `[-144, 24]` at
     `$.routes[<i>].gain_db`, and a `channel_matrix` coefficient outside `[-1, 1]` at

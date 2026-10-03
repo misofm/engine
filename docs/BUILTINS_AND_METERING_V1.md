@@ -181,14 +181,17 @@ therefore no longer carries a muted drum track's pre-fader reverb send.
   Each yielded send gets one record from its mirror through `RouteControlProducer::record`, the
   prepared route's own coefficient function, so a settled follow equals a plan freshly prepared
   with those mutes. Its ramp is the `smoothing_samples` of the last strip mute record staged for
-  the source strip in that submission, so the send fades with its strip.
+  the source strip in that submission that covers a lane whose effective mute changed, so the send
+  fades with its strip; a no-op record on the other lane never sets it.
 - **Never a redundant record.** `delta` yields only a change, for the same digest reason as the
   strip records above.
 - **All or nothing.** Follow records are room-checked with the strip mute records before any push.
   A full send queue refuses the whole submission as typed backpressure, at the wire index of the
-  strip mute that asked for the record, and the solo state and the send mirror both roll back. A
-  strip mute whose window exceeds a send's longest ramp (`2^22` samples) is refused `domain`
-  rather than clamped. The decode staging grows by one entry per live send.
+  first record staged on that send's queue (which can be an earlier send command, kinds 13-15, on
+  the same send), and the solo state and the send mirror both roll back. When a mute change moves
+  a following send, a window that exceeds the send's longest ramp (`2^22` samples) is refused
+  `domain` rather than clamped; a solo's window counts the same way and is reported at the batch's
+  first solo record. The same kind 4 is admitted when no following send moves, as before #1224. The decode staging grows by one entry per live send.
 - **A delayed send stays mixed.** A follow-muted send that carries a compensation delay mixes zero
   coefficients through its line rather than going inactive (#1217), exactly as an explicit
   `routeMute` does.
@@ -293,13 +296,16 @@ bindings follow it.
 - **Shape (D6).** A live route is `NodeKind::LiveRoute`, never a `GraphNodeBinding`. It never
   folds: the fold planner's metadata answers `has_route_control`, and `plain_route_gains` declines
   such a route, because an epilogue would never drain its queue.
-- **Resources (D8).** `route_control_resources` states exactly what the attach and the bind add:
+- **Resources (D8).** `route_control_resources` is an upper bound on what the attach adds before
+  bind and on what the bound plan retains:
   - each queue's retained payload;
   - the lane box, the plan's binding entry and the render-side owner box, per route;
   - the producer table;
-  - the route IDs;
+  - the route IDs, twice: the producer's copy and the binding's node-ID copy, which the plan holds
+    from attach until bind;
   - the route-activity table, when the compile-time estimate did not already charge it (no
-    prepared gate silences).
+    prepared gate silences). This part is `route_activity_bound_bytes`, an upper bound; every
+    other part is the exact size of what it names.
 
   The next slice admits these bytes against the host's caps.
 

@@ -308,6 +308,26 @@ logs in `target/ci/k3-1223-logs/`). Every gate returned rc 0.
   (2,763,281 B, +792). The named twin is `9e75ffa1…` (3,153,509 B). The module digest is not a
   per-change pin (#1061).
 
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1.** `sdk/test/live-controls-types.ts` adds `@ts-expect-error` for
+  `send.mute(true, { channel: "left" })` and `send.matrix({..}, { channel: "left" })`, so the
+  record's "red if a send gains a lane option" now holds for all three edits. Mutation T1
+  (`RouteEdits.mute` takes `LaneOptions`): `check-sdk-types.sh` RED (unused directive); the same
+  for `matrix`: RED.
+- **MINOR-2.** `docs/handoffs/submix-strips-and-sends/APP-LIVE.md` "Live sends" says that
+  `MisoSessionMap`/`SessionMap` gained a required `routes` (and `submixes`), which a test fake of
+  `sessionMap()` must return.
+- **NITs 1-3.** Not applied: the ASCII-byte check and a browser leg with routes are candidate
+  successors; the two 103-column lines are rewrapped at their next touch (both files ship).
+
+## Verdict
+
+- **Attempt 1** (`932f348a8`): Sol PASS. Two MINORs and three NITs; the MINORs are applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1223-attempt1.md`.
+
 ## Dependencies
 
 - *Admit live send commands in the browser* (#1222)

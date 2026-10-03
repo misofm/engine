@@ -262,7 +262,8 @@ muted source lane's column of the route matrix (`ll` and `rl` for the left lane,
 the right) contributes `+0.0`, never by way of the gain, and a send whose two source lanes are both
 muted is silenced exactly as a muted route is (below). It is what makes a `pre_fader` (or earlier)
 send go quiet with its muted strip; from a `post_fader` or `post_pan` tap the fader mute already
-silences the lane, so the follow changes only which work is skipped. Only a route into a submix
+silences the lane, so the follow changes no audible sample. A send whose two source lanes are muted
+is skipped, and its silent contribution becomes `+0.0` instead of a signed zero. Only a route into a submix
 may follow: a route into the output is never live, so `follows_mute: true` there refuses with
 `schema.invalid_enum` at `$.routes[<i>].follows_mute` ("follows_mute applies only to a route into
 a submix"). The refusal is a validation, not a parse, so a transaction that sets the flag and

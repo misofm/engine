@@ -160,8 +160,10 @@ numbers before editing.
 
     It runs today's `route_transform` checks, then `gated_route_coefficients` with
     `RouteGate { mute, follow_zeroed: source_lane_muted }`, and returns `Domain` if `route_transform`
-    refuses **or** any folded coefficient is not finite (VERIFY-2 MINOR 3: a finite gain times a
-    finite coefficient can overflow, for example +700 dB with `ll = 1e10`).
+    refuses **or** any coefficient of the **open** fold
+    (`gated_route_coefficients(&transform, RouteGate::OPEN)`) is not finite, so domain validity never
+    depends on the gate (VERIFY-2 MINOR 3: a finite gain times a finite coefficient can overflow, for
+    example +700 dB with `ll = 1e10`; #1215 MINOR-1).
   - **This slice:** the compiler's route lowering calls `route_coefficients` with `route.mute` (and
     `source_lane_muted = [false; 2]`) for its domain check and keeps `route_transform`'s unfolded
     transform plus `RouteGate { mute: route.mute, follow_zeroed: [false; 2] }` in `PreparedRoute`. A `Domain` refusal
@@ -412,10 +414,12 @@ with other constants).
     (first, middle and last route): red if the gate is invisible to the canonical text. Mutations:
     no row -> RED; open gate stored -> RED.
   - Gate 1, `host-core/tests/route_mute.rs::a_muted_route_mixes_zero_coefficients` (16 seeds): red if
-    the compiler drops `mute` or mutes by anything other than four `+0.0`. Mutations: open gate
+    the session grammar or compiler drops `mute` (the BTLV codec drop is the protocol round trip's
+    catch, above) or mutes by anything other than four `+0.0`. Mutations: open gate
     stored -> RED; mute through the gain (`0.0 * coefficient`) -> RED (`-0.0 != 0.0` at sample 12).
-  - Gate 3, `route_mute.rs::muting_the_delayed_route_moves_no_delay_or_latency`: red if mute drops
-    the route from the graph or its PDC. Mutation: the lowering skips a muted route -> RED.
+  - Gate 3, `route_mute.rs::muting_the_delayed_route_moves_no_delay_or_latency`: red if a muted
+    *delayed* route loses its PDC line, which the activity rule (#1217) must not drop. Mutation: the
+    lowering skips a muted route -> RED (also red under gates 1 and 5; verdict NIT 3).
   - Gate 4, `route_mute.rs::a_bus_with_a_muted_contributor_folds_no_lane`: red if the fold folds a
     gated route. Mutations: no decline -> RED (8 folds); fold with `RouteGate::OPEN` coefficients ->
     RED (8 folds).
@@ -445,6 +449,24 @@ with other constants).
     `aarch64-debug`).
 - **No bit moved (unmuted sessions).** The determinism record, the graph fixtures, every builtins
   `output_sha256`, the console-workload counts and the `audit capi` PCM digest are unchanged.
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **NIT-1.** D2's copy of the frozen interface says the domain check is of the open fold (#1215
+  MINOR-1's text).
+- **NIT-2.** The `3.2e34` comment in `route_coefficients.rs` is `1.0e35`.
+- **NIT-3.** The record's gate-1 and gate-3 test-value sentences are reworded (above).
+- **NIT-4.** No change: enginectl leaves the `mute` boolean check to the builder, as for `bypass`.
+- **NIT-5.** The transform is derived once (`route_values`, #1215 NIT-2).
+- **INFO.** A delayed muted route writes `-0.0` words, which keep its destination out of a
+  `+0.0` silence latch: a performance note for the silence work (DESIGN O2), never a bit change.
+
+## Verdict
+
+- **Attempt 1** (`f48fe7c74`): Sol PASS. No BLOCKER, MAJOR or MINOR; five NITs, applied or
+  answered above. `docs/handoffs/submix-sends-2026-10-02/verdicts/1216-attempt1.md`.
 
 ## Dependencies
 

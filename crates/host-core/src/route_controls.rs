@@ -40,6 +40,18 @@ pub enum RouteControlError {
 /// A transparent wrapper over the graph's producer, so the producer table host-core retains is
 /// exactly the bytes `graph::route_control_resources` charges for it: one graph producer per
 /// route, its route ID included and never copied. The ID is read through [`Self::route_id`].
+///
+/// # Lifetime (#1221 verdict NIT-3)
+///
+/// - A push's `Ok` means queued, not applied: the render thread applies the record at the route's
+///   op in a later block.
+/// - A producer belongs to the `PreparedHost` plan it was prepared with. A host drops or replaces
+///   it together with that plan; a producer kept past its plan accepts records until its ring
+///   fills, and nothing ever drains them.
+/// - A record still queued when the plan is replaced is discarded with it, so the replacement must
+///   be prepared from the committed state that already holds every acked value.
+///
+/// The strip and effect producers share this contract.
 #[repr(transparent)]
 pub struct RouteControlProducer {
     producer: GraphRouteControlProducer,

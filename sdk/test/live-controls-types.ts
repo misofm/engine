@@ -165,6 +165,10 @@ send.mute(true);
 send.matrix({ ll: 1, lr: 0.25, rl: 0, rr: 0.5 }, { smoothingSamples: 0 });
 // @ts-expect-error a send has no lane: its edits move both of its lanes together
 send.gainDb(-12, { channel: "left" });
+// @ts-expect-error a send has no lane: its mute silences both of its lanes together
+send.mute(true, { channel: "left" });
+// @ts-expect-error a send has no lane: its matrix moves both of its lanes together
+send.matrix({ ll: 1, lr: 0, rl: 0, rr: 1 }, { channel: "left" });
 // @ts-expect-error a send's matrix names all four coefficients
 send.matrix({ ll: 1, rr: 1 });
 // @ts-expect-error a send is not a strip: it has no fader

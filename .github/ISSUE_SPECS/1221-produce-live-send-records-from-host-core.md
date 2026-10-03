@@ -296,8 +296,11 @@ exactly the charged bytes, and the ID is never copied.
 `route_controls` is empty, and the route charge is zero. Replaying base behaviour (the attach call
 removed) gives 64 and 64 too, so the fallback did not apply.
 
-**Gate 6 numbers** (two sends, depth 8): 1,323 bytes charged. That is 608 queue, 352 owner, 144
-producer table, 4 ID and 215 activity bytes, and the largest allocation is 256 bytes.
+**Gate 6 numbers** (two sends, depth 8): 1,659 bytes charged. That is 944 queue, 352 owner, 144
+producer table, 4 ID and 215 activity bytes, and the largest allocation is 256 bytes. (Corrected by
+verdict MINOR-2: the attempt-1 text quoted the M10 run's depth-1 numbers, 1,323 and 608 queue; the
+queue grows 48 B a depth step. The K3 follow-ups later charge each route ID twice, #1220 verdict
+MINOR-1, so at the K3 head the ID part is 8 and the total 1,663.)
 
 **Gates** (this commit, on base `d405abb37`; x86-64-v3 AVX2, AMD EPYC 7313P).
 
@@ -325,6 +328,24 @@ producer table, 4 ID and 215 activity bytes, and the largest allocation is 256 b
   - `check-scalar-oracle-absent.py --wasm` on the named twin: rc 0.
   - `test-web-audioworklet.sh`: rc 0.
 - **No re-pin.**
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+- **MINOR-1** (the browser's exact-retained budget): delivered by #1222.
+- **MINOR-2.** The record's gate-6 numbers are corrected to depth 8 (the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`)).
+- **NIT-2.** The named-allocation join cannot be reached while a route record is no larger than a
+  strip record, so no test exercises it.
+- **NIT-3.** `RouteControlProducer`'s rustdoc states the lifetime contract: `Ok` means queued, a
+  producer belongs to its plan, and records queued at a plan replacement are discarded with it.
+- **For #1225.** Its spec gains the acked-records-at-a-swap hazard and gate, and the cross-route
+  skew statement.
+- **NIT-1** (gate 1's rendered half and the record's `mute` flag): not applied; the record-level
+  assertion defends it.
+
+## Verdict
+
+- **Attempt 1** (`1c5ce5d02`): Sol PASS. Two MINORs and three NITs, applied or answered above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1221-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1221-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

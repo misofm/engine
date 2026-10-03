@@ -19,8 +19,8 @@ use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_
 use crate::ids::{
     PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
-    prepared_effect_node, route_coefficients, route_destination_node, route_source_node,
-    route_transform, sidechain_matches, stages, track_node,
+    prepared_effect_node, route_destination_node, route_source_node, route_values,
+    sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
 use crate::schedule::{buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
@@ -349,7 +349,9 @@ impl GraphCompiler {
                     RouteSource::Track { track_id, .. } => track_id.as_str(),
                     RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
                 };
-                strip_mutes.get(source).copied().unwrap_or([false; 2])
+                *strip_mutes
+                    .get(source)
+                    .expect("a validated route source names a strip")
             } else {
                 [false; 2]
             };
@@ -357,11 +359,7 @@ impl GraphCompiler {
                 mute: route.mute,
                 follow_zeroed,
             };
-            let transform =
-                route_coefficients(route.gain_db, matrix, gate.mute, gate.follow_zeroed)
-                    .ok()
-                    .and_then(|_| route_transform(route.gain_db, matrix));
-            let Some(transform) = transform else {
+            let Ok(transform) = route_values(route.gain_db, matrix) else {
                 diagnostics.push(diag(
                     "graph.gain.non_finite",
                     &format!("$.routes[id={}].gain_db", route.id),

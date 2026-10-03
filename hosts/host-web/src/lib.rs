@@ -4227,13 +4227,6 @@ impl CommandRecord {
         }
     }
 
-    /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
-    ///
-    /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
-    /// of its own. It moves live-control state, and the mute records that state composes to are
-    /// staged once, coalesced, at the end of the submission's first pass. The shape rules are
-    /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
-    /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
     /// Check one send record's fixed shape and read its value (issue #1222 D1).
     ///
     /// `rack` and `channel` are `255`, `effect_index` and `parameter_id` are `0`, and every value
@@ -4266,6 +4259,13 @@ impl CommandRecord {
         }
     }
 
+    /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
+    ///
+    /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
+    /// of its own. It moves live-control state, and the mute records that state composes to are
+    /// staged once, coalesced, at the end of the submission's first pass. The shape rules are
+    /// `mute`'s, with `channel = 255` because solo addresses a strip and not a lane, and the same
+    /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
     const fn into_solo_request(self) -> Result<bool, u32> {
         if self.rack != RACK_NOT_APPLICABLE || self.channel != 255 {
             return Err(COMMAND_REASON_MALFORMED);
@@ -4924,10 +4924,11 @@ fn admit_commands_staged(
     // the prepared route's coefficient function, with the new source lanes. `delta` yields only a
     // change, so a settled send is never retargeted.
     //
-    // The ramp is the last strip-mute record staged for the source strip in this batch, in
-    // staging order (kind 4 records in wire order, then the coalescing pass's), and the follow
-    // record answers to that record's wire index. Every effective-mute change stages a strip mute
-    // record, so one always exists; a follow without one is refused rather than guessed.
+    // The ramp is the last strip-mute record staged for the source strip in this batch that
+    // covers a lane whose effective mute changed, in staging order (kind 4 records in wire order,
+    // then the coalescing pass's), and the follow record answers to that record's wire index.
+    // Every effective-mute change stages a strip mute record covering its lane, so one always
+    // exists; a follow without one is refused rather than guessed.
     //
     // Nothing is pushed here: the records join the room check below with every other staged
     // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
@@ -4943,15 +4944,30 @@ fn admit_commands_staged(
                 return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             };
             let fader_slot = (strip_count + entry.source_strip) as u32;
-            let Some((smoothing_samples, wire_index)) = ready.command_decoded[..lowered]
+            // Only a record covering a lane whose effective mute changed sets the ramp: a no-op
+            // record on the other lane must not (#1224 verdict MINOR-1). The scan stops at the
+            // follow records, which are never strip mutes (MINOR-2).
+            let changed = [
+                source_lane_muted[0] != entry.source_lane_muted[0],
+                source_lane_muted[1] != entry.source_lane_muted[1],
+            ];
+            let Some((smoothing_samples, wire_index)) = ready.command_decoded[..follow_start]
                 .iter()
                 .rev()
                 .find_map(|staged| match staged.kind {
                     StagedCommandKind::Command(AdmittedCommand::Fader(
                         TrackFaderRecord::Mute {
-                            smoothing_samples, ..
+                            lanes,
+                            smoothing_samples,
+                            ..
                         },
-                    )) if staged.queue_slot == fader_slot => {
+                    )) if staged.queue_slot == fader_slot
+                        && match lanes {
+                            BuiltinLaneSelector::Left => changed[0],
+                            BuiltinLaneSelector::Right => changed[1],
+                            BuiltinLaneSelector::Both => changed[0] || changed[1],
+                        } =>
+                    {
                         Some((smoothing_samples, staged.original_wire_index))
                     }
                     _ => None,

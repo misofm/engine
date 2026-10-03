@@ -14,6 +14,10 @@ The session schema's `automation` table accepts builtin (fader, mute, pan) and e
 4. **Cost.** Memory per automated lane independent of song length, CPU per block on the native console and the shipped browser artifact, and a benchmark row (the `console_mixing_automation` row is the natural base).
 5. **Bit-identity.** How browser and C ABI render identical bits for the same session and seek position.
 
+## Coordination with *Submix strips and live aux sends* (#1196, decision 13)
+
+A route with `follows_mute: true` (*Let a route into a submix follow its source strip's mute in the session*, #1218) zeroes the matrix columns of its source strip's muted lanes. Builtin automation of the fader's `mute` (parameter 6) is valid and inert today (`BUILTIN_AUTOMATION_TARGETS`, `crates/session/src/validate.rs:683-699`; `validate_builtin_automation_target` documents the inertness). When stored mute automation renders, a following send must follow the automated mute through the same gated route composition the live path uses (*Let a send follow its source strip's mute live in the browser*, #1224); otherwise a saved session with automated mute leaks its pre-fader sends. The design must answer how.
+
 ## Output
 
 A findings note under `docs/handoffs/` with the design, costs, a staged plan of small bounded issues, and the owner questions. No product code change.

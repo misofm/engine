@@ -1382,11 +1382,19 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
             output_id: id("alt-out"),
         },
         // #1216: a muted route carries field 6 through the codec; #1218: a following route
-        // carries field 7.
+        // carries field 7. The two routes swap the booleans, so a codec that confuses the fields
+        // in either direction is caught (#1218 verdict MINOR-1).
+        SessionEdit::UpsertRoute {
+            route: Route {
+                mute: false,
+                follows_mute: true,
+                ..route.clone()
+            },
+        },
         SessionEdit::UpsertRoute {
             route: Route {
                 mute: true,
-                follows_mute: true,
+                follows_mute: false,
                 ..route.clone()
             },
         },
@@ -1463,7 +1471,7 @@ fn every_route_and_automation_opcode_round_trips_canonically() {
         .expect("typed route/automation decode");
     assert_eq!(decoded.edits, edits);
     assert_eq!(encode(&decoded.edits), bytes);
-    let SessionEdit::UpsertAutomation { automation } = &decoded.edits[14] else {
+    let SessionEdit::UpsertAutomation { automation } = &decoded.edits[15] else {
         panic!("upsert automation");
     };
     assert_eq!(

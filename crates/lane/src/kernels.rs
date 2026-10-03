@@ -1062,10 +1062,12 @@ pub fn mix2x2_block<L: Lane>(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {
 /// the indexed law cannot pass its target before the snap while `(length - 1) * 3u < 1`,
 /// `u = 2^-24` the unit roundoff, which holds up to about `2^22.4` (the submix design's VERIFY-2).
 /// That bound assumes relative rounding. When `|target - start| < length * 2^-126` the step is
-/// subnormal, its rounding error is absolute (up to `2^-150`), and `c(k)` can pass the target by
-/// at most `(length - 1) * 2^-150`, under `2^-128` absolute: inaudible, monotonicity still holds,
-/// and the snap still assigns `target` exactly. A caller refuses a longer length before a ramp
-/// exists.
+/// subnormal (or exactly `2^-126`) and its rounding error is absolute, up to `2^-150`: `k * step`
+/// can then exceed `target - start` by less than `(length - 1) * 2^-150`, and the sum's rounding
+/// onto the target's grid can double that, so `c(k)` can pass the target by less than
+/// `(length - 1) * 2^-149` and never by more than `2^-128` (reached at `length = 2^22`). That is
+/// inaudible; `c(k)` stays monotone for `k < length`, and the snap assigns `target` exactly,
+/// stepping back by the overshoot. A caller refuses a longer length before a ramp exists.
 pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 
 /// The **indexed ramp** of a 2x2 route mix's four coefficients `[ll, lr, rl, rr]`.

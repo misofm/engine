@@ -308,8 +308,12 @@ non-constant signal per lane.
   them), so `reduce_group` is `#[inline(always)]` too. The module's `4wide6f32x4` kernel set
   (12 kernels, listed from `wasm-objdump -d` of the named twin) is now identical to the parent
   `f48fe7c74`'s, and the boot budget's high-water gate passes.
-  Inlining moves no bit: `fresh-process-determinism.json` is `cmp`-identical to both
-  `f48fe7c74`'s and `0da034dba`'s (#1218), and every fixture gate below is green.
+  Inlining moves no bit. The witness is render output, not `fresh-process-determinism.json`
+  (that file is `graph_fixture`'s compiled-graph fingerprint and cannot see render bits; verdict 2
+  NIT-2): Sol's render-digest probe (one to twelve routes, folded and declined, arena and host
+  forms, debug and release, with muted patterns) is identical across `f48fe7c74`, `0da034dba`
+  (#1218) and `1b5034c35`, and `check-browser-expected-resources.py --artifacts` holds the browser
+  identity fixture's three PCM digests, equal to native.
 - **MINOR-1.** `route_mute.rs` pre-fills every host output buffer (`render()` and gate 5's `pcm`)
   with `HOST_SENTINEL = 7.0`; the engine never pre-clears host planes, so the host-master form's
   `+0.0` store is now tested (1217-11). The optional case is added:
@@ -353,6 +357,24 @@ non-constant signal per lane.
     workspace clippy (`--all-features -D warnings`) clean, and clippy without features on `graph`,
     `graph-compiler`, `host-core` and `capi` clean. `run-aarch64-tests.sh debug` runs at the K3
     push (CI `aarch64-debug`).
+
+### K3 follow-up record (after the attempt 2 PASS verdict)
+
+- **MINOR-1** (an active input after an inactive one after an active one): landed in #1220's
+  attempt as `route_mute.rs::a_middle_inactive_route_keeps_every_active_contribution`, adapted from
+  the verifier's probe; mutation MC is red in that test alone.
+- **NIT-1** (the arena-form `+0.0` fill of an all-muted bus): covered by #1220's
+  `a_bus_whose_every_send_goes_inactive_is_refilled_with_positive_zero` (V3c red).
+- **NIT-2.** The attempt-2 record's "inlining moves no bit" now cites render evidence, not the
+  compile fingerprint (the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`)).
+
+## Verdict
+
+- **Attempt 1** (`071c6c14a`): Sol FAIL. BLOCKER-1: `check-web-audioworklet.sh` refused eight
+  outlined `reduce_group_into<f32x4, N>`; MINOR-1 and MINOR-2. `docs/handoffs/submix-sends-2026-10-02/verdicts/1217-attempt1.md`; probes
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1217-attempt1-verifier-scratch.rs`.
+- **Attempt 2** (`1b5034c35`): Sol PASS. One MINOR and two NITs, applied as above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1217-attempt2.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1217-attempt2-verifier-scratch.rs`.
 
 ## Dependencies
 

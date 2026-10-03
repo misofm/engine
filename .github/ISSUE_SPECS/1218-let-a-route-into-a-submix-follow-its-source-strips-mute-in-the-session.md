@@ -48,8 +48,10 @@ mute) is *Let a send follow its source strip's mute live in the browser* (#1224)
   (`RouteSource::{Track, Submix}`, each with a `tap`).
 - **Mute clears bits.** A settled-muted lane is exact `+0.0` at the fader, so a `post_fader` or
   `post_pan` send from a muted strip is already silent. `follows_mute` changes audio only for taps
-  before the fader (`input` through `pre_fader`); for the later taps it changes which work is
-  skipped.
+  before the fader (`input` through `pre_fader`); for the later taps it changes no audible sample.
+  A send whose two source lanes are muted is skipped, and its silent contribution becomes `+0.0`
+  instead of a signed zero (verdict MINOR-2: with a negative matrix coefficient, `+0.0 * c` is
+  `-0.0`, so the follow is digest-visible, never audible).
 - **Contextual refusal precedent.** Session validation refuses a closed token that is legal in
   general but not in its context with `schema.invalid_enum` at the token's path
   (`crates/session/src/validate.rs:646-652`: a shared builtin parameter must be addressed as `both`).
@@ -340,11 +342,43 @@ lane and an asymmetric send matrix.
     `cargo fmt --all -- --check` ok; clippy `-D warnings` ok; the seven check/test policy pairs ok.
     `run-aarch64-tests.sh debug`: not runnable on this x86 host; at batch push (CI `aarch64-debug`).
     D6's capi gates do not apply.
+    `check-web-audioworklet.sh` (inherited row, added by verdict MINOR-3): FAIL on this head,
+    identical on parent `071c6c14a` (#1217 BLOCKER-1: eight outlined `reduce_group_into<f32x4, N>`);
+    PASS with #1217 attempt 2's `#[inline(always)]` applied over this head.
 - **Worktree note.** During this attempt an uncommitted change to `crates/graph/src/runtime.rs`
   marked "issue #1217 attempt 2" (`reduce_group_into` `#[inline(always)]`, a tag-bit check in
   `route_activity`'s index) appeared in the shared worktree. It is not this slice's and is left
   uncommitted; the gates above ran with it present. The committed tree (without it) was rebuilt and
   its `route_mute` and `route_coefficients` tests rerun green in a separate worktree.
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1.** `every_route_and_automation_opcode_round_trips_canonically`
+  (`crates/protocol/src/session_wire/tests.rs`) upserts two routes with swapped booleans
+  (`mute: false, follows_mute: true` and `mute: true, follows_mute: false`). Test value: red if the
+  codec confuses route fields 6 and 7 in either direction. M10 (`parse_route` reads `follows_mute`
+  from `route::MUTE`) and M10b (`tx_route` writes `value.mute` into field 7) are each RED, then
+  reverted.
+- **MINOR-2.** `docs/SESSION_SCHEMA_V1.md` and this spec's Context say that from a `post_fader` or
+  `post_pan` tap the follow changes no audible sample, and that a send with both source lanes
+  muted is skipped, so its silent contribution becomes `+0.0` instead of a signed zero.
+- **MINOR-3.** The record's gate list carries the inherited `check-web-audioworklet.sh` row.
+- **NIT-1.** The lowering `expect`s the source strip ("a validated route source names a strip")
+  instead of defaulting to `[false; 2]`.
+- **NIT-2.** *Research: render stored session automation* (#1058) gains a coordination note: a
+  following send must follow stored mute automation.
+- **NIT-3.** `a_following_send_seals_one_route_follow_zeroed_row` adds the case where only the
+  follow silences the send (`(true, true, false)`) and asserts that the `estimate` row moves
+  exactly then. Test value: red if the activity charge is keyed on the route's `mute` alone rather
+  than the gate's `silences()`. That mutation (`estimate.rs`) is RED here and green on every other
+  test of `graph`, `graph-compiler` and `host-core`.
+
+## Verdict
+
+- **Attempt 1** (`0da034dba`): Sol PASS. Three MINORs and three NITs, applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1218-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1218-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

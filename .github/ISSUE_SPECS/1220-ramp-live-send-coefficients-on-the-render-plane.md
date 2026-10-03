@@ -300,8 +300,10 @@ input section on the destination bus (VERIFY-2 MINOR 7).
    - `RouteControlRecord::new` returns `None` for `length = (1 << 22) + 1` and for `mute = true` with
      a nonzero target.
 
-   *Test value: it turns red if the drain is unbounded, drops or reorders a record, or is skipped
-   while the route is inactive.*
+   *Test value: it turns red if the drain drops or reorders a record, or is skipped while the route
+   is inactive.* (Verdict MINOR-2 struck "is unbounded": single-threaded, an unbounded drain applies
+   exactly what a bounded one does. The bound is structural: the drain loops over
+   `available_at_entry()`, at most the capacity.)
 6. **Render allocates nothing.** In a two-thread test, `try_push` runs on one thread while `render`
    runs on another; `allocations == 0` and `frees == 0` around every render call after warm-up,
    measured with `bench_support::alloc`'s thread-scoped counters.
@@ -491,7 +493,11 @@ applied, run red and reverted. The rows are 1220-1 to 1220-12 in `crates/graph/t
   - The realtime check and test policies: ok (54 regions in 15 files). Graph: PASS and ok.
     Builtins: ok and ok. Workspace policy: ok.
   - `cargo fmt --all -- --check`: rc 0. Workspace `clippy --all-targets --all-features -D
-    warnings`: rc 0, and clippy without features on `graph` and `builtins-compiler` is clean.
+    warnings`: rc 0. (Verdict MINOR-3 corrected an earlier sentence here: `cargo clippy --locked -p
+    graph -p builtins-compiler --all-targets -- -D warnings`, without features, is **not** clean.
+    It reports two dead-code errors in `builtins-compiler`'s lib test target, `initial_matrix_state`
+    and `BoundaryVariant::{Nonadjacent, NonadjacentOutputConflict}`, identical at parent
+    `0268a1c74`, so pre-existing; filed as its own issue, see the verdict record below.)
   - Browser (the D9 instantiation is now linked):
     - `build-web-audioworklet.sh --named-twin`: rc 0. The module is `c21d647a...`, 2,740,212 bytes
       against 2,726,858 at base (+13,354, +0.49%).
@@ -508,6 +514,35 @@ applied, run red and reverted. The rows are 1220-1 to 1220-12 in `crates/graph/t
     `aarch64-debug`). On this host the live routes run `FrameLane = Simd8`. The simd128 module
     carries the 4-lane instantiation.
 - **No re-pin.**
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1.** `route_control_resources` charges each route ID twice: the producer's copy and the
+  binding's node-ID copy, which the plan holds from attach until bind. Its rustdoc and
+  `docs/BUILTINS_AND_METERING_V1.md` call it an upper bound on the attached and the bound state;
+  every part is the exact size of what it names except the activity table, which is
+  `route_activity_bound_bytes`. New test `route_control_resources_cover_the_attached_state`
+  (two 127-byte route IDs, a muted plan): what the attach alone retains is within the charge. Test
+  value: red if the charge counts each route ID once. Mutation (count once): RED, "the charge 1694
+  covers the 1804 bytes the attach retains". Gate 8's formula counts the IDs twice; its numbers are
+  now 1,663 (no silencing gate) and 1,448 (muted).
+- **MINOR-2.** Gate 5's test value (above and in the test's doc) no longer claims an unbounded
+  drain is red; the bound is structural.
+- **MINOR-3.** The record's clippy sentence is corrected; the pre-existing dead code is filed as
+  *Remove the dead code builtins-compiler reports under no-features clippy* (#1235).
+- **NIT-1.** `scripts/check-web-audioworklet-callgraph.py`'s `KERNEL_ROSTER` gains
+  `route-mix-ramp f32x4` (`lane7kernels20route_mix_ramp_block.*4wide6f32x4`, ceiling 0.10; head:
+  vector 22, scalar 0, budget 8). Mutation: `route_mix_settled_tail` made `#[inline(always)]`,
+  module rebuilt: the row fails (`vector=22 scalar=18 budget=8.0`), while the base's analyser,
+  without the row, passes the same module. The analyser's self-test passes.
+- **NIT-2, NIT-3.** No change (recorded by the verdict as acceptable).
+
+## Verdict
+
+- **Attempt 1** (`d405abb37`): Sol PASS. Three MINORs and three NITs, applied or answered above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1220-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1220-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 

@@ -168,18 +168,24 @@ SDK and rendered by the browser and the C ABI.
 - **#1054.** Route ramp lengths use each change's own smoothing until #1054 gives the session a
   smoothing table (P6). On the C ABI, live records use #1053's fixed ramp.
 
-## Owner questions (DESIGN 8.2), open on 2026-10-02
+## Owner questions (DESIGN 8.2), asked on 2026-10-02
 
-No filed slice depends on an answer.
+No filed slice depends on an answer. Q1-Q4 were answered on 2026-10-03; decision 13's ruling quotes
+the owner's words.
 
-- **Q1.** May a submix override a console slot's `link_mode`? Recommendation: no. Use a linked
-  insert for bus glue, and bypass the console compressor on buses.
+- **Q1.** May a submix override a console slot's `link_mode`? **Answered: yes, per strip**, as DAWs
+  choose per plugin instance. Filed outside this umbrella: *Let a strip override a console slot's
+  link mode* (#1236). Until it lands, use a linked insert for bus glue and bypass the console
+  compressor on buses.
 - **Q2.** Should route values be bounded to the fader's `[-144, 24]` dB and the matrix's `[-1, 1]`?
-  Recommendation: yes. Deferred item O11 waits on the answer.
+  **Answered: yes**, with subnormal folded coefficients flushed to `+0.0`. Filed outside this
+  umbrella: *Bound route gain and matrix values* (#1237), the former O11 without its metadata half.
 - **Q3.** Is the latency that each bus level adds through latent console slots accepted?
-  Recommendation: accept.
-- **Q4.** The SDK defaults `followsMute` to `true` on a route into a submix. Say if you want the
-  default reversed.
+  **Answered: accepted as is.** Latent effects (a limiter) belong in inserts.
+- **Q4.** The SDK defaults `followsMute` to `true` on a route into a submix. **Answered: default
+  kept.**
+- **Q5** (asked on 2026-10-03): should a submix keep the input section's `trim_db` and
+  `polarity_invert`? Open, pending the owner's reply; nothing changes until then.
 
 ## Gates every slice inherits
 
@@ -202,14 +208,14 @@ reason.
 
 ## Deferred (designed, not filed; DESIGN section 10)
 
-O1-O11 are designed but not filed, among them:
+O1-O11 are designed but not filed (except O11's bounds, filed as #1237), among them:
 
 - route fusion (O1);
 - silence skips (O2);
 - the epilogue folds (O3, O4);
 - bus bank alignment (O5);
 - live output routes (O9);
-- route value bounds and their metadata, after Q2 (O11).
+- route value metadata (O11's second half; its bounds are #1237).
 
 Each item names its trigger in DESIGN section 10. Further follow-ups, listed in DESIGN 8.2, are not
 designed yet: `follows_pan`, bus solo and implied upstream solo, and VCA trim of sends.

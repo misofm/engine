@@ -312,7 +312,7 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
             "mute {mute}, source lanes muted {source_lane_muted:?}"
         );
     }
-    // The same gain with a unit matrix folds to a finite 3.2e34 and is not refused.
+    // The same gain with a unit matrix folds to a finite 1.0e35 and is not refused.
     assert!(route_coefficients(700.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2]).is_ok());
     // A muted route's values are refused exactly as an open one's (#1216 D2).
     for mute in [false, true] {
@@ -450,7 +450,10 @@ fn assert_estimate_moves_by_the_route_activity_charge(
 ///
 /// Red if the follow is invisible to the canonical text (a follow-zeroed plan and an open one
 /// would share a digest while binding different constants), if the lane bits are swapped, or if
-/// the row lands before the route's `route-mute` row or on another route.
+/// the row lands before the route's `route-mute` row or on another route. The case where only the
+/// follow silences the send (both lanes muted, the send itself open) is the one where the estimate
+/// row moves: red there if the activity charge is keyed on the route's `mute` alone rather than on
+/// the gate's `silences()` (#1218 verdict NIT-3).
 #[test]
 fn a_following_send_seals_one_route_follow_zeroed_row() {
     let text = |model: &SessionModel| {
@@ -473,6 +476,7 @@ fn a_following_send_seals_one_route_follow_zeroed_row() {
     for (left, right, mute) in [
         (true, false, false),
         (false, true, false),
+        (true, true, false),
         (true, true, true),
     ] {
         let mut open = base.clone();
@@ -519,6 +523,21 @@ fn a_following_send_seals_one_route_follow_zeroed_row() {
             lines,
             without_estimate(&open_text),
             "the follow row is the only difference outside the estimate ({left}, {right}, {mute})"
+        );
+        let estimate = |text: &str| -> String {
+            text.lines()
+                .find(|line| line.starts_with("estimate\t"))
+                .expect("an estimate row")
+                .to_owned()
+        };
+        // Only the follow silences the send when both lanes are muted and the send is open; then,
+        // and only then, the follow charges the route-activity table.
+        let follow_alone_silences = left && right && !mute;
+        assert_eq!(
+            estimate(&following_text) != estimate(&open_text),
+            follow_alone_silences,
+            "the estimate moves exactly when the follow alone silences the send \
+             ({left}, {right}, {mute})"
         );
     }
 }

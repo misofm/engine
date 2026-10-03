@@ -32,9 +32,10 @@ Modes
     Assert the artifact still computes in the vector family, and in four lanes only. Four rules,
     none of which is a raw op-count minimum:
 
-    1. **Roster presence.** Each of the nine named kernels in `KERNEL_ROSTER` -- the
-       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library; the
-       tenth, the collapsed limiter's, is held by the forwarding rule below -- must match exactly
+    1. **Roster presence.** Each of the ten named kernels in `KERNEL_ROSTER` -- the
+       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library and
+       the live route's indexed-ramp mix (#1220); the eleventh, the collapsed limiter's, is held
+       by the forwarding rule below -- must match exactly
        one arithmetic-carrying function. A kernel that vanished, that was renamed, or that
        de-vectorised so completely it stopped carrying `f32x4` arithmetic at all fails here.
     2. **Per-kernel scalar budget (the shape gate).** Each roster kernel's scalar
@@ -126,12 +127,13 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 
 # The smallest scalar budget any kernel gets, in instructions.
 #
-# Seven of the ten roster kernels -- the nine `KERNEL_ROSTER` rows and the collapsed limiter's
+# Eight of the eleven roster kernels -- the ten `KERNEL_ROSTER` rows and the collapsed limiter's
 # kernel -- currently emit *zero* scalar `f32` arithmetic, so a ceiling
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
 # well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
-# (soft-clip, 25 vector operations -> ~100 scalar), so the slack cannot hide a scalarisation.
+# (the route ramp mix, 22 vector operations -> ~88 scalar), so the slack cannot hide a
+# scalarisation.
 SCALAR_SLACK = 8
 
 # The named arithmetic kernel bodies of the shipped effect library, with each one's scalar budget.
@@ -156,6 +158,7 @@ SCALAR_SLACK = 8
 #   compressor           f32x4    138 /  0   ratio 0        (collapsed)
 #   parametric-eq        f32x4     84 /  0   ratio 0        (collapsed)
 #   soft-clip            f32x4     25 /  0   ratio 0
+#   route-mix-ramp       f32x4     22 /  0   ratio 0        (#1220; row added by its verdict NIT-1)
 #
 # Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
 # the factor by which a *partial* de-vectorisation would have to stay below to escape: converting
@@ -224,6 +227,15 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
         0.10,
     ),
     ("soft-clip f32x4", r"soft_clip.*4wide6f32x4", 0.10),
+    # #1220 verdict NIT-1: the live route's indexed-ramp mix. Its sub-vector frames are outlined
+    # (`route_mix_ramp_tail`, `route_mix_settled_tail`); an inlined settled tail unrolls as 18
+    # scalar operations beside its 22 vector ones, which the generic "vector > scalar" rule admits
+    # and this row's budget (max(0.10 x 22, slack 8) = 8) refuses.
+    (
+        "route-mix-ramp f32x4",
+        r"lane7kernels20route_mix_ramp_block.*4wide6f32x4",
+        0.10,
+    ),
 )
 
 LIMITER_MONO_ENTRY_PATTERN = (

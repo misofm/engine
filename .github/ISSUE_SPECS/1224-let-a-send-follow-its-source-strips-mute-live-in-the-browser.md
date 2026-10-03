@@ -93,8 +93,10 @@ state; slices 24 and 25 added the route band and kinds. Re-read the current line
   - For each yielded route it updates the mirror's `source_lane_muted` (shadowed), builds the record
     with `RouteControlProducer::record`, and stages it on the route's slot.
   - Its ramp length is the smoothing of the **last strip-mute record staged for that source strip in
-    this batch, in staging order** (kind 4 records in wire order, then the coalescing pass's records,
-    which carry `solo_smoothing`) (VERIFY-2 MINOR 9).
+    this batch that covers a lane whose effective mute changed, in staging order** (kind 4 records in
+    wire order, then the coalescing pass's records, which carry `solo_smoothing`) (VERIFY-2 MINOR 9;
+    amended by the attempt 1 verdict, MINOR-1: a no-op record on the other lane must not set it).
+    When both lanes change through records with different windows, the last one wins.
 - **D4. All or nothing.**
   - Strip mute records and follow records are room-checked together before any push.
   - A full route queue refuses the whole batch as typed backpressure, and both mirrors (solo and
@@ -268,8 +270,10 @@ Base `932f348a8` (#1223 attempt 1). Anchors re-found by symbol.
    ramp to the strip's. Before this slice such a kind 4 was admitted. It now refuses only when it
    moves a followed send. Gate 3 covers it.
 3. **Cost.** The ramp lookup scans the staged entries once per yielded send, `O(sends x
-   staged)`, on the worklet's control path. That is at most 572 entries in the staging test,
-   and nothing allocates. Any per-strip memo is left to the weekly pass.
+   staged)`, on the worklet's control path, and nothing allocates. (Amended by verdict MINOR-2: the
+   scan stops at the follow records, `[..follow_start]`, so its bound is `sends x (2 * 256 + 2 *
+   strips)` entries; the attempt-1 text's "at most 572 entries" described the staging test, not a
+   bound, and the attempt-1 scan, `[..lowered]`, also walked the follow records already staged.) Any per-strip memo is left to the weekly pass.
 4. **The `effective_mute` closure** reads `ready.solo.effective_mute`, the one composition, so a
    bus source follows only its own mute (solo-safe).
 
@@ -350,6 +354,53 @@ Every gate below returned rc 0.
   #1223's record) -> `e323e4b17ff9a76bb38ae94ec3a18657ff43b68aab4eb8deae0f9f2006552e45`
   (2,765,144 B, +1,863). The named twin is `90d7d9cb…` (3,155,519 B). The module digest is not a
   per-change pin (#1061).
+
+### K3 follow-up record (after the attempt 1 PASS verdict)
+
+Amendments, applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k3`):
+
+- **MINOR-1 (D3 amended).** The follow ramp is the last strip-mute record staged for the source
+  strip that **covers a lane whose effective mute changed** (`hosts/host-web/src/lib.rs`, the
+  follow pass): a no-op record on the other lane no longer sets it, so a batch with `mute L @480`
+  and a no-op `mute R=false @0` fades the send over 480 samples instead of stepping it. D3's text
+  above is amended. New test `a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp` (probe
+  P3): red at `eff44271d`, green now; restoring attempt 1's rule turns it red alone.
+- **MINOR-2.** The lookup scans `command_decoded[..follow_start]`, never the follow records already
+  appended (quadratic in yielded sends at attempt 1). Deliverable 3's cost sentence is corrected.
+- **MINOR-3.** Probes adopted as committed tests, each with its mutation run (each RED in that test
+  alone, then reverted):
+  - `a_follow_record_carries_the_mirrors_live_values` (P1): the follow record drops the send's
+    own `mute` (M5); it uses 0 dB, not the mirror's gain (M9).
+  - `each_follow_takes_its_own_source_strips_window` (P2): the lookup ignores the source strip
+    (M2).
+  - `a_solo_follow_ramps_at_the_solo_window` (P4): the lookup sees only records staged before the
+    coalescing pass, with a ramp-0 fallback (the pass-ordering defect, its guard bypassed).
+  - Gate 1's test-value sentence no longer claims the pass ordering; `hosts/host-web/MUTATIONS.md`
+    says deliverable 3(b)'s red is the `malformed` guard's, and records the rows above.
+- **MINOR-4.** `docs/BUILTINS_AND_METERING_V1.md` "Sends follow mute": the `2^22` refusal applies
+  only when a mute change moves a following send (a solo's window counts the same way, reported
+  at the batch's first solo record; the same kind 4 is admitted otherwise), and a full send
+  queue's backpressure index is the first record staged on that send's queue.
+- **NITs 1-3.** Not applied (the overlong-solo index convention, `route_base` respelling
+  `route_slot`, a repeated clause); left for a later touch.
+- **ARTIFACT CHANGED.** With every K3 follow-up applied, the shipped module is
+  `4b0c2fb3581d895af68800f88976ebc5cef1f879fd6d4898dce5cbafa31a1e15` (2,765,142 B; named twin
+  `8410ed88...`, 3,155,514 B). Render closure unchanged (`closure=8 traps=5`, sole owner
+  `render_inner`); kernels 13.
+- **Gates** (x86-64-v3 AVX2, the follow-up tree), all rc 0: `build-web-audioworklet.sh
+  --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`, `check-web-audioworklet-v8-spill.py`; the CI browser legs (`npm run
+  qualify -- --check-matrix --self-test-mutations`, SDK source bundle, private PulseAudio null
+  sink) on chromium, firefox and webkit; `check-sdk-generated.sh`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh`, `sdk-package.sh check`; host-web lib suite 164 passed, 0 failed, 1
+  ignored; test-debug-a 1,239 passed, 0 failed, 9 ignored; test-debug-b 791 passed, 0 failed, 24
+  ignored; fmt; workspace clippy `-D warnings`; rustdoc `-D warnings`; the policy check/test
+  pairs. `run-aarch64-tests.sh debug`: at batch push (CI `aarch64-debug`).
+
+## Verdict
+
+- **Attempt 1** (`eff44271d`): Sol PASS. Four MINORs and three NITs; the MINORs are applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1224-attempt1.md`; probes `docs/handoffs/submix-sends-2026-10-02/verdicts/1224-attempt1-verifier-scratch.rs`.
 
 ## Dependencies
 
