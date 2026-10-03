@@ -243,6 +243,13 @@ export interface RouteSpec {
    * its latency compensation and its level kept, and contributes silence (issue #1216).
    */
   readonly mute?: boolean;
+  /**
+   * Whether the send follows its source strip's lane mutes, as a console's "follow mute": a muted
+   * source lane's matrix column contributes nothing (issue #1218). Only a route into a submix may
+   * follow. Absent is `true` for a route into a submix and `false` for a route into the output;
+   * `true` on a route into the output is refused.
+   */
+  readonly followsMute?: boolean;
 }
 
 /**

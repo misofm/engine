@@ -440,7 +440,7 @@ describe("validation refusals name the offending path", () => {
     // drop `mute` from the routes key order in `session-json.ts`, default it to anything but
     // `false` in `normalizeSession`, or skip the builder's boolean check.
     const json = oneTrack().toJson();
-    assert.match(json, /"gain_db": 0\.0,\n\s*"mute": false\n\s*\}/);
+    assert.match(json, /"gain_db": 0\.0,\n\s*"mute": false,\n/);
     assert.equal(oneTrack().toJSON().routes[0].mute, false);
     const base = session({ id: "route.mute", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
@@ -456,6 +456,76 @@ describe("validation refusals name the offending path", () => {
         }),
       /route\("r"\)\.mute/,
     );
+  });
+
+  /** One track with a main route into the output and a `pre_fader` send into bus `verb`. */
+  function withSend(send = {}, main = {}) {
+    return session({ id: "route.follows-mute", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .submix("verb")
+      .output("out")
+      .route({
+        id: "t-out",
+        source: { kind: "track", trackId: "t", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+        ...main,
+      })
+      .route({
+        id: "t-verb",
+        source: { kind: "track", trackId: "t", tap: "pre_fader" },
+        destination: { kind: "submix_input", submixId: "verb" },
+        ...send,
+      })
+      .route({
+        id: "verb-out",
+        source: { kind: "submix", submixId: "verb", tap: "post_pan" },
+        destination: { kind: "output_input", outputId: "out" },
+      });
+  }
+
+  test("an omitted followsMute is true into a submix and false into the output, written after mute", () => {
+    // #1218 gate 7 (D5). Red mutations: default `follows_mute` to a constant in `normalizeSession`
+    // (one destination kind gets the wrong value), drop it from the routes key order in
+    // `session-json.ts` (the key is missing), or put it before `mute` (the order regex fails).
+    const omitted = withSend();
+    assert.deepEqual(
+      omitted.toJSON().routes.map((row) => [row.id, row.follows_mute]),
+      [["t-out", false], ["t-verb", true], ["verb-out", false]],
+    );
+    const json = omitted.toJson();
+    assert.equal((json.match(/"mute": false,\n\s*"follows_mute": (true|false)\n\s*\}/g) ?? []).length, 3);
+    const explicit = withSend({ followsMute: false });
+    assert.deepEqual(
+      explicit.toJSON().routes.map((row) => [row.id, row.follows_mute]),
+      [["t-out", false], ["t-verb", false], ["verb-out", false]],
+    );
+  });
+
+  test("followsMute: true on a route into the output throws, at the route's own path", () => {
+    // #1218 gate 6 (D5, DESIGN P11). A route into the output is never live, so a follow there
+    // would leave the strip's main route silent after a live unmute. Red mutations: drop the
+    // destination check in `route()` (the builder accepts it and the engine refuses the document
+    // later), or the boolean check (a non-boolean is accepted).
+    for (const [main, message, code] of [
+      [
+        { followsMute: true },
+        /route\("t-out"\)\.followsMute: follows_mute applies only to a route into a submix/,
+        "schema.invalid_enum",
+      ],
+      [{ followsMute: 1 }, /route\("t-out"\)\.followsMute: expected a boolean/, undefined],
+    ]) {
+      assert.throws(
+        () => withSend({}, main),
+        (error) => {
+          assert.ok(error instanceof MisoUsageError);
+          assert.match(error.message, message);
+          assert.equal(error.diagnosticCode, code);
+          return true;
+        },
+      );
+    }
+    assert.equal(withSend({}, { followsMute: false }).toJSON().routes[0].follows_mute, false);
   });
 
   test("the ID namespaces are enforced in both directions", () => {

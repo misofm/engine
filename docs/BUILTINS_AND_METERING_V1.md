@@ -187,6 +187,8 @@ The gate applies at the fader, so taps at `input`, `post_input`, `insert_send`,
 pre-fader metering survives a solo, which is console-correct and is what makes gain-riding a
 silenced strip possible. Taps at `post_fader` and `post_pan`, and everything downstream of them
 (submixes, outputs, the designated master's peak and gain-reduction rows), read the **gated** mix.
+A send from a pre-fader tap follows its strip's mute only with `follows_mute: true`, which only a
+route into a submix may set (#1218).
 
 A gain-reduction tap on a strip that solo has silenced falls toward zero reduction, because its
 effects are seeing silence. That is the true state of that signal path, not an artifact of the

@@ -237,6 +237,12 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
             route_id: route.id.clone(),
             mute: true,
         },
+        // #1218: the follow switch, encoded on (the upserted route carries field 7 off). A codec
+        // value: a store would refuse it on this output route, and the corpus is never applied.
+        SessionEdit::SetRouteFollowsMute {
+            route_id: route.id.clone(),
+            follows_mute: true,
+        },
         SessionEdit::UpsertAutomation {
             automation: automation.clone(),
         },
@@ -697,7 +703,9 @@ pub enum ConformanceDecoder {
 /// and the corpus's `SetRouteSource` value is a tapped submix source.
 /// Issue #1216 repinned it from `a1dcc56f2e4a48f9`: route field `mute` (field 6), and opcode
 /// `0x0506` (`SetRouteMute`) appended, 42 edits, one per allocated opcode. The frame count stays 46.
-pub const COMPLETE_SCHEMA_HASH: u64 = 0x39e5_a2c1_d317_a9fe;
+/// Issue #1218 repinned it from `39e5a2c1d317a9fe`: route field `follows_mute` (field 7), and
+/// opcode `0x0507` (`SetRouteFollowsMute`) appended, 43 edits. The frame count stays 46.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0x95c1_ceb6_8e44_f6e2;
 
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.

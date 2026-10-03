@@ -350,7 +350,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "bass-band",
@@ -370,7 +371,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "vocal-band",
@@ -390,7 +392,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     }
   ],
   "automation": [

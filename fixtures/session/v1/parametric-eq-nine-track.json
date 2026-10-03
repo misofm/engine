@@ -61,7 +61,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq1-main",
@@ -81,7 +82,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq2-main",
@@ -101,7 +103,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq3-main",
@@ -121,7 +124,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq4-main",
@@ -141,7 +145,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq5-main",
@@ -161,7 +166,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq6-main",
@@ -181,7 +187,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq7-main",
@@ -201,7 +208,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "eq8-main",
@@ -221,7 +229,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     }
   ],
   "automation": [],

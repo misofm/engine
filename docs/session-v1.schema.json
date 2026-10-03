@@ -152,8 +152,10 @@
       "properties": { "ll": { "$ref": "#/$defs/f32" }, "lr": { "$ref": "#/$defs/f32" }, "rl": { "$ref": "#/$defs/f32" }, "rr": { "$ref": "#/$defs/f32" } }
     },
     "route": {
-      "type": "object", "additionalProperties": false, "required": ["id", "source", "destination", "channel_matrix", "gain_db", "mute"],
-      "properties": { "id": { "$ref": "#/$defs/id" }, "source": { "$ref": "#/$defs/route_source" }, "destination": { "$ref": "#/$defs/route_destination" }, "channel_matrix": { "$ref": "#/$defs/channel_matrix" }, "gain_db": { "$ref": "#/$defs/f32" }, "mute": { "type": "boolean" } }
+      "type": "object", "additionalProperties": false, "required": ["id", "source", "destination", "channel_matrix", "gain_db", "mute", "follows_mute"],
+      "properties": { "id": { "$ref": "#/$defs/id" }, "source": { "$ref": "#/$defs/route_source" }, "destination": { "$ref": "#/$defs/route_destination" }, "channel_matrix": { "$ref": "#/$defs/channel_matrix" }, "gain_db": { "$ref": "#/$defs/f32" }, "mute": { "type": "boolean" }, "follows_mute": { "type": "boolean" } },
+      "if": { "properties": { "destination": { "properties": { "kind": { "const": "output_input" } } } } },
+      "then": { "properties": { "follows_mute": { "const": false } } }
     },
     "automation_target": {
       "type": "object", "additionalProperties": false, "required": ["entity_id", "rack", "effect_id", "parameter_id", "channel"],

@@ -255,7 +255,19 @@ strip after its pan or matrix, now `{ kind = "submix", submix_id, tap = "post_pa
 `kind` and refuses with `schema.invalid_enum`. Every route carries a required boolean `mute`, written
 after `gain_db` (#1216): the send's on/off switch. A muted route stays in the graph, with its edge,
 its latency compensation and its gain and matrix kept, and contributes silence; muting or unmuting
-a route never changes the plan's structure or latency. A muted route whose edge into its
+a route never changes the plan's structure or latency. Every route also carries a required boolean
+`follows_mute`, written after `mute` (#1218). With `follows_mute: true` the send follows its source
+strip's lane mutes (the source's fader `left_mute` and `right_mute`, on a track or a submix): a
+muted source lane's column of the route matrix (`ll` and `rl` for the left lane, `lr` and `rr` for
+the right) contributes `+0.0`, never by way of the gain, and a send whose two source lanes are both
+muted is silenced exactly as a muted route is (below). It is what makes a `pre_fader` (or earlier)
+send go quiet with its muted strip; from a `post_fader` or `post_pan` tap the fader mute already
+silences the lane, so the follow changes only which work is skipped. Only a route into a submix
+may follow: a route into the output is never live, so `follows_mute: true` there refuses with
+`schema.invalid_enum` at `$.routes[<i>].follows_mute` ("follows_mute applies only to a route into
+a submix"). The refusal is a validation, not a parse, so a transaction that sets the flag and
+re-points the route into a submix commits. The prepared follow is part of the sealed graph text (a
+`route-follow-zeroed` row). A muted route whose edge into its
 destination carries no latency compensation contributes nothing: it is neither mixed nor read
 (#1217). A muted route whose edge is compensated keeps running and contributes its mix with `+0.0`
 coefficients through its delay, so its compensation line never holds stale audio. Either way the

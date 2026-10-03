@@ -98,6 +98,8 @@ pub enum SessionEditOpcode {
     SetRouteGainDb = 0x0505,
     /// `SetRouteMute` (#1216). Appended at the next unallocated route code.
     SetRouteMute = 0x0506,
+    /// `SetRouteFollowsMute` (#1218). Appended at the next unallocated route code.
+    SetRouteFollowsMute = 0x0507,
     /// `UpsertAutomation`.
     UpsertAutomation = 0x0600,
     /// `RemoveAutomation`.
@@ -157,6 +159,7 @@ impl SessionEditOpcode {
             0x0504 => Some(Self::SetRouteChannelMatrix),
             0x0505 => Some(Self::SetRouteGainDb),
             0x0506 => Some(Self::SetRouteMute),
+            0x0507 => Some(Self::SetRouteFollowsMute),
             0x0600 => Some(Self::UpsertAutomation),
             0x0601 => Some(Self::RemoveAutomation),
             0x0602 => Some(Self::SetAutomationTarget),
@@ -390,6 +393,12 @@ pub enum SessionEdit {
     SetRouteGainDb { route_id: StableId, gain_db: f32 },
     /// Set one route's on/off switch; a muted route stays in the graph.
     SetRouteMute { route_id: StableId, mute: bool },
+    /// Set whether one route follows its source strip's lane mutes. Validated on the final
+    /// candidate: only a route into a submix may follow.
+    SetRouteFollowsMute {
+        route_id: StableId,
+        follows_mute: bool,
+    },
     /// Insert or replace persistent automation by stable ID.
     UpsertAutomation { automation: Automation },
     /// Remove persistent automation by stable ID.
@@ -449,6 +458,7 @@ impl SessionEdit {
             Self::SetRouteChannelMatrix { .. } => SessionEditOpcode::SetRouteChannelMatrix,
             Self::SetRouteGainDb { .. } => SessionEditOpcode::SetRouteGainDb,
             Self::SetRouteMute { .. } => SessionEditOpcode::SetRouteMute,
+            Self::SetRouteFollowsMute { .. } => SessionEditOpcode::SetRouteFollowsMute,
             Self::UpsertAutomation { .. } => SessionEditOpcode::UpsertAutomation,
             Self::RemoveAutomation { .. } => SessionEditOpcode::RemoveAutomation,
             Self::SetAutomationTarget { .. } => SessionEditOpcode::SetAutomationTarget,
@@ -720,6 +730,10 @@ pub fn apply_session_edit(
             route_mut(session, route_id)?.gain_db = *gain_db
         }
         SessionEdit::SetRouteMute { route_id, mute } => route_mut(session, route_id)?.mute = *mute,
+        SessionEdit::SetRouteFollowsMute {
+            route_id,
+            follows_mute,
+        } => route_mut(session, route_id)?.follows_mute = *follows_mute,
         SessionEdit::UpsertAutomation { automation } => {
             upsert(&mut session.automation, automation, |item| &item.id);
         }
@@ -1170,7 +1184,7 @@ mod tests {
     fn set_route_mute_switches_the_route_in_the_committed_snapshot() {
         let mut store = store();
         let open = store.canonical_snapshot().to_owned();
-        assert!(open.contains("\"gain_db\": 0.0,\n      \"mute\": false\n"));
+        assert!(open.contains("\"gain_db\": 0.0,\n      \"mute\": false,\n"));
         for (revision, mute) in [(7, true), (8, false)] {
             store
                 .apply_transaction(
@@ -1393,9 +1407,10 @@ mod tests {
         }
     }
 
-    /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), and #1216 appends
-    /// `SetRouteMute` (`0x0506`): every allocated code round-trips through `from_raw`, there are
-    /// exactly 42 of them, and no retired code came back.
+    /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1216 appends
+    /// `SetRouteMute` (`0x0506`) and #1218 appends `SetRouteFollowsMute` (`0x0507`): every
+    /// allocated code round-trips through `from_raw`, there are exactly 43 of them, and no retired
+    /// code came back.
     ///
     /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
     /// variant, or if an opcode is added to the enum but not to `from_raw`.
@@ -1404,7 +1419,7 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 42);
+        assert_eq!(allocated.len(), 43);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
@@ -1417,6 +1432,10 @@ mod tests {
         assert_eq!(
             SessionEditOpcode::from_raw(0x0506),
             Some(SessionEditOpcode::SetRouteMute)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0507),
+            Some(SessionEditOpcode::SetRouteFollowsMute)
         );
         for retired in [0x0006, 0x0102, 0x0104] {
             assert_eq!(SessionEditOpcode::from_raw(retired), None);

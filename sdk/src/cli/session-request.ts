@@ -383,7 +383,7 @@ function submix(value: unknown, path: string): { id: string; spec: SubmixSpec | 
 
 function route(value: unknown, path: string): RouteSpec {
   const raw = record(value, path);
-  keys(raw, ["id", "source", "destination", "matrix", "gainDb", "mute"], ["id", "source", "destination"], path);
+  keys(raw, ["id", "source", "destination", "matrix", "gainDb", "mute", "followsMute"], ["id", "source", "destination"], path);
   return {
     id: string(raw.id, `${path}.id`),
     source: routeSource(raw.source, `${path}.source`),
@@ -392,6 +392,8 @@ function route(value: unknown, path: string): RouteSpec {
     ...(raw.gainDb === undefined ? {} : { gainDb: number(raw.gainDb, `${path}.gainDb`) }),
     // The builder refuses a non-boolean `mute`, as it does a non-boolean `bypass`.
     ...(raw.mute === undefined ? {} : { mute: raw.mute as boolean }),
+    // The builder refuses a non-boolean `followsMute`, and `true` on a route into the output.
+    ...(raw.followsMute === undefined ? {} : { followsMute: raw.followsMute as boolean }),
   };
 }
 

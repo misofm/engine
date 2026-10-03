@@ -806,6 +806,12 @@ export class SessionBuilder {
     }
     if (spec.gainDb !== undefined) f32(spec.gainDb, `${path}.gainDb`);
     if (spec.mute !== undefined) bool(spec.mute, `${path}.mute`);
+    if (spec.followsMute !== undefined) {
+      bool(spec.followsMute, `${path}.followsMute`);
+      if (spec.followsMute && spec.destination.kind !== "submix_input") {
+        fail(`${path}.followsMute`, "follows_mute applies only to a route into a submix", CODE.invalidEnum);
+      }
+    }
     return this.#next({ routes: [...this.#state.routes, freeze({ ...spec })] });
   }
 
@@ -1538,6 +1544,8 @@ function normalize(state: BuilderState): SessionModel {
       channel_matrix: matrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
       gain_db: f32(spec.gainDb ?? 0, `route("${spec.id}").gainDb`),
       mute: spec.mute ?? false,
+      // #1218 D5: a send follows its source's mute by default; a route into the output never does.
+      follows_mute: spec.followsMute ?? spec.destination.kind === "submix_input",
     }))
     .sort(byId);
   const automation = state.automation

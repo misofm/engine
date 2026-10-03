@@ -1,5 +1,6 @@
 //! Issue #1216: a route's `mute` is a session switch, and it is not structural. Issue #1217: an
-//! undelayed muted route is inactive -- neither mixed nor read by its destination's sum.
+//! undelayed muted route is inactive -- neither mixed nor read by its destination's sum. Issue
+//! #1218: a send into a submix may follow its source strip's lane mutes.
 //!
 //! * **#1217 gate 1, an inactive route is neither mixed nor read.** A bus, and the session output,
 //!   sum two contributors fed distinct noise, one route muted, and render the scalar D3 oracle
@@ -13,6 +14,11 @@
 //! * **#1216 gate 4, no folded muted lane.** A bus with a muted contributor declines the route fold
 //!   and renders the bits of the same plan bound with the fold declined.
 //! * **#1217 gate 5**: those sessions render without one allocator call after warm-up.
+//!
+//! * **#1218 gates 1 and 4, a follow send zeroes its muted source lane's column**, from a track
+//!   and from a submix, bit-identically to the same send with that column at `+0.0`.
+//! * **#1218 gate 2, a fully follow-muted send** is inactive when undelayed and stays active, mixing
+//!   `[+0.0; 4]`, when delayed.
 //!
 //! #1216's gate 1 (a muted route mixes zero coefficients) was superseded by #1217's: an undelayed
 //! muted route is no longer mixed at all.
@@ -83,6 +89,7 @@ fn route(id: &str, source: RouteSource, destination: RouteDestination) -> Route 
         },
         gain_db: 0.0,
         mute: false,
+        follows_mute: false,
     }
 }
 
@@ -814,17 +821,22 @@ fn delayed_bus(with_d: bool) -> SessionModel {
 /// every block, an arena buffer this block never wrote.
 #[test]
 fn a_muted_delayed_route_stays_active() {
-    let model = delayed_session_checked();
+    assert_delayed_route_stays_active(&delayed_session_checked(delayed_bus(true)));
+}
+
+/// The body of [`a_muted_delayed_route_stays_active`] for any `model` built from
+/// [`delayed_bus`]`(true)` whose `d-e` is silenced (muted, or following a fully muted `d`).
+fn assert_delayed_route_stays_active(model: &SessionModel) {
     let mut draw = Draw::new(12_173);
     let feeds: Vec<(String, [Vec<f32>; 2])> = ["d", "s"]
         .iter()
         .map(|id| ((*id).to_owned(), planes(&mut draw, None)))
         .collect();
     let (reference, _) = render_counted(&document(&delayed_bus(false)), &feeds);
-    let (actual, mixes) = render_counted(&document(&model), &feeds);
+    let (actual, mixes) = render_counted(&document(model), &feeds);
     assert!(
         graph::test_only_route_activity_built(),
-        "a plan with a muted route builds its route-activity table"
+        "a plan with a silenced route builds its route-activity table"
     );
     let mut expected = reference.clone();
     for (plane, samples) in expected.iter_mut().enumerate() {
@@ -851,16 +863,15 @@ fn a_muted_delayed_route_stays_active() {
         "the bus renders audio"
     );
     assert_eq!(
-        mixes[route_index(&model, "d-e")],
+        mixes[route_index(model, "d-e")],
         BLOCKS as u64,
-        "the muted delayed route mixes its zero coefficients every block"
+        "the silenced delayed route mixes its zero coefficients every block"
     );
 }
 
-/// [`delayed_bus`] with `d-e`, after asserting from the compiled plan that `d-e` is the one route
-/// PDC delays, by [`LIMITER_LATENCY`] samples.
-fn delayed_session_checked() -> SessionModel {
-    let model = delayed_bus(true);
+/// `model` ([`delayed_bus`] with `d-e`), after asserting from the compiled plan that `d-e` is the
+/// one route PDC delays, by [`LIMITER_LATENCY`] samples.
+fn delayed_session_checked(model: SessionModel) -> SessionModel {
     let artifact = graph_artifact(&document(&model));
     let route = graph::StableGraphId::parse("d-e").expect("graph id");
     assert!(
@@ -953,5 +964,227 @@ fn route_activity_renders_without_allocating() {
         .iter()
         .map(|id| ((*id).to_owned(), planes(&mut draw, None)))
         .collect();
-    assert_renders_without_allocating(&document(&delayed_session_checked()), &two);
+    assert_renders_without_allocating(&document(&delayed_session_checked(delayed_bus(true))), &two);
+}
+
+// ---- #1218: a send that follows its source strip's mute -----------------------------------
+
+/// Which strip a follow send leaves.
+#[derive(Clone, Copy, Debug)]
+enum FollowSource {
+    /// Track `t` itself.
+    Track,
+    /// Submix `s`, which `t` feeds by the unity route `t-s` from its `input` tap.
+    Submix,
+}
+
+/// #1218 gates 1 and 4. The source strip (`t`, or `s` fed by `t`) has its `lane` muted and sends
+/// `send` from its `pre_fader` tap, with `gain_db` and `matrix`, into bus `b`, whose `input` tap
+/// feeds the output by the unity route `b-main`. `send` follows the source's mute when `follows`.
+fn follow_send(
+    source: FollowSource,
+    lane: usize,
+    gain_db: f32,
+    matrix: &ChannelMatrix,
+    follows: bool,
+) -> SessionModel {
+    let (mut model, source_pcm, track) = empty_session();
+    add_track(&mut model, &source_pcm, &track, "t");
+    let tap = SendTap::PreFader;
+    let (from, fader) = match source {
+        FollowSource::Track => (
+            RouteSource::Track {
+                track_id: sid("t"),
+                tap,
+            },
+            &mut model.tracks[0].fader,
+        ),
+        FollowSource::Submix => {
+            model
+                .routes
+                .push(route("t-s", input_tap("t"), into_bus("s")));
+            model.submixes.push(Submix::unity(sid("s"), &model.console));
+            (
+                RouteSource::Submix {
+                    submix_id: sid("s"),
+                    tap,
+                },
+                &mut model.submixes[0].fader,
+            )
+        }
+    };
+    match lane {
+        0 => fader.left_mute = true,
+        _ => fader.right_mute = true,
+    }
+    let mut send = route("send", from, into_bus("b"));
+    send.gain_db = gain_db;
+    send.channel_matrix = matrix.clone();
+    send.follows_mute = follows;
+    model.routes.push(send);
+    model.routes.push(to_output("b-main", bus_input("b")));
+    model.submixes.push(Submix::unity(sid("b"), &model.console));
+    model
+}
+
+/// `matrix` with source lane `lane`'s column (`ll` and `rl` for the left, `lr` and `rr` for the
+/// right) set to `+0.0`: what a follow of a muted `lane` must render as.
+fn column_zeroed(matrix: &ChannelMatrix, lane: usize) -> ChannelMatrix {
+    let mut zeroed = matrix.clone();
+    match lane {
+        0 => (zeroed.ll, zeroed.rl) = (0.0, 0.0),
+        _ => (zeroed.lr, zeroed.rr) = (0.0, 0.0),
+    }
+    zeroed
+}
+
+const FOLLOW_COLUMN: &str = "a_follow_send_zeroes_its_muted_source_lanes_column";
+const FOLLOW_COLUMN_REPLAY: &str = "cargo test -p host-core --features host-core/test-support \
+                                    --test route_mute -- --exact \
+                                    a_follow_send_zeroes_its_muted_source_lanes_column";
+
+/// #1218 gates 1 and 4. A `pre_fader` follow send from a strip with one muted lane renders
+/// exactly the same session with that lane's matrix column at `+0.0` and no follow: the muted
+/// lane's column contributes nothing and the other column is unchanged. Gate 1 is a track with
+/// `left_mute`; gate 4 is a submix with `right_mute` (the construction mirrored); each also runs
+/// the other lane. The send's matrix and its source's two lanes are distinct, so a zeroed column
+/// is visible on both output lanes; without the follow the muted lane leaks (the pre-fader tap is
+/// un-gated), so the comparison is not vacuous.
+///
+/// Red if the flag is ignored (the muted column leaks), zeroes the wrong column (the lanes swap),
+/// is applied through the gain (both columns go silent), or reads source mutes from tracks only
+/// (the submix case leaks).
+#[test]
+fn a_follow_send_zeroes_its_muted_source_lanes_column() {
+    let ran = run_seeds(FOLLOW_COLUMN, FOLLOW_COLUMN_REPLAY, 8, |seed| {
+        for (source, lane) in [
+            (FollowSource::Track, 0),
+            (FollowSource::Submix, 1),
+            (FollowSource::Track, 1),
+            (FollowSource::Submix, 0),
+        ] {
+            let mut draw = Draw::new(seed);
+            let gain_db = draw.in_domain(-12.0, 6.0);
+            let mut coefficient = || {
+                let negative = draw.chance(1, 2);
+                signed(&mut draw, negative)
+            };
+            let matrix = ChannelMatrix {
+                ll: coefficient(),
+                lr: coefficient(),
+                rl: coefficient(),
+                rr: coefficient(),
+            };
+            let feeds = vec![("t".to_owned(), planes(&mut draw, None))];
+            let what = format!("seed {seed}, {source:?} lane {lane} muted");
+            let (actual, _) = render(
+                &document(&follow_send(source, lane, gain_db, &matrix, true)),
+                &feeds,
+            );
+            let zeroed = column_zeroed(&matrix, lane);
+            let (expected, _) = render(
+                &document(&follow_send(source, lane, gain_db, &zeroed, false)),
+                &feeds,
+            );
+            for plane in 0..2 {
+                assert_bits_equal(
+                    &actual[plane],
+                    &expected[plane],
+                    &format!("{what}, plane {plane}"),
+                );
+                assert!(
+                    actual[plane].iter().any(|sample| *sample != 0.0),
+                    "{what}: plane {plane} carries the open lane's column"
+                );
+            }
+            let (leak, _) = render(
+                &document(&follow_send(source, lane, gain_db, &matrix, false)),
+                &feeds,
+            );
+            assert_ne!(
+                leak, actual,
+                "{what}: without the follow the muted lane leaks"
+            );
+        }
+    });
+    if !dsp_reference::randomized::replaying() {
+        assert_eq!(ran, 8);
+    }
+}
+
+const FOLLOW_SILENT: &str = "a_fully_follow_muted_undelayed_send_is_inactive";
+const FOLLOW_SILENT_REPLAY: &str = "cargo test -p host-core --features host-core/test-support \
+                                    --test route_mute -- --exact \
+                                    a_fully_follow_muted_undelayed_send_is_inactive";
+
+/// #1218 gate 2, undelayed. Gate 1 of #1217's bus, with no route muted: `r0` follows `t0`, whose
+/// two lanes are muted, so `r0` is silenced and, undelayed, inactive. The bus renders the P4/D3
+/// oracle (`r0` first in route-ID order owns the store with `+0.0`, `r1` is added) bit for bit, and
+/// `r0`'s op never mixes while `r1`'s mixes every block.
+///
+/// Red if a fully follow-muted undelayed send is still mixed (its counter, and the signed zeros
+/// its zero-coefficient mix would add), or if the follow is ignored (the oracle omits `r0`'s
+/// pre-fader audio).
+#[test]
+fn a_fully_follow_muted_undelayed_send_is_inactive() {
+    let ran = run_seeds(FOLLOW_SILENT, FOLLOW_SILENT_REPLAY, 16, |seed| {
+        let mut draw = Draw::new(seed);
+        // No route muted: both contributors carry their signed-zero frames.
+        let (mut model, routes, feeds) = two_contributors(&mut draw, Sum::Bus, 2);
+        let fader = &mut model.tracks[0].fader;
+        (fader.left_mute, fader.right_mute) = (true, true);
+        assert_eq!(model.routes[0].id.as_str(), "r0");
+        model.routes[0].follows_mute = true;
+        let (actual, mixes) = render_counted(&document(&model), &feeds);
+        assert!(
+            graph::test_only_route_activity_built(),
+            "seed {seed}: a fully follow-zeroed send builds the route-activity table"
+        );
+        let contributions = vec![
+            (false, mix(&routes[0], &feeds[0].1)),
+            (true, mix(&routes[1], &feeds[1].1)),
+        ];
+        let expected = mix(
+            &to_output("b-main", bus_input("b")),
+            &d3_sum(&contributions),
+        );
+        for plane in 0..2 {
+            assert_bits_equal(
+                &actual[plane],
+                &expected[plane],
+                &format!("seed {seed}, plane {plane}"),
+            );
+        }
+        assert_eq!(mixes[route_index(&model, "r0")], 0, "seed {seed}: r0 mixed");
+        assert_eq!(
+            mixes[route_index(&model, "r1")],
+            BLOCKS as u64,
+            "seed {seed}: r1 mixes every block"
+        );
+    });
+    if !dsp_reference::randomized::replaying() {
+        assert_eq!(ran, 16);
+    }
+}
+
+/// #1218 gate 2, delayed. #1217 gate 3's bus with `d-e` open but following `d`, whose two lanes
+/// are muted: `d-e`'s edge into `e` carries the limiter's 486-sample compensation (asserted from
+/// the compiled plan), so it stays active, mixes `[+0.0; 4]` every block, and the bus renders that
+/// gate's oracle.
+///
+/// Red if a fully follow-muted delayed send is skipped (its counter stops, and its consumer would
+/// stage a buffer this block never wrote) or still mixes its open coefficients.
+#[test]
+fn a_fully_follow_muted_delayed_send_stays_active() {
+    let mut model = delayed_bus(true);
+    assert_eq!(model.tracks[0].id.as_str(), "d");
+    let fader = &mut model.tracks[0].fader;
+    (fader.left_mute, fader.right_mute) = (true, true);
+    let follow = model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "d-e")
+        .expect("d-e is declared");
+    (follow.mute, follow.follows_mute) = (false, true);
+    assert_delayed_route_stays_active(&delayed_session_checked(model));
 }

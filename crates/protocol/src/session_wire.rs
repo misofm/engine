@@ -585,6 +585,13 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             tx_id(sink, fields[0], route_id)?;
             tx_bool(sink, fields[1], *mute)
         }
+        SessionEdit::SetRouteFollowsMute {
+            route_id,
+            follows_mute,
+        } => {
+            tx_id(sink, fields[0], route_id)?;
+            tx_bool(sink, fields[1], *follows_mute)
+        }
         SessionEdit::UpsertAutomation { automation } => {
             tx_message(sink, fields[0], |v| tx_automation(v, automation))
         }
@@ -1045,7 +1052,12 @@ fn tx_route(sink: &mut dyn Sink, value: &Route) -> Result<(), EncodeError> {
         tx_channel_matrix(v, &value.channel_matrix)
     })?;
     tx_f32(sink, schema::session::route::GAIN_DB, value.gain_db)?;
-    tx_bool(sink, schema::session::route::MUTE, value.mute)
+    tx_bool(sink, schema::session::route::MUTE, value.mute)?;
+    tx_bool(
+        sink,
+        schema::session::route::FOLLOWS_MUTE,
+        value.follows_mute,
+    )
 }
 fn tx_automation_target(sink: &mut dyn Sink, value: &AutomationTarget) -> Result<(), EncodeError> {
     tx_start_message(
@@ -1354,6 +1366,10 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::SetRouteMute => Ok(SessionEdit::SetRouteMute {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             mute: parse_bool(one_spec!(payload, fields[1])?)?,
+        }),
+        crate::SessionEditOpcode::SetRouteFollowsMute => Ok(SessionEdit::SetRouteFollowsMute {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+            follows_mute: parse_bool(one_spec!(payload, fields[1])?)?,
         }),
         crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEdit::UpsertAutomation {
             automation: parse_automation(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1741,6 +1757,7 @@ fn parse_route(message: Message<'_>) -> Result<Route, DecodeError> {
         )?,
         gain_db: read_f32_exact(one_spec!(message, schema::session::route::GAIN_DB)?)?,
         mute: parse_bool(one_spec!(message, schema::session::route::MUTE)?)?,
+        follows_mute: parse_bool(one_spec!(message, schema::session::route::FOLLOWS_MUTE)?)?,
     })
 }
 fn parse_automation_target(message: Message<'_>) -> Result<AutomationTarget, DecodeError> {

@@ -5099,7 +5099,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"0be977ee7795c9578a9e858b36def82383eeb5e262988033dfe6d2b0aee5649c\""),
+            benchmark_field_pair("session_template_sha256", "\"d946f4630cc188f1a0c611a2207b70884f686f7f619e926bb87bd123cac981a6\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5274,7 +5274,10 @@ mod tests {
             // no PCM, meter, response or resource payload moved.
             // Re-pinned by issue #1216: route field `mute` added, value false, so `canonical.json`
             // and the two `prepare_256_tracks` workloads naming it move; nothing else moved.
-            "6d466903a9c09385a2a221fdd31eee623b35a6535c324879f7926a9dcedea88d",
+            // Re-pinned by issue #1218: route field `follows_mute` added, value false, so
+            // `canonical.json` and the two `prepare_256_tracks` workloads naming it move; nothing
+            // else moved.
+            "867d900422200e9b79af284f0709a1da08db3c2caa589e24bcd1f49ebb5e4def",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

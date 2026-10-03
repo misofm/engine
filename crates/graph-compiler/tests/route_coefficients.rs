@@ -17,7 +17,10 @@ use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
     RouteValueError, route_coefficients,
 };
-use session::{CompileCaps, SessionModel, compile_session, parse_session_json};
+use session::{
+    CompileCaps, Route, RouteDestination, RouteSource, SendTap, SessionModel, StableId, Submix,
+    compile_session, parse_session_json,
+};
 
 /// Nine tracks, each routed to the session output by its own route.
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -121,15 +124,91 @@ impl Draw {
     }
 }
 
+fn sid(value: &str) -> StableId {
+    StableId::parse(value).expect("literal stable ID")
+}
+
+/// The nine-track fixture plus #1218's sends: every track sends from `pre_fader` into bus `bus`,
+/// which sends from `pre_fader` into bus `aux`, and both buses feed the output. Each send's
+/// `follows_mute` is set later; the fixture's own routes go to the output and never follow.
+fn with_sends(base: &SessionModel) -> SessionModel {
+    let mut model = base.clone();
+    let template = model.routes[0].clone();
+    let route = |id: String, source: RouteSource, destination: RouteDestination| Route {
+        id: sid(&id),
+        source,
+        destination,
+        ..template.clone()
+    };
+    let output = template.destination.clone();
+    let into = |submix: &str| RouteDestination::SubmixInput {
+        submix_id: sid(submix),
+    };
+    let tap = SendTap::PreFader;
+    for name in ["aux", "bus"] {
+        let submix = Submix::unity(sid(name), &model.console);
+        model.submixes.push(submix);
+    }
+    let mut sends: Vec<Route> = model
+        .tracks
+        .iter()
+        .map(|track| {
+            let source = RouteSource::Track {
+                track_id: track.id.clone(),
+                tap,
+            };
+            route(format!("send-{}", track.id.as_str()), source, into("bus"))
+        })
+        .collect();
+    let bus = |tap| RouteSource::Submix {
+        submix_id: sid("bus"),
+        tap,
+    };
+    sends.push(route("send-bus".to_owned(), bus(tap), into("aux")));
+    sends.push(route(
+        "zz-bus".to_owned(),
+        bus(SendTap::PostPan),
+        output.clone(),
+    ));
+    let aux = RouteSource::Submix {
+        submix_id: sid("aux"),
+        tap: SendTap::PostPan,
+    };
+    sends.push(route("zz-aux".to_owned(), aux, output));
+    model.routes.extend(sends);
+    model
+}
+
 #[test]
 fn every_route_coefficient_comes_from_the_one_gated_function() {
     let base = parse_session_json(SESSION).expect("fixture parses");
+    // #1218 gate 5: sends into a submix, from tracks and from a submix, may follow.
+    let base = with_sends(&base);
     let mut draw = Draw(0x1215_6761_7465_u64);
     let gates: Vec<(bool, [bool; 2])> = (0..8_u8)
         .map(|g| (g & 1 != 0, [g & 2 != 0, g & 4 != 0]))
         .collect();
+    let mut shapes = std::collections::BTreeSet::new();
     for round in 0..24 {
         let mut model = base.clone();
+        // #1218 gate 5: every strip's lane mutes, drawn, so a follow reads the right strip.
+        let mut strip_mutes = std::collections::BTreeMap::new();
+        for fader in model
+            .tracks
+            .iter_mut()
+            .map(|track| (&track.id, &mut track.fader))
+            .chain(
+                model
+                    .submixes
+                    .iter_mut()
+                    .map(|submix| (&submix.id, &mut submix.fader)),
+            )
+        {
+            let (id, fader) = fader;
+            fader.left_mute = draw.next().is_multiple_of(2);
+            fader.right_mute = draw.next().is_multiple_of(2);
+            strip_mutes.insert(id.as_str().to_owned(), [fader.left_mute, fader.right_mute]);
+        }
         let mut drawn = Vec::new();
         for route in &mut model.routes {
             route.gain_db = draw.uniform(-120.0, 24.0);
@@ -137,19 +216,35 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
             [matrix.ll, matrix.lr, matrix.rl, matrix.rr] = [(); 4].map(|()| draw.coefficient());
             // #1216 gate 2: the session's own switch, drawn per route.
             route.mute = draw.next().is_multiple_of(2);
+            // #1218 gate 5: only a route into a submix may follow.
+            let into_submix = matches!(route.destination, RouteDestination::SubmixInput { .. });
+            route.follows_mute = into_submix && draw.next().is_multiple_of(2);
+            let source = match &route.source {
+                RouteSource::Track { track_id, .. } => track_id.as_str(),
+                RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+            };
+            let source_lane_muted = if route.follows_mute {
+                strip_mutes[source]
+            } else {
+                [false; 2]
+            };
             drawn.push((
                 route.id.as_str().to_owned(),
                 route.gain_db,
                 [matrix.ll, matrix.lr, matrix.rl, matrix.rr],
                 route.mute,
+                source_lane_muted,
             ));
         }
+        shapes.extend(drawn.iter().map(|row| row.4));
         let artifact = compile(&model).expect("finite routes compile");
         let routes: &[PreparedRoute] = artifact.graph().routes();
         assert_eq!(routes.len(), drawn.len());
-        for (id, gain_db, matrix, mute) in drawn {
-            let context =
-                format!("round {round}, route {id}: {gain_db} dB, {matrix:?}, mute {mute}");
+        for (id, gain_db, matrix, mute, source_lane_muted) in drawn {
+            let context = format!(
+                "round {round}, route {id}: {gain_db} dB, {matrix:?}, mute {mute}, \
+                 source lanes muted {source_lane_muted:?}"
+            );
             let prepared = routes
                 .iter()
                 .find(|route| {
@@ -157,16 +252,17 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
                         if route_id.as_str() == id)
                 })
                 .unwrap_or_else(|| panic!("{context}: no prepared route"));
-            // The plan's gate is the session's switch (#1216 D2); nothing else sets it yet.
+            // The plan's gate is the session's switch (#1216 D2) and, for a following send, its
+            // source strip's lane mutes (#1218 D2).
             assert_eq!(
                 prepared.gate,
                 RouteGate {
                     mute,
-                    follow_zeroed: [false; 2]
+                    follow_zeroed: source_lane_muted
                 },
                 "{context}"
             );
-            let checked = route_coefficients(gain_db, matrix, mute, [false; 2])
+            let checked = route_coefficients(gain_db, matrix, mute, source_lane_muted)
                 .unwrap_or_else(|error| panic!("{context}: {error:?}"));
             // The constant the runtime binds for this route is the domain-checked one, bit for bit.
             assert_eq!(
@@ -203,6 +299,8 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
             }
         }
     }
+
+    assert_eq!(shapes.len(), 4, "the rounds draw every follow-zeroed shape");
 
     // A finite gain times a finite coefficient can overflow. The overflow is refused whatever the
     // gate, so muting a route never admits values that would be infinite once it opens.
@@ -296,6 +394,87 @@ fn a_muted_route_seals_one_route_mute_row_after_its_transform() {
             without_estimate(&muted_lines),
             without_estimate(&open_lines),
             "the gate row is the only difference outside the estimate ({node})"
+        );
+    }
+}
+
+/// #1218 D3: a following send's zeroed source lanes are in the sealed graph text. A send from a
+/// muted track compiles with `follows_mute` on and off: outside the `estimate` row (a send whose
+/// two source lanes are muted is silenced, so #1217's activity table is charged), the texts differ
+/// by exactly one `route-follow-zeroed\t<node>\t<l>\t<r>` row, after that route's
+/// `route-transform` row and, when the send is also muted, its `route-mute` row.
+///
+/// Red if the follow is invisible to the canonical text (a follow-zeroed plan and an open one
+/// would share a digest while binding different constants), if the lane bits are swapped, or if
+/// the row lands before the route's `route-mute` row or on another route.
+#[test]
+fn a_following_send_seals_one_route_follow_zeroed_row() {
+    let text = |model: &SessionModel| {
+        let artifact = compile(model).expect("the session compiles");
+        String::from_utf8(
+            GraphCompiler::evidence(artifact.graph(), artifact.report()).canonical_bytes,
+        )
+        .expect("canonical text is UTF-8")
+    };
+    let without_estimate = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| !line.starts_with("estimate\t"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let base = with_sends(&parse_session_json(SESSION).expect("fixture parses"));
+    let track = base.tracks[3].id.as_str().to_owned();
+    let send = format!("send-{track}");
+    let node = format!("route:{send}");
+    for (left, right, mute) in [
+        (true, false, false),
+        (false, true, false),
+        (true, true, true),
+    ] {
+        let mut open = base.clone();
+        let fader = &mut open.tracks[3].fader;
+        (fader.left_mute, fader.right_mute) = (left, right);
+        let index = open
+            .routes
+            .iter()
+            .position(|route| route.id.as_str() == send)
+            .expect("the send is declared");
+        open.routes[index].mute = mute;
+        let mut following = open.clone();
+        following.routes[index].follows_mute = true;
+        let open_text = text(&open);
+        assert!(
+            open_text
+                .lines()
+                .all(|line| !line.starts_with("route-follow-zeroed")),
+            "a send that does not follow writes no follow row"
+        );
+        let following_text = text(&following);
+        let mut lines = without_estimate(&following_text);
+        let row = format!(
+            "route-follow-zeroed\t{node}\t{}\t{}",
+            u8::from(left),
+            u8::from(right)
+        );
+        let at = lines
+            .iter()
+            .position(|line| *line == row)
+            .unwrap_or_else(|| panic!("no `{row}` row"));
+        let previous = if mute {
+            format!("route-mute\t{node}")
+        } else {
+            format!("route-transform\t{node}\t")
+        };
+        assert!(
+            lines[at - 1].starts_with(&previous),
+            "`{row}` follows `{}`",
+            lines[at - 1]
+        );
+        lines.remove(at);
+        assert_eq!(
+            lines,
+            without_estimate(&open_text),
+            "the follow row is the only difference outside the estimate ({left}, {right}, {mute})"
         );
     }
 }

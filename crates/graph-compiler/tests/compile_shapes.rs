@@ -461,6 +461,7 @@ fn representative_console() -> SessionModel {
             },
             gain_db: 0.0,
             mute: false,
+            follows_mute: false,
         });
     }
     model

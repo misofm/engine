@@ -9663,7 +9663,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch01-main",
@@ -9683,7 +9684,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch02-main",
@@ -9703,7 +9705,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch03-main",
@@ -9723,7 +9726,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch04-main",
@@ -9743,7 +9747,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch05-main",
@@ -9763,7 +9768,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch06-main",
@@ -9783,7 +9789,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch07-main",
@@ -9803,7 +9810,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch08-main",
@@ -9823,7 +9831,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch09-main",
@@ -9843,7 +9852,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch10-main",
@@ -9863,7 +9873,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch11-main",
@@ -9883,7 +9894,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch12-main",
@@ -9903,7 +9915,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch13-main",
@@ -9923,7 +9936,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch14-main",
@@ -9943,7 +9957,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch15-main",
@@ -9963,7 +9978,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch16-main",
@@ -9983,7 +9999,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch17-main",
@@ -10003,7 +10020,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch18-main",
@@ -10023,7 +10041,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch19-main",
@@ -10043,7 +10062,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch20-main",
@@ -10063,7 +10083,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch21-main",
@@ -10083,7 +10104,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch22-main",
@@ -10103,7 +10125,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch23-main",
@@ -10123,7 +10146,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch24-main",
@@ -10143,7 +10167,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch25-main",
@@ -10163,7 +10188,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch26-main",
@@ -10183,7 +10209,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch27-main",
@@ -10203,7 +10230,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch28-main",
@@ -10223,7 +10251,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch29-main",
@@ -10243,7 +10272,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch30-main",
@@ -10263,7 +10293,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch31-main",
@@ -10283,7 +10314,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch32-main",
@@ -10303,7 +10335,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch33-main",
@@ -10323,7 +10356,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch34-main",
@@ -10343,7 +10377,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch35-main",
@@ -10363,7 +10398,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch36-main",
@@ -10383,7 +10419,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch37-main",
@@ -10403,7 +10440,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch38-main",
@@ -10423,7 +10461,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch39-main",
@@ -10443,7 +10482,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch40-main",
@@ -10463,7 +10503,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch41-main",
@@ -10483,7 +10524,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch42-main",
@@ -10503,7 +10545,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch43-main",
@@ -10523,7 +10566,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch44-main",
@@ -10543,7 +10587,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch45-main",
@@ -10563,7 +10608,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch46-main",
@@ -10583,7 +10629,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch47-main",
@@ -10603,7 +10650,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch48-main",
@@ -10623,7 +10671,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch49-main",
@@ -10643,7 +10692,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch50-main",
@@ -10663,7 +10713,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch51-main",
@@ -10683,7 +10734,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch52-main",
@@ -10703,7 +10755,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch53-main",
@@ -10723,7 +10776,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch54-main",
@@ -10743,7 +10797,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch55-main",
@@ -10763,7 +10818,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch56-main",
@@ -10783,7 +10839,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch57-main",
@@ -10803,7 +10860,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch58-main",
@@ -10823,7 +10881,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch59-main",
@@ -10843,7 +10902,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch60-main",
@@ -10863,7 +10923,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch61-main",
@@ -10883,7 +10944,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch62-main",
@@ -10903,7 +10965,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "ch63-main",
@@ -10923,7 +10986,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     }
   ],
   "automation": []

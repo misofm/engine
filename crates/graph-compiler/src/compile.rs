@@ -320,15 +320,42 @@ impl GraphCompiler {
                 TailSamples::Finite(0),
             );
         }
+        // #1218 D2: a following route reads its source strip's lane mutes. The map is built only
+        // when some route follows; IDs are unique across tracks and submixes.
+        let strip_mutes: BTreeMap<&str, [bool; 2]> = if model.routes.iter().any(|r| r.follows_mute)
+        {
+            strips
+                .iter()
+                .map(|strip| {
+                    (
+                        strip.id.as_str(),
+                        [strip.fader.left_mute, strip.fader.right_mute],
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         for route in &model.routes {
             let matrix = &route.channel_matrix;
             let matrix = [matrix.ll, matrix.lr, matrix.rl, matrix.rr];
             // The domain check is the live producer's own (issue #1215 D1): a value it would
             // refuse never compiles, and the plan keeps the unfolded transform it hashes. The
-            // session's mute rides the gate (issue #1216 D2); it is not structural.
+            // session's mute rides the gate (issue #1216 D2); it is not structural. A following
+            // route's source lane mutes ride it too (issue #1218 D2): they zero the coefficient
+            // columns through `gated_route_coefficients`, never the gain.
+            let follow_zeroed = if route.follows_mute {
+                let source = match &route.source {
+                    RouteSource::Track { track_id, .. } => track_id.as_str(),
+                    RouteSource::Submix { submix_id, .. } => submix_id.as_str(),
+                };
+                strip_mutes.get(source).copied().unwrap_or([false; 2])
+            } else {
+                [false; 2]
+            };
             let gate = RouteGate {
                 mute: route.mute,
-                follow_zeroed: [false; 2],
+                follow_zeroed,
             };
             let transform =
                 route_coefficients(route.gain_db, matrix, gate.mute, gate.follow_zeroed)

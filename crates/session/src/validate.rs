@@ -562,6 +562,17 @@ fn validate_routes(
             &path.key("destination"),
         );
         validate_finite(diagnostics, route.gain_db, &path.key("gain_db"));
+        // A route into the output is never live, so a follow there could only be prepared, and a
+        // live unmute of its source would leave the strip's main route silent (#1218 D1, DESIGN
+        // P11). The boolean is legal in general and illegal in this context.
+        if route.follows_mute && matches!(route.destination, RouteDestination::OutputInput { .. }) {
+            error(
+                diagnostics,
+                DiagnosticCode::InvalidEnum,
+                &path.key("follows_mute"),
+                "follows_mute applies only to a route into a submix",
+            );
+        }
         let matrix_path = path.key("channel_matrix");
         for (field, value) in [
             ("ll", route.channel_matrix.ll),

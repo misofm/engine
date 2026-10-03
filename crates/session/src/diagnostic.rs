@@ -33,7 +33,9 @@ pub enum DiagnosticCode {
     DuplicateId,
     /// A schema-owned entity reference has no declaration.
     MissingEntityReference,
-    /// A string enum token is outside its closed schema set.
+    /// A string enum token is outside its closed schema set, or a closed token or boolean value
+    /// that is legal in general is illegal in its context (for example `follows_mute: true` on a
+    /// route into the output).
     InvalidEnum,
     /// A source content identity does not match the canonical BLAKE3-256 grammar.
     SourceContentIdentityFormat,

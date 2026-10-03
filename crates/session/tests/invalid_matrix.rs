@@ -3,7 +3,7 @@
 use session::{
     AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, Output, ParameterChannel,
     ParameterUnit, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
-    SidechainDeclaration, StableId, canonical_session_json, compile_session,
+    SidechainDeclaration, StableId, Submix, canonical_session_json, compile_session,
     estimate_session_resources, parse_session_json,
 };
 
@@ -654,6 +654,72 @@ fn route_mute_is_a_required_boolean() {
     assert_eq!(
         parse_session_json(&canonical).expect("canonical reparses"),
         muted
+    );
+}
+
+/// Issue #1218 D1: a route's `follows_mute` is a required boolean, written after `mute`, and only
+/// a route into a submix may set it. `true` on a route into the output is a validation refusal,
+/// not a parse one: `schema.invalid_enum` at the key, from the document and from a typed model.
+///
+/// Red if the key becomes optional, if it accepts a non-boolean, if a route into the output may
+/// follow (its strip's main route would stay silent after a live unmute, VERIFY-2 N1), or if a
+/// following send loses its flag through the canonical writer.
+#[test]
+fn route_follows_mute_is_required_and_legal_only_into_a_submix() {
+    const FIELD: &str = "mute = false, follows_mute = false";
+    let mut count = 0;
+    parse_case(
+        &mut count,
+        &replaced(FIELD, "mute = false"),
+        DiagnosticCode::MissingField,
+        "$.routes[0].follows_mute",
+    );
+    parse_case(
+        &mut count,
+        &replaced(FIELD, "mute = false, follows_mute = 1"),
+        DiagnosticCode::WrongType,
+        "$.routes[0].follows_mute",
+    );
+    parse_case(
+        &mut count,
+        &replaced(FIELD, "mute = false, follows_mute = true"),
+        DiagnosticCode::InvalidEnum,
+        "$.routes[0].follows_mute",
+    );
+    model_case(
+        &mut count,
+        |s| {
+            assert!(matches!(
+                s.routes[0].destination,
+                RouteDestination::OutputInput { .. }
+            ));
+            s.routes[0].follows_mute = true;
+        },
+        DiagnosticCode::InvalidEnum,
+        "$.routes[0].follows_mute",
+    );
+    assert_eq!(count, 4);
+
+    let mut send = parse_session_json(EXAMPLE).expect("fixture parses");
+    let bus = Submix::unity(id("bus"), &send.console);
+    send.submixes.push(bus);
+    let mut route = send.routes[0].clone();
+    route.id = id("send");
+    route.destination = RouteDestination::SubmixInput {
+        submix_id: id("bus"),
+    };
+    route.follows_mute = true;
+    send.routes.push(route);
+    let canonical = canonical_session_json(&send).expect("a following send canonicalizes");
+    assert!(canonical.contains("\"mute\": false,\n      \"follows_mute\": true\n"));
+    let reparsed = parse_session_json(&canonical).expect("canonical reparses");
+    assert_eq!(
+        reparsed
+            .routes
+            .iter()
+            .map(|route| (route.id.as_str(), route.follows_mute))
+            .collect::<Vec<_>>(),
+        [("send", true), ("to-main", false)]
     );
 }
 

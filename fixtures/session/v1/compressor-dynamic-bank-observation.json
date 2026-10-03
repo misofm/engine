@@ -813,7 +813,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp1-main",
@@ -833,7 +834,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp2-main",
@@ -853,7 +855,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp3-main",
@@ -873,7 +876,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp4-main",
@@ -893,7 +897,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp5-main",
@@ -913,7 +918,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp6-main",
@@ -933,7 +939,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     },
     {
       "id": "comp7-main",
@@ -953,7 +960,8 @@
         "rr": 1.0
       },
       "gain_db": 0.0,
-      "mute": false
+      "mute": false,
+      "follows_mute": false
     }
   ],
   "automation": []
