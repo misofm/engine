@@ -371,8 +371,10 @@ Today no benchmark row has a single submix, so the cost of what the umbrella shi
      `.github/workflows/qualification.yml:710`), including the floor parity test, the facts test
      and the short-run record test.
      *Test value (facts test): it turns red if the row renders a fixture other than D1's, or if a
-     muted send, a muted strip or a compensated edge enters the plan the baseline times; no
-     existing test compiles this row.*
+     muted send, a muted track strip or a compensated edge enters the plan the baseline times; no
+     existing test compiles this row. A muted submix strip is not a route mute and its returns do
+     not follow mutes, so `check-console-fixtures.sh`'s every-submix-fader-unmuted witness holds
+     it, not this test.*
      *Test value (short-run record test): it turns red if the row's record is refused by
      `session_kind_shape`, names another fixture, renders with an error or performs a forbidden
      operation, which would otherwise surface only in the one timed run.*
@@ -459,6 +461,29 @@ module now starts at `lib.rs:2350`, the metered-row test at `:2897`, `STRIP_ROWS
   `session_sends` (the sends kind naming the standing fixture, reported as synthetic, and the
   standing kind naming the sends fixture), within the native part. `scripts/check-cross-targets.sh`
   was not run: it builds no touched crate.
+
+### Verdict follow-up record (after the attempt 1 PASS verdict)
+
+Applied in `2f6b62628` (on `02feade46`, branch `codex/batch-bench`):
+
+- **MINOR-1.** The facts test's doc and gate 2's test-value line say "a muted send or a muted
+  track strip", and name the fixture witness that holds a muted submix strip (the verdict's R2: a
+  muted submix strip leaves the test green, because its returns into `main-out` carry
+  `follows_mute: false` and a strip mute is not a route mute). No model assertion was added: it
+  would duplicate the witness.
+- **MINOR-2.** `tools/bench/src/console.rs`'s module doc gains `# The bus-and-send row (issue
+  #1227)` (the committed fixture, `PlanConfig::BASELINE` with bound sources as the C ABI's
+  fan-playback plan, no floor, the in-run `SENDS_PAIR` digest inequality), and the console-strip
+  rows are emitted after the bus-and-send row.
+- **NIT-1.** The stated-facts test's doc names its unique catch: a non-removal strip edit
+  (`HalfMono`-style) or a warmup attached to the row, which its record cannot show.
+- **NIT-2.** The facts test's failure message prints only the compensated timing rows.
+- **NIT-3.** The `rows` comment in `main` names every `native_session_rows()` list.
+
+## Verdict
+
+- **Attempt 1** (`e7bd95f88`): Sol PASS. Two MINORs and three NITs, all applied above.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1227-attempt1.md`.
 
 ## Dependencies
 

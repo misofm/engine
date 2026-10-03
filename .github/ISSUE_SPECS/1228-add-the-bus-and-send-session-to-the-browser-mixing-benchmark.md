@@ -228,6 +228,47 @@ starts at `:1454`); every one was found by its text. Nothing was timed and `run`
   preflight), three distinct, each asserted audible. `run` was not launched and no
   `artifacts/steps/` directory was created.
 
+### Amendment after the attempt 1 PASS verdict (MINOR-1, applied in `2f6b62628`)
+
+Nothing in attempt 1 proved the sends document runs live routes: live and static routes render
+the same bits, so a document booted without live controls (the native row's static path) left
+every digest and every gate green. `makeDocument` now asserts that
+`miso_engine_web_v1_live_control_route_count(handle)` equals the fixture's count of routes whose
+`destination.kind` is `submix_input`, and that the count is positive for
+`sixty_four_track_console_sends`. The expected counts are 192 for the sends document and 0 for
+the standing console and the app shape (all their routes go to `output_input`). The record and the
+validator are unchanged.
+
+*Test value: it turns red if a document is booted without live controls, which no other gate
+catches.*
+
+- **Mutation.** `boot()` was given `liveControlCommandQueueRecords = 0` for the documents only
+  (`document === mixingDocument ? 64 : 0`), so the documents boot static and the arms keep their
+  queue. On `2f6b62628` the preflight exits 1 with `sixty_four_track_console_sends: one live route
+  per route into a submix`. On `02feade46` the same mutant exits 0 with the same three digests as
+  the live boot, which reproduces the verdict's finding. (Zeroing the queue for every boot instead
+  fails earlier, at `preflight restated: a batch was refused`, because the arms need the queue.)
+- **Gate 1 on the committed checkpoint `2f6b62628`.** In a `git clone --shared` checked out at
+  `2f6b62628`, with a fresh `mktemp -d` WORKDIR: `prepare` exit 0, `host_web.wasm
+  30d075d3...aeff4 at 2f6b62628... (release pin 6c952a2c...: not the released module)`,
+  `provenance.json` commit `2f6b6262848e7109b7c7ab0f2892309f0bc500ec`, controls
+  `54c90a0f...6616`. `preflight` exit 0 with `documents` = `sixty_four_track_console`
+  `d913ad96...41b1`, `sixty_four_track_app_shape` `3dd8b2ff...d645` and
+  `sixty_four_track_console_sends` `cf5aca93...7002`. These are attempt 1's bits; the new
+  assertion held on all three documents. `run` was not launched, the clone stayed clean and no
+  `artifacts/steps/` entry was created.
+- **NIT-1.** The two long comment lines (the `.mjs` header and the example's module doc) are
+  wrapped to 100 columns.
+- **NIT-2.** Not applied: the verdict notes that the `.documents |= .[0:2]` case has two guards
+  (`length == 3` and the `.[2]` clause) and asks for no change. Both guards are needed, because
+  each one is the sole guard for another case.
+
+## Verdict
+
+- **Attempt 1** (`79d11ea49` + `02feade46`): Sol PASS. One MINOR and two NITs. MINOR-1 and NIT-1
+  are applied above; NIT-2 needs no change.
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/1228-attempt1.md`.
+
 ## Dependencies
 
 - *Add a bus-and-send row to the native console benchmark* (#1227, BM1)
