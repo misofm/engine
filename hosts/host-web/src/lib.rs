@@ -1037,7 +1037,8 @@ pub struct WebMeterHeader {
     pub struct_size: u32,
     /// ABI version.
     pub abi_version: u32,
-    /// Tracks the frame carries, so the `f32` view's `3T + 3` shape is checkable.
+    /// Tracks the frame carries. With [`Self::submix_count`] it makes the `f32` view's
+    /// `3(T + S) + 3` shape checkable.
     pub track_count: u32,
     /// Complete windows folded by the most recent poll.
     pub windows: u32,
@@ -1054,6 +1055,11 @@ pub struct WebMeterHeader {
     /// Publication generation. It increments on each real lease transition and on a detected
     /// meter-producer reset, so retained frames cannot cross either delivery epoch.
     pub reserved: [u64; 2],
+    /// Submix strips the frame carries after the tracks (issue #1209 D2), in canonical submix
+    /// order. Appended in place, so every earlier offset is unmoved.
+    pub submix_count: u32,
+    /// Always zero; pads the structure to its eight-byte alignment.
+    pub reserved_pad: u32,
 }
 
 /// `WebMeterHeader::reserved[1]` validity bits. The high 32 bits carry a saturating loss count.
@@ -1085,6 +1091,8 @@ const fn empty_meter_header() -> WebMeterHeader {
         master_track_plus_one: 0,
         master_gr_present: 0,
         reserved: [0; 2],
+        submix_count: 0,
+        reserved_pad: 0,
     }
 }
 
@@ -1485,8 +1493,10 @@ struct ReadyOwnership {
     observation_arm_samples: Box<[Box<[u64]>]>,
     /// The designated master track, or `None` (issue #143 D6).
     master_track: Option<u32>,
-    /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R, track0 GR, .., trackN GR,
-    /// master GR]` -- `3T + 3` words. The peak section is byte-for-byte where it always was.
+    /// `[track0 L, track0 R, .., trackN L, trackN R, bus0 L, bus0 R, .., busM L, busM R, master L,
+    /// master R, track0 GR, .., trackN GR, bus0 GR, .., busM GR, master GR]` -- `3(T + S) + 3`
+    /// words, one peak pair and one gain-reduction word per strip (issue #1209 D1). With `S = 0`
+    /// every word is where it always was.
     meter_frame: Box<[f32]>,
     /// The window and shape the `f32` frame cannot carry (issue #143 D5).
     meter_header: WebMeterHeader,
@@ -2091,10 +2101,11 @@ impl AudioWorkletEngineHost {
 
     /// The decimated meter frame (issue #137 D2, extended by #143 D5).
     ///
-    /// `3T + 3` words: two peaks per track, master left and right, then one **non-negative**
-    /// gain-reduction magnitude in decibels per track and the master's. The peak section is
-    /// byte-for-byte where it always was. Gain reduction is the latest fold from each independently
-    /// aged effect observation and does not share the peak interval in [`WebMeterHeader`].
+    /// `3(T + S) + 3` words (issue #1209 D1): two peaks per strip (the tracks, then the submixes in
+    /// canonical order), master left and right, then one **non-negative** gain-reduction magnitude
+    /// in decibels per strip in the same order and the master's. With no submixes every word is
+    /// where it always was. Gain reduction is the latest fold from each independently aged effect
+    /// observation and does not share the peak interval in [`WebMeterHeader`].
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
@@ -3175,8 +3186,8 @@ impl AudioWorkletEngineHost {
         // `panic_bounds_check` in this export's call graph, and this export is called from
         // `process()`, so the shipped artifact's gate covers it exactly as it covers the render
         // export.
-        let track_count = ready.meters.len();
-        if track_count == 0 {
+        let meter_count = ready.meters.len();
+        if meter_count == 0 {
             return 0;
         }
         // The render path is the sole producer of this fixed-capacity ring and increments the
@@ -3196,7 +3207,7 @@ impl AudioWorkletEngineHost {
         let mut folded_end = 0_u64;
         let mut folded = false;
         while popped < drain_budget {
-            for index in 0..track_count {
+            for index in 0..meter_count {
                 if ready.meter_pending.get(index).is_some_and(Option::is_none)
                     && let Some(meter) = ready.meters.get_mut(index)
                     && let Ok(snapshot) = meter.consumer.try_pop()
@@ -3310,8 +3321,10 @@ impl AudioWorkletEngineHost {
         if !folded {
             return 0;
         }
-        let tracks = ready.tracks.len();
-        let master = tracks * 2;
+        // Issue #1209 D1: one peak pair per strip, tracks then submixes, so the master follows the
+        // last submix rather than the last track.
+        let strips = ready.tracks.len() + ready.submixes.len();
+        let master = strips * 2;
         let mut stale_master_budget = ready.master_count;
         while stale_master_budget > 0 {
             let stale = ready
@@ -3390,7 +3403,7 @@ impl AudioWorkletEngineHost {
         // here: a tap that publishes a **linear** magnitude (the true-peak limiter's recursive
         // reduction word) becomes decibels once per closed window, never per sample and never on a
         // lane kernel.
-        let gain_base = tracks * 2 + 2;
+        let gain_base = strips * 2 + 2;
         for slot in ready.meter_frame.iter_mut().skip(gain_base) {
             *slot = 0.0;
         }
@@ -3409,10 +3422,9 @@ impl AudioWorkletEngineHost {
             let Some(track) = ready.observation_tracks.get(effect).copied() else {
                 continue;
             };
-            // Issue #1207 D4: the frame carries one gain-reduction word per *track* until #1209
-            // widens it, so a submix's effect (strip index `>= tracks`) is skipped rather than
-            // folded into the master's word or past the frame.
-            if track == u32::MAX || track as usize >= tracks {
+            // Issue #1209 D5: the frame carries one gain-reduction word per strip, so a submix's
+            // effect folds into its own word at `gain_base + T + j`.
+            if track == u32::MAX {
                 continue;
             }
             let armed = ready.observation_armed.get(effect).copied().unwrap_or(0);
@@ -3466,7 +3478,7 @@ impl AudioWorkletEngineHost {
         if master_present
             && let Some(track) = ready.master_track
             && let Some(value) = ready.meter_frame.get(gain_base + track as usize).copied()
-            && let Some(slot) = ready.meter_frame.get_mut(gain_base + tracks)
+            && let Some(slot) = ready.meter_frame.get_mut(gain_base + strips)
         {
             *slot = value;
         }
@@ -5738,13 +5750,17 @@ fn compile_ready(
 ) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let live_controls = live_control_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.live_controls.config"))?;
+    // Issue #1209 D3: one meter per strip, the tracks then the submixes, in the strip order
+    // host-core's addressing authority uses, so `meters[i]` is strip `i`'s peak pair.
     let meters: Vec<HostMeterRequest> = if live_controls.meter_period_frames.is_some() {
-        session
-            .normalized_model()
+        let model = session.normalized_model();
+        model
             .tracks
             .iter()
-            .map(|track| HostMeterRequest {
-                strip_id: track.id.as_str().into(),
+            .map(|track| track.id.as_str())
+            .chain(model.submixes.iter().map(|submix| submix.id.as_str()))
+            .map(|strip| HostMeterRequest {
+                strip_id: strip.into(),
                 tap: MeterTap::PostMatrix,
                 metrics: MeterMetricSet::SAMPLE_PEAK,
             })
@@ -6049,9 +6065,9 @@ fn compile_ready(
         if entry.is_some() {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         }
-        // The frame carries one gain-reduction slot per track, so every observed effect of a track
-        // points at that track and the poll folds them max-magnitude into the one slot. A
-        // submix's effect points at its strip index, which the fold skips until #1209.
+        // The frame carries one gain-reduction slot per strip, so every observed effect of a strip
+        // points at that strip and the poll folds them max-magnitude into the one slot; a
+        // submix's effect points at its strip index `T + j` (issue #1209 D5).
         observation_tracks[slot] =
             u32::try_from(strip).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?;
         let tap_count = handle.descriptor.observations.len();
@@ -6105,6 +6121,8 @@ fn compile_ready(
     let mut meter_header = empty_meter_header();
     meter_header.track_count =
         u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
+    meter_header.submix_count =
+        u32::try_from(submixes.len()).map_err(|_| fixed_diagnostic("web.live_controls.effects"))?;
     meter_header.master_track_plus_one = handles
         .master_track
         .map_or(0, |track| track.saturating_add(1));
@@ -6184,7 +6202,7 @@ fn compile_ready(
         spectrum_capture,
         host,
         meters: handles.meters,
-        meter_frame: boxed_zero_meter_frame(track_count)?,
+        meter_frame: boxed_zero_meter_frame(strip_count)?,
         master_peak: [0.0, 0.0],
         master_start_sample: None,
         master_end_sample: 0,
@@ -6254,12 +6272,10 @@ fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-/// `3T + 3` words: two peak lanes and one gain-reduction magnitude per track, then the master's.
-///
-/// The peak section keeps its exact `2T + 2` layout and its exact offsets, so every existing
-/// reader of this buffer is unmoved; the gain-reduction section is appended after it.
-fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
-    let count = track_count
+/// `3(T + S) + 3` words: two peak lanes and one gain-reduction magnitude per strip, then the
+/// master's (issue #1209 D1). With `S = 0` it is the `3T + 3` frame every reader already knows.
+fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
+    let count = strip_count
         .checked_mul(3)
         .and_then(|value| value.checked_add(3))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;

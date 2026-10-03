@@ -296,6 +296,12 @@ export interface MeterFrame {
   readonly masterGrDb: number | null;
   readonly firstSample: bigint;
   readonly endSample: bigint;
+  /** Submix strips (buses) the frame carries, in canonical submix order (issue #1209). */
+  readonly submixCount: number;
+  /** `[bus0 L, bus0 R, ..]`, `2 * submixCount` long. */
+  readonly submixPeaks: Float32Array;
+  /** One non-negative decibel magnitude per bus. */
+  readonly submixGrDb: Float32Array;
 }
 
 /** A staged-and-booted engine instance. */
@@ -1071,6 +1077,7 @@ export class WasmBoundary {
     const trackCount = this.shape().tracks.length;
     const reportedWindows = header.u32("windows");
     const masterGrPresent = header.u32("masterGrPresent");
+    const submixCount = header.u32("submixCount");
     if (header.u32("structSize") !== structBytes("meterHeader")
       || header.u32("abiVersion") !== ABI_LAYOUT.abiVersion
       || header.u32("trackCount") !== trackCount
@@ -1085,7 +1092,10 @@ export class WasmBoundary {
     }
 
     const buffer = this.#buffer("meterFrame");
-    const words = trackCount * 3 + 3;
+    // Issue #1209 D1: `3(T + S) + 3` words -- a peak pair per strip (tracks, then submixes), the
+    // master pair, one gain-reduction word per strip in the same order, the master's.
+    const strips = trackCount + submixCount;
+    const words = strips * 3 + 3;
     if (buffer.pointer === 0 || buffer.capacity !== words * Float32Array.BYTES_PER_ELEMENT) {
       throw new MisoEngineError("the engine returned a malformed meter frame buffer", {
         phase: "output",
@@ -1095,17 +1105,27 @@ export class WasmBoundary {
       });
     }
     const frame = new Float32Array(this.#exports.memory.buffer, buffer.pointer, words);
-    const peakWords = trackCount * 2 + 2;
+    const trackPeakWords = trackCount * 2;
+    const masterPeak = strips * 2;
+    const gainBase = masterPeak + 2;
+    // `peaks` keeps its `2T + 2` shape: the track words, then the master pair, which sits after
+    // the submix peaks in the frame.
+    const peaks = new Float32Array(trackPeakWords + 2);
+    peaks.set(frame.subarray(0, trackPeakWords));
+    peaks.set(frame.subarray(masterPeak, gainBase), trackPeakWords);
     return Object.freeze({
       tag: "miso.meter.v1" as const,
       sequence: header.u64("sequence"),
       windows,
       trackCount,
-      peaks: frame.slice(0, peakWords),
-      trackGrDb: frame.slice(peakWords, peakWords + trackCount),
+      peaks,
+      trackGrDb: frame.slice(gainBase, gainBase + trackCount),
       masterGrDb: masterGrPresent === 1 ? frame[words - 1]! : null,
       firstSample: header.u64("firstSample"),
       endSample: header.u64("endSample"),
+      submixCount,
+      submixPeaks: frame.slice(trackPeakWords, masterPeak),
+      submixGrDb: frame.slice(gainBase + trackCount, gainBase + strips),
     });
   }
 

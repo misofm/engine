@@ -1687,6 +1687,9 @@ async function testMainRealm() {
         peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
         trackGrDb: new Float32Array([6.5, 0]), masterGrDb: 6.5,
         firstSample: 512n, endSample: 768n,
+        // Issue #1209 gate 3: the 15-field frame with one bus is delivered with its bus section.
+        submixCount: 1, submixPeaks: new Float32Array([0.875, 0.9375]),
+        submixGrDb: new Float32Array([1.25]),
       },
     });
     node.port.onmessage({
@@ -1698,6 +1701,9 @@ async function testMainRealm() {
     });
     assert.equal(meterFrames.length, 1);
     assert.deepEqual([...meterFrames[0].peaks], [0.125, 0.25, 0.375, 0.5, 0.625, 0.75]);
+    assert.equal(meterFrames[0].submixCount, 1);
+    assert.deepEqual([...meterFrames[0].submixPeaks], [0.875, 0.9375]);
+    assert.deepEqual([...meterFrames[0].submixGrDb], [1.25]);
     assert.equal(Object.isFrozen(meterFrames[0]), true);
 
     // Issue #143 E4: the frame as an **app** reads it.
@@ -1721,7 +1727,8 @@ async function testMainRealm() {
     assert.equal(meterFrames[0].endSample - meterFrames[0].firstSample, 256n);
 
     // Every shape rule is a hard failure, not a silent skip. Each entry is one red mutation of
-    // one rule in the `miso.meter.v1` branch of `#receive`.
+    // one rule in the `miso.meter.v1` branch of `#receive`. `MISSING` removes the field.
+    const MISSING = Symbol("missing");
     for (const broken of [
       { generation: 0n },
       { generation: 1 },
@@ -1739,6 +1746,23 @@ async function testMainRealm() {
       { firstSample: 512 },
       { endSample: 256n },
       { endSample: 512n },
+      // Issue #1209 gate 3: the bus section's shape rules, against a one-bus base frame.
+      { submixGrDb: MISSING },
+      { submixPeaks: MISSING },
+      { submixCount: MISSING },
+      { submixPeaks: new Float32Array(1) },
+      { submixPeaks: new Float32Array(4) },
+      { submixCount: 2 },
+      { submixCount: -1, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0) },
+      { submixCount: 1.5 },
+      { submixPeaks: [0, 0] },
+      { submixPeaks: new Float32Array([-0.5, 0]) },
+      { submixPeaks: new Float32Array([0, Number.POSITIVE_INFINITY]) },
+      { submixGrDb: new Float32Array(0) },
+      { submixGrDb: new Float32Array([-1]) },
+      { submixGrDb: new Float32Array([Number.NaN]) },
+      { submixGrDb: [0] },
+      { unexpected: 0 },
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
@@ -1748,14 +1772,17 @@ async function testMainRealm() {
         workletModuleUrl: "processor.js",
       });
       const rejected = rejecting.status();
-      FakeNode.latest.port.onmessage({
-        data: {
-          tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
-          windows: 1, trackCount: 2,
-          peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
-          firstSample: 512n, endSample: 768n, ...broken,
-        },
-      });
+      const data = {
+        tag: "miso.meter.v1", sequence: 1, generation: 1n, validity: 0xb, lossCount: 0,
+        windows: 1, trackCount: 2,
+        peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
+        firstSample: 512n, endSample: 768n, submixCount: 1,
+        submixPeaks: new Float32Array(2), submixGrDb: new Float32Array(1), ...broken,
+      };
+      for (const [key, value] of Object.entries(broken)) {
+        if (value === MISSING) delete data[key];
+      }
+      FakeNode.latest.port.onmessage({ data });
       await errorResult(rejected, 255);
     }
     assert.equal(telemetryFrames.length, 1);
@@ -1867,6 +1894,7 @@ async function testMainRealm() {
           peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
           trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
           firstSample: 1024n, endSample: 1280n,
+          submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
         },
       });
       assert.equal(
@@ -1902,6 +1930,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 768n, endSample: 1024n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     assert.equal(meterFrames.length, framesAtRelease, "a released lease receives nothing");
@@ -1916,6 +1945,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(4), trackGrDb: new Float32Array(2), masterGrDb: null,
         firstSample: 0n, endSample: 0n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     await errorResult(doomed, 255);
@@ -2006,6 +2036,7 @@ async function testMainRealm() {
         windows: 1, trackCount: 2,
         peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
         firstSample: 0n, endSample: 256n,
+        submixCount: 0, submixPeaks: new Float32Array(0), submixGrDb: new Float32Array(0),
       },
     });
     assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
@@ -2064,11 +2095,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
     { id: "bass", channels: 1, frames: 96000n },
     { id: "drums", channels: 2, frames: 2048n },
   ];
-  // Issue #143 D5: `3T + 3` -- the frozen `2T + 2` peak section, then one gain-reduction magnitude
-  // per track and the master's.
-  const meterFrameFloats = trackIds.length * 3 + 3;
-  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 64);
-  meterHeader.setUint32(0, 64, true);
+  // Issue #1209 D1: `3(T + S) + 3` -- a peak pair per strip (the tracks, then one submix), the
+  // master pair, then one gain-reduction magnitude per strip and the master's.
+  const submixCount = 1;
+  const strips = trackIds.length + submixCount;
+  const meterFrameFloats = strips * 3 + 3;
+  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 72);
+  meterHeader.setUint32(0, 72, true);
+  meterHeader.setUint32(64, submixCount, true);
   meterHeader.setUint32(4, 0x00010000, true);
   meterHeader.setUint32(8, trackIds.length, true);
   meterHeader.setUint32(40, 1, true);
@@ -2180,12 +2214,19 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
     miso_engine_web_v1_meter_poll: () => {
       if (calls.meterWindows === 0) return 0;
       calls.meterWindows -= 1;
-      // Issue #143: the two sections carry **different** values, so a worklet that read the peak
+      // Issue #143: the sections carry **different** values, so a worklet that read the peak
       // view where the gain-reduction view belongs (or the reverse) is visible here rather than
-      // hidden by a uniform fill.
+      // hidden by a uniform fill. Issue #1209: so do the submix sections and the master pair,
+      // which follows the submix peaks, so a worklet that reads the master after the tracks or
+      // a bus from a track's slot is visible too.
       const frame = new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats);
-      frame.fill(0.5, 0, trackIds.length * 2 + 2);
-      frame.fill(6.5, trackIds.length * 2 + 2);
+      const tracks = trackIds.length;
+      frame.fill(0.5, 0, tracks * 2);
+      frame.fill(0.75, tracks * 2, strips * 2);
+      frame.fill(0.625, strips * 2, strips * 2 + 2);
+      frame.fill(6.5, strips * 2 + 2, strips * 2 + 2 + tracks);
+      frame.fill(2.25, strips * 2 + 2 + tracks, strips * 3 + 2);
+      frame[strips * 3 + 2] = 7.5;
       return 1;
     },
     miso_engine_web_v1_live_control_track_count: () => trackIds.length,
@@ -2990,12 +3031,16 @@ async function testProcessor() {
       assert.equal(frame.lossCount, 0);
       assert.equal(frame.windows, 1);
       assert.equal(frame.trackCount, 2);
-      assert.equal(frame.peaks.length, 6);
-      assert(frame.peaks.every((value) => value === 0.5));
+      // Issue #1209 D4: `peaks` keeps its `2T + 2` shape, the master pair read from after the bus.
+      assert.deepEqual([...frame.peaks], [0.5, 0.5, 0.5, 0.5, 0.625, 0.625]);
       // Issue #143: the gain-reduction section is its own view, its own length, and its own value.
       assert.equal(frame.trackGrDb.length, 2);
       assert(frame.trackGrDb.every((value) => value === 6.5));
-      assert.equal(frame.masterGrDb, 6.5, "the header says the master reading is present");
+      assert.equal(frame.masterGrDb, 7.5, "the header says the master reading is present");
+      // Issue #1209 D4: the bus section, appended.
+      assert.equal(frame.submixCount, 1);
+      assert.deepEqual([...frame.submixPeaks], [0.75, 0.75]);
+      assert.deepEqual([...frame.submixGrDb], [2.25]);
       assert.equal(frame.firstSample, 512n);
       assert.equal(frame.endSample, 768n);
 

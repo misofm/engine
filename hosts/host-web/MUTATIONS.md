@@ -336,3 +336,26 @@ and the mutation was reverted.
 | `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (segment-aware lookup, D2) | make `strip_index` one binary search over the concatenation `tracks ++ submixes` | `aaa-bus` sorts before `t0`, so its producer is never found and the boot refuses with `web.live_controls.effects` (both #1207 tests panic at boot) |
 | `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (per-strip effect tables, D3/D5) | put the K1 interim back: skip every prepared entry whose owner is not a track in `attach_effect_live_controls` and `attach_effect_observation` | the boot succeeds but `aaa-bus`'s console slot 0 has no filed producer at `dense_effect_slot(effect_base[2], rack_effects[2], ..)` |
 | `tests::a_bus_session_admits_and_renders_without_allocating` (gate 4) | allocate a copy of `effect_base` inside `ReadyOwnership::effect_slot` | `admission/render allocated`: the measured submission plus `render_next` counts one allocation |
+
+## Issue #1209 — submix strips in the browser meter frame
+
+Each mutation was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (frame section, D1) | write the master pair at `2T` (after the tracks) instead of `2(T + S)` | `aaa-bus 0.773352 is t0 + t1` fails: the bus's slot holds the master |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (frame size, D1) | size the frame `3T + 3` | `3(T + S) + 3 words`: 12 where 18 was required |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (meters, D3) | request meters for the tracks only | `every bus is metered`: the bus slots stay zero |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (gain base, D5) | `gain_base = 2T + 2` | `every bus is metered`: the bus peak words are zeroed as gain-reduction words |
+| `tests::the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix` (header field, D2) | leave `submix_count` at 0 | `submix_count == 2` fails |
+| `tests::bus_meters_render_and_poll_without_allocating` (gate 5) | allocate a `submixes.len()`-byte buffer per published window in `poll_meters` | `render/poll allocated` |
+| `tests::bus_meters_render_and_poll_without_allocating` (gate 5) | box each folded gain-reduction value in the poll | `render/poll allocated` |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | drop the `submixPeaks.length === 2 * submixCount` rule | the `submixPeaks` length-1/length-4 frames are accepted: `expected rejection` |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | keep the 12-field exact-field list | the one-bus frame fails the host and is never delivered |
+| `test-web-audioworklet.mjs` main-realm frame validation (gate 3) | drop the finite non-negative rule for `submixGrDb` | the `-1` and `NaN` frames are accepted: `expected rejection` |
+| `test-web-audioworklet.mjs` worklet meter frame (D1/D4) | build the master peak view at `2T` | `peaks` carries the bus value `0.75` where the master's `0.625` was required |
+| `test-web-audioworklet.mjs` worklet meter frame (D4) | do not copy the bus peak view into `submixPeaks` | `submixPeaks` reads `[0, 0]` |
+| `test-web-audioworklet.mjs` worklet meter frame (D4) | read the master gain word at `3T + 2` | `masterGrDb` reads a bus word, not `7.5` |
+| `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | size the headless reader's frame `3T + 3` | `sdk.meter.frame` refusal: the frame with buses is rejected |
+| `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | return an empty `submixPeaks` | `2S bus peak words` fails |

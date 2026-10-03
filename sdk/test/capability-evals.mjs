@@ -52,6 +52,38 @@ function compressorDocument() {
   });
 }
 
+/** Issue #1209 gate 2: tracks `t0`, `t1`, `t2`; `t0` and `t1` feed `bus-a`, `t2` feeds `bus-b`. */
+function busDocument() {
+  const document = JSON.parse(sessionDocument());
+  const [track] = document.tracks;
+  const [route] = document.routes;
+  document.tracks = ["t0", "t1", "t2"].map((id) => ({ ...structuredClone(track), id }));
+  document.submixes = ["bus-a", "bus-b"].map((id) => ({
+    id,
+    builtins: structuredClone(track.builtins),
+    console: [],
+    inserts: { effects: [] },
+    fader: structuredClone(track.fader),
+    pan: structuredClone(track.pan),
+  }));
+  const feed = (id, trackId, submixId) => ({
+    ...structuredClone(route),
+    id,
+    source: { kind: "track", track_id: trackId, tap: "post_pan" },
+    destination: { kind: "submix_input", submix_id: submixId },
+  });
+  const out = (id, submixId) => ({
+    ...structuredClone(route),
+    id,
+    source: { kind: "submix", submix_id: submixId, tap: "post_pan" },
+  });
+  document.routes = [
+    feed("t0-a", "t0", "bus-a"), feed("t1-a", "t1", "bus-a"), feed("t2-b", "t2", "bus-b"),
+    out("a-main", "bus-a"), out("b-main", "bus-b"),
+  ];
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
 describe("issue 321 -- complete headless ABI capability parity", () => {
   test("status and sessionMap expose the compiled addressing authority", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
@@ -157,6 +189,45 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
 
       assert.deepEqual(engine.meters(false), { ok: true, result: 0, code: "ok" });
       assert.equal(engine.pollMeters(), undefined);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a frame with submixes keeps the track shape and carries every bus", async () => {
+    // Issue #1209 gate 2: `T = 3`, `S = 2` through the shipped module. Red if the headless reader
+    // keeps the `3T + 3` shape check and refuses a frame with buses, or drops its submix sections.
+    const meterBlocks = 2;
+    const engine = await createOfflineEngine(busDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        meterBlocks,
+        observationTaps: 0,
+        masterTrackPlusOne: 0,
+      },
+    });
+    try {
+      assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
+      for (let block = 0; block < meterBlocks; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
+        engine.render();
+      }
+      const frame = engine.pollMeters();
+      assert.ok(frame);
+      const trackCount = engine.shape().tracks.length;
+      assert.equal(frame.trackCount, trackCount);
+      assert.equal(trackCount, 3);
+      assert.equal(frame.peaks.length, trackCount * 2 + 2, "2T + 2 peak words");
+      assert.equal(frame.trackGrDb.length, trackCount, "T gain-reduction words");
+      assert.equal(frame.submixCount, 2);
+      assert.equal(frame.submixPeaks.length, frame.submixCount * 2, "2S bus peak words");
+      assert.equal(frame.submixGrDb.length, frame.submixCount, "S bus gain-reduction words");
+      for (const values of [frame.peaks, frame.trackGrDb, frame.submixPeaks, frame.submixGrDb]) {
+        assert.ok(values.every((value) => Number.isFinite(value) && value >= 0), String(values));
+      }
+      assert.ok(frame.submixPeaks.every((value) => value > 0), "every bus lane is metered");
+      assert.ok(frame.peaks.every((value) => value > 0), "every track lane and the master");
     } finally {
       engine.dispose();
     }

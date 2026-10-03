@@ -188,7 +188,7 @@
       ]
     },
     "meterHeader": {
-      "bytes": 64,
+      "bytes": 72,
       "fields": [
         { "name": "structSize", "offset": 0, "type": "u32" },
         { "name": "abiVersion", "offset": 4, "type": "u32" },
@@ -199,7 +199,9 @@
         { "name": "sequence", "offset": 32, "type": "u64" },
         { "name": "masterTrackPlusOne", "offset": 40, "type": "u32" },
         { "name": "masterGrPresent", "offset": 44, "type": "u32" },
-        { "name": "reserved", "offset": 48, "type": "u64[2]" }
+        { "name": "reserved", "offset": 48, "type": "u64[2]" },
+        { "name": "submixCount", "offset": 64, "type": "u32" },
+        { "name": "reservedPad", "offset": 68, "type": "u32" }
       ]
     },
     "commandReport": {

@@ -387,8 +387,9 @@ fn frozen_layouts_and_values_are_exact() {
     );
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
-    assert_eq!(size_of::<WebMeterHeader>(), 64);
-    assert_eq!(METER_HEADER_BYTES, 64);
+    // Issue #1209 D2 appended `submix_count` and its pad: 64 bytes became 72, nothing moved.
+    assert_eq!(size_of::<WebMeterHeader>(), 72);
+    assert_eq!(METER_HEADER_BYTES, 72);
     assert_eq!(offset_of!(WebMeterHeader, track_count), 8);
     assert_eq!(offset_of!(WebMeterHeader, windows), 12);
     assert_eq!(offset_of!(WebMeterHeader, first_sample), 16);
@@ -397,6 +398,8 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebMeterHeader, master_track_plus_one), 40);
     assert_eq!(offset_of!(WebMeterHeader, master_gr_present), 44);
     assert_eq!(offset_of!(WebMeterHeader, reserved), 48);
+    assert_eq!(offset_of!(WebMeterHeader, submix_count), 64);
+    assert_eq!(offset_of!(WebMeterHeader, reserved_pad), 68);
     assert_eq!(offset_of!(WebCommandReport, result), 8);
     assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
@@ -5651,6 +5654,191 @@ fn a_bus_session_admits_and_renders_without_allocating() {
     assert_eq!(deallocations, 0, "admission/render freed");
 }
 
+/// Issue #1209 gates 1 and 5: three effect-free tracks over the observation fixture's source,
+/// each with its own fader pair so every track lane carries a distinct constant level.
+///
+/// With `buses`, `t0` and `t1` route into the unity submix `aaa-bus` and `t2` into `zzz-bus`, and
+/// both buses feed the output; without, every track feeds the output directly (the `S = 0` twin
+/// whose track and master words are today's computation).
+fn bus_meter_host(quantum: u32, buses: bool) -> AudioWorkletEngineHost {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture");
+    for (track, (left_db, right_db)) in
+        model
+            .tracks
+            .iter_mut()
+            .zip([(-6.0, -3.0), (-12.0, -1.0), (-2.0, -9.0)])
+    {
+        track.inserts.effects.clear();
+        track.fader.left_db = left_db;
+        track.fader.right_db = right_db;
+    }
+    if buses {
+        for (bus, feeders) in [("aaa-bus", &[0_usize, 1][..]), ("zzz-bus", &[2][..])] {
+            let id = session::StableId::parse(bus).expect("bus id");
+            model
+                .submixes
+                .push(session::Submix::unity(id.clone(), &model.console));
+            let mut out = model.routes[feeders[0]].clone();
+            for &feeder in feeders {
+                model.routes[feeder].destination = session::RouteDestination::SubmixInput {
+                    submix_id: id.clone(),
+                };
+            }
+            out.id = session::StableId::parse(&format!("{bus}-main")).expect("route id");
+            out.source = session::RouteSource::Submix {
+                submix_id: id,
+                tap: session::SendTap::PostPan,
+            };
+            model.routes.push(out);
+        }
+    }
+    model.quantum_frames = quantum;
+    model.sources[0].frames = u64::from(quantum) * 64;
+    let document = canonical_session_json(&model).expect("canonical bus meter session");
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        live_control_command_queue_records: 64,
+        live_control_meter_blocks: 2,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+        panic!(
+            "bus meter boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+/// Render `blocks` quanta of the constant `(0.5, 0.25)` source pair and poll once.
+fn bus_meter_frame(host: &mut AudioWorkletEngineHost, blocks: u64) -> Vec<f32> {
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    for block in 0..blocks {
+        feed_and_render_channels(host, block, 0.5, 0.25);
+    }
+    assert_eq!(host.poll_meters(), 1, "one complete window");
+    host.meter_frame().to_vec()
+}
+
+/// Issue #1209 gate 1: with `T = 3` and `S = 2` the frame is `3(T + S) + 3` words, each bus's
+/// `PostMatrix` peak pair sits after the tracks, the master follows the buses, and every gain
+/// reduction word is zero.
+///
+/// Red if any writer still assumes `3T + 3`, if submix peaks land in the master's slots, or if a
+/// bus is unmetered.
+#[test]
+fn the_meter_frame_carries_a_peak_pair_and_a_gain_word_per_submix() {
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 8;
+    let mut twin = bus_meter_host(QUANTUM, false);
+    let today = bus_meter_frame(&mut twin, BLOCKS);
+    assert_eq!(today.len(), 3 * 3 + 3, "the S = 0 twin keeps 3T + 3");
+    assert_eq!(twin.meter_header().submix_count, 0);
+
+    let mut host = bus_meter_host(QUANTUM, true);
+    let frame = bus_meter_frame(&mut host, BLOCKS);
+    let header = *host.meter_header();
+    assert_eq!(header.struct_size, 72);
+    assert_eq!(header.track_count, 3);
+    assert_eq!(header.submix_count, 2);
+    assert_eq!(header.reserved_pad, 0);
+    let (tracks, strips) = (3_usize, 5_usize);
+    assert_eq!(frame.len(), 3 * strips + 3, "3(T + S) + 3 words");
+
+    // Track peaks: today's words, bit for bit (track processing does not see the routing).
+    for word in 0..2 * tracks {
+        assert_eq!(
+            frame[word].to_bits(),
+            today[word].to_bits(),
+            "track peak word {word}"
+        );
+    }
+    let close = |actual: f32, expected: f32| (actual - expected).abs() <= expected.abs() * 1e-6;
+    // Bus peaks at `2(T + j)`: a unity bus's `PostMatrix` level is the sum of its feeders'.
+    for lane in 0..2 {
+        let aaa = frame[2 * tracks + lane];
+        let zzz = frame[2 * (tracks + 1) + lane];
+        assert!(aaa > 0.0 && zzz > 0.0, "lane {lane}: every bus is metered");
+        assert!(
+            close(aaa, frame[lane] + frame[2 + lane]),
+            "lane {lane}: aaa-bus {aaa} is t0 + t1"
+        );
+        assert!(
+            close(zzz, frame[4 + lane]),
+            "lane {lane}: zzz-bus {zzz} is t2"
+        );
+        // Master at `2(T + S)`: today's master, which no longer sits after the tracks.
+        let master = frame[2 * strips + lane];
+        assert!(
+            close(master, today[2 * tracks + lane]),
+            "lane {lane}: master {master} against today's {}",
+            today[2 * tracks + lane]
+        );
+        assert!(
+            close(master, aaa + zzz),
+            "lane {lane}: the master is the bus sum"
+        );
+    }
+    // Gain reduction from `2(T + S) + 2`: tracks, buses, master; nothing is armed.
+    for (word, value) in frame.iter().enumerate().skip(2 * strips + 2) {
+        assert_eq!(value.to_bits(), 0.0_f32.to_bits(), "gain word {word}");
+    }
+    assert_eq!(header.master_gr_present, 0);
+}
+
+/// Issue #1209 gate 5 (also #1207 verdict MINOR-2): on a session with submix strips carrying
+/// effects, with a meter on every strip and a track observation armed, a render that closes a
+/// window plus the per-block `poll_meters` that publishes the widened frame -- peaks for every
+/// strip and the gain-reduction fold -- allocates and frees nothing.
+///
+/// Red if the widened poll, its gain-reduction fold or the per-strip meters allocate per window;
+/// #1207's gate 4 measures admission and render only, never the poll.
+#[test]
+fn bus_meters_render_and_poll_without_allocating() {
+    const QUANTUM: u32 = 128;
+    let mut host = bus_effect_host(QUANTUM);
+    assert_eq!(host.meter_header().submix_count, 2);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    // `t0`'s compressor insert, tap 1, so the poll's gain-reduction fold reads a window.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    for block in 0..5 {
+        feed_and_render_tracks(&mut host, block, 0.5);
+    }
+    while host.poll_meters() > 0 {}
+    let left = [0.5_f32; QUANTUM as usize];
+    let right = [0.5_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            5 * u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((render, windows), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let render = host.render_next();
+            (render, host.poll_meters())
+        });
+    assert_eq!(render, RESULT_OK);
+    assert_eq!(windows, 1, "the measured poll published the widened frame");
+    assert_ne!(
+        host.meter_header().reserved[1] & METER_VALID_GAIN_REDUCTION,
+        0,
+        "the measured poll folded gain reduction"
+    );
+    assert_eq!(host.meter_frame().len(), 3 * 4 + 3, "3(T + S) + 3 words");
+    assert_eq!(allocations, 0, "render/poll allocated");
+    assert_eq!(deallocations, 0, "render/poll freed");
+}
+
 #[test]
 fn selected_observation_reads_are_bounded_stable_and_non_consuming() {
     const QUANTUM: u32 = 128;
@@ -5982,13 +6170,19 @@ fn observe(
 }
 
 /// The frame's gain-reduction section: one non-negative magnitude per track, then the master's.
+/// The submix words between them (issue #1209 D1) are skipped.
 fn gain_reduction(host: &AudioWorkletEngineHost) -> (Vec<f32>, Option<f32>) {
     let tracks = host.live_control_tracks().len();
+    let strips = tracks + host.meter_header().submix_count as usize;
     let frame = host.meter_frame();
-    assert_eq!(frame.len(), tracks * 3 + 3, "the frame is 3T + 3 words");
-    let base = tracks * 2 + 2;
+    assert_eq!(
+        frame.len(),
+        strips * 3 + 3,
+        "the frame is 3(T + S) + 3 words"
+    );
+    let base = strips * 2 + 2;
     let per_track = frame[base..base + tracks].to_vec();
-    let master = (host.meter_header().master_gr_present == 1).then(|| frame[base + tracks]);
+    let master = (host.meter_header().master_gr_present == 1).then(|| frame[base + strips]);
     (per_track, master)
 }
 

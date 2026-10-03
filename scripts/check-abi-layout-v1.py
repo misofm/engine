@@ -239,7 +239,7 @@ STRUCTURES = {
     "bootOptions": 64,
     "status": 80,
     "resourceReport": 224,
-    "meterHeader": 64,
+    "meterHeader": 72,
     "commandReport": 48,
     "observationSelection": 32,
     "observationResult": 96,

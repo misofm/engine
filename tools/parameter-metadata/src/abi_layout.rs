@@ -475,7 +475,7 @@ fn resource_report_fields() -> [Field; 28] {
     ]
 }
 
-fn meter_header_fields() -> [Field; 10] {
+fn meter_header_fields() -> [Field; 12] {
     [
         ("structSize", offset_of!(WebMeterHeader, struct_size), "u32"),
         ("abiVersion", offset_of!(WebMeterHeader, abi_version), "u32"),
@@ -499,6 +499,16 @@ fn meter_header_fields() -> [Field; 10] {
             "u32",
         ),
         ("reserved", offset_of!(WebMeterHeader, reserved), "u64[2]"),
+        (
+            "submixCount",
+            offset_of!(WebMeterHeader, submix_count),
+            "u32",
+        ),
+        (
+            "reservedPad",
+            offset_of!(WebMeterHeader, reserved_pad),
+            "u32",
+        ),
     ]
 }
 

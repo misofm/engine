@@ -894,10 +894,13 @@ class MisoAudioWorkletHost {
       // Every rule below is a shape rule the app is entitled to rely on without checking:
       // `trackGrDb` is exactly `trackCount` long, every entry is a finite non-negative magnitude,
       // `masterGrDb` is a finite number or `null` -- never `0` standing in for absence -- and the
-      // window is half-open and non-empty.
+      // window is half-open and non-empty. Issue #1209 D4: the buses ride three appended fields,
+      // `submixPeaks` a pair per bus and `submixGrDb` one magnitude per bus, every value finite
+      // and non-negative.
       if (!hasExactFields(message, [
         "tag", "sequence", "generation", "validity", "lossCount", "windows", "trackCount", "peaks",
-        "trackGrDb", "masterGrDb", "firstSample", "endSample",
+        "trackGrDb", "masterGrDb", "firstSample", "endSample", "submixCount", "submixPeaks",
+        "submixGrDb",
       ])
           || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
           || typeof message.generation !== "bigint" || message.generation <= 0n
@@ -917,7 +920,14 @@ class MisoAudioWorkletHost {
             || (typeof message.masterGrDb === "number" && Number.isFinite(message.masterGrDb)
               && message.masterGrDb >= 0))
           || typeof message.firstSample !== "bigint" || typeof message.endSample !== "bigint"
-          || message.firstSample < 0n || message.endSample <= message.firstSample) {
+          || message.firstSample < 0n || message.endSample <= message.firstSample
+          || !Number.isSafeInteger(message.submixCount) || message.submixCount < 0
+          || !(message.submixPeaks instanceof Float32Array)
+          || message.submixPeaks.length !== message.submixCount * 2
+          || !message.submixPeaks.every((value) => Number.isFinite(value) && value >= 0)
+          || !(message.submixGrDb instanceof Float32Array)
+          || message.submixGrDb.length !== message.submixCount
+          || !message.submixGrDb.every((value) => Number.isFinite(value) && value >= 0)) {
         this.#fail(webError(255, this.#oldestRequestId()));
         return;
       }

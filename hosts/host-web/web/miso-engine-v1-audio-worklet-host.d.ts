@@ -99,11 +99,12 @@
 // ## What a frame costs the render callback
 //
 // One `postMessage` per window, not per block. The body is a frozen object allocated at
-// construction whose two arrays are a `Float32Array` of `2 * trackCount + 2` peaks and one of
-// `trackCount` gain-reduction magnitudes, both allocated at construction and overwritten in place;
-// nothing is transferred, so the caller keeps no ownership obligation. The single allocation left
-// is the structured clone `postMessage` performs, which is `4 * (3 * trackCount + 2)` bytes plus a
-// handful of small numbers -- 392 bytes for a 32-track console. That cost has not been separately benchmarked in a browser; the telemetry
+// construction whose four arrays are a `Float32Array` of `2 * trackCount + 2` peaks, one of
+// `trackCount` gain-reduction magnitudes, and the buses' `2 * submixCount` peaks and
+// `submixCount` magnitudes, all allocated at construction and overwritten in place; nothing is
+// transferred, so the caller keeps no ownership obligation. The single allocation left is the
+// structured clone `postMessage` performs, which is `4 * (3 * (trackCount + submixCount) + 2)`
+// bytes plus a handful of small numbers -- 392 bytes for a 32-track console with no buses. That cost has not been separately benchmarked in a browser; the telemetry
 // lease measures the render export, not the post around it.
 //
 // # Exactly one artifact
@@ -608,6 +609,15 @@ export interface MisoMeterFrame {
   readonly firstSample: bigint;
   /// Absolute sample the reported window closed at, exclusive.
   readonly endSample: bigint;
+  /// Submix strips (buses) this frame carries, in canonical submix order (issue 1209).
+  readonly submixCount: number;
+  /// `[bus0 L, bus0 R, .., busM L, busM R]` post-matrix peak magnitudes, `2 * submixCount` long,
+  /// timestamped by `firstSample`/`endSample` exactly as `peaks` is.
+  readonly submixPeaks: Float32Array;
+  /// Gain reduction per bus, in non-negative decibels, `submixCount` long; every entry finite. It
+  /// follows `trackGrDb`'s rules: positional, `0` for "not reducing" or "no observed effect",
+  /// independently aged.
+  readonly submixGrDb: Float32Array;
 }
 
 /// One arm/disarm request for a single declared observation tap (issues 143, 151).
