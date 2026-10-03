@@ -1881,6 +1881,9 @@ async function testMainRealm() {
       // The tap is declared and correctly addressed; this preparation bound no observation
       // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
       { reason: 11, result: 7, what: "a session that bound no observation capacity" },
+      // Issue #1212: reason 12 (`notSoloable`) is in the host's vocabulary before anything emits
+      // it, so the kind-9 solo refusal #1213 adds is a typed refusal, never the sticky 255.
+      { reason: 12, result: 1, what: "a strip that cannot be soloed" },
     ]) {
       commandResult = result;
       commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });

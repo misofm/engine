@@ -315,6 +315,8 @@ export const enum MisoCommandReason {
   /// Prepare with `liveControlObservationTaps` set. Retrying will not help, which is why this is
   /// its own reason and not `Backpressure`.
   ObservationUnbound = 11,
+  /// The addressed strip is solo-safe: a submix is never soloed.
+  NotSoloable = 12,
 }
 
 /// One live-control command. `255` means "not applicable to this kind".

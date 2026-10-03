@@ -233,6 +233,7 @@ const COMMAND_REASONS = Object.freeze([
   "wrongState",
   "unknownTap",
   "observationUnbound",
+  "notSoloable",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.

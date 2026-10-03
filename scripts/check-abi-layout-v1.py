@@ -81,6 +81,7 @@ COMMAND_KINDS = [
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
+    "notSoloable",
 ]
 RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]

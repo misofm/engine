@@ -53,6 +53,7 @@ PLANE_OBSERVATION = "observation"
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
+    "notSoloable",
 ]
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
@@ -634,7 +635,7 @@ def self_test() -> int:
             slice(10, None)
         )),
         ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
-        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=12)),
+        ("reason value renumbered", lambda d: d["commandReasons"][12].update(value=13)),
         (
             "builtin live disagrees with update rate",
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),

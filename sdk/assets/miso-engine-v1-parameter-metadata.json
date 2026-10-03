@@ -29,7 +29,8 @@
     { "value": 8, "name": "backpressure" },
     { "value": 9, "name": "wrongState" },
     { "value": 10, "name": "unknownTap" },
-    { "value": 11, "name": "observationUnbound" }
+    { "value": 11, "name": "observationUnbound" },
+    { "value": 12, "name": "notSoloable" }
   ],
   "observationVocabularies": {
     "kinds": [{ "value": 1, "name": "gainReductionDb" }],

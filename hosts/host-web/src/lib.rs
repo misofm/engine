@@ -982,6 +982,11 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 /// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
 /// none. A caller fixes it by preparing with `live_control_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
+/// The addressed strip is solo-safe: a submix is never soloed (issue #1212).
+///
+/// Its own reason, not `MALFORMED` or `UNKNOWN_TRACK`: the record is well formed and the strip
+/// exists, and a caller that solos a bus learns that it addressed the wrong kind of strip.
+pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;
 
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
