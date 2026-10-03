@@ -114,7 +114,7 @@ fn prepare_with_live_controls(document: &str) -> Host {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
     assert_eq!(handles.track_controls.len(), TRACKS);
     Host {
         prepared,

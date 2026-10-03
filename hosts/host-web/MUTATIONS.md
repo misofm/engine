@@ -325,3 +325,14 @@ the correct pin made it pass again.
 | Target | Mutation | Observed failure |
 |---|---|---|
 | the digest pin | hand-edit `miso-engine-v1-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=e3a8ba31…`; exit 1, output directory left empty |
+
+## Issue #1207 — every strip in the live-control handles; bus effects filed in the browser
+
+Each mutation was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (segment-aware lookup, D2) | make `strip_index` one binary search over the concatenation `tracks ++ submixes` | `aaa-bus` sorts before `t0`, so its producer is never found and the boot refuses with `web.live_controls.effects` (both #1207 tests panic at boot) |
+| `tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (per-strip effect tables, D3/D5) | put the K1 interim back: skip every prepared entry whose owner is not a track in `attach_effect_live_controls` and `attach_effect_observation` | the boot succeeds but `aaa-bus`'s console slot 0 has no filed producer at `dense_effect_slot(effect_base[2], rack_effects[2], ..)` |
+| `tests::a_bus_session_admits_and_renders_without_allocating` (gate 4) | allocate a copy of `effect_base` inside `ReadyOwnership::effect_slot` | `admission/render allocated`: the measured submission plus `render_next` counts one allocation |

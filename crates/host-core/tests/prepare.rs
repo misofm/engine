@@ -703,8 +703,7 @@ fn live_controls_attach_bounded_control_and_meter_halves_in_canonical_track_orde
         .map(|track| track.id.as_str().to_owned())
         .collect();
     assert_eq!(
-        handles
-            .tracks
+        handles.strips[..handles.track_count]
             .iter()
             .map(|value| value.to_string())
             .collect::<Vec<_>>(),
@@ -758,7 +757,7 @@ fn no_live_control_request_attaches_nothing_and_charges_nothing() {
     .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
     assert!(handles.track_controls.is_empty());
     assert!(handles.meters.is_empty());
-    assert_eq!(handles.tracks.len(), 9);
+    assert_eq!(handles.strips.len(), 9);
     assert_eq!(plain.report.builtin_meter_payload_bytes, 0);
     let baseline = prepare_host_runtime(&compiled, &caps())
         .unwrap_or_else(|failure| {

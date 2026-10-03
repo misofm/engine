@@ -221,6 +221,69 @@ preparation and the C ABI* (#1206) added `maximum_submixes`; it moved no anchor 
 - The gate-3 table comparison against the base commit.
 - Whether #1053 had landed, and so whether D6 applied.
 
+### Attempt 1 record (Terra)
+
+- **D1** (`host-core/src/prepare.rs`): `HostLiveControlHandles.tracks` -> `strips` (tracks, then
+  submixes, each in canonical ID order) plus `track_count`; the control requests and default
+  meters iterate `strips[..track_count]`; `canonical_index` covers every strip; the master is
+  still validated against the track count. Doc comments name `strips` the addressing authority.
+- **Readers updated** (anchors as cited unless noted): `limiter_linked_session.rs` (the
+  `prepare`/`controls`/`observers` walks and both `placement` walks, now
+  `strips[..track_count]`); tests `effect_live_controls.rs` (`:78`, `:180`, `:212`),
+  `effect_observation.rs` (`:111`, `:181`), `input_liveness_live_controls.rs:117`,
+  `live_addressing.rs:168`, `prepare.rs` (`:701-707` to `strips[..track_count]`, `:761`),
+  `symmetry_witness.rs:134` (each was one line below the cited anchor); host-web build and
+  `ReadyOwnership.tracks` (now `drain`ed from `strips`, the tail becoming `submixes`).
+- **D2/D3/D4** (`host-web/src/lib.rs`): `strip_index(tracks, submixes, id)` searches the two
+  segments apart and replaces the producer, observation and `resolve_observation` searches;
+  `rack_effects`/`effect_base` cover tracks then `model.submixes`; `observation_present` is
+  `T + S`; `queue_count = 3T + total_effects`; bands, effect-band base and command guard
+  unchanged; the GR fold skips a strip index `>= T`. Boot refuses
+  (`web.live_controls.effects`) if `track_count > strips.len()` or the model's track/submix
+  counts disagree with the handles.
+- **D5** (`effect-compiler/src/prepare.rs`): both attach functions attach to every entry again;
+  `track_owned` and the interim doc paragraphs deleted; producer/observer `track_id` docs now say
+  "strip". Superseded tests deleted: `host-core/tests/submix_strip.rs::no_bus_effect_gets_a_live_channel_or_an_observation_handle`
+  (and its module-doc lines) and `host-web/src/tests.rs::live_controlled_boot_of_a_bus_with_an_effect_renders`
+  (its live-controlled bus boot with meters on is kept inside gate 1's host).
+- **D6**: #1053 has not landed (its spec is still open; capi reads no handles), so D6 did not
+  apply.
+- **Tests and test value** (mutation each, reverted after; rows in `hosts/host-web/MUTATIONS.md`):
+  - `host-web tests::a_bus_session_boots_live_controlled_and_files_every_bus_effect` (gate 1;
+    `aaa-bus`/`zzz-bus` around `t0`/`t1`, console `[eq]`/`[limiter]`, compressor insert per bus,
+    queue 64, taps 1, meters 2 blocks, 8 blocks `RESULT_OK`; all 12 effects checked at
+    `dense_effect_slot(effect_base[s], rack_effects[s], ..)` with `s` computed by the test): red
+    if a bus producer or observer is refused or misfiled, if a lookup binary-searches the unsorted
+    strip list, or if P16 is left in place. Mutations: one search over `tracks ++ submixes` ->
+    boot refuses; P16 restored -> `aaa-bus` console slot 0 has no producer.
+  - `host-web tests::a_bus_session_admits_and_renders_without_allocating` (gate 4; bypass of `t0`'s
+    compressor plus `render_next` under `ffi::live_response_ffi_tests::measured`, 0/0): red if
+    filing bus effects adds an admission- or render-time allocation. Mutation: allocate in
+    `ReadyOwnership::effect_slot` -> `admission/render allocated`.
+  - `host-core tests/strip_handles.rs::handles_list_tracks_then_submixes_and_file_bus_effects`
+    (gate 2; 3 tracks, buses declared `zzz-bus` then `aaa-bus`): red if a submix enters the track
+    prefix, if control requests or default meters cover buses, or if a bus effect lacks a channel
+    or observer. Mutations: controls over all strips -> red; strips sorted as one list -> red;
+    P16 restored -> red.
+- **Gate 3** (PR evidence, not committed): a temporary probe printed `effect_base`,
+  `rack_effects`, `queue_count` (`in_flight.len()`), `command_wanted.len()`,
+  `effect_controls.len()`, `observation_tracks`, `observation_present.len()` and `tracks` for 12
+  submix-free hosts (compressor, multiband, gate, input-filter, effect+input-filter,
+  live-control, paired nine-track, effect, eight-track bank, observation, same-track
+  observation, five-track effect-solo); the output at `8f8c013e6` and at this commit is
+  byte-identical (`diff` empty). No existing host-web live-control/observation test changed.
+- **Gates** (x86_64, this commit's tree): `cargo fmt --all -- --check` ok; clippy
+  `--workspace --all-targets --all-features -D warnings` ok; `cargo doc` with `-D warnings` ok;
+  the DESIGN section 7 workspace test command exit 0 (101 test binaries, 1151 passed, 0 failed);
+  `check-/test-` pairs for host-core, realtime, effect-runtime and workspace policy all exit 0;
+  browser: `build-web-audioworklet.sh --named-twin` ok (shipped module `0a6e44c9...`),
+  `check-web-audioworklet.sh` ok, `check-browser-expected-resources.py --artifacts` ok,
+  `check-sdk-headless.sh` ok. `run-aarch64-tests.sh debug`: not an arm64 host, so at batch push
+  (CI `aarch64-debug`).
+- **Open (hazard, as the spec says):** `observation_binding` and `copy_eq_target_config` now see
+  bus effects at strip index `T + j`; commands at such an index are still refused by the
+  per-track guard until #1213.
+
 ## Dependencies
 
 - *Count and cap submix strips in host preparation and the C ABI* (#1206)

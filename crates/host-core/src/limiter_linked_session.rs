@@ -386,8 +386,9 @@ fn prepare(backend: Backend) -> Console {
         backend,
     )
     .unwrap_or_else(|f| refused(&f));
-    assert_eq!(handles.tracks.len(), TRACKS);
-    for (index, track) in handles.tracks.iter().enumerate() {
+    assert_eq!(handles.track_count, TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS, "the fixture has no submix");
+    for (index, track) in handles.strips[..handles.track_count].iter().enumerate() {
         assert_eq!(
             **track,
             *format!("ch{index:02}"),
@@ -395,8 +396,7 @@ fn prepare(backend: Backend) -> Console {
         );
     }
     let controls = |address: LiveEffectAddress, effect: &str| -> Vec<usize> {
-        handles
-            .tracks
+        handles.strips[..handles.track_count]
             .iter()
             .map(|track| {
                 handles
@@ -416,8 +416,7 @@ fn prepare(backend: Backend) -> Console {
     // folded into the inserts they are inserts 1 and 2.
     let limiters = controls(strip_address(backend, 2), LIMITER);
     let compressors = controls(strip_address(backend, 1), COMPRESSOR);
-    let observers = handles
-        .tracks
+    let observers = handles.strips[..handles.track_count]
         .iter()
         .map(|track| {
             handles
@@ -461,9 +460,7 @@ fn placement(console: &Console, backend: Backend) -> Vec<(usize, usize)> {
         return (0..TRACKS).map(|track| (track, 0)).collect();
     }
     assert!(chains > 0, "the cohort planner bound banks at {backend:?}");
-    console
-        .handles
-        .tracks
+    console.handles.strips[..console.handles.track_count]
         .iter()
         .map(|track| {
             let mut found: Option<(&[Box<str>], usize)> = None;
@@ -482,9 +479,7 @@ fn placement(console: &Console, backend: Backend) -> Vec<(usize, usize)> {
             }
             let (mates, lane) =
                 found.unwrap_or_else(|| panic!("{track} renders in a bank at {backend:?}"));
-            let first = console
-                .handles
-                .tracks
+            let first = console.handles.strips[..console.handles.track_count]
                 .iter()
                 .position(|member| *member == mates[0])
                 .expect("a bank-mate is a track");

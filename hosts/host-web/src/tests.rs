@@ -5427,76 +5427,228 @@ fn same_track_observation_host(quantum: u32) -> AudioWorkletEngineHost {
     AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("two-effect observation boot")
 }
 
-/// #1200 gate 6 (VERIFY-2 N2): a live-controlled browser boot of a session whose bus strip
-/// carries an effect boots and renders. Until #1207 files bus effects, preparation attaches live
-/// controls and observation to track-owned effects only (DESIGN P16), so the browser never sees a
-/// producer or an observation handle it cannot file.
+/// Issue #1207 gates 1 and 4: two tracks and two submixes over the observation fixture.
 ///
-/// #1202 gate 7: the session also declares one console slot, a parametric EQ, and every strip --
-/// the bus included, live -- carries its entry, so a bus console slot must not get a live channel
-/// during K1 either.
-#[test]
-fn live_controlled_boot_of_a_bus_with_an_effect_renders() {
-    const QUANTUM: u32 = 128;
+/// The session declares console slots `pre_insert: [eq]` and `post_insert: [true-peak limiter]`.
+/// Tracks `t0` (compressor insert) and `t1` (EQ insert) feed the submixes `aaa-bus`, which sorts
+/// before every track ID, and `zzz-bus`, which sorts after; each bus carries every console slot
+/// and a `miso.compressor` insert, and both buses feed the output. A lookup that binary-searched
+/// the unsorted strip list `[t0, t1, aaa-bus, zzz-bus]` would miss `aaa-bus`.
+///
+/// This supersedes the K1 boot test (#1200 gate 6, extended by #1202 gate 7), whose
+/// live-controlled bus boot it repeats with meters on.
+fn bus_effect_host(quantum: u32) -> AudioWorkletEngineHost {
     let mut model = parse_session_json(include_str!(
         "../../../fixtures/session/v1/observation-frame-shape.json"
     ))
     .expect("accepted observation fixture");
-    let slot = session::StableId::parse("desk-eq").expect("slot id");
-    model.console.pre_insert = vec![session::ConsoleSlot {
-        slot: slot.clone(),
+    let slot = |slot: &str, effect: &str| session::ConsoleSlot {
+        slot: session::StableId::parse(slot).expect("slot id"),
         identity: session::EffectIdentity::Native {
-            effect_id: session::StableId::parse("miso.parametric-eq").expect("effect id"),
+            effect_id: session::StableId::parse(effect).expect("effect id"),
         },
         quality: session::EffectQuality::Normal,
         link_mode: session::LinkMode::DualMono,
-    }];
+    };
+    model.console.pre_insert = vec![slot("desk-eq", "miso.parametric-eq")];
+    model.console.post_insert = vec![slot("desk-limit", "miso.true-peak-limiter")];
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
     for track in &mut model.tracks {
-        track.console = vec![session::ConsoleEntry {
-            slot: slot.clone(),
-            bypass: false,
-            params: Vec::new(),
-        }];
+        track.console = model
+            .console
+            .slots()
+            .map(|slot| session::ConsoleEntry {
+                slot: slot.slot.clone(),
+                bypass: false,
+                params: Vec::new(),
+            })
+            .collect();
     }
-    let bus_id = session::StableId::parse("bus").expect("bus id");
-    let mut bus = session::Submix::unity(bus_id.clone(), &model.console);
-    bus.console[0].bypass = false;
-    bus.inserts
-        .effects
-        .push(model.tracks[0].inserts.effects[0].clone());
-    model.submixes.push(bus);
-    // Longer than the eight rendered blocks, so the last one is not the region's final block.
-    model.sources[0].frames = u64::from(QUANTUM) * 16;
-    model.tracks.truncate(1);
-    model.routes.truncate(1);
-    let mut bus_main = model.routes[0].clone();
-    model.routes[0].destination = session::RouteDestination::SubmixInput {
-        submix_id: bus_id.clone(),
-    };
-    bus_main.id = session::StableId::parse("bus-main").expect("route id");
-    bus_main.source = session::RouteSource::Submix {
-        submix_id: bus_id,
-        tap: session::SendTap::PostPan,
-    };
-    model.routes.push(bus_main);
+    let compressor = model.tracks[0].inserts.effects[0].clone();
+    for (bus, feeder) in [("aaa-bus", 0_usize), ("zzz-bus", 1)] {
+        let id = session::StableId::parse(bus).expect("bus id");
+        let mut submix = session::Submix::unity(id.clone(), &model.console);
+        for entry in &mut submix.console {
+            entry.bypass = false;
+        }
+        submix.inserts.effects.push(compressor.clone());
+        model.submixes.push(submix);
+        let mut out = model.routes[feeder].clone();
+        model.routes[feeder].destination = session::RouteDestination::SubmixInput {
+            submix_id: id.clone(),
+        };
+        out.id = session::StableId::parse(&format!("{bus}-main")).expect("route id");
+        out.source = session::RouteSource::Submix {
+            submix_id: id,
+            tap: session::SendTap::PostPan,
+        };
+        model.routes.push(out);
+    }
+    model.quantum_frames = quantum;
+    // Longer than the rendered blocks, so the last one is not the region's final block.
+    model.sources[0].frames = u64::from(quantum) * 16;
     let document = canonical_session_json(&model).expect("canonical bus session");
     let options = WebBootOptions {
-        source_ring_frames: QUANTUM * 4,
-        live_control_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        source_ring_frames: quantum * 4,
+        live_control_command_queue_records: 64,
         live_control_meter_blocks: 2,
-        live_control_observation_taps: 4,
-        ..boot_options(QUANTUM)
+        live_control_observation_taps: 1,
+        ..boot_options(quantum)
     };
-    let mut host =
-        AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
-            panic!(
-                "live-controlled bus boot: {}",
-                String::from_utf8_lossy(failure.diagnostic())
-            )
-        });
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+        panic!(
+            "live-controlled bus boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+/// Issue #1207 gate 1: a bus session boots live-controlled, renders, and files every bus effect's
+/// producer and observation handle at its strip's dense slot.
+///
+/// Red if a bus producer or observation handle is refused or misfiled, if a lookup
+/// binary-searches the unsorted strip list (`aaa-bus` is missed and boot refuses), or if the K1
+/// interim (DESIGN P16) is left in place (the bus slots stay `None`).
+#[test]
+fn a_bus_session_boots_live_controlled_and_files_every_bus_effect() {
+    const QUANTUM: u32 = 128;
+    let mut host = bus_effect_host(QUANTUM);
     for block in 0..8 {
         feed_and_render_tracks(&mut host, block, 0.25);
     }
+    let ready = host.ready.as_ref().expect("ready ownership");
+    assert_eq!(ready.tracks, [Box::from("t0"), Box::from("t1")]);
+    assert_eq!(ready.submixes, [Box::from("aaa-bus"), Box::from("zzz-bus")]);
+    assert_eq!(host.live_control_tracks().len(), 2, "the track prefix only");
+    // Strip order, computed here: the tracks, then the submixes at `T + j`.
+    let strips = ["t0", "t1", "aaa-bus", "zzz-bus"];
+    // Every strip carries the two console slots (slot 0 the EQ, slot 1 the limiter) and one
+    // insert: the compressor on `t0` and both buses, the EQ on `t1`.
+    let inserts = [
+        "miso.compressor",
+        "miso.parametric-eq",
+        "miso.compressor",
+        "miso.compressor",
+    ];
+    let mut filed = 0;
+    for (strip, id) in strips.iter().enumerate() {
+        let effects = [
+            (
+                LiveEffectAddress {
+                    rack: LiveEffectRack::Console,
+                    index: 0,
+                },
+                "miso.parametric-eq",
+            ),
+            (
+                LiveEffectAddress {
+                    rack: LiveEffectRack::Console,
+                    index: 1,
+                },
+                "miso.true-peak-limiter",
+            ),
+            (
+                LiveEffectAddress {
+                    rack: LiveEffectRack::Inserts,
+                    index: 0,
+                },
+                inserts[strip],
+            ),
+        ];
+        for (address, native) in effects {
+            let slot =
+                dense_effect_slot(ready.effect_base[strip], ready.rack_effects[strip], address)
+                    .unwrap_or_else(|| panic!("{id} {address:?} has a dense slot"));
+            let producer = ready.effect_controls[slot]
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} {address:?} has a filed producer"));
+            assert_eq!(&*producer.track_id, *id, "slot {slot}'s producer owner");
+            assert_eq!(producer.address, address, "slot {slot}'s producer address");
+            assert_eq!(
+                producer.descriptor.id.as_str(),
+                native,
+                "slot {slot}'s effect"
+            );
+            let observed = ready.effect_observations[slot].as_ref();
+            if native == "miso.parametric-eq" {
+                assert!(
+                    observed.is_none(),
+                    "{id} {address:?}: an EQ declares no tap"
+                );
+                assert_eq!(ready.observation_tracks[slot], u32::MAX);
+            } else {
+                let handle =
+                    observed.unwrap_or_else(|| panic!("{id} {address:?} has a filed observer"));
+                assert_eq!(&*handle.track_id, *id, "slot {slot}'s observer owner");
+                assert_eq!(handle.address, address, "slot {slot}'s observer address");
+                assert_eq!(ready.observation_tracks[slot] as usize, strip);
+            }
+            filed += 1;
+        }
+    }
+    assert_eq!(filed, 12);
+    assert_eq!(
+        ready.effect_controls.len(),
+        12,
+        "no producer slot beyond the strips'"
+    );
+    assert_eq!(ready.observation_present.len(), strips.len());
+}
+
+/// Issue #1207 gate 4: with every bus effect filed, a live-control submission to a track effect
+/// plus `render_next` allocates and frees nothing.
+///
+/// Red if filing bus effects adds a render- or admission-time allocation, for example a
+/// per-block lookup that builds a table.
+#[test]
+fn a_bus_session_admits_and_renders_without_allocating() {
+    const QUANTUM: u32 = 128;
+    let mut host = bus_effect_host(QUANTUM);
+    for block in 0..2 {
+        feed_and_render_tracks(&mut host, block, 0.25);
+    }
+    // `t0`'s compressor insert: track 0, rack `inserts` (1), effect 0, bypassed.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    let left = [0.25_f32; QUANTUM as usize];
+    let right = [0.25_f32; QUANTUM as usize];
+    let planes: [&[f32]; 2] = [&left, &right];
+    assert_eq!(
+        host.submit_source(
+            b"fixture-source",
+            1,
+            2 * u64::from(QUANTUM),
+            48_000,
+            &planes,
+            QUANTUM,
+            false,
+        ),
+        RESULT_OK
+    );
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            let admission = host.submit_commands(1);
+            let render = host.render_next();
+            (admission, render)
+        });
+    assert_eq!(
+        admission, RESULT_OK,
+        "the track effect's bypass is admitted"
+    );
+    assert_eq!(render, RESULT_OK, "the bus session renders");
+    assert_eq!(allocations, 0, "admission/render allocated");
+    assert_eq!(deallocations, 0, "admission/render freed");
 }
 
 #[test]

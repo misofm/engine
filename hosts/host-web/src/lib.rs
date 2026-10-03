@@ -922,6 +922,23 @@ fn dense_effect_slot(base: u32, counts: [u32; 3], address: LiveEffectAddress) ->
     usize::try_from(base.checked_add(earlier)?.checked_add(index)?).ok()
 }
 
+/// The strip index of `id`: its position among the tracks, or `tracks.len() + j` for submix `j`
+/// (issue #1207 D2).
+///
+/// host-core's strip list is the tracks in canonical ID order followed by the submixes in
+/// canonical ID order. Each segment is sorted but their concatenation is not -- a submix ID may
+/// sort before a track ID -- so the two segments are searched apart; a single binary search over
+/// the concatenation would silently miss such a submix.
+fn strip_index(tracks: &[Box<str>], submixes: &[Box<str>], id: &str) -> Option<usize> {
+    if let Ok(track) = tracks.binary_search_by(|track| track.as_ref().cmp(id)) {
+        return Some(track);
+    }
+    let submix = submixes
+        .binary_search_by(|submix| submix.as_ref().cmp(id))
+        .ok()?;
+    tracks.len().checked_add(submix)
+}
+
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
 /// A record's fixed shape is wrong: an unknown kind, a nonzero reserved word, or a non-finite value.
@@ -1393,7 +1410,9 @@ struct ReadyOwnership {
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
     effect_controls: Box<[Option<EffectControlProducer>]>,
-    /// Per-track prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup.
+    /// Per-strip prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup:
+    /// the tracks first, then the submixes (issue #1207 D3), so a track's entry is the same with
+    /// or without submixes.
     effect_base: Box<[u32]>,
     /// Room needed per destination queue by the submission being validated. Allocated at
     /// compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
@@ -1422,11 +1441,15 @@ struct ReadyOwnership {
     input_filter_shadows: Box<[BuiltinInputShadow]>,
     /// The compiled session rate used by input-filter semantic validation.
     sample_rate_hz: u32,
-    /// Canonical normalized track order: the addressing authority for `track_index`.
+    /// Canonical normalized track order: the addressing authority for `track_index`, and the
+    /// leading segment of the strip order.
     tracks: Vec<Box<str>>,
-    /// Effects per track in each lowered rack, in chain order `[pre_insert, inserts,
-    /// post_insert]`, so an effect-addressed command is answered with `UNKNOWN_EFFECT` before
-    /// anything else ([`LiveEffectAddress::lower`] reads them).
+    /// Canonical normalized submix order, the strip order's trailing segment: submix `j` is strip
+    /// `tracks.len() + j` (issue #1207 D2). No command addresses a submix yet.
+    submixes: Vec<Box<str>>,
+    /// Effects per strip (tracks, then submixes) in each lowered rack, in chain order
+    /// `[pre_insert, inserts, post_insert]`, so an effect-addressed command is answered with
+    /// `UNKNOWN_EFFECT` before anything else ([`LiveEffectAddress::lower`] reads them).
     rack_effects: Box<[[u32; 3]]>,
     /// The optional one-shot spectrum observer or atomically selectable collection. It is
     /// declared before the prepared host so consumers are released before the plan's producers.
@@ -1439,11 +1462,12 @@ struct ReadyOwnership {
     /// order the command producers use, so an addressed subscription reaches its lane with one
     /// index and no search. Empty when the configuration named no observation capacity.
     effect_observations: Box<[Option<EffectObservationHandle>]>,
-    /// Track index of each observed effect slot, or `u32::MAX` for a slot with no taps. Built once
-    /// at compilation, so the poll's fold is arithmetic rather than a search.
+    /// Strip index of each observed effect slot (a submix's is `tracks.len() + j`), or `u32::MAX`
+    /// for a slot with no taps. Built once at compilation, so the poll's fold is arithmetic rather
+    /// than a search.
     observation_tracks: Box<[u32]>,
-    /// Whether each track contributed a gain-reduction reading to the most recent poll. Allocated
-    /// at compilation; it is what makes `masterGrDb` absent rather than zero.
+    /// Whether each strip contributed a gain-reduction reading to the most recent poll. Allocated
+    /// at compilation, one entry per strip; it is what makes `masterGrDb` absent rather than zero.
     observation_present: Box<[bool]>,
     /// Armed-tap bitmask per effect slot, maintained at **admission**.
     ///
@@ -3385,7 +3409,10 @@ impl AudioWorkletEngineHost {
             let Some(track) = ready.observation_tracks.get(effect).copied() else {
                 continue;
             };
-            if track == u32::MAX {
+            // Issue #1207 D4: the frame carries one gain-reduction word per *track* until #1209
+            // widens it, so a submix's effect (strip index `>= tracks`) is skipped rather than
+            // folded into the master's word or past the frame.
+            if track == u32::MAX || track as usize >= tracks {
                 continue;
             }
             let armed = ready.observation_armed.get(effect).copied().unwrap_or(0);
@@ -5073,10 +5100,8 @@ fn resolve_observation(
     ready: &ReadyOwnership,
     selection: &ObservationSelection<'_>,
 ) -> Result<(usize, usize), ObservationReadError> {
-    let track = ready
-        .tracks
-        .binary_search_by(|id| id.as_ref().cmp(selection.track_id))
-        .map_err(|_| ObservationReadError::InvalidSelection)?;
+    let track = strip_index(&ready.tracks, &ready.submixes, selection.track_id)
+        .ok_or(ObservationReadError::InvalidSelection)?;
     let [pre_insert, inserts, post_insert] = ready
         .rack_effects
         .get(track)
@@ -5870,27 +5895,43 @@ fn compile_ready(
     // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
     // prepared with `live_control_observation_taps == 0`.
     report.observation_retained_bytes = engine.observation_retained_bytes;
-    let track_count = handles.tracks.len();
+    // Issue #1207 D1: `handles.strips` is the tracks, then the submixes. The tracks keep every
+    // per-track table, queue band and meter word; the submixes only extend the effect tables.
+    let track_count = handles.track_count;
+    let mut tracks = handles.strips;
+    if track_count > tracks.len() {
+        return Err(fixed_diagnostic("web.live_controls.effects").into());
+    }
+    let strip_count = tracks.len();
+    let mut submixes: Vec<Box<str>> = Vec::new();
+    submixes
+        .try_reserve_exact(strip_count - track_count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    submixes.extend(tracks.drain(track_count..));
     let mut rack_effects = Vec::new();
     rack_effects
-        .try_reserve_exact(track_count)
+        .try_reserve_exact(strip_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     // Issue #210 phase 1: the solo state's user-mute mirror starts from the *session's* baked
     // fader mutes -- the same `left_mute`/`right_mute` words `track_parameters` compiles into the
-    // prepared fader section -- read in the same normalized track order `handles.tracks` carries,
+    // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
     // because that order is the addressing authority for every queue, meter and command index.
     let mut prepared_mutes: Vec<[bool; 2]> = Vec::new();
     prepared_mutes
         .try_reserve_exact(track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     let model = session.normalized_model();
+    if model.tracks.len() != track_count || model.submixes.len() != submixes.len() {
+        return Err(fixed_diagnostic("web.live_controls.effects").into());
+    }
+    let count = |effects: usize| -> Result<u32, Vec<u8>> {
+        u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
+    };
+    // The lowered racks (decision 12), in chain order: every strip carries every `pre_insert` and
+    // `post_insert` slot, so those counts are the session's. A live address (rack byte `3`
+    // console or `1` inserts, #1096) reaches them through `dense_effect_slot`. Tracks first, then
+    // submixes (issue #1207 D3): the strip order, so `rack_effects[t]` of a track never moves.
     for track in &model.tracks {
-        let count = |effects: usize| -> Result<u32, Vec<u8>> {
-            u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
-        };
-        // The lowered racks (decision 12), in chain order: every track carries every
-        // `pre_insert` and `post_insert` slot, so those counts are the session's. A live address
-        // (rack byte `3` console or `1` inserts, #1096) reaches them through `dense_effect_slot`.
         rack_effects.push([
             count(model.console.pre_insert.len())?,
             count(track.inserts.effects.len())?,
@@ -5898,12 +5939,20 @@ fn compile_ready(
         ]);
         prepared_mutes.push([track.fader.left_mute, track.fader.right_mute]);
     }
-    // Issue #140 A: the dense effect-queue index. `effect_base[t]` is the number of effect
-    // instances declared by every earlier track, so `effect_slot` is arithmetic rather than a
-    // search, and the producers are permuted into exactly that order once, here.
+    for submix in &model.submixes {
+        rack_effects.push([
+            count(model.console.pre_insert.len())?,
+            count(submix.inserts.effects.len())?,
+            count(model.console.post_insert.len())?,
+        ]);
+    }
+    // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
+    // instances declared by every earlier strip, so `effect_slot` is arithmetic rather than a
+    // search, and the producers are permuted into exactly that order once, here. The tracks lead,
+    // so every track effect keeps its dense index and the submixes' effects follow them.
     let mut effect_base = Vec::new();
     effect_base
-        .try_reserve_exact(track_count)
+        .try_reserve_exact(strip_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     let mut total_effects = 0_u32;
     for counts in &rack_effects {
@@ -5920,14 +5969,11 @@ fn compile_ready(
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     effect_controls.resize_with(total_effects as usize, || None);
     for producer in handles.effect_controls {
-        let Ok(track) = handles
-            .tracks
-            .binary_search_by(|id| id.as_ref().cmp(producer.track_id.as_ref()))
-        else {
+        let Some(strip) = strip_index(&tracks, &submixes, &producer.track_id) else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
         };
         let Some(entry) =
-            dense_effect_slot(effect_base[track], rack_effects[track], producer.address)
+            dense_effect_slot(effect_base[strip], rack_effects[strip], producer.address)
                 .and_then(|slot| effect_controls.get_mut(slot))
         else {
             return Err(fixed_diagnostic("web.live_controls.effects").into());
@@ -5967,7 +6013,8 @@ fn compile_ready(
     report.largest_named_allocation_bytes = report
         .largest_named_allocation_bytes
         .max(effect_control_largest);
-    // Three per-track bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity.
+    // Three per-track bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity. They
+    // stay per track until a command can address a submix; the effect band covers every strip.
     let queue_count = track_count
         .checked_mul(3)
         .and_then(|value| value.checked_add(total_effects as usize))
@@ -5984,18 +6031,15 @@ fn compile_ready(
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     observation_arm_samples.resize_with(total_effects as usize, || Box::new([]));
-    // `observation_tracks[slot]` is the track index of that effect slot's observed instance, or
+    // `observation_tracks[slot]` is the strip index of that effect slot's observed instance, or
     // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
     let mut observation_tracks = vec![u32::MAX; total_effects as usize];
-    let observation_present = vec![false; track_count];
+    let observation_present = vec![false; strip_count];
     for handle in handles.effect_observations {
-        let Ok(track) = handles
-            .tracks
-            .binary_search_by(|id| id.as_ref().cmp(handle.track_id.as_ref()))
-        else {
+        let Some(strip) = strip_index(&tracks, &submixes, &handle.track_id) else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
-        let Some(slot) = dense_effect_slot(effect_base[track], rack_effects[track], handle.address)
+        let Some(slot) = dense_effect_slot(effect_base[strip], rack_effects[strip], handle.address)
         else {
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         };
@@ -6006,9 +6050,10 @@ fn compile_ready(
             return Err(fixed_diagnostic("web.live_controls.observation").into());
         }
         // The frame carries one gain-reduction slot per track, so every observed effect of a track
-        // points at that track and the poll folds them max-magnitude into the one slot.
+        // points at that track and the poll folds them max-magnitude into the one slot. A
+        // submix's effect points at its strip index, which the fold skips until #1209.
         observation_tracks[slot] =
-            u32::try_from(track).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?;
+            u32::try_from(strip).map_err(|_| fixed_diagnostic("web.live_controls.observation"))?;
         let tap_count = handle.descriptor.observations.len();
         let mut arm_samples = Vec::new();
         arm_samples
@@ -6133,7 +6178,8 @@ fn compile_ready(
         has_in_flight_commands: false,
         input_filter_shadows: input_filter_shadows.into_boxed_slice(),
         sample_rate_hz: session.sample_rate().0,
-        tracks: handles.tracks,
+        tracks,
+        submixes,
         rack_effects: rack_effects.into_boxed_slice(),
         spectrum_capture,
         host,

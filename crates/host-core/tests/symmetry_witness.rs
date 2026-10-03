@@ -131,7 +131,7 @@ fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
-    assert_eq!(handles.tracks.len(), TRACKS);
+    assert_eq!(handles.strips.len(), TRACKS);
     (
         session,
         Console {

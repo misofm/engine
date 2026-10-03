@@ -7,8 +7,6 @@
 //! * **Gate 2, PDC through a bus.** A bus limiter's latency reaches the arrival times.
 //! * **Gate 3, a bus is never collapsed.** A mono track panned hard left into a processed bus
 //!   leaves the bus's right output exactly `+0.0`.
-//! * **Gate 5, the K1 live-control interim.** No bus effect gets a live channel or an
-//!   observation handle until #1207.
 //! * **Gate 8, render allocates nothing** for gate 1's bus session.
 //! * **A bus into a bus** (verdict MINOR-3): a nested bus renders the bits of two tracks, each fed
 //!   its sum.
@@ -27,8 +25,6 @@
 //!   `pre_insert: [eq, compressor]` and `post_insert: [true-peak limiter]`, the bus and the
 //!   reference track carry drawn entries, and the contributors bypass every slot.
 //! * **Gate 3, a bypassed bus slot keeps its latency.**
-//! * **Gate 7, the K1 live-control interim with a console**: no bus console slot gets a live
-//!   channel or an observation handle.
 //! * **Gate 8, render allocates nothing** for gate 1's console session.
 //!
 //! Issue #1203: a route or a sidechain leaves a submix strip at any of the seven taps.
@@ -41,10 +37,7 @@
 //! * **Gate 6, render allocates nothing** for gate 1's tapped buses.
 //! * **D4, a muted bus still feeds its `pre_fader` tap** (verdict MINOR-2).
 
-use core::num::{NonZeroU32, NonZeroUsize};
-
 use bench_support::alloc as bench_alloc;
-use builtins::MeterTap;
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use dsp_reference::randomized::{Draw, first_difference, run_seeds};
 use effect_compiler::{EffectCompileCaps, launch_native_effect_registry};
@@ -57,8 +50,8 @@ use graph_compiler::{
     Backend, GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact,
 };
 use host_core::{
-    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
-    compile_host_session, prepare_host_runtime, prepare_host_session_with_live_controls,
+    HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission, compile_host_session,
+    prepare_host_runtime,
 };
 use session::{
     ChannelBuiltins, ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins,
@@ -1176,92 +1169,6 @@ fn a_mono_track_panned_left_into_a_processed_bus_leaves_its_right_silent() {
             "right sample {index} is {sample:?}: the bus was collapsed"
         );
     }
-}
-
-// ---- Gate 5 (#1200), extended by #1202 gate 7 -------------------------------------------------
-
-/// Session A declares gate 1's console, so every strip -- the bus included -- carries three console
-/// slots (#1202 gate 7). Every track-owned effect, console slots and the one insert, gets a live
-/// channel, and the observable ones an observation handle; no bus effect, console slot or insert,
-/// gets either.
-#[test]
-fn no_bus_effect_gets_a_live_channel_or_an_observation_handle() {
-    let registry = launch_native_effect_registry().expect("launch registry");
-    let mut draw = Draw::new(5);
-    let (bus, _, _, _) = gate_one_sessions(&mut draw, &registry);
-    // Session A, with one track-owned compressor so the track-owned half is not vacuous.
-    let mut model = parse_session_json(&bus).expect("session A parses");
-    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
-    model.tracks[0]
-        .inserts
-        .effects
-        .push(fixture.tracks[0].inserts.effects[0].clone());
-    let document = document(&model);
-    let (_, _, handles) = prepare_host_session_with_live_controls(
-        &document,
-        &caps(),
-        &HostLiveControlRequest {
-            control_queue_depth: Some(NonZeroUsize::new(64).expect("depth")),
-            meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
-            meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
-            meter_tap: MeterTap::PostMatrix,
-            observation_taps: 4,
-            master_track: None,
-        },
-    )
-    .unwrap_or_else(|failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())));
-    let tracks: Vec<&str> = model.tracks.iter().map(|track| track.id.as_str()).collect();
-    let mut controls: Vec<(&str, &str)> = handles
-        .effect_controls
-        .iter()
-        .map(|control| (&*control.track_id, &*control.effect_id))
-        .collect();
-    let mut observations: Vec<(&str, &str)> = handles
-        .effect_observations
-        .iter()
-        .map(|handle| (&*handle.track_id, &*handle.effect_id))
-        .collect();
-    controls.sort_unstable();
-    observations.sort_unstable();
-    assert_eq!(
-        model.submixes[0].console.len(),
-        3,
-        "the bus carries the console"
-    );
-    let mut track_owned: Vec<(&str, &str)> = model
-        .tracks
-        .iter()
-        .flat_map(|track| {
-            track
-                .console
-                .iter()
-                .map(|entry| entry.slot.as_str())
-                .chain(
-                    track
-                        .inserts
-                        .effects
-                        .iter()
-                        .map(|effect| effect.id.as_str()),
-                )
-                .map(|effect| (track.id.as_str(), effect))
-        })
-        .collect();
-    track_owned.sort_unstable();
-    assert!(
-        controls
-            .iter()
-            .chain(&observations)
-            .all(|(owner, _)| tracks.contains(owner)),
-        "a bus effect got a live channel: {controls:?} {observations:?}"
-    );
-    assert_eq!(controls, track_owned);
-    // An EQ publishes no observation, so the observed set is the track-owned dynamics.
-    assert!(
-        observations.iter().all(|owned| track_owned.contains(owned))
-            && observations.contains(&("t0", "comp"))
-            && observations.contains(&("t2", "desk-limit")),
-        "{observations:?}"
-    );
 }
 
 // ---- Gate 8 -------------------------------------------------------------------------------
