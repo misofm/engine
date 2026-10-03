@@ -72,6 +72,23 @@ Every anchor below is verified on the batch K3 follow-up tree (branch `codex/bat
    renders bit-identical to one where that strip carries an insert of the same effect at that mode
    (pre-insert position), and the slot still binds one bank; the `author-session` skill and the app
    handoff drop the bus-compression hazard guidance (DESIGN 2.2b).
+   **Deliverable (K3 follow-up amendment, from the K3 verdict's MINOR-2): amend the binding
+   texts in L2's own PR.** D2 changes decision 12's slot declaration, so L2 lands, in the same
+   PR as the grammar:
+   - `AGENTS.md`, "Approved audio architecture", the console sentence "the session declares each
+     console slot once (a stable slot ID, the native effect, quality and link mode), and every
+     strip carries every slot, in that order, with only its own parameters and bypass": it gains
+     the strip's link-mode override (the slot's `link_mode` becomes the default a strip's entry
+     may override). Until L2 lands, any earlier `AGENTS.md` mention carries decision 13's
+     qualifier for owner direction read by the planner, "Planned under decision 13 ..., subject to
+     owner review"; L2's PR removes it.
+   - Decision 12's ruling, `docs/rulings/engine-footprint-2026-09-29.md`, the **Shape** bullet
+     ("Each slot is declared once, with `slot` ..., `quality` and `link_mode`. Every track has
+     every slot: each track carries a `console` array of `{ "slot", "bypass", "params" }`"): an
+     amendment note that the entry now also carries `link_mode` (`slot` or a link token), citing
+     decision 13 Q1 and this issue. The rest of decision 12 is unchanged.
+   - Decision 13's ruling, `docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`, Q1: recorded
+     as delivered.
 
 ## Invariants
 
@@ -90,7 +107,15 @@ Every anchor below is verified on the batch K3 follow-up tree (branch `codex/bat
 ## Objective gates (umbrella)
 
 - L1 and L2 closed with Sol PASS, their evidence upstream and their GitHub issues synchronized.
+- `AGENTS.md`'s console sentence and decision 12's Shape bullet carry the per-strip link-mode
+  override, landed in L2's PR, with no decision-13 qualifier left on it.
 - Decision 13's ruling records Q1 as delivered.
+- Each slice's own gates, when filed, include (K3 verdict NIT): the touched effects'
+  `KERNEL_ROSTER` rows; `bash scripts/build-web-audioworklet.sh --named-twin <B> <A>`, then
+  `bash scripts/check-web-audioworklet.sh <A> <B>/miso-engine-v1-audio-worklet.simd128.named.wasm`,
+  `python3 -B scripts/check-browser-expected-resources.py --artifacts <A>` and
+  `bash scripts/test-web-audioworklet.sh`; `bash scripts/check-cross-targets.sh`; and
+  `scripts/run-aarch64-tests.sh` (CI `aarch64-debug`/`aarch64-release` when no arm64 host).
 
 ## Dependencies
 

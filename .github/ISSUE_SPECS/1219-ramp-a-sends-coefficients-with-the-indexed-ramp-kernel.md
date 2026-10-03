@@ -293,6 +293,13 @@ Answers the attempt 1 FAIL verdict (`submix-verdicts/1219-attempt1.md`).
   record above is annotated.
 - **NIT-A** (nothing in CI saw M12 or M13 until #1220 linked the kernel): #1220 linked it, and the
   K3 follow-up adds a `KERNEL_ROSTER` row for `route_mix_ramp_block<f32x4>` (#1220 NIT-1).
+- **Kernel edit after PASS (K3 follow-ups verdict BLOCKER-1, recorded as #1220's Amendment A2).**
+  `route_mix_ramp_block` no longer advances its frame-index vector by `L::splat(L::WIDTH as f32)`:
+  on `aarch64-apple-ios` that splat was stored through `memset_pattern16`, raising graph's #1018
+  count from 10 to 11 and failing `check-cross-targets.sh`. Each chunk's index is now
+  `L::splat(first as f32).add(offsets)` from a `u32` counter: bit-identical (every index is an
+  exact integer below `2^22`; `route_ramp` 4/4 and 17 render digests unchanged), graph back to 10,
+  and the `f32x4` instantiation is **21 vector / 0 scalar** (the 22 above is the attempt-2 value).
 
 ## Verdict
 

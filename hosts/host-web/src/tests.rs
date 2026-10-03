@@ -12939,3 +12939,42 @@ fn a_no_op_record_on_the_other_lane_never_sets_the_follow_ramp() {
         "a no-op record on the unchanged right lane set the left follow's ramp"
     );
 }
+
+/// Issue #1224 D3 as amended (K3 follow-ups verdict MINOR-1, probe V4): one `Both` record whose
+/// left lane changes and whose right lane is already muted. `bass` starts with its right lane
+/// muted; the batch mutes `bass` on both lanes at 400, re-mutes its right lane at 0 (a no-op) and
+/// mutes `drums`' right lane at 64. Host X carries the no-op, host Z does not. The strip renders the
+/// same in both, so any difference is `bass-room`'s follow ramp, which must be the `Both`
+/// record's 400.
+///
+/// Test value: red if the `Both` arm of the changed-lane rule asks for both lanes to have changed
+/// (`&&` for `||`): that refuses the batch, so a both-lane mute of a strip with one lane already
+/// muted and a following send fails; P3 above covers single-lane records only.
+#[test]
+fn a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp() {
+    let muted = [("bass", [false, true])];
+    let mut x = solo_follow_host(&muted, 16);
+    let mut z = solo_follow_host(&muted, 16);
+    // strips: bass 0, drums 1; channel 2 is both lanes.
+    stage_lane_mute(&mut x, 0, 0, 2, true, 400);
+    stage_lane_mute(&mut x, 1, 0, 1, true, 0);
+    stage_lane_mute(&mut x, 2, SOLO_FOLLOW_DRUMS, 1, true, 64);
+    stage_lane_mute(&mut z, 0, 0, 2, true, 400);
+    stage_lane_mute(&mut z, 1, SOLO_FOLLOW_DRUMS, 1, true, 64);
+    assert_eq!(x.submit_commands(3), RESULT_OK);
+    assert_eq!(z.submit_commands(2), RESULT_OK);
+    let (mut difference, mut audible) = (None, false);
+    for block in 0..8 {
+        let a = follow_render(&mut x, &SOLO_FOLLOW_TRACKS, block, None);
+        let c = follow_render(&mut z, &SOLO_FOLLOW_TRACKS, block, None);
+        audible |= a.iter().any(|sample| *sample != 0.0);
+        if difference.is_none() {
+            difference = first_bit_difference(&a, &c).map(|d| (block, d));
+        }
+    }
+    assert!(audible);
+    assert_eq!(
+        difference, None,
+        "a later no-op lane record set the follow ramp a `Both` record owns"
+    );
+}

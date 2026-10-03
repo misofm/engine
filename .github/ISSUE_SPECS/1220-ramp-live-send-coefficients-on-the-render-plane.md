@@ -539,6 +539,52 @@ Applied in the K3 follow-up commit (on `eff44271d`, branch `codex/batch-submix-k
   without the row, passes the same module. The analyser's self-test passes.
 - **NIT-2, NIT-3.** No change (recorded by the verdict as acceptable).
 
+### Amendment A2 (root, from the K3 follow-ups verdict BLOCKER-1)
+
+- **The defect.** `bash scripts/check-cross-targets.sh` (CI's required `cross-target` job) failed
+  on the K3 follow-up tree `843e27558`: `graph: memset_pattern16 calls rose from 10 to 11 (#1018)`.
+  The verdict bisected it to attempt 1 (`d405abb37`). The call is in
+  `lane::kernels::route_mix_ramp_block::<f32x4>`, instantiated in `graph`: the advance
+  `L::splat(L::WIDTH as f32)` (pattern `0x40800000` x 4, `4.0`) was stored to a stack slot through
+  `_memset_pattern16` on `aarch64-apple-ios`, a libc call inside a render kernel (the #1018 class
+  the ratchet exists to stop). No per-slice gate ran `check-cross-targets.sh`. Raising the ceiling
+  to 11 was not an equivalent fix and was not taken.
+- **The fix** (the verdict's proved edit, `crates/lane/src/kernels.rs`, kernel owned by #1219):
+  each chunk's frame-index vector is `L::splat(first as f32).add(offsets)` from a `u32` counter
+  `first` (from `position`, `+= L::WIDTH` per chunk), so there is no splatted constant to store.
+  Every index is an exact integer below `2^22`, so every value and every bit is unchanged.
+- **Comment numbers.** The kernel now has 21 vector operations (was 22): the `kernels.rs`
+  settled-tail doc, the `KERNEL_ROSTER` row's comment and the `SCALAR_SLACK` comment in
+  `scripts/check-web-audioworklet-callgraph.py`, and the `--kernel-min` comment in
+  `scripts/check-web-audioworklet.sh` say 21. NIT-1's record above (22) is the attempt-1 value.
+- **Evidence** (x86-64-v3, rustc 1.97.1, Node 22.23.2):
+  - `bash scripts/check-cross-targets.sh`: rc 0, `cross-target matrix: PASS`; graph back to
+    **10** `memset_pattern16` calls, every other row at its ceiling, the iOS and Android
+    eight-lane scans and the wasm rows pass.
+  - Bits: `cargo test -p lane --test route_ramp` 4/4 (the kernel against the indexed-ramp law,
+    bit for bit, at every width). The verdict's `k3fv_render_digests` probe (the #1222 send
+    session with live gain, matrix and mute; the #1224 solo-follow session under all 16 session
+    lane-mute combinations with live lane mutes, a solo and an un-solo) gives 17 render digests
+    byte-identical to `843e27558`'s. Not committed (a one-time "no bit moved" comparison).
+  - Browser: `build-web-audioworklet.sh --named-twin` rc 0; `check-web-audioworklet.sh` rc 0,
+    render `closure=8 traps=5` with sole owner `render_inner`, `kernels=13`, roster row
+    `route-mix-ramp f32x4 vector=21 scalar=0 budget=8.0`; `check-browser-expected-resources.py
+    --artifacts` rc 0 (32 red mutations); `test-web-audioworklet.sh` rc 0. ARTIFACT CHANGED: the
+    shipped module moves from `4b0c2fb3...1e15` (2,765,142 B) to
+    `79822522837672d3389b56ff5e8d252156e37ec88ca0ae06ae95e3b983d09203` (2,765,126 B; named twin
+    `4e5a17f4...`, 3,155,498 B).
+  - The roster row still bites: `route_mix_settled_tail` made `#[inline(always)]`, module rebuilt:
+    `FAIL roster route-mix-ramp f32x4: vector=21 scalar=18 budget=8.0`, rc 1. Restored.
+  - test-debug-a (the CI command): 108 binaries, 1,240 passed (the K3 follow-up's 1,239 plus
+    #1224's V4 test), 0 failed, 9 ignored; `cargo test -p lane --all-targets --features
+    lane/test-support` 68 passed; fmt; workspace clippy `--all-features -D warnings`; rustdoc
+    `-D warnings`; the lane, graph and workspace policy check/test pairs: all rc 0.
+    `run-aarch64-tests.sh`: no arm64 host, CI `aarch64-debug`/`aarch64-release` at the push.
+- **LESSON** (root ledger): per-slice gates for a slice that touches `lane`, `graph` or an effect
+  crate include `check-cross-targets.sh`, next to `check-web-audioworklet.sh`.
+- Verdict: `docs/handoffs/submix-sends-2026-10-02/verdicts/K3-followups-verdict.md`; probes
+  `docs/handoffs/submix-sends-2026-10-02/verdicts/K3-followups-verifier-scratch.rs`.
+
 ## Verdict
 
 - **Attempt 1** (`d405abb37`): Sol PASS. Three MINORs and three NITs, applied or answered above.

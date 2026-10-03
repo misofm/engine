@@ -168,32 +168,37 @@ Ruling:
   appended. The C ABI's `reserved[0]` of the compile limits becomes `maximum_submixes`. Nothing is
   renumbered, and a retired code is refused, never reallocated. There is no `ABI_VERSION` bump.
 - **Owner questions (DESIGN 8.2), all open on 2026-10-02; Q1-Q4 answered on 2026-10-03.** No
-  filed slice of #1196 depends on an answer. The owner's words are quoted verbatim.
-  - **Q1** (may a submix override a console slot's `link_mode`?): **answered.** The owner: "We
-    should follow whatever modern day DAWs look like." A DAW chooses stereo-linked or multi-mono
-    per plugin instance, so a strip may override its console slot's `link_mode`. This reverses the
-    planner's "no". The kernel's link is already a per-lane mask (DESIGN 8.2 Q1), so a per-strip
-    override never splits a bank. It is filed as its own issue, *Let a strip override a console
-    slot's link mode* (#1236), outside #1196. Until it lands, the bus-compression hazard guidance (DESIGN
-    2.2b) stands.
-  - **Q2** (bound route values to the fader's `[-144, 24]` dB and the matrix's `[-1, 1]`?):
-    **answered, agreed.** The owner: "This makes sense to add bounded min/max for these values
-    right?" -- agreed on 2026-10-03: route `gain_db` in `[-144, 24]` dB, matrix coefficients in
-    `[-1, 1]`, and a subnormal folded coefficient (`gain * coefficient`, for example -120 dB times
-    `1.2e-38`, which `route_coefficients` accepts today, #1215 verdict INFO) flushed to `+0.0`.
-    Deferred item O11 (DESIGN section 10) is no longer deferred: it is filed as *Bound route gain
-    and matrix values* (#1237), outside #1196.
-  - **Q3** (accept the latency that each bus level adds through latent console slots?):
-    **answered, accepted as is.** The owner: "There's no way around this right?" The planner
-    explained that every strip carries every console slot (O1) and a bypassed slot keeps its
-    latency (decision 12), so a latent console slot adds its latency at every bus level, and that
-    the way to avoid it is to put latent effects (a limiter) in inserts, not in the console. The
-    owner accepted that. Nothing changes and nothing is filed.
-  - **Q4** (the SDK defaults `followsMute` to `true` on a route into a submix): **answered,
-    default kept.** The owner: "Please explain this to me." The planner explained that a send
-    following its source strip's mute goes quiet when the strip is muted or soloed out, pre-fader
-    sends included, that only routes into a submix may follow, and that a monitor-style send opts
-    out with `followsMute: false`. The owner raised no objection, so the default stays `true`.
+  filed slice of #1196 depends on an answer. The owner's words are quoted verbatim, from the
+  owner's message of 2026-10-03. Each answer names its authority kind, as above.
+  - **Q1, owner direction, read by the planner** (may a submix override a console slot's
+    `link_mode`?): **answered.** The owner: "We should follow whatever modern day DAWs look like."
+    That is the owner's direction. The concrete rule is the planner's reading of it, subject to
+    owner review: a DAW chooses stereo-linked or multi-mono per plugin instance, so a strip may
+    override its console slot's `link_mode`. This reverses the planner's "no". The kernel's link
+    is already a per-lane mask (DESIGN 8.2 Q1), so a per-strip override would not need to split a
+    bank once the link mode leaves `EffectProgramKey`, where it is today (#1236's L1). It is filed
+    as its own issue, *Let a strip override a console slot's link mode* (#1236), outside #1196.
+    Until it lands, the bus-compression hazard guidance (DESIGN 2.2b) stands.
+  - **Q2, owner decision (the agreed bounds)** (bound route values to the fader's `[-144, 24]` dB
+    and the matrix's `[-1, 1]`?): **answered, agreed.** The owner: "This makes sense to add
+    bounded min/max for these values right?" -- agreed on 2026-10-03: route `gain_db` in
+    `[-144, 24]` dB, matrix coefficients in `[-1, 1]`, and a subnormal folded coefficient
+    (`gain * coefficient`, for example -120 dB times `1.2e-38`, which `route_coefficients` accepts
+    today, #1215 verdict INFO) flushed to `+0.0`. Deferred item O11 (DESIGN section 10) is no
+    longer deferred: it is filed as *Bound route gain and matrix values* (#1237), outside #1196.
+  - **Q3, owner decision (accepted as is)** (accept the latency that each bus level adds through
+    latent console slots?): **answered, accepted as is.** The owner: "There's no way around this
+    right?" The planner explained that every strip carries every console slot (O1) and a bypassed
+    slot keeps its latency (decision 12), so a latent console slot adds its latency at every bus
+    level, and that the way to avoid it is to put latent effects (a limiter) in inserts, not in the
+    console. The owner accepted that. Nothing changes and nothing is filed.
+  - **Q4, planner decision (the default), explained to the owner** (the SDK defaults `followsMute`
+    to `true` on a route into a submix): **answered, default kept.** The owner: "Please explain
+    this to me." The planner explained that a send following its source strip's mute goes quiet
+    when the strip is muted or soloed out, pre-fader sends included, that only routes into a
+    submix may follow, and that a monitor-style send opts out with `followsMute: false`. The owner
+    asked for the explanation and raised no objection, but did not decide: the default stays
+    `true` as the planner's (P11), subject to owner review.
   - **Q5** (asked on 2026-10-03: should a submix strip keep the input section's `trim_db` and
     `polarity_invert`?): **open, pending the owner's reply.** The planner explained that DAWs
     split on it (Logic and Pro Tools give an aux or bus no trim or polarity; Cubase and Studio One

@@ -1227,13 +1227,18 @@ pub fn route_mix_ramp_block<L: Lane>(
 
     let step = ramp.step.map(L::splat);
     let start = ramp.start.map(L::splat);
-    let advance = L::splat(L::WIDTH as f32);
-    // Exact: `position < length <= 2^22` whenever a frame ramps.
-    let mut index = L::splat(position as f32).add(L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]));
+    let offsets = L::load(&FRAME_INDEX_OFFSETS[..L::WIDTH]);
+    // Each chunk's index vector is built from a `u32` counter, not advanced by a splatted
+    // `L::WIDTH`: that splat is a constant LLVM stores through `memset_pattern16` on iOS, a libc
+    // call inside a render kernel (#1018's ratchet; the #1220 amendment). Exact either way:
+    // `position + vectored < length <= 2^22` whenever a frame ramps.
+    let mut first = position;
     for (left, right) in left_vectors
         .chunks_exact_mut(L::WIDTH)
         .zip(right_vectors.chunks_exact_mut(L::WIDTH))
     {
+        let index = L::splat(first as f32).add(offsets);
+        first += L::WIDTH as u32;
         let ll = index.fma(step[0], start[0]);
         let lr = index.fma(step[1], start[1]);
         let rl = index.fma(step[2], start[2]);
@@ -1242,7 +1247,6 @@ pub fn route_mix_ramp_block<L: Lane>(
         let old_right = L::load(right);
         lr.fma(old_right, ll.mul(old_left)).store(left);
         rr.fma(old_right, rl.mul(old_left)).store(right);
-        index = index.add(advance);
     }
     if !left_tail.is_empty() {
         // `vectored < ramping < length`, so the sum stays below `2^22`.
@@ -1262,7 +1266,7 @@ pub fn route_mix_ramp_block<L: Lane>(
 /// `f32`, which is exactly the tail `mix2x2_block::<L>` finishes with.
 ///
 /// Outlined for the same reason as [`route_mix_ramp_tail`]: inlined, `mix2x2_block`'s `f32` tail
-/// unrolls into the four-lane instantiation as 18 scalar operations beside its 22 vector ones
+/// unrolls into the four-lane instantiation as 18 scalar operations beside its 21 vector ones
 /// (measured on a `wasm32` `simd128` build), one edit away from the browser's kernel-shape rule.
 #[inline(never)]
 fn route_mix_settled_tail(left: &mut [f32], right: &mut [f32], c: [f32; 4]) {

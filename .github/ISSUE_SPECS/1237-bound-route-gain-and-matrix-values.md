@@ -27,9 +27,9 @@ Every anchor below is verified on the batch K3 follow-up tree (branch `codex/bat
 - **Compiler and live producers.** `graph_compiler::route_values` (`crates/graph-compiler/src/ids.rs:309`)
   backs both `route_coefficients` (`:341`) and the lowering (`crates/graph-compiler/src/compile.rs`,
   the route loop): it refuses (`RouteValueError::Domain`) a value `route_transform` refuses or an
-  open fold that overflows. host-core's send producer (`crates/host-core/src/route_controls.rs:82`)
-  and host-web's admission (`COMMAND_REASON_DOMAIN`, `hosts/host-web/src/lib.rs:982`; doc at
-  `:878-883`) refuse a live value through it.
+  open fold that overflows. host-core's send producer (`RouteControlProducer::record`,
+  `crates/host-core/src/route_controls.rs:86`) and host-web's admission (`COMMAND_REASON_DOMAIN`,
+  `hosts/host-web/src/lib.rs:982`; doc at `:878-883`) refuse a live value through it.
 - **The fold.** `graph::gated_route_coefficients` (`crates/graph/src/lib.rs:784`) is the one
   derivation of a route's four constants, for the bound op, the fold lane and every live record.
   It accepts a subnormal product: `route_coefficients(-120.0, [1.2e-38, 0, 0, 1], ..)` returns a
@@ -113,6 +113,12 @@ Every anchor below is verified on the batch K3 follow-up tree (branch `codex/bat
 7. Workspace gates: `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
    --all-features -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
    --no-deps`, test-debug-a and test-debug-b, and the policy check/test pairs.
+7a. Worklet and cross-target gates (K3 verdict MINOR-5: `graph` and `graph-compiler` compile into
+   the shipped worklet and the iOS product crates): `bash scripts/build-web-audioworklet.sh
+   --named-twin <B> <A>`, then `bash scripts/check-web-audioworklet.sh <A>
+   <B>/miso-engine-v1-audio-worklet.simd128.named.wasm` and `bash scripts/test-web-audioworklet.sh`
+   exit 0 (gate 6 runs `check-browser-expected-resources.py --artifacts <A>` on the same `<A>`);
+   and `bash scripts/check-cross-targets.sh` exits 0, with no `memset_pattern16` ceiling raised.
 8. Each new test has a one-sentence test-value answer and a recorded mutation run (for example:
    `validate_routes` back to `validate_finite` for `gain_db` turns gate 1 red; the flush removed
    turns gate 4 red).

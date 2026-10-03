@@ -15,8 +15,8 @@ false positive.
   searched (`FORBIDDEN.search`, `:324`) anywhere in each closure member's symbol name.
 - Two accessors are `#[inline(always)]` only for this reason, each with a comment saying so:
   `GraphRouteControlProducer::free` (`crates/graph/src/lib.rs:1005-1014`) and
-  `RouteControlProducer::free` (`crates/host-core/src/route_controls.rs:59-68`). Both bodies are
-  an atomic load. The #1222 verifier rebuilt the module without the two attributes: the
+  `RouteControlProducer::free` (`crates/host-core/src/route_controls.rs:71-80`, the attribute at
+  `:77`). Both bodies are an atomic load. The #1222 verifier rebuilt the module without the two attributes: the
   `miso_engine_web_v1_command_submit` allocation gate then fails on exactly
   `RouteControlProducer4free` and `GraphRouteControlProducer4free`.
 - On `wasm32-unknown-unknown` the Rust allocator's symbols are already matched by `dlmalloc`,
@@ -80,7 +80,9 @@ false positive.
 3. Mutation: drop `^(free|malloc|calloc|realloc)$` entirely from `FORBIDDEN`; the self-test's
    bare-`free` case fails. Record the run.
 4. `bash scripts/build-web-audioworklet.sh --named-twin <N> <A>` then
-   `bash scripts/check-web-audioworklet.sh <A>` exit 0 with the attributes removed.
+   `bash scripts/check-web-audioworklet.sh <A>
+   <N>/miso-engine-v1-audio-worklet.simd128.named.wasm` exit 0 with the attributes removed (the
+   script takes `ARTIFACT_DIRECTORY NAMED_TWIN`).
 5. `python3 -B scripts/check-browser-expected-resources.py --artifacts <A>` passes (no render
    digest moved).
 6. `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --

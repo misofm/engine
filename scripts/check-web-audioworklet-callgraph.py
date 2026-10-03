@@ -132,7 +132,7 @@ EIGHT_LANE = re.compile(r"(?:f32|f64|u32|i32)x8|(?i:simd8)|transpose_tile_8")
 # expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
 # coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
 # well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
-# (the route ramp mix, 22 vector operations -> ~88 scalar), so the slack cannot hide a
+# (the route ramp mix, 21 vector operations -> ~84 scalar), so the slack cannot hide a
 # scalarisation.
 SCALAR_SLACK = 8
 
@@ -229,8 +229,9 @@ KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     ("soft-clip f32x4", r"soft_clip.*4wide6f32x4", 0.10),
     # #1220 verdict NIT-1: the live route's indexed-ramp mix. Its sub-vector frames are outlined
     # (`route_mix_ramp_tail`, `route_mix_settled_tail`); an inlined settled tail unrolls as 18
-    # scalar operations beside its 22 vector ones, which the generic "vector > scalar" rule admits
-    # and this row's budget (max(0.10 x 22, slack 8) = 8) refuses.
+    # scalar operations beside its 21 vector ones (22 before the #1220 amendment built each chunk's
+    # frame index from a `u32` counter), which the generic "vector > scalar" rule admits and this
+    # row's budget (max(0.10 x 21, slack 8) = 8) refuses.
     (
         "route-mix-ramp f32x4",
         r"lane7kernels20route_mix_ramp_block.*4wide6f32x4",

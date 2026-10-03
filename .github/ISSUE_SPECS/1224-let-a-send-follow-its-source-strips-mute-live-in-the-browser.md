@@ -396,6 +396,14 @@ Amendments, applied in the K3 follow-up commit (on `eff44271d`, branch `codex/ba
   ignored; test-debug-a 1,239 passed, 0 failed, 9 ignored; test-debug-b 791 passed, 0 failed, 24
   ignored; fmt; workspace clippy `-D warnings`; rustdoc `-D warnings`; the policy check/test
   pairs. `run-aarch64-tests.sh debug`: at batch push (CI `aarch64-debug`).
+- **K3 follow-ups verdict MINOR-1** (the amended D3 rule's `Both` arm was untested). Probe V4
+  adopted as `a_both_lane_record_with_one_lane_changed_sets_the_follow_ramp`: `bass` starts
+  `[F, T]`; one batch mutes `bass` on both lanes at 400, re-mutes its right lane at 0 (a no-op) and
+  mutes `drums`' right lane at 64, compared bit for bit with the same batch without the no-op.
+  Test value: red if the `Both` arm asks for both lanes to have changed, which refuses a both-lane
+  mute of a strip with one lane already muted and a following send (user-visible). Mutation
+  `BuiltinLaneSelector::Both => changed[0] && changed[1]`: RED in this test only (host-web lib
+  161 passed, 1 failed), restored; `hosts/host-web/MUTATIONS.md` records the row.
 
 ## Verdict
 
