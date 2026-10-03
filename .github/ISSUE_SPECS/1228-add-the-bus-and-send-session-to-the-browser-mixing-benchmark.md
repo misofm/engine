@@ -219,6 +219,14 @@ starts at `:1454`); every one was found by its text. Nothing was timed and `run`
     sixty_four_track_console and sixty_four_track_console_sends rendered the same bits`; with the
     check cut back to the old `(0,1)` pair the same mutant exits 0. The run's use of the helper is
     not exercised (it is timed).
+- **Gate 1 on the committed checkpoint `79d11ea49`** (fresh `mktemp -d` WORKDIR): `prepare` exit 0,
+  `host_web.wasm 30d075d3...aeff4 at 79d11ea49... (release pin 6c952a2c...: not the released
+  module)`, `provenance.json` commit `79d11ea49e51614ba78237de018607aa4c60c089`, controls
+  `54c90a0f...6616`; `preflight` exit 0 with `documents` = `sixty_four_track_console`
+  `d913ad96...41b1`, `sixty_four_track_app_shape` `3dd8b2ff...d645`,
+  `sixty_four_track_console_sends` `cf5aca93...7002` (the same bits as the uncommitted-tree
+  preflight), three distinct, each asserted audible. `run` was not launched and no
+  `artifacts/steps/` directory was created.
 
 ## Dependencies
 
