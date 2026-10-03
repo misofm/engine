@@ -307,11 +307,15 @@ pub struct HostLiveControlRequest {
     /// can use other periods. Latest gain-reduction observations can be independently aged,
     /// so a browser frame's peak interval does not establish the gain-reduction interval.
     pub observation_taps: u32,
-    /// The track whose gain reduction is reported as the master's, or `None` (issue #143 D6).
+    /// The strip whose gain reduction is reported as the master's, or `None` (issue #143 D6): an
+    /// index into [`HostLiveControlHandles::strips`], tracks first, then submixes (issue #1208
+    /// D3).
     ///
-    /// V1 has no structural master bus — submixes and outputs carry no effect racks — so the
-    /// master reading is a *designation* rather than a discovery. The successor is effect racks on
-    /// submixes; until then this is twenty lines and an honest name.
+    /// The master reading is a *designation*, not a discovery: no strip is structurally the
+    /// master. Issue #1208 widens that stopgap from tracks to every strip without retiring it, so
+    /// a bus whose strip carries a limiter can now be designated. The field, its refusal code
+    /// `host.observation.master_track` and the browser and SDK spellings keep their track-era
+    /// names (DESIGN P17).
     pub master_track: Option<u32>,
 }
 
@@ -331,8 +335,9 @@ impl Default for HostLiveControlRequest {
 /// One caller-selected engine meter observer. Ordering is retained in returned meter handles.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostMeterRequest {
-    /// Stable compiled track identity.
-    pub track_id: Box<str>,
+    /// Stable compiled identity of the observed strip: a track or a submix (issue #1208 D1). A
+    /// submix offers the same seven boundaries a track does.
+    pub strip_id: Box<str>,
     /// Chain boundary observed by this meter.
     pub tap: MeterTap,
     /// Numeric groups computed and marked present in each snapshot.
@@ -367,8 +372,9 @@ pub struct HostLiveControlHandles {
     /// order (`pre_insert`, then `post_insert`), an insert by its index in the strip's `inserts`
     /// ([`Self::effect_control_mut`]).
     pub effect_controls: Vec<EffectControlProducer>,
-    /// One meter consumer per track, in `strips[..track_count]` order; empty when no meters were
-    /// requested.
+    /// The meter consumers. With the default set, one per track, in `strips[..track_count]` order;
+    /// with a caller selection, one per selected meter in the caller's order, each on any strip
+    /// (issue #1208 D1). Empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
     /// One reader set per prepared strip effect instance that declares an observation tap (issue
     /// #143), a submix strip's effects included (issue #1207 D5).
@@ -377,7 +383,8 @@ pub struct HostLiveControlHandles {
     /// descriptor declares no tap. Addressed by `(track_id, address)`, exactly as
     /// [`Self::effect_controls`] is.
     pub effect_observations: Vec<EffectObservationHandle>,
-    /// The designated master track index, echoed back after validation against `track_count`.
+    /// The designated master strip index, echoed back after validation against `strips.len()`
+    /// (issue #1208 D3): tracks first, then submixes. Still a designation, not a discovery.
     pub master_track: Option<u32>,
 }
 
@@ -963,11 +970,11 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     {
         return Err(shape("host.meter.period"));
     }
-    // Source semantics: tracks only.
+    // A selected meter may name any strip (issue #1208 D1); the default set stays one per track.
     let meter_tracks: Vec<(&str, MeterTap, MeterMetricSet)> = match selected_meters {
         Some(meters) => meters
             .iter()
-            .map(|meter| (meter.track_id.as_ref(), meter.tap, meter.metrics))
+            .map(|meter| (meter.strip_id.as_ref(), meter.tap, meter.metrics))
             .collect(),
         None => live_control_tracks
             .iter()
@@ -1216,7 +1223,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // Canonical normalized track order is the live controls' addressing authority, so both halves
     // are permuted into it here rather than into whatever order preparation happened to build them.
     // A channel whose track is not in that order at all is a hard rejection, never a silent drop.
-    // It covers every strip (issue #1207 D1); a control or meter is still only ever a track's.
+    // It covers every strip (issue #1207 D1): a control is still only ever a track's, while a
+    // selected meter may observe a submix (issue #1208 D1).
     let canonical_index: std::collections::BTreeMap<&str, usize> = live_control_strips
         .iter()
         .enumerate()
@@ -1253,10 +1261,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         meters.sort_by_key(|value| canonical_index[&*value.track_id]);
     }
 
-    // Issue #143 D6: a designated master must name a track this session actually has, or the
-    // frame would report a master reading nobody can address.
+    // Issue #143 D6, widened to strips by issue #1208 D3: a designated master must name a strip
+    // this session actually has, or the frame would report a master reading nobody can address.
     let master_track = match live_controls.master_track {
-        Some(index) if (index as usize) < live_control_tracks.len() => Some(index),
+        Some(index) if (index as usize) < live_control_strips.len() => Some(index),
         Some(_) => return Err(shape("host.observation.master_track")),
         None => None,
     };

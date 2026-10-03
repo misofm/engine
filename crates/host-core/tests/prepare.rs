@@ -61,12 +61,12 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     };
     let meters = [
         HostMeterRequest {
-            track_id: "eq7".into(),
+            strip_id: "eq7".into(),
             tap: MeterTap::Input,
             metrics: MeterMetricSet::COUNTS,
         },
         HostMeterRequest {
-            track_id: "eq1".into(),
+            strip_id: "eq1".into(),
             tap: MeterTap::PostFader,
             metrics: MeterMetricSet::SAMPLE_PEAK,
         },
@@ -89,7 +89,7 @@ fn selected_meter_observers_preserve_caller_order_taps_and_metric_identity() {
     assert_eq!(handles.meters[1].tap, MeterTap::PostFader);
 
     let invalid = [HostMeterRequest {
-        track_id: "eq1".into(),
+        strip_id: "eq1".into(),
         tap: MeterTap::PostFader,
         metrics: MeterMetricSet::from_bits_retain(0x80),
     }];

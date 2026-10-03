@@ -5744,7 +5744,7 @@ fn compile_ready(
             .tracks
             .iter()
             .map(|track| HostMeterRequest {
-                track_id: track.id.as_str().into(),
+                strip_id: track.id.as_str().into(),
                 tap: MeterTap::PostMatrix,
                 metrics: MeterMetricSet::SAMPLE_PEAK,
             })
