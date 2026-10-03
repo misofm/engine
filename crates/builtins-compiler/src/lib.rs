@@ -4926,7 +4926,7 @@ mod tests {
         EffectNodeId, GraphEdge, GraphEdgeId, GraphNode, GraphNodeBinding, GraphPortId,
         GraphPortKind, GraphPreparedEffect, GraphPreparedSourceSetDriver, GraphResourceEstimate,
         GraphSourceInputClaim, GraphSourceSetResourceReport, PreparedGraphPlanParts, PreparedRoute,
-        RackId, RouteTransform,
+        RackId, RouteGate, RouteTransform,
     };
 
     /// The compiler always emits `spec.nodes` sorted by id; hand-built fixtures list them in
@@ -6194,6 +6194,7 @@ mod tests {
                 vec![PreparedRoute {
                     node: route,
                     transform: route_transform,
+                    gate: RouteGate::OPEN,
                 }]
             } else {
                 Vec::new()

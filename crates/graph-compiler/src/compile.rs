@@ -19,8 +19,8 @@ use crate::estimate::{effect_control_resource, estimate_fits_platform, resource_
 use crate::ids::{
     PreparedEffectIndex, add_main_edge, add_node, add_route_destination_edge,
     add_route_source_edge, diag, effect_path, gid, into_effects, port, ports_for,
-    prepared_effect_node, route_destination_node, route_source_node, route_transform,
-    sidechain_matches, stages, track_node,
+    prepared_effect_node, route_coefficients, route_destination_node, route_source_node,
+    route_transform, sidechain_matches, stages, track_node,
 };
 use crate::pdc::timings;
 use crate::schedule::{buffer_assignments, cycle_primary_path, cycle_witnesses, topo};
@@ -321,7 +321,14 @@ impl GraphCompiler {
             );
         }
         for route in &model.routes {
-            let Some(transform) = route_transform(route.gain_db, &route.channel_matrix) else {
+            let matrix = &route.channel_matrix;
+            let matrix = [matrix.ll, matrix.lr, matrix.rl, matrix.rr];
+            // The domain check is the live producer's own (issue #1215 D1): a value it would
+            // refuse never compiles, and the plan keeps the unfolded transform it hashes.
+            let transform = route_coefficients(route.gain_db, matrix, false, [false; 2])
+                .ok()
+                .and_then(|_| route_transform(route.gain_db, matrix));
+            let Some(transform) = transform else {
                 diagnostics.push(diag(
                     "graph.gain.non_finite",
                     &format!("$.routes[id={}].gain_db", route.id),
@@ -348,6 +355,7 @@ impl GraphCompiler {
                     route_id: gid(route.id.as_str()),
                 },
                 transform,
+                gate: RouteGate::OPEN,
             });
         }
         for (index, strip) in strips.iter().enumerate() {

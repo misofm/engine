@@ -280,6 +280,7 @@ fn prepared_plan(lend: bool, calls: &Arc<Calls>) -> engine::realtime::PreparedRe
                     rl: 0.375,
                     rr: 1.125,
                 },
+                gate: RouteGate::OPEN,
             })
             .collect(),
         track_delays: Vec::new(),

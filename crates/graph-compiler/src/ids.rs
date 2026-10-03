@@ -283,21 +283,63 @@ pub(crate) fn sidechain_matches(
 /// every checked-in graph fixture is byte-identical. A session with a **non-zero** route gain gets
 /// a one-time semantic-hash change: its `route-transform` canonical line now carries the
 /// deterministic coefficient instead of the host's.
-pub(crate) fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<RouteTransform> {
+///
+/// `matrix` is `[ll, lr, rl, rr]`, the session's `channel_matrix` in that order.
+pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTransform> {
     let gain = math::db_to_gain_f32(gain_db);
+    let [ll, lr, rl, rr] = matrix;
     (gain_db.is_finite()
         && gain.is_finite()
         && !gain.is_subnormal()
-        && [matrix.ll, matrix.lr, matrix.rl, matrix.rr]
+        && matrix
             .into_iter()
             .all(|v| v.is_finite() && !v.is_subnormal()))
     .then_some(RouteTransform {
         gain,
-        ll: matrix.ll,
-        lr: matrix.lr,
-        rl: matrix.rl,
-        rr: matrix.rr,
+        ll,
+        lr,
+        rl,
+        rr,
     })
+}
+
+/// Why [`route_coefficients`] refused a route's values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteValueError {
+    /// The gain or a matrix coefficient is non-finite or subnormal, the linear gain is, or a
+    /// folded coefficient (`gain * coefficient`) overflows.
+    Domain,
+}
+
+/// The four coefficients a route with these values applies -- the constants a plan binds for it,
+/// and the ones a live producer pushes (DESIGN 5.7, issue #1215).
+///
+/// `matrix` is `[ll, lr, rl, rr]`; `source_lane_muted[lane]` zeroes the column that source lane
+/// feeds. The values are checked as the compiler checks a route ([`route_transform`]), and refused
+/// with [`RouteValueError::Domain`] when any folded product is not finite (a finite gain times a
+/// finite coefficient can overflow: +700 dB with `ll = 1e10`). That check is of the open fold, so
+/// whether values are in domain never depends on the gate. The coefficients themselves are
+/// [`graph::gated_route_coefficients`] -- the runtime's own derivation, not a copy of it.
+pub fn route_coefficients(
+    gain_db: f32,
+    matrix: [f32; 4],
+    mute: bool,
+    source_lane_muted: [bool; 2],
+) -> Result<[f32; 4], RouteValueError> {
+    let transform = route_transform(gain_db, matrix).ok_or(RouteValueError::Domain)?;
+    if !gated_route_coefficients(&transform, RouteGate::OPEN)
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return Err(RouteValueError::Domain);
+    }
+    Ok(gated_route_coefficients(
+        &transform,
+        RouteGate {
+            mute,
+            follow_zeroed: source_lane_muted,
+        },
+    ))
 }
 /// Lower the prepared entries into the plan's effects, and -- separately -- the live-control
 /// channels of whichever of them live controls drive (issue #140 A).

@@ -183,6 +183,59 @@ No allocation gate: this slice adds no render-thread state.
 - The new test's name with its one-sentence test-value answer.
 - A one-time "no bit moved" comparison against the base (PR evidence, not a committed test).
 
+### Attempt 1 record (Terra)
+
+- **D1, graph** (`crates/graph/src/lib.rs`): `RouteGate { mute, follow_zeroed }`, `RouteGate::OPEN`,
+  `const fn silences`, `PreparedRoute.gate`, and `pub const fn gated_route_coefficients`, beside
+  `RouteTransform`. With an open gate it is `folded_route`'s four unfused `gain * c` products in the
+  same order; a silencing gate gives `[+0.0; 4]`; `follow_zeroed[0]` writes `+0.0` to `ll`/`rl`,
+  `[1]` to `lr`/`rr` (matching `route_word`: `ll`/`rl` scale the left input). `folded_route` is deleted.
+- **D1, graph-compiler** (`ids.rs`, exported from `lib.rs`): `RouteValueError::Domain` and
+  `route_coefficients`. `route_transform` now takes `[f32; 4]` (its one caller passes the session
+  matrix in `[ll, lr, rl, rr]` order). **Reading recorded:** the overflow check covers the *open* fold,
+  so a value's domain never depends on the gate. A muted route cannot admit values that become
+  infinite once it opens. The lowering calls `route_coefficients(.., false, [false; 2])` and keeps
+  `route_transform`'s unfolded transform with `RouteGate::OPEN`. Its refusal is still
+  `graph.gain.non_finite` at `$.routes[id=<id>].gain_db`.
+- **D2** (`runtime.rs`): `RuntimeParts.routes: BTreeMap<GraphNodeId, (RouteTransform, RouteGate)>`.
+  `PlanningMetadata::route` returns `(&RouteTransform, RouteGate)` in both impls. `node_kind` and
+  `plain_route_gains` bind `gated_route_coefficients`. `route_folds_over_program` keeps its signature
+  and wraps entries with `RouteGate::OPEN`, so `program/tests.rs` is untouched.
+- **Anchor drift:** `git grep 'PreparedRoute {'` at the K3 base gives **18** literals, not 17. The
+  extra one is a new `crates/graph/src/lib.rs` literal from K2, at `:5239` before the edit. All 18
+  carry `gate: RouteGate::OPEN`. Every literal sits in an authorized file.
+- **Test:**
+  `crates/graph-compiler/tests/route_coefficients.rs::every_route_coefficient_comes_from_the_one_gated_function`.
+  Test value: it turns red if the domain-checked coefficients and the bound coefficients diverge, if
+  a gate zeroes the wrong column, a signed zero or too little, or if an overflowing fold is
+  accepted, at compile or under a gate. It runs 24 seeded compiles of the nine-track fixture with
+  random gains in [-120, 24) dB and random matrices, including exact `+-0.0`, and checks all 8 gates
+  exhaustively per route. It also checks 700 dB with `ll = 1e10` under all 8 gates, the compile
+  refusal, and a finite 700 dB fold that still compiles. Mutations, each applied, run red and
+  reverted:
+  M1, swapped gate columns, RED (column bits).
+  M2, no overflow check, RED (`Ok([inf, ..])`).
+  M3, `route_coefficients` with its own `powf` gain, RED (bound and checked bits differ).
+  M4, `silences` as `mute && (l || r)`, RED.
+  M5, lowering without `route_coefficients`, RED (700 dB compiles).
+  M6, zeroing by `* 0.0`, RED (`-0.0` bits).
+  M7, overflow checked after gating, RED (a muted overflow returns `Ok`).
+- **Gates (worktree head before commit, x86-64-v3 host):**
+  1. `cargo build --locked --release -p audit -p bench -p capi -p session-validator`: ok.
+     `check-graph-determinism.sh`: PASS (100/100), and `target/issue6/fresh-process-determinism.json`
+     is byte-identical (`cmp`) to the one captured at base `f77b6159a`. `graph_fixture -- --check`:
+     exit 0. `check-builtins-fixtures.sh . target/release/audit`: ok (50 files), no re-pin.
+     `cargo test --locked --release -p audit -p bench -p console-workload`: 110 passed, 0 failed,
+     with no count edited. `audit capi` output is byte-identical (`cmp`) to base.
+  2. The new test passes, and so do M1 to M7 above.
+  3. test-debug-a: exit 0 (1175 passed, 0 failed, 9 ignored). `cargo fmt --all -- --check`: ok.
+     `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: ok. The graph,
+     builtins, realtime and workspace check and test policies: all ok. `run-aarch64-tests.sh debug`:
+     not runnable on this x86 host; at batch push (CI `aarch64-debug`).
+- **No bit moved (one-time, vs base `f77b6159a`):** the determinism JSON and the `audit capi`
+  output are byte-identical. The graph and builtins fixture digests pass unchanged, and every
+  existing `route_folds` count assertion passes unedited.
+
 ## Dependencies
 
 - *Build submix strips and bus taps in the SDK and teach agents to author them* (#1205, batch K1 closed and

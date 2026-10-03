@@ -236,6 +236,7 @@ fn prepared_plan(folded: bool) -> engine::realtime::PreparedRenderPlan {
                         rl: 0.0,
                         rr: 1.0,
                     },
+                    gate: RouteGate::OPEN,
                 })
                 .collect()
         } else {

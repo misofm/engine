@@ -746,6 +746,67 @@ pub struct RouteTransform {
     pub rl: f32,
     pub rr: f32,
 }
+
+/// What silences a route, beside its gain and matrix (DESIGN 5.7, issue #1215).
+///
+/// `mute` silences the whole route; `follow_zeroed[lane]` zeroes the column that carries that
+/// source lane (left feeds `ll` and `rl`, right feeds `lr` and `rr`). Every prepared route is
+/// [`RouteGate::OPEN`] until a session can mute a route or let it follow its source strip's mute.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RouteGate {
+    pub mute: bool,
+    pub follow_zeroed: [bool; 2],
+}
+
+impl RouteGate {
+    pub const OPEN: Self = Self {
+        mute: false,
+        follow_zeroed: [false; 2],
+    };
+
+    /// Muted, or follow-zeroed on both source lanes: the route contributes nothing.
+    #[must_use]
+    pub const fn silences(self) -> bool {
+        self.mute || (self.follow_zeroed[0] && self.follow_zeroed[1])
+    }
+}
+
+/// The four coefficients a route applies: its 2x2 with the linear gain folded in, gated.
+///
+/// The one derivation of a route's constants (D3, #98 F4; DESIGN 5.7): the runtime binds a route
+/// op and a fold lane from it, and a live producer pushes what it returns, so the bits a plan binds
+/// and the bits a live change sends cannot differ. A silencing gate returns `[+0.0; 4]`; otherwise
+/// each product is `gain * coefficient` in that operand order, unfused, with the column of a
+/// follow-zeroed source lane replaced by `+0.0`.
+#[must_use]
+pub const fn gated_route_coefficients(transform: &RouteTransform, gate: RouteGate) -> [f32; 4] {
+    if gate.silences() {
+        return [0.0; 4];
+    }
+    let [left_zeroed, right_zeroed] = gate.follow_zeroed;
+    [
+        if left_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.ll
+        },
+        if right_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.lr
+        },
+        if left_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.rl
+        },
+        if right_zeroed {
+            0.0
+        } else {
+            transform.gain * transform.rr
+        },
+    ]
+}
 /// The graph's frozen reduction, over one frame's worth of contributions (evidence only).
 ///
 /// Render never calls this: it reduces whole blocks through `lane`'s `sum2_block` and
@@ -2204,6 +2265,7 @@ impl GraphNodeObserverBinding {
 pub struct PreparedRoute {
     pub node: GraphNodeId,
     pub transform: RouteTransform,
+    pub gate: RouteGate,
 }
 
 /// One strip's declared input-side time alignment (#210 phase 2; submixes since #1201).
@@ -3523,6 +3585,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             })
             .collect();
         for observer in &mut bindings.observers {
@@ -4643,6 +4706,7 @@ mod tests {
                         rl: coefficient(&mut state),
                         rr: coefficient(&mut state),
                     },
+                    gate: RouteGate::OPEN,
                 });
             }
         }
@@ -4699,6 +4763,7 @@ mod tests {
                     rl: -0.25,
                     rr: 0.75,
                 },
+                gate: RouteGate::OPEN,
             });
         }
         assert!(output_fed, "seed {seed}: the output must be fed");
@@ -5245,6 +5310,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             });
             bindings.push(GraphNodeBinding::new(
                 input.clone(),
@@ -5759,10 +5825,12 @@ mod tests {
                 PreparedRoute {
                     node: route_a,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
                 PreparedRoute {
                     node: route_b,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
             ],
             track_delays: Vec::new(),
@@ -6464,6 +6532,7 @@ mod tests {
                     rl: 0.0,
                     rr: 1.0,
                 },
+                gate: RouteGate::OPEN,
             }],
             track_delays: Vec::new(),
             effects: vec![GraphPreparedEffect {
@@ -6731,10 +6800,12 @@ mod tests {
                 PreparedRoute {
                     node: route_direct,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
                 PreparedRoute {
                     node: route_effect,
                     transform: identity,
+                    gate: RouteGate::OPEN,
                 },
             ],
             track_delays: Vec::new(),

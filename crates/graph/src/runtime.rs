@@ -3621,7 +3621,8 @@ use rack::{
 
 use crate::{
     GraphNodeBinding, GraphNodeId, GraphPreparedBuiltinBank, GraphPreparedBuiltinBankProcessor,
-    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteTransform, TrackStage,
+    GraphPreparedEffectBank, GraphSpec, PreparedRoute, RouteGate, RouteTransform, TrackStage,
+    gated_route_coefficients,
     program::{ExecutionProgram, Op},
 };
 
@@ -3917,7 +3918,7 @@ pub(crate) fn bank_membership(
 
 /// Everything a bound plan hands the runtime, consumed exactly once per node.
 pub(crate) struct RuntimeParts {
-    pub(crate) routes: BTreeMap<GraphNodeId, RouteTransform>,
+    pub(crate) routes: BTreeMap<GraphNodeId, (RouteTransform, RouteGate)>,
     pub(crate) effects: BTreeMap<GraphNodeId, GraphPreparedEffect>,
     /// Issue #140 A: live-control channels by effect node, taken by whichever owner renders that
     /// node -- the per-node `LiveControlEffect`, or the bank slot that holds the node's lane.
@@ -4013,7 +4014,7 @@ impl RuntimeParts {
         Self {
             routes: routes
                 .into_iter()
-                .map(|route| (route.node, route.transform))
+                .map(|route| (route.node, (route.transform, route.gate)))
                 .collect(),
             effects: effects
                 .into_iter()
@@ -4089,8 +4090,8 @@ impl RuntimeParts {
                     self.frames,
                 ))),
             }
-        } else if let Some(transform) = self.routes.remove(node) {
-            NodeKind::Route(folded_route(&transform))
+        } else if let Some((transform, gate)) = self.routes.remove(node) {
+            NodeKind::Route(gated_route_coefficients(&transform, gate))
         } else if let Some([left, right]) = self.track_delays.remove(node) {
             // A delay entry on a node that is not a source input: a submix's `Input`, which
             // reduces the routes that target it (#1201 D2). Without this arm the entry would sit
@@ -6023,20 +6024,6 @@ fn apply_scatter_redirects(
     }
 }
 
-/// A route's 2x2 with its linear gain folded in, once, at bind (D3, #98 F4).
-///
-/// One derivation, two callers: [`RuntimeParts::node_kind`] builds `NodeKind::Route` from it and
-/// [`route_fold`] builds `FoldLane` from it, so a chain's epilogue cannot apply constants that
-/// differ from the ones the route op it replaced would have applied.
-const fn folded_route(transform: &RouteTransform) -> [f32; 4] {
-    [
-        transform.gain * transform.ll,
-        transform.gain * transform.lr,
-        transform.gain * transform.rl,
-        transform.gain * transform.rr,
-    ]
-}
-
 /// The route constants `node_kind` *would* hand this node, asked without consuming anything.
 ///
 /// [`RuntimeParts::node_kind`] takes the node's binding, its prepared effect and its route out of
@@ -6051,7 +6038,7 @@ trait PlanningMetadata {
     fn has_binding(&self, node: &GraphNodeId) -> bool;
     fn has_effect(&self, node: &GraphNodeId) -> bool;
     fn has_observer(&self, node: &GraphNodeId) -> bool;
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform>;
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)>;
 }
 
 impl PlanningMetadata for RuntimeParts {
@@ -6070,8 +6057,10 @@ impl PlanningMetadata for RuntimeParts {
     fn has_observer(&self, node: &GraphNodeId) -> bool {
         self.observers.contains_key(node)
     }
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
-        self.routes.get(node)
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)> {
+        self.routes
+            .get(node)
+            .map(|(transform, gate)| (transform, *gate))
     }
 }
 
@@ -6089,9 +6078,9 @@ struct BorrowedPlanningMetadata<'a> {
     effects: std::collections::BTreeSet<&'a crate::EffectNodeId>,
     /// The plan's own observers and the bindings', together.
     observers: std::collections::BTreeSet<&'a GraphNodeId>,
-    /// Each route node's transform. When a node is listed twice the later entry wins (`insert`
-    /// replaces), which is what a reverse search of `plan.routes` returned.
-    routes: BTreeMap<&'a GraphNodeId, &'a RouteTransform>,
+    /// Each route node's transform and gate. When a node is listed twice the later entry wins
+    /// (`insert` replaces), which is what a reverse search of `plan.routes` returned.
+    routes: BTreeMap<&'a GraphNodeId, (&'a RouteTransform, RouteGate)>,
 }
 
 impl<'a> BorrowedPlanningMetadata<'a> {
@@ -6102,7 +6091,7 @@ impl<'a> BorrowedPlanningMetadata<'a> {
     ) -> Self {
         let mut routes = BTreeMap::new();
         for route in &plan.routes {
-            routes.insert(&route.node, &route.transform);
+            routes.insert(&route.node, (&route.transform, route.gate));
         }
         Self {
             membership: bank_membership(&plan.spec, &plan.banks, &plan.builtin_banks),
@@ -6143,7 +6132,7 @@ impl PlanningMetadata for BorrowedPlanningMetadata<'_> {
     fn has_observer(&self, node: &GraphNodeId) -> bool {
         self.observers.contains(node)
     }
-    fn route(&self, node: &GraphNodeId) -> Option<&RouteTransform> {
+    fn route(&self, node: &GraphNodeId) -> Option<(&RouteTransform, RouteGate)> {
         self.routes.get(node).copied()
     }
 }
@@ -6160,7 +6149,9 @@ fn plain_route_gains(
     {
         return None;
     }
-    parts.route(node).map(folded_route)
+    parts
+        .route(node)
+        .map(|(transform, gate)| gated_route_coefficients(transform, gate))
 }
 
 /// Whether anything can *see* the buffer op `index` writes other than by reading it as an input,
@@ -6870,7 +6861,10 @@ pub(crate) fn route_folds_over_program(
         Vec::new(),
         1,
     );
-    parts.routes.clone_from(routes);
+    parts.routes = routes
+        .iter()
+        .map(|(node, transform)| (node.clone(), (*transform, RouteGate::OPEN)))
+        .collect();
     parts.membership = lanes
         .iter()
         .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
@@ -10360,6 +10354,7 @@ mod tests {
                         rl: 0.3,
                         rr: 1.125 - 0.046875 * track as f32,
                     },
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: Vec::new(),
@@ -10877,6 +10872,7 @@ mod tests {
                 .map(|(index, node)| crate::PreparedRoute {
                     node: node.clone(),
                     transform: transform(index),
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: Vec::new(),
@@ -12794,6 +12790,7 @@ mod tests {
                         rl: 0.3,
                         rr: 1.125 - 0.046875 * track as f32,
                     },
+                    gate: crate::RouteGate::OPEN,
                 })
                 .collect(),
             track_delays: shape
