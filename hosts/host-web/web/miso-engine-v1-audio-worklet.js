@@ -611,6 +611,24 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       }
       this.trackIds.push(id);
     }
+    // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
+    // sections), read through the same staging exactly as the track IDs are. Preparation sizes
+    // that staging for the longest source, track or submix ID, so the capacity check below is a
+    // corrupt-artifact check, not a limit a valid session can reach.
+    const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
+    if (!u32(submixCount)) return false;
+    this.submixIds = [];
+    for (let index = 0; index < submixCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_live_control_submix_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      this.submixIds.push(id);
+    }
 
     // Issue #207: source introspection, read once here for the same reason the track identities
     // are -- the construction path is the one that may allocate, and `process()` never touches
@@ -731,6 +749,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         return false;
       }
       this.submixCount = this.meterHeaderView.getUint32(64, true);
+      // Issue #1210 D3: the frame's submix sections are the enumerated submixes, in their order.
+      if (this.submixCount !== this.submixIds.length) return false;
       const strips = this.trackCount + this.submixCount;
       if (!u32(framePointer) || framePointer === 0
           || frameCapacity !== (strips * 3 + 3) * 4) return false;
@@ -981,6 +1001,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
           frames: source.frames,
         })),
         metersAttached: this.metersAttached === true,
+        submixes: [...this.submixIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {

@@ -359,3 +359,10 @@ and the mutation was reverted.
 | `test-web-audioworklet.mjs` worklet meter frame (D4) | read the master gain word at `3T + 2` | `masterGrDb` reads a bus word, not `7.5` |
 | `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | size the headless reader's frame `3T + 3` | `sdk.meter.frame` refusal: the frame with buses is rejected |
 | `capability-evals.mjs` bus frame (gate 2, `check-sdk-headless.sh`) | return an empty `submixPeaks` | `2S bus peak words` fails |
+| `tests::submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them` (#1210 D2) | drop `.max(shape.longest_submix_id_bytes)` from the ID-staging projection | `id_staging_bytes` is 14, not the 63-byte submix ID (the copy past it would trap) |
+| `tests::submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them` (#1210 D1) | answer `_submix_id` from `ready.submixes` reversed | submix 0 is the 63-byte `zz-` ID, not `a-bus` |
+| `test-web-audioworklet.mjs` main-realm session map (#1210 gate 3) | drop `"submixes"` from the host's `sessionMap` expected fields | the well-formed map with `submixes` fails the host with 255 |
+| `test-web-audioworklet.mjs` main-realm session map (#1210 gate 3) | drop the nonempty-string rule for `submixes` entries | `the host accepted a session map with a non-string submix` |
+| `test-web-audioworklet.mjs` worklet session map (#1210 D3) | stop posting `submixes` in the `miso.sessionmap.v1` reply | `the enumerated submix order` assertion fails |
+| `test-web-audioworklet.mjs` worklet construction (#1210 D3) | drop the header `submix_count` == enumerated count check | `a submix count the meter header disagrees with must fail initialization` |
+| `check-session-map-shape.py --self-test` (#1210) | the host list or the worklet reply without `submixes` | both new self-test mutations are caught (17 in all) |

@@ -65,6 +65,7 @@ const edits = new LiveControlEdits({
   tracks: ["t"],
   sources: [],
   metersAttached: true,
+  submixes: [],
 });
 const track = edits.track("t");
 

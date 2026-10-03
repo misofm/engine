@@ -179,7 +179,8 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         shape.maximum_source_channels,
         shape
             .longest_source_id_bytes
-            .max(shape.longest_track_id_bytes),
+            .max(shape.longest_track_id_bytes)
+            .max(shape.longest_submix_id_bytes),
         options,
         (false, (0, 0)),
     )
@@ -923,7 +924,8 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             shape.maximum_source_channels,
             shape
                 .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes),
+                .max(shape.longest_track_id_bytes)
+                .max(shape.longest_submix_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -3382,7 +3384,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             shape.maximum_source_channels,
             shape
                 .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes),
+                .max(shape.longest_track_id_bytes)
+                .max(shape.longest_submix_id_bytes),
             options,
             (false, (0, 0)),
         )
@@ -5837,6 +5840,90 @@ fn bus_meters_render_and_poll_without_allocating() {
     assert_eq!(host.meter_frame().len(), 3 * 4 + 3, "3(T + S) + 3 words");
     assert_eq!(allocations, 0, "render/poll allocated");
     assert_eq!(deallocations, 0, "render/poll freed");
+}
+
+/// Issue #1210 gate 1: three tracks over the observation fixture, and with `buses` two unity
+/// submixes declared out of canonical order: a 63-byte `zz-` bus, longer than every source and
+/// track ID, fed by `t0` and `t1`, then `a-bus`, which sorts before every track ID, fed by `t2`.
+fn submix_name_document(quantum: u32, buses: bool) -> (String, [String; 2]) {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture");
+    let long = format!("zz-{}", "x".repeat(60));
+    let canonical = ["a-bus".to_owned(), long.clone()];
+    if buses {
+        for (bus, feeders) in [(long.as_str(), &[0_usize, 1][..]), ("a-bus", &[2][..])] {
+            let id = session::StableId::parse(bus).expect("bus id");
+            model
+                .submixes
+                .push(session::Submix::unity(id.clone(), &model.console));
+            let mut out = model.routes[feeders[0]].clone();
+            for &feeder in feeders {
+                model.routes[feeder].destination = session::RouteDestination::SubmixInput {
+                    submix_id: id.clone(),
+                };
+            }
+            out.id = session::StableId::parse(&format!("{bus}-main")).expect("route id");
+            out.source = session::RouteSource::Submix {
+                submix_id: id,
+                tap: session::SendTap::PostPan,
+            };
+            model.routes.push(out);
+        }
+    }
+    model.quantum_frames = quantum;
+    let document = canonical_session_json(&model).expect("canonical submix name session");
+    (document, canonical)
+}
+
+/// Issue #1210 gate 1: the submix enumeration exports report every submix ID byte for byte in
+/// canonical order, through ID staging sized for the longest submix ID.
+///
+/// Red if the staging capacity ignores submix IDs (the long ID's copy overruns the buffer and
+/// traps) or if the export orders submixes other than canonically (the frame's order, #1209 D3).
+#[test]
+fn submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them() {
+    const QUANTUM: u32 = 128;
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM * 4,
+        ..boot_options(QUANTUM)
+    };
+    let (document, canonical) = submix_name_document(QUANTUM, true);
+    let handle = crate::ffi::test_boot(document.as_bytes(), options);
+    assert_ne!(handle, 0, "the submix session boots");
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, canonical[1].len() as u64);
+
+    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 2);
+    assert_eq!(miso_engine_web_v1_live_control_track_count(handle), 3);
+    for (index, expected) in canonical.iter().enumerate() {
+        let length = miso_engine_web_v1_live_control_submix_id(handle, index as u32);
+        assert_eq!(length, expected.len() as u32);
+        assert_eq!(
+            crate::ffi::test_read_source_id(handle, length).expect("staged submix ID"),
+            expected.as_bytes()
+        );
+    }
+    assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 2), 0);
+    assert_eq!(
+        miso_engine_web_v1_live_control_submix_id(handle, u32::MAX),
+        0
+    );
+    // An invalid handle answers zero, as the track queries do.
+    assert_eq!(
+        miso_engine_web_v1_live_control_submix_count(handle.wrapping_add(1)),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
+
+    let (document, _) = submix_name_document(QUANTUM, false);
+    let handle = crate::ffi::test_boot(document.as_bytes(), options);
+    assert_ne!(handle, 0, "the submix-free session boots");
+    assert_eq!(miso_engine_web_v1_live_control_submix_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_live_control_submix_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
 #[test]

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createEngine } from "../src/browser/engine.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 
-const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"] });
+const SHAPE = Object.freeze({ sampleRateHz: 48_000, quantumFrames: 128, tracks: ["t"], submixes: [] });
 const PREPARED = Object.freeze({
   target: Object.freeze({ kind: "output", outputId: "out" }),
   channels: "both",
@@ -346,7 +346,7 @@ test("browser spectrum invalidates a dead Worker and permits a fresh managed lif
   let residentArmed = false;
   const host = hostWithCapture({
     async sessionMap() {
-      return { tracks: ["t"], sources: [], metersAttached: false };
+      return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] };
     },
     async observationMap() {
       return {

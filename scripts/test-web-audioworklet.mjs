@@ -115,6 +115,7 @@ async function testMainRealm() {
   let held = null;
   let readyMutation = null;
   let statusMutation = null;
+  let sessionMapMutation = null;
   let planeMutation = null;
   let commandResult = 0;
   let mixedSuccess = false;
@@ -186,7 +187,9 @@ async function testMainRealm() {
               { id: "drums", channels: 2, frames: 2048n },
             ],
             metersAttached: true,
+            submixes: ["aaa-bus", "zzz-bus"],
           };
+          if (sessionMapMutation !== null) response = sessionMapMutation(response);
         } else {
           response = { tag: "miso.ack.v1", requestId: received.requestId, result: 0 };
         }
@@ -1350,6 +1353,30 @@ async function testMainRealm() {
     statusMutation = null;
     await schemaHost.dispose();
 
+    // Issue #1210 gate 3: the session map's submix list is part of the exact field set. A reply
+    // without it, or with an entry that is not a nonempty string, fails the whole host; the
+    // well-formed reply is delivered with its canonical order intact.
+    for (const [what, mutation] of [
+      ["no submix list", ({ submixes: _dropped, ...rest }) => rest],
+      ["a submix list that is not an array", (map) => ({ ...map, submixes: "aaa-bus" })],
+      ["a non-string submix", (map) => ({ ...map, submixes: ["aaa-bus", 7] })],
+      ["an empty submix ID", (map) => ({ ...map, submixes: ["aaa-bus", ""] })],
+    ]) {
+      const mapHost = await createMisoAudioWorkletHost({
+        context,
+        document: new Uint8Array(),
+        options: limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      sessionMapMutation = mutation;
+      await errorResult(mapHost.sessionMap(), 255).catch((error) => {
+        throw new Error(`the host accepted a session map with ${what}`, { cause: error });
+      });
+      sessionMapMutation = null;
+      await mapHost.dispose();
+    }
+
     const planeHost = await createMisoAudioWorkletHost({
       context,
       document: new Uint8Array(),
@@ -1488,6 +1515,7 @@ async function testMainRealm() {
       { id: "drums", channels: 2, frames: 2048n },
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
+    assert.deepEqual(map.submixes, ["aaa-bus", "zzz-bus"], "issue #1210: the submix order is delivered");
 
     const pan = {
       kind: 1, rack: 255, channel: 255, trackIndex: 1, effectIndex: 0, parameterId: 0,
@@ -2089,6 +2117,9 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
+  // Issue #1210 D3: the submix IDs in canonical order, as many as the meter header's
+  // `submix_count` below; the worklet refuses construction when the two disagree.
+  const submixIds = ["drums-bus"];
   // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
   // frame count differ between rows, so a worklet that reads the wrong row/query is visible here.
   const sourceRows = [
@@ -2097,7 +2128,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
   ];
   // Issue #1209 D1: `3(T + S) + 3` -- a peak pair per strip (the tracks, then one submix), the
   // master pair, then one gain-reduction magnitude per strip and the master's.
-  const submixCount = 1;
+  const submixCount = submixIds.length;
   const strips = trackIds.length + submixCount;
   const meterFrameFloats = strips * 3 + 3;
   const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 72);
@@ -2236,6 +2267,14 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
       for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
       return id.length;
     },
+    miso_engine_web_v1_live_control_submix_count: () => submixIds.length,
+    miso_engine_web_v1_live_control_submix_id: (_handle, index) => {
+      const id = submixIds[index];
+      if (id === undefined) return 0;
+      const bytes = new Uint8Array(memory.buffer, pointers[2], id.length);
+      for (let byte = 0; byte < id.length; byte += 1) bytes[byte] = id.charCodeAt(byte);
+      return id.length;
+    },
     miso_engine_web_v1_source_count: () => sourceRows.length,
     miso_engine_web_v1_source_id: (_handle, index) => {
       const id = sourceRows[index]?.id;
@@ -2281,7 +2320,7 @@ function createFakeExports(quantum, backend = 1, liveControlsAttached = true) {
       return 0;
     },
   };
-  return { exports, calls, trackIds, sourceRows, meterFrameFloats, meterHeader };
+  return { exports, calls, trackIds, submixIds, sourceRows, meterFrameFloats, meterHeader };
 }
 
 function createTelemetryClock(elapsedMsByBlock) {
@@ -3136,6 +3175,7 @@ async function testProcessor() {
       assert.deepEqual(map.tracks, ["kick", "snare"]);
       assert.deepEqual(map.sources, fake.sourceRows, "issue #207: canonical source order and shape");
       assert.equal(map.metersAttached, true);
+      assert.deepEqual(map.submixes, fake.submixIds, "issue #1210: the enumerated submix order");
       // The identities were read once at construction and the reads are not repeated per request:
       // a second map answers from the same numbers, and `process()` never sees any of this.
       processor.receive({ tag: "miso.sessionmap.v1", requestId: 2 });
@@ -3154,6 +3194,17 @@ async function testProcessor() {
         ["an empty source ID", (e) => { e.miso_engine_web_v1_source_id = () => 0; }],
         ["a source ID longer than staging",
           (e) => { e.miso_engine_web_v1_source_id = () => 65; }],
+        // Issue #1210 D3: the submix IDs are read under the track IDs' rules, and the meter
+        // header's submix count must be the enumerated count.
+        ["an empty submix ID", (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 0; }],
+        ["a submix ID longer than staging",
+          (e) => { e.miso_engine_web_v1_live_control_submix_id = () => 65; }],
+        ["a submix count the meter header disagrees with",
+          (e) => {
+            const read = e.miso_engine_web_v1_live_control_submix_id;
+            e.miso_engine_web_v1_live_control_submix_count = () => 2;
+            e.miso_engine_web_v1_live_control_submix_id = (handle) => read(handle, 0);
+          }],
       ]) {
         const fake = createFakeExports(64);
         mutate(fake.exports);

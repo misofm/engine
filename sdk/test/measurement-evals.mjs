@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createEngine } from "../src/browser/engine.ts";
 import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
-import { createMeasurementFeeds } from "../src/browser/measurement.ts";
+import { createMeasurementFeeds, meterProjection } from "../src/browser/measurement.ts";
 import { ABI_LAYOUT } from "../src/generated/abi.ts";
 
 const meterFrame = () => ({
@@ -19,6 +19,9 @@ const meterFrame = () => ({
   masterGrDb: null,
   firstSample: 128n,
   endSample: 512n,
+  submixCount: 0,
+  submixPeaks: new Float32Array(0),
+  submixGrDb: new Float32Array(0),
 });
 
 const telemetryFrame = {
@@ -73,7 +76,11 @@ function browserContext(onClose = () => {}) {
   };
 }
 
-function openBrowser(host, policy = { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } }) {
+function openBrowser(
+  host,
+  policy = { liveControls: { commandQueueRecords: 8, meterBlocks: 1 } },
+  submixes = [],
+) {
   return createEngine({
     document: "opaque",
     policy,
@@ -84,6 +91,7 @@ function openBrowser(host, policy = { liveControls: { commandQueueRecords: 8, me
       backend: "simd128",
       sources: [],
       tracks: ["t"],
+      submixes,
     }),
     createContext: () => browserContext(),
     createHost: async () => host,
@@ -92,7 +100,7 @@ function openBrowser(host, policy = { liveControls: { commandQueueRecords: 8, me
 
 test("SDK measurement feeds use one shared lease and preserve copied projections", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["snare", "kick"], true);
+  const feeds = createMeasurementFeeds(host, ["snare", "kick"], [], true);
   const firstUpdates = [];
   const secondUpdates = [];
   const stopFirst = await feeds.meters((update) => firstUpdates.push(update));
@@ -139,9 +147,116 @@ test("SDK measurement feeds use one shared lease and preserve copied projections
   feeds.close();
 });
 
+// Issue #1210 gate 2(b). A two-track, two-bus frame: every section holds distinct values, so a
+// projection that keys a bus by the wrong index, or reads a bus out of the track or master
+// section, disagrees with the expectation built from the frame's own arrays.
+const busFrame = () => ({
+  ...meterFrame(),
+  submixCount: 2,
+  submixPeaks: new Float32Array([0.11, 0.12, 0.21, 0.22]),
+  submixGrDb: new Float32Array([3.5, 4.5]),
+});
+
+test("a bus frame projects each submix's meter keyed by ID in canonical order", async () => {
+  const host = fakeHost();
+  const feeds = createMeasurementFeeds(host, ["snare", "kick"], ["aaa-bus", "zzz-bus"], true);
+  const updates = [];
+  const stop = await feeds.meters((update) => updates.push(update));
+  const frame = busFrame();
+  assert.equal(Object.keys(frame).length, 15, "the shipped 15-field miso.meter.v1 message");
+  host.emitMeter(frame);
+  assert.equal(updates.length, 1);
+  const [update] = updates;
+  assert.deepEqual([...update.submixes.keys()], ["aaa-bus", "zzz-bus"]);
+  assert.deepEqual([...update.submixes.values()], [0, 1].map((index) => ({
+    peakLeft: frame.submixPeaks[index * 2],
+    peakRight: frame.submixPeaks[index * 2 + 1],
+    gainReductionDb: frame.submixGrDb[index],
+  })));
+  // The track and master sections are untouched by the bus sections.
+  assert.deepEqual([...update.tracks.values()].map((meter) => meter.peakLeft),
+    [frame.peaks[0], frame.peaks[2]]);
+  assert.equal(update.master.peakLeft, frame.peaks[4]);
+  stop();
+  feeds.close();
+
+  // A session without submixes projects an empty map.
+  assert.equal(meterProjection(meterFrame(), ["snare", "kick"], []).submixes.size, 0);
+});
+
+test("a meter frame for another submix list is refused with sdk.meter.submix_count", () => {
+  const refused = (frame, submixIds) => assert.throws(
+    () => meterProjection(frame, ["snare", "kick"], submixIds),
+    (error) => error instanceof MisoEngineError && error.code === "abiMismatch"
+      && error.diagnostics.length === 1 && error.diagnostics[0].code === "sdk.meter.submix_count",
+  );
+  refused({ ...busFrame(), submixCount: 3 }, ["aaa-bus", "zzz-bus"]);
+  refused(busFrame(), ["aaa-bus"]);
+  refused(busFrame(), ["aaa-bus", "mid-bus", "zzz-bus"]);
+  refused(meterFrame(), ["aaa-bus"]);
+  refused({ ...busFrame(), submixPeaks: new Float32Array(2) }, ["aaa-bus", "zzz-bus"]);
+  refused({ ...busFrame(), submixGrDb: new Float32Array(1) }, ["aaa-bus", "zzz-bus"]);
+});
+
+test("the browser engine meters and observes a bus by its submix ID", async () => {
+  // Issue #1210 D4/D5 on the browser path: the engine hands the scratch shape's submixes to the
+  // meter projection and resolves observation bindings against the strips, tracks first. Red if
+  // `engine.ts` passes the track list alone to the feeds, the map, the resolver or the decoder.
+  const host = fakeHost();
+  const reads = [];
+  Object.assign(host, {
+    async observationMap() {
+      return {
+        tag: "miso.observationmap.v1", result: 0,
+        bindings: [
+          { trackIndex: 0, rack: 1, effectIndex: 0, effectSlotId: "comp",
+            nativeEffectId: "miso.compressor", tapIds: [1] },
+          { trackIndex: 1, rack: 1, effectIndex: 0, effectSlotId: "bus-comp",
+            nativeEffectId: "miso.compressor", tapIds: [1] },
+        ],
+      };
+    },
+    async readObservations(request) {
+      reads.push(request.selections);
+      return {
+        tag: "miso.observation.v1", result: 0,
+        rows: request.selections.map((selection) => ({ ...selection, status: 1,
+          sampleRateHz: 48_000, firstSample: 0n, endSample: 0n, sequence: 0n, blocks: 0,
+          leftPresent: 0, rightPresent: 0, left: 0, right: 0 })),
+      };
+    },
+  });
+  const engine = await openBrowser(host, {
+    liveControls: { commandQueueRecords: 8, meterBlocks: 1, observationTaps: 1 },
+  }, ["bus"]);
+  try {
+    const map = await engine.observationMap();
+    assert.deepEqual(map.bindings.map((binding) => binding.trackId), ["t", "bus"]);
+    const selection = (trackId, effectSlotId) => ({
+      trackId, rack: "inserts", effectSlotId, tapId: 1, channels: "both",
+    });
+    const rows = await engine.readObservations([selection("t", "comp"), selection("bus", "bus-comp")]);
+    assert.deepEqual(reads[0].map((address) => address.trackIndex), [0, 1]);
+    assert.deepEqual(rows.map((row) => row.trackId), ["t", "bus"]);
+
+    const updates = [];
+    await engine.subscribeMeters((update) => updates.push(update));
+    host.emitMeter({
+      ...meterFrame(), trackCount: 1, peaks: new Float32Array([0.1, 0.2, 0.9, 0.8]),
+      trackGrDb: new Float32Array([1]), submixCount: 1, submixPeaks: new Float32Array([0.3, 0.4]),
+      submixGrDb: new Float32Array([2.5]),
+    });
+    assert.equal(updates.length, 1);
+    assert.deepEqual([...updates[0].submixes.keys()], ["bus"]);
+    assert.equal(updates[0].submixes.get("bus").gainReductionDb, 2.5);
+  } finally {
+    await engine.close();
+  }
+});
+
 test("throwing one SDK listener does not suppress another listener", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   let delivered = 0;
   await feeds.meters(() => { throw new Error("consumer callback"); });
   await feeds.meters(() => { delivered += 1; });
@@ -152,7 +267,7 @@ test("throwing one SDK listener does not suppress another listener", async () =>
 
 test("identical listener functions retain independent subscriptions", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   let delivered = 0;
   const listener = () => { delivered += 1; };
   const stopFirst = await feeds.meters(listener);
@@ -168,7 +283,7 @@ test("identical listener functions retain independent subscriptions", async () =
 
 test("telemetry preserves every host measurement and shares its lease", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   const updates = [];
   const stop = await feeds.telemetry((update) => updates.push(update));
   host.emitTelemetry(telemetryFrame);
@@ -182,7 +297,7 @@ test("telemetry preserves every host measurement and shares its lease", async ()
 test("a lease refusal is typed and does not reserve a later subscriber", async () => {
   const host = fakeHost();
   host.meterResult = 7;
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   await assert.rejects(
     feeds.meters(() => undefined),
     (error) => error instanceof MisoEngineError && error.code === "unsupported" && error.result === 7,
@@ -206,7 +321,7 @@ test("a rejected numeric lease result is typed and recoverable", async () => {
     }
     return originalMeters(request);
   };
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   await assert.rejects(
     feeds.meters(() => undefined),
     (error) => error instanceof MisoEngineError && error.code === "backpressure" && error.result === 6,
@@ -219,7 +334,7 @@ test("a rejected numeric lease result is typed and recoverable", async () => {
 });
 
 test("measurement admission without live controls is a typed SDK refusal", async () => {
-  const feeds = createMeasurementFeeds(fakeHost(), ["track"], false);
+  const feeds = createMeasurementFeeds(fakeHost(), ["track"], [], false);
   await assert.rejects(feeds.meters(() => undefined), (error) => error instanceof MisoUsageError);
   await assert.rejects(feeds.telemetry(() => undefined), (error) => error instanceof MisoUsageError);
   feeds.close();
@@ -227,7 +342,7 @@ test("measurement admission without live controls is a typed SDK refusal", async
 
 test("closing an already-armed feed rejects same-turn admission", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, ["track"], true);
+  const feeds = createMeasurementFeeds(host, ["track"], [], true);
   await feeds.meters(() => undefined);
   const admission = feeds.meters(() => undefined);
   feeds.close();
@@ -275,6 +390,7 @@ test("browser live controls retain the managed observation conflict hook", async
     async sessionMap() {
       return {
         tag: "miso.sessionmap.v1", result: 0, tracks: ["t"], sources: [], metersAttached: true,
+        submixes: [],
       };
     },
     async command(request) {
@@ -325,7 +441,7 @@ test("browser live controls retain the managed observation conflict hook", async
 
 test("telemetry shares one lease until its last subscription and isolates throwing callbacks", async () => {
   const host = fakeHost();
-  const feeds = createMeasurementFeeds(host, [], true);
+  const feeds = createMeasurementFeeds(host, [], [], true);
   let deliveries = 0;
   const first = await feeds.telemetry(() => { throw new Error("consumer"); });
   const second = await feeds.telemetry(() => { deliveries += 1; });

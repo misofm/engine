@@ -5,7 +5,7 @@ import { MisoEngineError, MisoUsageError } from "../src/core/errors.ts";
 import { moduleBytes } from "./support.mjs";
 import { BUNDLED_ENGINE_ASSETS } from "../src/assets.ts";
 
-const shape = { sampleRateHz: 48000, quantumFrames: 128 };
+const shape = { sampleRateHz: 48000, quantumFrames: 128, tracks: [], submixes: [] };
 class FakeWorker {
   listeners = new Map(); history = new Map(); terminated = 0; requests = [];
   addEventListener(type, listener) { const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set); const historical = this.history.get(type) ?? []; historical.push(listener); this.history.set(type, historical); }
@@ -436,7 +436,7 @@ for (const initialLiveControls of [undefined, {}, { commandQueueRecords: 0 }, { 
       createHost: async request => {
         assert.equal((request.options.liveControls?.commandQueueRecords ?? 0) > 0, attached);
         return {
-          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false }; },
+          async sessionMap() { maps++; return { tracks: ["t"], sources: [], metersAttached: false, submixes: [] }; },
           async command(request) { commands++; return { result: 0, reason: 0, rejectedIndex: 0,
             admitted: request.commands.length, appliedAtSample: 128n }; },
           async dispose() { closed.push("host"); },

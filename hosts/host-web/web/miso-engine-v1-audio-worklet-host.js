@@ -987,7 +987,7 @@ class MisoAudioWorkletHost {
         : pending.response === "eqConfig"
           ? ["tag", "requestId", "result", "reason", "config"]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached", "submixes"]
           : pending.response === "observationMap"
             ? ["tag", "requestId", "result", "bindings"]
             : pending.response === "observationRead"
@@ -1058,6 +1058,10 @@ class MisoAudioWorkletHost {
         && validU32(source.channels) && source.channels > 0
         && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
+      // Issue #1210 D3: the submix IDs in canonical order, the order of the meter frame's submix
+      // sections.
+      && Array.isArray(message.submixes)
+      && message.submixes.every((value) => typeof value === "string" && value.length > 0)
     );
     const validObservationMap = pending.response !== "observationMap" || (
       message.result === RESULT_OK && Array.isArray(message.bindings)
@@ -1367,7 +1371,8 @@ class MisoAudioWorkletHost {
     });
   }
 
-  /// Read the compiled session's canonical track order (issue #137 D1).
+  /// Read the compiled session's canonical track order (issue #137 D1), its sources (issue #207)
+  /// and its canonical submix order (issue #1210 D3).
   ///
   /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
   /// sends a string on the command path.

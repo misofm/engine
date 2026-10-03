@@ -136,7 +136,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("unknown tracks and numeric domains refuse before transport", async () => {
     let calls = 0;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [] },
       () => {
         calls += 1;
         throw new Error("must not be called");
@@ -258,6 +258,7 @@ describe("issue 322 -- shared semantic live controls", () => {
           tracks: ["t"],
           sources: [{ id: "s", channels: 2, frames: 4_800n }],
           metersAttached: false,
+          submixes: [],
         };
       },
       async command(value) {
@@ -364,7 +365,7 @@ describe("issue 322 -- shared semantic live controls", () => {
   test("a torn acknowledgement is rejected after, never before, transport answers", async () => {
     let answered = false;
     const liveControls = new EngineLiveControls(
-      { tracks: ["t"], sources: [], metersAttached: false },
+      { tracks: ["t"], sources: [], metersAttached: false, submixes: [] },
       async () => {
         answered = true;
         return {

@@ -220,6 +220,80 @@ prefix and `ReadyOwnership.submixes` the submix IDs in canonical order.
 - Each new test's name with its one-sentence test-value answer.
 - The ARTIFACT CHANGED report and the regenerated layout diff (two new exports).
 
+### Attempt 1 record (Terra)
+
+- **D1** (`ffi.rs`, `lib.rs`): `miso_engine_web_v1_live_control_submix_count`/`_submix_id`
+  beside the track pair, backed by `live_control_submixes()` and `copy_live_control_submix_id`
+  over `ReadyOwnership.submixes` (canonical order, through `copy_id_into_staging`). Added to the
+  shell gate list, `check-abi-layout-v1.py` `EXPORTS` and `abi_layout.rs` (`[&str; 118]`) in
+  alphabetical position (each list is sorted; the shell list is `sort`ed). **D2**:
+  `HostSessionShape.longest_submix_id_bytes`; staging = max of the three (`lib.rs` boot and the
+  three `tests.rs` spellings). **D3**: worklet reads the submix IDs at construction under the
+  track IDs' rules and posts `submixes` last in `miso.sessionmap.v1`; it also refuses
+  construction when the meter header's `submix_count` differs from the enumerated count (the
+  analogue of its existing `track_count` check). Host: `"submixes"` appended to the expected
+  fields, entries must be nonempty strings. `.d.ts` `MisoSessionMap.submixes: readonly string[]`
+  (SDK mirror is a byte copy). SDK `SessionShape`/`SessionMap.submixes` read by `shape()`; the
+  browser `createBrowserLiveControls` map copies it. **D4**: `createMeasurementFeeds(host,
+  trackIds, submixIds, available)`; `MeterUpdate.submixes`; `meterProjection` (now exported from
+  the module only, not the barrel) refuses `sdk.meter.submix_count`. **D5**: headless
+  `observationMap`/`readObservations` and the browser engine pass `[...tracks, ...submixes]` to
+  enrich, resolve and `decodeObservationRows` (parameters renamed `strips`); the browser engine
+  builds the list lazily, because `live-response-evals.mjs` scratch shapes carry no `tracks`.
+- **Stubs**: every site in the Context carries `submixes` (`browser-defaults-evals` `shape` also
+  gained `tracks: []`); `measurement-evals` call sites pass `[]` and its `meterFrame()` carries
+  the three S = 0 fields. The `test-web-audioworklet.sh` sed literal still matches (substring)
+  and still goes red; unchanged.
+- **Layout diff**: `exports` gains `miso_engine_web_v1_live_control_submix_count` and
+  `_submix_id` (nothing else); the self-test fixture is again a byte copy of the asset.
+- **Tests and test value** (each mutation applied, run red, reverted; rows in
+  `hosts/host-web/MUTATIONS.md`):
+  - `host-web tests::submix_ids_enumerate_in_canonical_order_through_staging_sized_for_them`
+    (gate 1; `zz-` + 60 declared first, `a-bus` second): red if staging ignores submix IDs or the
+    export reorders submixes. Mutations: drop the submix max -> `id_staging_bytes` 14 != 63;
+    reversed lookup -> submix 0 is the long ID.
+  - `capability-evals.mjs` "the session map names every submix in the frame's bus order" (gate
+    2a; `zz-bus` -40 dB declared first, `aa-bus` unity): red if the enumeration and the frame
+    disagree on order or `shape()` skips the exports. Mutations: reversed list -> red; empty
+    list -> red. Structural (loud > 10x quiet), no rendered values.
+  - `measurement-evals.mjs` "a bus frame projects each submix's meter keyed by ID in canonical
+    order" and "a meter frame for another submix list is refused with sdk.meter.submix_count"
+    (gate 2b): red if a bus is keyed by the wrong index or read from another section, or the
+    count is unchecked. Mutations: reversed index -> red; bus read from `peaks` -> red; count
+    clause dropped -> red (the `submixCount: 3` case).
+  - `measurement-evals.mjs` "the browser engine meters and observes a bus by its submix ID"
+    (browser path of D4/D5, fake host): red if `engine.ts` hands the tracks alone to the feeds,
+    the map or the resolver. Mutations: each of the three -> red. (Passing tracks to
+    `decodeObservationRows` stays green: it falls back to `selection.trackId`, so no defect.)
+  - `test-web-audioworklet.mjs` (gate 3): a reply without `submixes`, with a non-array, a
+    non-string or an empty entry fails the host with 255; the well-formed reply is delivered
+    with its order; the worklet posts the enumerated list and refuses an empty/over-long submix
+    ID and a header count mismatch. Mutations: host list without `submixes` -> red; element rule
+    dropped -> red; worklet stops posting -> red; header check dropped -> red.
+  - `capability-evals.mjs` "a bus effect's observation names its submix and a track tap still
+    reads" (gate 4; `t` and `bus` each with a compressor insert, taps 2): red if the SDK enriches
+    against tracks only. Mutation: enrich with `shape.tracks` -> red. Resolving against tracks
+    only stays green here (the track read resolves either way); the browser test above covers
+    the resolver.
+  - `check-session-map-shape.py --self-test`: two new mutations (host list, worklet reply
+    without `submixes`); 17 caught.
+- **Gates** (x86_64 AVX2; A = `target/ci/k2-1210-artifacts`, B = `target/ci/k2-1210-named`):
+  5: both shape-gate commands ok, `--self-test` 17 caught; `check-abi-layout-v1.py --self-test`
+  ok (22). 6: `build-web-audioworklet.sh --named-twin` ok; `check-abi-layout-v1.py <A>/...` ok;
+  `check-web-audioworklet.sh` ok (export list +2); `check-browser-expected-resources.py
+  --artifacts` ok (32 red mutations); `test-web-audioworklet.sh` ok; `check-sdk-generated.sh` ok;
+  `check-sdk-types.sh` ok; `check-sdk-headless.sh` ok (339 pass, 0 fail); `sdk-package.sh check`
+  ok. 7: workspace test command rc 0 (102 binaries, 1158 passed, 0 failed; includes
+  `parameter-metadata`); `check-/test-host-core-policy.sh` ok; `cargo fmt --check` ok; workspace
+  clippy `-D warnings` clean.
+- **ARTIFACT CHANGED**: shipped module `c43ee960...82af59` (2 694 139 B) against #1209's
+  `f5d36ba0...00ad0`; the bytes move because two exports and the worklet/host JS changed. No
+  re-pin; CI's `artifact-identity` line is the authority.
+- **Open (outside this slice):** host-web `observation_selection_for_address` still looks the
+  address up in `ready.tracks` only, so a selected read of a **bus** tap is refused
+  (`invalidArgument`) after the SDK resolves it to its strip index. Gate 4 needs only the track
+  read; a bus-tap read needs a host-web successor (or #1213).
+
 ## Dependencies
 
 - *Carry submix strips in the browser meter frame* (#1209)

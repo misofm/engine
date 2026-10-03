@@ -233,6 +233,8 @@ export interface SessionShape {
   readonly backend: "scalar" | "simd128";
   readonly sources: readonly SourceShape[];
   readonly tracks: readonly string[];
+  /** The submix IDs in canonical order (issue #1210 D3): submix `j` is strip `tracks.length + j`. */
+  readonly submixes: readonly string[];
 }
 
 export interface SourceShape {
@@ -253,6 +255,11 @@ export interface SessionMap {
   readonly tracks: readonly string[];
   readonly sources: readonly SourceShape[];
   readonly metersAttached: boolean;
+  /**
+   * The submix IDs in canonical order (issue #1210 D3), the order of the meter frame's submix
+   * sections. Submix `j` is strip `tracks.length + j`.
+   */
+  readonly submixes: readonly string[];
 }
 
 interface ObservationLayoutField {
@@ -468,6 +475,12 @@ export class WasmBoundary {
       const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_track_id(handle, index));
       tracks.push(this.#readIdBuffer(idBytes));
     }
+    const submixCount = Number(this.#exports.miso_engine_web_v1_live_control_submix_count(handle));
+    const submixes: string[] = [];
+    for (let index = 0; index < submixCount; index += 1) {
+      const idBytes = Number(this.#exports.miso_engine_web_v1_live_control_submix_id(handle, index));
+      submixes.push(this.#readIdBuffer(idBytes));
+    }
     return Object.freeze({
       sampleRateHz,
       quantumFrames,
@@ -477,6 +490,7 @@ export class WasmBoundary {
       backend: backendValue === constantValue("backends", "simd128") ? "simd128" : "scalar",
       sources: Object.freeze(sources),
       tracks: Object.freeze(tracks),
+      submixes: Object.freeze(submixes),
     });
   }
 
@@ -536,13 +550,14 @@ export class WasmBoundary {
     return id.byteLength;
   }
 
-  /** The canonical track/source order plus whether meter observers were prepared. */
+  /** The canonical track/source/submix order plus whether meter observers were prepared. */
   sessionMap(): SessionMap {
     const shape = this.shape();
     return Object.freeze({
       tracks: shape.tracks,
       sources: shape.sources,
       metersAttached: this.#metersAttached,
+      submixes: shape.submixes,
     });
   }
 
@@ -568,7 +583,9 @@ export class WasmBoundary {
         diagnostics: [{ code: "sdk.observation.id_staging", path: "$" }],
       });
     }
-    const tracks = this.shape().tracks;
+    // Issue #1210 D5: a binding's index is a strip index, the tracks then the submixes.
+    const shape = this.shape();
+    const strips = [...shape.tracks, ...shape.submixes];
     const raw: RawObservationBinding[] = [];
     const readId = (length: number, path: string): string => {
       if (!Number.isSafeInteger(length) || length <= 0 || length > idCapacity) {
@@ -625,7 +642,7 @@ export class WasmBoundary {
         tapIds,
       });
     }
-    return enrichObservationMap(tracks, raw);
+    return enrichObservationMap(strips, raw);
   }
 
   /** Internal managed-subscription view of the optional prepared spectrum query. */
@@ -643,8 +660,10 @@ export class WasmBoundary {
     validateObservationSelections(selections);
     const handle = this.#live();
     const map = this.observationMap();
-    const tracks = this.shape().tracks;
-    const addresses = resolveObservationAddressesWithTracks(map, tracks, selections);
+    // Issue #1210 D5: selections resolve against the strips, the tracks then the submixes.
+    const shape = this.shape();
+    const strips = [...shape.tracks, ...shape.submixes];
+    const addresses = resolveObservationAddressesWithTracks(map, strips, selections);
     const selectionPointer = Number(this.#exports.miso_engine_web_v1_observation_selection_ptr());
     const selectionCapacity = Number(this.#exports.miso_engine_web_v1_observation_selection_capacity());
     const selectionBytes = Number(this.#exports.miso_engine_web_v1_observation_selection_bytes());
@@ -733,7 +752,7 @@ export class WasmBoundary {
     }));
     return decodeObservationRows(
       map,
-      tracks,
+      strips,
       selections,
       addresses,
       rows,

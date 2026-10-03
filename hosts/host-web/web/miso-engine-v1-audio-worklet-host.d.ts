@@ -398,6 +398,9 @@ export interface MisoSessionMap {
   readonly sources: MisoSessionSource[];
   /// Whether preparation bound meter observers at all.
   readonly metersAttached: boolean;
+  /// Canonical normalized submix order (issue 1210): submix `j` is strip `tracks.length + j`, and
+  /// the meter frame's submix sections (`submixPeaks`, `submixGrDb`) follow this order.
+  readonly submixes: readonly string[];
 }
 
 /** Numeric current-owner address used by the additive selected-observation request. */

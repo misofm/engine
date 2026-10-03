@@ -84,6 +84,57 @@ function busDocument() {
   return `${JSON.stringify(document, null, 2)}\n`;
 }
 
+/**
+ * Issue #1210 gate 2(a): tracks `t0`, `t1`, `t2`; the submixes are declared out of canonical order.
+ * `zz-bus` (declared first) sums `t0` and `t1` behind a -40 dB fader; `aa-bus` carries `t2` alone
+ * at unity, so its lanes peak well above `zz-bus`'s whatever the source block holds.
+ */
+function namedBusDocument() {
+  const document = JSON.parse(busDocument());
+  const [quiet, loud] = document.submixes;
+  quiet.id = "zz-bus";
+  quiet.fader = { ...quiet.fader, left_db: -40.0, right_db: -40.0 };
+  loud.id = "aa-bus";
+  document.submixes = [quiet, loud];
+  for (const route of document.routes) {
+    for (const end of [route.source, route.destination]) {
+      if (end.submix_id === "bus-a") end.submix_id = "zz-bus";
+      else if (end.submix_id === "bus-b") end.submix_id = "aa-bus";
+    }
+  }
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
+/**
+ * Issue #1210 gate 4: track `t` (compressor insert `comp`) feeds `bus`, which carries its own
+ * compressor insert `bus-comp` and feeds the output.
+ */
+function busObservationDocument() {
+  const compressor = CATALOG.effects.find((row) => row.id === "miso.compressor");
+  assert.ok(compressor);
+  const insert = (id) => effectEntry(id, compressor.id, compressor.parameters.map((row) => ({
+    id: row.id, unit: row.unitName, value: row.default, channel: "both",
+  })));
+  const document = JSON.parse(sessionDocument({ effects: { inserts: [insert("comp")] } }));
+  const [track] = document.tracks;
+  const [route] = document.routes;
+  document.submixes = [{
+    id: "bus",
+    builtins: structuredClone(track.builtins),
+    console: [],
+    inserts: { effects: [insert("bus-comp")] },
+    fader: structuredClone(track.fader),
+    pan: structuredClone(track.pan),
+  }];
+  document.routes = [
+    { ...structuredClone(route), id: "t-bus",
+      destination: { kind: "submix_input", submix_id: "bus" } },
+    { ...structuredClone(route), id: "bus-main",
+      source: { kind: "submix", submix_id: "bus", tap: "post_pan" } },
+  ];
+  return `${JSON.stringify(document, null, 2)}\n`;
+}
+
 describe("issue 321 -- complete headless ABI capability parity", () => {
   test("status and sessionMap expose the compiled addressing authority", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
@@ -102,6 +153,7 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       assert.deepEqual(map.tracks, ["t"]);
       assert.deepEqual(map.sources, [{ id: "s", channels: 2, frames: 4_800n }]);
       assert.equal(map.metersAttached, false);
+      assert.deepEqual(map.submixes, [], "issue #1210: a session without submixes");
     } finally {
       engine.dispose();
     }
@@ -228,6 +280,79 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
       }
       assert.ok(frame.submixPeaks.every((value) => value > 0), "every bus lane is metered");
       assert.ok(frame.peaks.every((value) => value > 0), "every track lane and the master");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("the session map names every submix in the frame's bus order", async () => {
+    // Issue #1210 gate 2(a). Red if the shipped enumeration orders submixes other than the frame
+    // does (the quiet bus's pair would sit where the map says the loud bus is), or if `shape()`
+    // does not read the submix exports at all.
+    const meterBlocks = 2;
+    const engine = await createOfflineEngine(namedBusDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        meterBlocks,
+        observationTaps: 0,
+        masterTrackPlusOne: 0,
+      },
+    });
+    try {
+      const map = engine.sessionMap();
+      assert.deepEqual(map.submixes, ["aa-bus", "zz-bus"], "canonical order, not declaration order");
+      assert.deepEqual(engine.shape().submixes, map.submixes);
+      assert.deepEqual(map.tracks, ["t0", "t1", "t2"]);
+      assert.deepEqual(engine.meters(true), { ok: true, result: 0, code: "ok" });
+      for (let block = 0; block < meterBlocks; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 31 + block);
+        engine.render();
+      }
+      const frame = engine.pollMeters();
+      assert.ok(frame);
+      assert.equal(frame.submixCount, map.submixes.length);
+      const pair = (id) => {
+        const index = map.submixes.indexOf(id);
+        return [frame.submixPeaks[index * 2], frame.submixPeaks[index * 2 + 1]];
+      };
+      const [loud, quiet] = [pair("aa-bus"), pair("zz-bus")];
+      for (const lane of [0, 1]) {
+        assert.ok(quiet[lane] > 0, "the quiet bus is metered");
+        assert.ok(loud[lane] > 10 * quiet[lane], `lane ${lane}: ${loud} vs ${quiet}`);
+      }
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a bus effect's observation names its submix and a track tap still reads", async () => {
+    // Issue #1210 gate 4. Red if the SDK enriches or resolves observation bindings against the
+    // tracks only: the bus binding's strip index is past the track list, so the map throws
+    // `sdk.observation.map` and every read, the track's own included, fails with it.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const map = engine.observationMap();
+      const owners = map.bindings.map((binding) => [binding.trackId, binding.effectSlotId]);
+      assert.deepEqual(owners.filter(([trackId]) => trackId === "bus"), [["bus", "bus-comp"]]);
+      assert.deepEqual(owners.filter(([trackId]) => trackId === "t"), [["t", "comp"]]);
+      const read = (trackId, effectSlotId) => {
+        const binding = map.bindings.find((row) => row.trackId === trackId
+          && row.effectSlotId === effectSlotId);
+        assert.ok(binding);
+        return engine.readObservations([{
+          trackId, rack: binding.rack, effectSlotId, tapId: binding.tapIds[0], channels: "both",
+        }]);
+      };
+      const [track] = read("t", "comp");
+      assert.equal(track.trackId, "t");
+      assert.equal(track.status, "unarmed");
     } finally {
       engine.dispose();
     }

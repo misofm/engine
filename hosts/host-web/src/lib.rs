@@ -1956,7 +1956,8 @@ impl AudioWorkletEngineHost {
             shape.maximum_source_channels,
             shape
                 .longest_source_id_bytes
-                .max(shape.longest_track_id_bytes),
+                .max(shape.longest_track_id_bytes)
+                .max(shape.longest_submix_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2054,6 +2055,14 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn live_control_tracks(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
+    }
+
+    /// Canonical normalized submix order (issue #1210 D1): the trailing segment of the strip order,
+    /// submix `j` being strip `live_control_tracks().len() + j`, in the order of the meter frame's
+    /// submix sections.
+    #[must_use]
+    pub fn live_control_submixes(&self) -> &[Box<str>] {
+        self.ready.as_ref().map_or(&[], |ready| &ready.submixes)
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -2826,6 +2835,17 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         let Some(id) = ready.tracks.get(index as usize) else {
+            return 0;
+        };
+        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
+    }
+
+    /// Copy one canonical submix ID into ID staging; returns its byte length (issue #1210 D1).
+    pub(crate) fn copy_live_control_submix_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let Some(id) = ready.submixes.get(index as usize) else {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
