@@ -309,6 +309,44 @@ measurement on a real host path).
 - The machine metadata the records already carry.
 - The D1 commit hash.
 
+### Attempt 1 record (Terra, records on `244a52a0c`)
+
+`artifacts/steps/bus-send-base/REPORT.md` holds the full record; this is its summary.
+
+- **D1 commit `244a52a0c7c9ac1c64064b94265079a017c0aab9`** (BM1 and BM2, both Sol PASS; no
+  `bus_send_profile.rs`). Clean detached worktree `/home/bl/misofm/wt-1229-d1`, fresh WORKDIR outside
+  it; removed after the copy. Invocations in order: V8 `prepare` (exit 0), V8 `preflight` (exit 0),
+  native preflight (PASS, workload launches 0), **one native run** (PASS, 3 launches, 2 measured
+  rounds), **one V8 run** (exit 0, no refused file). No refusal, nothing deleted or re-run.
+- **Load.** Native pre-run wait hit the 900 s cap (loadavg `1.13` before, `1.74` after); records say
+  `uncontrolled` (waived `loadavg_above_ceiling` only; affinity cpu 31, SMT sibling idle, 60 s
+  cooldown). V8 waited 501 s (loadavg `0.44`); records say `controlled`.
+- **Native p50/p95/p99 ns per block**, rounds 1 / 2: sends `160926/167158/171116` /
+  `160084/167098/170825`; standing console `100421/105871/107234` / `100151/105601/108175`.
+- **V8 documents p50/p95/p99 ns**, rounds 1 / 2: sends `336606/349942/356335` /
+  `345253/373797/496082`; standing console `231845/243076/249459` / `239279/262023/333721`.
+- **Facts:** `route_transforms=202 reduction_nodes=11 bank_route_folds=0 route_ops_per_block=202
+  delayed_route_edges=0`.
+- **Profile** (one run, pinned to cpu 31 under the lock, after the timed runs): probe 33.1 ns in
+  situ, 201 clock reads/block (18 graph), `runs()` 15 of 16 entries (not truncated); profiled block
+  time `net_total` 165067.4 ns. Shares: **(a) route 8.08 %**; **(b) <= 3.83 %** (`output` 0.17 % +
+  `identity-copy` 0 + `other` 3.66 %; 12 `OTHER_OP` units, 10 of them reductions); **(c) fold
+  0.00 %** (0 entries). D4 reading: (a) alone at or above about 5 %. No decision filed.
+- **D5:** R9 and O5 unevaluated as the Context predicts (0 static folds; 5 submix bank chains
+  carrying 28 pad lanes at width 8, no time attributable). C ABI shape: static.
+- **Gates.** 1: native disposition PASS with 2 measured rounds, accepted == raw, both validators
+  accept the committed files. 2: one launched invocation per path. 3: D2 build ok; `cargo test
+  --locked --release -p audit -p bench -p console-workload` 113 passed, 0 failed, 2 ignored. 5:
+  `cargo fmt --check`, workspace clippy `-D warnings`, `check-bench-policy.sh`,
+  `test-bench-policy.sh` (`timed_subjects` unchanged: nothing under `tools/bench/`),
+  `check-workspace-policy.sh`, `test-workspace-policy.sh` and `test-console-benchmark.sh` all
+  pass.
+- **Test value.** No test was added or changed. The example is an instrument that gates nothing
+  (D2), so it claims no test value and has no mutation.
+- **Deviations.** The profile run's stderr went to a scratch file (it was empty). The spec's
+  command redirected only stdout. The facts test ran in the batch worktree before timing (the same
+  library code as the D1 commit), not inside the D1 worktree.
+
 ## Dependencies
 
 - *Add the bus-and-send session to the browser mixing benchmark* (#1228, BM2), which itself follows *Add a

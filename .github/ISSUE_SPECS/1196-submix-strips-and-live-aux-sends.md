@@ -231,3 +231,14 @@ addresses the submix's entry, #1202), but the SDK's `.automation()` builder stil
 it. Stored automation renders nothing yet (#1058), so the impact is nil today. The
 author-session skill says so and points agents at the JSON. A successor adds `{ submixId }` beside
 `trackId` in the builder and in `enginectl`.
+
+## Evidence: the bus-and-send baseline (#1229, BM3), for the weekly performance pass
+
+The pass's input for O1 is `artifacts/steps/bus-send-base/REPORT.md` (#1229 attempt 1, records on
+`244a52a0c`). In brief: the native static-plan sends row p50 is 160926 / 160084 ns per block,
+against 100421 / 100151 ns for the standing console. The V8 sends document p50 is 336606 /
+345253 ns, against 231845 / 239279 ns for the standing console. In the untimed native profile,
+route ops take 8.08 % of the profiled block time, route-input reductions at most 3.83 %, and the
+bank fold 0 %. Under DESIGN 6.3's guidance that reads as "(a) alone at or above about 5 %". R9 and
+O5 stay unevaluated on this fixture. The C ABI ran the static shape. No decision is taken here, and
+no saving figure is stated.
