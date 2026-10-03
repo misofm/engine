@@ -385,15 +385,16 @@ def self_test() -> int:
         # The brief's named red mutation: a kind added to the Rust authority alone, after the last
         # kind that ships. It names the next unclaimed value, so it stays the "added and not
         # threaded" shape -- red because the other spellings lack it -- rather than a duplicate of
-        # a shipped value, which would go red through the contiguity rule instead. Kinds 1-15
-        # ship (`inputFilters` is 12; issue #1222 spent 13-15 on the route kinds), so it is 16.
+        # a shipped value, which would go red through the contiguity rule instead. Kinds 1-17
+        # ship (`inputFilters` is 12; issue #1222 spent 13-15 on the route kinds and issue #1245
+        # 16-17 on the VCA kinds), so it is 18.
         (
             "a Rust kind is added without the other spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_ROUTE_MATRIX: u32 = 15;",
-                "pub const COMMAND_ROUTE_MATRIX: u32 = 15;\n"
-                "pub const COMMAND_SOLO_MODE: u32 = 16;",
+                "pub const COMMAND_VCA_MUTE: u32 = 17;",
+                "pub const COMMAND_VCA_MUTE: u32 = 17;\n"
+                "pub const COMMAND_SOLO_MODE: u32 = 18;",
             ),
         ),
         (
@@ -430,7 +431,7 @@ def self_test() -> int:
             "the host JS set stops at effectBypass",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);",
             ),
         ),
@@ -438,16 +439,16 @@ def self_test() -> int:
             "the host JS set stops one kind short of the wire",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);",
             ),
         ),
         (
             "the host JS set gains a kind the wire does not decode",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18]);",
             ),
         ),
         (
@@ -455,7 +456,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "COMMAND_KINDS.has(command.kind)",
-                "command.kind >= 1 && command.kind <= 15",
+                "command.kind >= 1 && command.kind <= 17",
             ),
         ),
         (
@@ -549,13 +550,13 @@ def self_test() -> int:
             "the schema gate's list drops the render kind added last",
             mutate(
                 SCHEMA_GATE,
-                '"routeGainDb", "routeMute", "routeMatrix",',
-                '"routeGainDb", "routeMute",',
+                '"routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",',
+                '"routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb",',
             ),
         ),
         (
             "the .d.ts enum drops the render kind added last",
-            mutate(HOST_DTS, "  RouteMatrix = 15,\n", ""),
+            mutate(HOST_DTS, "  VcaMute = 17,\n", ""),
         ),
         (
             "the .d.ts enum drops the first of the two phase-3 kinds",

@@ -182,7 +182,47 @@ emits nothing. Precedence is fixed:
 - **Solo-safe is not VCA-safe.** A submix is never solo-muted, but a VCA that reaches it mutes it.
 - **A VCA has no solo.** A VCA mute neither engages a solo nor counts toward `any_solo`.
 
-A VCA's offset is baked into each member's prepared fader gain; there is no live VCA move yet.
+A VCA's offset is baked into each member's prepared fader gain.
+
+### Live VCA groups (issue #1245)
+
+The browser rides and mutes a VCA live with two command kinds, 16 `vcaFaderDb` and 17 `vcaMute`.
+Their index word is a **VCA index** (the VCA's position in the session's `vcas`, canonical VCA-ID
+order), refused `unknownVca` (reason 14) at or past the VCA count; their shape is `faderDb`'s and
+`mute`'s plus a zero `effect_index` and `parameter_id`. A VCA has no audio path and no render code:
+admission composes every move through `host_core::LiveVcaState`, the live copy of the composition
+preparation bakes, into the records the members already take.
+
+- **A ride** moves the VCA's offset and stages nothing itself. After the batch, one VCA fader pass
+  stages, for every strip a VCA reaches, a `TrackFaderRecord::FaderDb` on the member's own fader
+  queue for each lane whose effective value
+  `clamp(own + sum of the reaching VCAs' offsets, -144, 24)` changed, with the last ride's ramp, so
+  every member follows through its existing declicked fader ramp, together. A member pushed past
+  +24 dB clamps there and returns to its own balance when the VCA comes back: the state keeps the
+  member's own value, never the clamped one.
+- **A member's own `faderDb`** on a reached strip moves its own value and stages its effective
+  value, so it lands on top of the VCA and keeps its balance. A strip no VCA reaches lowers exactly
+  as before.
+- **A mute** sets the VCA's mute term in the one strip-mute owner, so the solo coalescing pass emits
+  every member's changed lanes and the follow pass every following send's, with the last kind 9 or
+  17 record's ramp. Mute wins over solo, a solo-safe submix is muted too, and un-muting a VCA leaves
+  a member's own mute on. A kind 4 later in the same batch composes with the new VCA mute.
+- **Never a redundant record**, for the digest reason above: a ride that changes no member's
+  effective value (every member clamped at -144 dB) and a mute of already-muted members stage
+  nothing.
+- **All or nothing.** VCA fader records, then strip mute records, then follow records are staged and
+  room-checked together before any push; a full member or send queue refuses the whole submission
+  as typed backpressure, and the VCA state rolls back with the solo state and the send mirror. The
+  decode staging grows by two entries per strip a VCA reaches, and the bridge's exact retained
+  report charges the VCA state.
+- **Bounded per-command work** (amendment A1, a planner decision subject to owner review). A batch's
+  VCA work grows with the (strip, reaching VCA) pairs, and it runs on the AudioWorklet thread, so a
+  browser session may declare at most 256 VCAs and 16,384 pairs; past either it is refused at boot
+  (`web.vca.maximum_vcas`, `web.vca.reach_pairs`, `RESULT_REFUSED_BUDGET`) before any VCA table is
+  built, and the VCA state's retained bytes and construction transient are projected against the
+  memory budget. At the bound, the worst batch (a ride and a mute of a VCA reaching every pair plus
+  254 member moves) admits in about 0.15 ms native and 0.18 ms (median) in the shipped simd128
+  module under V8, against a 2.67 ms quantum.
 
 ### Sends follow mute (issue #1224)
 

@@ -129,10 +129,10 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | gate | mutation | observed red |
 |---|---|---|
 | `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
-| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 14;` after reason 13 (`UNKNOWN_ROUTE`, issue #1222; it was 13 after reason 12, issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
-| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 13`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 15;` after reason 14 (`UNKNOWN_VCA`, issue #1245; it was 14 after reason 13 under issue #1222, and 13 after reason 12 under issue #1212) in `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py --self-test` | twenty in-memory mutations across all six spellings, among them: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 14`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
-| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 13 to `14` (issue #1222; reason 12 to `13` under issue #1212, and reason 11 to `12` before that) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 14 to `15` (issue #1245; reason 13 to `14` under issue #1222, reason 12 to `13` under issue #1212, and reason 11 to `12` before that) | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
 ## Issue #241 — source introspection follows the declaration
 
@@ -414,7 +414,7 @@ Each row was applied, its test run red, and the tree restored.
 | K3 follow-up (V6): `tests::a_refused_send_batch_pushes_nothing_and_keeps_the_mirror` (gate 2, admitted then refused) | `ready.routes.commit()` dropped on success | RED here and in #1224's `a_full_send_queue_refuses_the_strip_mutes_it_follows` |
 | K3 follow-up (verdict MINOR-4, V3): `tests::the_exact_retained_budget_charges_the_send_lanes` (absolute check) | the bridge rows charge `route_control_resources.queue_bytes`, not `total_bytes` | RED |
 | K3 follow-up (V4) | the mirror and shadow bytes dropped from the bridge rows | RED |
-| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 16;` after `COMMAND_ROUTE_MATRIX = 15` | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
+| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` (the "added and not threaded" class) | `pub const COMMAND_SOLO_MODE: u32 = 18;` after `COMMAND_VCA_MUTE = 17` (issue #1245; it was 16 after `COMMAND_ROUTE_MATRIX = 15` under issue #1222) | `.d.ts MisoCommandKind disagrees with the Rust host constants` -- the threading rule, no longer the contiguity rule a shipped value 12 tripped |
 | `check-command-kind-vocabulary.py --self-test` (the JS set gains an undecoded kind) | the host JS set ends `…, 14, 16]` | `the host JS COMMAND_KINDS set disagrees with the Rust host constants` |
 
 ## Issue #1223 — live route enumeration and the SDK's send edits
@@ -473,3 +473,33 @@ Each row was applied, its test run red, and the tree restored. "Audio" rows ran 
 | #1242 attempt 2 (verdict MAJOR-1, probe P1): `tests::a_both_lane_unmute_keeps_a_one_lane_vca_mute` | the `COMMAND_MUTE` arm stages one record from the first covered lane's effective mute (attempt 1) | RED: the `emitted` mirror; with that assertion removed, the render differs at block 1 sample 128 |
 | #1242 attempt 2 (verdict MAJOR-1, probe P2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | the same attempt-1 `COMMAND_MUTE` arm | RED |
 | #1242 attempt 2 (verdict MINOR-1, M2): `tests::a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute` | host-web seeds submixes with `vca_mute: [false; 2]` | RED (seed 5); the other three #1242 host-web tests stay green |
+
+## Issue #1245 — browser live VCA groups
+
+Each row was applied alone, the whole host-web lib suite run, the named tests observed red, and the
+tree restored (driver and log: the #1245 attempt 1 record).
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::a_live_vca_ride_lands_on_a_fresh_plans_bits` (gate 1) and `tests::a_member_move_and_a_vca_move_compose` (gate 2) | kind 3 on a reached strip stages its own value, not the effective one | both: the live output's bits differ from the fresh plan's |
+| gate 1, gate 2, `tests::a_vca_batch_that_overfills_a_queue_is_refused_whole` (gate 4) | the VCA fader pass stages on the next strip's fader queue | all three |
+| `tests::a_vca_move_that_changes_no_effective_value_stages_nothing` (gate 3) | the VCA fader pass stages every reached lane, changed or not | gate 3 only: fader room moves |
+| gate 4 and `tests::vca_records_are_addressed_and_shape_checked` (gate 6) | the VCA state commits as a ride is read | both: a refused submission leaves the VCA mirror moved |
+| gate 4 | the VCA state is never committed on success | gate 4: the admitted ride is rolled back by the next refusal |
+| gates 1, 2, 4 and `tests::a_vca_mute_silences_member_sends_and_survives_solo` (gate 5) | a VCA mute does not run the coalescing pass (`if solo_seen`) | all four |
+| gates 1, 2, 4 and 5 | the follow pass ignores a VCA mute (`solo_seen \|\| mute_seen`) | all four |
+| gates 1, 2, 4 and 5 | a VCA mute never reaches the strip-mute owner | all four |
+| `tests::a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it` (D3, amendment A1) | a later kind 4 does not refresh its strip's VCA mute term first | this test only: the un-mute stages `false`, and the coalesced mute ramps over 480 samples |
+| gate 6 and the bound test | the VCA kinds are bounded by the strip count | gate 6 (VCA 5 is `unknownTrack`), and the bound test's VCA 255 is refused |
+| gate 6 | an unknown VCA is refused `unknownRoute` | gate 6 only |
+| gate 6 | the VCA shape drops the `effect_index` rule | gate 6 only |
+| `tests::the_decode_staging_holds_a_full_batch_and_its_vca_records` (gate 7) | `command_staging_count` adds `vca_reached_strips * 0` | gate 7 (the length pin; with it removed, `malformed`) and the retained-budget test |
+| `tests::vca_rides_and_mutes_admit_and_render_without_allocating` (gate 8) | allocate an 8-byte `Vec` per VCA fader record | gate 8 only |
+| `tests::the_exact_retained_budget_charges_the_vca_state` (D4) | leave the VCA state out of the bridge rows | this test only |
+| `tests::the_browser_bounds_vca_reach_and_a_batch_at_the_bound_fits_a_quantum` (amendment A1) | the reach-pair bound is not enforced | this test only: 16,385 pairs boot |
+| the bound test | the VCA count bound is 512, not 256 | this test only: 257 VCAs boot |
+| gate 1 and the bound test | the boot-time pair count ignores nesting (a VCA's ancestors are not passed to its VCA members) | both: the boot count disagrees with the live state's reach |
+| `check-command-kind-vocabulary.py --self-test` and `test-web-audioworklet.sh` | the "added last" mutations re-anchored past kind 17: the JS set `[1 … 17]` stops at 16 or gains an undecoded 18, the literal `<= 17`, the schema gate's list and the `.d.ts` enum drop `vcaMute` | every one refused (32 red mutations) |
+| `check-command-reason-vocabulary.py --self-test` | re-anchored past reason 14: `FUTURE_TAP = 15`, `UNKNOWN_TAP` renumbered to 15, the worklet's `UNSUPPORTED_KIND = 15`, `reason <= 14`, the JS table and the schema gate's list truncated | every one refused (20 red mutations) |
+| `live-controls-evals.mjs` (the vocabulary test) | drop `vcaMute` from `kindsAwaitingSdk` | `the semantic methods cover the generated command vocabulary exactly` |
+

@@ -235,6 +235,7 @@ const COMMAND_REASONS = Object.freeze([
   "observationUnbound",
   "notSoloable",
   "unknownRoute",
+  "unknownVca",
 ]);
 
 /// `true` for exactly the reasons this ABI version declares.
@@ -251,12 +252,13 @@ const COMMAND_FIELDS = [
 ];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #210
 // phase 1 added kind 9, solo-in-place; phase 3 added kinds 10 and 11, the live input trim and
-// polarity invert; issue #808 adds kind 12, a live prepared input-filter pair.
+// polarity invert; issue #808 adds kind 12, a live prepared input-filter pair. Issue #1222 added
+// kinds 13-15, the live send kinds, and issue #1245 kinds 16 and 17, the VCA ride and mute.
 //
 // This set is the bound: `validCommand` asks it, never a hand-written `kind <= 12`. It is one of
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
 const NOT_APPLICABLE = 255;
 
 function validCommand(command) {

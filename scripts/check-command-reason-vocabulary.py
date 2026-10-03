@@ -327,9 +327,9 @@ def self_test() -> int:
             "a Rust reason is bumped without the other five spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_REASON_UNKNOWN_ROUTE: u32 = 13;",
-                "pub const COMMAND_REASON_UNKNOWN_ROUTE: u32 = 13;\n"
-                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 14;",
+                "pub const COMMAND_REASON_UNKNOWN_VCA: u32 = 14;",
+                "pub const COMMAND_REASON_UNKNOWN_VCA: u32 = 14;\n"
+                "pub const COMMAND_REASON_FUTURE_TAP: u32 = 15;",
             ),
         ),
         (
@@ -337,7 +337,7 @@ def self_test() -> int:
             mutate(
                 RUST_CONSTANTS,
                 "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;",
-                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 14;",
+                "pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 15;",
             ),
         ),
         # The shipped #151 defect itself, in each of the five downstream spellings.
@@ -345,7 +345,7 @@ def self_test() -> int:
             "the host JS table stops at wrongState",
             mutate(
                 HOST_JS,
-                '  "unknownTap",\n  "observationUnbound",\n  "notSoloable",\n  "unknownRoute",\n',
+                '  "unknownTap",\n  "observationUnbound",\n  "notSoloable",\n  "unknownRoute",\n  "unknownVca",\n',
                 "",
             ),
         ),
@@ -362,7 +362,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "reason < COMMAND_REASONS.length;",
-                "reason <= 13;",
+                "reason <= 14;",
             ),
         ),
         (
@@ -410,7 +410,7 @@ def self_test() -> int:
             mutate(
                 WORKLET_JS,
                 "const COMMAND_REASON_UNSUPPORTED_KIND = 7;",
-                "const COMMAND_REASON_UNSUPPORTED_KIND = 14;",
+                "const COMMAND_REASON_UNSUPPORTED_KIND = 15;",
             ),
         ),
         (
@@ -425,7 +425,7 @@ def self_test() -> int:
             "the schema gate's list stops at wrongState",
             mutate(
                 SCHEMA_GATE,
-                '"wrongState", "unknownTap", "observationUnbound",\n    "notSoloable", "unknownRoute",',
+                '"wrongState", "unknownTap", "observationUnbound",\n    "notSoloable", "unknownRoute", "unknownVca",',
                 '"wrongState",',
             ),
         ),

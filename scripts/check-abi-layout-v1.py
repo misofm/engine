@@ -77,12 +77,12 @@ BUFFER_KINDS = [
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
     "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert", "inputFilters",
-    "routeGainDb", "routeMute", "routeMatrix",
+    "routeGainDb", "routeMute", "routeMatrix", "vcaFaderDb", "vcaMute",
 ]
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
     "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
-    "notSoloable", "unknownRoute",
+    "notSoloable", "unknownRoute", "unknownVca",
 ]
 RESPONSE_TARGETS = [(1, "effect"), (2, "inputFilters")]
 RESPONSE_GRIDS = [(1, "linear"), (2, "logarithmic")]

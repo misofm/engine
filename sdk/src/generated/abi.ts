@@ -2146,6 +2146,14 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 15,
         "name": "routeMatrix"
+      },
+      {
+        "value": 16,
+        "name": "vcaFaderDb"
+      },
+      {
+        "value": 17,
+        "name": "vcaMute"
       }
     ],
     "commandReasons": [
@@ -2204,6 +2212,10 @@ export const ABI_LAYOUT = deepFreeze(
       {
         "value": 13,
         "name": "unknownRoute"
+      },
+      {
+        "value": 14,
+        "name": "unknownVca"
       }
     ],
     "racks": [

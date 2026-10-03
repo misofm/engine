@@ -281,12 +281,131 @@ with no stateful downstream (empty console, no stateful inserts, identity input 
 host-web has no aarch64 leg; its 4-lane coverage is the shipped simd128 module through
 `check-sdk-headless.sh` and `check-browser-expected-resources.py --artifacts` (DESIGN section 7).
 
+## Amendment A1 (from the #1244 verdict MINOR-1; a planner decision subject to owner review)
+
+The #1244 verdict measured that the browser, which admits up to 1 MiB of raw JSON with no VCA cap,
+can declare about 6.26 M (strip, reaching VCA) pairs: ~48 MiB retained on wasm32, a ~75 MB
+`try_new` transient, and ~10.6 ms (native) for one VCA dB move on the AudioWorklet thread, about
+four 2.67 ms quanta. This slice therefore also bounds per-command VCA work in the browser.
+
+- **A1a. Bounds.** `MAXIMUM_BROWSER_VCAS = 256` and `MAXIMUM_BROWSER_VCA_REACH_PAIRS = 16,384`
+  (`hosts/host-web/src/lib.rs`). A browser session past either is refused at boot, before
+  preparation builds any per-pair table, with `RESULT_REFUSED_BUDGET` and `web.vca.maximum_vcas` or
+  `web.vca.reach_pairs`. The pair count is computed by `browser_vca_shape` with fixed-width
+  (256-bit) ancestor bitsets in a topological order of the VCA membership edges: linear in the
+  membership entries, and nothing proportional to the count it bounds. A count cap alone is not
+  enough (strips x VCAs still explodes), so the pair cap is the binding one; 256 is far more VCAs
+  than a mix uses and is the bitset width. 16,384 pairs hold, for example,
+  1,024 strips in 16 VCAs each, or 64 strips in all 256.
+- **A1b. Why the numbers.** One batch's VCA work is bounded by about three passes over the pairs
+  (the VCA fader pass over both lanes and one VCA-mute refresh) plus 256 member moves of at most
+  256 reaching VCAs each. Measured at the bound (64 tracks under a chain of 256 VCAs, every track
+  reached by every VCA; the batch is a ride and a mute of the top VCA plus 254 member `faderDb`
+  moves on two such tracks):
+  - native release (x86-64-v3 AVX2): **0.153 ms** (three runs: 152.9, 153.4, 153.1 us), 5.7% of a
+    quantum;
+  - the shipped simd128 module in V8 (node 22.23.2, one engine, 200 batches, first 20 dropped):
+    median **0.18 ms**, p99 0.39 ms, max 0.75 ms; the very first submission on a fresh engine
+    took ~3 ms, which is V8's lazy compilation of the command path, not VCA work.
+  So a phone several times slower than this host stays well under one quantum.
+- **A1c. Charging.** `LiveVcaState::retained_bytes()` is charged into the exact retained bridge
+  rows (D4). At boot, the VCA state's projected retained bytes (exact, `BrowserVcaShape`) plus a
+  conservative bound on `try_new`'s transient (two `vca_reach()` results with their parent index,
+  the effective faders and the cursor) are added to the retained projection and refused
+  `host.budget.vca_projection` past the memory budget.
+- **A1d. The mute refresh is lazy.** D3 has kind 17 refresh the strip-mute owner's VCA term for
+  every reached strip at once, which costs one pass over the pairs per record (256 per batch).
+  Instead the term is refreshed for the strip a later kind 4 addresses, before it composes, and for
+  every reached strip once after the batch loop, before the coalescing pass. Every reader of the
+  term sees the same value as under D3 (the kind 4 arm, the coalescing pass and the follow pass),
+  so a kind 4 later in the batch still composes with the new VCA mute.
+
 ## Evidence
 
 - The output of every gate command above, from the PR's head commit.
 - Each new test's name with its one-sentence test-value answer.
 - The re-anchored mutation list, with each mutation's observed red result.
 - The shipped module's ARTIFACT CHANGED report.
+
+### Attempt 1 record (Terra)
+
+- **D1-D5** in `hosts/host-web/src/lib.rs`: kinds 16 `vcaFaderDb` and 17 `vcaMute`, reason 14
+  `unknownVca`, the decode whitelist, `CommandRecord::into_vca_edit` (kinds 3/4 shape rules plus a
+  zero `effect_index` and `parameter_id`), the strip-index check skipping the VCA kinds,
+  `ReadyOwnership.vcas: LiveVcaState` (built after the solo state; empty for a session without
+  VCAs or without live controls), committed and rolled back with `solo` and `routes`. Kind 3 on a
+  reached strip stages its effective value (split `Left`/`Right` when the covered lanes differ);
+  on an unreached strip it lowers as before. The VCA fader pass runs after the batch loop and
+  before the mute coalescing pass; the coalescing pass runs on `solo_seen || vca_mute_seen` with
+  the first kind 9/17 wire index and the last one's ramp; the follow pass adds `vca_mute_seen`.
+  `command_staging_count(strips, routes, vca_reached_strips)` grows by `2 * reached`; the VCA
+  state's `retained_bytes()` and `largest_allocation_bytes()` are charged beside the route mirror.
+- **Amendment A1** (above): the browser bounds, the boot projection, and the lazy mute refresh.
+- **Deviations.**
+  1. A1d: kind 17 refreshes the strip-mute owner lazily, not "at once" for every reached strip
+     (one pass over the pairs per batch instead of per record); every reader sees D3's value, and
+     `a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it` defends it.
+  2. The `unsupportedKind` arm for a host without live controls is kept (as the route kinds keep
+     theirs) but is not reachable from the wire: such a host has no command staging. Gate 6
+     therefore does not test it.
+  3. The worst batch's first submission on a fresh wasm engine took ~3 ms (V8 lazy compilation of
+     the command path, any kind); warm batches are 0.18 ms median.
+- **Vocabulary (D6):** every kind and reason spelling (Rust, whitelist, host JS set and table,
+  both `.d.ts` copies byte-identical, both generators, both schema-gate lists, both self-test
+  fixtures), `sdk/assets/**` and `sdk/src/generated/**` regenerated (`cmp`-identical to the built
+  artifact's JSON), the self-tests re-anchored (`COMMAND_SOLO_MODE = 18` after `VCA_MUTE = 17`,
+  undecoded 18, `[1 … 17]`, `<= 17`, the "added last" drops of `vcaMute`; `FUTURE_TAP = 15` after
+  `UNKNOWN_VCA = 14`, renumber targets 15, `reason <= 14`, `commandReasons[14].update(value=15)`),
+  and `kindsAwaitingSdk = ["vcaFaderDb", "vcaMute"]` in `live-controls-evals.mjs` for #1246.
+- **Tests** (`hosts/host-web/src/tests.rs`; each mutation applied alone over the whole host-web lib
+  suite, rows in `hosts/host-web/MUTATIONS.md`; driver and log
+  `/tmp/claude-1002/kv-1245/mut/`):
+  - `a_live_vca_ride_lands_on_a_fresh_plans_bits` (gate 1 and the settled-session differential;
+    8 seeds x 6 batches of nested/overlapping VCA rides across the domain, one-lane and both-lane
+    VCA mutes, member moves, one-lane member mutes and solos, compared after each batch's ramps
+    with a host booted from the test's own edited session): red if admission emits to the wrong
+    member, lane or slot, composes differently from preparation, stores a clamp, or drops a VCA
+    mute from a member or its sends (M1, M2, M5, M6, M14, M17).
+  - `a_member_move_and_a_vca_move_compose` (gate 2): red if a member move overwrites the VCA term
+    or the reverse, the clamp is stored, or a VCA un-mute clears a member's own mute (M1, M2, M5,
+    M6, M17).
+  - `a_vca_move_that_changes_no_effective_value_stages_nothing` (gate 3): red if composition
+    re-emits an unchanged target (M3).
+  - `a_vca_batch_that_overfills_a_queue_is_refused_whole` (gate 4): red if any record is pushed, or
+    a mirror commits, before every destination's room is checked (M2, M4, M5, M6, M16, M17).
+  - `a_vca_mute_silences_member_sends_and_survives_solo` (gate 5): red if the VCA mute misses the
+    follow composition, un-soloing clears it, or live and preparation disagree (M5, M6, M17).
+  - `vca_records_are_addressed_and_shape_checked` (gate 6): red if a VCA index is checked against
+    another table, misnamed, or the shape rules differ (M4, M7, M8, M9).
+  - `the_decode_staging_holds_a_full_batch_and_its_vca_records` (gate 7): red if the staging is not
+    grown by the reached strips (M10; 531 entries needed, 528 without growth).
+  - `vca_rides_and_mutes_admit_and_render_without_allocating` (gate 8; `allocations == 0`,
+    `deallocations == 0`): red if VCA admission or its passes allocate (M11).
+  - `the_exact_retained_budget_charges_the_vca_state` (D4): red if the VCA state or the staging
+    growth is left out of the exact retained report (M10, M12).
+  - `a_member_mute_after_a_vca_mute_in_one_batch_composes_with_it` (D3/A1d): red if a later kind 4
+    does not see the batch's VCA mute (M15; this test only).
+  - `the_browser_bounds_vca_reach_and_a_batch_at_the_bound_fits_a_quantum` (A1): red if either
+    bound is not enforced, the boot count disagrees with the live reach, the projection mis-states
+    the state's bytes, or (release) a batch at the bound costs a quantum (M7, M13, M14, M18).
+  - Every existing host-web test passes unchanged; no test superseded; no digest or pin moved.
+- **Gates** (x86-64-v3 AVX2 host; logs `/tmp/claude-1002/kv-1245/gates/` and `browser/`), all rc 0:
+  kind vocabulary `--self-test` (32 red) and plain; reason vocabulary `--self-test` (20 red) and
+  plain; `build-web-audioworklet.sh --named-twin`: **ARTIFACT CHANGED**, shipped module
+  `731f65cb…f5e` (2,848,600 B; named twin `77d7f7cc…a93`); parameter-metadata and ABI-layout
+  `--self-test` and on the artifact JSON; `check-web-audioworklet.sh` (command-submit closure 64,
+  allocation-free, callgraph and trap audit green; render closure 8, kernels 13);
+  `check-browser-expected-resources.py --artifacts` (32 red self-test, no re-pin);
+  `test-web-audioworklet.sh`; `check-sdk-generated.sh`, `check-sdk-types.sh`,
+  `check-sdk-headless.sh` (357 pass, 0 fail), `sdk-package.sh check`; the browser legs
+  `npm run qualify -- --check-matrix --self-test-mutations` in SDK source-bundle mode under a
+  private PulseAudio null sink: chromium 151.0.7922.34, firefox 153.0, webkit 26.5 all passed;
+  the workspace test command (115 binaries, 1,286 passed, 0 failed, 9 ignored); `cargo fmt
+  --check`; clippy `--all-features -D warnings`; `cargo doc -D warnings`; host-core, realtime and
+  workspace `check-*`/`test-*` (the two known "directed fault unexpectedly passed" lines,
+  rc 0, as on the base); `check-cross-targets.sh` PASS (host-core unchanged).
+- **Timing** (A1b): native release 0.153 ms; wasm (node 22.23.2) median 0.18 ms, p99 0.39 ms; the
+  scratch scripts are `/tmp/claude-1002/kv-1245/wasm/`.
 
 ## Dependencies
 
