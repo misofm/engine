@@ -326,9 +326,13 @@ enginectl session build --request - --output - < request.json
 
 Requests use `schemaVersion: 1`, a required `session` object, an optional `console` object
 (`preInsert` and `postInsert` slot arrays), and optional `sources`, `tracks`, `submixes`,
-`outputs`, `routes`, and `automation` arrays; each track spec carries its `console` entries and
-`inserts`. A `submixes` entry is a bare ID, which is a transparent strip, or an object
+`vcas`, `outputs`, `routes`, and `automation` arrays; each track spec carries its `console` entries
+and `inserts`. A `submixes` entry is a bare ID, which is a transparent strip, or an object
 `{ id, builtins?, console?, inserts?, fader?, pan? }`, a submix strip with a track's strip keys.
+A `vcas` entry is `{ id, fader?, members }`: a VCA group whose members are tracks, submixes and
+other VCAs. The CLI declares the VCAs after every track and submix, and each nested VCA before a
+VCA that lists it, so the request may list them in any order; a membership cycle is refused
+(`reference.missing_entity`).
 A route or sidechain source is `{ kind: "track", trackId, tap }` or
 `{ kind: "submix", submixId, tap }`, at any of the seven taps; the retired `submix_output` is
 refused. The CLI validates with the packaged engine before publishing

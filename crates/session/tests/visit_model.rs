@@ -15,57 +15,92 @@ struct Trace {
     arrays: Vec<(FieldKey, usize)>,
     tags: Vec<Token>,
     ids: Vec<(FieldKey, String)>,
+    /// Every `id_item`, with the key of the array that is open around it.
+    items: Vec<(Option<FieldKey>, String)>,
+    /// Every key emitted directly inside the root record, in walk order.
+    root_keys: Vec<FieldKey>,
+    /// Open containers: `Some(key)` for an array, `None` for a record.
+    open: Vec<Option<FieldKey>>,
+}
+impl Trace {
+    fn key(&mut self, key: FieldKey) {
+        if self.open.len() == 1 {
+            self.root_keys.push(key);
+        }
+    }
 }
 impl ModelVisitor for Trace {
     type Error = Infallible;
     fn record_begin(&mut self, key: Option<FieldKey>, fields: u32) -> Result<(), Self::Error> {
+        if let Some(key) = key {
+            self.key(key);
+        }
         self.records.push((key, fields));
+        self.open.push(None);
         Ok(())
     }
     fn record_end(&mut self) -> Result<(), Self::Error> {
+        self.open.pop();
         Ok(())
     }
     fn array_begin(&mut self, key: FieldKey, len: usize) -> Result<(), Self::Error> {
+        self.key(key);
         self.arrays.push((key, len));
+        self.open.push(Some(key));
         Ok(())
     }
     fn array_end(&mut self) -> Result<(), Self::Error> {
+        self.open.pop();
         Ok(())
     }
     fn wire_tag(&mut self, tag: Token) -> Result<(), Self::Error> {
         self.tags.push(tag);
         Ok(())
     }
-    fn bool(&mut self, _: FieldKey, _: bool) -> Result<(), Self::Error> {
+    fn bool(&mut self, key: FieldKey, _: bool) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
-    fn u8(&mut self, _: FieldKey, _: u8) -> Result<(), Self::Error> {
+    fn u8(&mut self, key: FieldKey, _: u8) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
-    fn u32(&mut self, _: FieldKey, _: u32) -> Result<(), Self::Error> {
+    fn u32(&mut self, key: FieldKey, _: u32) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
-    fn u64(&mut self, _: FieldKey, _: u64) -> Result<(), Self::Error> {
+    fn u64(&mut self, key: FieldKey, _: u64) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
     fn source_bit_depth(
         &mut self,
-        _: FieldKey,
+        key: FieldKey,
         _: session::SourceBitDepth,
     ) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
-    fn f32(&mut self, _: FieldKey, _: f32) -> Result<(), Self::Error> {
+    fn f32(&mut self, key: FieldKey, _: f32) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
     fn id(&mut self, key: FieldKey, value: &session::StableId) -> Result<(), Self::Error> {
+        self.key(key);
         self.ids.push((key, value.as_str().to_owned()));
         Ok(())
     }
-    fn text(&mut self, _: FieldKey, _: &str) -> Result<(), Self::Error> {
+    fn id_item(&mut self, value: &session::StableId) -> Result<(), Self::Error> {
+        let array = self.open.last().copied().flatten();
+        self.items.push((array, value.as_str().to_owned()));
         Ok(())
     }
-    fn token(&mut self, _: FieldKey, _: Token) -> Result<(), Self::Error> {
+    fn text(&mut self, key: FieldKey, _: &str) -> Result<(), Self::Error> {
+        self.key(key);
+        Ok(())
+    }
+    fn token(&mut self, key: FieldKey, _: Token) -> Result<(), Self::Error> {
+        self.key(key);
         Ok(())
     }
 }
@@ -80,6 +115,7 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
         + model.sources.len()
         + model.tracks.len()
         + model.submixes.len()
+        + model.vcas.len()
         + model.outputs.len()
         + model.routes.len()
         + model.automation.len();
@@ -281,4 +317,99 @@ fn console_fields_are_appended_and_walked_in_schema_order() {
     let desk_a = ids.iter().position(|id| *id == "desk-a").expect("slot id");
     let vocal = ids.iter().position(|id| *id == "vocal").expect("track id");
     assert!(desk_a < vocal, "slots are walked before tracks");
+}
+
+fn vca(id: &str, members: &[&str]) -> session::Vca {
+    session::Vca {
+        id: StableId::parse(id).expect("id"),
+        fader: session::DualMonoFader {
+            left_db: -6.0,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: true,
+        },
+        members: members
+            .iter()
+            .map(|member| StableId::parse(member).expect("id"))
+            .collect(),
+    }
+}
+
+/// #1240 D1's registry and walk: the root's field IDs are exactly the allocated set -- `vcas` is
+/// appended as 16 and the retired `limits` field 8 is never reused -- `vcas` is walked between
+/// `submixes` and `outputs`, a VCA record declares `2 + members` fields, and `members` is an array
+/// of `id_item`s (not records), sorted by ID in canonical order and declared order otherwise.
+#[test]
+fn vca_root_field_is_sixteen_and_members_are_id_items() {
+    let mut model = parse_session_json(EXAMPLE).expect("fixture");
+    model.vcas = vec![vca("drums", &["vocal", "all"]), vca("all", &[])];
+    let mut declared = Trace::default();
+    model.visit(WalkOrder::Declared, &mut declared).unwrap();
+    let root: Vec<(&str, u16)> = declared
+        .root_keys
+        .iter()
+        .map(|key| (key.name, key.id))
+        .collect();
+    let mut distinct = root.clone();
+    distinct.dedup();
+    assert_eq!(
+        distinct,
+        [
+            ("schema_version", 1),
+            ("session_id", 2),
+            ("revision", 3),
+            ("sample_rate_hz", 4),
+            ("quantum_frames", 5),
+            ("render_profile", 6),
+            ("output_profile", 7),
+            ("sources", 9),
+            ("console", 15),
+            ("tracks", 10),
+            ("submixes", 11),
+            ("vcas", 16),
+            ("outputs", 12),
+            ("routes", 13),
+            ("automation", 14),
+        ],
+        "root fields in walk order; field 8 stays retired"
+    );
+    assert_eq!(
+        [keys::vca::ID.id, keys::vca::FADER.id, keys::vca::MEMBERS.id],
+        [1, 2, 3]
+    );
+    assert!(declared.arrays.contains(&(keys::session::VCAS, 2)));
+    assert!(declared.arrays.contains(&(keys::vca::MEMBERS, 2)));
+    assert!(declared.arrays.contains(&(keys::vca::MEMBERS, 0)));
+    // Each VCA record is the one immediately before its fader record.
+    let vca_fields: Vec<u32> = declared
+        .records
+        .windows(2)
+        .filter(|pair| pair[1] == (Some(keys::vca::FADER), 4))
+        .map(|pair| {
+            assert_eq!(pair[0].0, None, "a VCA is an array element");
+            pair[0].1
+        })
+        .collect();
+    assert_eq!(vca_fields, [4, 2], "a VCA declares 2 + members fields");
+    let members = Some(keys::vca::MEMBERS);
+    assert_eq!(
+        declared.items,
+        [(members, "vocal".to_owned()), (members, "all".to_owned())],
+        "members are id_items inside their array, in declared order on a declared walk"
+    );
+
+    let mut canonical = Trace::default();
+    model.visit(WalkOrder::Canonical, &mut canonical).unwrap();
+    assert_eq!(
+        canonical.items,
+        [(members, "all".to_owned()), (members, "vocal".to_owned())],
+        "members are sorted by ID on a canonical walk"
+    );
+    let vca_ids: Vec<&str> = canonical
+        .ids
+        .iter()
+        .map(|(_, id)| id.as_str())
+        .filter(|id| ["all", "drums"].contains(id))
+        .collect();
+    assert_eq!(vca_ids, ["all", "drums"], "VCAs are sorted by ID");
 }

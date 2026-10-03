@@ -513,6 +513,48 @@ process.stdout.write = function () {
     assert.deepEqual(refusal.diagnostics?.map((row) => row.code), ["schema.invalid_enum"]);
   });
 
+  test("a request's vcas reach the document members first, in the engine's canonical JSON", async () => {
+    // Issue #1240 gate 4 (enginectl). The VCAs nest and are listed parent first, and they group
+    // a track, a submix and a nested VCA. Red mutations: leave `vcas` out of the root's admitted
+    // keys (the request is refused as an unknown key); read them before the tracks or the submixes
+    // (`reference.missing_entity`); declare them in request order (the builder refuses the
+    // forward reference); or leave a member out of the mapping (the document differs).
+    const body = request({
+      vcas: [
+        { id: "all", fader: { leftDb: -1.5, rightMute: true }, members: ["drums", "low", "vocal"] },
+        { id: "drums", fader: { leftDb: -6, rightDb: -6 }, members: ["bass", "bus"] },
+        { id: "spare", members: [] },
+      ],
+    });
+    const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(body));
+    assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    const text = built.stdout.toString("utf8");
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-vca-"));
+    const path = resolve(directory, "session.json");
+    await writeFile(path, text);
+    const canonical = execFileSync(
+      "cargo",
+      ["run", "--locked", "-q", "-p", "session-validator", "--", "validate", "--canonical", path],
+      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    assert.equal(canonical, text);
+    assert.deepEqual(
+      JSON.parse(text).vcas,
+      [
+        { id: "all", fader: { left_db: -1.5, right_db: 0, left_mute: false, right_mute: true }, members: ["drums", "low", "vocal"] },
+        { id: "drums", fader: { left_db: -6, right_db: -6, left_mute: false, right_mute: false }, members: ["bass", "bus"] },
+        { id: "spare", fader: { left_db: 0, right_db: 0, left_mute: false, right_mute: false }, members: [] },
+      ],
+    );
+
+    // A membership cycle in the request is the builder's forward-reference refusal, with the
+    // engine's code, never a hang.
+    const cyclic = request({ vcas: [{ id: "a", members: ["b"] }, { id: "b", members: ["a"] }] });
+    const refused = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(cyclic));
+    failure(refused, 3, "request.shape");
+    assert.deepEqual(JSON.parse(refused.stderr.toString("utf8")).diagnostics?.map((row) => row.code), ["reference.missing_entity"]);
+  });
+
   test("the request's own key refusals on the console and a track carry the engine's code", async () => {
     // #1097 verdict L2. enginectl reads a request before the builder does, so its own key check is
     // the first refusal for a console sidechain or an effect field on an entry, and it must name

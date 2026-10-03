@@ -22,6 +22,7 @@ import type {
   SourceSpec,
   SubmixSpec,
   TrackSpec,
+  VcaSpec,
 } from "./types.ts";
 
 /**
@@ -107,6 +108,7 @@ export interface SessionModel extends ModelRecord {
   readonly console: ModelRecord;
   readonly tracks: readonly ModelRecord[];
   readonly submixes: readonly ModelRecord[];
+  readonly vcas: readonly ModelRecord[];
   readonly outputs: readonly ModelRecord[];
   readonly routes: readonly ModelRecord[];
   readonly automation: readonly ModelRecord[];
@@ -169,6 +171,9 @@ const TRACK_KEYS: ReadonlySet<string> = new Set([
 /** A submix strip's keys: a track's without its source. */
 const SUBMIX_KEYS: ReadonlySet<string> = new Set(["builtins", "console", "inserts", "fader", "pan"]);
 const CONSOLE_KEYS: ReadonlySet<string> = new Set(["preInsert", "postInsert"]);
+/** A VCA's keys (#1240), and its fader's: the strip fader's four. */
+const VCA_KEYS: ReadonlySet<string> = new Set(["fader", "members"]);
+const FADER_KEYS: ReadonlySet<string> = new Set(["leftDb", "rightDb", "leftMute", "rightMute"]);
 const CONSOLE_SLOT_KEYS: ReadonlySet<string> = new Set(["slot", "effectId", "quality", "linkMode"]);
 const CONSOLE_ENTRY_KEYS: ReadonlySet<string> = new Set(["slot", "bypass", "parameters", "channel"]);
 const LINK_MODES: readonly string[] = ["dual_mono", "maximum", "average"];
@@ -209,6 +214,7 @@ const CODE = Object.freeze({
   wrongType: "schema.wrong_type",
   qualityUnsupported: "effect.quality.unsupported",
   linkModeUnsupported: "effect.link_mode.unsupported",
+  outOfRange: "numeric.out_of_schema_range",
 } as const);
 
 function fail(path: string, message: string, code?: string): never {
@@ -641,6 +647,13 @@ interface SubmixEntry {
   readonly spec: SubmixSpec | undefined;
 }
 
+/** One validated VCA group: its normalized offset fader and its members in declared order. */
+interface VcaEntry {
+  readonly id: string;
+  readonly fader: ModelRecord;
+  readonly members: readonly string[];
+}
+
 /** One validated console slot, in the session's slot order. */
 interface ConsoleSlotEntry {
   readonly slot: string;
@@ -657,6 +670,7 @@ interface BuilderState {
   readonly console: readonly ConsoleSlotEntry[] | undefined;
   readonly tracks: readonly TrackEntry[];
   readonly submixes: readonly SubmixEntry[];
+  readonly vcas: readonly VcaEntry[];
   readonly outputs: readonly string[];
   readonly routes: readonly RouteSpec[];
   readonly automation: readonly AutomationSpec[];
@@ -741,7 +755,7 @@ export class SessionBuilder {
     stableId(id, "track().id");
     const path = `track("${id}")`;
     if (this.#graphIds().has(id)) {
-      fail(`${path}.id`, "tracks, submixes and outputs share one ID namespace");
+      fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace");
     }
     this.#validateTrack(spec, path);
     return this.#next({ tracks: [...this.#state.tracks, freeze({ id, spec: { ...spec } })] });
@@ -760,7 +774,7 @@ export class SessionBuilder {
     stableId(id, "submix().id");
     const path = `submix("${id}")`;
     if (this.#graphIds().has(id)) {
-      fail(`${path}.id`, "tracks, submixes and outputs share one ID namespace");
+      fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace");
     }
     if (spec !== undefined) {
       if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
@@ -777,9 +791,55 @@ export class SessionBuilder {
   output(id: string): SessionBuilder {
     stableId(id, "output().id");
     if (this.#graphIds().has(id)) {
-      fail(`output("${id}").id`, "tracks, submixes and outputs share one ID namespace");
+      fail(`output("${id}").id`, "tracks, submixes, VCAs and outputs share one ID namespace");
     }
     return this.#next({ outputs: [...this.#state.outputs, id] });
+  }
+
+  /**
+   * Declare a VCA group (#1240): a control-only fader whose per-lane dB offset adds to every
+   * member's own fader and whose per-lane mute mutes every member, with no audio path.
+   *
+   * Its ID shares the graph-entity namespace. Every member must already be a declared track,
+   * submix or VCA -- so a builder can never make a membership cycle -- and appear once; one strip
+   * may sit in several VCAs. `fader` defaults to 0 dB unmuted on both lanes, and its offsets are
+   * in the `fader_db` domain, `[-144, 24]` dB. VCAs are inert until preparation applies them
+   * (#1242).
+   */
+  vca(id: string, spec: VcaSpec): SessionBuilder {
+    stableId(id, "vca().id");
+    const path = `vca("${id}")`;
+    if (this.#graphIds().has(id)) {
+      fail(`${path}.id`, "tracks, submixes, VCAs and outputs share one ID namespace", CODE.duplicateId);
+    }
+    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) {
+      fail(path, "expected { fader?, members }");
+    }
+    knownKeys(spec, VCA_KEYS, path, "a VCA");
+    if (!Array.isArray(spec.members)) fail(`${path}.members`, "expected an array of member IDs", CODE.wrongType);
+    const strips = new Set([
+      ...this.#state.tracks.map((entry) => entry.id),
+      ...this.#state.submixes.map((entry) => entry.id),
+      ...this.#state.vcas.map((entry) => entry.id),
+    ]);
+    const members: string[] = [];
+    spec.members.forEach((member: unknown, index: number) => {
+      const memberPath = `${path}.members[${index}]`;
+      stableId(member, memberPath);
+      if (members.includes(member as string)) {
+        fail(memberPath, `'${String(member)}' is already a member of this VCA`, CODE.duplicateId);
+      }
+      if (!strips.has(member as string)) {
+        fail(
+          memberPath,
+          `'${String(member)}' is not a declared track, submix or VCA; declare a member before the VCA that lists it`,
+          CODE.missingEntity,
+        );
+      }
+      members.push(member as string);
+    });
+    const fader = normalizeVcaFader(spec.fader, `${path}.fader`);
+    return this.#next({ vcas: [...this.#state.vcas, freeze({ id, fader, members })] });
   }
 
   /** Declare a route. Both endpoints must already be declared, with the right role. */
@@ -860,6 +920,7 @@ export class SessionBuilder {
     return new Set([
       ...this.#state.tracks.map((entry) => entry.id),
       ...this.#state.submixes.map((entry) => entry.id),
+      ...this.#state.vcas.map((entry) => entry.id),
       ...this.#state.outputs,
     ]);
   }
@@ -954,6 +1015,7 @@ export function session(options: SessionOptions): SessionBuilder {
     console: undefined,
     tracks: [],
     submixes: [],
+    vcas: [],
     outputs: [],
     routes: [],
     automation: [],
@@ -1033,6 +1095,32 @@ function normalizeBuiltins(
       ),
   });
   return freeze({ left: lane(left ?? {}, "left"), right: lane(right ?? {}, "right") });
+}
+
+/**
+ * A VCA's offset fader (#1240 D3): the strip fader's defaults, with each offset held to the
+ * `fader_db` catalog domain under the engine's own code, `numeric.out_of_schema_range`.
+ */
+function normalizeVcaFader(raw: VcaSpec["fader"], path: string): ModelRecord {
+  if (raw !== undefined && (raw === null || typeof raw !== "object" || Array.isArray(raw))) {
+    fail(path, "expected { leftDb?, rightDb?, leftMute?, rightMute? }", CODE.wrongType);
+  }
+  if (raw !== undefined) knownKeys(raw, FADER_KEYS, path, "a VCA fader");
+  const row = builtin("fader_db");
+  const offset = (value: number | undefined, lane: string): number => {
+    if (value === undefined) return builtinDefaultNumber("fader_db");
+    const normalized = f32(value, `${path}.${lane}`);
+    if (normalized < Math.fround(row.minimum ?? -Infinity) || normalized > Math.fround(row.maximum ?? Infinity)) {
+      fail(`${path}.${lane}`, `a VCA offset is in [${row.minimum}, ${row.maximum}] dB`, CODE.outOfRange);
+    }
+    return normalized;
+  };
+  return freeze({
+    left_db: offset(raw?.leftDb, "leftDb"),
+    right_db: offset(raw?.rightDb, "rightDb"),
+    left_mute: raw?.leftMute === undefined ? builtinDefaultBoolean("mute") : bool(raw.leftMute, `${path}.leftMute`),
+    right_mute: raw?.rightMute === undefined ? builtinDefaultBoolean("mute") : bool(raw.rightMute, `${path}.rightMute`),
+  });
 }
 
 function normalizeFader(raw: TrackSpec["fader"], path: string): ModelRecord {
@@ -1535,6 +1623,9 @@ function normalize(state: BuilderState): SessionModel {
   const submixes = state.submixes
     .map((entry) => normalizeSubmix(entry, slots, options.sampleRateHz))
     .sort(byId);
+  const vcas = state.vcas
+    .map(({ id, fader, members }) => freeze({ id, fader, members: [...members].sort(asciiCompare) }))
+    .sort(byId);
   const outputs = state.outputs.map((id) => freeze({ id })).sort(byId);
   const routes = state.routes
     .map((spec) => freeze({
@@ -1563,6 +1654,7 @@ function normalize(state: BuilderState): SessionModel {
     console: normalizeConsole(slots),
     tracks,
     submixes,
+    vcas,
     outputs,
     routes,
     automation,

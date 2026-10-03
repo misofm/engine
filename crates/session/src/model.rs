@@ -110,6 +110,8 @@ pub struct SessionModel {
     pub tracks: Vec<Track>,
     /// Submixes, order-insensitive by stable ID.
     pub submixes: Vec<Submix>,
+    /// VCA groups, order-insensitive by stable ID (#1240). Control-only: inert until #1242.
+    pub vcas: Vec<Vca>,
     /// Outputs, order-insensitive by stable ID.
     pub outputs: Vec<Output>,
     /// Declarative routes; graph semantics are owned by issue 006.
@@ -747,6 +749,24 @@ impl Submix {
             },
         }
     }
+}
+
+/// A VCA group (#1239, #1240): a control-only fader with no audio path.
+///
+/// Its `fader` is read as a per-lane dB offset in `[-144, 24]` that adds to every reachable
+/// member's own fader, and its per-lane mute mutes every reachable member. A member is a track, a
+/// submix or another VCA; membership is acyclic (`vca.cycle`) and one strip may sit in several
+/// VCAs. The canonical session stores each member's own value and each VCA's value, never an
+/// effective value. VCAs parse and validate here and are inert until preparation applies them
+/// (#1242).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vca {
+    /// Stable VCA identity, in the graph-entity namespace of tracks, submixes and outputs.
+    pub id: StableId,
+    /// Per-lane dB offset and mute.
+    pub fader: DualMonoFader,
+    /// Member strips and nested VCAs, order-insensitive by stable ID; may be empty.
+    pub members: Vec<StableId>,
 }
 
 /// A named PCM output entity.

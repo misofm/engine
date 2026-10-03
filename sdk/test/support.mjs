@@ -93,7 +93,7 @@ export function sessionDocument(options = {}) {
       fader: { left_db: 0.0, right_db: 0.0, left_mute: false, right_mute: false },
       pan: { left: -1.0, right: 1.0, smoothing_samples: 0 },
     }],
-    submixes: [], outputs: [{ id: "out" }],
+    submixes: [], vcas: [], outputs: [{ id: "out" }],
     routes: [{ id: "main", source: { kind: "track", track_id: trackId, tap: "post_pan" },
       destination: { kind: "output_input", output_id: "out" },
       channel_matrix: { ll: 1.0, lr: 0.0, rl: 0.0, rr: 1.0 }, gain_db: 0.0, mute: false, follows_mute: false }],

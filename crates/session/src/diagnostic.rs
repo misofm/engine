@@ -73,6 +73,8 @@ pub enum DiagnosticCode {
     ConsoleEntryOrder,
     /// A console slot declares a third-party identity; console slots are native (decision 12).
     ConsoleSlotNotNative,
+    /// A VCA lies on a membership cycle among VCAs, a self-member included (#1240).
+    VcaCycle,
 }
 
 impl DiagnosticCode {
@@ -108,6 +110,7 @@ impl DiagnosticCode {
             Self::ConsoleEntryMissing => "console.entry_missing",
             Self::ConsoleEntryOrder => "console.entry_order",
             Self::ConsoleSlotNotNative => "console.slot_not_native",
+            Self::VcaCycle => "vca.cycle",
         }
     }
 }

@@ -569,7 +569,7 @@ def self_test() -> int:
         ),
         (
             "the staged document size moves by one byte",
-            printed_row("sessionDocumentBytes", "1956"),
+            printed_row("sessionDocumentBytes", "1970"),
             None,
         ),
         ("a zero-by-fixture row becomes nonzero", printed_row("graphDelayBytes", "8"), None),

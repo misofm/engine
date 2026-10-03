@@ -27,6 +27,7 @@
     "post_insert": []
   },
   "submixes": [],
+  "vcas": [],
   "outputs": [
     {
       "id": "main-out"

@@ -623,6 +623,71 @@ describe("validation refusals name the offending path", () => {
     }
   });
 
+  test("VCAs: the builder refuses what the engine refuses, with the engine's code", async () => {
+    // Issue #1240 gate 4 (builder refusals). Each refusal is paired with the engine's answer to the
+    // same defect written by hand, so neither side can drift alone. Red mutations: drop VCA IDs
+    // from `#graphIds`; skip the repeated-member check in `vca()`; accept an undeclared member;
+    // drop the `[-144, 24]` check in `normalizeVcaFader`; change a refusal's code.
+    const code = (build) => {
+      try {
+        build();
+      } catch (error) {
+        assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+        return { code: error.diagnosticCode, message: error.message };
+      }
+      return assert.fail("the builder accepted the defect");
+    };
+    const base = () => oneTrack().track("u", { source: "stem" }).submix("bus");
+    const valid = base()
+      .vca("inner", { members: ["u", "bus"] })
+      .vca("outer", { members: ["inner", "t"] });
+    assert.equal((await validate(valid, { asset })).ok, true, "the base every defect edits must boot");
+    const engineFirstCode = async (edit) => {
+      const model = mutableModel(valid.toJSON());
+      edit(model);
+      const outcome = await validate(JSON.stringify(model), { asset });
+      assert.equal(outcome.ok, false, "the engine must refuse the hand-written defect");
+      return outcome.diagnostics[0]?.code;
+    };
+    const vcaAt = (model, id) => model.vcas.find((row) => row.id === id);
+
+    // A default fader is 0 dB unmuted on both lanes.
+    assert.deepEqual(valid.toJSON().vcas[0].fader, { left_db: 0, right_db: 0, left_mute: false, right_mute: false });
+
+    const invalid = code(() => base().vca("Inner", { members: [] }));
+    assert.equal(invalid.code, "id.invalid");
+    assert.match(invalid.message, /^vca\(\)\.id/);
+    assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").id = "Inner"; }), "id.invalid");
+
+    for (const taken of ["t", "bus", "out", "inner"]) {
+      const clash = code(() => valid.vca(taken, { members: [] }));
+      assert.equal(clash.code, "id.duplicate", taken);
+      assert.match(clash.message, new RegExp(`^vca\\("${taken}"\\)\\.id`), taken);
+    }
+    assert.equal(code(() => valid.track("inner", { source: "stem" })).message.startsWith('track("inner").id'), true);
+    assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").id = "u"; }), "id.duplicate");
+
+    for (const [member, why] of [["ghost", "undeclared"], ["out", "an output"], ["later", "a forward reference"]]) {
+      const missing = code(() => base().vca("v", { members: ["t", member] }));
+      assert.equal(missing.code, "reference.missing_entity", why);
+      assert.match(missing.message, /^vca\("v"\)\.members\[1\]/, why);
+    }
+    assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").members.push("ghost"); }), "reference.missing_entity");
+
+    const repeated = code(() => base().vca("v", { members: ["t", "u", "t"] }));
+    assert.equal(repeated.code, "id.duplicate");
+    assert.match(repeated.message, /^vca\("v"\)\.members\[2\]/);
+    assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").members.push("u"); }), "id.duplicate");
+
+    for (const [fader, lane] of [[{ leftDb: 24.5 }, "leftDb"], [{ rightDb: -144.5 }, "rightDb"]]) {
+      const range = code(() => base().vca("v", { fader, members: ["t"] }));
+      assert.equal(range.code, "numeric.out_of_schema_range", lane);
+      assert.match(range.message, new RegExp(`^vca\\("v"\\)\\.fader\\.${lane}`), lane);
+    }
+    assert.doesNotThrow(() => base().vca("v", { fader: { leftDb: 24, rightDb: -144 }, members: ["t"] }));
+    assert.equal(await engineFirstCode((model) => { vcaAt(model, "inner").fader.left_db = 24.5; }), "numeric.out_of_schema_range");
+  });
+
   test("live input filters are accepted while delay remains prepared-only", () => {
     const base = session({ id: "auto", sampleRateHz: 48_000 })
       .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })

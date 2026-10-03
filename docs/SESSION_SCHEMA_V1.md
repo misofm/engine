@@ -34,7 +34,8 @@ refuse.
 
 The schema requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
-`output_profile`, `sources`, `console`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`. Every
+`output_profile`, `sources`, `console`, `tracks`, `submixes`, `vcas`, `outputs`, `routes`, and
+`automation`. Every
 object rejects unknown keys and every field is explicit, including empty arrays and
 `"sidechain": { "kind": "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
 and memory budget are host policy and are not session-document fields.
@@ -57,8 +58,33 @@ compensates it. On the wire the submix message carries `id` 1,
 `builtins` 2, the repeated `console` entry 3 (the track's field 11 entry message, #1202),
 `inserts` 4, `fader` 5 and the tagged pan-or-matrix 6 (pan 1, matrix 2, as the track's field 10).
 
+A VCA group (#1240, umbrella #1239) is `{ id, fader, members }`, in that canonical key order:
+a control-only fader with no audio path. `fader` is the strip fader's record read as a per-lane
+offset; each `left_db`/`right_db` is in `[-144, 24]` dB (`numeric.out_of_schema_range` outside,
+`numeric.non_finite` for NaN or an infinity). `members` is the schema's one array of stable-ID
+strings: a non-array is `schema.wrong_type` at `$.vcas[<i>].members`, and a non-string item
+`schema.wrong_type`, a malformed one `id.invalid`, at `$.vcas[<i>].members[<j>]`. It may be empty.
+A VCA's ID joins the graph-entity namespace; a collision with a track, submix, output or another
+VCA is `id.duplicate` at `$.vcas[<i>].id`, and a VCA ID never satisfies a lookup that wants a strip
+or an output (a route source or destination, a sidechain source, an automation target's
+`entity_id`): each is `reference.missing_entity`, as an unknown ID is. Every member names a declared
+track, submix or VCA (`reference.missing_entity` at `$.vcas[<i>].members[<j>]` otherwise, an output
+included), and appears once in its VCA (`id.duplicate` at the later occurrence); one strip may sit in
+several VCAs. Membership is acyclic: a VCA on a membership cycle among VCAs, a self-member included,
+is refused with `vca.cycle` at `$.vcas[<i>]`, once per VCA on the cycle in ascending declared index,
+while a diamond (one VCA reachable along two paths) is legal. Canonically `vcas` sorts by ID and each
+`members` list sorts by ID. The canonical session stores each VCA's own offset and each member's
+own fader, never an effective value. VCAs parse, validate and round-trip, and are inert at
+preparation until *Apply VCA offsets and mutes at preparation* (#1242) applies them. On the wire
+the VCA message carries `id` 1, `fader` 2 and the repeated `members` 3.
+
+The root field registry is `schema_version` 1, `session_id` 2, `revision` 3, `sample_rate_hz` 4,
+`quantum_frames` 5, `render_profile` 6, `output_profile` 7, `sources` 9, `tracks` 10, `submixes`
+11, `outputs` 12, `routes` 13, `automation` 14, `console` 15 and `vcas` 16. Root field 8 was
+`limits` (removed in `04d291dd`); it is retired and never reallocated.
+
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
-submixes, and outputs share the graph-entity namespace; routes, automations, console slots (across
+submixes, VCAs and outputs share the graph-entity namespace; routes, automations, console slots (across
 both sections), a strip's (track's or submix's) inserts, and `(parameter_id, channel)` pairs are
 unique in their corresponding scopes. Canonical entity
 sets sort by ID, effect parameters sort by `(parameter_id, channel)`, and rack effects plus
