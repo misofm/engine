@@ -3455,7 +3455,7 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
             "{name}: exact owner slices, owner box and once-retained factory"
         );
         let decoded_count =
-            command_staging_count(shape.track_count as usize).expect("decoded command count");
+            command_staging_count(shape.track_count as usize, 0).expect("decoded command count");
         let decoded_bytes = (decoded_count * size_of::<StagedCommand>()) as u64;
         let input_shadow_bytes = if live_control_command_queue_records == 0 {
             0
@@ -11367,4 +11367,1008 @@ fn the_exact_retained_budget_charges_the_send_lanes() {
         "the exact aggregate gate refuses: {}",
         String::from_utf8_lossy(refused.diagnostic())
     );
+}
+
+// Issue #1224: a send with `follows_mute` follows its source strip's effective mute live. Every
+// session here feeds each track its own two-lane signal (`strip_planes`), every send matrix is
+// asymmetric, and every bus is a unity submix (no console slot, no insert, input section
+// identity), so a comparison at the output is exact.
+
+/// One #1224 route: `(id, source strip, the source is a submix, tap, destination bus or `None`
+/// for the output, matrix, follows_mute)`.
+type FollowRoute<'a> = (
+    &'a str,
+    &'a str,
+    bool,
+    session::SendTap,
+    Option<&'a str>,
+    [f32; 4],
+    bool,
+);
+
+const FOLLOW_UNITY: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+/// A strip-to-output route at unity from the post-pan tap.
+const fn follow_main<'a>(id: &'a str, source: &'a str, bus: bool) -> FollowRoute<'a> {
+    (
+        id,
+        source,
+        bus,
+        session::SendTap::PostPan,
+        None,
+        FOLLOW_UNITY,
+        false,
+    )
+}
+
+/// Tracks `tracks` (track `tracks[i]` reads its own source, fed `strip_planes(i, _)`), unity
+/// submixes `buses`, the routes `routes`, the fader lane mutes `muted` by strip ID, and a
+/// true-peak limiter insert (default parameters) on track `limited`.
+fn follow_document(
+    tracks: &[&str],
+    buses: &[&str],
+    routes: &[FollowRoute<'_>],
+    muted: &[(&str, [bool; 2])],
+    limited: Option<&str>,
+) -> String {
+    let (mut model, source, track, mut limiter, template) = strip_base();
+    let output = template.destination.clone();
+    for id in tracks {
+        strip_add_track(&mut model, &source, &track, id);
+    }
+    model.submixes = buses
+        .iter()
+        .map(|id| session::Submix::unity(strip_id(id), &model.console))
+        .collect();
+    limiter.id = strip_id("ceiling");
+    limiter.identity = session::EffectIdentity::Native {
+        effect_id: strip_id("miso.true-peak-limiter"),
+    };
+    limiter.params = Vec::new();
+    for track in &mut model.tracks {
+        if limited == Some(track.id.as_str()) {
+            track.inserts.effects = vec![limiter.clone()];
+        }
+    }
+    for (id, lanes) in muted {
+        let fader = match model.tracks.iter_mut().find(|t| t.id.as_str() == *id) {
+            Some(track) => &mut track.fader,
+            None => {
+                &mut model
+                    .submixes
+                    .iter_mut()
+                    .find(|s| s.id.as_str() == *id)
+                    .expect("muted strip")
+                    .fader
+            }
+        };
+        (fader.left_mute, fader.right_mute) = (lanes[0], lanes[1]);
+    }
+    for (id, from, bus, tap, into, matrix, follows) in routes {
+        let source = if *bus {
+            session::RouteSource::Submix {
+                submix_id: strip_id(from),
+                tap: *tap,
+            }
+        } else {
+            session::RouteSource::Track {
+                track_id: strip_id(from),
+                tap: *tap,
+            }
+        };
+        let destination = into.map_or_else(|| output.clone(), strip_into);
+        let mut route = strip_route(&template, id, source, destination, *matrix);
+        route.follows_mute = *follows;
+        model.routes.push(route);
+    }
+    canonical_session_json(&model).expect("#1224 session canonicalizes")
+}
+
+/// Feed `tracks[i]` `strip_planes(i, block)` (or zeros for track `silent`), render, and return
+/// the output.
+fn follow_render(
+    host: &mut AudioWorkletEngineHost,
+    tracks: &[&str],
+    block: u64,
+    silent: Option<&str>,
+) -> Vec<f32> {
+    for (feed, id) in tracks.iter().enumerate() {
+        let planes = if silent == Some(*id) {
+            let zeros = vec![0.0_f32; STRIP_QUANTUM as usize];
+            [zeros.clone(), zeros]
+        } else {
+            strip_planes(feed as u64, block)
+        };
+        submit_strip_source(host, id, block, &planes);
+    }
+    assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+    host.output_pcm().expect("output").to_vec()
+}
+
+/// Render `blocks` blocks from `first` on every host in lockstep, requiring every host's output
+/// bit-identical to the first's when `checked`. Returns whether any compared block carried signal.
+fn follow_lockstep(
+    hosts: &mut [&mut AudioWorkletEngineHost],
+    tracks: &[&str],
+    first: u64,
+    blocks: u64,
+    checked: bool,
+    what: &str,
+) -> bool {
+    let mut audible = false;
+    for block in first..first + blocks {
+        let outputs: Vec<Vec<f32>> = hosts
+            .iter_mut()
+            .map(|host| follow_render(host, tracks, block, None))
+            .collect();
+        if checked {
+            for (other, output) in outputs.iter().enumerate().skip(1) {
+                for (sample, (x, y)) in outputs[0].iter().zip(output).enumerate() {
+                    assert_eq!(
+                        x.to_bits(),
+                        y.to_bits(),
+                        "{what}: host 0 vs {other}, block {block} sample {sample}: {x} vs {y}"
+                    );
+                }
+            }
+            audible |= outputs[0].iter().any(|sample| *sample != 0.0);
+        }
+    }
+    audible
+}
+
+/// Stage one kind 4 record on `channel` (0 left, 1 right, 2 both).
+fn stage_lane_mute(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    strip: u32,
+    channel: u8,
+    on: bool,
+    smoothing: u32,
+) {
+    let value = if on { 1.0 } else { 0.0 };
+    stage_command(
+        host,
+        index,
+        COMMAND_MUTE,
+        255,
+        channel,
+        strip,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Every live send's follow-zeroed source lanes.
+fn follow_lanes(host: &AudioWorkletEngineHost) -> Vec<[bool; 2]> {
+    let routes = &host.ready.as_ref().expect("ready").routes;
+    (0..routes.len())
+        .map(|route| routes.get(route).expect("live route").source_lane_muted)
+        .collect()
+}
+
+/// Every fader queue's free room, by strip.
+fn follow_fader_room(host: &AudioWorkletEngineHost) -> Vec<usize> {
+    host.ready
+        .as_ref()
+        .expect("ready")
+        .controls
+        .iter()
+        .map(|controls| controls.fader.available_capacity())
+        .collect()
+}
+
+/// Gate 1's tracks, in feed order. Canonical strip order: `bass` 0, `drums` 1, `vocal` 2, then
+/// the submixes `room` 3 and `verb` 4. Live sends, in route-ID order: `bass-room` 0,
+/// `drums-verb` 1.
+const SOLO_FOLLOW_TRACKS: [&str; 3] = ["drums", "bass", "vocal"];
+const SOLO_FOLLOW_DRUMS: u32 = 1;
+const SOLO_FOLLOW_VOCAL: u32 = 2;
+const SOLO_FOLLOW_ROUTES: [FollowRoute<'static>; 7] = [
+    (
+        "drums-verb",
+        "drums",
+        false,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    (
+        "bass-room",
+        "bass",
+        false,
+        session::SendTap::PreFader,
+        Some("room"),
+        [-0.5, 0.7, 0.9, -0.2],
+        true,
+    ),
+    follow_main("drums-main", "drums", false),
+    follow_main("bass-main", "bass", false),
+    follow_main("vocal-main", "vocal", false),
+    follow_main("verb-main", "verb", true),
+    follow_main("room-main", "room", true),
+];
+
+fn solo_follow_host(muted: &[(&str, [bool; 2])], queue_records: u64) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &SOLO_FOLLOW_TRACKS,
+            &["verb", "room"],
+            &SOLO_FOLLOW_ROUTES,
+            muted,
+            None,
+        ),
+        strip_options(queue_records, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 1: soloing `vocal` silences `drums`' and `bass`' pre-fader `follows_mute`
+/// sends into `verb` and `room` with their faders, bit-identically to a host booted with `drums`
+/// and `bass` muted (where #1218 prepares both sends silenced), once the ramps settle; un-soloing
+/// restores both, bit-identically to an unedited host.
+///
+/// Test value: red if solo composition ignores routes (the measured leak: the pre-fader sends stay
+/// open under solo), reads the wrong strip or lane, runs before the solo coalescing pass and so
+/// reads the previous batch's mutes, or leaves a residue after the ramp.
+#[test]
+fn soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest() {
+    let mut live = solo_follow_host(&[], 16);
+    let mut muted = solo_follow_host(&[("drums", [true; 2]), ("bass", [true; 2])], 16);
+    let mut open = solo_follow_host(&[], 16);
+    follow_lockstep(
+        &mut [&mut live, &mut muted, &mut open],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        2,
+        false,
+        "warm-up",
+    );
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[true; 2], [true; 2]],
+        "both sends follow"
+    );
+    // 480 samples settle within four 128-frame blocks.
+    follow_lockstep(
+        &mut [&mut live, &mut muted],
+        &SOLO_FOLLOW_TRACKS,
+        2,
+        4,
+        false,
+        "solo ramp",
+    );
+    follow_render(&mut open, &SOLO_FOLLOW_TRACKS, 2, None);
+    for block in 3..6 {
+        follow_render(&mut open, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut muted],
+            &SOLO_FOLLOW_TRACKS,
+            6,
+            3,
+            true,
+            "soloed vs booted muted"
+        ),
+        "vocal stays audible"
+    );
+    for block in 6..9 {
+        follow_render(&mut open, &SOLO_FOLLOW_TRACKS, block, None);
+    }
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[false; 2], [false; 2]],
+        "both sends reopen"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut open],
+        &SOLO_FOLLOW_TRACKS,
+        9,
+        4,
+        false,
+        "un-solo ramp",
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut open],
+            &SOLO_FOLLOW_TRACKS,
+            13,
+            3,
+            true,
+            "un-soloed vs unedited"
+        ),
+        "the mix is audible"
+    );
+}
+
+/// Issue #1224 gate 2: no redundant send record.
+///
+/// * Soloing `drums` (a follow source) moves only `bass-room`; soloing `vocal` on top, which is
+///   no `follows_mute` source and changes no follow source's effective mute, pushes no send
+///   record.
+/// * Muting `drums` pushes one record on `drums-verb`; muting it again pushes none (its strip
+///   record is staged, as kind 4 always is).
+/// * A redundant solo toggle -- `vocal` on again, and a batch turning it off and back on -- pushes
+///   no send record and leaves the output bit-identical to a twin that received neither.
+///
+/// Test value: red if `delta` re-emits an unchanged target (a settled send's ramp restarts, which
+/// is digest visible) or the follow pass emits for a strip whose effective mute did not move.
+#[test]
+fn a_follow_never_pushes_a_redundant_send_record() {
+    let mut live = solo_follow_host(&[], 16);
+    let mut twin = solo_follow_host(&[], 16);
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        0,
+        1,
+        false,
+        "warm-up",
+    );
+    let full = vec![16_usize; 2];
+
+    for host in [&mut live, &mut twin] {
+        stage_solo(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "solo drums");
+        assert_eq!(send_queue_room(host), [15, 16], "only bass-room follows");
+        stage_solo(host, 0, SOLO_FOLLOW_VOCAL, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "solo vocal too");
+        assert_eq!(send_queue_room(host), [15, 16], "no send record");
+    }
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        1,
+        1,
+        false,
+        "drain",
+    );
+    assert_eq!(send_queue_room(&live), full);
+
+    for host in [&mut live, &mut twin] {
+        stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums");
+        assert_eq!(send_queue_room(host), [16, 15], "drums-verb follows");
+        assert_eq!(follow_lanes(host), [[true; 2], [true; 2]]);
+        stage_mute(host, 0, SOLO_FOLLOW_DRUMS, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "mute drums again");
+        assert_eq!(send_queue_room(host), [16, 15], "no second send record");
+    }
+    follow_lockstep(
+        &mut [&mut live, &mut twin],
+        &SOLO_FOLLOW_TRACKS,
+        2,
+        2,
+        true,
+        "settled",
+    );
+
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "vocal on again");
+    stage_solo(&mut live, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    stage_solo(&mut live, 1, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(live.submit_commands(2), RESULT_OK, "vocal off and on");
+    assert_eq!(send_queue_room(&live), full, "no send record");
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut twin],
+            &SOLO_FOLLOW_TRACKS,
+            4,
+            4,
+            true,
+            "redundant toggles vs none"
+        ),
+        "vocal is audible"
+    );
+}
+
+/// Issue #1224 gate 3: a submission whose follow records would overfill a send queue is typed
+/// backpressure at the strip mute that asked for them, and nothing moves: no strip mute record
+/// and no send record is pushed, and the solo state and the send mirror are unchanged and closed.
+/// Once the queue drains, a strip mute whose window is longer than any send ramp is refused
+/// `domain` the same way, and then the solo is admitted.
+///
+/// Test value: red if strip mutes commit while their follows do not -- a follow record pushed
+/// before the room check, a send queue left out of it, a mirror committed on refusal, or a follow
+/// ramp silently clamped away from its strip's window.
+#[test]
+fn a_full_send_queue_refuses_the_strip_mutes_it_follows() {
+    const DEPTH: u64 = 4;
+    let mut host = solo_follow_host(&[], DEPTH);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    for index in 0..DEPTH as usize {
+        stage_send(
+            &mut host,
+            index,
+            COMMAND_ROUTE_GAIN_DB,
+            1,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(DEPTH as u32),
+        RESULT_OK,
+        "fill drums-verb"
+    );
+    let room = send_queue_room(&host);
+    assert_eq!(room, [DEPTH as usize, 0]);
+    let fader_room = follow_fader_room(&host);
+    let lanes = follow_lanes(&host);
+    let mirror = send_mirror(&host);
+
+    let refused = |host: &AudioWorkletEngineHost, index: u32, what: &str| {
+        let report = *host.command_report();
+        assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE, "{what}: reason");
+        assert_eq!(report.rejected_index, index, "{what}: wire index");
+        assert_eq!(report.admitted, 0, "{what}: admitted");
+        assert_eq!(send_queue_room(host), room, "{what}: send queues");
+        assert_eq!(follow_fader_room(host), fader_room, "{what}: fader queues");
+        assert_eq!(follow_lanes(host), lanes, "{what}: follow lanes");
+        assert_eq!(send_mirror(host), mirror, "{what}: send mirror");
+        let ready = host.ready.as_ref().expect("ready");
+        assert!(
+            !ready.routes.transaction_open(),
+            "{what}: send mirror closed"
+        );
+        assert!(!ready.solo.transaction_open(), "{what}: solo state closed");
+        assert!(!ready.solo.any_solo(), "{what}: no solo engaged");
+        assert!(
+            !ready.solo.user_mute(SOLO_FOLLOW_DRUMS as usize, 0),
+            "{what}: drums"
+        );
+    };
+
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_BACKPRESSURE, "solo vocal");
+    refused(&host, 0, "solo");
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        SOLO_FOLLOW_VOCAL,
+        0,
+        0,
+        0,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    stage_mute(&mut host, 1, SOLO_FOLLOW_DRUMS, true, 480);
+    assert_eq!(host.submit_commands(2), RESULT_BACKPRESSURE, "mute drums");
+    refused(&host, 1, "kind 4");
+
+    // A strip mute whose window no send ramp can take (past `ROUTE_RAMP_LENGTH_MAXIMUM`, `2^22`)
+    // is refused `domain` at its wire index once a send follows it, rather than clamped.
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
+    let drained = send_queue_room(&host);
+    assert_eq!(drained, [DEPTH as usize; 2]);
+    stage_mute(&mut host, 0, SOLO_FOLLOW_DRUMS, true, (1 << 22) + 1);
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT, "overlong");
+    let report = *host.command_report();
+    assert_eq!(
+        (report.reason, report.rejected_index, report.admitted),
+        (COMMAND_REASON_DOMAIN, 0, 0)
+    );
+    assert_eq!(send_queue_room(&host), drained, "overlong: send queues");
+    assert_eq!(
+        follow_fader_room(&host),
+        fader_room,
+        "overlong: fader queues"
+    );
+    assert_eq!(follow_lanes(&host), lanes, "overlong: follow lanes");
+    assert!(!host.ready.as_ref().expect("ready").solo.user_mute(1, 0));
+
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "drained: admitted");
+    assert_eq!(follow_lanes(&host), [[true; 2], [true; 2]]);
+}
+
+/// Gate 4's tracks, in feed order. Strips: `drums` 0, `vocal` 1, `verb` 2; one live send,
+/// `drums-verb`.
+const LANE_FOLLOW_TRACKS: [&str; 2] = ["drums", "vocal"];
+const LANE_FOLLOW_ROUTES: [FollowRoute<'static>; 4] = [
+    (
+        "drums-verb",
+        "drums",
+        false,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    follow_main("drums-main", "drums", false),
+    follow_main("vocal-main", "vocal", false),
+    follow_main("verb-main", "verb", true),
+];
+
+fn lane_follow_host(drums: [bool; 2]) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &LANE_FOLLOW_TRACKS,
+            &["verb"],
+            &LANE_FOLLOW_ROUTES,
+            &[("drums", drums)],
+            None,
+        ),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 4: per lane. From every lane-mute state of `drums` to every other, kind 4
+/// records on the lanes that change (one `both` record when both move together) land on the
+/// output of a host booted in the target state, whose prepared send has the same source columns
+/// zeroed. Then, over a left-only mute, soloing `vocal` follows both lanes, and un-soloing returns
+/// the send to the left-only state.
+///
+/// Test value: red if the follow path maps a source lane to the other column, zeroes both columns
+/// for a one-lane mute, reads one lane for both, or loses a user's lane mute across a solo.
+#[test]
+fn a_one_lane_mute_follows_into_its_own_source_column() {
+    let states = [[false, false], [true, false], [false, true], [true, true]];
+    for from in states {
+        for to in states {
+            if from == to {
+                continue;
+            }
+            let what = format!("{from:?} -> {to:?}");
+            let mut live = lane_follow_host(from);
+            let mut booted = lane_follow_host(to);
+            let mut staged = 0;
+            if from[0] != to[0] && from[1] != to[1] && to[0] == to[1] {
+                stage_lane_mute(&mut live, 0, 0, 2, to[0], 480);
+                staged = 1;
+            } else {
+                for lane in 0..2 {
+                    if from[lane] != to[lane] {
+                        stage_lane_mute(&mut live, staged, 0, lane as u8, to[lane], 480);
+                        staged += 1;
+                    }
+                }
+            }
+            assert_eq!(live.submit_commands(staged as u32), RESULT_OK, "{what}");
+            assert_eq!(follow_lanes(&live), [to], "{what}: the mirror");
+            follow_lockstep(
+                &mut [&mut live, &mut booted],
+                &LANE_FOLLOW_TRACKS,
+                0,
+                4,
+                false,
+                &what,
+            );
+            assert!(
+                follow_lockstep(
+                    &mut [&mut live, &mut booted],
+                    &LANE_FOLLOW_TRACKS,
+                    4,
+                    3,
+                    true,
+                    &what
+                ),
+                "{what}: audible"
+            );
+        }
+    }
+
+    let mut live = lane_follow_host([true, false]);
+    let mut soloed = lane_follow_host([true, true]);
+    let mut left = lane_follow_host([true, false]);
+    stage_solo(&mut live, 0, 1, true, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "solo vocal");
+    assert_eq!(follow_lanes(&live), [[true, true]]);
+    follow_lockstep(
+        &mut [&mut live, &mut soloed],
+        &LANE_FOLLOW_TRACKS,
+        0,
+        4,
+        false,
+        "solo",
+    );
+    follow_lockstep(&mut [&mut left], &LANE_FOLLOW_TRACKS, 0, 4, false, "solo");
+    follow_lockstep(
+        &mut [&mut live, &mut soloed],
+        &LANE_FOLLOW_TRACKS,
+        4,
+        3,
+        true,
+        "soloed",
+    );
+    follow_lockstep(&mut [&mut left], &LANE_FOLLOW_TRACKS, 4, 3, false, "soloed");
+    stage_solo(&mut live, 0, 1, false, 480);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "un-solo vocal");
+    assert_eq!(
+        follow_lanes(&live),
+        [[true, false]],
+        "the user's left mute stays"
+    );
+    follow_lockstep(
+        &mut [&mut live, &mut left],
+        &LANE_FOLLOW_TRACKS,
+        7,
+        4,
+        false,
+        "un-solo",
+    );
+    assert!(
+        follow_lockstep(
+            &mut [&mut live, &mut left],
+            &LANE_FOLLOW_TRACKS,
+            11,
+            3,
+            true,
+            "un-soloed"
+        ),
+        "audible"
+    );
+}
+
+/// Gate 5's tracks, in feed order. Strips: `t0` 0, `t1` 1, then the submixes `drums` 2 and
+/// `verb` 3. Live sends, in route-ID order: `drums-verb` 0, `t0-drums` 1, `t1-drums` 2. `t1` also
+/// reaches the output directly, so a fully muted bus leaves the output audible.
+const BUS_FOLLOW_TRACKS: [&str; 2] = ["t0", "t1"];
+const BUS_FOLLOW_DRUMS: u32 = 2;
+const BUS_FOLLOW_ROUTES: [FollowRoute<'static>; 6] = [
+    (
+        "t0-drums",
+        "t0",
+        false,
+        session::SendTap::PostPan,
+        Some("drums"),
+        [0.35, 0.15, -0.65, 0.45],
+        false,
+    ),
+    (
+        "t1-drums",
+        "t1",
+        false,
+        session::SendTap::PostPan,
+        Some("drums"),
+        [0.6, 0.4, -0.3, 0.9],
+        false,
+    ),
+    (
+        "drums-verb",
+        "drums",
+        true,
+        session::SendTap::PreFader,
+        Some("verb"),
+        [0.8, -0.3, 0.25, 0.6],
+        true,
+    ),
+    follow_main("drums-main", "drums", true),
+    follow_main("verb-main", "verb", true),
+    follow_main("t1-main", "t1", false),
+];
+
+fn bus_follow_host(drums: [bool; 2]) -> AudioWorkletEngineHost {
+    strip_boot(
+        &follow_document(
+            &BUS_FOLLOW_TRACKS,
+            &["drums", "verb"],
+            &BUS_FOLLOW_ROUTES,
+            &[("drums", drums)],
+            None,
+        ),
+        strip_options(16, 0, 0),
+    )
+}
+
+/// Issue #1224 gate 5: a bus as the source. Kind 4 muting bus `drums` (both lanes, then its right
+/// lane alone) silences its pre-fader `follows_mute` send into `verb` and un-muting restores it,
+/// each matching a freshly booted host with the bus in that state. Soloing `t0` leaves the bus,
+/// which is solo-safe, and its send alone: no send record.
+///
+/// Test value: red if follow composition reads only tracks' mutes (a bus mute leaves its sends
+/// open), resolves a bus source without the track offset, or solo-mutes a bus's sends.
+#[test]
+fn muting_a_bus_silences_its_followed_send() {
+    for (channel, lanes) in [(2_u8, [true, true]), (1, [false, true])] {
+        let what = format!("bus lanes {lanes:?}");
+        let mut live = bus_follow_host([false; 2]);
+        let mut muted = bus_follow_host(lanes);
+        let mut open = bus_follow_host([false; 2]);
+        stage_lane_mute(&mut live, 0, BUS_FOLLOW_DRUMS, channel, true, 480);
+        assert_eq!(live.submit_commands(1), RESULT_OK, "{what}: mute");
+        assert_eq!(follow_lanes(&live)[0], lanes, "{what}: drums-verb follows");
+        follow_lockstep(
+            &mut [&mut live, &mut muted],
+            &BUS_FOLLOW_TRACKS,
+            0,
+            4,
+            false,
+            &what,
+        );
+        follow_lockstep(&mut [&mut open], &BUS_FOLLOW_TRACKS, 0, 4, false, &what);
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut muted],
+                &BUS_FOLLOW_TRACKS,
+                4,
+                3,
+                true,
+                &what
+            ),
+            "{what}: audible"
+        );
+        follow_lockstep(&mut [&mut open], &BUS_FOLLOW_TRACKS, 4, 3, false, &what);
+        stage_lane_mute(&mut live, 0, BUS_FOLLOW_DRUMS, channel, false, 480);
+        assert_eq!(live.submit_commands(1), RESULT_OK, "{what}: un-mute");
+        assert_eq!(follow_lanes(&live)[0], [false; 2], "{what}: reopened");
+        follow_lockstep(
+            &mut [&mut live, &mut open],
+            &BUS_FOLLOW_TRACKS,
+            7,
+            4,
+            false,
+            &what,
+        );
+        assert!(
+            follow_lockstep(
+                &mut [&mut live, &mut open],
+                &BUS_FOLLOW_TRACKS,
+                11,
+                3,
+                true,
+                &what
+            ),
+            "{what}: audible"
+        );
+    }
+
+    let mut host = bus_follow_host([false; 2]);
+    follow_render(&mut host, &BUS_FOLLOW_TRACKS, 0, None);
+    stage_solo(&mut host, 0, 0, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK, "solo t0");
+    assert_eq!(send_queue_room(&host), [16; 3], "no send record");
+    assert_eq!(follow_lanes(&host)[0], [false; 2]);
+}
+
+/// Gate 6's tracks, in feed order. Strips: `drums` 0, `s` 1, then `verb` 2. `s` carries a
+/// true-peak limiter (486 samples at 48 kHz) into `verb`, so PDC delays `drums-verb`, `drums`'
+/// only path, by 486 samples. One live send per host is `drums-verb` (route-ID order:
+/// `drums-verb` 0, `s-verb` 1).
+const DELAYED_FOLLOW_TRACKS: [&str; 2] = ["drums", "s"];
+const DELAYED_FOLLOW_LATENCY: usize = 486;
+
+fn delayed_follow_document(follows: bool) -> String {
+    follow_document(
+        &DELAYED_FOLLOW_TRACKS,
+        &["verb"],
+        &[
+            (
+                "drums-verb",
+                "drums",
+                false,
+                session::SendTap::PreFader,
+                Some("verb"),
+                [0.8, -0.3, 0.25, 0.6],
+                follows,
+            ),
+            (
+                "s-verb",
+                "s",
+                false,
+                session::SendTap::PostPan,
+                Some("verb"),
+                [0.35, 0.15, -0.65, 0.45],
+                false,
+            ),
+            follow_main("verb-main", "verb", true),
+        ],
+        &[],
+        Some("s"),
+    )
+}
+
+/// Issue #1224 gate 6: a delayed follow-muted send. `drums-verb` carries the 486-sample
+/// compensation (asserted from the plan: fed `drums` alone, the output is exactly zero for 486
+/// frames and carries `drums` from frame 486). Host A follows: it mutes and un-mutes `drums` with
+/// kind 4. Host B has the same session with `follows_mute` false and sends the same kind 4 records
+/// plus kind 14 on the send. The mute is one record at 480 samples; the un-mute is two kind 4
+/// records, at 200 and then 480 samples, so the follow takes the last one's ramp. Both hosts
+/// render the same bits on every block, including the 486 samples after each edit.
+///
+/// Test value: red if the follow path deactivates a delayed send, re-sends a stale target, or uses
+/// a ramp length other than the last strip mute's (the first, or none).
+#[test]
+fn a_delayed_send_follows_like_an_explicit_send_mute() {
+    let probe_document = delayed_follow_document(true);
+    let mut probe = strip_boot(&probe_document, strip_options(16, 0, 0));
+    assert!(
+        probe.resources().graph_delay_bytes > 0,
+        "the plan carries a delay line"
+    );
+    let mut probed = Vec::new();
+    for block in 0..5 {
+        let output = follow_render(&mut probe, &DELAYED_FOLLOW_TRACKS, block, Some("s"));
+        let frames = STRIP_QUANTUM as usize;
+        probed.extend((0..frames).map(|frame| (output[frame], output[frames + frame])));
+    }
+    let first = probed
+        .iter()
+        .position(|(left, right)| *left != 0.0 || *right != 0.0);
+    assert_eq!(
+        first,
+        Some(DELAYED_FOLLOW_LATENCY),
+        "drums reaches verb 486 samples late"
+    );
+
+    let mut follow = strip_boot(&probe_document, strip_options(16, 0, 0));
+    let mut explicit = strip_boot(&delayed_follow_document(false), strip_options(16, 0, 0));
+    follow_lockstep(
+        &mut [&mut follow, &mut explicit],
+        &DELAYED_FOLLOW_TRACKS,
+        0,
+        2,
+        true,
+        "idle",
+    );
+
+    stage_lane_mute(&mut follow, 0, 0, 2, true, 480);
+    stage_lane_mute(&mut explicit, 0, 0, 2, true, 480);
+    stage_send(
+        &mut explicit,
+        1,
+        COMMAND_ROUTE_MUTE,
+        0,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(follow.submit_commands(1), RESULT_OK, "A: mute drums");
+    assert_eq!(
+        explicit.submit_commands(2),
+        RESULT_OK,
+        "B: mute drums and its send"
+    );
+    assert_eq!(follow_lanes(&follow)[0], [true; 2]);
+    follow_lockstep(
+        &mut [&mut follow, &mut explicit],
+        &DELAYED_FOLLOW_TRACKS,
+        2,
+        8,
+        true,
+        "muted",
+    );
+
+    for host in [&mut follow, &mut explicit] {
+        stage_lane_mute(host, 0, 0, 2, false, 200);
+        stage_lane_mute(host, 1, 0, 2, false, 480);
+    }
+    stage_send(&mut explicit, 2, COMMAND_ROUTE_MUTE, 0, 480, [0.0; 4]);
+    assert_eq!(follow.submit_commands(2), RESULT_OK, "A: un-mute drums");
+    assert_eq!(
+        explicit.submit_commands(3),
+        RESULT_OK,
+        "B: un-mute drums and its send"
+    );
+    assert_eq!(follow_lanes(&follow)[0], [false; 2]);
+    assert!(
+        follow_lockstep(
+            &mut [&mut follow, &mut explicit],
+            &DELAYED_FOLLOW_TRACKS,
+            10,
+            8,
+            true,
+            "un-muted"
+        ),
+        "audible"
+    );
+}
+
+/// Issue #1224 gate 9: admitting solo toggles and kind 4 mutes that stage follow records, then
+/// rendering, allocates and frees nothing.
+///
+/// Test value: red if the follow pass or the grown staging allocates on the admission or render
+/// path.
+#[test]
+fn follow_records_admit_and_render_without_allocating() {
+    let mut host = solo_follow_host(&[], 64);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 0, None);
+    // Warm every path once outside the measurement.
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    follow_render(&mut host, &SOLO_FOLLOW_TRACKS, 1, None);
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, false, 480);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    for (feed, id) in SOLO_FOLLOW_TRACKS.iter().enumerate() {
+        submit_strip_source(&mut host, id, 2, &strip_planes(feed as u64, 2));
+    }
+    stage_solo(&mut host, 0, SOLO_FOLLOW_VOCAL, true, 480);
+    stage_lane_mute(&mut host, 1, SOLO_FOLLOW_DRUMS, 0, true, 128);
+    stage_solo(&mut host, 2, SOLO_FOLLOW_VOCAL, false, 480);
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| {
+            (host.submit_commands(3), host.render_next())
+        });
+    assert_eq!(admission, RESULT_OK, "the follow batch is admitted");
+    assert_eq!(render, RESULT_OK);
+    assert_eq!(follow_lanes(&host), [[false; 2], [true, false]]);
+    assert_eq!(allocations, 0, "admission/render allocated");
+    assert_eq!(deallocations, 0, "admission/render freed");
+}
+
+/// Issue #1224 D4: the decode staging holds a full batch, a solo transition and every follow
+/// record it owes. Six tracks, each with a compressor insert and a pre-fader `follows_mute` send
+/// into each of six buses (36 live sends): 255 `channel = both` threshold records (510 entries)
+/// and one solo of `t0` (five coalesced strip records, then 30 follow records) need 545 entries,
+/// past the 536 that `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` holds.
+///
+/// Test value: red if the staging is not grown by the live-send count, so a legal batch whose
+/// solo moves many followed sends is refused `malformed` by the staging bound.
+#[test]
+fn the_decode_staging_holds_a_full_batch_and_its_follow_records() {
+    const TRACKS: [&str; 6] = ["t0", "t1", "t2", "t3", "t4", "t5"];
+    const BUSES: [&str; 6] = ["b0", "b1", "b2", "b3", "b4", "b5"];
+    let ids: Vec<(String, &str, &str)> = TRACKS
+        .iter()
+        .flat_map(|track| {
+            BUSES
+                .iter()
+                .map(move |bus| (format!("{track}-{bus}"), *track, *bus))
+        })
+        .collect();
+    let routes: Vec<FollowRoute<'_>> = ids
+        .iter()
+        .map(|(id, track, bus)| {
+            (
+                id.as_str(),
+                *track,
+                false,
+                session::SendTap::PreFader,
+                Some(*bus),
+                [0.8, -0.3, 0.25, 0.6],
+                true,
+            )
+        })
+        .collect();
+    let (_, _, _, compressor, _) = strip_base();
+    let document = follow_document(&TRACKS, &BUSES, &routes, &[], None);
+    let mut model = parse_session_json(&document).expect("staging session");
+    for track in &mut model.tracks {
+        track.inserts.effects = vec![compressor.clone()];
+    }
+    let document = canonical_session_json(&model).expect("staging session canonicalizes");
+    let mut host = strip_boot(&document, strip_options(128, 0, 0));
+    let strips = TRACKS.len() + BUSES.len();
+    assert_eq!(
+        host.command_staging_entries(),
+        Some(MAXIMUM_COMMAND_RECORDS as usize * 2 + strips * 2 + routes.len()),
+    );
+    follow_render(&mut host, &TRACKS, 0, None);
+    let records = MAXIMUM_COMMAND_RECORDS as usize;
+    for index in 0..records - 1 {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_PARAM,
+            1,
+            2,
+            (index % TRACKS.len()) as u32,
+            0,
+            1,
+            0,
+            [-12.0, 0.0, 0.0, 0.0],
+        );
+    }
+    stage_solo(&mut host, records - 1, 0, true, 480);
+    assert_eq!(
+        host.submit_commands(MAXIMUM_COMMAND_RECORDS),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason,
+    );
+    assert_eq!(host.command_report().admitted, MAXIMUM_COMMAND_RECORDS);
+    let lanes = follow_lanes(&host);
+    for (route, lanes) in lanes.iter().enumerate() {
+        let muted = route >= BUSES.len();
+        assert_eq!(*lanes, [muted; 2], "live send {route}");
+    }
 }

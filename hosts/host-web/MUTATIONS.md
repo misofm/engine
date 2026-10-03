@@ -434,3 +434,27 @@ the module with the mutation.
 | `live-controls-evals.mjs` (the vocabulary test) | drop `routeMatrix` from `kindNames` | `the semantic methods cover the generated command vocabulary exactly` |
 | `live-controls-types.ts` | `RouteEdits.gainDb` takes `LaneOptions` | `Unused '@ts-expect-error'` (a send has no lane) |
 | `live-controls-types.ts` | `RouteEdits` gains `faderDb` | `_RouteSurface` fails, and the `faderDb` `@ts-expect-error` is unused |
+
+## Issue #1224 — sends follow their source strip's mute
+
+Each row was applied, its test run red, and the tree restored. "Audio" rows ran with the tests'
+`follow_lanes` mirror assertions removed, so the red is the rendered output's, not the mirror's.
+
+| gate | mutation | observed red |
+|---|---|---|
+| deliverable 3 (a): `tests::a_follow_never_pushes_a_redundant_send_record` (gate 2) | `delta` yields every following route, changed or not | `solo drums` is refused: `delta` yields the unchanged `drums-verb`, whose strip staged no mute record (`malformed`); gates 3, 5, 9 and the staging test go red too. With that guard also bypassed (a missing strip record read as ramp 0), the red is `only bass-room follows`: a redundant `drums-verb` record was pushed |
+| deliverable 3 (b): `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1) | the follow pass placed before the solo coalescing pass | `solo vocal` is refused (`malformed`): no strip mute record is staged yet for the follow's ramp; gates 2, 3, 4, 9 and the staging test go red too |
+| deliverable 3 (c): `tests::a_full_send_queue_refuses_the_strip_mutes_it_follows` (gate 3) | push each follow record as it is built, before the room check | `solo: send queues`: `bass-room`'s queue lost a slot on a refused batch |
+| `tests::soloing_a_track_silences_the_followed_pre_fader_sends_of_the_rest` (gate 1, audio) | no follow pass (`if false && …`) | `soloed vs booted muted: block 6 sample 0: 0.031146944 vs 0.6195009` -- the measured leak |
+| gates 4, 5 and 6 (audio) | no follow pass | gate 4 `[false, false] -> [true, false]` block 4; gate 5 `bus lanes [true, true]` block 4; gate 6 `muted` block 5 sample 102 (frame 742 = the edit at 256 + 486) |
+| gate 1 and gate 6 (audio) | build the follow record with the mirror's old `source_lane_muted` | gate 1 at block 6 sample 0; gate 6 `muted` at block 5 sample 102 |
+| `tests::a_one_lane_mute_follows_into_its_own_source_column` (gate 4, audio) | `followed_lanes` returns `[lane 1, lane 0]` | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 `bus lanes [false, true]` too |
+| gate 4 (audio) | `followed_lanes` reads lane 0 for both | `[false, false] -> [true, false]`: block 4 sample 0; gate 5 too |
+| `tests::muting_a_bus_silences_its_followed_send` (gate 5, audio) | the follow pass's effective mute is `strip < tracks.len() && …` | `bus lanes [true, true]`: block 4 sample 0 |
+| `tests::a_delayed_send_follows_like_an_explicit_send_mute` (gate 6, audio) | the ramp is the *first* strip mute record staged for the source | `un-muted`: block 13 sample 102 (200-sample ramp against 480) |
+| gate 6 (audio) | the follow record's ramp length is 0 | `muted`: block 5 sample 102 |
+| gate 3 | `ready.routes.commit()` right after the follow pass | `solo: follow lanes`: the refused batch kept the followed lanes |
+| gate 3 (the overlong window) | clamp the follow ramp to `2^22` | `overlong`: the strip mute is admitted (`0`), not `invalidArgument` |
+| gate 2 | skip `LiveRouteState::follow` after staging | `solo vocal too` is refused: the stale mirror re-yields `bass-room` in a batch that staged no `bass` mute record (`malformed`); with that guard bypassed, `no send record`: the redundant record is pushed |
+| `tests::follow_records_admit_and_render_without_allocating` (gate 9) | allocate an 8-byte `Vec` per follow record | `admission/render allocated` |
+| `tests::the_decode_staging_holds_a_full_batch_and_its_follow_records` (D4) | `command_staging_count` adds `route_count * 0` | the length pin (536 + 0, not 572); with the pin removed, the batch is refused `reason 1` (`malformed`, the staging bound) |

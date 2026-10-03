@@ -163,6 +163,36 @@ Two rules of the admission path are load-bearing rather than incidental:
   settled kernel, which fills the plane. For a negative input that is the difference between an
   exact `+0.0` and a `-0.0`, and it is digest visible.
 
+### Sends follow mute (issue #1224)
+
+A send with `follows_mute: true` follows its source strip's **effective** mute live: user mute, or
+solo-derived mute for a track. A submix is solo-safe, so a bus source follows only its own mute.
+Muting a track or a bus, or soloing another track, silences every such send from that strip through
+the same declicked ramp, in the same submission; unmuting or un-soloing reopens it. A soloed vocal
+therefore no longer carries a muted drum track's pre-fader reverb send.
+
+- **One composition.** `host_core::LiveRouteMuteFollow::delta` names the live sends whose
+  follow-zeroed source lanes, `[effective_mute(source, 0), effective_mute(source, 1)]`, differ from
+  what their mirror last sent. It takes the effective mute as a function, so the browser reads its
+  solo state and the C ABI its committed model's mutes (#1226). A send without `follows_mute` is
+  never touched.
+- **After the batch's last mute.** The browser runs the follow pass once per submission, after
+  every kind 4 record and the solo coalescing pass, so it reads the batch's final effective mutes.
+  Each yielded send gets one record from its mirror through `RouteControlProducer::record`, the
+  prepared route's own coefficient function, so a settled follow equals a plan freshly prepared
+  with those mutes. Its ramp is the `smoothing_samples` of the last strip mute record staged for
+  the source strip in that submission, so the send fades with its strip.
+- **Never a redundant record.** `delta` yields only a change, for the same digest reason as the
+  strip records above.
+- **All or nothing.** Follow records are room-checked with the strip mute records before any push.
+  A full send queue refuses the whole submission as typed backpressure, at the wire index of the
+  strip mute that asked for the record, and the solo state and the send mirror both roll back. A
+  strip mute whose window exceeds a send's longest ramp (`2^22` samples) is refused `domain`
+  rather than clamped. The decode staging grows by one entry per live send.
+- **A delayed send stays mixed.** A follow-muted send that carries a compensation delay mixes zero
+  coefficients through its line rather than going inactive (#1217), exactly as an explicit
+  `routeMute` does.
+
 ### Ruling D1 — solo is not persisted in Session V1
 
 **Solo is monitoring state, not mix state, and no session key carries it.** A session reloads with
@@ -188,7 +218,8 @@ pre-fader metering survives a solo, which is console-correct and is what makes g
 silenced strip possible. Taps at `post_fader` and `post_pan`, and everything downstream of them
 (submixes, outputs, the designated master's peak and gain-reduction rows), read the **gated** mix.
 A send from a pre-fader tap follows its strip's mute only with `follows_mute: true`, which only a
-route into a submix may set (#1218).
+route into a submix may set (#1218). A pre-fader send without `follows_mute` stays audible under
+solo, and only a route into a submix can follow.
 
 A gain-reduction tap on a strip that solo has silenced falls toward zero reduction, because its
 effects are seeing silence. That is the true state of that signal path, not an artifact of the

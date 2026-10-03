@@ -127,7 +127,7 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
-pub use live_route_state::{LiveRoute, LiveRouteState, LiveRouteStateError};
+pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
     HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,

@@ -33,10 +33,10 @@ use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime}
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
-    LiveControlSoloState, LiveRouteState, PrepareDiagnostics, PrepareRejection, PreparedHost,
-    RouteControlError, RouteControlProducer, RouteControlRecord, SourceControlError,
-    SourceSubmission, StripMuteSeed, apply_input_filter_edit, compile_host_model,
-    compiled_session_shape, control_table_bytes, parse_host_session,
+    LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState, PrepareDiagnostics,
+    PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
+    SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
+    compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_selected_meters_between_render_calls, source_id_arena_bytes,
 };
@@ -1476,7 +1476,7 @@ struct ReadyOwnership {
     /// Decoded submission staging. Two entries per staged record, because one wire record
     /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
     /// plus `2 * strip_count` for the coalesced solo emission (issue #210 phase 1, per strip
-    /// since issue #1213).
+    /// since issue #1213), plus one per live send for the follow pass (issue #1224 D4).
     command_decoded: Box<[StagedCommand]>,
     /// Issue #210 phase 1: the live controls' solo bits and their mirrors of user mute and of what
     /// the render plane was last told. Solo composes into the *existing* mute records at admission
@@ -4427,9 +4427,10 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 ///
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
 /// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
-/// phase 1; per strip since issue #1213), which is why `command_decoded` is
-/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count` long and why the room counted is per lowered
-/// record rather than per wire record.
+/// phase 1; per strip since issue #1213), and one that changes a strip's effective mute owes one
+/// more per live send that follows it (issue #1224), which is why `command_decoded` is
+/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count + route_count` long and why the room counted is
+/// per lowered record rather than per wire record.
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///
@@ -4527,6 +4528,8 @@ fn admit_commands_staged(
     let mut solo_seen = false;
     let mut solo_first_wire_index = 0_u32;
     let mut solo_smoothing = 0_u32;
+    // Issue #1224 D3: whether any strip mute record was staged, so the follow pass below runs.
+    let mut mute_seen = false;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
         let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
@@ -4597,6 +4600,7 @@ fn admit_commands_staged(
                 let lane = usize::from(matches!(lanes, BuiltinLaneSelector::Right));
                 let effective = ready.solo.effective_mute(track, lane);
                 ready.solo.record_emitted(track, lanes, effective);
+                mute_seen = true;
                 staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: effective,
@@ -4911,6 +4915,81 @@ fn admit_commands_staged(
                 };
                 lowered += 1;
                 ready.solo.record_emitted(strip, lanes, muted);
+            }
+        }
+    }
+    // Issue #1224 D3: the follow pass. It runs after every kind 4 record and the coalescing pass
+    // above, so it reads the batch's final effective mutes: a send with `follows_mute` whose
+    // source strip's effective lane mutes moved gets one record, built from its mirror through
+    // the prepared route's coefficient function, with the new source lanes. `delta` yields only a
+    // change, so a settled send is never retargeted.
+    //
+    // The ramp is the last strip-mute record staged for the source strip in this batch, in
+    // staging order (kind 4 records in wire order, then the coalescing pass's), and the follow
+    // record answers to that record's wire index. Every effective-mute change stages a strip mute
+    // record, so one always exists; a follow without one is refused rather than guessed.
+    //
+    // Nothing is pushed here: the records join the room check below with every other staged
+    // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
+    if (solo_seen || mute_seen) && !ready.routes.is_empty() {
+        let follow_start = lowered;
+        let route_base = strip_count * 3 + ready.effect_controls.len();
+        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
+        for (route, source_lane_muted) in LiveRouteMuteFollow::delta(&ready.routes, &effective_mute)
+        {
+            let (Some(entry), Some(producer)) =
+                (ready.routes.get(route), ready.route_controls.get(route))
+            else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            let fader_slot = (strip_count + entry.source_strip) as u32;
+            let Some((smoothing_samples, wire_index)) = ready.command_decoded[..lowered]
+                .iter()
+                .rev()
+                .find_map(|staged| match staged.kind {
+                    StagedCommandKind::Command(AdmittedCommand::Fader(
+                        TrackFaderRecord::Mute {
+                            smoothing_samples, ..
+                        },
+                    )) if staged.queue_slot == fader_slot => {
+                        Some((smoothing_samples, staged.original_wire_index))
+                    }
+                    _ => None,
+                })
+            else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            // A ramp past `ROUTE_RAMP_LENGTH_MAXIMUM` cannot be followed at the strip's length, so
+            // the strip mute that asked for it is refused whole, never clamped.
+            let record = producer
+                .record(
+                    entry.gain_db,
+                    entry.matrix,
+                    entry.mute,
+                    source_lane_muted,
+                    smoothing_samples,
+                )
+                .map_err(|_| refuse(COMMAND_REASON_DOMAIN, wire_index as usize))?;
+            let slot = route_base + route;
+            let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+                return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, wire_index as usize));
+            };
+            *wanted = wanted.saturating_add(1);
+            let Some(staged) = ready.command_decoded.get_mut(lowered) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+            };
+            *staged = StagedCommand {
+                queue_slot: slot as u32,
+                original_wire_index: wire_index,
+                kind: StagedCommandKind::Command(AdmittedCommand::Route(record)),
+            };
+            lowered += 1;
+        }
+        let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
+        for staged in follow_start..lowered {
+            let route = ready.command_decoded[staged].queue_slot as usize - route_base;
+            if !ready.routes.follow(route, &effective_mute) {
+                return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
             }
         }
     }
@@ -6479,7 +6558,7 @@ fn compile_ready(
     // The decoded command array carries the enlarged internal EffectControlRecord enum. Its
     // typed backing is a separate retained allocation from the public 48-byte wire staging row;
     // charge the full actual array before the final aggregate budget check.
-    let decoded_count = command_staging_count(strip_count)?;
+    let decoded_count = command_staging_count(strip_count, routes.len())?;
     let decoded_bytes = u64::try_from(decoded_count)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<StagedCommand>() as u64))
@@ -6508,7 +6587,7 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
-        command_decoded: boxed_command_staging(strip_count)?,
+        command_decoded: boxed_command_staging(strip_count, routes.len())?,
         solo,
         route_controls,
         routes,
@@ -6607,7 +6686,10 @@ fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec<u8>> {
+fn boxed_command_staging(
+    strip_count: usize,
+    route_count: usize,
+) -> Result<Box<[StagedCommand]>, Vec<u8>> {
     // Two entries per staged wire record: one `channel = both` command on a per-lane effect
     // parameter lowers to one record per lane (#140 C).
     //
@@ -6618,7 +6700,10 @@ fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec
     // `TrackFaderRecord::Mute` carries one `muted` bool and a strip whose user mute is asymmetric
     // needs one record per lane to restore. The two terms add rather than max: a batch may carry
     // 256 effect-parameter records *and* a solo toggle.
-    let count = command_staging_count(strip_count)?;
+    //
+    // Plus `route_count` for issue #1224's follow pass: at most one record per live send per
+    // batch, because `delta` yields each send once, after the batch's last strip mute.
+    let count = command_staging_count(strip_count, route_count)?;
     let empty = StagedCommand {
         queue_slot: 0,
         original_wire_index: 0,
@@ -6634,9 +6719,10 @@ fn boxed_command_staging(strip_count: usize) -> Result<Box<[StagedCommand]>, Vec
     Ok(value.into_boxed_slice())
 }
 
-fn command_staging_count(strip_count: usize) -> Result<usize, Vec<u8>> {
+fn command_staging_count(strip_count: usize, route_count: usize) -> Result<usize, Vec<u8>> {
     (MAXIMUM_COMMAND_RECORDS as usize * 2)
         .checked_add(strip_count.checked_mul(2).ok_or_else(arithmetic)?)
+        .and_then(|count| count.checked_add(route_count))
         .ok_or_else(arithmetic)
 }
 

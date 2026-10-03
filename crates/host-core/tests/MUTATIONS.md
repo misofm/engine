@@ -412,6 +412,22 @@ reverted.
 | 1222-H3 | take the shadow once, at construction, not per transaction | `a_rollback_restores_every_field_…`: rolled back to the seeds, not the committed values |
 | 1222-H4 | keep routes into the output in the mirror | both tests: the mirror has seven entries, not four |
 
+## Issue #1224 — `LiveRouteMuteFollow::delta` and `LiveRouteState::follow`
+
+Unit tests in `crates/host-core/src/live_route_state.rs` (gate 7). Each row was applied, run red
+and reverted.
+
+| row | mutation | observed red |
+|---|---|---|
+| 1224-H1 | `delta` yields every following route, changed or not | all three `delta` tests: `seeded: nothing changed` yields four routes |
+| 1224-H2 | `delta` drops its `follows_mute` check | `delta_follows_one_lane_at_a_time` and `a_send_without_follow_never_follows_…`: `b-send` is yielded |
+| 1224-H3 | `delta` stops after its first yield (`.take(1)`) | `delta_yields_every_following_send_…`: only `a-send`, not `b-send`; `a_send_without_follow_…`: only route 0 |
+| 1224-H4 | `follow` drops its `follows_mute` check | `a_send_without_follow_…`: `b-send does not follow` |
+| 1224-H5 | `follow` writes the lanes without the transaction shadow | `a_send_without_follow_…`: `state.transaction_open()` is false |
+
+The host-web rows of the same issue, `followed_lanes` swapping or duplicating a lane among them,
+are in `hosts/host-web/MUTATIONS.md`.
+
 ## Issue #1223 — the session shape's route IDs
 
 | row | mutation | observed red |
