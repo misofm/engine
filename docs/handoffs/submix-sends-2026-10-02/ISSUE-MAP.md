@@ -3,8 +3,9 @@
 Filed on 2026-10-02 by *Record the submix, send and VCA ruling* (#1197), under decision 13
 (`docs/rulings/submix-strips-sends-and-vca-2026-10-02.md`). The left column is the plan's slice
 label, which `DESIGN.md`, the `VERIFY`, `REVISION` and `APPLIED` documents in this folder, and the
-plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder is not committed
-except for the unfiled VCA drafts; each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
+plan files they cite as `issues/<label>-*.md`, use. The plan's `issues/` folder is not committed:
+the VCA drafts it held were removed when *VCA groups* (#1239) was filed (they stand at `8c6268967`);
+each filed spec is `.github/ISSUE_SPECS/<number>-*.md`, and its
 GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) were renamed in
 #1197's attempt 2 to the slug of their GitHub titles; their plan files keep the plan's names.
 A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes; the rows of
@@ -56,22 +57,32 @@ the verdicts (`verdicts/`).
 
 BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196.
 
-## Not filed
+## VCA groups (filed 2026-10-03)
 
-| Draft | Title | Where |
-|---|---|---|
-| V0 | VCA groups | `issues/V0-vca-groups-umbrella.md` (this folder) |
-| V1 | Declare VCA groups in the session | `issues/V1-declare-vca-groups-in-the-session.md` (this folder) |
-| V2 | Apply VCA offsets and mutes at preparation | `issues/V2-apply-vca-offsets-and-mutes-at-preparation.md` (this folder) |
-| V3 | Ride VCA groups live in the browser | `issues/V3-ride-vca-groups-live-in-the-browser.md` (this folder) |
-| V4 | Enumerate VCA groups and drive them from the SDK | `issues/V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` (this folder) |
-| V5 | Deliver value-only VCA edits to the running C ABI plan | `issues/V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` (this folder) |
+Filed as its own umbrella once batch K3 was delivered (#1224), every anchor re-verified on the K3
+head `8c6268967`. The drafts' six files became nine issues: the grammar was split from its session
+edits (on the #1199/#1204 precedent), the caps from preparation (#1206), and the host-core
+composition from the browser's admission (#1221/#1222). Each spec is
+`.github/ISSUE_SPECS/<number>-*.md`.
 
-The root files the VCA umbrella when batch K3 closes (#1224's Sol PASS and the K3 push), and
-re-verifies the drafts' anchors then. V4 closes the VCA batch V1-V4, so its draft carries the
-deliverable that removes the decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5); the
-filed V4 must keep it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are filed as *Bound route
-gain and matrix values* (#1237), and Q1's answer as *Let a strip override a console slot's link
-mode* (#1236). Both are standalone, outside #1196.
+| Label | Issue | Title | Draft |
+|---|---|---|---|
+| V0 | #1239 | VCA groups | `V0-vca-groups-umbrella.md` |
+| V1 | #1240 | Declare VCA groups in the session | `V1-declare-vca-groups-in-the-session.md` |
+| V2 | #1241 | Edit VCA groups through session transactions | `V1-declare-vca-groups-in-the-session.md` (its wire and edits) |
+| V3 | #1242 | Apply VCA offsets and mutes at preparation | `V2-apply-vca-offsets-and-mutes-at-preparation.md` |
+| V4 | #1243 | Count and cap VCA groups in host preparation and the C ABI | `V2-apply-vca-offsets-and-mutes-at-preparation.md` (its caps) |
+| V5 | #1244 | Compose live VCA moves in host-core | `V3-ride-vca-groups-live-in-the-browser.md` (its host-core state) |
+| V6 | #1245 | Ride VCA groups live in the browser | `V3-ride-vca-groups-live-in-the-browser.md` |
+| V7 | #1246 | Enumerate VCA groups and drive them from the SDK | `V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` |
+| V8 | #1247 | Deliver value-only VCA edits to the running C ABI plan | `V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` |
+
+#1240-#1246 are one batch, pushed once; #1246 closes it and carries the deliverable that removes the
+decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5). #1247 waits on #1053, #1225 and
+#1226. At filing, P13's VCA guard was widened to "every C ABI delta while the model declares a
+VCA" (a planner decision recorded in the ruling), and the specs of #1053, #1225 and #1226 were
+amended to carry it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are
+filed as *Bound route gain and matrix values* (#1237), and Q1's answer as *Let a strip override a
+console slot's link mode* (#1236). Both are standalone, outside #1196.
 
 The probe sources that `DESIGN.md` 3.2 and `VERIFY-1.md` name under `scratchpad/` were never committed.

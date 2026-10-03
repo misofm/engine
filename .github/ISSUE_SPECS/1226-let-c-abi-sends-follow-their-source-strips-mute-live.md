@@ -74,8 +74,10 @@ committed model.
 - **D4. The guard goes.** Remove the P13 follow guard from `live_builtin_delta`: a mute on a follow
   source is now live. The submix-strip and VCA parts of P13 are not this slice's (slice 27 lifted the
   first; the VCA umbrella owns the second).
-- **D5. #1053's spec note.** Mark the P13 note in #1053's spec as superseded by this slice, if the
-  spec is still in `.github/ISSUE_SPECS/`.
+- **D5. #1053's spec note.** Mark the follow-source bullet of the P13 note in #1053's spec as
+  superseded by this slice, if the spec is still in `.github/ISSUE_SPECS/`. The VCA bullet stays
+  until *Deliver value-only VCA edits to the running C ABI plan* (#1247), and this slice keeps the
+  VCA guard in `live_builtin_delta` (amended at filing of *VCA groups*, #1239).
 - **D6. Resources.** The `LiveRouteState` mirror and its shadow are charged in `capi_resources`
   (`crates/capi/src/runtime/compile.rs:109-213`), and the `resource_lifecycle` oracles change by
   exactly those rows.

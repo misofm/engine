@@ -106,7 +106,11 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
   - **any** change to a route into the output;
   - a change to `left_mute` or `right_mute` of a strip that, in the post-commit model, is the
     source of a `follows_mute` route (the P13 follow guard, kept until *Let C ABI sends follow their
-    source strip's mute live*).
+    source strip's mute live*);
+  - **any** delta while the pre- or post-commit model declares at least one VCA (the P13 VCA guard,
+    kept until *Deliver value-only VCA edits to the running C ABI plan*, #1247; added at filing of
+    *VCA groups*, #1239): D3's `source_lane_muted` reads raw committed mutes, which would reopen a
+    VCA-muted member's following send.
 - **D2. Ramp lengths.** Every live record, strip and route alike, uses the fixed ramp length #1053
   ruled for its fader and mute records (its A2 D3), derived at preparation. A per-change smoothing is
   used only where the wire carries one: a strip `pan` or `matrix` uses its own `smoothing_samples`,

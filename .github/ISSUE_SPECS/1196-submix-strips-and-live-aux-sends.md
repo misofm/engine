@@ -129,12 +129,11 @@ launch-critical features, and they never hold this umbrella open:
 Whether route fusion (deferred item O1) earns a brief is the weekly performance pass's decision on
 #1229's numbers (DESIGN 6.3, P14).
 
-### VCA groups (a separate umbrella, not yet filed)
+### VCA groups (a separate umbrella, filed as #1239)
 
-VCA groups are in scope (delegated decision (a)). Their umbrella and slices are drafted at
-`docs/handoffs/submix-sends-2026-10-02/issues/V0`-`V5`. The root files them when batch K3 closes
-(#1224's Sol PASS and the K3 push), and re-verifies their anchors then. Nothing in this umbrella
-depends on VCA.
+VCA groups are in scope (delegated decision (a)). Their umbrella, *VCA groups* (#1239), was filed
+when batch K3 was delivered, with every anchor re-verified on the K3 head (`8c6268967`); its slices
+are #1240-#1247. Nothing in this umbrella depends on VCA.
 
 ## Batches (CI-conscious mode: one push per batch)
 
@@ -146,7 +145,7 @@ depends on VCA.
 | K3 | #1215-#1224 | Route mute and follow-mute (two migrations, one push), the activity rule, live sends, browser sends, live follow-mute. |
 | C1 (after #1053) | #1225, #1226 | The C ABI value-only path, then its follow-mute composition. |
 | BM (after K3) | #1227, #1228, #1229 | Successor tooling and evidence; not launch-critical. |
-| VCA (after K3) | V1-V4, then V5 after #1226 and #1053 | Filed when K3 closes. |
+| VCA (after K3) | #1240-#1246, then #1247 after #1053, #1225 and #1226 | Filed as its own umbrella, #1239. |
 
 `AGENTS.md` allows one launch-critical implementation at a time, and K2 and K3 touch overlapping
 host-web and host-core files, so the batches run in order. K3's #1215-#1220 may be drafted during K2
@@ -160,9 +159,10 @@ SDK and rendered by the browser and the C ABI.
 ## Coordination
 
 - **#1053** (P13). Until the C ABI composes the dependants, a committed-model delta that changes a
-  submix strip's field (until #1225), the mute of a follow-mute source (until #1226), or (later) a
-  VCA member's fader is structural. #1053's spec carries the rule and the two host-core renames that
-  touch its code.
+  submix strip's field (until #1225), the mute of a follow-mute source (until #1226), or (from
+  #1242, until #1247) any delta of a session that declares a VCA is structural. #1053's spec carries
+  the rule and the two host-core renames that touch its code; #1225's and #1226's carry the VCA
+  part.
 - **#210.** Its "Live send levels" bullet is delivered here: #1220-#1223 in the browser and #1225 on
   the C ABI. Its N-output part is unchanged.
 - **#1054.** Route ramp lengths use each change's own smoothing until #1054 gives the session a

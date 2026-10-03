@@ -110,11 +110,19 @@ Ruling:
   - **(a) VCA groups are in scope** (DESIGN 2.2a).
     - A VCA is a control-only group. It carries no audio. Its per-lane dB offset adds to each
       member's own fader, and its mute ORs into each member's effective mute.
-    - It is its own umbrella, *VCA groups*, drafted at `docs/handoffs/submix-sends-2026-10-02/issues/V0`-`V5`.
-      The root files it once batch K3 of #1196 closes (the Sol PASS and push of *Let a send follow
-      its source strip's mute live in the browser*, #1224), and re-verifies its anchors then.
-    - Only its C ABI slice (V5) also waits on #1053 and on *Let C ABI sends follow their source
-      strip's mute live* (#1226). Nothing in #1196 depends on VCA.
+    - It is its own umbrella, *VCA groups* (#1239), filed on 2026-10-03 once batch K3 of #1196 was
+      delivered (*Let a send follow its source strip's mute live in the browser*, #1224). Its anchors
+      were re-verified on the K3 head `8c6268967`, and a fresh Sol adversarial verification was
+      folded in. Its slices are #1240-#1247. The drafts (`issues/V0`-`V5` in the handoff folder) were
+      split into eight slices and removed at filing; git history keeps them.
+    - Only its C ABI slice, *Deliver value-only VCA edits to the running C ABI plan* (#1247), also
+      waits on #1053, #1225 and *Let C ABI sends follow their source strip's mute live* (#1226).
+      Nothing in #1196 depends on VCA.
+    - **Planner decision at filing, subject to owner review:** P13's VCA guard is widened. It was
+      "any fader field of a VCA member"; it is now "every C ABI delta while the pre- or post-commit
+      model declares a VCA", until #1247. #1225's route records and #1226's follow mirror read raw
+      committed mutes, so the narrow guard would let a live send edit reopen a VCA-muted member's
+      following send. The specs of #1053, #1225 and #1226 carry the widened rule.
     - Out of its scope: VCA solo, VCA trim of send levels, and VCA automation.
   - **(b) A submix strip is the same dual-mono strip a track has** (DESIGN 2.2b). L and R have
     independent state and parameters; channels link only through a declared `link_mode`; and
@@ -215,11 +223,11 @@ Ruling:
   #1229's numbers (DESIGN 6.3, P14). No performance tier is committed blind.
 - **#1053 and #210.** #1053's spec carries the coordination rule (P13): until the slice named there
   lands, a committed-model delta that touches a submix strip, the mute of a follow-mute source, or
-  (later) a VCA member's fader is structural on the C ABI. #210's "Live send levels" bullet is owned
-  by #1196: live send levels in the browser through *Ramp live send coefficients on the render
-  plane* (#1220) to *Enumerate sends and drive them from the SDK* (#1223), and on the C ABI by
-  *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225). The N-output
-  part of #210 is unchanged.
+  (from #1242, until #1247) any delta of a session that declares a VCA is structural on the C ABI.
+  #210's "Live send levels" bullet is owned by #1196: live send levels in the browser through
+  *Ramp live send coefficients on the render plane* (#1220) to *Enumerate sends and drive them from
+  the SDK* (#1223), and on the C ABI by *Deliver value-only send and submix-strip edits to the
+  running C ABI plan* (#1225). The N-output part of #210 is unchanged.
 
 The slices, their dependencies, their gates and the batches are in #1196.
 
@@ -230,7 +238,8 @@ The slices, their dependencies, their gates and the batches are in #1196.
   - K3: #1215-#1224, route mute, follow-mute and live sends in the browser;
   - C1 (after #1053): #1225 and #1226, the C ABI;
   - BM, after K3: #1227-#1229.
-- **The VCA umbrella** is filed when K3 closes and runs after it.
+- **The VCA umbrella** (#1239) was filed when K3 was delivered and runs after it: batch VCA is
+  #1240-#1246, pushed once; #1247 follows #1053, #1225 and #1226.
 - **Decided, not landed.** `AGENTS.md` states these promises with a decision-13 qualifier until
   they land. The qualifier names the point's authority: "Approved by decision 13" for an owner
   decision or an owner-delegated answer, and "Planned under decision 13 ..., subject to owner
@@ -242,6 +251,6 @@ The slices, their dependencies, their gates and the batches are in #1196.
     the banking paragraph's "tracks" into "strips";
   - *Let a send follow its source strip's mute live in the browser* (#1224) removes them from the
     route-mute and follow-mute sentences;
-  - V4, *Enumerate VCA groups and drive them from the SDK*, which closes the VCA batch V1-V4,
-    removes the one on the VCA sentence. V5 (the C ABI) is not needed for that: from V2 on, VCAs
-    apply at preparation on every host.
+  - *Enumerate VCA groups and drive them from the SDK* (#1246), which closes the VCA batch
+    #1240-#1246, removes the one on the VCA sentence. #1247 (the C ABI) is not needed for that: from
+    *Apply VCA offsets and mutes at preparation* (#1242) on, VCAs apply at preparation on every host.
