@@ -40,7 +40,7 @@
 //!
 //! Restore is **per lane**. `TrackFaderRecord::Mute` carries one `muted` bool, so a track whose
 //! user mute is `[true, false]` needs two records, not one; the worst case for a whole session is
-//! `2 * strip_count` records. [`LiveControlSoloState::track_delta`] is what states that bound.
+//! `2 * strip_count` records. [`LiveControlSoloState::strip_delta`] is what states that bound.
 //!
 //! # Never emit a redundant mute record
 //!
@@ -54,7 +54,7 @@
 //! > a solo-derived record is emitted for exactly those lanes whose effective mute **changed**.
 //!
 //! [`LiveControlSoloState::emitted_mute`] is the mirror of what the render plane was last told, and
-//! [`LiveControlSoloState::track_delta`] is the difference between it and the composed effective
+//! [`LiveControlSoloState::strip_delta`] is the difference between it and the composed effective
 //! mute.
 //!
 //! # The transaction
@@ -161,7 +161,7 @@ impl LiveControlSoloState {
 
     /// Strips these live controls address: the tracks, then the submixes.
     #[must_use]
-    pub const fn track_count(&self) -> usize {
+    pub const fn strip_count(&self) -> usize {
         self.solo.len()
     }
 
@@ -263,7 +263,7 @@ impl LiveControlSoloState {
 
     /// Record that a mute record for `lanes` has been staged for this strip.
     ///
-    /// The caller stages the record; this is the mirror update that keeps [`Self::track_delta`]
+    /// The caller stages the record; this is the mirror update that keeps [`Self::strip_delta`]
     /// from staging it a second time in the same submission.
     pub fn record_emitted(&mut self, strip: usize, lanes: BuiltinLaneSelector, muted: bool) {
         if strip >= self.emitted.len() {
@@ -279,7 +279,7 @@ impl LiveControlSoloState {
 
     /// The records this strip still owes -- never a redundant one, at most two.
     #[must_use]
-    pub fn track_delta(&self, strip: usize) -> LiveControlMuteDelta {
+    pub fn strip_delta(&self, strip: usize) -> LiveControlMuteDelta {
         let left = self.effective_mute(strip, 0);
         let right = self.effective_mute(strip, 1);
         match (
@@ -381,9 +381,9 @@ mod tests {
             );
         }
         // One `Both` record per muted track; the soloed track owes nothing.
-        assert_eq!(solo.track_delta(1), [None, None]);
+        assert_eq!(solo.strip_delta(1), [None, None]);
         assert_eq!(
-            solo.track_delta(0),
+            solo.strip_delta(0),
             [Some((BuiltinLaneSelector::Both, true)), None]
         );
     }
@@ -395,21 +395,21 @@ mod tests {
         assert!(solo.set_solo(1, true));
         // Track 0's left was already muted; only its right lane changed.
         assert_eq!(
-            solo.track_delta(0),
+            solo.strip_delta(0),
             [Some((BuiltinLaneSelector::Right, true)), None]
         );
         solo.record_emitted(0, BuiltinLaneSelector::Right, true);
-        assert_eq!(solo.track_delta(0), [None, None]);
+        assert_eq!(solo.strip_delta(0), [None, None]);
 
         // Disengaging restores the asymmetric set: left stays muted, right unmutes.
         assert!(solo.set_solo(1, false));
         assert!(!solo.any_solo());
         assert_eq!(
-            solo.track_delta(0),
+            solo.strip_delta(0),
             [Some((BuiltinLaneSelector::Right, false)), None]
         );
         solo.record_emitted(0, BuiltinLaneSelector::Right, false);
-        assert_eq!(solo.track_delta(0), [None, None]);
+        assert_eq!(solo.strip_delta(0), [None, None]);
     }
 
     /// Both lanes changing to *different* values is the only two-record case.
@@ -422,7 +422,7 @@ mod tests {
         // disagree, so one `Both` record cannot carry it.
         assert!(solo.set_user_mute(0, BuiltinLaneSelector::Left, true));
         assert_eq!(
-            solo.track_delta(0),
+            solo.strip_delta(0),
             [
                 Some((BuiltinLaneSelector::Left, true)),
                 Some((BuiltinLaneSelector::Right, false)),
@@ -545,7 +545,7 @@ mod tests {
             assert_eq!(bus_mutes(&solo), settled, "after solo({track}) = {engaged}");
             for strip in [3, 4] {
                 assert_eq!(
-                    solo.track_delta(strip),
+                    solo.strip_delta(strip),
                     [None, None],
                     "bus {strip} owes nothing"
                 );
@@ -571,7 +571,7 @@ mod tests {
         assert!(!solo.transaction_open());
         // Nothing was solo-muted by the refused requests.
         for strip in 0..5 {
-            assert_eq!(solo.track_delta(strip), [None, None], "strip {strip}");
+            assert_eq!(solo.strip_delta(strip), [None, None], "strip {strip}");
         }
         // A real solo still counts exactly once, and a bus request does not add to it.
         assert!(solo.set_solo(0, true));

@@ -229,12 +229,109 @@ All gates are native tests in `hosts/host-web/src/tests.rs` unless stated, at 48
     - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
     - `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
 
+## Amendment A1 (earlier K2 verdicts, recorded at attempt 1)
+
+- **A1a (#1210 open item, K2 verdict).** host-web `observation_selection_for_address` resolves its
+  index per strip (tracks, then submixes, as `strip_index`), so a selected read of a bus tap at
+  `T + j` succeeds. Gate: a headless `readObservations` on a bus tap returns a row with
+  `trackId: "bus"`; the mutation "tracks-only lookup" must turn it red.
+- **A1b (#1208 condition).** A browser boot naming a bus as master reports `masterGrDb`; gate 6
+  covers it.
+- **A1c.** Gate 5 must turn red under "restore #1207's GR skip of strip indices `>= T`" (run and
+  recorded).
+- **A1d (#1211 PASS verdict MINOR-1).** `LiveControlSoloState::track_count()` becomes
+  `strip_count()` and `track_delta()` becomes `strip_delta()` (it counts strips while
+  `HostLiveControlHandles::track_count` counts tracks). host-web's own copy of the effective-mute
+  formula is deleted in favour of host-core's `effective_mute` (D3).
+- **Authorized paths added:** `crates/host-core/src/solo.rs` (the A1d rename, its callers and
+  docs; widens "doc comments only"), `sdk/test/capability-evals.mjs` (the A1a and D5a headless
+  gates).
+
 ## Evidence
 
 - The output of every gate command above, from the PR's head commit.
 - Each new test's name with its one-sentence test-value answer.
 - The list of per-track tables and band spellings that became per-strip.
 - The ARTIFACT CHANGED report.
+
+### Attempt 1 record (Terra)
+
+- **D1 (per strip, `N = T + S`, tracks first).** `ReadyOwnership::strip_count()`; bands in
+  `queue_available`, `push`, `preflight_effect`; `builtin_input_slot` and
+  `prepared_queue_address`; every admission slot (generic guard, the three per-strip bands, the
+  prepared-owner markers, coalescing, companion validation, push and commit passes);
+  `queue_count = 3N + effects`; `command_staging_count(N)` (`2N` solo term);
+  `input_filter_shadows` from track then submix builtins; the solo seeds;
+  `observation_selection_for_address` (A1a). The meter frame and GR fold were already per strip
+  (#1209).
+- **D2.** No kind-specific code: kinds 1-8, 10-12 reach a bus through the moved bound and bands.
+- **D3.** Seeds per strip (tracks `solo_safe: false`, submixes `true`, from each fader's mutes);
+  kind 4 takes `ready.solo.effective_mute(strip, first covered lane)`; the inline formula is gone
+  (no copy of it left in host-web); coalescing walks strips.
+- **D4.** Kind 9 checks `ready.solo.solo_safe(strip)` after decoding and refuses
+  `COMMAND_REASON_NOT_SOLOABLE` (result `RESULT_INVALID_ARGUMENT`) at the record's index.
+- **D5.** Needed no code beyond D1: the fold and master read were per strip since #1209/#1208.
+- **D5a.** Worklet compares against `trackCount + submixIds.length`; SDK against
+  `live_control_track_count + live_control_submix_count`.
+- **D6.** Docs at the cited sites (`WebMeterHeader.master_track_plus_one`,
+  `WebBootOptions.live_control_master_track_plus_one`, `ReadyOwnership.master_track`, the `.d.ts`
+  and its byte mirror, `abi.ts`, the `host-mirror.ts` message, both docs). `COMMAND_SOLO` doc
+  names `notSoloable`. `solo.rs` module doc already said "strip"; only A1d touched it.
+- **A1d.** Renamed; callers `host-web/src/lib.rs` (coalescing) and `tests.rs` (two
+  `strip_count()`); two existing `MUTATIONS.md` rows name `strip_delta`.
+- **Tests and test value** (each mutation applied, run red, reverted; rows in
+  `hosts/host-web/MUTATIONS.md`). Sessions feed distinct splitmix noise per lane per source.
+  - `live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track` (gate 1; 13 single-kind commands
+    incl. per-lane fader/mute/trim/polarity, insert parameter, bypass on/off, subscribe and
+    unsubscribe, then kind 12 through the prepared companion and one 4-kind batch; smoothing 0 and
+    480; every output sample bit-compared): red if a strip index is refused, misbanded or reaches
+    another strip. Mutations: guard on `tracks.len()` -> red (pan refused); `push` band on
+    `tracks.len()` -> red (255); `queue_count` per track -> red (7); shadows tracks-only -> red.
+  - `a_bus_mute_command_equals_the_bus_booted_muted` (gate 2a): red if a bus mute has no owner.
+    Mutation: seeds per track only -> red (`unknownTrack`).
+  - `soloing_a_track_keeps_its_bus_and_return_audible` (gate 2b; also proves `a` reaches the
+    output only via the submixes): red if solo composition mutes a strip past `T`. Mutation:
+    submixes seeded `solo_safe: false` -> red.
+  - `a_solo_at_a_bus_index_refuses_not_soloable_and_stages_nothing` (gate 2c; both buses, behind a
+    valid record): red if a bus can be soloed or the refusal's reason/index moves. Mutations: drop
+    the D4 check -> red (reason 2); `solo_safe: false` -> red (admitted).
+  - `a_bus_can_be_unmuted_while_a_track_is_soloed` (gate 3): red if kind 4 composes inline
+    without `solo_safe`. Mutation: the old inline formula -> red (block 4 differs).
+  - `a_bus_record_behind_a_bad_track_record_is_never_pushed` (gate 4a): red if a bus record is
+    pushed before validation ends. Mutation: push bus faders in pass one -> red.
+  - `overfilling_a_bus_queue_is_typed_backpressure_with_no_push` (gate 4b): red if the room check
+    skips a bus queue. Mutation: skip bus fader slots in the room pass -> red (255).
+  - `a_bus_compressor_reports_its_gain_reduction_in_the_bus_word` (gate 5 + A1a native): bus word
+    bit-equal to the track twin's and > 0, track words 0, selected read at `T` names `bus`/`comp`
+    with the twin's values, `T + 1` invalid, disarm returns the word to 0. Red if a bus effect
+    cannot be armed, folds elsewhere or is skipped, or the read is tracks-only. Mutations (A1c):
+    #1207's `>= T` GR skip restored -> red (word 0); tracks-only lookup -> red.
+  - `a_bus_limiter_can_be_the_designated_master` (gate 6, A1b): limiter ceiling -6 dB on the bus,
+    master word `T + 1`; `master_gr_present == 1`, master word == bus word > 0; `T + S + 1`
+    refuses `RESULT_REFUSED_DOCUMENT` with `host.observation.master_track`. Red if the master
+    reading is not the bus's. Mutation: `>= T` GR skip -> red (`master_gr_present` 0).
+  - `bus_edits_and_a_bus_observation_admit_and_render_without_allocating` (gate 7; 7-record batch:
+    bus fader, pan, trim, insert parameter, subscribe, mute, plus a track solo): 0/0. Mutation: a
+    `submixes.len()` `Vec` in admission -> red (1 allocation).
+  - `capability-evals.mjs` "a selected read of a bus tap names the bus, unarmed and then armed at
+    its strip index" (A1a headless): red if host-web resolves the read against tracks only.
+    Mutation: tracks-only lookup, artifact rebuilt into a scratch dir -> red (`invalidArgument`).
+  - `capability-evals.mjs` "a bad effect at a bus index is an unknown effect, and only past every
+    strip an unknown track" (D5a): red if the SDK classifier bounds by the track count. Mutation:
+    track count only -> red. The worklet's twin classifier has no harness path (no existing test
+    drives `receiveEqTargetConfig`), so its one-line change is untested beyond the build gates.
+- **Gate 8:** no existing host-web test edited except the two A1d renames; all pass.
+- **Gates** (x86_64 AVX2; A = `target/ci/k2-1213-artifacts`, B = `target/ci/k2-1213-named`), all
+  rc 0: `build-web-audioworklet.sh --named-twin`; `check-web-audioworklet.sh`;
+  `check-browser-expected-resources.py --artifacts` (32 red mutations); `test-web-audioworklet.sh`;
+  `check-sdk-generated.sh`; `check-sdk-types.sh`; `check-sdk-headless.sh` (341 pass, 0 fail); DESIGN
+  section 7 workspace test command (103 binaries, 1172 passed, 0 failed); `check-/test-` host-core,
+  realtime and workspace policy; `cargo fmt --check`; workspace clippy `-D warnings`; `cargo doc`
+  `-D warnings`. `run-aarch64-tests.sh debug`: no arm64 host; at the K2 push.
+- **ARTIFACT CHANGED:** shipped module `7d6c0a8b...0f90b` (2 695 834 B) against #1212's
+  `19d19812...`; the bytes move because admission, the build tables and the worklet classifier
+  changed. No re-pin; CI's `artifact-identity` line is the authority.
+- No digest, oracle or canonical text re-pinned; no test superseded.
 
 ## Dependencies
 

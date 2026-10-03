@@ -1572,7 +1572,9 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     let reason = 0;
     if (result === RESULT_INVALID_ARGUMENT) {
-      reason = message.trackIndex >= this.trackCount
+      // Issue #1213 D5a: the index is a strip index, tracks first, then submixes, so only an
+      // index past every strip is an unknown track; a bad rack or effect on a bus is not.
+      reason = message.trackIndex >= this.trackCount + this.submixIds.length
         ? COMMAND_REASON_UNKNOWN_TRACK
         : !effectRack(message.rack)
           ? COMMAND_REASON_UNKNOWN_RACK

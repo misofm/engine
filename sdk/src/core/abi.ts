@@ -114,7 +114,10 @@ export interface BootOptions {
   readonly maximumMemoryBytes?: bigint;
   /** Optional prepared continuous-spectrum hop, selected outside the packed boot options block. */
   readonly spectrumHopFrames?: 256 | 512 | 1024 | 2048;
-  /** The four live-control words. Absent attaches no live controls at all. */
+  /**
+   * The four live-control words. Absent attaches no live controls at all. `masterTrackPlusOne` is
+   * the designated master's strip index (tracks first, then submixes) plus one, or `0` for none.
+   */
   readonly liveControls?: {
     readonly commandQueueRecords?: number;
     readonly meterBlocks?: number;

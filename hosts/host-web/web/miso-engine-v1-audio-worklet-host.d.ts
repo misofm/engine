@@ -741,11 +741,13 @@ export interface MisoWebBootOptions {
   /// `MisoCommandReason.ObservationUnbound`. Requires `liveControlCommandQueueRecords !== 0n`,
   /// because a subscription rides the effect's own command queue.
   liveControlObservationTaps: bigint;
-  /// The designated master track **plus one**, or `0n` for none (issue 143).
+  /// The designated master strip index (tracks first, then submixes) **plus one**, or `0n` for
+  /// none (issue 143). `T + j + 1` designates submix `j`, so a mix bus with a limiter can report
+  /// `masterGrDb` (issue 1213).
   ///
-  /// V1 has no structural master bus -- submixes and outputs carry no effect racks -- so
-  /// `masterGrDb` is a designation rather than a discovery. Plus one because zero has to keep
-  /// meaning "unset". Requires `liveControlObservationTaps !== 0n`.
+  /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
+  /// Plus one because zero has to keep meaning "unset". Requires
+  /// `liveControlObservationTaps !== 0n`.
   liveControlMasterTrackPlusOne: bigint;
   /// One optional prepared graph boundary; `null` retains no capture storage.
   spectrum?: MisoSpectrumBootOptions | null;

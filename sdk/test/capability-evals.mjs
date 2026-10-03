@@ -358,6 +358,97 @@ describe("issue 321 -- complete headless ABI capability parity", () => {
     }
   });
 
+  test("a selected read of a bus tap names the bus, unarmed and then armed at its strip index", async () => {
+    // Issue #1213 (K2 verdict requirement (a)). The SDK resolves a bus tap to its strip index
+    // `T + j`, and host-web must resolve that index per strip -- tracks, then submixes. Red if the
+    // host looks the index up among the tracks only: the read then fails with `invalidArgument`.
+    // The arm is kind 7 at the bus's strip index through the shipped module.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: {
+        commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords,
+        observationTaps: 2,
+      },
+    });
+    try {
+      const map = engine.sessionMap();
+      const busIndex = map.tracks.length + map.submixes.indexOf("bus");
+      assert.equal(busIndex, 1, "strip order: the track, then the bus");
+      const binding = engine.observationMap().bindings.find((row) => row.trackId === "bus");
+      assert.ok(binding);
+      const selection = [{
+        trackId: "bus", rack: binding.rack, effectSlotId: "bus-comp", tapId: binding.tapIds[0],
+        channels: "both",
+      }];
+      const [unarmed] = engine.readObservations(selection);
+      assert.equal(unarmed.trackId, "bus");
+      assert.equal(unarmed.effectSlotId, "bus-comp");
+      assert.equal(unarmed.status, "unarmed");
+
+      const writer = new LiveControlWriter({
+        submit: (records, count) => engine.submitCommands(records, count),
+      });
+      writer.stage({
+        kind: "observeSubscribe",
+        trackIndex: busIndex,
+        rack: binding.rack === "console" ? 3 : 1,
+        channel: 255,
+        effectIndex: 0,
+        parameterId: binding.tapIds[0],
+        smoothingSamples: 1,
+        values: [0, 0, 0, 0],
+      });
+      assert.equal((await writer.flush()).admitted, 1);
+      for (let block = 0; block < 4; block += 1) {
+        feed(engine, 1n, BigInt(block * engine.shape().quantumFrames), 41 + block);
+        engine.render();
+      }
+      const [armed] = engine.readObservations(selection);
+      assert.equal(armed.trackId, "bus");
+      assert.notEqual(armed.status, "unarmed", "kind 7 at the bus's strip index armed its tap");
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a bad effect at a bus index is an unknown effect, and only past every strip an unknown track", async () => {
+    // Issue #1213 D5a. The prepared path classifies a refused configuration copy itself; the
+    // index is a strip index, so the bound is `T + S`. Red if the classifier compares against the
+    // track count: the bus's missing insert would then report `unknownTrack`.
+    const engine = await createOfflineEngine(busObservationDocument(), {
+      asset,
+      liveControls: { commandQueueRecords: ABI_LAYOUT.constants.defaultCommandQueueRecords },
+    });
+    try {
+      const refusal = async (trackIndex) => {
+        const writer = new LiveControlWriter({
+          submit: (records, count) => engine.submitCommands(records, count),
+        });
+        writer.stage({
+          kind: "effectParam",
+          trackIndex,
+          rack: 1, // inserts
+          channel: 2,
+          effectIndex: 7,
+          parameterId: 1,
+          smoothingSamples: 0,
+          values: [-20, 0, 0, 0],
+        });
+        // The writer turns a caller-error refusal into a usage error that names the reason.
+        let reason;
+        await assert.rejects(writer.flush(), (error) => {
+          reason = /refused a batch for (\w+) at record 0/.exec(error.message)?.[1];
+          return error instanceof MisoUsageError && reason !== undefined;
+        });
+        return reason;
+      };
+      assert.equal(await refusal(1), "unknownEffect", "the bus at strip index T + 0");
+      assert.equal(await refusal(2), "unknownTrack", "one past the last strip");
+    } finally {
+      engine.dispose();
+    }
+  });
+
   test("a session prepared without meters refuses the lease as unsupported", async () => {
     const engine = await createOfflineEngine(sessionDocument(), { asset });
     try {

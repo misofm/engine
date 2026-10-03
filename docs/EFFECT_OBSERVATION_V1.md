@@ -128,9 +128,12 @@ tap keeps its own cell.
 `masterGrDb` is `null`, never `0`, when no track was designated or the designated track published
 no window: `0` would be indistinguishable from "the master is not reducing".
 
-V1 has no structural master bus — submixes and outputs carry no effect racks — so the master
-reading is a **designation** (`live_control_master_track_plus_one`), not a discovery. The successor
-is effect racks on submixes.
+V1 has no structural master bus, so the master reading is a **designation**
+(`live_control_master_track_plus_one`), not a discovery. The word is the designated strip index
+plus one, tracks first, then submixes (issue #1213): `T + j + 1` designates submix `j`, so a mix bus
+whose limiter is observed reports its gain reduction as `masterGrDb`. A command's `trackIndex` is the
+same strip index, so kind 7 at `T + j` arms a bus effect's tap and its reading folds into
+`submixGrDb[j]`.
 
 ## Plan replacement drops subscriptions
 

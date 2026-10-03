@@ -63,7 +63,7 @@ export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {
   }
   if (masterTrackPlusOne !== 0n && observationTaps === 0n) {
     throw new MisoUsageError(
-      "a designated master track is a designation over observed effects, so "
+      "a designated master strip is a designation over observed effects, so "
       + "liveControlMasterTrackPlusOne requires liveControlObservationTaps",
     );
   }

@@ -1243,12 +1243,15 @@ export class WasmBoundary {
     }
     let reason = commandReasonValue("none");
     if (result === constantValue("resultCodes", "invalidArgument")) {
-      const trackCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle));
+      // Issue #1213 D5a: the index is a strip index (tracks, then submixes), so the bound is the
+      // strip count; a bad rack or effect on a bus is not an unknown track.
+      const stripCount = Number(this.#exports.miso_engine_web_v1_live_control_track_count(handle))
+        + Number(this.#exports.miso_engine_web_v1_live_control_submix_count(handle));
       // An effect lives in an insert (`1`) or a console slot (`3`); anything else, the retired
       // `0` and `2` included, is an unknown rack, as the worklet classifies it (#1096).
       const effectRack = address.rack === constantValue("racks", "inserts")
         || address.rack === constantValue("racks", "console");
-      reason = address.trackIndex >= trackCount
+      reason = address.trackIndex >= stripCount
         ? commandReasonValue("unknownTrack")
         : !effectRack
           ? commandReasonValue("unknownRack")

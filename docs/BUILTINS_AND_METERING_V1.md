@@ -129,8 +129,12 @@ by a bounded per-track queue of mute records. Solo-in-place adds a state machine
 `LiveControlSoloState` in `host-core` — which composes
 
 ```
-effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)
+effective_mute(strip, lane) = user_mute || (any_solo && !solo_safe(strip) && !soloed(strip))
 ```
+
+Submixes are solo-safe: a submix is never soloed (a solo at its strip index refuses with
+`notSoloable`) and never solo-muted, so a soloed track stays audible through every bus and return it
+feeds (issue #1213).
 
 and emits the *existing* mute records into the *existing* queues. The render thread cannot tell a
 solo-derived mute from a user mute, so every property the mute path already has is inherited

@@ -4256,7 +4256,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
         let state = host.live_control_solo().expect("solo state");
         (
             state.solo_count(),
-            (0..state.track_count())
+            (0..state.strip_count())
                 .map(|track| {
                     (
                         state.solo(track),
@@ -4322,7 +4322,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
         let state = host.live_control_solo().expect("solo state");
         (
             state.solo_count(),
-            (0..state.track_count())
+            (0..state.strip_count())
                 .map(|track| {
                     (
                         state.solo(track),
@@ -9100,4 +9100,1224 @@ fn a_live_bypass_cannot_lift_the_delay_or_multiband_session_bypass() {
             "un-bypassing insert {effect_index} is audible exactly when its bypass is a shunt"
         );
     }
+}
+
+// Issue #1213: browser live commands address submix strips. The index word is a strip index:
+// tracks first, then submixes in canonical order.
+
+const STRIP_QUANTUM: u32 = 128;
+/// Source length of every #1213 session, in quanta: longer than any gate renders.
+const STRIP_SOURCE_BLOCKS: u64 = 160;
+
+/// A deterministic sample in `(-0.9, 0.9)`, never zero, for lane `lane` of feed `feed` at
+/// absolute frame `frame` (splitmix64 of the three), so every lane of every feed differs and no
+/// two frames repeat: a lane swap or an index error cannot hide behind a constant (VERIFY-2 M13).
+fn strip_sample(feed: u64, lane: u64, frame: u64) -> f32 {
+    let mut z = feed.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ lane.wrapping_add(1).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ frame.wrapping_add(1).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let unit = (z >> 40) as f32 / (1_u64 << 24) as f32;
+    let sample = (unit * 2.0 - 1.0) * 0.9;
+    if sample == 0.0 { 0.5 } else { sample }
+}
+
+/// Feed `feed`'s two lanes for one block.
+fn strip_planes(feed: u64, block: u64) -> [Vec<f32>; 2] {
+    let quantum = u64::from(STRIP_QUANTUM);
+    let lane = |lane: u64| {
+        (block * quantum..(block + 1) * quantum)
+            .map(|frame| strip_sample(feed, lane, frame))
+            .collect::<Vec<f32>>()
+    };
+    [lane(0), lane(1)]
+}
+
+fn submit_strip_source(
+    host: &mut AudioWorkletEngineHost,
+    id: &str,
+    block: u64,
+    planes: &[Vec<f32>; 2],
+) {
+    let views: [&[f32]; 2] = [&planes[0], &planes[1]];
+    assert_eq!(
+        host.submit_source(
+            id.as_bytes(),
+            1,
+            block * u64::from(STRIP_QUANTUM),
+            48_000,
+            &views,
+            STRIP_QUANTUM,
+            false,
+        ),
+        RESULT_OK,
+        "source {id} block {block}"
+    );
+}
+
+fn strip_id(text: &str) -> session::StableId {
+    session::StableId::parse(text).expect("stable id")
+}
+
+/// The observation fixture emptied of tracks, sources and routes, returning the source, a
+/// transparent track template, the fixture's compressor insert and a track-to-output route.
+fn strip_base() -> (
+    session::SessionModel,
+    session::Source,
+    session::Track,
+    session::Effect,
+    session::Route,
+) {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("accepted observation fixture");
+    model.quantum_frames = STRIP_QUANTUM;
+    let mut source = model.sources.pop().expect("fixture source");
+    source.frames = u64::from(STRIP_QUANTUM) * STRIP_SOURCE_BLOCKS;
+    let mut track = model.tracks.swap_remove(0);
+    let compressor = track.inserts.effects[0].clone();
+    let route = model.routes.swap_remove(0);
+    model.tracks.clear();
+    model.routes.clear();
+    model.sources.clear();
+    model.automation.clear();
+    let unity = session::Submix::unity(strip_id("unused"), &model.console);
+    track.builtins = unity.builtins;
+    track.console = unity.console;
+    track.inserts = unity.inserts;
+    track.fader = unity.fader;
+    track.matrix_or_pan = unity.matrix_or_pan;
+    (model, source, track, compressor, route)
+}
+
+/// Adds a source and a track reading it, both named `id`, with `track`'s strip.
+fn strip_add_track(
+    model: &mut session::SessionModel,
+    source: &session::Source,
+    track: &session::Track,
+    id: &str,
+) {
+    let mut source = source.clone();
+    source.id = strip_id(id);
+    model.sources.push(source);
+    let mut track = track.clone();
+    track.id = strip_id(id);
+    track.source_id = strip_id(id);
+    model.tracks.push(track);
+}
+
+/// A route `id` from `source`'s post-pan point to `destination`, with `matrix` at 0 dB.
+fn strip_route(
+    template: &session::Route,
+    id: &str,
+    source: session::RouteSource,
+    destination: session::RouteDestination,
+    matrix: [f32; 4],
+) -> session::Route {
+    let mut route = template.clone();
+    route.id = strip_id(id);
+    route.source = source;
+    route.destination = destination;
+    route.channel_matrix = session::ChannelMatrix {
+        ll: matrix[0],
+        lr: matrix[1],
+        rl: matrix[2],
+        rr: matrix[3],
+    };
+    route.gain_db = 0.0;
+    route
+}
+
+fn strip_post_pan(id: &str, submix: bool) -> session::RouteSource {
+    if submix {
+        session::RouteSource::Submix {
+            submix_id: strip_id(id),
+            tap: session::SendTap::PostPan,
+        }
+    } else {
+        session::RouteSource::Track {
+            track_id: strip_id(id),
+            tap: session::SendTap::PostPan,
+        }
+    }
+}
+
+fn strip_into(bus: &str) -> session::RouteDestination {
+    session::RouteDestination::SubmixInput {
+        submix_id: strip_id(bus),
+    }
+}
+
+/// Strip `S` of gates 1, 4, 5 and 7: per-lane trims and input filters, `insert` (the fixture's
+/// compressor unless a gate swaps it), an asymmetric fader and a non-identity pan; no console
+/// slots.
+fn strip_s(model: &session::SessionModel, insert: session::Effect) -> session::Submix {
+    let mut strip = session::Submix::unity(strip_id("bus"), &model.console);
+    strip.builtins.left.trim_db = 3.0;
+    strip.builtins.right.trim_db = -2.0;
+    strip.builtins.left.hpf_hz = 40.0;
+    strip.builtins.left.lpf_hz = 15_000.0;
+    strip.builtins.right.hpf_hz = 60.0;
+    strip.builtins.right.lpf_hz = 12_000.0;
+    strip.inserts.effects = vec![insert];
+    strip.fader.left_db = -6.0;
+    strip.fader.right_db = -4.0;
+    strip.matrix_or_pan = session::MatrixOrPan::Pan {
+        left: 0.8,
+        right: 0.35,
+        smoothing_samples: 0,
+    };
+    strip
+}
+
+/// Gate 1's routes, `(route id, feeding track, matrix)`, in declaration order. The route IDs are
+/// not in track order, so route-ID order (the order the bus sums in) is `t1, t2, t0`.
+const STRIP_ROUTES: [(&str, usize, [f32; 4]); 3] = [
+    ("route-c", 0, [0.8, -0.3, 0.25, 0.6]),
+    ("route-a", 1, [-0.5, 0.7, 0.9, -0.2]),
+    ("route-b", 2, [0.35, 0.15, -0.65, 0.45]),
+];
+
+/// Gate 1's sessions, with strip `S` carrying `insert`:
+///
+/// * A: tracks `t0..t2` (transparent), each reading its own source, routed by [`STRIP_ROUTES`]
+///   into submix `bus` (strip `S`), and `bus` at unity to the output. `bus` is strip index 3.
+/// * B: one track `ref` with strip `S`, reading source `ref`, at unity to the output.
+fn strip_pair_documents(insert: Option<session::Effect>) -> (String, String) {
+    let (mut a, source, track, compressor, route) = strip_base();
+    let insert = insert.unwrap_or(compressor);
+    let output = route.destination.clone();
+    for index in 0..3 {
+        strip_add_track(&mut a, &source, &track, &format!("t{index}"));
+    }
+    for (id, feeder, matrix) in STRIP_ROUTES {
+        a.routes.push(strip_route(
+            &route,
+            id,
+            strip_post_pan(&format!("t{feeder}"), false),
+            strip_into("bus"),
+            matrix,
+        ));
+    }
+    a.submixes = vec![strip_s(&a, insert.clone())];
+    a.routes.push(strip_route(
+        &route,
+        "bus-main",
+        strip_post_pan("bus", true),
+        output.clone(),
+        [1.0, 0.0, 0.0, 1.0],
+    ));
+
+    let (mut b, source, mut track, _, route) = strip_base();
+    let s = strip_s(&b, insert);
+    track.builtins = s.builtins;
+    track.console = s.console;
+    track.inserts = s.inserts;
+    track.fader = s.fader;
+    track.matrix_or_pan = s.matrix_or_pan;
+    strip_add_track(&mut b, &source, &track, "ref");
+    b.routes.push(strip_route(
+        &route,
+        "ref-main",
+        strip_post_pan("ref", false),
+        output,
+        [1.0, 0.0, 0.0, 1.0],
+    ));
+    (
+        canonical_session_json(&a).expect("bus session canonicalizes"),
+        canonical_session_json(&b).expect("reference session canonicalizes"),
+    )
+}
+
+/// The bus's input for one block: each route's `l' = (lr * r) + (ll * l)` with two roundings,
+/// added left to right in route-ID order (DESIGN D3 and D9). The routes are at 0 dB, so the
+/// folded matrix is the declared one.
+fn strip_bus_sum(block: u64) -> [Vec<f32>; 2] {
+    let mut routes = STRIP_ROUTES;
+    routes.sort_by(|x, y| x.0.cmp(y.0));
+    let frames = STRIP_QUANTUM as usize;
+    let mut sum = [vec![0.0_f32; frames], vec![0.0_f32; frames]];
+    for (rank, (_, feeder, [ll, lr, rl, rr])) in routes.into_iter().enumerate() {
+        let planes = strip_planes(feeder as u64, block);
+        for frame in 0..frames {
+            let (l, r) = (planes[0][frame], planes[1][frame]);
+            let left = (lr * r) + (ll * l);
+            let right = (rr * r) + (rl * l);
+            if rank == 0 {
+                sum[0][frame] = left;
+                sum[1][frame] = right;
+            } else {
+                sum[0][frame] += left;
+                sum[1][frame] += right;
+            }
+        }
+    }
+    sum
+}
+
+/// Index of `bus` in session A: three tracks, then submix 0.
+const STRIP_BUS: u32 = 3;
+
+fn strip_boot(document: &str, options: WebBootOptions) -> AudioWorkletEngineHost {
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+        panic!(
+            "#1213 boot: {}",
+            String::from_utf8_lossy(failure.diagnostic())
+        )
+    })
+}
+
+fn strip_options(queue_records: u64, meter_blocks: u64, master_plus_one: u64) -> WebBootOptions {
+    WebBootOptions {
+        source_ring_frames: STRIP_QUANTUM * 4,
+        live_control_command_queue_records: queue_records,
+        live_control_meter_blocks: meter_blocks,
+        live_control_observation_taps: 1,
+        live_control_master_track_plus_one: master_plus_one,
+        ..boot_options(STRIP_QUANTUM)
+    }
+}
+
+/// Gate 1's hosts: A over the bus session, B over the reference session.
+fn strip_pair(
+    insert: Option<session::Effect>,
+    queue_records: u64,
+    meter_blocks: u64,
+) -> (AudioWorkletEngineHost, AudioWorkletEngineHost) {
+    let (bus, reference) = strip_pair_documents(insert);
+    (
+        strip_boot(&bus, strip_options(queue_records, meter_blocks, 0)),
+        strip_boot(&reference, strip_options(queue_records, meter_blocks, 0)),
+    )
+}
+
+/// Render one block on both hosts -- A's three sources, B fed the bus's sum -- and return whether
+/// the block carried any nonzero sample, after requiring the two outputs to be bit-identical.
+fn strip_render_pair(
+    a: &mut AudioWorkletEngineHost,
+    b: &mut AudioWorkletEngineHost,
+    block: u64,
+    what: &str,
+) -> bool {
+    for feeder in 0..3_u64 {
+        submit_strip_source(
+            a,
+            &format!("t{feeder}"),
+            block,
+            &strip_planes(feeder, block),
+        );
+    }
+    submit_strip_source(b, "ref", block, &strip_bus_sum(block));
+    assert_eq!(a.render_next(), RESULT_OK, "{what}: A block {block}");
+    assert_eq!(b.render_next(), RESULT_OK, "{what}: B block {block}");
+    let left = a.output_pcm().expect("A output");
+    let right = b.output_pcm().expect("B output");
+    assert_eq!(left.len(), right.len());
+    for (index, (x, y)) in left.iter().zip(right).enumerate() {
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "{what}: block {block} sample {index}: bus {x} vs track {y}"
+        );
+    }
+    left.iter().any(|sample| *sample != 0.0)
+}
+
+/// One gate-1 command: `(what, kind, rack, channel, effect, parameter, smoothing, values)`.
+type StripCommand = (&'static str, u32, u8, u8, u32, u32, u32, [f32; 4]);
+
+/// Issue #1213 gate 1: every live strip kind sent to a bus renders the bits the same command
+/// renders on a track with the same strip, fed the bus's sum.
+///
+/// Test value: red if an index at or past `T` is refused, lands in a track's band, or reaches
+/// another strip's queue, or if any band spelling still uses the track count. No earlier test
+/// addressed a bus.
+#[test]
+fn live_strip_edits_on_a_bus_equal_the_same_edits_on_a_track() {
+    for smoothing in [0_u32, 480] {
+        let (mut a, mut b) = strip_pair(None, 64, 0);
+        let mut block = 0_u64;
+        let mut audible = false;
+        for _ in 0..2 {
+            audible |= strip_render_pair(&mut a, &mut b, block, "before any command");
+            block += 1;
+        }
+        let commands: [StripCommand; 13] = [
+            (
+                "pan",
+                COMMAND_PAN,
+                255,
+                255,
+                0,
+                0,
+                smoothing,
+                [-0.2, 0.7, 0.0, 0.0],
+            ),
+            (
+                "matrix",
+                COMMAND_MATRIX,
+                255,
+                255,
+                0,
+                0,
+                smoothing,
+                [0.9, -0.3, 0.2, 0.6],
+            ),
+            (
+                "fader",
+                COMMAND_FADER_DB,
+                255,
+                2,
+                0,
+                0,
+                smoothing,
+                [-9.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "left fader",
+                COMMAND_FADER_DB,
+                255,
+                0,
+                0,
+                0,
+                smoothing,
+                [-1.5, 0.0, 0.0, 0.0],
+            ),
+            (
+                "left mute",
+                COMMAND_MUTE,
+                255,
+                0,
+                0,
+                0,
+                smoothing,
+                [1.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "unmute",
+                COMMAND_MUTE,
+                255,
+                2,
+                0,
+                0,
+                smoothing,
+                [0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "threshold",
+                COMMAND_EFFECT_PARAM,
+                RACK_INSERTS,
+                2,
+                0,
+                1,
+                smoothing,
+                [-18.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "bypass",
+                COMMAND_EFFECT_BYPASS,
+                RACK_INSERTS,
+                255,
+                0,
+                0,
+                0,
+                [1.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "unbypass",
+                COMMAND_EFFECT_BYPASS,
+                RACK_INSERTS,
+                255,
+                0,
+                0,
+                0,
+                [0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "subscribe",
+                COMMAND_OBSERVE_SUBSCRIBE,
+                RACK_INSERTS,
+                255,
+                0,
+                1,
+                2,
+                [0.0; 4],
+            ),
+            (
+                "unsubscribe",
+                COMMAND_OBSERVE_UNSUBSCRIBE,
+                RACK_INSERTS,
+                255,
+                0,
+                1,
+                2,
+                [0.0; 4],
+            ),
+            (
+                "right trim",
+                COMMAND_TRIM_DB,
+                255,
+                1,
+                0,
+                0,
+                smoothing,
+                [4.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                "left polarity",
+                COMMAND_POLARITY_INVERT,
+                255,
+                0,
+                0,
+                0,
+                smoothing,
+                [1.0, 0.0, 0.0, 0.0],
+            ),
+        ];
+        for (what, kind, rack, channel, effect, parameter, window, values) in commands {
+            let what = format!("{what} (smoothing {smoothing})");
+            for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
+                stage_command(
+                    host, 0, kind, rack, channel, index, effect, parameter, window, values,
+                );
+                assert_eq!(
+                    host.submit_commands(1),
+                    RESULT_OK,
+                    "{what} at strip {index}"
+                );
+            }
+            assert_eq!(
+                a.command_report().applied_at_sample,
+                b.command_report().applied_at_sample,
+                "{what}"
+            );
+            for _ in 0..5 {
+                audible |= strip_render_pair(&mut a, &mut b, block, &what);
+                block += 1;
+            }
+        }
+        // Kind 12 rides the prepared path: the companion carries the targets designed off the
+        // render thread from the strip's own committed input-filter configuration.
+        let what = format!("input filters (smoothing {smoothing})");
+        for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
+            let bytes = stage_prepared_input_filter(host, 0, index, 120.0, 9_000.0);
+            assert_eq!(
+                host.submit_prepared_commands(1, bytes),
+                RESULT_OK,
+                "{what} at strip {index}"
+            );
+        }
+        // One batch of several kinds to the bus, admitted whole.
+        for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
+            stage_command(
+                host,
+                0,
+                COMMAND_FADER_DB,
+                255,
+                1,
+                index,
+                0,
+                0,
+                smoothing,
+                [-3.0, 0.0, 0.0, 0.0],
+            );
+            stage_command(
+                host,
+                1,
+                COMMAND_PAN,
+                255,
+                255,
+                index,
+                0,
+                0,
+                smoothing,
+                [0.1, -0.1, 0.0, 0.0],
+            );
+            stage_command(
+                host,
+                2,
+                COMMAND_EFFECT_PARAM,
+                RACK_INSERTS,
+                2,
+                index,
+                0,
+                1,
+                0,
+                [-24.0, 0.0, 0.0, 0.0],
+            );
+            stage_command(
+                host,
+                3,
+                COMMAND_POLARITY_INVERT,
+                255,
+                0,
+                index,
+                0,
+                0,
+                smoothing,
+                [0.0, 0.0, 0.0, 0.0],
+            );
+            assert_eq!(host.submit_commands(4), RESULT_OK, "batch at strip {index}");
+        }
+        for _ in 0..6 {
+            audible |= strip_render_pair(&mut a, &mut b, block, &what);
+            block += 1;
+        }
+        assert!(audible, "the compared output is not silence");
+    }
+}
+
+/// Gates 2 and 3's session: tracks `a`, `b` and `c`, each reading its own source; `a` and `b`
+/// feed the bus `drums` post-pan, `a` also sends post-fader into the return `verb`, `c` goes
+/// straight to the output, and both submixes reach the output. Strip order `[a, b, c, drums,
+/// verb]`, so `drums` is strip index 3 and `verb` 4.
+fn solo_bus_host(drums_muted: bool) -> AudioWorkletEngineHost {
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    for id in ["a", "b", "c"] {
+        strip_add_track(&mut model, &source, &track, id);
+    }
+    let mut drums = session::Submix::unity(strip_id("drums"), &model.console);
+    drums.fader.left_db = -3.0;
+    drums.fader.left_mute = drums_muted;
+    drums.fader.right_mute = drums_muted;
+    let mut verb = session::Submix::unity(strip_id("verb"), &model.console);
+    verb.fader.right_db = -5.0;
+    model.submixes = vec![drums, verb];
+    let identity = [1.0, 0.0, 0.0, 1.0];
+    model.routes = vec![
+        strip_route(
+            &route,
+            "a-drums",
+            strip_post_pan("a", false),
+            strip_into("drums"),
+            [0.9, 0.1, -0.2, 0.7],
+        ),
+        strip_route(
+            &route,
+            "b-drums",
+            strip_post_pan("b", false),
+            strip_into("drums"),
+            [0.6, -0.4, 0.3, 0.8],
+        ),
+        strip_route(
+            &route,
+            "c-main",
+            strip_post_pan("c", false),
+            output.clone(),
+            identity,
+        ),
+        strip_route(
+            &route,
+            "drums-main",
+            strip_post_pan("drums", true),
+            output.clone(),
+            identity,
+        ),
+        strip_route(
+            &route,
+            "verb-main",
+            strip_post_pan("verb", true),
+            output,
+            [0.5, 0.0, 0.0, 0.5],
+        ),
+    ];
+    let mut send = strip_route(
+        &route,
+        "a-verb",
+        strip_post_pan("a", false),
+        strip_into("verb"),
+        [0.3, 0.2, 0.2, 0.3],
+    );
+    send.source = session::RouteSource::Track {
+        track_id: strip_id("a"),
+        tap: session::SendTap::PostFader,
+    };
+    model.routes.push(send);
+    let document = canonical_session_json(&model).expect("canonical solo bus session");
+    strip_boot(
+        &document,
+        strip_options(DEFAULT_COMMAND_QUEUE_RECORDS as u64, 0, 0),
+    )
+}
+
+/// Feed `a`, `b` and `c` one block and render; returns the output.
+fn solo_bus_render(host: &mut AudioWorkletEngineHost, block: u64) -> Vec<f32> {
+    for (feed, id) in ["a", "b", "c"].into_iter().enumerate() {
+        submit_strip_source(host, id, block, &strip_planes(10 + feed as u64, block));
+    }
+    assert_eq!(host.render_next(), RESULT_OK);
+    host.output_pcm().expect("output").to_vec()
+}
+
+/// Render `blocks` blocks on both hosts from `first`; when `compare`, require identical bits and
+/// return whether any compared sample was nonzero.
+fn solo_bus_compare(
+    left: &mut AudioWorkletEngineHost,
+    right: &mut AudioWorkletEngineHost,
+    first: u64,
+    blocks: u64,
+    what: &str,
+) -> bool {
+    let mut audible = false;
+    for block in first..first + blocks {
+        let x = solo_bus_render(left, block);
+        let y = solo_bus_render(right, block);
+        for (index, (p, q)) in x.iter().zip(&y).enumerate() {
+            assert_eq!(
+                p.to_bits(),
+                q.to_bits(),
+                "{what}: block {block} sample {index}"
+            );
+        }
+        audible |= x.iter().any(|sample| *sample != 0.0);
+    }
+    audible
+}
+
+/// Issue #1213 gate 2(a): kind 4 at a bus index mutes the bus, bit-identically to a host booted
+/// with that bus's fader muted, once the ramp has settled.
+///
+/// Test value: red if a bus mute has no owner -- refused, dropped, or landed on a track's fader.
+#[test]
+fn a_bus_mute_command_equals_the_bus_booted_muted() {
+    let mut live = solo_bus_host(false);
+    let mut booted = solo_bus_host(true);
+    stage_mute(&mut live, 0, 3, true, STRIP_QUANTUM);
+    assert_eq!(live.submit_commands(1), RESULT_OK, "mute drums");
+    // Two blocks cover the one-quantum ramp; both hosts render them, unchecked.
+    for block in 0..2 {
+        solo_bus_render(&mut live, block);
+        solo_bus_render(&mut booted, block);
+    }
+    assert!(
+        solo_bus_compare(&mut live, &mut booted, 2, 4, "drums muted live vs at boot"),
+        "c and verb stay audible"
+    );
+}
+
+/// Issue #1213 gate 2(b): soloing track `a`, which feeds the bus `drums` and the return `verb`,
+/// renders bit-identically to explicit mutes on every other track, and the two submixes stay
+/// audible.
+///
+/// Test value: red if solo composition reaches a strip past `T` (the buses would be solo-muted on
+/// the solo side and not on the mute side).
+#[test]
+fn soloing_a_track_keeps_its_bus_and_return_audible() {
+    let mut solo = solo_bus_host(false);
+    let mut mute = solo_bus_host(false);
+    solo_bus_compare(&mut solo, &mut mute, 0, 1, "before any command");
+    stage_solo(&mut solo, 0, 0, true, STRIP_QUANTUM);
+    assert_eq!(solo.submit_commands(1), RESULT_OK, "solo a");
+    stage_mute(&mut mute, 0, 1, true, STRIP_QUANTUM);
+    stage_mute(&mut mute, 1, 2, true, STRIP_QUANTUM);
+    assert_eq!(mute.submit_commands(2), RESULT_OK, "mute b and c");
+    assert_eq!(
+        solo.command_report().applied_at_sample,
+        mute.command_report().applied_at_sample
+    );
+    assert!(
+        solo_bus_compare(&mut solo, &mut mute, 1, 5, "solo a vs mute b and c"),
+        "a is audible through drums and verb"
+    );
+    // Only the buses carry `a` to the output: with `drums` and `verb` muted too the output is
+    // silent, so the audible blocks above are the submixes'.
+    for (index, bus) in [3_u32, 4].into_iter().enumerate() {
+        stage_mute(&mut mute, index, bus, true, 0);
+    }
+    assert_eq!(mute.submit_commands(2), RESULT_OK, "mute both submixes");
+    let silent = solo_bus_render(&mut mute, 6);
+    assert!(
+        silent.iter().all(|sample| *sample == 0.0),
+        "a reaches the output only via submixes"
+    );
+}
+
+/// Issue #1213 gate 2(c): kind 9 at a bus index refuses with `notSoloable` at its wire index and
+/// stages nothing, even behind a valid record in the same submission.
+///
+/// Test value: red if a bus can be soloed, or if the refusal reports another reason or index, or
+/// if the valid record before it reaches a queue.
+#[test]
+fn a_solo_at_a_bus_index_refuses_not_soloable_and_stages_nothing() {
+    let mut host = solo_bus_host(false);
+    solo_bus_render(&mut host, 0);
+    for bus in [3_u32, 4] {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+        stage_solo(&mut host, 1, bus, true, 0);
+        assert_eq!(
+            host.submit_commands(2),
+            RESULT_INVALID_ARGUMENT,
+            "solo strip {bus}"
+        );
+        let report = *host.command_report();
+        assert_eq!(report.result, RESULT_INVALID_ARGUMENT);
+        assert_eq!(
+            report.reason, COMMAND_REASON_NOT_SOLOABLE,
+            "solo strip {bus}"
+        );
+        assert_eq!(report.rejected_index, 1, "the solo record's wire index");
+        let ready = host.ready.as_ref().expect("ready");
+        assert!(
+            ready.in_flight.iter().all(|count| *count == 0),
+            "nothing staged"
+        );
+        assert!(!ready.solo.any_solo(), "no solo bit moved");
+        assert!(!ready.solo.transaction_open(), "the transaction closed");
+        for (strip, controls) in ready.controls.iter().enumerate() {
+            assert_eq!(
+                controls.fader.available_capacity(),
+                DEFAULT_COMMAND_QUEUE_RECORDS as usize,
+                "strip {strip}'s fader queue untouched"
+            );
+        }
+    }
+}
+
+/// Issue #1213 gate 3 (VERIFY-2 M4): with `drums` muted at boot and `a` soloed, kind 4 unmuting
+/// `drums` makes it audible -- bit-identical, after the ramp, to a host booted with `drums`
+/// unmuted under the same solo.
+///
+/// Test value: red if kind 4 composes the effective mute inline without `solo_safe`: the unmute
+/// then stages `Mute { muted: true }` and `drums` stays silent.
+#[test]
+fn a_bus_can_be_unmuted_while_a_track_is_soloed() {
+    let mut unmuted = solo_bus_host(true);
+    let mut reference = solo_bus_host(false);
+    for host in [&mut unmuted, &mut reference] {
+        stage_solo(host, 0, 0, true, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK, "solo a");
+    }
+    for block in 0..2 {
+        solo_bus_render(&mut unmuted, block);
+        solo_bus_render(&mut reference, block);
+    }
+    stage_mute(&mut unmuted, 0, 3, false, STRIP_QUANTUM);
+    assert_eq!(
+        unmuted.submit_commands(1),
+        RESULT_OK,
+        "unmute drums under solo"
+    );
+    for block in 2..4 {
+        solo_bus_render(&mut unmuted, block);
+        solo_bus_render(&mut reference, block);
+    }
+    assert!(
+        solo_bus_compare(
+            &mut unmuted,
+            &mut reference,
+            4,
+            4,
+            "drums unmuted live vs at boot"
+        ),
+        "drums and verb carry a"
+    );
+}
+
+/// Issue #1213 gate 4(a): a batch of a valid bus fader record and an out-of-domain track record
+/// stages nothing and returns one refusal at the bad record's index.
+///
+/// Test value: red if admission pushes a bus record before every record is validated.
+#[test]
+fn a_bus_record_behind_a_bad_track_record_is_never_pushed() {
+    let (mut a, _) = strip_pair(None, 4, 0);
+    stage_command(
+        &mut a,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        STRIP_BUS,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut a,
+        1,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [99.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(a.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    let report = *a.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_DOMAIN);
+    assert_eq!(report.rejected_index, 1, "the bad track record");
+    assert_eq!(report.admitted, 0);
+    let ready = a.ready.as_ref().expect("ready");
+    assert!(
+        ready.in_flight.iter().all(|count| *count == 0),
+        "nothing staged"
+    );
+    for (strip, controls) in ready.controls.iter().enumerate() {
+        assert_eq!(
+            controls.fader.available_capacity(),
+            4,
+            "strip {strip}'s fader queue"
+        );
+    }
+}
+
+/// Issue #1213 gate 4(b): a batch that overfills one bus queue is typed backpressure at the first
+/// record that does not fit, and nothing -- the track record before it included -- is pushed.
+///
+/// Test value: red if the room check skips a bus queue, so admission pushes into it and fails
+/// half-way.
+#[test]
+fn overfilling_a_bus_queue_is_typed_backpressure_with_no_push() {
+    let (mut a, _) = strip_pair(None, 4, 0);
+    stage_command(
+        &mut a,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    for index in 1..6 {
+        stage_command(
+            &mut a,
+            index,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            STRIP_BUS,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(a.submit_commands(6), RESULT_BACKPRESSURE);
+    let report = *a.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(
+        report.rejected_index, 1,
+        "the first bus record names the full queue"
+    );
+    let ready = a.ready.as_ref().expect("ready");
+    assert!(
+        ready.in_flight.iter().all(|count| *count == 0),
+        "nothing staged"
+    );
+    for (strip, controls) in ready.controls.iter().enumerate() {
+        assert_eq!(
+            controls.fader.available_capacity(),
+            4,
+            "strip {strip}'s fader queue"
+        );
+    }
+}
+
+/// The meter frame's gain-reduction word for strip `strip`, given the host's strip count.
+fn strip_gain_word(host: &AudioWorkletEngineHost, strip: usize) -> f32 {
+    let strips = host.live_control_tracks().len() + host.meter_header().submix_count as usize;
+    let frame = host.meter_frame();
+    assert_eq!(frame.len(), strips * 3 + 3);
+    frame[strips * 2 + 2 + strip]
+}
+
+/// Issue #1213 gate 5 (VERIFY-2 M6), plus the selected read of a bus tap (K2 verdict
+/// requirement (a)): kind 7 at the bus's index arms its compressor's gain-reduction tap, whose
+/// reading folds into the bus's frame word `gain_base + T + 0`, bit-equal to the word a track
+/// with the same strip reports; a selected read at the bus's strip index names the bus; kind 8
+/// disarms it and the word returns to `0`.
+///
+/// Test value: red if a bus effect cannot be armed, folds into a track's word, is read at the
+/// wrong frame offset or skipped by the fold (#1207's `>= T` skip), or if a selected read
+/// resolves the strip index against the tracks only.
+#[test]
+fn a_bus_compressor_reports_its_gain_reduction_in_the_bus_word() {
+    const WINDOW: u64 = 2;
+    let (mut a, mut b) = strip_pair(None, 64, WINDOW);
+    assert_eq!(a.set_meter_lease(true), RESULT_OK);
+    assert_eq!(b.set_meter_lease(true), RESULT_OK);
+    for (host, index) in [(&mut a, STRIP_BUS), (&mut b, 0)] {
+        assert_eq!(
+            observe(host, index, RACK_INSERTS, 0, 1, WINDOW as u32, true),
+            RESULT_OK
+        );
+    }
+    let mut block = 0;
+    for _ in 0..4 * WINDOW {
+        strip_render_pair(&mut a, &mut b, block, "armed");
+        block += 1;
+    }
+    assert!(
+        a.poll_meters() >= 1 && b.poll_meters() >= 1,
+        "a window closed"
+    );
+    let bus = strip_gain_word(&a, STRIP_BUS as usize);
+    let reference = strip_gain_word(&b, 0);
+    assert!(bus > 0.0, "the bus compressor reduces: {bus}");
+    assert_eq!(
+        bus.to_bits(),
+        reference.to_bits(),
+        "bus {bus} vs track {reference}"
+    );
+    for track in 0..3 {
+        assert_eq!(
+            strip_gain_word(&a, track).to_bits(),
+            0,
+            "track {track}'s word"
+        );
+    }
+    let address = |track_index| ObservationAddress {
+        track_index,
+        rack: LiveEffectRack::Inserts,
+        effect_index: 0,
+        tap_id: 1,
+        channels: ObservationReadChannels::Both,
+    };
+    let bus_read = a
+        .read_observation_addresses(&[address(STRIP_BUS)])
+        .expect("a selected read at the bus's strip index");
+    let track_read = b
+        .read_observation_addresses(&[address(0)])
+        .expect("the same read on the track");
+    assert_eq!(&*bus_read[0].track_id, "bus");
+    assert_eq!(&*bus_read[0].effect_slot_id, "comp");
+    assert_eq!(bus_read[0].status, track_read[0].status);
+    assert_eq!(
+        bus_read[0].left.map(f32::to_bits),
+        track_read[0].left.map(f32::to_bits)
+    );
+    assert_eq!(
+        bus_read[0].right.map(f32::to_bits),
+        track_read[0].right.map(f32::to_bits)
+    );
+    assert_eq!(
+        a.read_observation_addresses(&[address(STRIP_BUS + 1)])
+            .err(),
+        Some(ObservationReadError::InvalidSelection),
+        "one past the last strip"
+    );
+
+    assert_eq!(
+        observe(&mut a, STRIP_BUS, RACK_INSERTS, 0, 1, WINDOW as u32, false),
+        RESULT_OK
+    );
+    for _ in 0..2 * WINDOW {
+        for feeder in 0..3_u64 {
+            submit_strip_source(
+                &mut a,
+                &format!("t{feeder}"),
+                block,
+                &strip_planes(feeder, block),
+            );
+        }
+        assert_eq!(a.render_next(), RESULT_OK);
+        block += 1;
+    }
+    while a.poll_meters() != 0 {}
+    assert_eq!(
+        strip_gain_word(&a, STRIP_BUS as usize).to_bits(),
+        0,
+        "disarmed"
+    );
+}
+
+/// Issue #1213 gate 6 (VERIFY-2 M6, #1208's condition): booting with the master word `T + 0 + 1`
+/// designates the bus, whose true-peak limiter insert is driven over its -6 dB ceiling; with the
+/// limiter's tap armed at the bus's index, the header reports a master reading and the master word
+/// equals the bus's word, nonzero. `T + S + 1` refuses at boot.
+///
+/// Test value: red if the boot word still indexes tracks only, or the master reading is taken
+/// from another strip's word or never folded for a bus.
+#[test]
+fn a_bus_limiter_can_be_the_designated_master() {
+    const WINDOW: u64 = 2;
+    let (_, _, _, mut limiter, _) = strip_base();
+    limiter.id = strip_id("limit");
+    limiter.identity = session::EffectIdentity::Native {
+        effect_id: strip_id("miso.true-peak-limiter"),
+    };
+    limiter.params = vec![session::EffectParam {
+        parameter_id: 1,
+        channel: session::ParameterChannel::Both,
+        unit: session::ParameterUnit::Db,
+        value: -6.0,
+    }];
+    let (bus, _) = strip_pair_documents(Some(limiter));
+    let mut host = strip_boot(&bus, strip_options(64, WINDOW, u64::from(STRIP_BUS) + 1));
+    assert_eq!(host.meter_header().master_track_plus_one, STRIP_BUS + 1);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(
+        observe(
+            &mut host,
+            STRIP_BUS,
+            RACK_INSERTS,
+            0,
+            1,
+            WINDOW as u32,
+            true
+        ),
+        RESULT_OK
+    );
+    for block in 0..4 * WINDOW {
+        for feeder in 0..3_u64 {
+            submit_strip_source(
+                &mut host,
+                &format!("t{feeder}"),
+                block,
+                &strip_planes(feeder, block),
+            );
+        }
+        assert_eq!(host.render_next(), RESULT_OK);
+    }
+    assert!(host.poll_meters() >= 1, "a window closed");
+    let header = *host.meter_header();
+    assert_eq!(header.master_gr_present, 1, "the designated bus published");
+    let bus_word = strip_gain_word(&host, STRIP_BUS as usize);
+    let master_word = strip_gain_word(&host, STRIP_BUS as usize + 1);
+    assert!(bus_word > 0.0, "the bus limiter reduces: {bus_word}");
+    assert_eq!(
+        master_word.to_bits(),
+        bus_word.to_bits(),
+        "master word is the bus's"
+    );
+
+    let failure = AudioWorkletEngineHost::boot(
+        bus.as_bytes(),
+        strip_options(64, WINDOW, u64::from(STRIP_BUS) + 2),
+    )
+    .err()
+    .expect("one past the last strip refuses");
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
+    assert!(
+        failure
+            .diagnostic()
+            .starts_with(b"host.observation.master_track\t"),
+        "{}",
+        String::from_utf8_lossy(failure.diagnostic())
+    );
+}
+
+/// Issue #1213 gate 7: admitting a batch of bus edits, a bus observation and a track solo, then
+/// rendering, allocates and frees nothing.
+///
+/// Test value: red if strip-sized admission, the strip-wide solo coalescing or the bus fold
+/// allocates on the admission or render path.
+#[test]
+fn bus_edits_and_a_bus_observation_admit_and_render_without_allocating() {
+    let (mut a, _) = strip_pair(None, 64, 2);
+    assert_eq!(a.set_meter_lease(true), RESULT_OK);
+    for block in 0..2 {
+        for feeder in 0..3_u64 {
+            submit_strip_source(
+                &mut a,
+                &format!("t{feeder}"),
+                block,
+                &strip_planes(feeder, block),
+            );
+        }
+        assert_eq!(a.render_next(), RESULT_OK);
+    }
+    stage_command(
+        &mut a,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        STRIP_BUS,
+        0,
+        0,
+        480,
+        [-9.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut a,
+        1,
+        COMMAND_PAN,
+        255,
+        255,
+        STRIP_BUS,
+        0,
+        0,
+        480,
+        [0.2, -0.4, 0.0, 0.0],
+    );
+    stage_command(
+        &mut a,
+        2,
+        COMMAND_TRIM_DB,
+        255,
+        0,
+        STRIP_BUS,
+        0,
+        0,
+        480,
+        [2.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut a,
+        3,
+        COMMAND_EFFECT_PARAM,
+        RACK_INSERTS,
+        2,
+        STRIP_BUS,
+        0,
+        1,
+        0,
+        [-20.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut a,
+        4,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        RACK_INSERTS,
+        255,
+        STRIP_BUS,
+        0,
+        1,
+        2,
+        [0.0; 4],
+    );
+    stage_command(
+        &mut a,
+        5,
+        COMMAND_MUTE,
+        255,
+        1,
+        STRIP_BUS,
+        0,
+        0,
+        480,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    stage_solo(&mut a, 6, 1, true, 480);
+    let planes: Vec<[Vec<f32>; 2]> = (0..3).map(|feeder| strip_planes(feeder, 2)).collect();
+    for (feeder, planes) in planes.iter().enumerate() {
+        submit_strip_source(&mut a, &format!("t{feeder}"), 2, planes);
+    }
+    let ((admission, render), allocations, deallocations) =
+        crate::ffi::live_response_ffi_tests::measured(|| (a.submit_commands(7), a.render_next()));
+    assert_eq!(admission, RESULT_OK, "the bus batch is admitted");
+    assert_eq!(render, RESULT_OK);
+    assert_eq!(allocations, 0, "admission/render allocated");
+    assert_eq!(deallocations, 0, "admission/render freed");
 }
