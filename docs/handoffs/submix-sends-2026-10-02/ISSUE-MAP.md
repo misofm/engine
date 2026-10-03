@@ -11,8 +11,9 @@ GitHub issue body matches it. Five specs (#1203, #1205, #1208, #1210, #1212) wer
 A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes; the rows of
 #1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, the rows of
 #1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, the rows of #1206-#1214 (closed by
-PR #1233) link it at `cfa086d4`, and the rows of #1215-#1224 (closed by PR #1238) link it at
-`6f1788f3`, where each last stood.
+PR #1233) link it at `cfa086d4`, the rows of #1215-#1224 (closed by PR #1238) link it at
+`6f1788f3`, and the rows of #1240-#1246 (closed by PR #1249) link it at `1cb677a7`, where each
+last stood.
 
 The umbrella's app-facing documents -- `APP-SDK.md`, the session migration script and, later,
 `APP-LIVE.md` -- live in [`docs/handoffs/submix-strips-and-sends/`](../submix-strips-and-sends/),
@@ -56,34 +57,39 @@ the verdicts (`verdicts/`).
 | BM2 | #1228 | Add the bus-and-send session to the browser mixing benchmark | `.github/ISSUE_SPECS/1228-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md` | `BM2-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md` |
 | BM3 | #1229 | Record the bus-and-send baseline and its route-work profile | `.github/ISSUE_SPECS/1229-record-the-bus-and-send-baseline-and-its-route-work-profile.md` | `BM3-record-the-bus-and-send-baseline-and-its-route-work-profile.md` |
 
-BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196.
+BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196. Their specs were re-verified
+against `1cb677a7` (K1-K3 and the VCA batch merged) on 2026-10-03.
 
 ## VCA groups (filed 2026-10-03)
 
 Filed as its own umbrella once batch K3 was delivered (#1224), every anchor re-verified on the K3
 head `8c6268967`. The drafts' six files became nine issues: the grammar was split from its session
 edits (on the #1199/#1204 precedent), the caps from preparation (#1206), and the host-core
-composition from the browser's admission (#1221/#1222). Each spec is
-`.github/ISSUE_SPECS/<number>-*.md`.
+composition from the browser's admission (#1221/#1222). Each open issue's spec is
+`.github/ISSUE_SPECS/<number>-*.md`; a closed one's is linked where it last stood.
 
-| Label | Issue | Title | Draft |
-|---|---|---|---|
-| V0 | #1239 | VCA groups | `V0-vca-groups-umbrella.md` |
-| V1 | #1240 | Declare VCA groups in the session | `V1-declare-vca-groups-in-the-session.md` |
-| V2 | #1241 | Edit VCA groups through session transactions | `V1-declare-vca-groups-in-the-session.md` (its wire and edits) |
-| V3 | #1242 | Apply VCA offsets and mutes at preparation | `V2-apply-vca-offsets-and-mutes-at-preparation.md` |
-| V4 | #1243 | Count and cap VCA groups in host preparation and the C ABI | `V2-apply-vca-offsets-and-mutes-at-preparation.md` (its caps) |
-| V5 | #1244 | Compose live VCA moves in host-core | `V3-ride-vca-groups-live-in-the-browser.md` (its host-core state) |
-| V6 | #1245 | Ride VCA groups live in the browser | `V3-ride-vca-groups-live-in-the-browser.md` |
-| V7 | #1246 | Enumerate VCA groups and drive them from the SDK | `V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` |
-| V8 | #1247 | Deliver value-only VCA edits to the running C ABI plan | `V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` |
+| Label | Issue | Title | Spec | Draft |
+|---|---|---|---|---|
+| V0 | #1239 | VCA groups | `.github/ISSUE_SPECS/1239-vca-groups.md` | `V0-vca-groups-umbrella.md` |
+| V1 | #1240 | Declare VCA groups in the session | [`1240-declare-vca-groups-in-the-session.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1240-declare-vca-groups-in-the-session.md) (retired, closed) | `V1-declare-vca-groups-in-the-session.md` |
+| V2 | #1241 | Edit VCA groups through session transactions | [`1241-edit-vca-groups-through-session-transactions.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1241-edit-vca-groups-through-session-transactions.md) (retired, closed) | `V1-declare-vca-groups-in-the-session.md` (its wire and edits) |
+| V3 | #1242 | Apply VCA offsets and mutes at preparation | [`1242-apply-vca-offsets-and-mutes-at-preparation.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1242-apply-vca-offsets-and-mutes-at-preparation.md) (retired, closed) | `V2-apply-vca-offsets-and-mutes-at-preparation.md` |
+| V4 | #1243 | Count and cap VCA groups in host preparation and the C ABI | [`1243-count-and-cap-vca-groups-in-host-preparation-and-the-c-abi.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1243-count-and-cap-vca-groups-in-host-preparation-and-the-c-abi.md) (retired, closed) | `V2-apply-vca-offsets-and-mutes-at-preparation.md` (its caps) |
+| V5 | #1244 | Compose live VCA moves in host-core | [`1244-compose-live-vca-moves-in-host-core.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1244-compose-live-vca-moves-in-host-core.md) (retired, closed) | `V3-ride-vca-groups-live-in-the-browser.md` (its host-core state) |
+| V6 | #1245 | Ride VCA groups live in the browser | [`1245-ride-vca-groups-live-in-the-browser.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1245-ride-vca-groups-live-in-the-browser.md) (retired, closed) | `V3-ride-vca-groups-live-in-the-browser.md` |
+| V7 | #1246 | Enumerate VCA groups and drive them from the SDK | [`1246-enumerate-vca-groups-and-drive-them-from-the-sdk.md`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1246-enumerate-vca-groups-and-drive-them-from-the-sdk.md) (retired, closed) | `V4-enumerate-vca-groups-and-drive-them-from-the-sdk.md` |
+| V8 | #1247 | Deliver value-only VCA edits to the running C ABI plan | `.github/ISSUE_SPECS/1247-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` | `V5-deliver-value-only-vca-edits-to-the-running-c-abi-plan.md` |
 
 #1240-#1246 are one batch, pushed once; #1246 closes it and carries the deliverable that removes the
 decision-13 qualifier from `AGENTS.md`'s VCA sentence (#1197 D5). #1247 waits on #1053, #1225 and
 #1226. At filing, P13's VCA guard was widened to "every C ABI delta while the model declares a
 VCA" (a planner decision recorded in the ruling), and the specs of #1053, #1225 and #1226 were
-amended to carry it. Owner question Q2 was answered on 2026-10-03: deferred item O11's bounds are
-filed as *Bound route gain and matrix values* (#1237), and Q1's answer as *Let a strip override a
+amended to carry it. PR #1249 delivered #1240-#1246, together with *Make the live-route allocation
+gates wait on the queue and fail instead of hanging* (#1250), a harness fix the batch's AArch64
+leg needed; its spec stands at [`1cb677a7`](https://github.com/misofm/engine/blob/1cb677a76c5c4100f360fed341c64f7de8226bd1/.github/ISSUE_SPECS/1250-make-the-live-route-allocation-gates-wait-on-the-queue-and-fail-instead-of-hanging.md),
+and its verdict's remaining hang-on-failure sites are *Make concurrent tests fail instead of
+hanging when a thread panics* (#1251), standalone. Owner question Q2 was answered on 2026-10-03:
+deferred item O11's bounds are filed as *Bound route gain and matrix values* (#1237), and Q1's answer as *Let a strip override a
 console slot's link mode* (#1236). Both are standalone, outside #1196.
 
 The probe sources that `DESIGN.md` 3.2 and `VERIFY-1.md` name under `scratchpad/` were never committed.
