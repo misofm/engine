@@ -33,7 +33,7 @@ use engine::realtime::{ObservationWindow, PlanarBufferMut, RenderIo, RenderTime}
 use host_core::{
     CompiledSession, EffectControlProducer, EffectObservationHandle, HostLiveControlRequest,
     HostMeterRequest, HostPrepareCaps, HostShapePolicy, InputFilterEdit, InputFilterEditErrorKind,
-    LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState, PrepareDiagnostics,
+    LiveControlSoloState, LiveRouteMuteFollow, LiveRouteState, LiveVcaState, PrepareDiagnostics,
     PrepareRejection, PreparedHost, RouteControlError, RouteControlProducer, RouteControlRecord,
     SourceControlError, SourceSubmission, StripMuteSeed, apply_input_filter_edit,
     compile_host_model, compiled_session_shape, control_table_bytes, parse_host_session,
@@ -78,6 +78,34 @@ pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 /// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
 /// cannot silently outrun this projection.
 pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 20;
+
+/// The most VCAs a browser session may declare (issue #1245 amendment A1).
+///
+/// A planner decision, subject to owner review. A VCA command runs on the AudioWorklet thread, and
+/// its cost grows with the (strip, reaching VCA) pairs it recomposes, so the browser bounds both
+/// the VCA count and the pair count ([`MAXIMUM_BROWSER_VCA_REACH_PAIRS`]) at boot, before any VCA
+/// table is built. 256 is far more VCAs than a mix uses, and it is the width of the boot-time reach
+/// count's ancestor bitsets.
+pub const MAXIMUM_BROWSER_VCAS: usize = 256;
+
+/// The most (strip, reaching VCA) pairs a browser session may declare (issue #1245 amendment A1).
+///
+/// A planner decision, subject to owner review. A batch's VCA work is bounded by about three
+/// passes over the pairs (the VCA fader pass over both lanes, and one VCA-mute refresh), plus 256
+/// member moves of at most [`MAXIMUM_BROWSER_VCAS`] reaching VCAs each; at this bound that is a
+/// small fraction of one 128-frame quantum (the measurement is in the #1245 record). 16,384 pairs
+/// hold, for example, 1,024 strips in 16 VCAs each. A session past either bound is refused at boot
+/// with `web.vca.maximum_vcas` or `web.vca.reach_pairs` (`RESULT_REFUSED_BUDGET`).
+pub const MAXIMUM_BROWSER_VCA_REACH_PAIRS: u64 = 16_384;
+
+/// Words of one boot-time VCA ancestor bitset.
+const VCA_REACH_WORDS: usize = MAXIMUM_BROWSER_VCAS / 64;
+
+/// A conservative bound on the transient bytes `session::SessionModel::vca_reach` holds per
+/// membership entry: its `BTreeMap<&str, Vec<usize>>` parent index at minimum node occupancy
+/// (about 90 bytes per key and value with the node's edge share) plus the value `Vec`'s doubled
+/// capacity, rounded up (issue #1245 amendment A1).
+const VCA_PARENT_ENTRY_BYTES: u64 = 128;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
@@ -831,8 +859,8 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// and `smoothing_samples` the engage/disengage fade -- the same declick window a mute takes.
 ///
 /// It moves no state of its own on the render thread. Admission composes
-/// `effective_mute = user_mute || (any_solo && !solo_safe && !my_solo)` over the live controls'
-/// [`host_core::LiveControlSoloState`] and emits the *existing*
+/// `effective_mute = user_mute || vca_mute || (any_solo && !solo_safe && !my_solo)` over the live
+/// controls' [`host_core::LiveControlSoloState`] and emits the *existing*
 /// `TrackFaderRecord::Mute` records into the *existing* per-strip fader queues, so this kind is
 /// on the `render` plane (it moves what the render thread reads) while adding nothing below
 /// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
@@ -886,6 +914,29 @@ pub const COMMAND_ROUTE_MUTE: u32 = 14;
 ///
 /// Addressed and shaped as [`COMMAND_ROUTE_GAIN_DB`]; `values[0..4]` are `ll, lr, rl, rr`.
 pub const COMMAND_ROUTE_MATRIX: u32 = 15;
+/// Ride one VCA's per-lane dB offset over an explicit ramp window (issue #1245 D1).
+///
+/// The index word is a **VCA index**: the VCA's position in the session's `vcas`, in canonical
+/// VCA-ID order -- not a strip index. An index at or past the VCA count (every index, in a
+/// session without VCAs) refuses with [`COMMAND_REASON_UNKNOWN_VCA`]. The shape is
+/// [`COMMAND_FADER_DB`]'s -- `rack` `255`, `channel` `0`/`1`/`2`, `values[0]` the offset in
+/// `[-144, 24]` dB (else `DOMAIN`), `values[1..]` `0.0`, `smoothing_samples` the ramp -- plus
+/// `effect_index` and `parameter_id` `0`, as the route kinds rule; anything else is `MALFORMED`.
+///
+/// A VCA has no audio path. Admission composes the move through [`host_core::LiveVcaState`] --
+/// `clamp(own + sum of the reaching VCAs' offsets)`, the one composition preparation bakes -- and
+/// stages each reached member's changed fader lanes as the *existing* `TrackFaderRecord::FaderDb`
+/// records on the member's fader queue, with this record's ramp. A member lane whose effective
+/// value does not change gets no record.
+pub const COMMAND_VCA_FADER_DB: u32 = 16;
+/// Set or clear one VCA's per-lane mute over an explicit ramp window (issue #1245 D1).
+///
+/// Addressed and shaped as [`COMMAND_VCA_FADER_DB`]; `values[0]` must be exactly `0.0` or `1.0`,
+/// anything else is `DOMAIN`, exactly as `mute` requires. The VCA mute term joins every reached
+/// member's effective mute (`user_mute || vca_mute || solo term`, so mute wins over solo and a
+/// solo-safe submix is muted too), and the *existing* strip mute records and, for `follows_mute`
+/// sends, follow records carry the change.
+pub const COMMAND_VCA_MUTE: u32 = 17;
 
 /// The `rack` of an effect-addressed record: one of the track's inserts (decision 12, #1096).
 ///
@@ -1017,6 +1068,12 @@ pub const COMMAND_REASON_NOT_SOLOABLE: u32 = 12;
 /// Its own reason, not `UNKNOWN_TRACK`: a send is addressed by its live-route index, not a strip
 /// index, and a caller that names a send that does not exist learns which address was wrong.
 pub const COMMAND_REASON_UNKNOWN_ROUTE: u32 = 13;
+/// A VCA kind's index word is not a VCA of this session (issue #1245 D2).
+///
+/// Its own reason, not `UNKNOWN_TRACK` or `UNKNOWN_ROUTE`: a VCA is addressed by its VCA index, in
+/// canonical VCA-ID order, and a caller that names a VCA that does not exist learns which address
+/// was wrong.
+pub const COMMAND_REASON_UNKNOWN_VCA: u32 = 14;
 
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
@@ -1482,6 +1539,12 @@ struct ReadyOwnership {
     /// the render plane was last told. Solo composes into the *existing* mute records at admission
     /// and adds nothing below it, so this is the whole of solo-in-place on the host side.
     solo: LiveControlSoloState,
+    /// Issue #1245 D3: every VCA's offset and mute, every reached member's own fader value and the
+    /// effective fader value the render plane was last told. A VCA move composes into the
+    /// *existing* member fader records here, and its mute term into `solo`. It carries its own
+    /// transaction shadow, committed or rolled back with `solo` and `routes`. Empty -- and
+    /// allocated nothing -- for a session without VCAs or without live controls.
+    vcas: LiveVcaState,
     /// Records admitted per destination queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every live-control
@@ -1816,6 +1879,13 @@ enum RouteEdit {
     Matrix([f32; 4]),
 }
 
+/// The one VCA field a VCA command moves, on the lanes it covers (issue #1245 D1).
+#[derive(Clone, Copy)]
+enum VcaEdit {
+    FaderDb(BuiltinLaneSelector, f32),
+    Mute(BuiltinLaneSelector, bool),
+}
+
 /// One decoded record and the payload its destination queue takes (issue #140 C).
 #[derive(Clone, Copy)]
 enum AdmittedCommand {
@@ -2047,7 +2117,8 @@ impl AudioWorkletEngineHost {
                 .longest_source_id_bytes
                 .max(shape.longest_track_id_bytes)
                 .max(shape.longest_submix_id_bytes)
-                .max(shape.longest_route_id_bytes),
+                .max(shape.longest_route_id_bytes)
+                .max(shape.longest_vca_id_bytes),
             options,
             (
                 spectrum_request.is_some(),
@@ -2066,6 +2137,23 @@ impl AudioWorkletEngineHost {
             return Err(BootFailure::projected_budget(
                 "host.budget.retained_projection",
                 retained_projection,
+                memory_budget,
+            ));
+        }
+        // Issue #1245 amendment A1: the live VCA state's retained bytes and the transient its
+        // construction holds, on top of everything retained before it, fit the budget; the bounds
+        // above keep both small. Checked before preparation builds a single reach table.
+        let vca_shape = browser_vca_shape(session.normalized_model())?;
+        let vca_peak = vca_shape
+            .retained_bytes()
+            .zip(vca_shape.transient_bytes())
+            .and_then(|(retained, transient)| retained.checked_add(transient))
+            .and_then(|vca| vca.checked_add(retained_projection))
+            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+        if vca_peak > memory_budget {
+            return Err(BootFailure::projected_budget(
+                "host.budget.vca_projection",
+                vca_peak,
                 memory_budget,
             ));
         }
@@ -2163,6 +2251,17 @@ impl AudioWorkletEngineHost {
         self.ready
             .as_ref()
             .map_or(0, |ready| ready.route_controls.len())
+    }
+
+    /// Number of live VCAs (issue #1246 D1): the session's VCAs in canonical VCA-ID order, which
+    /// is the order a VCA kind's (`16`, `17`) index word reads. It is the live VCA state's own
+    /// count, the bound admission refuses an index against, so it is zero before compilation,
+    /// without VCAs and without live controls.
+    #[must_use]
+    pub fn live_control_vca_count(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.vcas.vca_count())
     }
 
     /// Number of sources the compiled session declares; zero before compilation (issue #207).
@@ -2961,6 +3060,24 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         Self::copy_id_into_staging(self.buffers.as_mut(), producer.route_id().as_bytes())
+    }
+
+    /// Copy one VCA ID into ID staging; returns its byte length (issue #1246 D1). VCA `index` is
+    /// the normalized model's `vcas[index]`, the model the live VCA state was built from, and an
+    /// index at or past [`Self::live_control_vca_count`] -- every index without live controls --
+    /// copies nothing.
+    pub(crate) fn copy_live_control_vca_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let index = index as usize;
+        if index >= ready.vcas.vca_count() {
+            return 0;
+        }
+        let Some(vca) = ready.session.normalized_model().vcas.get(index) else {
+            return 0;
+        };
+        Self::copy_id_into_staging(self.buffers.as_mut(), vca.id.as_str().as_bytes())
     }
 
     /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
@@ -4054,6 +4171,8 @@ impl CommandRecord {
                 | COMMAND_ROUTE_GAIN_DB
                 | COMMAND_ROUTE_MUTE
                 | COMMAND_ROUTE_MATRIX
+                | COMMAND_VCA_FADER_DB
+                | COMMAND_VCA_MUTE
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -4259,6 +4378,35 @@ impl CommandRecord {
         }
     }
 
+    /// Check one VCA record's fixed shape and read its edit (issue #1245 D1).
+    ///
+    /// Kind 3's and kind 4's rules -- `rack` `255`, `channel` a lane selector, `values[1..]` `0.0`
+    /// (else `MALFORMED`), an offset in `[-144, 24]` dB or a mute of exactly `0.0` or `1.0` (else
+    /// `DOMAIN`) -- plus the route kinds' `effect_index` and `parameter_id` of `0` (else
+    /// `MALFORMED`), which kinds 3 and 4 do not check.
+    fn into_vca_edit(self) -> Result<VcaEdit, u32> {
+        if !matches!(self.kind, COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE)
+            || self.rack != RACK_NOT_APPLICABLE
+            || self.effect_index != 0
+            || self.parameter_id != 0
+            || self.values[1..].iter().any(|value| *value != 0.0)
+        {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
+        if self.kind == COMMAND_VCA_FADER_DB {
+            // The declared domain of `fader_db`, which a VCA offset shares (#1239).
+            if !(-144.0..=24.0).contains(&self.values[0]) {
+                return Err(COMMAND_REASON_DOMAIN);
+            }
+            return Ok(VcaEdit::FaderDb(lanes, self.values[0]));
+        }
+        if self.values[0] != 0.0 && self.values[0] != 1.0 {
+            return Err(COMMAND_REASON_DOMAIN);
+        }
+        Ok(VcaEdit::Mute(lanes, self.values[0] == 1.0))
+    }
+
     /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
     ///
     /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
@@ -4428,9 +4576,10 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
 /// parameter), and one submission that touches solo owes up to two *more* per strip (issue #210
 /// phase 1; per strip since issue #1213), and one that changes a strip's effective mute owes one
-/// more per live send that follows it (issue #1224), which is why `command_decoded` is
-/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count + route_count` long and why the room counted is
-/// per lowered record rather than per wire record.
+/// more per live send that follows it (issue #1224), and one that rides a VCA owes up to two more
+/// per strip a VCA reaches (issue #1245), which is why `command_decoded` is
+/// `2 * MAXIMUM_COMMAND_RECORDS + 2 * strip_count + route_count + 2 * vca_reached_strips` long and
+/// why the room counted is per lowered record rather than per wire record.
 ///
 /// # The solo transaction (issue #210 phase 1)
 ///
@@ -4438,7 +4587,8 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 /// emitted-mute mirror -- while it is still deciding whether the submission is admissible at all.
 /// So the state carries its own shadow and this wrapper is where it is closed: `commit` once pass
 /// three has actually pushed, `rollback` on every refusal. A refused submission leaves host state
-/// exactly as it was, which is the same all-or-nothing contract the queues keep.
+/// exactly as it was, which is the same all-or-nothing contract the queues keep. The live-send
+/// mirror (issue #1222) and the live VCA state (issue #1245) are closed the same way, together.
 fn admit_commands(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
@@ -4463,11 +4613,13 @@ fn admit_commands(
         Ok(()) => {
             ready.solo.commit();
             ready.routes.commit();
+            ready.vcas.commit();
             Ok(())
         }
         Err(rejection) => {
             ready.solo.rollback();
             ready.routes.rollback();
+            ready.vcas.rollback();
             for shadow in &mut ready.input_filter_shadows {
                 shadow.rollback();
             }
@@ -4526,23 +4678,39 @@ fn admit_commands_staged(
     // Issue #210 phase 1: solo state changes are applied as they are read, but the mute records
     // they compose to are staged once, after the whole batch, by the coalescing pass below.
     let mut solo_seen = false;
-    let mut solo_first_wire_index = 0_u32;
-    let mut solo_smoothing = 0_u32;
+    // Issue #1245 D3: a VCA mute (kind 17) moves the same composition, so it runs the same pass.
+    let mut vca_mute_seen = false;
+    // The coalesced mute records answer to the batch's first kind 9 or 17 record and take the
+    // last one's ramp.
+    let mut coalesce_first_wire_index = 0_u32;
+    let mut coalesce_smoothing = 0_u32;
     // Issue #1224 D3: whether any strip mute record was staged, so the follow pass below runs.
     let mut mute_seen = false;
+    // Issue #1245 D3: a VCA ride (kind 16) stages nothing itself; the VCA fader pass below stages
+    // every reached member's changed lanes once, at the first kind 16 record's wire index, with
+    // the last one's ramp.
+    let mut vca_fader_seen = false;
+    let mut vca_fader_first_wire_index = 0_u32;
+    let mut vca_fader_smoothing = 0_u32;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
         let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
         let track = command.track_index as usize;
         // Issue #1222 D2: the index word is read by kind. A send kind's is a live-route index,
-        // checked against the live routes in its own arm below; every other kind's is a strip
-        // index, checked here against the strip count. One generic check ahead of the dispatch
-        // would refuse a valid send at or past the strip count, and pass an invalid one below it.
-        let route_kind = matches!(
+        // checked against the live routes in its own arm below, and a VCA kind's a VCA index
+        // (issue #1245 D1), checked against the VCAs in its own arm; every other kind's is a
+        // strip index, checked here against the strip count. One generic check ahead of the
+        // dispatch would refuse a valid send or VCA at or past the strip count, and pass an
+        // invalid one below it.
+        let strip_addressed = !matches!(
             command.kind,
-            COMMAND_ROUTE_GAIN_DB | COMMAND_ROUTE_MUTE | COMMAND_ROUTE_MATRIX
+            COMMAND_ROUTE_GAIN_DB
+                | COMMAND_ROUTE_MUTE
+                | COMMAND_ROUTE_MATRIX
+                | COMMAND_VCA_FADER_DB
+                | COMMAND_VCA_MUTE
         );
-        if !route_kind && track >= strip_count {
+        if strip_addressed && track >= strip_count {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
         let mut staged = [AdmittedCommand::Effect(EffectControlRecord::Bypass(false)); 2];
@@ -4566,12 +4734,60 @@ fn admit_commands_staged(
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
-                (slot, 1)
+                // Issue #1245 D3: a fader move on a strip some VCA reaches moves the member's own
+                // value, and what reaches the queue is its effective value -- the own value plus
+                // every reaching VCA's offset, clamped -- for the covered lanes. Two different
+                // lane values split a `Both` command into one `Left` and one `Right` record. A
+                // strip no VCA reaches (`set_member_db` refuses it) lowers exactly as before.
+                if let AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                    lanes,
+                    db,
+                    smoothing_samples,
+                }) = staged[0]
+                    && ready.vcas.set_member_db(track, lanes, db)
+                {
+                    let left = ready.vcas.effective_db(track, 0);
+                    let right = ready.vcas.effective_db(track, 1);
+                    let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
+                        for (position, (lane, db)) in [
+                            (BuiltinLaneSelector::Left, left),
+                            (BuiltinLaneSelector::Right, right),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            ready.vcas.record_emitted_db(track, lane, db);
+                            staged[position] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                                lanes: lane,
+                                db,
+                                smoothing_samples,
+                            });
+                        }
+                        2
+                    } else {
+                        let effective = if matches!(lanes, BuiltinLaneSelector::Right) {
+                            right
+                        } else {
+                            left
+                        };
+                        ready.vcas.record_emitted_db(track, lanes, effective);
+                        staged[0] = AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
+                            lanes,
+                            db: effective,
+                            smoothing_samples,
+                        });
+                        1
+                    };
+                    (slot, produced)
+                } else {
+                    (slot, 1)
+                }
             }
             // A mute command carries the user's *intent*; what reaches the queue is the composed
             // effective mute. With no solo engaged the two are the same value and this stages
             // byte-for-byte what it staged before solo existed. Every lane a selector covers
-            // shares one strip-scoped solo term, so one record still carries the whole command.
+            // shares one strip-scoped solo term; only a one-lane VCA mute splits a `Both` command
+            // into two per-lane records (below).
             //
             // Issue #1213 D3 (VERIFY-2 M4): the effective value is read from the solo state's one
             // composition, which knows a submix is solo-safe; it is never spelled again here. An
@@ -4592,21 +4808,57 @@ fn admit_commands_staged(
                 else {
                     return Err(refuse(COMMAND_REASON_MALFORMED, index));
                 };
+                // Issue #1245 D3 (amendment A1): an earlier kind 17 in this batch may have moved
+                // this strip's VCA mute term; refresh it before the mute composes.
+                if vca_mute_seen
+                    && ready.vcas.reaches(track)
+                    && !ready.solo.set_vca_mute(track, ready.vcas.vca_mute(track))
+                {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+                }
                 if !ready.solo.set_user_mute(track, lanes, muted) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
-                // The first lane the selector covers: after `set_user_mute` every covered lane
-                // holds `muted`, and the solo term is per strip, so the covered lanes agree.
-                let lane = usize::from(matches!(lanes, BuiltinLaneSelector::Right));
-                let effective = ready.solo.effective_mute(track, lane);
-                ready.solo.record_emitted(track, lanes, effective);
+                // After `set_user_mute` every covered lane holds `muted` and the solo term is per
+                // strip, but a VCA mute (issue #1242 D3) is per lane: a `Both` command on a strip
+                // whose VCA mutes one lane composes to two different lane values. Then it stages
+                // one `Left` and one `Right` record, each with its own lane's effective mute, and
+                // mirrors each lane separately. When the covered lanes agree -- always, for a
+                // session without VCAs -- it stages the one record it staged before.
                 mute_seen = true;
-                staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
-                    lanes,
-                    muted: effective,
-                    smoothing_samples,
-                });
-                (strip_count + track, 1)
+                let left = ready.solo.effective_mute(track, 0);
+                let right = ready.solo.effective_mute(track, 1);
+                let produced = if matches!(lanes, BuiltinLaneSelector::Both) && left != right {
+                    for (position, (lane, muted)) in [
+                        (BuiltinLaneSelector::Left, left),
+                        (BuiltinLaneSelector::Right, right),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        ready.solo.record_emitted(track, lane, muted);
+                        staged[position] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
+                            lanes: lane,
+                            muted,
+                            smoothing_samples,
+                        });
+                    }
+                    2
+                } else {
+                    let effective = if matches!(lanes, BuiltinLaneSelector::Right) {
+                        right
+                    } else {
+                        left
+                    };
+                    ready.solo.record_emitted(track, lanes, effective);
+                    staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
+                        lanes,
+                        muted: effective,
+                        smoothing_samples,
+                    });
+                    1
+                };
+                (strip_count + track, produced)
             }
             // Solo lowers to nothing here. It moves one live-control bit; the records that bit
             // composes to are the coalescing pass's business, because a batch of alternating
@@ -4626,12 +4878,56 @@ fn admit_commands_staged(
                 if !ready.solo.set_solo(track, engaged) {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
                 }
-                if !solo_seen {
-                    solo_first_wire_index = index as u32;
+                if !solo_seen && !vca_mute_seen {
+                    coalesce_first_wire_index = index as u32;
                 }
                 solo_seen = true;
-                solo_smoothing = command.smoothing_samples;
+                coalesce_smoothing = command.smoothing_samples;
                 (strip_count + track, 0)
+            }
+            // Issue #1245 D3: a VCA kind moves the VCA state and stages nothing itself. A ride's
+            // member fader records are the VCA fader pass's business, and a mute's member mute
+            // records the coalescing pass's, so a batch of several moves stages each member's net
+            // change once. The mute term reaches the strip-mute owner at once, so a later kind 4
+            // in the same batch composes with it.
+            COMMAND_VCA_FADER_DB | COMMAND_VCA_MUTE => {
+                // No live controls at all: the session has no write path for any member.
+                if ready.controls.is_empty() {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                if track >= ready.vcas.vca_count() {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
+                }
+                match command
+                    .into_vca_edit()
+                    .map_err(|reason| refuse(reason, index))?
+                {
+                    VcaEdit::FaderDb(lanes, db) => {
+                        if !ready.vcas.set_vca_db(track, lanes, db) {
+                            return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
+                        }
+                        if !vca_fader_seen {
+                            vca_fader_first_wire_index = index as u32;
+                        }
+                        vca_fader_seen = true;
+                        vca_fader_smoothing = command.smoothing_samples;
+                    }
+                    VcaEdit::Mute(lanes, muted) => {
+                        if !ready.vcas.set_vca_mute(track, lanes, muted) {
+                            return Err(refuse(COMMAND_REASON_UNKNOWN_VCA, index));
+                        }
+                        // The strip-mute owner's VCA term is refreshed lazily (amendment A1): for
+                        // the strip a later kind 4 addresses, before it composes, and for every
+                        // reached strip once after the loop. Refreshing every reached member here
+                        // would cost one pass over the reach pairs per record.
+                        if !solo_seen && !vca_mute_seen {
+                            coalesce_first_wire_index = index as u32;
+                        }
+                        vca_mute_seen = true;
+                        coalesce_smoothing = command.smoothing_samples;
+                    }
+                }
+                (0, 0)
             }
             // Issue #1222 D4: a send kind moves one field of its mirror and stages one record
             // built from the whole mirror, through the prepared route's own coefficient function.
@@ -4876,6 +5172,42 @@ fn admit_commands_staged(
             lowered += 1;
         }
     }
+    // Issue #1245 D3: the VCA fader pass. Every kind 16 and kind 3 in the batch has moved the VCA
+    // state; what each reached member still owes the render plane is the difference between its
+    // effective fader value and what the render plane was last told -- at most two records per
+    // reached strip, and never a redundant one (a settled lane's retarget moves bits). It stages
+    // them on each member's existing fader queue with the last kind 16 record's ramp, at the first
+    // one's wire index, ahead of the mute records below.
+    if vca_fader_seen {
+        for strip in 0..strip_count {
+            let slot = strip_count + strip;
+            for (lanes, db) in ready.vcas.fader_delta(strip).into_iter().flatten() {
+                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+                    return Err(refuse(
+                        COMMAND_REASON_UNSUPPORTED_KIND,
+                        vca_fader_first_wire_index as usize,
+                    ));
+                };
+                *wanted = wanted.saturating_add(1);
+                let Some(entry) = ready.command_decoded.get_mut(lowered) else {
+                    return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+                };
+                *entry = StagedCommand {
+                    queue_slot: slot as u32,
+                    original_wire_index: vca_fader_first_wire_index,
+                    kind: StagedCommandKind::Command(AdmittedCommand::Fader(
+                        TrackFaderRecord::FaderDb {
+                            lanes,
+                            db,
+                            smoothing_samples: vca_fader_smoothing,
+                        },
+                    )),
+                };
+                lowered += 1;
+                ready.vcas.record_emitted_db(strip, lanes, db);
+            }
+        }
+    }
     // The coalesced net emission (issue #210 phase 1, correction 1). Every solo and mute change in
     // the batch has been applied; what the live controls owe the render plane is now the difference
     // between the composed effective mute and what the render plane was last told -- at most two
@@ -4887,8 +5219,25 @@ fn admit_commands_staged(
     //
     // The fade is the last solo record's `smoothing_samples`: a batch is one gesture, and the
     // gesture that moved the solo state is the one whose declick window the live controls asked
-    // for.
-    if solo_seen {
+    // for. A VCA mute (kind 17, issue #1245 D3) moves the same composition and runs the same pass:
+    // the ramp is the last kind 9 or 17 record's, and the records answer to the first one's wire
+    // index.
+    if solo_seen || vca_mute_seen {
+        // Issue #1245 D3 (amendment A1): every reached strip's VCA mute term reaches the one
+        // strip-mute owner once, before its delta is read, so the cost is one pass over the reach
+        // pairs per batch however many kind 17 records it carries.
+        if vca_mute_seen {
+            for strip in 0..strip_count {
+                if ready.vcas.reaches(strip)
+                    && !ready.solo.set_vca_mute(strip, ready.vcas.vca_mute(strip))
+                {
+                    return Err(refuse(
+                        COMMAND_REASON_MALFORMED,
+                        coalesce_first_wire_index as usize,
+                    ));
+                }
+            }
+        }
         for strip in 0..strip_count {
             let slot = strip_count + strip;
             for (lanes, muted) in ready.solo.strip_delta(strip).into_iter().flatten() {
@@ -4904,12 +5253,12 @@ fn admit_commands_staged(
                 };
                 *entry = StagedCommand {
                     queue_slot: slot as u32,
-                    original_wire_index: solo_first_wire_index,
+                    original_wire_index: coalesce_first_wire_index,
                     kind: StagedCommandKind::Command(AdmittedCommand::Fader(
                         TrackFaderRecord::Mute {
                             lanes,
                             muted,
-                            smoothing_samples: solo_smoothing,
+                            smoothing_samples: coalesce_smoothing,
                         },
                     )),
                 };
@@ -4932,7 +5281,7 @@ fn admit_commands_staged(
     //
     // Nothing is pushed here: the records join the room check below with every other staged
     // entry (D4), and the mirror's lanes move under its shadow, after every record is built.
-    if (solo_seen || mute_seen) && !ready.routes.is_empty() {
+    if (solo_seen || mute_seen || vca_mute_seen) && !ready.routes.is_empty() {
         let follow_start = lowered;
         let route_base = strip_count * 3 + ready.effect_controls.len();
         let effective_mute = |strip: usize, lane: usize| ready.solo.effective_mute(strip, lane);
@@ -5962,6 +6311,182 @@ fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootF
 /// word. Bridge storage is the exact layout projection above. Preparation's graph/effect/builtin
 /// subcompilers receive this same total budget and retain their existing checked pre-allocation
 /// estimators, so no structural count ceiling is introduced here.
+/// The VCA shape the browser bounds at boot (issue #1245 amendment A1).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BrowserVcaShape {
+    strips: u64,
+    vcas: u64,
+    /// (strip, reaching VCA) pairs: the entries of `vca_reach()`.
+    pairs: u64,
+    /// Membership entries over every VCA.
+    members: u64,
+}
+
+impl BrowserVcaShape {
+    /// Exactly the bytes [`LiveVcaState::try_new`] keeps for this shape: per VCA its offset and
+    /// mute, per strip its own and emitted dB, the two flattened reach tables with their starts,
+    /// and the shadow of the four mutable arrays. Zero without a VCA.
+    fn retained_bytes(self) -> Option<u64> {
+        if self.vcas == 0 {
+            return Some(0);
+        }
+        let word = size_of::<usize>() as u64;
+        let vca = (size_of::<[f32; 2]>() + size_of::<[bool; 2]>()) as u64;
+        let strip = 2 * size_of::<[f32; 2]>() as u64;
+        let mirrors = self
+            .vcas
+            .checked_mul(vca)?
+            .checked_add(self.strips.checked_mul(strip)?)?;
+        let tables = (self.strips + 1)
+            .checked_add(self.vcas + 1)?
+            .checked_add(self.pairs.checked_mul(2)?)?
+            .checked_mul(word)?;
+        mirrors.checked_mul(2)?.checked_add(tables)
+    }
+
+    /// A conservative bound on the transient bytes [`LiveVcaState::try_new`] holds beyond what it
+    /// keeps. `try_new` holds one `vca_reach()` result (a per-strip list with up to doubled
+    /// capacity, plus its parent index) and the inverse table's cursor, and drops the reach lists
+    /// before it seeds the emitted mirror from the flattened tables. This charges two reach
+    /// results and the effective faders, so it over-counts. At the browser's bounds (256 VCAs,
+    /// 16,384 pairs) it is never the binding refusal: the exact retained-budget check, or
+    /// preparation's own resource limit, refuses a smaller budget first (the #1245 verdict's
+    /// NIT-2); it stays as a defensive pre-check before any per-pair table is built.
+    fn transient_bytes(self) -> Option<u64> {
+        if self.vcas == 0 {
+            return Some(0);
+        }
+        let word = size_of::<usize>() as u64;
+        let reach = self
+            .strips
+            .checked_mul(size_of::<Vec<usize>>() as u64)?
+            .checked_add(self.pairs.checked_mul(2 * word)?)?
+            .checked_add(self.members.checked_mul(VCA_PARENT_ENTRY_BYTES)?)?
+            .checked_add(self.vcas.checked_mul(word + 1)?)?;
+        reach
+            .checked_mul(2)?
+            .checked_add(
+                self.strips
+                    .checked_mul(size_of::<session::EffectiveStripFader>() as u64)?,
+            )?
+            .checked_add(self.vcas.checked_mul(word)?)
+    }
+}
+
+/// Count a normalized model's VCAs and (strip, reaching VCA) pairs, refusing a session past the
+/// browser's bounds before any per-pair table exists (issue #1245 amendment A1).
+///
+/// Each VCA's ancestors -- the VCAs that reach it -- are one fixed-width bitset, filled in an order
+/// where every VCA follows the VCAs that list it; a strip's reach is the union, over the VCAs that
+/// list it, of each one's ancestors and itself. The work is linear in the membership entries, and
+/// it allocates nothing proportional to the pair count it is bounding.
+fn browser_vca_shape(model: &session::SessionModel) -> Result<BrowserVcaShape, BootFailure> {
+    let refused = |code: &str| BootFailure::fixed(RESULT_REFUSED_BUDGET, code);
+    let allocation = || refused("web.resource.allocation");
+    let strips = (model.tracks.len() + model.submixes.len()) as u64;
+    let vcas = &model.vcas;
+    if vcas.is_empty() {
+        return Ok(BrowserVcaShape {
+            strips,
+            ..BrowserVcaShape::default()
+        });
+    }
+    if vcas.len() > MAXIMUM_BROWSER_VCAS {
+        return Err(refused("web.vca.maximum_vcas"));
+    }
+    // VCA IDs, sorted, for member lookup.
+    let mut ids: Vec<(&str, usize)> = Vec::new();
+    ids.try_reserve_exact(vcas.len())
+        .map_err(|_| allocation())?;
+    ids.extend(
+        vcas.iter()
+            .enumerate()
+            .map(|(index, vca)| (vca.id.as_str(), index)),
+    );
+    ids.sort_unstable();
+    let vca_of = |id: &str| {
+        ids.binary_search_by(|(candidate, _)| (*candidate).cmp(id))
+            .ok()
+            .map(|position| ids[position].1)
+    };
+    let members: usize = vcas.iter().map(|vca| vca.members.len()).sum();
+    // Kahn's order over the VCA-to-VCA membership edges.
+    let mut listed_by = vec_zeroed::<u32>(vcas.len()).ok_or_else(allocation)?;
+    for vca in vcas {
+        for member in &vca.members {
+            if let Some(child) = vca_of(member.as_str()) {
+                listed_by[child] += 1;
+            }
+        }
+    }
+    let mut ancestors = vec_zeroed::<[u64; VCA_REACH_WORDS]>(vcas.len()).ok_or_else(allocation)?;
+    let mut ready: Vec<usize> = Vec::new();
+    ready
+        .try_reserve_exact(vcas.len())
+        .map_err(|_| allocation())?;
+    ready.extend((0..vcas.len()).filter(|index| listed_by[*index] == 0));
+    // Every membership entry naming a strip, with the reach it contributes.
+    let mut strip_entries: Vec<(&str, [u64; VCA_REACH_WORDS])> = Vec::new();
+    strip_entries
+        .try_reserve_exact(members)
+        .map_err(|_| allocation())?;
+    let mut ordered = 0_usize;
+    while let Some(index) = ready.pop() {
+        ordered += 1;
+        let mut reach = ancestors[index];
+        reach[index / 64] |= 1 << (index % 64);
+        for member in &vcas[index].members {
+            match vca_of(member.as_str()) {
+                Some(child) => {
+                    for (word, bits) in ancestors[child].iter_mut().zip(reach) {
+                        *word |= bits;
+                    }
+                    listed_by[child] -= 1;
+                    if listed_by[child] == 0 {
+                        ready.push(child);
+                    }
+                }
+                None => strip_entries.push((member.as_str(), reach)),
+            }
+        }
+    }
+    // Validation refuses a membership cycle; an order that misses a VCA cannot be counted.
+    if ordered != vcas.len() {
+        return Err(refused("web.vca.reach_pairs"));
+    }
+    strip_entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut pairs = 0_u64;
+    for run in strip_entries.chunk_by(|left, right| left.0 == right.0) {
+        let mut reach = [0_u64; VCA_REACH_WORDS];
+        for (_, bits) in run {
+            for (word, bit) in reach.iter_mut().zip(bits) {
+                *word |= bit;
+            }
+        }
+        pairs += reach
+            .iter()
+            .map(|word| u64::from(word.count_ones()))
+            .sum::<u64>();
+    }
+    if pairs > MAXIMUM_BROWSER_VCA_REACH_PAIRS {
+        return Err(refused("web.vca.reach_pairs"));
+    }
+    Ok(BrowserVcaShape {
+        strips,
+        vcas: vcas.len() as u64,
+        pairs,
+        members: members as u64,
+    })
+}
+
+/// `count` zeroed values in an exactly reserved `Vec`, or `None` when it cannot be reserved.
+fn vec_zeroed<T: Copy + Default>(count: usize) -> Option<Vec<T>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).ok()?;
+    values.resize(count, T::default());
+    Some(values)
+}
+
 fn projected_retained_bytes(
     compiled: &CompiledSession,
     source_ring_frames: u32,
@@ -6061,6 +6586,7 @@ fn prepare_caps(
         maximum_automation_spans_per_block: automation_spans,
         maximum_tracks: u64::MAX,
         maximum_submixes: u64::MAX,
+        maximum_vcas: u64::MAX,
         maximum_sources: u64::MAX,
         maximum_routes: u64::MAX,
         maximum_effects: u64::MAX,
@@ -6284,7 +6810,9 @@ fn compile_ready(
     // prepared fader section -- read in the same normalized track order `handles.strips` leads with,
     // because that order is the addressing authority for every queue, meter and command index.
     // One seed per strip (issue #1213 D3): the tracks, soloable, then the submixes, solo-safe, each
-    // seeded from its own session fader mutes.
+    // seeded from its own session fader mutes. Issue #1242 D3: each also carries its VCA mute
+    // from the same composition the compilers baked (`effective_strip_faders`, in strip order),
+    // before the solo state and the live-send mirror are built from it.
     let mut prepared_mutes: Vec<StripMuteSeed> = Vec::new();
     prepared_mutes
         .try_reserve_exact(strip_count)
@@ -6293,6 +6821,7 @@ fn compile_ready(
     if model.tracks.len() != track_count || model.submixes.len() != submixes.len() {
         return Err(fixed_diagnostic("web.live_controls.effects").into());
     }
+    let effective_faders = model.effective_strip_faders();
     let count = |effects: usize| -> Result<u32, Vec<u8>> {
         u32::try_from(effects).map_err(|_| fixed_diagnostic("web.live_controls.effects"))
     };
@@ -6309,6 +6838,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [track.fader.left_mute, track.fader.right_mute],
             solo_safe: false,
+            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
         });
     }
     for submix in &model.submixes {
@@ -6320,6 +6850,7 @@ fn compile_ready(
         prepared_mutes.push(StripMuteSeed {
             mutes: [submix.fader.left_mute, submix.fader.right_mute],
             solo_safe: true,
+            vca_mute: effective_faders[prepared_mutes.len()].vca_mute,
         });
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[s]` is the number of effect
@@ -6404,7 +6935,8 @@ fn compile_ready(
     let solo = LiveControlSoloState::try_new(&prepared_mutes)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     // A following send's source lanes start at its source strip's effective mute; solo is never
-    // persisted, so at preparation that is the session fader mute the compiler folded in.
+    // persisted, so at preparation that is the session fader mute or VCA mute the compilers
+    // folded in (issue #1242 D3).
     let routes = if route_controls.is_empty() {
         LiveRouteState::empty()
     } else {
@@ -6441,6 +6973,28 @@ fn compile_ready(
         report.largest_bridge_allocation_bytes.max(route_largest);
     report.largest_named_allocation_bytes =
         report.largest_named_allocation_bytes.max(route_largest);
+    // Issue #1245 D3/D4: the live VCA state, built after the solo state from the same normalized
+    // model, and charged beside the route mirror -- every byte it reserved, its shadow included.
+    // A session without VCAs, or a host without live controls (which refuses every VCA kind),
+    // keeps the empty state and adds nothing to any row.
+    let vcas = if handles.strip_controls.is_empty() {
+        LiveVcaState::empty()
+    } else {
+        LiveVcaState::try_new(model).map_err(|_| fixed_diagnostic("web.resource.allocation"))?
+    };
+    let vca_retained = vcas.retained_bytes();
+    let vca_largest = vcas.largest_allocation_bytes();
+    report.bridge_metadata_bytes = report
+        .bridge_metadata_bytes
+        .checked_add(vca_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.bridge_retained_bytes = report
+        .bridge_retained_bytes
+        .checked_add(vca_retained)
+        .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
+    report.largest_bridge_allocation_bytes =
+        report.largest_bridge_allocation_bytes.max(vca_largest);
+    report.largest_named_allocation_bytes = report.largest_named_allocation_bytes.max(vca_largest);
     // Three per-strip bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity, each
     // `T + S` long since issue #1213 D1; the effect band follows and covers every strip, and the
     // live send band follows it (issue #1222 D4).
@@ -6574,7 +7128,8 @@ fn compile_ready(
     // The decoded command array carries the enlarged internal EffectControlRecord enum. Its
     // typed backing is a separate retained allocation from the public 48-byte wire staging row;
     // charge the full actual array before the final aggregate budget check.
-    let decoded_count = command_staging_count(strip_count, routes.len())?;
+    let decoded_count =
+        command_staging_count(strip_count, routes.len(), vcas.reached_strip_count())?;
     let decoded_bytes = u64::try_from(decoded_count)
         .ok()
         .and_then(|count| count.checked_mul(size_of::<StagedCommand>() as u64))
@@ -6603,8 +7158,13 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
-        command_decoded: boxed_command_staging(strip_count, routes.len())?,
+        command_decoded: boxed_command_staging(
+            strip_count,
+            routes.len(),
+            vcas.reached_strip_count(),
+        )?,
         solo,
+        vcas,
         route_controls,
         routes,
         in_flight: boxed_zero_u32(queue_count)?,
@@ -6705,6 +7265,7 @@ fn boxed_zero_meter_frame(strip_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
 fn boxed_command_staging(
     strip_count: usize,
     route_count: usize,
+    vca_reached_strips: usize,
 ) -> Result<Box<[StagedCommand]>, Vec<u8>> {
     // Two entries per staged wire record: one `channel = both` command on a per-lane effect
     // parameter lowers to one record per lane (#140 C).
@@ -6719,7 +7280,11 @@ fn boxed_command_staging(
     //
     // Plus `route_count` for issue #1224's follow pass: at most one record per live send per
     // batch, because `delta` yields each send once, after the batch's last strip mute.
-    let count = command_staging_count(strip_count, route_count)?;
+    //
+    // Plus `2 * vca_reached_strips` for issue #1245's VCA fader pass: at most one `FaderDb` per
+    // lane of each strip some VCA reaches, per batch. A VCA mute adds nothing here: its member
+    // records are the coalescing pass's, already bounded by `2 * strip_count`.
+    let count = command_staging_count(strip_count, route_count, vca_reached_strips)?;
     let empty = StagedCommand {
         queue_slot: 0,
         original_wire_index: 0,
@@ -6735,10 +7300,15 @@ fn boxed_command_staging(
     Ok(value.into_boxed_slice())
 }
 
-fn command_staging_count(strip_count: usize, route_count: usize) -> Result<usize, Vec<u8>> {
+fn command_staging_count(
+    strip_count: usize,
+    route_count: usize,
+    vca_reached_strips: usize,
+) -> Result<usize, Vec<u8>> {
     (MAXIMUM_COMMAND_RECORDS as usize * 2)
         .checked_add(strip_count.checked_mul(2).ok_or_else(arithmetic)?)
         .and_then(|count| count.checked_add(route_count))
+        .and_then(|count| count.checked_add(vca_reached_strips.checked_mul(2)?))
         .ok_or_else(arithmetic)
 }
 

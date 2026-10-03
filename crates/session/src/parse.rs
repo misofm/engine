@@ -5,6 +5,7 @@ use crate::{
     DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
     RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel,
     Sidechain, SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track,
+    Vca,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     json_preflight,
     model::ClosedToken,
@@ -727,6 +728,7 @@ fn parse_root(
             "console",
             "tracks",
             "submixes",
+            "vcas",
             "outputs",
             "routes",
             "automation",
@@ -744,6 +746,7 @@ fn parse_root(
     let console = parse_record(parser, table, "console", &path, parse_console);
     let tracks = parse_list(parser, table, "tracks", &path, parse_track);
     let submixes = parse_list(parser, table, "submixes", &path, parse_submix);
+    let vcas = parse_list(parser, table, "vcas", &path, parse_vca);
     let outputs = parse_list(parser, table, "outputs", &path, parse_output);
     let routes = parse_list(parser, table, "routes", &path, parse_route);
     let automation = parse_list(parser, table, "automation", &path, parse_automation);
@@ -759,6 +762,7 @@ fn parse_root(
         console,
         tracks,
         submixes,
+        vcas,
         outputs,
         routes,
         automation,
@@ -775,6 +779,7 @@ fn parse_root(
             Some(console),
             Some(tracks),
             Some(submixes),
+            Some(vcas),
             Some(outputs),
             Some(routes),
             Some(automation),
@@ -790,6 +795,7 @@ fn parse_root(
             console,
             tracks,
             submixes,
+            vcas,
             outputs,
             routes,
             automation,
@@ -1304,6 +1310,59 @@ fn parse_submix(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) 
         fader: fader?,
         matrix_or_pan: matrix_or_pan?,
     })
+}
+
+/// A VCA group (#1240 D1): `id`, an offset `fader` read by the strip's fader parser, and
+/// `members`, the schema's one array of stable IDs.
+fn parse_vca(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Vca> {
+    parser.keys(table, &["id", "fader", "members"], &path);
+    let id = parser.id(table, "id", &path);
+    let fader = parse_record(parser, table, "fader", &path, parse_fader);
+    let members = parse_id_list(parser, table, "members", &path);
+    Some(Vca {
+        id: id?,
+        fader: fader?,
+        members: members?,
+    })
+}
+
+/// An array of stable IDs: a non-array is `schema.wrong_type` at the key, a non-string item
+/// `schema.wrong_type` and a malformed ID `id.invalid` at the item's index (#1240 D1).
+fn parse_id_list(
+    parser: &mut Parser,
+    parent: TableRef<'_>,
+    key: &'static str,
+    path: &DiagnosticPath,
+) -> Option<Vec<StableId>> {
+    let list_path = path.key(key);
+    let values = parser.array(parent, key, path)?;
+    let mut output = Vec::with_capacity(values.values.len());
+    for (index, mapped) in values
+        .values
+        .iter_mapped(parser.code_map, values.offset)
+        .enumerate()
+    {
+        let span = code_span(parser.code_map, mapped.offset);
+        let item_path = list_path.index(index);
+        match mapped.value {
+            Value::String(text) => match StableId::parse(text.as_str()) {
+                Some(id) => output.push(id),
+                None => parser.error_at(
+                    DiagnosticCode::InvalidId,
+                    item_path,
+                    span,
+                    "stable IDs must match [a-z][a-z0-9._-]{0,126}",
+                ),
+            },
+            _ => parser.error_at(
+                DiagnosticCode::WrongType,
+                item_path,
+                span,
+                "expected JSON string",
+            ),
+        }
+    }
+    Some(output)
 }
 
 fn parse_output(parser: &mut Parser, table: TableRef<'_>, path: DiagnosticPath) -> Option<Output> {

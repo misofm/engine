@@ -18,7 +18,9 @@
     { "value": 12, "name": "inputFilters", "applied": true, "plane": "render" },
     { "value": 13, "name": "routeGainDb", "applied": true, "plane": "render" },
     { "value": 14, "name": "routeMute", "applied": true, "plane": "render" },
-    { "value": 15, "name": "routeMatrix", "applied": true, "plane": "render" }
+    { "value": 15, "name": "routeMatrix", "applied": true, "plane": "render" },
+    { "value": 16, "name": "vcaFaderDb", "applied": true, "plane": "render" },
+    { "value": 17, "name": "vcaMute", "applied": true, "plane": "render" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
@@ -34,7 +36,8 @@
     { "value": 10, "name": "unknownTap" },
     { "value": 11, "name": "observationUnbound" },
     { "value": 12, "name": "notSoloable" },
-    { "value": 13, "name": "unknownRoute" }
+    { "value": 13, "name": "unknownRoute" },
+    { "value": 14, "name": "unknownVca" }
   ],
   "observationVocabularies": {
     "kinds": [{ "value": 1, "name": "gainReductionDb" }],

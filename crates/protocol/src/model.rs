@@ -11,7 +11,7 @@ use session::{
     Console, ConsoleEntry, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
     EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
     RouteDestination, RouteSource, SessionModel, SidechainDeclaration, Source, SourceBitDepth,
-    StableId, Submix, compile_session,
+    StableId, Submix, Vca, compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
@@ -108,6 +108,12 @@ pub enum SessionEditOpcode {
     SetAutomationTarget = 0x0602,
     /// `SetAutomationSegments`.
     SetAutomationSegments = 0x0603,
+    /// `UpsertVca` (#1241), the first code of the new VCA family (`0x07xx`).
+    UpsertVca = 0x0700,
+    /// `RemoveVca` (#1241).
+    RemoveVca = 0x0701,
+    /// `SetVcaFader` (#1241).
+    SetVcaFader = 0x0702,
 }
 
 impl SessionEditOpcode {
@@ -164,6 +170,9 @@ impl SessionEditOpcode {
             0x0601 => Some(Self::RemoveAutomation),
             0x0602 => Some(Self::SetAutomationTarget),
             0x0603 => Some(Self::SetAutomationSegments),
+            0x0700 => Some(Self::UpsertVca),
+            0x0701 => Some(Self::RemoveVca),
+            0x0702 => Some(Self::SetVcaFader),
             _ => None,
         }
     }
@@ -413,6 +422,19 @@ pub enum SessionEdit {
         automation_id: StableId,
         segments: Vec<AutomationSegment>,
     },
+    /// Insert or replace a VCA by stable ID: its fader offsets and its whole member list.
+    ///
+    /// A member may be declared later in the same transaction: membership, namespace, range and
+    /// acyclicity are validated once, on the final candidate.
+    UpsertVca { vca: Vca },
+    /// Remove a VCA without cascading: a VCA that still lists it as a member refuses the
+    /// transaction at final validation unless the same transaction rewrites that VCA.
+    RemoveVca { vca_id: StableId },
+    /// Replace one VCA's fader offsets and mutes. A strip edit never resolves a VCA ID.
+    SetVcaFader {
+        vca_id: StableId,
+        fader: DualMonoFader,
+    },
 }
 
 impl SessionEdit {
@@ -463,6 +485,9 @@ impl SessionEdit {
             Self::RemoveAutomation { .. } => SessionEditOpcode::RemoveAutomation,
             Self::SetAutomationTarget { .. } => SessionEditOpcode::SetAutomationTarget,
             Self::SetAutomationSegments { .. } => SessionEditOpcode::SetAutomationSegments,
+            Self::UpsertVca { .. } => SessionEditOpcode::UpsertVca,
+            Self::RemoveVca { .. } => SessionEditOpcode::RemoveVca,
+            Self::SetVcaFader { .. } => SessionEditOpcode::SetVcaFader,
         }
     }
 }
@@ -470,7 +495,8 @@ impl SessionEdit {
 /// An edit-resolution failure before session compilation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEditError {
-    /// A targeted source, strip (a track or a submix), effect, route, or automation was absent.
+    /// A targeted source, strip (a track or a submix), effect, route, automation or VCA was
+    /// absent.
     NotFound,
     /// An effect insertion position exceeded the post-removal rack length.
     InvalidFinalPosition,
@@ -754,6 +780,16 @@ pub fn apply_session_edit(
                 return Err(SessionEditError::EmptyAutomationSegments);
             }
             automation_mut(session, automation_id)?.segments = segments.clone();
+        }
+        SessionEdit::UpsertVca { vca } => upsert(&mut session.vcas, vca, |item| &item.id),
+        SessionEdit::RemoveVca { vca_id } => remove(&mut session.vcas, vca_id, |item| &item.id)?,
+        SessionEdit::SetVcaFader { vca_id, fader } => {
+            session
+                .vcas
+                .iter_mut()
+                .find(|item| &item.id == vca_id)
+                .ok_or(SessionEditError::NotFound)?
+                .fader = fader.clone();
         }
     }
     Ok(())
@@ -1408,8 +1444,9 @@ mod tests {
     }
 
     /// #1094 appends `SetConsole` (`0x0007`) and `SetTrackConsole` (`0x0211`), #1216 appends
-    /// `SetRouteMute` (`0x0506`) and #1218 appends `SetRouteFollowsMute` (`0x0507`): every
-    /// allocated code round-trips through `from_raw`, there are exactly 43 of them, and no retired
+    /// `SetRouteMute` (`0x0506`), #1218 appends `SetRouteFollowsMute` (`0x0507`) and #1241 opens
+    /// the VCA family with `UpsertVca`, `RemoveVca` and `SetVcaFader` (`0x0700`-`0x0702`): every
+    /// allocated code round-trips through `from_raw`, there are exactly 46 of them, and no retired
     /// code came back.
     ///
     /// Red if a new code reuses the retired `0x0006`, if a `from_raw` arm maps a code to another
@@ -1419,7 +1456,7 @@ mod tests {
         let allocated = (0..=u16::MAX)
             .filter_map(|raw| SessionEditOpcode::from_raw(raw).map(|opcode| (raw, opcode)))
             .collect::<Vec<_>>();
-        assert_eq!(allocated.len(), 43);
+        assert_eq!(allocated.len(), 46);
         assert!(allocated.iter().all(|(raw, opcode)| opcode.raw() == *raw));
         assert_eq!(
             SessionEditOpcode::from_raw(0x0007),
@@ -1436,6 +1473,18 @@ mod tests {
         assert_eq!(
             SessionEditOpcode::from_raw(0x0507),
             Some(SessionEditOpcode::SetRouteFollowsMute)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0700),
+            Some(SessionEditOpcode::UpsertVca)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0701),
+            Some(SessionEditOpcode::RemoveVca)
+        );
+        assert_eq!(
+            SessionEditOpcode::from_raw(0x0702),
+            Some(SessionEditOpcode::SetVcaFader)
         );
         for retired in [0x0006, 0x0102, 0x0104] {
             assert_eq!(SessionEditOpcode::from_raw(retired), None);

@@ -1025,6 +1025,24 @@ pub(crate) mod session {
             fields: &[ID, BUILTINS, CONSOLE, INSERTS, FADER, MATRIX_OR_PAN],
         };
     }
+    pub(crate) mod vca {
+        use super::*;
+        // #1241 D1: a VCA's `members` is a repeated UTF-8 stable ID, built exactly as
+        // `set_track_effect_order::EFFECT_ID`; an empty list is zero occurrences.
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const FADER: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
+        pub(crate) const MEMBERS: FieldSpec = FieldSpec {
+            id: 3,
+            wire: Wire::Utf8,
+            mandatory: true,
+            repeated: true,
+            nested: None,
+        };
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "Vca",
+            fields: &[ID, FADER, MEMBERS],
+        };
+    }
     pub(crate) mod output {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
@@ -1516,6 +1534,31 @@ pub(crate) mod session {
             fields: &[ID, SEGMENT],
         };
     }
+    pub(crate) mod upsert_vca {
+        use super::*;
+        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &vca::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "UpsertVca",
+            fields: &[VALUE],
+        };
+    }
+    pub(crate) mod remove_vca {
+        use super::*;
+        pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "RemoveVca",
+            fields: &[ID],
+        };
+    }
+    pub(crate) mod set_vca_fader {
+        use super::*;
+        pub(crate) const VCA_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
+        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(2, true, false, &fader::SPEC);
+        pub(crate) static SPEC: MessageSpec = MessageSpec {
+            name: "SetVcaFader",
+            fields: &[VCA_ID, VALUE],
+        };
+    }
 
     pub(crate) fn payload_spec(opcode: crate::SessionEditOpcode) -> &'static MessageSpec {
         use crate::SessionEditOpcode::*;
@@ -1563,6 +1606,9 @@ pub(crate) mod session {
             RemoveAutomation => &remove_automation::SPEC,
             SetAutomationTarget => &set_automation_target::SPEC,
             SetAutomationSegments => &set_automation_segments::SPEC,
+            UpsertVca => &upsert_vca::SPEC,
+            RemoveVca => &remove_vca::SPEC,
+            SetVcaFader => &set_vca_fader::SPEC,
         }
     }
 }

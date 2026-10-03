@@ -184,7 +184,8 @@ fn limits() -> CompileLimits {
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
         maximum_submixes: 0,
-        reserved: [0; 3],
+        maximum_vcas: 0,
+        reserved: [0; 2],
     }
 }
 
@@ -474,6 +475,11 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
             limits.maximum_tracks
         } else {
             limits.maximum_submixes
+        },
+        maximum_vcas: if limits.maximum_vcas == 0 {
+            limits.maximum_tracks
+        } else {
+            limits.maximum_vcas
         },
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,
@@ -1777,9 +1783,10 @@ fn resource_queries_racing_plan_swaps_always_find_the_published_row() {
 
 // Issue #1206 D2: a C ABI caller bounds submix strips through `maximum_submixes`, the word of the
 // compile limits that was `reserved[0]`. Zero means "use `maximum_tracks`" -- what every caller
-// written before the word was named passes -- and the three remaining reserved words still refuse
-// when nonzero. It lives here, not in a file of its own, because this file is the C ABI's
-// approved owner of exported-C `unsafe` calls (`scripts/check-realtime-policy.sh`).
+// written before the word was named passes -- and the two remaining reserved words (#1243 named
+// `maximum_vcas` after it) still refuse when nonzero. It lives here, not in a file of its own,
+// because this file is the C ABI's approved owner of exported-C `unsafe` calls
+// (`scripts/check-realtime-policy.sh`).
 
 const SUBMIX_FIXTURE: &str =
     include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
@@ -1829,7 +1836,8 @@ fn submix_limits(maximum_tracks: u64, maximum_submixes: u64) -> CompileLimits {
         maximum_replay_bytes: 8_192,
         maximum_replay_entries: 16,
         maximum_submixes,
-        reserved: [0; 3],
+        maximum_vcas: 0,
+        reserved: [0; 2],
     }
 }
 
@@ -1933,9 +1941,82 @@ fn maximum_submixes_bounds_submixes_and_zero_defers_to_maximum_tracks() {
         "the word overrides a larger track cap",
     );
 
-    // The three remaining reserved words still refuse, each on its own.
-    for word in 0..3 {
+    // The two remaining reserved words still refuse, each on its own.
+    for word in 0..2 {
         let mut nonzero = submix_limits(2, 3);
+        nonzero.reserved[word] = 1;
+        let (result, _) = compile_result_c(&document, &nonzero);
+        assert_eq!(result, RESULT_INVALID_ARGUMENT, "reserved[{word}]");
+    }
+}
+
+// Issue #1243 D2: a C ABI caller bounds VCA groups through `maximum_vcas`, the word after
+// `maximum_submixes` that was `reserved[0]`. Zero means "use `maximum_tracks`", exactly as for
+// submixes; the word is a bound of its own, never `maximum_submixes` (held at zero below, which
+// for this submix-free session is any track cap).
+
+/// Two tracks routed to the main output, plus three empty, unity VCA groups.
+fn two_track_three_vca_session() -> String {
+    let mut model = session::parse_session_json(SUBMIX_FIXTURE).expect("fixture parses");
+    model.tracks.truncate(2);
+    let kept: Vec<StableId> = model.tracks.iter().map(|track| track.id.clone()).collect();
+    model.routes.retain(|route| match &route.source {
+        session::RouteSource::Track { track_id, .. } => kept.contains(track_id),
+        _ => true,
+    });
+    for index in 0..3 {
+        model.vcas.push(session::Vca {
+            id: StableId::parse(&format!("vca{index}")).expect("stable id"),
+            fader: session::DualMonoFader {
+                left_db: 0.0,
+                right_db: 0.0,
+                left_mute: false,
+                right_mute: false,
+            },
+            members: Vec::new(),
+        });
+    }
+    session::canonical_session_json(&model).expect("canonical session")
+}
+
+fn vca_limits(maximum_tracks: u64, maximum_vcas: u64) -> CompileLimits {
+    CompileLimits {
+        maximum_vcas,
+        ..submix_limits(maximum_tracks, 0)
+    }
+}
+
+/// Test value: turns red if the C bound ignores the new word, treats zero as "no VCAs" (or as
+/// unbounded), reads `maximum_submixes` in its place, or stops refusing the remaining reserved
+/// words while the named word is set.
+#[test]
+fn maximum_vcas_bounds_vcas_and_zero_defers_to_maximum_tracks() {
+    let document = two_track_three_vca_session();
+
+    // Zero: the VCA bound is `maximum_tracks`.
+    assert_count_refusal(
+        &document,
+        &vca_limits(2, 0),
+        "zero word, three VCAs over two tracks",
+    );
+    assert_prepares(
+        &document,
+        &vca_limits(3, 0),
+        "zero word, three VCAs within three tracks",
+    );
+
+    // Nonzero: the word is the bound, whatever `maximum_tracks` is.
+    assert_prepares(&document, &vca_limits(2, 3), "three VCAs at a cap of three");
+    assert_count_refusal(&document, &vca_limits(2, 2), "three VCAs over a cap of two");
+    assert_count_refusal(
+        &document,
+        &vca_limits(3, 2),
+        "the word overrides a larger track cap",
+    );
+
+    // Only the named word is freed: each remaining reserved word still refuses on its own.
+    for word in 0..2 {
+        let mut nonzero = vca_limits(2, 3);
         nonzero.reserved[word] = 1;
         let (result, _) = compile_result_c(&document, &nonzero);
         assert_eq!(result, RESULT_INVALID_ARGUMENT, "reserved[{word}]");

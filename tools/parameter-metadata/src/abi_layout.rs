@@ -58,9 +58,10 @@ use host_web::{
     COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_NOT_SOLOABLE,
     COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_ROUTE,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES, COMMAND_ROUTE_GAIN_DB,
-    COMMAND_ROUTE_MATRIX, COMMAND_ROUTE_MUTE, COMMAND_SOLO, COMMAND_TRIM_DB,
+    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNKNOWN_VCA,
+    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES,
+    COMMAND_REPORT_BYTES, COMMAND_ROUTE_GAIN_DB, COMMAND_ROUTE_MATRIX, COMMAND_ROUTE_MUTE,
+    COMMAND_SOLO, COMMAND_TRIM_DB, COMMAND_VCA_FADER_DB, COMMAND_VCA_MUTE,
     DEFAULT_COMMAND_QUEUE_RECORDS, DEFAULT_MAXIMUM_MEMORY_BYTES, DEFAULT_METER_BLOCKS,
     DIAGNOSTIC_BYTES, LIVE_RESPONSE_CAPTURE_BYTES, LIVE_RESPONSE_MAXIMUM_ID_BYTES,
     LIVE_RESPONSE_MAXIMUM_OWNERS, LIVE_RESPONSE_MAXIMUM_POINTS, LIVE_RESPONSE_MAXIMUM_SECTIONS,
@@ -131,7 +132,7 @@ pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "outpu
 /// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
 /// consumer name an export without typing a string. `memory` is deliberately absent: it is the
 /// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
-pub const EXPORTS: [&str; 120] = [
+pub const EXPORTS: [&str; 122] = [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot",
     "miso_engine_web_v1_boot_diagnostic_bytes",
@@ -164,6 +165,8 @@ pub const EXPORTS: [&str; 120] = [
     "miso_engine_web_v1_live_control_submix_id",
     "miso_engine_web_v1_live_control_track_count",
     "miso_engine_web_v1_live_control_track_id",
+    "miso_engine_web_v1_live_control_vca_count",
+    "miso_engine_web_v1_live_control_vca_id",
     "miso_engine_web_v1_meter_header_ptr",
     "miso_engine_web_v1_meter_lease",
     "miso_engine_web_v1_meter_poll",
@@ -1772,6 +1775,8 @@ pub fn render() -> String {
         (COMMAND_ROUTE_GAIN_DB, "routeGainDb"),
         (COMMAND_ROUTE_MUTE, "routeMute"),
         (COMMAND_ROUTE_MATRIX, "routeMatrix"),
+        (COMMAND_VCA_FADER_DB, "vcaFaderDb"),
+        (COMMAND_VCA_MUTE, "vcaMute"),
     ];
     let command_reasons = [
         (COMMAND_REASON_NONE, "none"),
@@ -1788,6 +1793,7 @@ pub fn render() -> String {
         (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
         (COMMAND_REASON_NOT_SOLOABLE, "notSoloable"),
         (COMMAND_REASON_UNKNOWN_ROUTE, "unknownRoute"),
+        (COMMAND_REASON_UNKNOWN_VCA, "unknownVca"),
     ];
 
     let mut out = String::with_capacity(1 << 14);

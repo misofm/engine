@@ -21,6 +21,10 @@ for (let attempt = 0; attempt < 512 && publications.length < 2; attempt += 1) {
 
 Evidence:
 - It failed once in Chromium on PR #1105 (run 36719596271, job 109902172521).
+- It failed again in Chromium on PR #1238 (run 37115329466, attempt 1, job 111181516316, head
+  `8c6268967`), and passed when the failed jobs were re-run. The same attempt failed Firefox's
+  `sdk-spectrum-continuous` gate, which is *Name the failed predicate and bound the waits of the
+  browser continuous-spectrum gate by a deadline* (#1248).
 - It passed when the failed job was re-run, and in every local three-browser run.
 - The probe's code has been unchanged since `756ed813`.
 

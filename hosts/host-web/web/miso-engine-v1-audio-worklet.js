@@ -613,8 +613,8 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
     }
     // Issue #1210 D3: the submix IDs, in canonical order (the order of the meter frame's submix
     // sections), read through the same staging exactly as the track IDs are. Preparation sizes
-    // that staging for the longest source, track, submix or route ID, so the capacity check below is a
-    // corrupt-artifact check, not a limit a valid session can reach.
+    // that staging for the longest source, track, submix, route or VCA ID, so the capacity check
+    // below is a corrupt-artifact check, not a limit a valid session can reach.
     const submixCount = this.exports.miso_engine_web_v1_live_control_submix_count(this.handle);
     if (!u32(submixCount)) return false;
     this.submixIds = [];
@@ -645,6 +645,23 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         id += String.fromCharCode(bytes[byte]);
       }
       this.routeIds.push(id);
+    }
+    // Issue #1246 D3: the VCA IDs, in canonical VCA-ID order, read through the same staging under
+    // the same rules. VCA `i` is what a VCA kind's (16, 17) index word `i` addresses, so the SDK
+    // takes its VCA indices from this list and never sorts. Zero without live controls.
+    const vcaCount = this.exports.miso_engine_web_v1_live_control_vca_count(this.handle);
+    if (!u32(vcaCount)) return false;
+    this.vcaIds = [];
+    for (let index = 0; index < vcaCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_live_control_vca_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      this.vcaIds.push(id);
     }
 
     // Issue #207: source introspection, read once here for the same reason the track identities
@@ -1020,6 +1037,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
         metersAttached: this.metersAttached === true,
         submixes: [...this.submixIds],
         routes: [...this.routeIds],
+        vcas: [...this.vcaIds],
       });
     } else if (message?.tag === "miso.observationmap.v1"
         && exactFields(message, ["tag", "requestId"])) {

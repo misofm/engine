@@ -14,6 +14,7 @@ import type {
   SourceSpec,
   SubmixSpec,
   TrackSpec,
+  VcaSpec,
 } from "../core/types.ts";
 
 /**
@@ -381,6 +382,58 @@ function submix(value: unknown, path: string): { id: string; spec: SubmixSpec | 
   return { id: string(raw.id, `${path}.id`), spec: strip(raw, path) };
 }
 
+/** One `vcas` entry (#1240): `{ id, fader?, members }`. */
+function vca(value: unknown, path: string): { id: string; spec: VcaSpec } {
+  const raw = record(value, path);
+  keys(raw, ["id", "fader", "members"], ["id", "members"], path, UNKNOWN_FIELD);
+  let fader: VcaSpec["fader"];
+  if (raw.fader !== undefined) {
+    const supplied = record(raw.fader, `${path}.fader`);
+    keys(supplied, ["leftDb", "rightDb", "leftMute", "rightMute"], [], `${path}.fader`);
+    fader = supplied as VcaSpec["fader"];
+  }
+  const members = array(raw.members, `${path}.members`).map((member, index) => string(member, `${path}.members[${index}]`));
+  return { id: string(raw.id, `${path}.id`), spec: { ...(fader === undefined ? {} : { fader }), members } };
+}
+
+/**
+ * The request's VCAs reordered so every nested VCA precedes a VCA that lists it, otherwise in
+ * request order. A membership cycle (a self-member included) is refused here with the engine's
+ * code, `vca.cycle`, at the request path of the VCA the walk reaches twice.
+ */
+function membersFirst<T extends { readonly id: string; readonly path: string; readonly spec: VcaSpec }>(
+  vcas: readonly T[],
+): T[] {
+  // The first entry with an ID is the one a member resolves to; a repeated ID is still declared,
+  // so the builder refuses it with `id.duplicate`.
+  const byId = new Map<string, T>();
+  for (const entry of vcas) if (!byId.has(entry.id)) byId.set(entry.id, entry);
+  const seen = new Set<T>();
+  const open = new Set<T>();
+  const ordered: T[] = [];
+  const visit = (entry: T): void => {
+    if (seen.has(entry)) return;
+    seen.add(entry);
+    open.add(entry);
+    for (const member of entry.spec.members) {
+      const nested = byId.get(member);
+      if (nested === undefined) continue;
+      if (open.has(nested)) {
+        throw new MisoUsageError(
+          `${nested.path}: VCA '${nested.id}' is on a membership cycle (it is reached again through `
+            + `'${entry.id}'); a VCA may not contain itself`,
+          "vca.cycle",
+        );
+      }
+      visit(nested);
+    }
+    open.delete(entry);
+    ordered.push(entry);
+  };
+  vcas.forEach(visit);
+  return ordered;
+}
+
 function route(value: unknown, path: string): RouteSpec {
   const raw = record(value, path);
   keys(raw, ["id", "source", "destination", "matrix", "gainDb", "mute", "followsMute"], ["id", "source", "destination"], path);
@@ -448,7 +501,7 @@ function automation(value: unknown, path: string): AutomationSpec {
 /** Decode and translate one strict V1 authoring request through the public SDK builder. */
 export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   const root = record(value, "$");
-  keys(root, ["schemaVersion", "session", "sources", "console", "tracks", "submixes", "outputs", "routes", "automation"], ["schemaVersion", "session"], "$");
+  keys(root, ["schemaVersion", "session", "sources", "console", "tracks", "submixes", "vcas", "outputs", "routes", "automation"], ["schemaVersion", "session"], "$");
   if (root.schemaVersion !== 1) fail("$.schemaVersion", "expected 1");
   const options = record(root.session, "$.session");
   keys(options, ["id", "sampleRateHz", "revision", "quantumFrames"], ["id", "sampleRateHz"], "$.session");
@@ -484,6 +537,15 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   for (const [index, value] of optionalArray(root, "tracks").entries()) {
     const decoded = track(value, `$.tracks[${index}]`);
     builder = builder.track(decoded.id, decoded.spec);
+  }
+  // VCAs follow every track and submix they may group, and are declared members first: a request
+  // may list a VCA before the nested VCAs it names, which the builder alone would refuse.
+  const vcas = optionalArray(root, "vcas").map((value, index) => {
+    const path = `$.vcas[${index}]`;
+    return { ...vca(value, path), path };
+  });
+  for (const decoded of membersFirst(vcas)) {
+    builder = builder.vca(decoded.id, decoded.spec);
   }
   for (const [index, value] of optionalArray(root, "routes").entries()) {
     builder = builder.route(route(value, `$.routes[${index}]`));

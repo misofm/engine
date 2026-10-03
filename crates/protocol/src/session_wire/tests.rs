@@ -1726,3 +1726,107 @@ fn random_submix_strips_round_trip_losslessly() {
     assert!(pans > 0 && matrices > 0, "both variants drawn");
     assert!(repeated_console > 0, "a repeated console field drawn");
 }
+
+fn random_vca(draw: &mut Draw, index: usize) -> Vca {
+    Vca {
+        id: id(&format!("vca-{index}")),
+        fader: DualMonoFader {
+            left_db: draw.f32(),
+            right_db: draw.f32(),
+            left_mute: draw.bit(),
+            right_mute: draw.bit(),
+        },
+        // Zero to four members, so a draw may omit field 3 or repeat it; declared order is kept.
+        members: (0..draw.below(5))
+            .map(|member| id(&format!("m-{}-{member}", draw.below(100))))
+            .collect(),
+    }
+}
+
+/// #1241 gate 1: `UpsertVca` with random VCAs (empty and non-empty `members`, both lanes, muted
+/// and unmuted), `RemoveVca` and `SetVcaFader` encode and decode to equal edits and re-encode to
+/// the same bytes; a hand-built VCA message with field IDs 1, 2 and 3 (D1) decodes to the expected
+/// VCA, and one with no field 3 decodes to empty `members`.
+///
+/// Red if field 3 is lost, mis-tagged or refused when empty, or if the fader is read from the
+/// wrong message or field.
+#[test]
+fn vca_edits_round_trip_and_members_decode_empty() {
+    let mut draw = Draw(0x1241_0000_00ca_0001);
+    let mut empty = 0;
+    let mut repeated = 0;
+    let mut muted = [0; 2];
+    for index in 0..64 {
+        let vca = random_vca(&mut draw, index);
+        match vca.members.len() {
+            0 => empty += 1,
+            2.. => repeated += 1,
+            _ => {}
+        }
+        muted[0] += usize::from(vca.fader.left_mute);
+        muted[1] += usize::from(vca.fader.right_mute);
+        let fader = random_vca(&mut draw, index).fader;
+        let edits = vec![
+            SessionEdit::UpsertVca { vca: vca.clone() },
+            SessionEdit::SetVcaFader {
+                vca_id: vca.id.clone(),
+                fader,
+            },
+            SessionEdit::RemoveVca {
+                vca_id: vca.id.clone(),
+            },
+        ];
+        let bytes = encode(&edits);
+        let decoded = ProtocolCodec::default()
+            .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 64]))
+            .expect("VCA edits decode");
+        assert_eq!(decoded.edits, edits, "draw {index}");
+        assert_eq!(encode(&decoded.edits), bytes, "draw {index} re-encodes");
+    }
+    assert!(
+        empty > 0 && repeated > 0,
+        "empty and repeated members drawn"
+    );
+    assert!(
+        muted.iter().all(|&count| count > 0 && count < 64),
+        "mutes vary"
+    );
+
+    let fader = DualMonoFader {
+        left_db: -6.5,
+        right_db: 3.25,
+        left_mute: true,
+        right_mute: false,
+    };
+    let fader_bytes = nested_bytes(&|sink| tx_fader(sink, &fader));
+    let message = |members: &[&str]| {
+        let mut fields = vec![
+            (1, WIRE_UTF8, true, b"drums".to_vec()),
+            (2, WIRE_MESSAGE, true, fader_bytes.clone()),
+        ];
+        fields.extend(
+            members
+                .iter()
+                .map(|member| (3, WIRE_UTF8, true, member.as_bytes().to_vec())),
+        );
+        raw_message(fields)
+    };
+    let parse = |members: &[&str]| parse_vca(Message::nested(&message(members)).expect("nested"));
+    assert_eq!(
+        parse(&["snare", "kick"]),
+        Ok(Vca {
+            id: id("drums"),
+            fader: fader.clone(),
+            members: vec![id("snare"), id("kick")],
+        })
+    );
+    assert_eq!(
+        parse(&[]),
+        Ok(Vca {
+            id: id("drums"),
+            fader,
+            members: Vec::new(),
+        })
+    );
+    assert_eq!(parse(&["not a stable id"]), Err(DecodeError::InvalidTlv));
+}

@@ -62,16 +62,26 @@ structural, compiling and swapping a replacement plan, until *Deliver value-only
 submix-strip edits to the running C ABI plan* (#1225) lands.
 
 A caller bounds submix strips through `miso_engine_v1_compile_limits.maximum_submixes` (#1206), an
-in-place V1 amendment: the word is the former `reserved[0]`, at offset 176, and `reserved` shrinks
-to three words at 184..207, so the struct stays 208 bytes and no symbol, size or `ABI_VERSION`
-changes. Zero means "use `maximum_tracks`" -- not "no submixes" and not "unbounded" -- which is the
-value every caller written before the word was named already passes. A nonzero value is the bound
-itself; a session over it refuses with `host.resource.count`. The three remaining reserved words
-must still be zero. For a caller written before #1206, zero newly bounds submixes by
-`maximum_tracks`: between K1 (#1199-#1205) and #1206 they were uncounted, so such a caller now gets
-that typed refusal for a session with more submixes than `maximum_tracks`. A caller cannot probe
-whether a library honours the word; a library older than #1206 refuses a nonzero word with
-`RESULT_INVALID_ARGUMENT`, the safe direction.
+in-place V1 amendment: the word is the former `reserved[0]`, at offset 176, followed by
+`maximum_vcas` at 184 (#1243, below) and two reserved words at 192..207, so the struct stays 208
+bytes and no symbol, size or `ABI_VERSION` changes. Zero means "use `maximum_tracks`" -- not "no
+submixes" and not "unbounded" -- which is the value every caller written before the word was named
+already passes. A nonzero value is the bound itself; a session over it refuses with
+`host.resource.count`. The two remaining reserved words must still be zero. For a caller written
+before #1206, zero newly bounds submixes by `maximum_tracks`: between K1 (#1199-#1205) and #1206
+they were uncounted, so such a caller now gets that typed refusal for a session with more submixes
+than `maximum_tracks`. A caller cannot probe whether a library honours the word; a library older
+than #1206 refuses a nonzero word with `RESULT_INVALID_ARGUMENT`, the safe direction.
+
+A caller bounds VCA groups through `miso_engine_v1_compile_limits.maximum_vcas` (#1243), the same
+kind of in-place V1 amendment: the word is the next former reserved word, at offset 184, and
+`reserved` shrinks to two words at 192..207, so the struct is still 208 bytes and no symbol, size
+or `ABI_VERSION` changes. Zero means "use `maximum_tracks`" -- not "no VCAs" and not "unbounded" --
+which every caller written before the word was named already passes. A nonzero value is the bound
+itself, independent of `maximum_tracks` and `maximum_submixes`; a session over it refuses with
+`host.resource.count`. No released library accepted a VCA before this word existed (VCA groups
+arrive in the same batch, #1240), so zero changes no previously accepted session; a library older
+than #1243 refuses a nonzero word with `RESULT_INVALID_ARGUMENT`.
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was

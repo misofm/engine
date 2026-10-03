@@ -164,6 +164,7 @@ fn one_effect_session(effect_id: &str) -> String {
     "pan": {{ "left": -1.0, "right": 1.0, "smoothing_samples": 0 }}
   }}],
   "submixes": [],
+  "vcas": [],
   "outputs": [{{ "id": "out" }}],
   "routes": [{{
     "id": "r",

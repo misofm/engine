@@ -49,6 +49,7 @@ fn base_document() -> String {
           "console": {{ "pre_insert": [ {{ "slot": "eq", "identity": {{ "kind": "native", "effect_id": "miso.parametric-eq" }}, "quality": "normal", "link_mode": "dual_mono" }} ], "post_insert": [] }},
           "tracks": [ {}, {} ],
           "submixes": [ {{ "id": "bus", {strip} }} ],
+          "vcas": [],
           "outputs": [ {{ "id": "main-out" }} ],
           "routes": [
             {{ "id": "a-bus", "source": {{ "kind": "track", "track_id": "a", "tap": "post_pan" }},

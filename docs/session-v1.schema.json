@@ -4,7 +4,7 @@
   "title": "MisoFM Session V1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "session_id", "revision", "sample_rate_hz", "quantum_frames", "render_profile", "output_profile", "sources", "console", "tracks", "submixes", "outputs", "routes", "automation"],
+  "required": ["schema_version", "session_id", "revision", "sample_rate_hz", "quantum_frames", "render_profile", "output_profile", "sources", "console", "tracks", "submixes", "vcas", "outputs", "routes", "automation"],
   "properties": {
     "schema_version": { "const": 1 },
     "session_id": { "$ref": "#/$defs/id" },
@@ -17,6 +17,7 @@
     "console": { "$ref": "#/$defs/console" },
     "tracks": { "type": "array", "items": { "$ref": "#/$defs/track" } },
     "submixes": { "type": "array", "items": { "$ref": "#/$defs/submix" } },
+    "vcas": { "type": "array", "items": { "$ref": "#/$defs/vca" } },
     "outputs": { "type": "array", "items": { "$ref": "#/$defs/id_record" } },
     "routes": { "type": "array", "items": { "$ref": "#/$defs/route" } },
     "automation": { "type": "array", "items": { "$ref": "#/$defs/automation" } }
@@ -140,6 +141,22 @@
         { "type": "object", "additionalProperties": false, "required": ["id", "builtins", "console", "inserts", "fader", "pan"], "properties": { "id": { "$ref": "#/$defs/id" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "pan": { "$ref": "#/$defs/pan" } } },
         { "type": "object", "additionalProperties": false, "required": ["id", "builtins", "console", "inserts", "fader", "matrix"], "properties": { "id": { "$ref": "#/$defs/id" }, "builtins": { "$ref": "#/$defs/builtins" }, "console": { "type": "array", "items": { "$ref": "#/$defs/console_entry" } }, "inserts": { "$ref": "#/$defs/rack" }, "fader": { "$ref": "#/$defs/fader" }, "matrix": { "$ref": "#/$defs/matrix" } } }
       ]
+    },
+    "vca": {
+      "type": "object", "additionalProperties": false, "required": ["id", "fader", "members"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "fader": {
+          "type": "object", "additionalProperties": false, "required": ["left_db", "right_db", "left_mute", "right_mute"],
+          "properties": {
+            "left_db": { "type": "number", "minimum": -144, "maximum": 24 },
+            "right_db": { "type": "number", "minimum": -144, "maximum": 24 },
+            "left_mute": { "type": "boolean" },
+            "right_mute": { "type": "boolean" }
+          }
+        },
+        "members": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
+      }
     },
     "route_destination": {
       "oneOf": [

@@ -8,7 +8,7 @@ use session::{
     ChannelMatrix, Console, ConsoleEntry, ConsoleSlot, DualMonoBuiltins, DualMonoFader, Effect,
     EffectIdentity, EffectParam, EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName,
     RenderProfile, Route, RouteDestination, RouteSource, SidechainDeclaration, Source,
-    SourceBitDepth, StableId, Submix,
+    SourceBitDepth, StableId, Submix, Vca,
 };
 
 use crate::{
@@ -613,6 +613,12 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
             }
             Ok(())
         }
+        SessionEdit::UpsertVca { vca } => tx_message(sink, fields[0], |v| tx_vca(v, vca)),
+        SessionEdit::RemoveVca { vca_id } => tx_id(sink, fields[0], vca_id),
+        SessionEdit::SetVcaFader { vca_id, fader } => {
+            tx_id(sink, fields[0], vca_id)?;
+            tx_message(sink, fields[1], |v| tx_fader(v, fader))
+        }
     }
 }
 
@@ -1025,6 +1031,21 @@ fn tx_submix(sink: &mut dyn Sink, value: &Submix) -> Result<(), EncodeError> {
         tx_matrix_or_pan(v, &value.matrix_or_pan)
     })
 }
+fn tx_vca(sink: &mut dyn Sink, value: &Vca) -> Result<(), EncodeError> {
+    tx_start_message(
+        sink,
+        schema::session::vca::SPEC
+            .field_count(&[(schema::session::vca::MEMBERS, value.members.len())])?,
+    )?;
+    tx_id(sink, schema::session::vca::ID, &value.id)?;
+    tx_message(sink, schema::session::vca::FADER, |v| {
+        tx_fader(v, &value.fader)
+    })?;
+    for member in &value.members {
+        tx_id(sink, schema::session::vca::MEMBERS, member)?;
+    }
+    Ok(())
+}
 fn tx_output(sink: &mut dyn Sink, value: &Output) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::output::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::output::ID, &value.id)
@@ -1387,6 +1408,16 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 .map(|value| parse_automation_segment(payload.nested_value(value)?))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        crate::SessionEditOpcode::UpsertVca => Ok(SessionEdit::UpsertVca {
+            vca: parse_vca(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
+        }),
+        crate::SessionEditOpcode::RemoveVca => Ok(SessionEdit::RemoveVca {
+            vca_id: stable_id(one_spec!(payload, fields[0])?)?,
+        }),
+        crate::SessionEditOpcode::SetVcaFader => Ok(SessionEdit::SetVcaFader {
+            vca_id: stable_id(one_spec!(payload, fields[0])?)?,
+            fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
+        }),
     }
 }
 
@@ -1725,6 +1756,18 @@ fn parse_submix(message: Message<'_>) -> Result<Submix, DecodeError> {
         matrix_or_pan: parse_matrix_or_pan(
             message.nested_value(one_spec!(message, schema::session::submix::MATRIX_OR_PAN)?)?,
         )?,
+    })
+}
+fn parse_vca(message: Message<'_>) -> Result<Vca, DecodeError> {
+    let message = message.schema_spec(&schema::session::vca::SPEC)?;
+    Ok(Vca {
+        id: stable_id(one_spec!(message, schema::session::vca::ID)?)?,
+        fader: parse_fader(
+            message.nested_value(one_spec!(message, schema::session::vca::FADER)?)?,
+        )?,
+        members: values_spec!(message, schema::session::vca::MEMBERS)?
+            .map(stable_id)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn parse_output(message: Message<'_>) -> Result<Output, DecodeError> {

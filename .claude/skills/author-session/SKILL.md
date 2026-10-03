@@ -27,9 +27,9 @@ sniffing, or TOML translation. Unknown keys reject.
    cargo run -q -p parameter-metadata -- --print
    ```
 
-The fourteen root keys are `schema_version`, `session_id`, `revision`, `sample_rate_hz`,
+The fifteen root keys are `schema_version`, `session_id`, `revision`, `sample_rate_hz`,
 `quantum_frames`, `render_profile`, `output_profile`, `sources`, `console`, `tracks`, `submixes`,
-`outputs`, `routes`, and `automation`. Every field and empty array is explicit. Durable unsigned
+`vcas`, `outputs`, `routes`, and `automation`. Every field and empty array is explicit. Durable unsigned
 64-bit values (`revision`, source `frames`, automation `start_sample`/`end_sample`) are canonical
 decimal JSON strings: no sign, whitespace, leading zero except `"0"`, or value above
 `18446744073709551615`.
@@ -114,6 +114,26 @@ a submix target in the JSON itself. For
 6 mute and 12 pan accept left/right/both, while matrix IDs 7-10 accept `both` only. Delay (11) is
 prepared-only and cannot be automated. Stored automation is inert today: it authors and
 round-trips, and renders nothing.
+
+## VCA groups
+
+`vcas` is required, `[]` when empty. A VCA is `{ "id", "fader", "members" }`: a control-only fader
+with no audio path, whose per-lane `left_db`/`right_db` is an offset in `[-144, 24]` dB that adds to
+every member's own fader, and whose mutes mute every member (VCAs are inert at preparation until
+#1242). `members` is an array of ID strings naming tracks, submixes and other VCAs, each once; an
+output is never a member, VCAs nest and overlap, and a diamond is legal, but membership is acyclic.
+A VCA's ID is in the graph-entity namespace, yet it is never a route endpoint, a sidechain source
+or an automation target. The canonical writer sorts `vcas` and each `members` list by ID; save each
+member's own fader and each VCA's own offset, never a computed effective value.
+
+## VCA refusals, by code
+
+| Defect | Code | Stage |
+| --- | --- | --- |
+| A VCA on a membership cycle (a self-member included), at `$.vcas[<i>]` | `vca.cycle` | typed-model |
+| A member that is not a declared track, submix or VCA; a VCA ID as a route endpoint, sidechain source or automation target | `reference.missing_entity` | typed-model |
+| A repeated member; a VCA ID already used by a track, submix, output or VCA | `id.duplicate` | typed-model |
+| A VCA offset outside `[-144, 24]` dB | `numeric.out_of_schema_range` | typed-model |
 
 ## Buses: submix strips and their taps
 

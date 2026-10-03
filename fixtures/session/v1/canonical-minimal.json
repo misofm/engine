@@ -20,6 +20,7 @@
   },
   "tracks": [],
   "submixes": [],
+  "vcas": [],
   "outputs": [
     {
       "id": "main-out"

@@ -57,7 +57,7 @@ fn document(revision: u64, console: &str, a: &str, b: &str) -> String {
           "sources": [ {{ "id": "voice", "content": "blake3:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea", "channels": 2, "bit_depth": "32f", "frames": "48000" }} ],
           "console": {console},
           "tracks": [ {}, {} ],
-          "submixes": [], "outputs": [ {{ "id": "main-out" }} ],
+          "submixes": [], "vcas": [], "outputs": [ {{ "id": "main-out" }} ],
           "routes": [ {}, {} ], "automation": [] }}"#,
         track("a", a, EQ_INSERT),
         track("b", b, ""),

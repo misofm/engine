@@ -152,13 +152,18 @@ See `VERIFY.md` in this folder. These amendments supersede the text above where 
     - a change to `left_mute` or `right_mute` of a strip that, in the post-commit model, is the
       source of a route with `follows_mute: true`, until *Let C ABI sends follow their source
       strip's mute live* (#1226);
-    - once the VCA umbrella lands, any fader field of a VCA member, until that umbrella's C ABI
-      slice.
+    - while the pre- or post-commit model declares at least one VCA, **every** delta, until
+      *Deliver value-only VCA edits to the running C ABI plan* (#1247). (Widened at filing of *VCA
+      groups*, #1239, from "any fader field of a VCA member": this path would push a member's own
+      fader value and drop the VCA offset, and #1225's route records and #1226's follow mirror read
+      the source strip's raw committed mutes, which would reopen a VCA-muted member's following
+      send.)
 
     Whichever of #1053 and the slice that creates the dependency lands second implements the rule
     in `live_builtin_delta`: *Declare the submix strip in the session grammar and wire* (#1199) for
     submix-strip fields, *Let a route into a submix follow its source strip's mute in the session*
-    (#1218) for follow sources, and the VCA preparation slice for VCA members.
+    (#1218) for follow sources, and *Apply VCA offsets and mutes at preparation* (#1242) for the VCA
+    rule.
 
     That umbrella renames two host-core fields #1053's capi code reads:
     `HostLiveControlHandles.tracks` becomes `strips` (*List every strip in the live-control handles

@@ -62,6 +62,9 @@ pub trait ModelVisitor {
     fn f32(&mut self, key: FieldKey, value: f32) -> Result<(), Self::Error>;
     /// Emit a stable-ID field.
     fn id(&mut self, key: FieldKey, value: &StableId) -> Result<(), Self::Error>;
+    /// Emit one stable ID as an element of the open array (a VCA's `members`, #1240): the
+    /// schema's one array of scalars. Each item is a repeated field of the array's key.
+    fn id_item(&mut self, value: &StableId) -> Result<(), Self::Error>;
     /// Emit arbitrary UTF-8 text.
     fn text(&mut self, key: FieldKey, value: &str) -> Result<(), Self::Error>;
     /// Emit a closed token.
@@ -82,7 +85,7 @@ macro_rules! key_module { ($name:ident,$doc:literal;$($field:tt)*) => {#[doc=$do
 #[rustfmt::skip]
 pub mod keys {
  use super::FieldKey;
- key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
+ key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,CONSOLE="console":15,TRACKS="tracks":10,SUBMIXES="submixes":11,VCAS="vcas":16,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
  key_module!(console,"Session console fields (decision 12).";PRE_INSERT="pre_insert":1,POST_INSERT="post_insert":2);
  key_module!(console_slot,"Console slot declaration fields.";SLOT="slot":1,IDENTITY="identity":2,QUALITY="quality":3,LINK_MODE="link_mode":4);
  key_module!(console_entry,"Per-track console entry fields.";SLOT="slot":1,BYPASS="bypass":2,PARAMS="params":3);
@@ -104,6 +107,9 @@ pub mod keys {
  // Field 3 is `console`, the reserved field #1202 appends; pan and matrix share tagged field 6,
  // exactly as the track's field 10 (#1199 D1).
  key_module!(submix,"Submix strip fields.";ID="id":1,BUILTINS="builtins":2,CONSOLE="console":3,INSERTS="inserts":4,FADER="fader":5,PAN="pan":6,MATRIX="matrix":6);
+ // Root field 8 was `limits` (removed in 04d291dd); it is retired and never reallocated. `vcas`
+ // is appended as 16 (#1240).
+ key_module!(vca,"VCA group fields (#1240).";ID="id":1,FADER="fader":2,MEMBERS="members":3);
  key_module!(output,"Output fields.";ID="id":1);
  key_module!(route,"Route fields.";ID="id":1,SOURCE="source":2,DESTINATION="destination":3,CHANNEL_MATRIX="channel_matrix":4,GAIN_DB="gain_db":5,MUTE="mute":6,FOLLOWS_MUTE="follows_mute":7);
  key_module!(route_source,"Route-source fields.";KIND="kind":1,TRACK_ID="track_id":2,SUBMIX_ID="submix_id":2,TAP="tap":3);
@@ -152,7 +158,7 @@ mod walk {
         fn canonical_cmp(&self, other: &Self) -> Ordering;
     }
     macro_rules! ids { ($($t:ty),+) => {$(impl CanonicalOrd for $t { fn canonical_cmp(&self, other: &Self) -> Ordering { self.id.cmp(&other.id) } })+}; }
-    ids!(Source, Track, Submix, Output, Route, Automation);
+    ids!(Source, Track, Submix, Vca, Output, Route, Automation);
     impl CanonicalOrd for EffectParam {
         fn canonical_cmp(&self, other: &Self) -> Ordering {
             (self.parameter_id, self.channel).cmp(&(other.parameter_id, other.channel))
@@ -191,11 +197,29 @@ mod walk {
         visitor.array_end()
     }
 
+    /// An array of stable IDs, sorted by ID in canonical order (a VCA's `members`, #1240).
+    fn id_array<V: ModelVisitor>(
+        key: FieldKey,
+        ids: &[StableId],
+        order: WalkOrder,
+        visitor: &mut V,
+    ) -> Result<(), V::Error> {
+        visitor.array_begin(key, ids.len())?;
+        if order == WalkOrder::Canonical && !ids.is_sorted() {
+            let mut sorted: Vec<_> = ids.iter().collect();
+            sorted.sort();
+            sorted.into_iter().try_for_each(|id| visitor.id_item(id))?;
+        } else {
+            ids.iter().try_for_each(|id| visitor.id_item(id))?;
+        }
+        visitor.array_end()
+    }
+
     records! {
-        SessionModel=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
+        SessionModel=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.vcas.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
           v.u32(f::SCHEMA_VERSION,s.schema_version),v.id(f::SESSION_ID,&s.session_id),v.u64(f::REVISION,s.revision),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),v.u32(f::QUANTUM_FRAMES,s.quantum_frames),
           s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),
-          sorted_array(f::SOURCES,&s.sources,o,v),s.console.record(Some(f::CONSOLE),o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),
+          sorted_array(f::SOURCES,&s.sources,o,v),s.console.record(Some(f::CONSOLE),o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),sorted_array(f::VCAS,&s.vcas,o,v),
           sorted_array(f::OUTPUTS,&s.outputs,o,v),sorted_array(f::ROUTES,&s.routes,o,v),sorted_array(f::AUTOMATION,&s.automation,o,v)
         }
         RenderProfile=>render_profile |s,v,_o,f| [2] {v.id(f::ID,&s.id),v.token(f::MODE,token(s.mode.token(),s.mode.wire()))}
@@ -227,6 +251,7 @@ mod walk {
           v.id(f::ID,&s.id),s.builtins.record(Some(f::BUILTINS),o,v),array(f::CONSOLE,&s.console,o,v),s.inserts.record(Some(f::INSERTS),o,v),s.fader.record(Some(f::FADER),o,v),
           {let k=match s.matrix_or_pan {MatrixOrPan::Pan{..}=>f::PAN,MatrixOrPan::Matrix{..}=>f::MATRIX};s.matrix_or_pan.record(Some(k),o,v)}
         }
+        Vca=>vca |s,v,o,f| [2+s.members.len() as u32] {v.id(f::ID,&s.id),s.fader.record(Some(f::FADER),o,v),id_array(f::MEMBERS,&s.members,o,v)}
         Output=>output |s,v,_o,f| [1] {v.id(f::ID,&s.id)}
         ChannelMatrix=>channel_matrix |s,v,_o,f| [4] {v.f32(f::LL,s.ll),v.f32(f::LR,s.lr),v.f32(f::RL,s.rl),v.f32(f::RR,s.rr)}
         Route=>route |s,v,o,f| [7] {

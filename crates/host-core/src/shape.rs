@@ -33,6 +33,8 @@ pub struct HostSessionShape {
     /// Longest declared route ID in bytes, over every route of the session (not only the live
     /// ones), or zero when there are no routes (issue #1223 D2).
     pub longest_route_id_bytes: u64,
+    /// Longest declared VCA ID in bytes, or zero when there are no VCAs (issue #1246 D2).
+    pub longest_vca_id_bytes: u64,
     /// Number of sources.
     pub source_count: u64,
     /// Number of tracks.
@@ -93,6 +95,14 @@ pub fn compiled_session_shape(
                 .routes
                 .iter()
                 .map(|route| route.id.as_str().len())
+                .max()
+                .unwrap_or(0),
+        )?,
+        longest_vca_id_bytes: count(
+            model
+                .vcas
+                .iter()
+                .map(|vca| vca.id.as_str().len())
                 .max()
                 .unwrap_or(0),
         )?,

@@ -110,11 +110,19 @@ Ruling:
   - **(a) VCA groups are in scope** (DESIGN 2.2a).
     - A VCA is a control-only group. It carries no audio. Its per-lane dB offset adds to each
       member's own fader, and its mute ORs into each member's effective mute.
-    - It is its own umbrella, *VCA groups*, drafted at `docs/handoffs/submix-sends-2026-10-02/issues/V0`-`V5`.
-      The root files it once batch K3 of #1196 closes (the Sol PASS and push of *Let a send follow
-      its source strip's mute live in the browser*, #1224), and re-verifies its anchors then.
-    - Only its C ABI slice (V5) also waits on #1053 and on *Let C ABI sends follow their source
-      strip's mute live* (#1226). Nothing in #1196 depends on VCA.
+    - It is its own umbrella, *VCA groups* (#1239), filed on 2026-10-03 once batch K3 of #1196 was
+      delivered (*Let a send follow its source strip's mute live in the browser*, #1224). Its anchors
+      were re-verified on the K3 head `8c6268967`, and a fresh Sol adversarial verification was
+      folded in. Its slices are #1240-#1247. The drafts (`issues/V0`-`V5` in the handoff folder) were
+      split into eight slices and removed at filing; git history keeps them.
+    - Only its C ABI slice, *Deliver value-only VCA edits to the running C ABI plan* (#1247), also
+      waits on #1053, #1225 and *Let C ABI sends follow their source strip's mute live* (#1226).
+      Nothing in #1196 depends on VCA.
+    - **Planner decision at filing, subject to owner review:** P13's VCA guard is widened. It was
+      "any fader field of a VCA member"; it is now "every C ABI delta while the pre- or post-commit
+      model declares a VCA", until #1247. #1225's route records and #1226's follow mirror read raw
+      committed mutes, so the narrow guard would let a live send edit reopen a VCA-muted member's
+      following send. The specs of #1053, #1225 and #1226 carry the widened rule.
     - Out of its scope: VCA solo, VCA trim of send levels, and VCA automation.
   - **(b) A submix strip is the same dual-mono strip a track has** (DESIGN 2.2b). L and R have
     independent state and parameters; channels link only through a declared `link_mode`; and
@@ -207,6 +215,34 @@ Ruling:
   - The question DESIGN 8.2 held back as its own "Q5" (a class-B change of bus-sum order, only if
     a measurement shows D9's route order blocks folding) is still not asked; it is unrelated to the
     owner's Q5 above.
+- **VCA batch questions (#1240-#1246), recorded on 2026-10-03 as planner decisions, subject to owner
+  review.** They are the owner questions the VCA batch raised. No VCA slice waits on an answer:
+  each slice implements the decision as written until the owner rules otherwise. Q5 above stays
+  open and is not one of them.
+  - **V-Q1, the widened C ABI interim guard.** Recorded at (a) above: until #1247, every C ABI
+    delta while the pre- or post-commit model declares a VCA is structural (a replacement plan),
+    not only a fader field of a VCA member. The narrow guard would let #1225's live route records
+    or #1226's follow mirror, which read raw committed mutes, reopen a VCA-muted member's following
+    send. The cost is a structural replacement for every edit of a VCA session on the C ABI until
+    #1247 lands. The specs of #1053, #1225 and #1226 carry it.
+  - **V-Q2, no `vcas` metadata family** (#1246 D5). The parameter metadata gains no per-VCA family
+    and its top-level keys do not change: a VCA fader's domain is the builtins' `fader_db` row (-144
+    to +24 dB), which the metadata already publishes and the SDK's `vca(id, { fader })` and
+    `VcaEdits.faderDb` read. Sends set the precedent: K3 added no `routes` family.
+  - **V-Q3, the browser's VCA bounds** (#1245 amendment A1, from the #1244 verdict's MINOR-1). A
+    count of VCAs does not bound the per-command work: in a chain where one VCA holds every strip
+    and each later VCA holds the one before, every strip reaches every VCA. Under the browser's
+    only other bound, the 1 MiB document, that reached 6.26 M (strip, VCA) pairs, about 48 MiB on
+    wasm32 and 10.6 ms natively per VCA move, four 128-frame quanta at 48 kHz (#1244 verdict). The
+    browser therefore refuses at boot, before any per-pair table exists, a session with more than
+    256 VCAs (`web.vca.maximum_vcas`) or more than 16,384 (strip, VCA) reach pairs
+    (`web.vca.reach_pairs`), both `RESULT_REFUSED_BUDGET`, and charges the live VCA state's exact
+    retained bytes to the boot budget. At the bound the worst batch (a ride and a mute of the top
+    VCA plus 254 member moves) measured 0.15 ms natively, and in the shipped simd128 module under
+    V8 0.18 ms median and 0.39 ms p99, against a 2.67 ms quantum (the #1245 record, reproduced by
+    its verdict). The numbers are the planner's: a higher bound trades worklet headroom for larger
+    VCA trees. The C ABI caps VCAs at preparation through `maximum_vcas` (#1243) and has no live
+    VCA state until #1247, which sizes its own bound.
 - **Performance.** The bus-and-send benchmark rows and their baseline are three standalone
   successor issues, outside the umbrella: *Add a bus-and-send row to the native console benchmark*
   (#1227), *Add the bus-and-send session to the browser mixing benchmark* (#1228) and *Record the
@@ -215,11 +251,11 @@ Ruling:
   #1229's numbers (DESIGN 6.3, P14). No performance tier is committed blind.
 - **#1053 and #210.** #1053's spec carries the coordination rule (P13): until the slice named there
   lands, a committed-model delta that touches a submix strip, the mute of a follow-mute source, or
-  (later) a VCA member's fader is structural on the C ABI. #210's "Live send levels" bullet is owned
-  by #1196: live send levels in the browser through *Ramp live send coefficients on the render
-  plane* (#1220) to *Enumerate sends and drive them from the SDK* (#1223), and on the C ABI by
-  *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225). The N-output
-  part of #210 is unchanged.
+  (from #1242, until #1247) any delta of a session that declares a VCA is structural on the C ABI.
+  #210's "Live send levels" bullet is owned by #1196: live send levels in the browser through
+  *Ramp live send coefficients on the render plane* (#1220) to *Enumerate sends and drive them from
+  the SDK* (#1223), and on the C ABI by *Deliver value-only send and submix-strip edits to the
+  running C ABI plan* (#1225). The N-output part of #210 is unchanged.
 
 The slices, their dependencies, their gates and the batches are in #1196.
 
@@ -230,7 +266,8 @@ The slices, their dependencies, their gates and the batches are in #1196.
   - K3: #1215-#1224, route mute, follow-mute and live sends in the browser;
   - C1 (after #1053): #1225 and #1226, the C ABI;
   - BM, after K3: #1227-#1229.
-- **The VCA umbrella** is filed when K3 closes and runs after it.
+- **The VCA umbrella** (#1239) was filed when K3 was delivered and runs after it: batch VCA is
+  #1240-#1246, pushed once; #1247 follows #1053, #1225 and #1226.
 - **Decided, not landed.** `AGENTS.md` states these promises with a decision-13 qualifier until
   they land. The qualifier names the point's authority: "Approved by decision 13" for an owner
   decision or an owner-delegated answer, and "Planned under decision 13 ..., subject to owner
@@ -242,6 +279,6 @@ The slices, their dependencies, their gates and the batches are in #1196.
     the banking paragraph's "tracks" into "strips";
   - *Let a send follow its source strip's mute live in the browser* (#1224) removes them from the
     route-mute and follow-mute sentences;
-  - V4, *Enumerate VCA groups and drive them from the SDK*, which closes the VCA batch V1-V4,
-    removes the one on the VCA sentence. V5 (the C ABI) is not needed for that: from V2 on, VCAs
-    apply at preparation on every host.
+  - *Enumerate VCA groups and drive them from the SDK* (#1246), which closes the VCA batch
+    #1240-#1246, removes the one on the VCA sentence. #1247 (the C ABI) is not needed for that: from
+    *Apply VCA offsets and mutes at preparation* (#1242) on, VCAs apply at preparation on every host.

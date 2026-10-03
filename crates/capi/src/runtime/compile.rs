@@ -354,12 +354,12 @@ pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
 pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
     limits.struct_size == crate::COMPILE_LIMITS_SIZE
         && limits.reserved0 == 0
-        && limits.reserved == [0; 3]
+        && limits.reserved == [0; 2]
         && all_limits_nonzero(limits)
 }
 
 /// Translate the frozen C ABI limits into the facade's caps, field for field, except
-/// `maximum_submixes`, whose zero means `maximum_tracks` (#1206 D2).
+/// `maximum_submixes` and `maximum_vcas`, whose zero means `maximum_tracks` (#1206 D2, #1243 D2).
 ///
 /// This is the only place the mapping is spelled. `AnyLaunchRate`: the C ABI compiles whatever
 /// launch rate the session declares (issue 032), unlike the browser host which is pinned to its
@@ -376,6 +376,12 @@ pub(crate) fn prepare_caps(limits: CompileLimits) -> HostPrepareCaps {
             limits.maximum_tracks
         } else {
             limits.maximum_submixes
+        },
+        // #1243 D2: likewise, zero means "bound VCA groups by tracks".
+        maximum_vcas: if limits.maximum_vcas == 0 {
+            limits.maximum_tracks
+        } else {
+            limits.maximum_vcas
         },
         maximum_sources: limits.maximum_sources,
         maximum_routes: limits.maximum_routes,

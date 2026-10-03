@@ -727,6 +727,7 @@
     }
   ],
   "submixes": [],
+  "vcas": [],
   "outputs": [
     {
       "id": "main-out"

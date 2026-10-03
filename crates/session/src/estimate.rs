@@ -10,7 +10,7 @@ use crate::{
 /// Resource requirements of a normalized session declaration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceEstimate {
-    /// All source, track, submix, and output entities; this is not a product track limit.
+    /// All source, track, submix, VCA and output entities; this is not a product track limit.
     pub entity_count: u64,
     /// Source entity count.
     pub source_count: u64,
@@ -58,6 +58,7 @@ pub fn estimate_session_resources(
     let source_count = count(session.sources.len(), "$.sources", &mut errors);
     let track_count = count(session.tracks.len(), "$.tracks", &mut errors);
     let submix_count = count(session.submixes.len(), "$.submixes", &mut errors);
+    let vca_count = count(session.vcas.len(), "$.vcas", &mut errors);
     let output_count = count(session.outputs.len(), "$.outputs", &mut errors);
     let route_count = count(session.routes.len(), "$.routes", &mut errors);
     let automation_count = count(session.automation.len(), "$.automation", &mut errors);
@@ -102,10 +103,23 @@ pub fn estimate_session_resources(
         "$.automation",
         &mut errors,
     );
+    // A VCA (#1240) is a graph-namespace entity beside the submixes; its members are each one
+    // canonical array item.
     let entity_count = checked_add(
         checked_add(source_count, track_count, "$.entities", &mut errors),
-        checked_add(submix_count, output_count, "$.entities", &mut errors),
+        checked_add(
+            checked_add(submix_count, vca_count, "$.entities", &mut errors),
+            output_count,
+            "$.entities",
+            &mut errors,
+        ),
         "$.entities",
+        &mut errors,
+    );
+    let vca_member_count = sum_counts(
+        session.vcas.iter(),
+        |vca| vca.members.len(),
+        "$.vcas",
         &mut errors,
     );
 
@@ -129,6 +143,7 @@ pub fn estimate_session_resources(
     vector!(session.console.post_insert, crate::ConsoleSlot, "$.console");
     vector!(session.tracks, crate::Track, "$.tracks");
     vector!(session.submixes, crate::Submix, "$.submixes");
+    vector!(session.vcas, crate::Vca, "$.vcas");
     vector!(session.outputs, crate::Output, "$.outputs");
     vector!(session.routes, crate::Route, "$.routes");
     vector!(session.automation, crate::Automation, "$.automation");
@@ -166,6 +181,9 @@ pub fn estimate_session_resources(
             largest_model_allocation = largest_model_allocation.max(bytes);
         }
     }
+    for vca in &session.vcas {
+        vector!(vca.members, StableId, "$.vcas.members");
+    }
     for automation in &session.automation {
         vector!(
             automation.segments,
@@ -176,7 +194,12 @@ pub fn estimate_session_resources(
 
     let index_node_bytes = checked_mul(entity_count, 128, "$.compiled_indexes", &mut errors);
     let structural_items = checked_add(
-        checked_add(entity_count, route_count, "$.canonical", &mut errors),
+        checked_add(
+            checked_add(entity_count, route_count, "$.canonical", &mut errors),
+            vca_member_count,
+            "$.canonical",
+            &mut errors,
+        ),
         checked_add(
             checked_add(effect_count, parameter_count, "$.canonical", &mut errors),
             checked_add(
@@ -357,6 +380,10 @@ impl ModelVisitor for StringBytes<'_> {
         fn token(_key:FieldKey, _value:Token);
     }
     fn id(&mut self, _: FieldKey, value: &StableId) -> Result<(), Self::Error> {
+        self.add(value.as_str());
+        Ok(())
+    }
+    fn id_item(&mut self, value: &StableId) -> Result<(), Self::Error> {
         self.add(value.as_str());
         Ok(())
     }

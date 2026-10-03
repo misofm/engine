@@ -5099,7 +5099,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
-            benchmark_field_pair("session_template_sha256", "\"d946f4630cc188f1a0c611a2207b70884f686f7f619e926bb87bd123cac981a6\""),
+            benchmark_field_pair("session_template_sha256", "\"dc19e091f9fd80c43ad26e837f7f2221d41b6b6a9a6f055a380afa43c6d72330\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5277,7 +5277,9 @@ mod tests {
             // Re-pinned by issue #1218: route field `follows_mute` added, value false, so
             // `canonical.json` and the two `prepare_256_tracks` workloads naming it move; nothing
             // else moved.
-            "867d900422200e9b79af284f0709a1da08db3c2caa589e24bcd1f49ebb5e4def",
+            // Re-pinned by issue #1240: root key `vcas` added, empty, so `canonical.json` and the
+            // two `prepare_256_tracks` workloads naming it move; nothing else moved.
+            "09f675d1cc3e87374c9daac12ab7471be57a73247874c5a8b62b992e7787b6dd",
             "accepted joined-corpus manifest identity"
         );
         remove_temporary_root(root);

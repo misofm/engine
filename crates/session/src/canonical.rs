@@ -162,6 +162,11 @@ impl ModelVisitor for JsonWriter {
     fn id(&mut self, key: FieldKey, value: &crate::StableId) -> Result<(), Self::Error> {
         self.text(key, value.as_str())
     }
+    fn id_item(&mut self, value: &crate::StableId) -> Result<(), Self::Error> {
+        self.array_item();
+        write_quoted(&mut self.output, value.as_str());
+        Ok(())
+    }
     fn text(&mut self, key: FieldKey, value: &str) -> Result<(), Self::Error> {
         self.field(key);
         write_quoted(&mut self.output, value);
@@ -417,6 +422,24 @@ mod tests {
             mute: false,
             follows_mute: false,
         });
+        // A VCA forest (#1240), declared out of ID order with members out of ID order: `master`
+        // nests `group` (a VCA) beside a track and the submix, `group` overlaps `master` on the
+        // track, and `spare` has no members.
+        let vca = |name: &str, left_db: f32, right_mute: bool, members: &[&str]| crate::Vca {
+            id: id(name),
+            fader: DualMonoFader {
+                left_db,
+                right_db: 2.25,
+                left_mute: false,
+                right_mute,
+            },
+            members: members.iter().map(|member| id(member)).collect(),
+        };
+        model.vcas = vec![
+            vca("spare", 0.0, false, &[]),
+            vca("master", -3.5, true, &["vocal", "mix", "group"]),
+            vca("group", -144.0, false, &["vocal"]),
+        ];
         canonical_session_json(&model).expect("full tagged surface canonicalizes")
     }
 
