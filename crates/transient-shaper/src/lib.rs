@@ -28,10 +28,14 @@
 //!
 //! # State
 //!
-//! Eleven words per lane per channel — `fast`, `slow`, then `(current, target, remaining)` for each
-//! of the three parameters — unchanged, at `state_layout_version` 1. The D11 ramp's precomputed
-//! `step` is *derived* on restore (`(target - current) / remaining`) rather than persisted, which
-//! is what keeps the layout a contract fixture.
+//! Fourteen words per lane per channel — `fast`, `slow`, then `(current, target, step, remaining)`
+//! for each of the three parameters — at `state_layout_version` 1 (#1278 D2a). The layout before
+//! it carried eleven words and re-derived each ramp's step on restore as
+//! `(target - current) / remaining`, which resumes a mid-flight ramp on another path than the
+//! continued one walks; carrying the step makes a restored lane continue bit for bit. The version
+//! stays V1, the sole prelaunch identity (AGENTS.md): nothing persists a payload (R6b), and the
+//! section lengths refuse an eleven-word one. Restore validates both channels in place and commits
+//! from the bytes: no heap value is created or dropped, and the payload calls are render-safe.
 
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
@@ -50,7 +54,9 @@ use effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as spec_value_valid,
 };
 use effect_runtime::ramp::LinearRamp;
-use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
+use effect_runtime::state_payload::{
+    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
+};
 use lane::kernels::gain_mix_step;
 use lane::{Backend, Lane};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
@@ -59,7 +65,7 @@ pub mod corpus;
 
 const PARAMETER_COUNT: usize = 3;
 const RAMP_SAMPLES: u32 = 64;
-const STATE_WORDS: usize = 11;
+const STATE_WORDS: usize = 2 + PARAMETER_COUNT * RAMP_WORDS;
 const LANE_STATE_BYTES: u32 = (STATE_WORDS * 4) as u32;
 
 const fn effect_id(value: &'static str) -> effect_contract::EffectId {
@@ -170,6 +176,8 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     display_name: "Transient Shaper",
     contract_major: 1,
     contract_minor: 0,
+    // #1278 D2a grew the layout to fourteen words without a bump: V1 is the sole prelaunch
+    // identity (AGENTS.md), and nothing persists a payload (R6b).
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &TRANSIENT_SHAPER_PARAMETERS,
@@ -575,6 +583,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         self.left_env = el;
         self.right_env = er;
     }
+
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
     fn snapshot(
         &self,
         lane: usize,
@@ -618,7 +628,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
     }
 }
 
-/// Reads one lane's eleven state words out of a payload section.
+/// Writes one lane's fourteen state words into a payload section.
 fn write_lane<L: Lane, const W: usize>(
     bytes: &mut [u8],
     env: &Env<L>,
@@ -632,25 +642,23 @@ fn write_lane<L: Lane, const W: usize>(
     write_f32(bytes, 0, fast[lane]);
     write_f32(bytes, 1, slow[lane]);
     for (index, ramp) in ramps.ramps[lane].iter().enumerate() {
-        let word = 2 + index * 3;
-        write_f32(bytes, word, ramp.current);
-        write_f32(bytes, word + 1, ramp.target);
-        write_u32(bytes, word + 2, ramp.remaining);
+        write_ramp(bytes, 2 + index * RAMP_WORDS, *ramp);
     }
 }
 
-/// The eleven words of one restored lane: the two envelope words and the three ramps.
+/// The fourteen words of one restored lane: the two envelope words and the three ramps.
 struct LaneWords {
     fast: f32,
     slow: f32,
     ramps: [LinearRamp; PARAMETER_COUNT],
 }
 
-/// Validates and decodes one lane's eleven state words.
+/// Validates and decodes one lane's fourteen state words, reading the payload bytes in place.
 ///
-/// The D11 `step` is **derived**, not persisted: `(target - current) / remaining` while a ramp is
-/// active. This keeps the layout eleven words. The representable continuation in the contract
-/// test resumes exactly; iteratively rounded currents need not reconstruct the original step.
+/// Each ramp is read whole, its step included (#1278 D2a), and its every remaining value is
+/// checked against the parameter's domain (`ramp_path_within`, with a 64-ulp rounding budget for
+/// the iterated `current + step`), so a carried step cannot walk a ramp out of its domain. The
+/// returned value is a few words on the stack: nothing here allocates.
 fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     let fast = read_f32(bytes, 0);
     let slow = read_f32(bytes, 1);
@@ -659,28 +667,27 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
     }
     let mut ramps = [LinearRamp::fixed(0.0); PARAMETER_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
-        let word = 2 + index * 3;
-        let current = read_f32(bytes, word);
-        let target = read_f32(bytes, word + 1);
-        let remaining = read_u32(bytes, word + 2);
+        let read = read_ramp(bytes, 2 + index * RAMP_WORDS);
         let parameter = &TRANSIENT_SHAPER_PARAMETERS[index];
-        if !value_valid(parameter, current)
-            || !value_valid(parameter, target)
-            || remaining > RAMP_SAMPLES
+        let (low, high) = parameter
+            .minimum
+            .zip(parameter.maximum)
+            .ok_or(state_error("effect.state.parameter"))?;
+        let slack = 64.0 * f32::EPSILON * low.abs().max(high.abs());
+        // As in the compressor: a ramping `current` is an iterated sum that may round a few ulps
+        // past a domain edge, and the effect's own snapshot must restore, so it is held to the
+        // path's rounding budget; the target and a settled current are held to the domain.
+        let current_valid = read.remaining != 0 || value_valid(parameter, read.current);
+        if !current_valid
+            || !value_valid(parameter, read.target)
+            || !ramp_path_within(read, (low, high), slack, RAMP_SAMPLES)
         {
             return Err(state_error("effect.state.parameter"));
         }
-        let current = normalize_zero(current);
-        let target = normalize_zero(target);
         *ramp = LinearRamp {
-            current,
-            target,
-            step: if remaining == 0 {
-                0.0
-            } else {
-                (target - current) / remaining as f32
-            },
-            remaining,
+            current: normalize_zero(read.current),
+            target: normalize_zero(read.target),
+            ..read
         };
     }
     Ok(LaneWords { fast, slow, ramps })
@@ -693,6 +700,7 @@ fn valid_envelope(value: f32) -> bool {
 const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
+// REALTIME_POLICY_END
 
 /// The runtime parameter domain of one contract parameter row.
 fn domain(parameter: &ParameterDescriptor) -> Option<ParameterSpec> {
@@ -977,6 +985,7 @@ impl PreparedNativeEffect for PreparedTransientShaper {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -991,6 +1000,7 @@ impl PreparedNativeEffect for PreparedTransientShaper {
     ) -> Result<(), StatePayloadError> {
         self.0.restore(0, state_layout_version, input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShaperBank<L, W> {
@@ -1032,6 +1042,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1049,6 +1060,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedTransientShap
         let track = checked_track(track_index, W)?;
         self.shaper.restore(track, state_layout_version, input)
     }
+    // REALTIME_POLICY_END
 }
 
 #[cfg(test)]

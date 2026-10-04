@@ -26,7 +26,7 @@ realtime_root="crates/engine/src/realtime"
 # is the only non-FFI web-host file admitted here.
 # `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", carries the full justification.
 unsafe_raw="$(gate_scan_collect 'unsafe source scan' 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' '*.rs' crates hosts tools)" || exit $?
-unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
+unsafe_matches="$(gate_filter_exclude 'unsafe source exclusions' '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/capi/tests/plan_swap_race.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/wasm-gate-guest/src/lib.rs:' "$unsafe_raw")" || exit $?
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"
@@ -64,14 +64,14 @@ while IFS= read -r source; do
 done <<<"$marked_files"
 fi
 
-# The floors were the tree's counts after #664's complete LocalRing removal (twelve files and
-# forty-one regions); #1253 raises them by exactly what it adds, builtins-compiler's fader and
-# matrix drains: one file and two regions, to thirteen files and forty-three regions. Deleting a
-# marker to silence the gate still fails here -- the file leaves the discovered set or a region
-# leaves the marked set -- instead of passing with less coverage. Raising a floor is part of the
-# change that adds a marker.
-[[ "$marked_file_count" -ge 13 ]] || fail "expected at least thirteen marked realtime files"
-[[ "$marker_count" -ge 43 ]] || fail "expected at least forty-three marked realtime regions"
+# The floors are the merged tree's own counts after #1269 phase 1 (the swap carry and the
+# #1071/#1278 effect-restore regions) and #1053 (#1253's builtins-compiler fader and matrix
+# drains): twenty-five files and eighty-nine regions (they were twelve and forty-one after #664's
+# complete LocalRing removal). Deleting a marker to silence the gate fails here -- the file leaves
+# the discovered set or a region leaves the marked set -- instead of passing with less coverage.
+# Raising a floor is part of the change that adds a marker.
+[[ "$marked_file_count" -ge 25 ]] || fail "expected at least twenty-five marked realtime files"
+[[ "$marker_count" -ge 89 ]] || fail "expected at least eighty-nine marked realtime regions"
 
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?

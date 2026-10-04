@@ -7,6 +7,10 @@
 //! non-empty fader and matrix lanes, effect parameter records, designed EQ targets and a live
 //! bypass record. Each edit and each event dequeue runs on this thread outside the audited scope;
 //! only the render call is inside it, one scope per call.
+//!
+//! After the first call, one structural transaction (#1273 deliverable 3) adds a muted track, so
+//! the next audited call is a swap block that carries the unchanged source's ring into the
+//! successor plan, and the live edits after it ride the successor's lanes.
 
 #![allow(unsafe_code)]
 
@@ -20,7 +24,8 @@ use capi::{
     SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_dequeue_event,
     miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
     miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
-    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command,
+    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command, plan_carry_counts,
+    plan_replacement_count,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 use protocol::{
@@ -45,6 +50,9 @@ const FIXTURE_JSON: &str =
 const COMPRESSOR_TRACK: &str = "eq2";
 /// The audited compressor insert's instance ID.
 const COMPRESSOR: &str = "comp";
+/// Render calls before the structural transaction (issue #1273 deliverable 3): the next call is
+/// the carrying swap block.
+const CALLS_BEFORE_TRANSACTION: u64 = 1;
 
 /// The nine-track EQ fixture with an enabled compressor insert (`comp`) on `eq2`, so the live
 /// editor also reaches a non-EQ effect lane. Every track keeps its console EQ slot, whose band 1
@@ -67,6 +75,38 @@ fn audit_session_json() -> String {
         .effects
         .push(compressor);
     session::canonical_session_json(&model).expect("canonical audit session")
+}
+
+/// One structural transaction at `revision`: `UpsertTrack` of a muted copy of the first track,
+/// and its route. The source is unchanged, so the successor carries its ring.
+fn structural_transaction(request_id: u64, revision: u64) -> Vec<u8> {
+    let model = session::parse_session_json(&audit_session_json()).expect("the audit session");
+    let mut track = model.tracks[0].clone();
+    track.id = StableId::parse("a-muted").expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    let mut route = model.routes[0].clone();
+    route.id = StableId::parse("a-muted-main").expect("route ID");
+    if let session::RouteSource::Track { track_id, .. } = &mut route.source {
+        *track_id = track.id.clone();
+    }
+    let edits = [
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ];
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("the structural transaction encodes");
+    bytes.truncate(len);
+    bytes
 }
 
 struct AuditHandles {
@@ -133,6 +173,41 @@ impl AuditHandles {
             });
         }
         Ok(handles)
+    }
+
+    /// Commits [`structural_transaction`] through `editor`'s request and revision sequence, and
+    /// feeds the source's next block through the producer it moved, so the swap block renders PCM
+    /// from the carried ring. Control work, run outside every render scope.
+    fn apply_structural_transaction(&mut self, editor: &mut LiveEditor) -> Result<(), u32> {
+        editor.request_id += 1;
+        let request = structural_transaction(editor.request_id, editor.revision);
+        let mut response = [0_u8; 4_096];
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the request and response
+        // storage outlive the synchronous call.
+        let committed = unsafe {
+            miso_engine_v1_submit_command(
+                self.session,
+                request.as_ptr(),
+                request.len() as u64,
+                &mut output,
+            )
+        };
+        if committed != RESULT_OK {
+            return Err(committed);
+        }
+        editor.revision += 1;
+        match submit_source_chunk(self.session, QUANTUM_FRAMES as u64) {
+            (RESULT_OK, accepted) if accepted == QUANTUM_FRAMES as u64 => Ok(()),
+            (RESULT_OK, _) => Err(RESULT_INTERNAL),
+            (refused, _) => Err(refused),
+        }
     }
 }
 
@@ -406,6 +481,13 @@ impl PreparedAudit {
             if call.is_multiple_of(LIVE_EDIT_PERIOD) {
                 editor.commit_next();
             }
+            // Issue #1273: one structural transaction between two render calls, outside the
+            // render scope, so the next audited call is a carrying swap block.
+            if call == CALLS_BEFORE_TRANSACTION {
+                self.handles
+                    .apply_structural_transaction(&mut editor)
+                    .expect("apply the audit's structural transaction");
+            }
             // SAFETY: The plan is live and exclusive, the descriptor points to the same complete
             // writable output for every synchronous call, and exact time is bounded.
             let result = audit::in_render_scope(|| unsafe {
@@ -423,19 +505,28 @@ impl PreparedAudit {
             }
         }
         let snapshot = audit::snapshot();
+        // SAFETY: The plan is live and no render call runs concurrently.
+        let (carried, carry_mismatches) = unsafe { plan_carry_counts(plan) };
+        // SAFETY: As above.
+        let replacements = unsafe { plan_replacement_count(plan) };
         assert_eq!(editor.edits, CALLS.div_ceil(LIVE_EDIT_PERIOD));
-        // The liveness witness: every edit was live, so the first plan still renders and its
-        // source ring takes the next contiguous generation-1 chunk with no seek. After a
-        // replacement the ring would refuse it until a seek, so an edit that silently rebuilt
-        // fails the audit instead of auditing a path it never took.
-        assert_eq!(
-            submit_source_chunk(self.handles.session, QUANTUM_FRAMES as u64).0,
-            RESULT_OK,
-            "a live edit rebuilt the plan"
-        );
         assert_eq!(render_errors, 0);
         assert_eq!(output_address_changes, 0);
         assert_eq!(snapshot.total(), 0);
+        // The liveness witness: the one structural transaction is the only plan the render
+        // thread ever swapped in, so every periodic edit was applied live. An edit that silently
+        // rebuilt would swap in a plan of its own and fail the audit instead of auditing a path
+        // it never took. (Since #1273 a rebuild carries the unchanged source's ring, so source
+        // submission no longer tells the two apart.)
+        assert_eq!(
+            replacements, 1,
+            "plan replacements: exactly the structural transaction's (more: a live edit rebuilt)"
+        );
+        assert_eq!(
+            (carried, carry_mismatches),
+            (1, 0),
+            "the structural transaction's swap block carried the source's ring"
+        );
         AuditEvidence {
             calls: CALLS,
             stable_output_address: output_address_changes == 0,

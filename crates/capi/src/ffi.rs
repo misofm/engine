@@ -526,6 +526,64 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek(
     generation: u64,
     source_frame: u64,
 ) -> u32 {
+    // SAFETY: The caller's contract is this entry point's, forwarded unchanged.
+    unsafe {
+        source_seek_entry(
+            session,
+            source_id,
+            source_id_bytes,
+            generation,
+            source_frame,
+            None,
+        )
+    }
+}
+
+/// Queue one generation-tagged source seek whose `source_frame` enters the graph in the block that
+/// starts at absolute render sample `anchor_sample` (issue #1275). The argument checks, result
+/// codes and thread rule are [`miso_engine_v1_source_seek`]'s; an anchor that is not a multiple of
+/// the plan's quantum is refused as `source.seek.anchor_unaligned`.
+///
+/// # Safety
+///
+/// `session` must be live and `source_id` must reference the declared borrowed byte count.
+///
+/// Thread: control.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_source_seek_at(
+    session: *mut Session,
+    source_id: *const u8,
+    source_id_bytes: u64,
+    generation: u64,
+    source_frame: u64,
+    anchor_sample: u64,
+) -> u32 {
+    // SAFETY: The caller's contract is this entry point's, forwarded unchanged.
+    unsafe {
+        source_seek_entry(
+            session,
+            source_id,
+            source_id_bytes,
+            generation,
+            source_frame,
+            Some(anchor_sample),
+        )
+    }
+}
+
+/// The shared body of the two seek entry points: a plain seek when `anchor_sample` is `None`.
+///
+/// # Safety
+///
+/// The seek entry points' contract: `session` live and `source_id` readable for its byte count.
+unsafe fn source_seek_entry(
+    session: *mut Session,
+    source_id: *const u8,
+    source_id_bytes: u64,
+    generation: u64,
+    source_frame: u64,
+    anchor_sample: Option<u64>,
+) -> u32 {
     catch_result(|| {
         // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
         let kind = unsafe { session_kind(session) };
@@ -544,7 +602,15 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek(
         // SAFETY: `session` passed the live-kind check and the ABI requires exclusive serial
         // source-control ownership for seek.
         let session = unsafe { &mut *session };
-        match session.state.seek(source_id, generation, source_frame) {
+        let outcome = match anchor_sample {
+            None => session.state.seek(source_id, generation, source_frame),
+            Some(anchor_sample) => {
+                session
+                    .state
+                    .seek_at(source_id, generation, source_frame, anchor_sample)
+            }
+        };
+        match outcome {
             Ok(()) => {
                 session.last_error.borrow_mut().clear();
                 RESULT_OK
@@ -1056,6 +1122,51 @@ pub(crate) fn test_telemetry_counters(session: *mut Session) -> protocol::Teleme
     unsafe { &(*session).state }.test_telemetry_counters()
 }
 
+/// How many applied plan swaps carried state from their predecessor, and how many found a
+/// predecessor whose shape could not supply it (`RealtimePlanOwner::carried_count` and
+/// `carry_mismatch_count`). Not part of the C ABI: no symbol is exported, and the header does not
+/// declare it. `audit capi` reads it to prove its audited render calls include a carrying swap
+/// (issue #1273 deliverable 3).
+///
+/// # Safety
+///
+/// `plan` must be a live plan handle returned by `miso_engine_v1_compile_session`, and no render
+/// call or destroy may run on it concurrently: the counters are the render thread's own.
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
+    // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
+    // the render-thread state aliases no exclusive borrow.
+    let state = unsafe { &(*plan).state };
+    (
+        state.owner.carried_count(),
+        state.owner.carry_mismatch_count(),
+    )
+}
+
+/// How many plan replacements this plan handle's render thread has swapped in: the active plan's
+/// epoch, since the compiled plan is epoch 0 and each published replacement takes the next one.
+/// A live edit publishes no plan, so it leaves this count unchanged. Not part of the C ABI, like
+/// [`plan_carry_counts`]: `audit capi` and the live-edit race read it to prove that their live
+/// edits rebuilt nothing and their structural transactions each swapped in exactly one plan.
+///
+/// # Safety
+///
+/// As [`plan_carry_counts`]: a live plan handle with no concurrent render call or destroy.
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn plan_replacement_count(plan: *const Plan) -> u64 {
+    // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
+    // the render-thread state aliases no exclusive borrow.
+    unsafe { &(*plan).state }.owner.active_epoch().0
+}
+
+#[cfg(test)]
+pub(crate) fn test_plan_carry_counts(plan: *mut Plan) -> (u64, u64) {
+    // SAFETY: Test callers retain the exclusively owned live plan, with no render in flight.
+    unsafe { plan_carry_counts(plan) }
+}
+
 #[cfg(test)]
 pub(crate) fn test_set_structural_faults(
     session: *mut Session,
@@ -1097,6 +1208,27 @@ pub(crate) fn test_source_seek(
             source_id.len() as u64,
             generation,
             source_frame,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_source_seek_at(
+    session: *mut Session,
+    source_id: &[u8],
+    generation: u64,
+    source_frame: u64,
+    anchor_sample: u64,
+) -> u32 {
+    // SAFETY: Test callers retain the live session and borrowed source ID for this call.
+    unsafe {
+        miso_engine_v1_source_seek_at(
+            session,
+            source_id.as_ptr(),
+            source_id.len() as u64,
+            generation,
+            source_frame,
+            anchor_sample,
         )
     }
 }
@@ -1335,7 +1467,8 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x1f);
+        assert_eq!(capabilities.feature_mask, 0x3f);
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 
@@ -2161,6 +2294,49 @@ mod tests {
         );
         assert_eq!(report.accepted_frames, 128);
         assert_eq!(read_last_error(session.cast()), b"");
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// Issue #1275 gate 3: `miso_engine_v1_source_seek_at` keeps the plain seek's argument checks
+    /// and reports each refusal through `last_error`, including the anchor rule only it has.
+    ///
+    /// Test value: red if the export drops its anchor (an unaligned anchor is then accepted) or
+    /// skips the session's diagnostic.
+    #[test]
+    fn anchored_seek_refusals_reach_the_c_host_as_their_own_diagnostic() {
+        let seek_at = |session: *mut Session, id: &[u8], generation, frame, anchor| {
+            test_source_seek_at(session, id, generation, frame, anchor)
+        };
+        let (engine, session, plan) = compiled_fixture();
+        assert_eq!(
+            seek_at(ptr::null_mut(), b"fixture-source", 2, 0, 0),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            seek_at(engine.cast(), b"fixture-source", 2, 0, 0),
+            RESULT_WRONG_HANDLE
+        );
+        // The quantum is 128 frames, so 129 is not a block start.
+        assert_eq!(
+            seek_at(session, b"fixture-source", 2, 0, 129),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            read_last_error(session.cast()),
+            b"source.seek.anchor_unaligned"
+        );
+        assert_eq!(
+            seek_at(session, b"absent-source", 2, 0, 128),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.id.unknown");
+        assert_eq!(seek_at(session, b"fixture-source", 2, 0, 128), RESULT_OK);
+        assert_eq!(read_last_error(session.cast()), b"");
+        assert_eq!(
+            seek_at(session, b"fixture-source", 2, 0, 256),
+            RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_last_error(session.cast()), b"source.generation.stale");
         destroy_fixture(engine, session, plan);
     }
 

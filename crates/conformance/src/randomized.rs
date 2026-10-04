@@ -19,13 +19,20 @@
 //!   to subnormals, signed zeros, non-finite and extreme values, and payloads the effect's own
 //!   crafting hook writes, restored into a scalar instance and into its bank lanes at once: they
 //!   must accept or refuse together, with the same code, and render the same words afterwards.
+//! * **restored against continued.** At block boundaries -- always at the first one where a ramp
+//!   the lane's automation started may be in flight (within 64 samples of the span) and
+//!   preferentially after it, at every quantum, 32 included -- a lane's snapshot is restored into a freshly prepared instance,
+//!   which then renders beside the lane: it must render and report exactly what the lane renders
+//!   by continuing. A payload carries every word a continuation reads (#1278).
 //! * **bind eligibility.** A cohort that differs in one program-key field declines, a malformed
 //!   shape refuses with `effect.bank.requests`, and an invalid member refuses with the code
 //!   `prepare` gives it (the three-outcome rule on `bind_homogeneous_bank`).
 //!
 //! And the invariants a differential cannot see when both sides share a defect: an unbypassed
 //! effect keeps every output word inside the D7 block bound (`|x| < 1e30`, never NaN) whatever the
-//! input, and no `process` call allocates, locks, logs or makes a syscall.
+//! input, and no `process` call and no state-payload call (snapshot or restore, scalar or bank
+//! lane: the plan-swap carry makes them in the swap block) allocates, frees, locks, logs or makes a
+//! syscall.
 //!
 //! Comparisons treat every NaN as one value (`dsp_reference::randomized::same_word`, issue #1065):
 //! the payload of a NaN an operation generates is the CPU's choice. Everything else, the sign of
@@ -34,16 +41,32 @@
 use dsp_reference::randomized::{Draw, Profile, first_difference, run_seeds, same_word};
 use effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectProcessBlock, InitialParameterValue, LinkMode, NativeEffectFactory,
+    EffectDescriptor, EffectProcessBlock, EffectTargetRequest, InitialParameterValue, LinkMode,
+    NativeEffectFactory, NativeEffectTargetPreparation, PREPARED_EFFECT_TARGET_WORDS,
     ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, PortRole,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
-    PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, canonical_bits, default_initial_values,
-    is_negative_zero, normalize_zero, parameter_value_valid,
+    PreparedEffectMetadata, PreparedEffectTarget, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, canonical_bits,
+    default_initial_values, is_negative_zero, normalize_zero, parameter_value_valid,
 };
 use engine::realtime::audit;
 use lane::Backend;
+
+/// How long after a span's last sample a ramp it started may still be in flight: every banked
+/// launch effect smooths a parameter change over 64 samples (or 64 per-sample updates). The
+/// harness cannot read an effect's ramps, so this is what "mid-ramp" means to its coverage.
+const IN_FLIGHT_SAMPLES: u64 = 64;
+
+/// The render quanta a scenario runs at (128 twice, as the common host quantum).
+///
+/// A scenario indexes them by its seed rather than drawing one, so every five consecutive seeds
+/// visit every quantum (`32` at seed 3) at every bank width the build has, and
+/// [`assert_reached`]'s quantum-32 clause needs only a ramp in flight in that scenario rather than
+/// a lucky draw. A 4-lane (NEON/simd128) build binds one width per seed where an AVX2 build may
+/// bind two, and drawn, twelve multiband seeds left the 4-lane build no automated quantum-32
+/// scenario (#1278 follow-up).
+const QUANTA: [u32; 5] = [128, 128, 64, 32, 256];
 
 /// One state payload's three sections, as `snapshot_state_payload` writes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,15 +101,6 @@ pub enum Known {
     ///
     /// Owned by #1070.
     BindDeclinesBeforeValidating,
-    /// The effect holds subnormal words it was legally given -- a subnormal parameter value
-    /// inside the declared domain, a subnormal input sample in its history -- and its own restore
-    /// then refuses the snapshot that carries them, so a snapshot does not survive its own
-    /// restore. Narrowing: a refused own snapshot is accepted only with `effect.state.parameter`
-    /// or `effect.state.history`, and so long as the scalar instance and every bank lane refuse it
-    /// alike.
-    ///
-    /// Owned by #1071.
-    SubnormalStateRefusedOnRestore,
     /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
     /// retarget in the same bank (so the bank is not its scalar instances), and by a block
     /// boundary (so the render is not partition-invariant, master plan P1). Narrowing: a scenario
@@ -123,6 +137,13 @@ pub struct EffectDifferential<'a> {
     /// witness must then hold on every lane, and a scalar instance must render its two channels
     /// alike.
     pub witness: bool,
+    /// The effect's own reading of a snapshot: whether any ramp in it is in flight. Given, the
+    /// in-flight coverage counts the continuations whose snapshot it says are mid-ramp, exactly;
+    /// absent, it counts by the harness's proxy (see
+    /// [`DifferentialCoverage::continuations_in_flight`]). The proxy over-counts where an
+    /// accepted automation event can leave every ramp settled, which a prepared target that moves
+    /// only a disabled band's parameters does (the EQ's).
+    pub in_flight: Option<fn(&Payload) -> bool>,
 }
 
 /// What the differential reached. A test asserts the parts it relies on, so a generator that
@@ -159,6 +180,17 @@ pub struct DifferentialCoverage {
     pub mono_capable: bool,
     /// Automation spans delivered, valid or not.
     pub spans: u64,
+    /// Whether the effect under test takes prepared targets (`target_preparation`), the route its
+    /// automation enters by when it refuses raw spans (the parametric EQ).
+    pub prepared_targets: bool,
+    /// Prepared targets applied at a block boundary, to the scalar instance, its bank lane and
+    /// any twin of that lane at once, and accepted by all of them.
+    pub applied_targets: u64,
+    /// Of those, the ones whose words differ from the words the lane was known to be heading for.
+    /// Each starts a ramp unless its designed words are the lane's current ones (a disabled EQ
+    /// band designs the identity whatever its parameters), so this is an upper bound; the
+    /// in-flight clauses are what prove ramps moved.
+    pub moving_targets: u64,
     /// Resets applied to every side at a block boundary.
     pub resets: u64,
     /// Restores both sides accepted.
@@ -167,6 +199,22 @@ pub struct DifferentialCoverage {
     pub refused_restores: u64,
     /// Restores of a payload the effect's crafting hook wrote.
     pub crafted_restores: u64,
+    /// Lane snapshots restored into a fresh instance, which then rendered beside the lane it was
+    /// taken from (restored against continued).
+    pub continuations: u64,
+    /// Of those, the ones taken mid-ramp: as [`EffectDifferential::in_flight`] reads the lane's
+    /// snapshot when the effect gives that reading, else by proxy, while a ramp the lane's
+    /// automation started may be in flight: at a boundary less than 64 samples after the last
+    /// sample of a span the lane **accepted**
+    /// (its report counted no invalid span that block), or after a moving prepared target the
+    /// lane accepted, with no reset and no replacing restore since (every banked launch effect
+    /// smooths a change over 64 samples). A span the effect refused -- the EQ refuses every raw
+    /// span -- starts nothing and credits nothing.
+    pub continuations_in_flight: u64,
+    /// Of those, the ones taken in a scenario whose quantum is 32, under the 64-sample ramps.
+    pub continuations_in_flight_at_32: u64,
+    /// Blocks a restored instance rendered beside its continued lane, compared word for word.
+    pub continued_blocks: u64,
     /// Witness answers checked against a crafting hook's claim.
     pub witness_checks: u64,
     /// Blocks on a mono scenario whose every lane's witness was required to hold, and held.
@@ -202,10 +250,17 @@ impl DifferentialCoverage {
         self.native_banks += other.native_banks;
         self.banks_natively |= other.banks_natively;
         self.spans += other.spans;
+        self.prepared_targets |= other.prepared_targets;
+        self.applied_targets += other.applied_targets;
+        self.moving_targets += other.moving_targets;
         self.resets += other.resets;
         self.restores += other.restores;
         self.refused_restores += other.refused_restores;
         self.crafted_restores += other.crafted_restores;
+        self.continuations += other.continuations;
+        self.continuations_in_flight += other.continuations_in_flight;
+        self.continuations_in_flight_at_32 += other.continuations_in_flight_at_32;
+        self.continued_blocks += other.continued_blocks;
         self.witness_checks += other.witness_checks;
         self.witness_holds += other.witness_holds;
         self.witness |= other.witness;
@@ -228,6 +283,7 @@ pub fn run_effect_differential(spec: &EffectDifferential<'_>) -> DifferentialCov
         audited,
         banks_natively: spec.banks_natively,
         witness: spec.witness,
+        prepared_targets: spec.factory.target_preparation().is_some(),
         ..DifferentialCoverage::default()
     };
     run_seeds(spec.test, spec.replay, spec.seeds, |seed| {
@@ -258,7 +314,9 @@ fn allocation_audit_is_real() -> bool {
     observed.allocations > 0
 }
 
-/// Runs one `process` call inside an armed render scope and fails on any forbidden operation.
+/// Runs one render-thread call -- `process`, `process_bank`, or a state-payload call, which the
+/// plan-swap carry makes in the swap block -- inside an armed render scope, and fails on any
+/// forbidden operation.
 fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
     if !armed {
         return call();
@@ -270,7 +328,7 @@ fn audited<T>(armed: bool, what: &str, call: impl FnOnce() -> T) -> T {
     assert_eq!(
         observed.total(),
         0,
-        "{what}: forbidden operations inside process: {observed:?}"
+        "{what}: forbidden operations inside a render-thread call: {observed:?}"
     );
     result
 }
@@ -289,6 +347,10 @@ struct Shape {
     mono: bool,
     /// Hostile input words and hostile payload words are drawn.
     hostile: bool,
+    /// Under [`Known::RampCutsMoveBits`]: the scenario carries automation (on one lane) rather
+    /// than chunked blocks. Indexed by the seed like the quantum, so every ten consecutive seeds
+    /// pair every quantum with both, at every width (seed 3 automates at quantum 32).
+    automate: bool,
 }
 
 fn scenario(
@@ -306,13 +368,14 @@ fn scenario(
     let mono = draw.chance(1, 3);
     let shape = Shape {
         quality: draw.pick(descriptor.qualities),
-        quantum: draw.pick(&[128_u32, 128, 64, 32, 256]),
+        quantum: QUANTA[(seed % QUANTA.len() as u64) as usize],
         link: draw.pick(&links),
         bypass: draw.chance(1, 8),
         ports: draw_ports(&mut draw, descriptor),
         capacity: draw.pick(&[1_u32, 2, 4, 8, 16]),
         mono,
         hostile: !mono && draw.chance(1, 2),
+        automate: (seed / QUANTA.len() as u64).is_multiple_of(2),
     };
     let bound = coverage.banks.iter().sum::<u64>();
     for &width in BankWidth::ALL {
@@ -389,34 +452,34 @@ fn run_scalar(
                 coverage.resets += 1;
             }
             if draw.chance(1, if small { 5 } else { 40 }) {
-                // The oracle's own snapshot, into both: it must restore, write itself back word
-                // for word, and leave the twins rendering alike. (Restored against *continued* is
-                // not a contract mid-ramp: a payload carries a ramp's `current`, `target` and
-                // `remaining`, and the restore re-derives its step.)
-                let payload = snapshot_scalar(oracle.as_ref(), sizes);
-                let input = || {
+                // Restored against continued: the oracle's snapshot, into the twin only. It must
+                // restore and write itself back word for word, and from here the twin, restored,
+                // renders exactly what the oracle renders by continuing -- mid-ramp included,
+                // because a payload carries every word a continuation reads (#1278).
+                let payload = snapshot_scalar(oracle.as_ref(), sizes, audited_calls);
+                let input =
                     StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
-                        .expect("the prepared sizes")
-                };
-                for effect in [&mut *oracle, &mut *twin] {
-                    if let Err(error) = effect.restore_state_payload(version, input()) {
-                        assert!(
-                            spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
-                                && SUBNORMAL_REFUSAL_CODES.contains(&error.code),
-                            "{context}: lane {lane}'s own snapshot refused ({})",
-                            error.code
-                        );
-                        continue;
-                    }
-                    assert!(
-                        same_payload(&snapshot_scalar(effect.as_ref(), sizes), &payload),
-                        "{context}: lane {lane}'s snapshot does not survive its own restore"
+                        .expect("the prepared sizes");
+                if let Err(error) = audited(audited_calls, "restore_state_payload", || {
+                    twin.restore_state_payload(version, input)
+                }) {
+                    panic!(
+                        "{context}: lane {lane}'s own snapshot refused ({})",
+                        error.code
                     );
                 }
+                assert!(
+                    same_payload(
+                        &snapshot_scalar(twin.as_ref(), sizes, audited_calls),
+                        &payload
+                    ),
+                    "{context}: lane {lane}'s snapshot does not survive its own restore"
+                );
                 coverage.restores += 1;
+                coverage.continuations += 1;
             } else if shape.hostile && draw.chance(1, if small { 5 } else { 40 }) {
                 // A rewritten payload into both: they accept or refuse together.
-                let mut payload = snapshot_scalar(oracle.as_ref(), sizes);
+                let mut payload = snapshot_scalar(oracle.as_ref(), sizes, audited_calls);
                 let section = match draw.below(3) {
                     0 => &mut payload.common,
                     1 => &mut payload.left,
@@ -428,8 +491,12 @@ fn run_scalar(
                         .expect("the prepared sizes")
                 };
                 let (a, b) = (
-                    restore_code(oracle.restore_state_payload(version, input())),
-                    restore_code(twin.restore_state_payload(version, input())),
+                    restore_code(audited(audited_calls, "restore_state_payload", || {
+                        oracle.restore_state_payload(version, input())
+                    })),
+                    restore_code(audited(audited_calls, "restore_state_payload", || {
+                        twin.restore_state_payload(version, input())
+                    })),
                 );
                 assert_eq!(a, b, "{context}: lane {lane}'s twins disagree on a restore");
                 match a {
@@ -562,8 +629,8 @@ fn run_scalar(
             }
             if (small && chunk.is_none()) || block + 1 == spec.blocks {
                 assert_eq!(
-                    snapshot_scalar(oracle.as_ref(), sizes),
-                    snapshot_scalar(twin.as_ref(), sizes),
+                    snapshot_scalar(oracle.as_ref(), sizes, audited_calls),
+                    snapshot_scalar(twin.as_ref(), sizes, audited_calls),
                     "{context}: lane {lane}'s twin holds other state"
                 );
                 coverage.state_comparisons += 1;
@@ -807,7 +874,7 @@ fn run_width(
     // `Some(lane)`: only that lane carries automation; `Some(lanes)`: none does.
     let ramp_cuts = spec.known.contains(&Known::RampCutsMoveBits);
     let automated = ramp_cuts.then(|| {
-        if draw.chance(1, 2) {
+        if shape.automate {
             draw.below(lanes)
         } else {
             lanes
@@ -822,6 +889,21 @@ fn run_width(
     let reset_at = draw.below(spec.blocks);
     // A mono scenario stays channel-symmetric until a restore writes the channels apart.
     let mut symmetric = shape.mono;
+    // Restored against continued: a lane's snapshot restored into a fresh instance, rendered
+    // beside the lane from then on. The plan-swap carry (#1269) is exactly this move.
+    let mut continuation: Option<Continuation> = None;
+    // Per lane, the sample before which a ramp its automation started may still be in flight.
+    let mut in_flight_until = vec![0_u64; lanes];
+    // Whether a continuation has been taken while a ramp may be in flight: the first boundary
+    // that offers one always takes it, so a scenario whose automation leaves a ramp in flight at
+    // a boundary reaches a mid-ramp continuation without a further draw.
+    let mut taken_in_flight = false;
+    // Prepared targets (#1278 attempt 3): an effect that refuses raw spans and takes its
+    // automation as prepared targets (the EQ) gets ramps only this way. Per lane, the candidate
+    // the lane was last given, and the target words it is known to be heading for (initially its
+    // prepared configuration; forgotten when a restore replaces its state).
+    let preparation = factory.target_preparation();
+    let mut targets = Targets::new(preparation, shape, &values);
     for block in 0..spec.blocks {
         let context = format!("{width:?} block {block} at sample {first} ({shape:?})");
         // --- Block-boundary operations -------------------------------------------------------
@@ -832,11 +914,18 @@ fn run_width(
                 ResetKind::DiscontinuityKeepParameters,
             ]);
             if let Some(arm) = arm.as_mut() {
-                disengage(arm, bank.as_ref(), sizes, &context, coverage);
+                disengage(arm, bank.as_ref(), sizes, audited_calls, &context, coverage);
             }
             for scalar in &mut scalars {
                 scalar.reset(kind);
             }
+            if let Some(continuation) = continuation.as_mut() {
+                continuation.twin.reset(kind);
+            }
+            // A reset ends every ramp (a discontinuity snaps them, a full reset restarts from the
+            // prepared configuration), so nothing is in flight until automation moves again.
+            in_flight_until.fill(0);
+            targets.reset(kind, &values);
             bank.reset(kind);
             if let Some(arm) = arm.as_mut() {
                 arm.bank.reset(kind);
@@ -844,7 +933,7 @@ fn run_width(
         }
         let terminal = hostile_block.is_some_and(|(at, _)| at == block);
         if draw.chance(1, 6) || (terminal && draw.chance(1, 2)) {
-            symmetric &= !restore(
+            let restored = restore(
                 spec,
                 draw,
                 shape,
@@ -855,9 +944,100 @@ fn run_width(
                 sizes,
                 version,
                 &metadata,
+                audited_calls,
                 &context,
                 coverage,
             );
+            symmetric &= !restored.asymmetric;
+            if restored.replaced {
+                // Another state now: whatever was in flight on the lane is not known to be.
+                in_flight_until[restored.lane] = 0;
+                targets.forget(restored.lane);
+            }
+            // The lane took another payload; the continued instance is no longer its twin.
+            if continuation
+                .as_ref()
+                .is_some_and(|continuation| continuation.lane == restored.lane)
+            {
+                continuation = None;
+            }
+        }
+        if continuation.is_some() && draw.chance(1, 8) {
+            continuation = None;
+        }
+        // Preferentially while a ramp may be in flight (#1278 attempt 2): a restore that
+        // re-derives a word the continuation reads diverges only mid-ramp, and a uniform draw
+        // reached that rarely on an effect whose automation the scenario narrows to one lane.
+        let flying: Vec<usize> = (0..lanes)
+            .filter(|&lane| first < in_flight_until[lane])
+            .collect();
+        let take = if !flying.is_empty() && (!taken_in_flight || draw.chance(1, 2)) {
+            taken_in_flight = true;
+            Some(draw.pick(&flying))
+        } else if continuation.is_none() && draw.chance(1, 3) {
+            Some(draw.below(lanes))
+        } else {
+            None
+        };
+        if let Some(lane) = take {
+            continuation = Some(Continuation::take(
+                factory,
+                requests[lane],
+                scalars[lane].as_ref(),
+                lane,
+                sizes,
+                version,
+                audited_calls,
+                &context,
+            ));
+            coverage.continuations += 1;
+            let in_flight = spec
+                .in_flight
+                .map_or(first < in_flight_until[lane], |decode| {
+                    decode(&snapshot_scalar(scalars[lane].as_ref(), sizes, false))
+                });
+            if in_flight {
+                coverage.continuations_in_flight += 1;
+                if shape.quantum == 32 {
+                    coverage.continuations_in_flight_at_32 += 1;
+                }
+            }
+        }
+        // Prepared targets, after the take, so a continuation taken at a later boundary holds the
+        // ramp mid-flight. One lane per boundary, applied to the scalar instance, its bank lane,
+        // the mono arm's lane and the lane's continued twin at once: a host applies one target to
+        // whichever instance renders the lane.
+        if let Some(preparation) = preparation
+            && draw.chance(1, 3)
+        {
+            let lane = automated.unwrap_or_else(|| draw.below(lanes));
+            if lane < lanes {
+                if let Some(arm) = arm.as_mut() {
+                    disengage(arm, bank.as_ref(), sizes, audited_calls, &context, coverage);
+                }
+                let twin = continuation
+                    .as_mut()
+                    .filter(|continuation| continuation.lane == lane)
+                    .map(|continuation| continuation.twin.as_mut());
+                if targets.apply(
+                    preparation,
+                    draw,
+                    descriptor,
+                    shape,
+                    lane,
+                    Receivers {
+                        scalar: scalars[lane].as_mut(),
+                        bank: bank.as_mut(),
+                        arm: arm.as_mut().map(|arm| arm.bank.as_mut()),
+                        twin,
+                    },
+                    audited_calls,
+                    &context,
+                    coverage,
+                ) {
+                    in_flight_until[lane] = in_flight_until[lane].max(first + IN_FLIGHT_SAMPLES);
+                }
+            }
         }
 
         if spec.witness && symmetric {
@@ -963,7 +1143,7 @@ fn run_width(
             let holds = arm.restored && designed;
             let eligible = arm.agree && holds && !forced_dual;
             if !eligible {
-                disengage(arm, bank.as_ref(), sizes, &context, coverage);
+                disengage(arm, bank.as_ref(), sizes, audited_calls, &context, coverage);
                 arm.agree &= holds;
             }
             arm.collapsed = eligible;
@@ -992,6 +1172,23 @@ fn run_width(
             };
             let (mut left, mut right) = (gather(&input_left), gather(&input_right));
             let (side_l, side_r) = (gather(&side_left), gather(&side_right));
+            let continued = continuation
+                .as_mut()
+                .filter(|continuation| continuation.lane == lane)
+                .map(|continuation| {
+                    let (mut twin_left, mut twin_right) = (left.clone(), right.clone());
+                    let report = render_scalar(
+                        continuation.twin.as_mut(),
+                        (&mut twin_left, &mut twin_right),
+                        connected.then_some((&side_l, &side_r)),
+                        first,
+                        &lane_spans[lane],
+                        shape.quantum,
+                        chunk,
+                        audited_calls,
+                    );
+                    (twin_left, twin_right, report)
+                });
             let report = render_scalar(
                 scalar.as_mut(),
                 (&mut left, &mut right),
@@ -1002,6 +1199,27 @@ fn run_width(
                 chunk,
                 audited_calls,
             );
+            if let Some((twin_left, twin_right, twin_report)) = continued {
+                for (plane, continued, restored) in
+                    [("left", &left, &twin_left), ("right", &right, &twin_right)]
+                {
+                    if let Some(frame) = first_difference(continued, restored) {
+                        panic!(
+                            "{context}: lane {lane} {plane} frame {frame}: the instance restored \
+                             from its snapshot rendered {:#010x} where the lane, continuing, \
+                             rendered {:#010x} (chunk {chunk:?}, spans {:?})",
+                            restored[frame].to_bits(),
+                            continued[frame].to_bits(),
+                            lane_spans[lane],
+                        );
+                    }
+                }
+                assert_eq!(
+                    twin_report, report,
+                    "{context}: lane {lane}'s restored instance reports other than the lane"
+                );
+                coverage.continued_blocks += 1;
+            }
             for frame in 0..frames {
                 scalar_left[frame * lanes + lane] = left[frame];
                 scalar_right[frame * lanes + lane] = right[frame];
@@ -1010,6 +1228,15 @@ fn run_width(
         }
         if chunk.is_some() {
             coverage.chunked_blocks += 1;
+        }
+        // Only spans the lane accepted can have started a ramp: a lane whose report counts an
+        // invalid span (the EQ counts every raw span) credits nothing for this block.
+        for (lane, until) in in_flight_until.iter_mut().enumerate() {
+            if scalar_reports[lane].invalid_spans == 0 {
+                for span in &lane_spans[lane] {
+                    *until = (*until).max(span.end_sample.saturating_add(IN_FLIGHT_SAMPLES));
+                }
+            }
         }
 
         // --- The bank, and its collapsing twin ------------------------------------------------------
@@ -1172,10 +1399,290 @@ fn run_width(
 
         // --- State ------------------------------------------------------------------------------
         if compare_every_block || block + 1 == spec.blocks {
-            compare_state(&scalars, bank.as_ref(), sizes, &context, coverage);
+            compare_state(
+                &scalars,
+                bank.as_ref(),
+                sizes,
+                audited_calls,
+                &context,
+                coverage,
+            );
         }
         first += frames as u64;
     }
+}
+
+/// A fresh instance holding one lane's restored snapshot: restored against continued.
+struct Continuation {
+    /// The lane the snapshot was taken from.
+    lane: usize,
+    /// A fresh instance, prepared from the lane's request, holding the restored snapshot.
+    twin: Box<dyn PreparedNativeEffect>,
+}
+
+impl Continuation {
+    /// Prepares a fresh instance from `request` (control plane, unaudited), then snapshots `lane`
+    /// and restores the payload into it inside render scopes. The lane's own snapshot must
+    /// restore.
+    #[allow(clippy::too_many_arguments)]
+    fn take(
+        factory: &dyn NativeEffectFactory,
+        request: PrepareEffectRequest<'_>,
+        source: &dyn PreparedNativeEffect,
+        lane: usize,
+        sizes: StatePayloadSizes,
+        version: u32,
+        armed: bool,
+        context: &str,
+    ) -> Self {
+        let mut twin = factory
+            .prepare(request)
+            .expect("a lane's own request prepares again");
+        let payload = snapshot_scalar(source, sizes, armed);
+        let input = StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
+            .expect("the prepared sizes");
+        if let Err(error) = audited(armed, "restore_state_payload", || {
+            twin.restore_state_payload(version, input)
+        }) {
+            panic!(
+                "{context}: lane {lane}'s snapshot refused by a fresh instance ({})",
+                error.code
+            );
+        }
+        // No word-for-word write-back here: a fresh instance's ring cursors need not be the
+        // lane's, and a restore rotates a ring into the receiver's frame (the limiter does), so
+        // the twin's own snapshot may legitimately differ. What it renders may not.
+        Self { lane, twin }
+    }
+}
+
+/// The instances one lane's prepared target is applied to at once.
+struct Receivers<'a> {
+    /// The lane's scalar instance.
+    scalar: &'a mut (dyn PreparedNativeEffect + 'static),
+    /// The dual bank, at the lane.
+    bank: &'a mut (dyn PreparedNativeEffectBank + 'static),
+    /// The mono arm's bank, at the lane, disengaged.
+    arm: Option<&'a mut (dyn PreparedNativeEffectBank + 'static)>,
+    /// The lane's continued twin, if one renders beside it.
+    twin: Option<&'a mut (dyn PreparedNativeEffect + 'static)>,
+}
+
+/// Target words a lane is known to be heading for, per effect-owned slot and channel.
+type Heading = Vec<(u32, ParameterChannel, [u32; PREPARED_EFFECT_TARGET_WORDS])>;
+
+/// Prepared-target automation (#1278 attempt 3): the route an effect that refuses raw spans (the
+/// parametric EQ, #807) takes its automation by, and so the only way the restored-against-continued
+/// oracle can reach such an effect mid-ramp.
+struct Targets {
+    /// Whether the effect under test takes prepared targets at all.
+    enabled: bool,
+    sample_rate: u32,
+    /// Control-plane target storage, `maximum_targets` long.
+    out: Vec<PreparedEffectTarget>,
+    /// Per lane, the complete candidate the lane was last given.
+    candidates: Vec<Vec<InitialParameterValue>>,
+    /// Per lane, the prepared configuration's target words.
+    initial: Vec<Heading>,
+    /// Per lane, the target words the lane is known to be heading for; an absent slot is unknown.
+    heading: Vec<Heading>,
+}
+
+impl Targets {
+    fn new(
+        preparation: Option<&dyn NativeEffectTargetPreparation>,
+        shape: Shape,
+        values: &[Vec<InitialParameterValue>],
+    ) -> Self {
+        let Some(preparation) = preparation else {
+            return Self {
+                enabled: false,
+                sample_rate: 0,
+                out: Vec::new(),
+                candidates: Vec::new(),
+                initial: Vec::new(),
+                heading: Vec::new(),
+            };
+        };
+        let sample_rate = shape.quality.sample_rate;
+        let mut out = vec![
+            PreparedEffectTarget {
+                slot: 0,
+                channel: ParameterChannel::Left,
+                words: [0; PREPARED_EFFECT_TARGET_WORDS],
+            };
+            preparation.maximum_targets()
+        ];
+        let initial: Vec<Heading> = values
+            .iter()
+            .map(|lane| {
+                let changed = vec![true; lane.len()];
+                let count = preparation
+                    .prepare_targets(
+                        EffectTargetRequest {
+                            sample_rate,
+                            values: lane,
+                            changed: &changed,
+                        },
+                        &mut out,
+                    )
+                    .expect("a configuration that prepared also prepares as targets");
+                let mut heading = Heading::new();
+                for target in &out[..count] {
+                    record(&mut heading, target);
+                }
+                heading
+            })
+            .collect();
+        Self {
+            enabled: true,
+            sample_rate,
+            out,
+            candidates: values.to_vec(),
+            heading: initial.clone(),
+            initial,
+        }
+    }
+
+    /// A full reset returns every lane to its prepared configuration; a discontinuity snaps every
+    /// ramp to where it was heading, so the heading stands.
+    fn reset(&mut self, kind: ResetKind, values: &[Vec<InitialParameterValue>]) {
+        if self.enabled && kind == ResetKind::FullToDefaults {
+            self.candidates = values.to_vec();
+            self.heading.clone_from(&self.initial);
+        }
+    }
+
+    /// A restore replaced `lane`'s state: where it is heading is no longer known.
+    fn forget(&mut self, lane: usize) {
+        if let Some(heading) = self.heading.get_mut(lane) {
+            heading.clear();
+        }
+    }
+
+    /// Draws a candidate that moves one to three of `lane`'s continuous values (both channels of
+    /// a per-lane value on a mono scenario), prepares it off the audited scope, and applies every
+    /// target to every receiver inside one. They must accept or refuse together. Returns whether
+    /// an accepted target's words differ from the words the lane was known to be heading for --
+    /// a ramp that moves (unless it lands exactly on the lane's current words).
+    #[allow(clippy::too_many_arguments)]
+    fn apply(
+        &mut self,
+        preparation: &dyn NativeEffectTargetPreparation,
+        draw: &mut Draw,
+        descriptor: &'static EffectDescriptor,
+        shape: Shape,
+        lane: usize,
+        mut receivers: Receivers<'_>,
+        armed: bool,
+        context: &str,
+        coverage: &mut DifferentialCoverage,
+    ) -> bool {
+        let mut candidate = self.candidates[lane].clone();
+        let parameter_of =
+            |entry: &InitialParameterValue| &descriptor.parameters[entry.parameter_index as usize];
+        let continuous: Vec<usize> = (0..candidate.len())
+            .filter(|&index| parameter_of(&candidate[index]).domain == ParameterDomain::Continuous)
+            .collect();
+        if continuous.is_empty() {
+            return false;
+        }
+        let mut changed = vec![false; candidate.len()];
+        for _ in 0..=draw.below(3) {
+            let index = draw.pick(&continuous);
+            let parameter = parameter_of(&candidate[index]);
+            let value = draw_value(draw, parameter);
+            candidate[index].value = value;
+            changed[index] = true;
+            if shape.mono && parameter.channel_policy == ParameterChannelPolicy::PerLane {
+                let parameter_index = candidate[index].parameter_index;
+                for (other, entry) in candidate.iter_mut().enumerate() {
+                    if entry.parameter_index == parameter_index {
+                        entry.value = value;
+                        changed[other] = true;
+                    }
+                }
+            }
+        }
+        let count = preparation
+            .prepare_targets(
+                EffectTargetRequest {
+                    sample_rate: self.sample_rate,
+                    values: &candidate,
+                    changed: &changed,
+                },
+                &mut self.out,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{context}: lane {lane}'s legal candidate did not prepare ({error:?})")
+            });
+        let mut moving = false;
+        let mut accepted = false;
+        for target in &self.out[..count] {
+            let scalar = audited(armed, "apply_prepared_target", || {
+                receivers.scalar.apply_prepared_target(target)
+            });
+            let banked = audited(armed, "apply_prepared_target_lane", || {
+                receivers.bank.apply_prepared_target_lane(lane, target)
+            });
+            assert_eq!(
+                banked, scalar,
+                "{context}: lane {lane}'s bank and scalar disagree on a prepared target"
+            );
+            if let Some(arm) = receivers.arm.as_deref_mut() {
+                let twin = audited(armed, "apply_prepared_target_lane", || {
+                    arm.apply_prepared_target_lane(lane, target)
+                });
+                assert_eq!(
+                    twin, scalar,
+                    "{context}: lane {lane}'s twin bank disagrees on a prepared target"
+                );
+            }
+            if let Some(twin) = receivers.twin.as_deref_mut() {
+                let continued = audited(armed, "apply_prepared_target", || {
+                    twin.apply_prepared_target(target)
+                });
+                assert_eq!(
+                    continued, scalar,
+                    "{context}: lane {lane}'s restored instance disagrees on a prepared target"
+                );
+            }
+            if scalar.is_ok() {
+                accepted = true;
+                coverage.applied_targets += 1;
+                if record(&mut self.heading[lane], target) {
+                    moving = true;
+                    coverage.moving_targets += 1;
+                }
+            }
+        }
+        if accepted {
+            self.candidates[lane] = candidate;
+        }
+        moving
+    }
+}
+
+/// Records `target` as where its slot and channels are heading; whether a known heading moved.
+fn record(heading: &mut Heading, target: &PreparedEffectTarget) -> bool {
+    let channels: &[ParameterChannel] = match target.channel {
+        ParameterChannel::Left => &[ParameterChannel::Left],
+        ParameterChannel::Right => &[ParameterChannel::Right],
+        ParameterChannel::Both => &[ParameterChannel::Left, ParameterChannel::Right],
+    };
+    let mut moved = false;
+    for &channel in channels {
+        if let Some(entry) = heading
+            .iter_mut()
+            .find(|entry| entry.0 == target.slot && entry.1 == channel)
+        {
+            moved |= entry.2 != target.words;
+            entry.2 = target.words;
+        } else {
+            heading.push((target.slot, channel, target.words));
+        }
+    }
+    moved
 }
 
 /// Ends a collapsed run: `desymmetrize_channels`, then every lane's state must be the dual bank's.
@@ -1183,6 +1690,7 @@ fn disengage(
     arm: &mut MonoArm,
     bank: &dyn PreparedNativeEffectBank,
     sizes: StatePayloadSizes,
+    armed: bool,
     context: &str,
     coverage: &mut DifferentialCoverage,
 ) {
@@ -1194,8 +1702,8 @@ fn disengage(
     coverage.disengages += 1;
     for lane in 0..arm.bank.metadata().width.lanes() as usize {
         assert_eq!(
-            snapshot_lane(arm.bank.as_ref(), lane, sizes),
-            snapshot_lane(bank, lane, sizes),
+            snapshot_lane(arm.bank.as_ref(), lane, sizes, armed),
+            snapshot_lane(bank, lane, sizes, armed),
             "{context}: lane {lane}'s state after desymmetrize_channels is not the dual bank's"
         );
     }
@@ -1426,25 +1934,12 @@ fn empty_payload(sizes: StatePayloadSizes) -> Payload {
     }
 }
 
-fn snapshot_scalar(effect: &dyn PreparedNativeEffect, sizes: StatePayloadSizes) -> Payload {
-    let mut payload = empty_payload(sizes);
-    let output = StatePayloadOutput::new(
-        &mut payload.common,
-        &mut payload.left,
-        &mut payload.right,
-        sizes,
-    )
-    .expect("the prepared sizes");
-    effect
-        .snapshot_state_payload(output)
-        .expect("a prepared instance snapshots");
-    payload
-}
-
-fn snapshot_lane(
-    bank: &dyn PreparedNativeEffectBank,
-    lane: usize,
+/// Snapshots a scalar instance into buffers allocated here, outside the audited call: the payload
+/// call itself runs inside a render scope, as the plan-swap carry runs it in the swap block.
+fn snapshot_scalar(
+    effect: &dyn PreparedNativeEffect,
     sizes: StatePayloadSizes,
+    armed: bool,
 ) -> Payload {
     let mut payload = empty_payload(sizes);
     let output = StatePayloadOutput::new(
@@ -1454,8 +1949,32 @@ fn snapshot_lane(
         sizes,
     )
     .expect("the prepared sizes");
-    bank.snapshot_track_state_payload(lane as u32, output)
-        .expect("a bank lane snapshots");
+    audited(armed, "snapshot_state_payload", || {
+        effect.snapshot_state_payload(output)
+    })
+    .expect("a prepared instance snapshots");
+    payload
+}
+
+/// As [`snapshot_scalar`], for one bank lane.
+fn snapshot_lane(
+    bank: &dyn PreparedNativeEffectBank,
+    lane: usize,
+    sizes: StatePayloadSizes,
+    armed: bool,
+) -> Payload {
+    let mut payload = empty_payload(sizes);
+    let output = StatePayloadOutput::new(
+        &mut payload.common,
+        &mut payload.left,
+        &mut payload.right,
+        sizes,
+    )
+    .expect("the prepared sizes");
+    audited(armed, "snapshot_track_state_payload", || {
+        bank.snapshot_track_state_payload(lane as u32, output)
+    })
+    .expect("a bank lane snapshots");
     payload
 }
 
@@ -1485,13 +2004,14 @@ fn compare_state(
     scalars: &[Box<dyn PreparedNativeEffect>],
     bank: &dyn PreparedNativeEffectBank,
     sizes: StatePayloadSizes,
+    armed: bool,
     context: &str,
     coverage: &mut DifferentialCoverage,
 ) {
     for (lane, scalar) in scalars.iter().enumerate() {
         let (expected, banked) = (
-            snapshot_scalar(scalar.as_ref(), sizes),
-            snapshot_lane(bank, lane, sizes),
+            snapshot_scalar(scalar.as_ref(), sizes, armed),
+            snapshot_lane(bank, lane, sizes, armed),
         );
         if expected != banked {
             let section = if expected.common != banked.common {
@@ -1508,9 +2028,6 @@ fn compare_state(
         coverage.state_comparisons += 1;
     }
 }
-
-/// The refusals #1071 forgives: a restore that wants a word zero or normal and finds it subnormal.
-const SUBNORMAL_REFUSAL_CODES: [&str; 2] = ["effect.state.parameter", "effect.state.history"];
 
 /// Edge words for a payload rewrite at any block: both zeros, subnormals, the smallest normal,
 /// `+-1`, and small counts. Every one is a finite `f32`.
@@ -1578,9 +2095,10 @@ fn restore(
     sizes: StatePayloadSizes,
     version: u32,
     metadata: &PreparedEffectMetadata,
+    armed: bool,
     context: &str,
     coverage: &mut DifferentialCoverage,
-) -> bool {
+) -> Restored {
     let lanes = scalars.len();
     let lane = draw.below(lanes);
     // Under `RampCutsMoveBits` a restore may not start a ramp on a lane the scenario keeps free
@@ -1591,7 +2109,7 @@ fn restore(
     } else {
         lane
     };
-    let mut payload = snapshot_scalar(scalars[source].as_ref(), sizes);
+    let mut payload = snapshot_scalar(scalars[source].as_ref(), sizes, armed);
     let mut claim = None;
     let mut rewritten = true;
     match if untouched { 3 } else { draw.below(4) } {
@@ -1618,24 +2136,27 @@ fn restore(
     }
     let mut arm = arm;
     if let Some(arm) = arm.as_deref_mut() {
-        disengage(arm, bank, sizes, context, coverage);
+        disengage(arm, bank, sizes, armed, context, coverage);
     }
     let input = || {
         StatePayloadInput::new(&payload.common, &payload.left, &payload.right, sizes)
             .expect("the prepared sizes")
     };
-    let scalar = restore_code(scalars[lane].restore_state_payload(version, input()));
-    let banked = restore_code(bank.restore_track_state_payload(lane as u32, version, input()));
+    let scalar = restore_code(audited(armed, "restore_state_payload", || {
+        scalars[lane].restore_state_payload(version, input())
+    }));
+    let banked = restore_code(audited(armed, "restore_track_state_payload", || {
+        bank.restore_track_state_payload(lane as u32, version, input())
+    }));
     assert_eq!(
         banked, scalar,
         "{context}: lane {lane}'s bank and scalar restores disagree"
     );
     if let Some(arm) = arm {
-        let twin = restore_code(arm.bank.restore_track_state_payload(
-            lane as u32,
-            version,
-            input(),
-        ));
+        let twin = restore_code(audited(armed, "restore_track_state_payload", || {
+            arm.bank
+                .restore_track_state_payload(lane as u32, version, input())
+        }));
         assert_eq!(
             twin, scalar,
             "{context}: lane {lane}'s twin bank restore disagrees"
@@ -1648,10 +2169,7 @@ fn restore(
         Ok(()) => coverage.restores += 1,
         Err(_) => coverage.refused_restores += 1,
     }
-    // #1071's allowance: only its own two refusal codes, the words the restore wants zero or normal.
-    let tolerated = spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
-        && scalar.is_err_and(|code| SUBNORMAL_REFUSAL_CODES.contains(&code));
-    if !rewritten && (scalar.is_ok() || (source == lane && !tolerated)) {
+    if !rewritten && (scalar.is_ok() || source == lane) {
         // An untouched snapshot restores and writes itself back word for word, from the scalar
         // instance and from the bank lane. The lane's own always restores; another lane's may be
         // refused where a payload is bound to its lane's configuration (the EQ's is).
@@ -1661,11 +2179,14 @@ fn restore(
             "{context}: lane {lane} refused its own snapshot"
         );
         assert!(
-            same_payload(&snapshot_scalar(scalars[lane].as_ref(), sizes), &payload),
+            same_payload(
+                &snapshot_scalar(scalars[lane].as_ref(), sizes, armed),
+                &payload
+            ),
             "{context}: lane {lane}'s snapshot does not survive its own restore"
         );
         assert!(
-            same_payload(&snapshot_lane(bank, lane, sizes), &payload),
+            same_payload(&snapshot_lane(bank, lane, sizes, armed), &payload),
             "{context}: bank lane {lane}'s snapshot does not survive its own restore"
         );
     }
@@ -1682,7 +2203,21 @@ fn restore(
             "{context}: lane {lane}'s bank witness after a crafted restore"
         );
     }
-    scalar.is_ok() && payload.left != payload.right
+    Restored {
+        lane,
+        asymmetric: scalar.is_ok() && payload.left != payload.right,
+        replaced: scalar.is_ok() && (rewritten || source != lane),
+    }
+}
+
+/// What one restore event did.
+struct Restored {
+    /// The lane it restored into.
+    lane: usize,
+    /// It was accepted with left and right sections that differ.
+    asymmetric: bool,
+    /// It was accepted with a payload other than the lane's own untouched snapshot.
+    replaced: bool,
 }
 
 /// The three-outcome rule on `bind_homogeneous_bank`, on cohorts built to break it.
@@ -1863,6 +2398,21 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
         "nothing was restored or reset: {coverage:?}"
     );
     assert!(
+        coverage.continuations > 0
+            && (coverage.banks.iter().sum::<u64>() == 0
+                || (coverage.continued_blocks > 0
+                    && coverage.continuations_in_flight > 0
+                    && coverage.continuations_in_flight_at_32 > 0)),
+        "no restored instance rendered beside its continued lane with a ramp in flight, at \
+         quantum 32 included: {coverage:?}"
+    );
+    assert!(
+        !coverage.prepared_targets
+            || coverage.banks.iter().sum::<u64>() == 0
+            || coverage.moving_targets > 0,
+        "an effect that takes prepared targets was never given one that moves: {coverage:?}"
+    );
+    assert!(
         coverage.malformed_refusals > 0 && coverage.heterogeneous_declines > 0,
         "the bind-eligibility probes were not answered: {coverage:?}"
     );
@@ -1920,6 +2470,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         capacity: 1,
         mono: false,
         hostile: false,
+        automate: false,
     };
     let values: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
     let frames = QUANTUM as usize;
@@ -2063,6 +2614,14 @@ pub fn assert_d7_reports(factory: &dyn NativeEffectFactory) {
 macro_rules! randomized_effect_test {
     ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
      known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr $(,)?) => {
+        $crate::randomized_effect_test!(
+            $name, $factory, seeds: $seeds, blocks: $blocks, craft: $craft, known: $known,
+            banks_natively: $banks, witness: $witness, in_flight: None,
+        );
+    };
+    ($name:ident, $factory:expr, seeds: $seeds:expr, blocks: $blocks:expr, craft: $craft:expr,
+     known: $known:expr, banks_natively: $banks:expr, witness: $witness:expr,
+     in_flight: $in_flight:expr $(,)?) => {
         #[test]
         fn $name() {
             ::bench_support::alloc::assert_installed();
@@ -2082,9 +2641,207 @@ macro_rules! randomized_effect_test {
                 known: $known,
                 banks_natively: $banks,
                 witness: $witness,
+                in_flight: $in_flight,
             });
             println!("{coverage:#?}");
             $crate::assert_reached(&coverage);
         }
     };
+}
+
+impl EffectDifferential<'_> {
+    /// Every refusal of the effect's **own** snapshot, taken at each sample of a ramp that
+    /// rounds past its parameter's domain edge (#1278): no seed.
+    ///
+    /// The plan-swap carry restores every lane it carries, so a restore must accept every state
+    /// the effect itself reaches. A smoothed ramp iterates `current + step` with a step rounded
+    /// once, so a ramp that ends on a domain edge can round a few ulps past the edge on its way.
+    /// For each smoothed continuous parameter, each edge and each quality row, this finds a start
+    /// value a few hundred ulps inside the edge whose `f32` walk leaves the domain, prepares a
+    /// scalar instance there on both channels, sends a `Point` to the edge, and after every
+    /// rendered sample of the ramp restores the instance's snapshot into a freshly prepared twin.
+    /// It returns each refusal. (An associated function of this exported type, so an effect
+    /// crate's tests reach it.)
+    #[must_use]
+    pub fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+        edge_ramp_restore_violations(factory)
+    }
+
+    /// Panics with every [`Self::edge_ramp_restore_violations`] of `factory`.
+    ///
+    /// # Panics
+    ///
+    /// When the effect refuses a snapshot of its own state.
+    pub fn assert_edge_ramps_restore(factory: &dyn NativeEffectFactory) {
+        assert_edge_ramps_restore(factory);
+    }
+}
+
+// The body of `EffectDifferential::edge_ramp_restore_violations`.
+fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
+    let descriptor = factory.descriptor();
+    let link = [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average]
+        .into_iter()
+        .find(|link| descriptor.supported_link_modes.contains(*link))
+        .expect("an effect supports a link mode");
+    let sidechain = descriptor
+        .ports
+        .iter()
+        .find(|port| port.role == PortRole::SidechainInput)
+        .map_or(PreparedSidechainPort::None, |port| {
+            if port.required {
+                PreparedSidechainPort::Connected {
+                    id: port.id,
+                    required: true,
+                }
+            } else {
+                PreparedSidechainPort::Unconnected {
+                    id: port.id,
+                    required: false,
+                }
+            }
+        });
+    let connected = matches!(sidechain, PreparedSidechainPort::Connected { .. });
+    let mut violations = Vec::new();
+    for quality in descriptor.qualities {
+        let shape = Shape {
+            quality: *quality,
+            quantum: 64,
+            link,
+            bypass: false,
+            ports: PreparedPorts { sidechain },
+            capacity: 2,
+            mono: false,
+            hostile: false,
+            automate: false,
+        };
+        let sizes = quality.maximum_state;
+        for (index, parameter) in descriptor.parameters.iter().enumerate() {
+            let (Some(low), Some(high)) = (parameter.minimum, parameter.maximum) else {
+                continue;
+            };
+            if parameter.domain != ParameterDomain::Continuous
+                || parameter.automation_rate == AutomationRate::None
+                || parameter.smoothing_samples < 2
+                || low >= high
+            {
+                continue;
+            }
+            let samples = parameter.smoothing_samples;
+            for edge in [low, high] {
+                let Some(start) = overshooting_start(edge, low, high, samples) else {
+                    continue;
+                };
+                let mut values: Vec<InitialParameterValue> =
+                    default_initial_values(descriptor).collect();
+                for value in &mut values {
+                    if value.parameter_index as usize == index {
+                        value.value = start;
+                    }
+                }
+                let Ok(mut effect) = factory.prepare(request(shape, &values)) else {
+                    continue;
+                };
+                let channels: &[ParameterChannel] = match parameter.channel_policy {
+                    ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
+                    ParameterChannelPolicy::PerLane => {
+                        &[ParameterChannel::Left, ParameterChannel::Right]
+                    }
+                };
+                let spans: Vec<PreparedAutomationSpan> = channels
+                    .iter()
+                    .map(|channel| PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: *channel,
+                        parameter_index: index as u32,
+                        start_sample: 0,
+                        end_sample: 0,
+                        start_value: edge,
+                        end_value: edge,
+                    })
+                    .collect();
+                for sample in 0..u64::from(samples) {
+                    let wave = ((sample * 37 % 97) as f32 - 48.25) / 194.0;
+                    let (mut left, mut right) = ([wave], [-wave]);
+                    let side = [wave * 0.5];
+                    let block = EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        connected.then_some((&side[..], &side[..])),
+                        sample,
+                        if sample == 0 { &spans } else { &[] },
+                        shape.quantum,
+                    )
+                    .expect("a well-shaped block");
+                    let _ = effect.process(block);
+                    let payload = snapshot_scalar(effect.as_ref(), sizes, false);
+                    let mut twin = factory
+                        .prepare(request(shape, &values))
+                        .expect("the same request prepares again");
+                    let input = StatePayloadInput::new(
+                        &payload.common,
+                        &payload.left,
+                        &payload.right,
+                        sizes,
+                    )
+                    .expect("the prepared sizes");
+                    if let Err(error) =
+                        twin.restore_state_payload(descriptor.state_layout_version, input)
+                    {
+                        violations.push(format!(
+                            "{} at {} Hz: `{}` ramp from {start:e} ({:#010x}) to {edge}, after \
+                             sample {sample}: its own snapshot is refused ({})",
+                            descriptor.display_name,
+                            quality.sample_rate,
+                            parameter.display_name,
+                            start.to_bits(),
+                            error.code
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// A start a few hundred ulps inside `edge` whose `f32` ramp of `samples` steps to `edge`
+/// (`step = (edge - start) / samples`, then `current += step` before the snap) leaves
+/// `[low, high]`, if one is found.
+fn overshooting_start(edge: f32, low: f32, high: f32, samples: u32) -> Option<f32> {
+    let inward = |value: f32| {
+        if edge == high {
+            value.next_down()
+        } else {
+            value.next_up()
+        }
+    };
+    let mut start = edge;
+    for _ in 0..4096 {
+        start = inward(start);
+        if !(low..=high).contains(&start) {
+            return None;
+        }
+        let step = (edge - start) / samples as f32;
+        let mut current = start;
+        for _ in 1..samples {
+            current += step;
+            if !(low..=high).contains(&current) {
+                return Some(start);
+            }
+        }
+    }
+    None
+}
+
+// The body of `EffectDifferential::assert_edge_ramps_restore`.
+fn assert_edge_ramps_restore(factory: &dyn NativeEffectFactory) {
+    let violations = edge_ramp_restore_violations(factory);
+    assert!(
+        violations.is_empty(),
+        "{}: a restore refuses the effect's own mid-ramp snapshot (#1278):\n{}",
+        factory.descriptor().display_name,
+        violations.join("\n")
+    );
 }

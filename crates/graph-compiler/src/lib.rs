@@ -13788,7 +13788,7 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
         assert!(registry.get_ascii("miso.delay").is_some());
         let effect_caps = EffectCompileCaps {
-            maximum_total_state_bytes: 768_168,
+            maximum_total_state_bytes: 768_196,
             maximum_scratch_bytes: 36,
             maximum_automation_spans_per_block: 32,
         };
@@ -13801,7 +13801,7 @@ mod tests {
             entry.rack == effect_compiler::EffectRack::Dynamic
                 && entry.metadata.latency == LatencySamples(0)
                 && entry.metadata.tail == TailSamples::Infinite
-                && entry.metadata.state_sizes.total() == Some(768_168)
+                && entry.metadata.state_sizes.total() == Some(768_196)
                 && entry.metadata.scratch_bytes == 36
                 && matches!(entry.metadata.ports.sidechain, PreparedSidechainPort::None)
         }));
@@ -13862,7 +13862,7 @@ mod tests {
         );
         assert_eq!(artifact.report().estimate.effect_bank_metadata_bytes, 0);
         assert_eq!(artifact.report().estimate.effects, 10);
-        assert_eq!(artifact.report().estimate.declared_effect_bytes, 7_682_040);
+        assert_eq!(artifact.report().estimate.declared_effect_bytes, 7_682_320);
         assert_eq!(artifact.report().output_latency, LatencySamples(0));
         assert_eq!(artifact.report().output_tail, TailSamples::Infinite);
         let effect_nodes = artifact

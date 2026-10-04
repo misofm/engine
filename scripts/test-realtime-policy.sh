@@ -26,9 +26,10 @@ create_fixture() {
         "$root/tools/bench/src"
     # The marked file set mirrors the real tree after #371 (RT-16/IO-14), #664's complete
     # LocalRing removal and #1253's builtins-compiler drains: thirteen files and forty-three
-    # regions across crates/ and hosts/, so the floors in the gate and the discovery
-    # walk are exercised against the same shape the gate sees on main. Column-zero markers and
-    # indented markers (as in the real `impl`-block regions) both appear.
+    # regions across crates/ and hosts/, padded at the end of this function to the gate's current
+    # floors, so the floors and the discovery walk are exercised against the counts the gate sees
+    # on main. Column-zero markers and indented markers (as in the real `impl`-block regions) both
+    # appear.
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn render() {}' \
@@ -280,6 +281,23 @@ create_fixture() {
         'fn drain_matrix_controls() {}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/builtins-compiler/src/lib.rs"
+    # The floors rose with #1269 phase 1 (the swap carry and effect-restore regions) and #1053
+    # (#1253's drains) to the merged tree's 25 files and 89 regions. The thirteen files and
+    # forty-three regions above keep the shapes the mutations below exercise; these twelve files
+    # hold the other forty-six regions (one file of thirteen, eleven of three), so the fixture
+    # again sits exactly on both floors.
+    mkdir -p "$root/crates/floor/src"
+    local pad region regions
+    for pad in $(seq 1 12); do
+        regions=3
+        [[ "$pad" -eq 1 ]] && regions=13
+        for region in $(seq 1 "$regions"); do
+            printf '%s\n' \
+                '// REALTIME_POLICY_BEGIN' \
+                "fn floor_${pad}_${region}() {}" \
+                '// REALTIME_POLICY_END'
+        done >"$root/crates/floor/src/pad_${pad}.rs"
+    done
 }
 
 expect_failure() {
@@ -411,13 +429,13 @@ expect_failure marked-unbounded-try-pop-drain 'bound it with available_at_entry'
     'sed -i "s/fn drain_fader_controls() {}/fn drain_fader_controls() { while let Ok(record) = control.try_pop() { apply(record); } }/" "$root/crates/builtins-compiler/src/lib.rs"'
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
 # trips the file floor instead of passing with less coverage.
-expect_failure marked-file-count-floor 'expected at least thirteen marked realtime files' \
+expect_failure marked-file-count-floor 'expected at least twenty-five marked realtime files' \
     'sed -i "/REALTIME_POLICY/d" "$root/crates/builtins/src/lib.rs"'
-expect_failure no-marked-files-uses-floor 'expected at least thirteen marked realtime files' \
+expect_failure no-marked-files-uses-floor 'expected at least twenty-five marked realtime files' \
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least forty-three marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least eighty-nine marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.

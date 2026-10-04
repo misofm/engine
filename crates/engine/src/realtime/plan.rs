@@ -286,6 +286,31 @@ pub trait PreparedPlanExecutor: Send {
     ) -> Result<u32, ResponseSnapshotError> {
         Err(ResponseSnapshotError::Unsupported)
     }
+    /// This executor as `Any`, so a successor's [`adopt_predecessor`](Self::adopt_predecessor)
+    /// can downcast its predecessor to a concrete type it knows how to take state from.
+    ///
+    /// `None` (the default) declares that this executor offers no state to a successor.
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
+    /// Take state from the plan this one displaces, in the block that makes this plan active.
+    ///
+    /// **Where it runs.** On the render thread, inside the render scope, in the one block that
+    /// applies the swap: after this plan has adopted the predecessor's sample clock and before it
+    /// renders that block. It never runs on a block whose swap is deferred, nor for a candidate
+    /// dropped unapplied. A synchronous host makes the same hand-over through
+    /// [`PreparedRenderPlan::adopt_predecessor_plan`].
+    ///
+    /// **Render-thread code.** No allocation, free, lock, syscall, log or unbounded loop: the
+    /// hand-over may only copy or swap state between preallocated storage.
+    ///
+    /// **Afterwards.** The predecessor is pushed to retirement after this returns and is reclaimed
+    /// off the render thread; it never renders again, so state may be moved out of it.
+    ///
+    /// The default takes nothing and reports [`CarryOutcome::NotRequested`].
+    fn adopt_predecessor(&mut self, _predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
+        CarryOutcome::NotRequested
+    }
     /// Invalidate owner-side observers after a render refusal that happened before dispatch.
     ///
     /// This is an internal hook so a prepared executor can discard a partial capture without
@@ -457,6 +482,17 @@ pub trait PreparedPlanExecutor: Send {
     }
 }
 
+/// What a successor plan took from the plan it displaced, at the block that applied the swap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CarryOutcome {
+    /// No hand-over ran or the successor asked for none (also every block without an applied swap).
+    NotRequested,
+    /// The successor took state from its predecessor.
+    Carried,
+    /// The successor asked for state but its predecessor was not a shape it can take state from.
+    PredecessorMismatch,
+}
+
 /// Absolute sample time supplied by the host; no wall clock is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderTime {
@@ -575,8 +611,9 @@ impl PreparedRenderPlan {
     }
     /// Adopt a continuing timeline, for a plan that replaces a running one.
     ///
-    /// Only [`super::RealtimePlanOwner`] calls this, at a block boundary, so a plan swap does not
-    /// restart the host's clock at zero.
+    /// [`super::RealtimePlanOwner`] (at an applied swap) and
+    /// [`PreparedRenderPlan::adopt_predecessor_plan`] (for a synchronous host) call this, at a
+    /// block boundary, so a plan swap does not restart the host's clock at zero.
     pub(crate) const fn adopt_absolute_sample(&mut self, absolute_sample: u64) {
         self.next_absolute_sample = absolute_sample;
     }
@@ -844,6 +881,47 @@ impl PreparedRenderPlan {
             });
         }
         self.render(io, RenderTime { absolute_sample })
+    }
+
+    /// Hand a directly owned predecessor's clock and state to this plan, for a synchronous host.
+    ///
+    /// This plan adopts `predecessor`'s [`next_absolute_sample`](Self::next_absolute_sample), then,
+    /// when both plans have executors, runs [`PreparedPlanExecutor::adopt_predecessor`] -- the same
+    /// hand-over [`super::RealtimePlanOwner`] makes at an applied swap. Call it at a block
+    /// boundary, before this plan renders, and render `predecessor` no more. The hand-over runs
+    /// inside a render scope (arming one when called outside), so the realtime audit sees it in
+    /// every host.
+    ///
+    /// A predecessor with a different [`RenderEnvelope`] (rate, quantum or output channels) is
+    /// not a predecessor this plan can continue: it reports
+    /// [`CarryOutcome::PredecessorMismatch`] and leaves this plan's clock and state untouched,
+    /// the same envelope rule the exchange path enforces at publication.
+    pub fn adopt_predecessor_plan(&mut self, predecessor: &mut Self) -> CarryOutcome {
+        if self.program.envelope != predecessor.program.envelope {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        self.adopt_absolute_sample(predecessor.next_absolute_sample);
+        super::audit::in_render_scope(|| self.carry_from(predecessor))
+    }
+
+    /// This plan's executor as `Any` ([`PreparedPlanExecutor::as_any_mut`]), so the crate that
+    /// built it can reach its own executor type off the render thread -- to read its identity or
+    /// install a hand-over program before publication. `None` without an executor or when the
+    /// executor offers none.
+    #[doc(hidden)]
+    pub fn executor_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        self.executor.as_deref_mut()?.as_any_mut()
+    }
+
+    /// Run the executor hand-over from `predecessor`, if both plans have executors.
+    pub(crate) fn carry_from(&mut self, predecessor: &mut Self) -> CarryOutcome {
+        match (
+            self.executor.as_deref_mut(),
+            predecessor.executor.as_deref_mut(),
+        ) {
+            (Some(successor), Some(predecessor)) => successor.adopt_predecessor(predecessor),
+            _ => CarryOutcome::NotRequested,
+        }
     }
 
     pub(crate) fn render_inner(

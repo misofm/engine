@@ -56,6 +56,25 @@ The accepted Rust exported-C regressions supply the complete 11-command, six-eve
 replacement, retirement/reclaim, source-preserving/source-changing, failure, replay, and lifecycle
 matrix without copying protocol semantics into the qualification consumer.
 
+A structural transaction keeps every unchanged source playing (#1273, slice 4 of #1269). The
+replacement plan is prepared from the newest plan's state inventory and committed session model,
+with no ring for a source whose declaration and ring configuration are unchanged; at its swap block
+it takes that source's ring from the plan it displaces, with the queued PCM, the generation and the
+read position. The source's producer moves to the replacement's source set right after the protocol
+commit succeeds, which is the last fallible step, so a refused transaction moves nothing. From the
+commit on, `miso_engine_v1_source_submit_planar_f32` and `miso_engine_v1_source_seek` address the
+newest committed session: a host keeps feeding an unchanged source contiguously and must not reseek
+it. A removed source is refused as `source.id.unknown`, and PCM already accepted for it is discarded
+with its plan. An added source starts at generation 1, frame 0, until the host seeks it. A source
+whose declaration the transaction changed restarts the same way, in a new ring at generation 1,
+frame 0; PCM accepted for it before the commit is discarded with its plan, so the host restarts
+its feed. For a session whose unchanged paths hold no DSP state, the output across the swap is
+bit-identical to the post-edit session compiled fresh and fed the same PCM from frame 0
+(`runtime::tests`' `a_c_abi_structural_transaction_keeps_the_source_playing`). The replacement's
+resource report counts the rings it carries and its carry program, as the plan will own them once
+active; the double-live admission counts a carried ring once, with the plan it displaces; and
+capi's epoch row charges the state inventory each epoch keeps.
+
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
 structural, compiling and swapping a replacement plan, until *Deliver value-only send and
@@ -83,15 +102,34 @@ itself, independent of `maximum_tracks` and `maximum_submixes`; a session over i
 arrive in the same batch, #1240), so zero changes no previously accepted session; a library older
 than #1243 refuses a nonzero word with `RESULT_INVALID_ARGUMENT`.
 
+A host starts a stem a structural transaction added in exact time through
+`miso_engine_v1_source_seek_at` (#1275, slice 6 of #1269), an in-place V1 amendment: one new
+exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32) in the capability
+report, whose feature mask becomes 63; no struct, size or `ABI_VERSION` changes. It is
+`miso_engine_v1_source_seek` with an anchor: the seek's source frame enters the graph in the
+block that starts at absolute render sample `anchor_sample`, which must be a multiple of the
+quantum or the call returns `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
+thread rule, argument checks and every other result are the plain seek's. The host checks the bit
+before calling the symbol, since a library older than #1275 does not export it. After the
+transaction returns, the host picks `A` a few quanta past the last rendered block, calls
+`seek_at(id, g, F, A)` with `F` the frame the playing stems read at `A`, then submits generation
+`g` from `F`; the stem renders silence until `A` and plays `F` from `A` on, bit-identical to the
+post-edit session compiled fresh and fed that PCM from frame 0 (`runtime::tests`'
+`an_added_c_abi_source_starts_at_its_anchored_render_sample`). The frozen exported set is now 15
+`miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
+where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
+defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
+asking for defined symbols alone).
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and
 submit generation 2; all four consumer rows passed against the same once-built libraries. This is
 recorded as one consumer-fixture correction in `QUALIFICATION.tsv`.
 
-GNU `nm` found exactly the 14 frozen `miso_engine_v1_*` definitions in both library forms. The
-object parser classifies undefined references separately; a synthetic
-mutation replacing a definition with an identically named undefined reference is rejected.
+GNU `nm` found exactly the 14 frozen `miso_engine_v1_*` definitions (15 since #1275) in both
+library forms. The object parser classifies undefined references separately; a synthetic mutation
+replacing a definition with an identically named undefined reference is rejected.
 
 ## Runner and realtime evidence
 
@@ -102,7 +140,11 @@ and no-clobber behavior. The runner, its fixtures, and its exclusive-output-dire
 not modified, retried, or described as a new Issue-116 seal.
 
 The exported C render audit completed 100,000 calls with stable caller storage and zero allocation,
-deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors. A
+deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors.
+Since #1273 the audit applies one structural transaction (a muted track and its route) after its
+first call, outside the render scopes, so its second audited call is a swap block that carries the
+source's ring; the tool fails unless that transaction's plan is the only one the render thread
+swapped in (so every periodic live edit was applied live, #1258 D3) and its swap carried. A
 separate functional one-million-block render/swap audit observed two accepted swaps, one retirement
 deferral, zero forbidden-operation counters, and zero syscalls between the explicit realtime trace
 markers. Neither audit selected a benchmark mode or recorded durations.
@@ -139,11 +181,11 @@ admission. Host-core's default feature graph remains protocol-free; only capi en
 
 `resource_lifecycle` checks these charges against the allocator (#1060). Its counting allocator
 observes a C ABI compile and a replay of its host-core half owner by owner, and nothing is taken
-from the accounting it checks. What capi allocates itself, plus the observed source producers and
-parameter catalog, must equal `capi_retained_bytes` to the byte. The session store must fit its
-compiled-model estimate, and the prepared plan its engine rows (a bound; see the test). The
-canonical JSON is charged once, with the compiled model in the graph cap: capi's epoch row no
-longer charges it a second time. The double-live admission is derived from the two live reports
+from the accounting it checks. What capi allocates itself, plus the observed source producers,
+parameter catalog and plan state inventory (#1273), must equal `capi_retained_bytes` to the byte.
+The session store must fit its compiled-model estimate, and the prepared plan its engine rows (a
+bound; see the test). The canonical JSON is charged once, with the compiled model in the graph cap:
+capi's epoch row no longer charges it a second time. The double-live admission is derived from the two live reports
 and the owning crates' resource reports rather than from a hand-maintained layout mirror.
 The C response vectors now pin session-derived metadata/state and registered telemetry
 counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
@@ -256,9 +298,13 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Same response and events.** A live edit returns `TransactionApplied` and emits one
   `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
   The reliable event lane holds two events, so a host drains it after each edit either way.
-- **Detecting a rebuild.** As before: after a replacement the next source submission is refused
-  until the host seeks. After a live edit, submission simply continues. No new symbol, opcode,
-  field, result code or event is added.
+- **No rebuild signal.** Since #1273 a host needs none. After a live edit or a replacement alike
+  it goes on submitting every source the transaction left unchanged, with no seek; after a
+  replacement it acts only on a source the transaction added, changed or removed (see the #1273
+  paragraph under "Linux artifact and consumer boundary", and `miso_engine_v1_source_seek_at`
+  (#1275) to start an added one in time). The ABI gives no way to tell the two apart: the response and the events are
+  the same, and `miso_engine_v1_plan_resources` describes whichever plan is active, which a
+  replacement may leave unchanged. No new symbol, opcode, field, result code or event is added.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the

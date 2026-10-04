@@ -4061,6 +4061,159 @@ impl BankStage for BuiltinStage {
     fn channels_agree(&self) -> bool {
         self.0.channels_agree()
     }
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+/// The builtin bank processor slot `slot` of `chain` holds, if that slot is a builtin stage
+/// (issue #1276 D3). Allocation-free: a slot borrow and two downcasts.
+fn builtin_processor_mut(
+    chain: &mut BankChain,
+    slot: usize,
+) -> Option<&mut dyn GraphPreparedBuiltinBankProcessor> {
+    let stage = chain
+        .slot_stage_mut(slot)?
+        .as_any_mut()?
+        .downcast_mut::<BuiltinStage>()?;
+    Some(stage.0.as_mut())
+}
+
+/// The populated lane at `at` of a builtin bank whose input lanes carry: its chain and processor.
+fn input_lane_mut(
+    units: &mut [crate::runtime::RuntimeUnit],
+    at: crate::GraphLaneLocation,
+) -> Option<(&mut BankChain, usize, usize)> {
+    match units.get_mut(at.unit as usize)? {
+        crate::runtime::RuntimeUnit::Bank { chain, .. } => {
+            let slot = usize::from(at.slot);
+            let lane = usize::from(at.lane);
+            let lanes = builtin_processor_mut(chain, slot)?.carried_input_lanes()?;
+            (lane < lanes).then_some((chain, slot, lane))
+        }
+        crate::runtime::RuntimeUnit::Op(_) => None,
+    }
+}
+// REALTIME_POLICY_END
+
+impl crate::runtime::Runtime {
+    /// Every banked strip input section of this runtime: `(strip ID, location)`, in program order
+    /// (issue #1276 D6). Read off the render thread, after bind.
+    pub(crate) fn builtin_input_lanes(&mut self) -> Vec<(Box<str>, crate::GraphLaneLocation)> {
+        let mut lanes = Vec::new();
+        for binding in &self.response_bindings {
+            if binding.stable_id.as_ref() != "input-filters" || binding.rack != 0 {
+                continue;
+            }
+            let Some(crate::runtime::RuntimeUnit::Bank {
+                lanes: width,
+                members,
+                ..
+            }) = self.units.get(binding.unit)
+            else {
+                continue;
+            };
+            if *width == 0 || binding.member >= members.len() {
+                continue;
+            }
+            let (Ok(unit), Ok(slot), Ok(lane)) = (
+                u32::try_from(binding.unit),
+                u16::try_from(binding.member / *width),
+                u16::try_from(binding.member % *width),
+            ) else {
+                continue;
+            };
+            lanes.push((
+                binding.track_id.clone(),
+                crate::GraphLaneLocation { unit, slot, lane },
+            ));
+        }
+        lanes.retain(|(_, at)| input_lane_mut(&mut self.units, *at).is_some());
+        lanes
+    }
+
+    /// Whether `at` names a populated, carrying input lane of this runtime.
+    pub(crate) fn has_input_lane(&mut self, at: crate::GraphLaneLocation) -> bool {
+        input_lane_mut(&mut self.units, at).is_some()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Whether every move of `moves` resolves, on this (successor) runtime and on `predecessor`,
+    /// to two lanes [`GraphPreparedBuiltinBankProcessor::adopt_input_lane`] would join. Checked
+    /// before anything moves, so the carry is all or nothing. Allocation-free.
+    pub(crate) fn can_carry_input_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphLaneMove],
+    ) -> bool {
+        moves.iter().all(|step| {
+            let Some((chain, slot, lane)) = input_lane_mut(&mut self.units, step.successor) else {
+                return false;
+            };
+            let Some(successor) = builtin_processor_mut(chain, slot) else {
+                return false;
+            };
+            let Some((chain, slot, predecessor_lane)) =
+                input_lane_mut(&mut predecessor.units, step.predecessor)
+            else {
+                return false;
+            };
+            builtin_processor_mut(chain, slot)
+                .is_some_and(|from| successor.can_adopt_input_lane(lane, from, predecessor_lane))
+        })
+    }
+
+    /// Run the builtin-input section of a carry program at the swap block (issue #1276 D4-D6).
+    ///
+    /// `moves` is sorted by predecessor location. Each predecessor chain is disengaged once, when
+    /// it rendered its last block collapsed (D5), and each predecessor bank drains its live
+    /// queues once (D4), before any lane of it is copied. Then every lane is copied, and its
+    /// successor chain inherits the predecessor chain's channel agreement. Bounded by
+    /// `moves.len()`; allocation-free. The caller has checked [`Self::can_carry_input_lanes`].
+    pub(crate) fn carry_input_lanes(
+        &mut self,
+        predecessor: &mut Self,
+        moves: &[crate::GraphLaneMove],
+    ) {
+        let mut disengaged: Option<u32> = None;
+        let mut drained: Option<(u32, u16)> = None;
+        for step in moves {
+            let Some((chain, slot, predecessor_lane)) =
+                input_lane_mut(&mut predecessor.units, step.predecessor)
+            else {
+                continue;
+            };
+            if disengaged != Some(step.predecessor.unit) {
+                chain.disengage_for_carry();
+                disengaged = Some(step.predecessor.unit);
+            }
+            let agree = chain.carried_channel_agreement();
+            let Some(from) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
+                // Admission validated every record, so none is refused; a refused one is still
+                // consumed, and the rest of the bank's records with it.
+                let refused = from.drain_for_carry();
+                debug_assert_eq!(
+                    refused, 0,
+                    "an admitted input record was refused at the carry"
+                );
+                drained = Some((step.predecessor.unit, step.predecessor.slot));
+            }
+            let Some((chain, slot, lane)) = input_lane_mut(&mut self.units, step.successor) else {
+                continue;
+            };
+            let Some(into) = builtin_processor_mut(chain, slot) else {
+                continue;
+            };
+            if into.adopt_input_lane(lane, from, predecessor_lane) {
+                chain.inherit_channel_agreement(agree);
+            }
+        }
+    }
+    // REALTIME_POLICY_END
 }
 
 /// A padded group's active mask **is** its membership: the planner emits `Some` members before

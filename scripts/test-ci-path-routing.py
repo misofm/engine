@@ -242,6 +242,9 @@ def assert_self_test_selection(router) -> None:
         ("scripts/web-mixing-automation-lib.jq", ["console-benchmark"]),
         ("scripts/console-benchmark-record-validator.jq", ["console-benchmark"]),
         ("scripts/web-mixing-automation-validator.jq", ["console-benchmark"]),
+        # #1289: the rebuild harness imports prepared-control.js and reads the ABI layout.
+        ("hosts/host-web/web/prepared-control.js", ["console-benchmark"]),
+        ("sdk/assets/miso-engine-v1-abi-layout.json", ["console-benchmark", "sdk-deletions"]),
         ("scripts/check-sdk-deletions.py", ["sdk-deletions"]),
         ("sdk/src/core/session.ts", ["sdk-deletions"]),
         ("sdk/test/boot-evals.mjs", ["sdk-deletions"]),

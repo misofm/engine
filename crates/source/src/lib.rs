@@ -56,6 +56,25 @@ pub enum SourceCommand {
         /// First decoded source frame for the new generation.
         frame: SourceFrame,
     },
+    /// Switch to a strictly newer generation so that `frame` enters the graph in the block that
+    /// starts at absolute render sample `anchor_sample` (issue #1274).
+    ///
+    /// `anchor_sample` is on the plan's absolute render clock -- the first sample the graph hands
+    /// its source set each block, which every plan swap continues -- and must be a multiple of the
+    /// quantum. The output hears `frame` the plan's latency later. The render consumer holds the
+    /// seek until the first block starting at or after the anchor; observed late, it starts at
+    /// `frame + (block start - anchor_sample)`, so the source is in time either way. While the
+    /// seek is held, already queued PCM of the playing generation keeps playing and the new
+    /// generation's first submitted block waits as the pending block, so a host may prime the
+    /// ring from `frame` as soon as the seek is accepted.
+    SeekAt {
+        /// The nonzero generation to make audible.
+        generation: SourceGeneration,
+        /// Decoded source frame that enters the graph at `anchor_sample`.
+        frame: SourceFrame,
+        /// Absolute render sample of the block `frame` enters in; a multiple of the quantum.
+        anchor_sample: u64,
+    },
 }
 
 /// Stable source diagnostic registry values.
@@ -368,6 +387,9 @@ pub enum SourceSeekError {
     Backpressure {
         full_count: u64,
     },
+    /// A [`SourceCommand::SeekAt`] anchor that is not a multiple of the render quantum: no block
+    /// starts there.
+    AnchorUnaligned,
 }
 
 /// Failure to copy one prepared source quantum into caller-owned source planes.
@@ -592,6 +614,7 @@ impl PcmSourceRing {
             underrun_events: 0,
             native_decoder_sanitized_samples: 0,
             generation_changed: false,
+            held_seek: None,
         };
         // The producer starts with exactly the configured blocks; the retained block above never
         // enters the recycle queue until the consumer has a played block to hold instead.
@@ -626,7 +649,8 @@ impl PcmSourceRing {
 /// Transfer blocks the render consumer *retains* outside both queues at every block boundary:
 /// the played block while one is readable, otherwise the same storage idle (#917). This is in
 /// addition to the pre-fetched `current` block the consumer already held before #917 whenever its
-/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun).
+/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun), or a held anchored
+/// seek's pending block (#1274), which is of another generation and may start behind `next_frame`.
 const RETAINED_TRANSFER_BLOCKS: usize = 1;
 
 struct PreparedShape {
@@ -721,9 +745,20 @@ impl PcmSourceProducer {
         }
     }
 
-    /// Request a strictly newer generation; it becomes audible only on the next render block.
+    /// Request a strictly newer generation; it becomes audible only on the next render block, or,
+    /// for [`SourceCommand::SeekAt`], on the block its anchor names.
+    ///
+    /// Either command switches this producer to the new generation at once, so the host submits
+    /// that generation's PCM from `frame` straight away.
     pub fn try_seek(&mut self, command: SourceCommand) -> Result<(), SourceSeekError> {
-        let SourceCommand::Seek { generation, frame } = command;
+        let (generation, frame, anchor_sample) = match command {
+            SourceCommand::Seek { generation, frame } => (generation, frame, None),
+            SourceCommand::SeekAt {
+                generation,
+                frame,
+                anchor_sample,
+            } => (generation, frame, Some(anchor_sample)),
+        };
         if !generation.is_valid() {
             return Err(SourceSeekError::GenerationZero);
         }
@@ -733,10 +768,12 @@ impl PcmSourceProducer {
                 requested: generation,
             });
         }
-        match self
-            .command_producer
-            .try_push(SourceCommand::Seek { generation, frame })
+        if anchor_sample
+            .is_some_and(|anchor| !anchor.is_multiple_of(u64::from(self.quantum_frames)))
         {
+            return Err(SourceSeekError::AnchorUnaligned);
+        }
+        match self.command_producer.try_push(command) {
             Ok(()) => {
                 self.active_generation = generation;
                 self.next_write_frame = frame;
@@ -939,10 +976,11 @@ fn validate_submission_metadata(
 /// one block outside both queues -- the played block while one is readable, otherwise the same
 /// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`) -- in
 /// addition to the pre-fetched `current` block it already held before #917 at the boundaries
-/// where `current.start_frame` is ahead of `next_frame`. The hold is therefore "what it held
-/// before, plus one", which is what keeps the producer's admission sequence unchanged. The
-/// idle storage goes back to the producer's recycle queue only inside `begin_block`, at the moment
-/// a newer block becomes the played block. So:
+/// where `current.start_frame` is ahead of `next_frame`, or where `current` is a held anchored
+/// seek's pending block (#1274), of another generation and possibly behind `next_frame`. The hold
+/// is therefore "what it held before, plus one", which is what keeps the producer's admission
+/// sequence unchanged. The idle storage goes back to the producer's recycle queue only inside
+/// `begin_block`, at the moment a newer block becomes the played block. So:
 ///
 /// * a block is never recycled while a `played_plane` borrow is live: the only release point takes
 ///   `&mut self`, and a block is only ever reached by the producer through the recycle queue;
@@ -976,23 +1014,57 @@ pub struct PcmSourceConsumer {
     underrun_events: u64,
     native_decoder_sanitized_samples: u64,
     generation_changed: bool,
+    /// An observed [`SourceCommand::SeekAt`] whose anchor block has not begun yet (issue #1274).
+    held_seek: Option<HeldSeek>,
+}
+
+/// A [`SourceCommand::SeekAt`] the consumer has popped and holds until its anchor block.
+#[derive(Clone, Copy, Debug)]
+struct HeldSeek {
+    generation: SourceGeneration,
+    frame: SourceFrame,
+    anchor_sample: u64,
+}
+
+/// When an observed anchored seek may apply.
+#[derive(Clone, Copy)]
+enum SeekClock {
+    /// At once, as a plain seek to its frame: a caller that supplies no block time.
+    Now,
+    /// In the block starting at this absolute render sample, if it is at or past the anchor.
+    At(u64),
+    /// Not now: preparation between blocks, which has no render time.
+    Hold,
 }
 
 impl PcmSourceConsumer {
     /// Apply an already-admitted seek on the exclusive consumer owner between blocks.
     /// Recycles stale storage and retains current-generation PCM without consuming a frame.
     /// Producers still only enqueue commands; this is not a shared controller handle.
+    ///
+    /// An anchored seek ([`SourceCommand::SeekAt`]) has no block time here: it is held, never
+    /// applied or dropped, until the render reaches its anchor, and this returns `false`. That
+    /// holds for a seek a producer pushes while this runs, too: if the acquire's re-observe
+    /// (#1274 MINOR-3) takes a newer seek, plain or anchored, this returns `false`.
     pub fn prepare_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) -> bool {
         self.end_block();
         self.flush_deferred_recycle();
         // The prepared source command queue has one slot. Observe exactly that admitted
         // command, then check the requested identity before granting readiness.
-        self.observe_seek_at_block_boundary();
-        if self.active_generation != generation || self.next_frame != frame {
+        self.observe_seek_at_block_boundary(SeekClock::Hold);
+        // The held-seek test is not redundant: a caller may prepare the playing generation again
+        // while a newer anchored seek is held, and that is not ready.
+        if self.held_seek.is_some()
+            || self.active_generation != generation
+            || self.next_frame != frame
+        {
             return false;
         }
-        self.acquire_current_block();
-        true
+        self.acquire_current_block(SeekClock::Hold);
+        // A producer running concurrently may push a newer seek and its block between the command
+        // pop above and the data pop in the acquire; the acquire's re-observe takes that seek.
+        // Readiness is granted for `generation` alone, so check again.
+        self.held_seek.is_none() && self.active_generation == generation
     }
 
     /// Immutable prepared ring shape shared with the producer endpoint.
@@ -1025,12 +1097,43 @@ impl PcmSourceConsumer {
     /// The previously played block stops being readable here. A short (end-of-region) block has
     /// its tail zeroed in place, once, so every [`Self::played_plane`] is a whole quantum.
     /// This render-path operation allocates nothing and never blocks.
+    ///
+    /// Without a block time an anchored seek applies at once, as a plain seek to its frame; the
+    /// graph calls [`Self::begin_block_at`] instead.
     pub fn begin_block(&mut self) -> SourceReadReport {
+        self.begin_block_with(SeekClock::Now)
+    }
+
+    /// [`Self::begin_block`] for the block that starts at absolute render sample `first_sample`.
+    ///
+    /// An anchored seek ([`SourceCommand::SeekAt`]) is held while `first_sample` is before its
+    /// anchor; the block that starts at or past it applies the seek at `frame + (first_sample -
+    /// anchor_sample)` (saturating). While it is held, queued PCM of the playing generation still
+    /// plays, the new generation's first block is kept as the pending block, and with nothing
+    /// playable the block underruns. A newer command replaces a held one. This render-path
+    /// operation allocates nothing and never blocks.
+    pub fn begin_block_at(&mut self, first_sample: u64) -> SourceReadReport {
+        self.begin_block_with(SeekClock::At(first_sample))
+    }
+
+    fn begin_block_with(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.begin_block_observe(clock);
+        self.begin_block_play(clock)
+    }
+
+    /// The first half of [`Self::begin_block_with`]: release the played block and observe the
+    /// admitted command. The two halves are separate so a test can interleave a producer between
+    /// the command pop and the data pop, the window `acquire_current_block` must close.
+    fn begin_block_observe(&mut self, clock: SeekClock) {
         self.end_block();
         self.flush_deferred_recycle();
         self.generation_changed = false;
-        self.observe_seek_at_block_boundary();
-        self.acquire_current_block();
+        self.observe_seek_at_block_boundary(clock);
+    }
+
+    /// The second half of [`Self::begin_block_with`]: acquire and play this block.
+    fn begin_block_play(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.acquire_current_block(clock);
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
         if self.end_reached() {
@@ -1216,21 +1319,74 @@ impl PcmSourceConsumer {
         Ok(())
     }
 
-    fn observe_seek_at_block_boundary(&mut self) {
-        let Ok(SourceCommand::Seek { generation, frame }) = self.command_consumer.try_pop() else {
+    /// Pop the admitted command, if any, then apply a held anchored seek whose block has come.
+    fn observe_seek_at_block_boundary(&mut self, clock: SeekClock) {
+        match self.command_consumer.try_pop() {
+            Ok(SourceCommand::Seek { generation, frame }) => {
+                self.held_seek = None;
+                self.apply_seek(generation, frame);
+            }
+            Ok(SourceCommand::SeekAt {
+                generation,
+                frame,
+                anchor_sample,
+            }) => {
+                // A newer command replaces a held one; the replaced seek's pending block is stale.
+                self.held_seek = Some(HeldSeek {
+                    generation,
+                    frame,
+                    anchor_sample,
+                });
+                let active = self.active_generation;
+                if let Some(block) = self
+                    .current
+                    .take_if(|block| block.generation != active && block.generation != generation)
+                {
+                    self.discard_block(block);
+                }
+            }
+            Err(_) => {}
+        }
+        let Some(held) = self.held_seek else {
             return;
         };
+        let late_by = match clock {
+            SeekClock::Now => 0,
+            SeekClock::At(first_sample) if first_sample >= held.anchor_sample => {
+                first_sample - held.anchor_sample
+            }
+            SeekClock::At(_) | SeekClock::Hold => return,
+        };
+        self.held_seek = None;
+        self.apply_seek(
+            held.generation,
+            SourceFrame(held.frame.0.saturating_add(late_by)),
+        );
+    }
+
+    /// Make `generation` audible from `frame`. A pending `current` block of that generation that
+    /// does not start behind `frame` is kept -- an anchored seek's primed block -- and any other is
+    /// discarded, noting the region end it carries.
+    fn apply_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) {
         self.generation_changed = true;
         self.active_generation = generation;
         self.next_frame = frame;
         self.end_frame = None;
         self.end_of_region = false;
         if let Some(block) = self.current.take() {
-            self.discard_block(block);
+            if block.generation == generation && block.start_frame.0 >= frame.0 {
+                if block.end_of_region {
+                    self.note_end_frame(&block);
+                }
+                self.current = Some(block);
+            } else {
+                self.note_end_and_discard(block);
+            }
         }
     }
 
-    fn acquire_current_block(&mut self) {
+    /// Pop toward the block to play. `clock` is the block's, for a seek observed here.
+    fn acquire_current_block(&mut self, clock: SeekClock) {
         if self.current.is_some() {
             return;
         }
@@ -1241,23 +1397,49 @@ impl PcmSourceConsumer {
             self.native_decoder_sanitized_samples = self
                 .native_decoder_sanitized_samples
                 .max(block.native_decoder_sanitized_samples);
-            if block.generation != self.active_generation || block.start_frame.0 < self.next_frame.0
+            if self.is_unobserved_generation(block.generation) {
+                // This block's seek was pushed after this block's command pop. The producer pushes
+                // a seek's command before any of its PCM, on one thread, through release/acquire
+                // queues, so the command is in the one-slot command queue now: observe it before
+                // judging the block rather than discard accepted PCM (#1274 MINOR-3). Bounded:
+                // at most one command pop per popped block.
+                self.observe_seek_at_block_boundary(clock);
+            }
+            if block.generation == self.active_generation
+                && block.start_frame.0 >= self.next_frame.0
             {
-                self.note_end_and_discard(block);
-                continue;
+                if block.end_of_region {
+                    self.note_end_frame(&block);
+                }
+                self.current = Some(block);
+                break;
             }
-            if block.end_of_region {
-                self.note_end_frame(&block);
+            if self
+                .held_seek
+                .is_some_and(|held| held.generation == block.generation)
+            {
+                // A held anchored seek's first block: kept unexamined as the pending block until
+                // the seek applies (its end, if it carries one, is noted then), and the blocks
+                // behind it stay queued.
+                self.current = Some(block);
+                break;
             }
-            self.current = Some(block);
-            break;
+            self.note_end_and_discard(block);
         }
     }
 
+    /// Whether `generation` is newer than every seek this consumer has observed.
+    fn is_unobserved_generation(&self, generation: SourceGeneration) -> bool {
+        generation > self.active_generation
+            && self
+                .held_seek
+                .is_none_or(|held| generation > held.generation)
+    }
+
     fn current_matches_next_frame(&self) -> bool {
-        self.current
-            .as_ref()
-            .is_some_and(|block| block.start_frame == self.next_frame)
+        self.current.as_ref().is_some_and(|block| {
+            block.generation == self.active_generation && block.start_frame == self.next_frame
+        })
     }
 
     fn note_end_and_discard(&mut self, block: Box<TransferBlock>) {
@@ -1356,8 +1538,12 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 
 /// One render-owned source endpoint moved into the graph fan-out wrapper.
 pub struct SourceGraphSource {
-    consumer: PcmSourceConsumer,
-    resources: SourceResourceReport,
+    /// `None` for a vacant source ([`Self::vacant`]).
+    consumer: Option<PcmSourceConsumer>,
+    /// Exact channel count, of the consumer or the vacancy.
+    channel_count: u32,
+    /// `None` for a vacant source: it charges no PCM payload and no ring overhead.
+    resources: Option<SourceResourceReport>,
     /// Fixed caller-owned bytes not represented by the ring report (every host passes zero).
     additional_overhead_bytes: u64,
     /// Largest such fixed allocation, if larger than the ring allocation (zero from every host).
@@ -1374,10 +1560,25 @@ impl SourceGraphSource {
         additional_largest_allocation_bytes: u64,
     ) -> Self {
         Self {
-            consumer,
-            resources,
+            channel_count: consumer.channel_count(),
+            consumer: Some(consumer),
+            resources: Some(resources),
             additional_overhead_bytes,
             additional_largest_allocation_bytes,
+        }
+    }
+
+    /// Construct a vacant source of `channel_count` channels: no ring, until a successor plan's
+    /// carry program moves a predecessor's consumer into it at the swap block. Until then every
+    /// claim on it renders `+0.0` and each block reports a source underrun.
+    #[must_use]
+    pub const fn vacant(channel_count: u32) -> Self {
+        Self {
+            consumer: None,
+            channel_count,
+            resources: None,
+            additional_overhead_bytes: 0,
+            additional_largest_allocation_bytes: 0,
         }
     }
 }
@@ -1401,7 +1602,10 @@ pub enum SourceGraphSourceSetError {
 }
 
 struct GraphSourceEntry {
-    consumer: PcmSourceConsumer,
+    /// `None` while vacant: the entry renders `+0.0` and reports an underrun every block.
+    consumer: Option<PcmSourceConsumer>,
+    /// The channel count the mappings were validated against, kept for a vacant entry.
+    channel_count: u32,
 }
 
 struct SourceGraphSourceSetDriver {
@@ -1470,7 +1674,9 @@ fn source_set_retained_resources(
 
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
-        source_index < self.sources.len()
+        self.sources
+            .get(source_index)
+            .is_some_and(|source| source.consumer.is_some())
     }
 
     fn prepare_source_seek(&mut self, source_index: usize, generation: u64, frame: u64) -> bool {
@@ -1480,7 +1686,8 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         let prepared = self
             .sources
             .get_mut(source_index)
-            .is_some_and(|source| source.consumer.prepare_seek(generation, SourceFrame(frame)));
+            .and_then(|source| source.consumer.as_mut())
+            .is_some_and(|consumer| consumer.prepare_seek(generation, SourceFrame(frame)));
         if prepared {
             self.pending_generation_change = true;
         }
@@ -1493,7 +1700,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
 
     fn begin_block(
         &mut self,
-        _first_sample: u64,
+        first_sample: u64,
         frames: u32,
     ) -> Result<(), engine::realtime::RenderError> {
         if frames != self.quantum_frames {
@@ -1505,14 +1712,24 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         };
         self.pending_generation_change = false;
         for source in &mut self.sources {
-            let report = source.consumer.begin_block();
+            // A vacant entry has nothing to play: its block is an underrun.
+            let Some(consumer) = source.consumer.as_mut() else {
+                self.block_validity.source_underrun = true;
+                continue;
+            };
+            // The block's absolute render sample is the clock an anchored seek waits on.
+            let report = consumer.begin_block_at(first_sample);
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;
         }
         // No claim will read this quantum, so nothing needs the played blocks past this point.
         if self.mappings.is_empty() {
-            for source in &mut self.sources {
-                source.consumer.end_block();
+            for consumer in self
+                .sources
+                .iter_mut()
+                .filter_map(|source| source.consumer.as_mut())
+            {
+                consumer.end_block();
             }
         }
         Ok(())
@@ -1543,14 +1760,18 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             .sources
             .get(source_index)
             .ok_or(engine::realtime::RenderError::InvalidEnvelope)?;
-        source
-            .consumer
+        let Some(consumer) = source.consumer.as_ref() else {
+            // Vacant: the claim is silence, as an underrun is.
+            left.fill(0.0);
+            right.fill(0.0);
+            return Ok(());
+        };
+        consumer
             .copy_channel(left_channel, left)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)?;
         // The played block is not released here: it stays readable in place until the next
         // `begin_block` or seek preparation, whichever claim copied last (#917).
-        source
-            .consumer
+        consumer
             .copy_channel(right_channel, right)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)
     }
@@ -1571,7 +1792,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     /// reads them in place of the copy.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
         let mapping = self.mappings.get(claim_index)?;
-        let consumer = &self.sources.get(mapping.source_index)?.consumer;
+        let consumer = self.sources.get(mapping.source_index)?.consumer.as_ref()?;
         Some((
             consumer.played_plane(mapping.left_channel)?,
             consumer.played_plane(mapping.right_channel)?,
@@ -1582,14 +1803,18 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
         let mut written = 0;
         for source in &self.sources {
-            let telemetry = source.consumer.telemetry();
-            for value in [
-                telemetry.cumulative_read_frames,
-                telemetry.stale_generation_discard_count,
-                telemetry.underrun_frames,
-                telemetry.underrun_events,
-                telemetry.native_decoder_sanitized_samples,
-            ] {
+            // A vacant entry reports zeros, so every source keeps its five telemetry slots.
+            let values = source.consumer.as_ref().map_or([0; 5], |consumer| {
+                let telemetry = consumer.telemetry();
+                [
+                    telemetry.cumulative_read_frames,
+                    telemetry.stale_generation_discard_count,
+                    telemetry.underrun_frames,
+                    telemetry.underrun_events,
+                    telemetry.native_decoder_sanitized_samples,
+                ]
+            });
+            for value in values {
                 let Some(slot) = output.get_mut(written) else {
                     return written;
                 };
@@ -1599,6 +1824,68 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         }
         written
     }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn source_vacancy(&self, source_index: usize) -> Option<bool> {
+        self.sources
+            .get(source_index)
+            .map(|source| source.consumer.is_none())
+    }
+
+    fn vacant_source_count(&self) -> usize {
+        self.sources
+            .iter()
+            .filter(|source| source.consumer.is_none())
+            .count()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Move each named predecessor consumer into this set's vacant entry with a swap, so the
+    /// predecessor's entry becomes vacant and nothing is allocated, freed or dropped. Every move
+    /// is checked first -- both indices in range, this entry vacant, the predecessor's occupied,
+    /// the channel counts and quanta equal -- and any failure moves nothing. The predecessor's
+    /// pending generation change (a seek prepared since its last block) is carried too.
+    fn adopt_sources(
+        &mut self,
+        predecessor: &mut dyn GraphPreparedSourceSetDriver,
+        moves: &[(u32, u32)],
+    ) -> bool {
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return false;
+        };
+        let movable = predecessor.quantum_frames == self.quantum_frames
+            && moves.iter().all(|&(successor, source)| {
+                match (
+                    self.sources.get(successor as usize),
+                    predecessor.sources.get(source as usize),
+                ) {
+                    (Some(successor), Some(source)) => {
+                        successor.consumer.is_none()
+                            && source.consumer.is_some()
+                            && successor.channel_count == source.channel_count
+                    }
+                    _ => false,
+                }
+            });
+        if !movable {
+            return false;
+        }
+        for &(successor, source) in moves {
+            core::mem::swap(
+                &mut self.sources[successor as usize].consumer,
+                &mut predecessor.sources[source as usize].consumer,
+            );
+        }
+        self.pending_generation_change |= predecessor.pending_generation_change;
+        true
+    }
+    // REALTIME_POLICY_END
 }
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
@@ -1620,18 +1907,23 @@ pub fn prepare_graph_source_set(
     let mut largest = 0_u64;
     let mut entries = Vec::with_capacity(sources.len());
     for source in sources {
-        pcm_payload = pcm_payload
-            .checked_add(source.resources.pcm_payload_already_charged_bytes)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
+        if let Some(resources) = source.resources {
+            pcm_payload = pcm_payload
+                .checked_add(resources.pcm_payload_already_charged_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            overhead = overhead
+                .checked_add(resources.overhead_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            largest = largest.max(resources.largest_allocation_bytes);
+        }
         overhead = overhead
-            .checked_add(source.resources.overhead_bytes)
-            .and_then(|value| value.checked_add(source.additional_overhead_bytes))
+            .checked_add(source.additional_overhead_bytes)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        largest = largest
-            .max(source.resources.largest_allocation_bytes)
-            .max(source.additional_largest_allocation_bytes);
+        largest = largest.max(source.additional_largest_allocation_bytes);
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
+            channel_count: source.channel_count,
         });
     }
     overhead = overhead
@@ -1646,8 +1938,8 @@ pub fn prepare_graph_source_set(
         let source = entries
             .get(mapping.source_index)
             .ok_or(SourceGraphSourceSetError::SourceIndex)?;
-        if mapping.left_channel >= source.consumer.channel_count()
-            || mapping.right_channel >= source.consumer.channel_count()
+        if mapping.left_channel >= source.channel_count
+            || mapping.right_channel >= source.channel_count
         {
             return Err(SourceGraphSourceSetError::ChannelIndex);
         }
@@ -1768,7 +2060,7 @@ mod tests {
             host.submit(chunk(1, 0, &[&old], 4, false)).unwrap();
             host.submit(chunk(1, 4, &[&old], 4, false)).unwrap();
             if retained {
-                consumer.acquire_current_block();
+                consumer.acquire_current_block(SeekClock::Now);
             }
             host.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -1792,6 +2084,279 @@ mod tests {
             assert_eq!(report.underrun_frames, 0);
             assert_eq!(consumer.next_frame, SourceFrame(104));
         }
+    }
+
+    fn seek_at(generation: u64, frame: u64, anchor_sample: u64) -> SourceCommand {
+        SourceCommand::SeekAt {
+            generation: SourceGeneration(generation),
+            frame: SourceFrame(frame),
+            anchor_sample,
+        }
+    }
+
+    /// Render one block starting at `first_sample` and return its single channel.
+    fn render_at(
+        consumer: &mut PcmSourceConsumer,
+        first_sample: u64,
+    ) -> ([f32; 4], SourceReadReport) {
+        let report = consumer.begin_block_at(first_sample);
+        let mut output = [f32::NAN; 4];
+        consumer.copy_channel(0, &mut output).unwrap();
+        consumer.end_block();
+        (output, report)
+    }
+
+    /// #1274 D1. Red if an anchor no block starts at is admitted, or if the refusal switches the
+    /// producer's generation anyway.
+    #[test]
+    fn an_unaligned_anchor_is_refused_without_a_generation_switch() {
+        let (producer, _consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        assert_eq!(
+            host.try_seek(seek_at(2, 100, 6)),
+            Err(SourceSeekError::AnchorUnaligned)
+        );
+        assert_eq!(host.telemetry().active_generation, SourceGeneration(1));
+        host.submit(chunk(1, 0, &[&[0.5; 4]], 4, false))
+            .expect("generation 1 still accepted");
+        host.try_seek(seek_at(2, 100, 8)).expect("aligned anchor");
+        host.submit(chunk(2, 100, &[&[0.5; 4]], 4, false))
+            .expect("the new generation is accepted at once, from its frame");
+    }
+
+    /// #1274 D3. Red if a newer anchored seek does not replace a held one, or if the replaced
+    /// seek's pending block is kept when the newer seek is observed rather than discarded: kept
+    /// out of the queues until the newer anchor, it holds the producer one block short of priming
+    /// the newer generation to its full admission depth before that anchor. (Its PCM cannot play
+    /// either way: `apply_seek` and the generation compare already refuse it.)
+    #[test]
+    fn a_newer_anchored_seek_replaces_a_held_one() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let depth = consumer.transfer_block_capacity();
+        host.try_seek(seek_at(2, 100, 24)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
+        let (output, report) = render_at(&mut consumer, 0);
+        assert_eq!(
+            output, [0.0; 4],
+            "held: nothing of the old generation queued"
+        );
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        host.try_seek(seek_at(3, 200, 8)).unwrap();
+        host.submit(chunk(3, 200, &[&[3.0; 4]], 4, false)).unwrap();
+        host.submit(chunk(3, 204, &[&[3.25; 4]], 4, false)).unwrap();
+        let (output, report) = render_at(&mut consumer, 4);
+        assert_eq!(output, [0.0; 4], "the replacement is held too");
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        // Before its anchor the newer generation primes to the full admission depth.
+        let values = [3.0, 3.25, 3.5, 3.75];
+        for (block, value) in values.iter().enumerate().skip(2) {
+            let start = 200 + 4 * u64::try_from(block).unwrap();
+            host.submit(chunk(3, start, &[&[*value; 4]], 4, false))
+                .expect("the replaced seek's pending block was recycled");
+        }
+        assert_eq!(values.len(), depth);
+        for (block, value) in values.iter().enumerate() {
+            let first_sample = 8 + 4 * u64::try_from(block).unwrap();
+            let (output, report) = render_at(&mut consumer, first_sample);
+            assert_eq!(
+                output, [*value; 4],
+                "the newer seek applies at its own anchor"
+            );
+            assert_eq!(report.generation_changed, block == 0);
+            assert_eq!(report.active_generation, SourceGeneration(3));
+        }
+        let (output, _) = render_at(&mut consumer, 24);
+        assert_eq!(output, [0.0; 4], "the replaced seek never applies");
+        assert_eq!(consumer.active_generation, SourceGeneration(3));
+    }
+
+    /// #1274 D3. Red if the held generation's primed block plays before its anchor because it
+    /// starts at the frame the old generation has reached (`current_matches_next_frame` must
+    /// compare the generation), or if it is discarded rather than kept as the pending block.
+    #[test]
+    fn a_primed_block_waits_for_its_anchor() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 4, 8)).unwrap();
+        host.submit(chunk(2, 4, &[&[2.0; 4]], 4, false)).unwrap();
+        let (output, report) = render_at(&mut consumer, 0);
+        assert_eq!((output, report.underrun_frames), ([0.0; 4], 4));
+        // The old generation's underrun has reached frame 4, the primed block's start.
+        let (output, report) = render_at(&mut consumer, 4);
+        assert_eq!((output, report.underrun_frames), ([0.0; 4], 4));
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        let (output, report) = render_at(&mut consumer, 8);
+        assert_eq!((output, report.copied_frames), ([2.0; 4], 4));
+        assert_eq!(report.active_generation, SourceGeneration(2));
+    }
+
+    /// #1274 D4. Red if seek preparation pops an anchored seek and drops it, losing an accepted
+    /// seek, or applies it with no block time.
+    #[test]
+    fn prepare_seek_holds_an_anchored_seek() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.submit(chunk(1, 0, &[&[1.0; 4]], 4, false)).unwrap();
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        assert!(!consumer.prepare_seek(SourceGeneration(2), SourceFrame(100)));
+        assert_eq!(consumer.active_generation, SourceGeneration(1));
+        host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
+        let (output, report) = render_at(&mut consumer, 4);
+        assert_eq!(
+            output, [1.0; 4],
+            "the old generation plays while the seek is held"
+        );
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        let (output, report) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0; 4]);
+        assert_eq!(report.active_generation, SourceGeneration(2));
+    }
+
+    /// #1274 D3. Red if a late anchored seek past the region end is not the end of the region:
+    /// the pending block it was primed with must still report where the region ends.
+    #[test]
+    fn a_late_anchored_seek_past_the_region_end_is_the_end_of_region() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0, 2.0]], 2, true)).unwrap();
+        let (_, report) = render_at(&mut consumer, 4);
+        assert!(
+            !report.end_of_region,
+            "held, with its region-end block pending"
+        );
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        // Eight samples late: frame 108 is past the region's end at 102.
+        let (output, report) = render_at(&mut consumer, 16);
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(report.active_generation, SourceGeneration(2));
+        assert!(report.end_of_region);
+        assert_eq!(report.copied_frames, 0);
+        assert_eq!(report.underrun_frames, 0, "past the end is not an underrun");
+    }
+
+    /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region
+    /// end it carries: a stem whose primed block is its region's last, short block would then
+    /// report an underrun on every block after it ends, and never reach the end of its region.
+    #[test]
+    fn an_on_time_anchored_seek_to_a_last_short_block_ends_its_region() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0, 2.0]], 2, true)).unwrap();
+        let (_, report) = render_at(&mut consumer, 4);
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        let (output, report) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0, 2.0, 0.0, 0.0]);
+        assert_eq!(report.active_generation, SourceGeneration(2));
+        assert_eq!(report.copied_frames, 2);
+        assert!(report.end_of_region);
+        let events = report.cumulative_underrun_events;
+        for first_sample in [12, 16] {
+            let (output, report) = render_at(&mut consumer, first_sample);
+            assert_eq!(output, [0.0; 4]);
+            assert!(report.end_of_region, "block {first_sample} is past the end");
+            assert_eq!(report.underrun_frames, 0, "the end is not an underrun");
+            assert_eq!(report.cumulative_underrun_events, events);
+        }
+    }
+
+    /// Render one block with a producer step between its command pop and its data pop: the
+    /// window in which a seek's PCM can reach the render before its command does.
+    fn render_with_producer_in_window(
+        consumer: &mut PcmSourceConsumer,
+        clock: SeekClock,
+        producer: impl FnOnce(),
+    ) -> ([f32; 4], SourceReadReport) {
+        consumer.begin_block_observe(clock);
+        producer();
+        let report = consumer.begin_block_play(clock);
+        let mut output = [f32::NAN; 4];
+        consumer.copy_channel(0, &mut output).unwrap();
+        consumer.end_block();
+        (output, report)
+    }
+
+    /// #1274 MINOR-3, the acked-batch question. Red if the render discards an accepted block of
+    /// a newer generation because the block's seek command was pushed after the block boundary
+    /// popped the command queue: the producer acked the PCM, and it must play (a plain seek at
+    /// once, an anchored one at its anchor) rather than count as a stale discard.
+    #[test]
+    fn a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm() {
+        for anchored in [false, true] {
+            let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let command = if anchored {
+                seek_at(2, 100, 8)
+            } else {
+                SourceCommand::Seek {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(100),
+                }
+            };
+            let (output, report) =
+                render_with_producer_in_window(&mut consumer, SeekClock::At(4), || {
+                    host.try_seek(command).unwrap();
+                    host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
+                        .expect("accepted");
+                });
+            if anchored {
+                assert_eq!(output, [0.0; 4], "held until its anchor");
+                assert_eq!(report.active_generation, SourceGeneration(1));
+                let (output, report) = render_at(&mut consumer, 8);
+                assert_eq!(output, [2.0; 4], "anchored: the acked block plays");
+                assert!(report.generation_changed);
+            } else {
+                assert_eq!(output, [2.0; 4], "plain: the acked block plays at once");
+                assert!(report.generation_changed);
+            }
+            assert_eq!(consumer.active_generation, SourceGeneration(2));
+            assert_eq!(consumer.stale_generation_discard_count, 0);
+            assert_eq!(consumer.underrun_events, u64::from(anchored));
+        }
+
+        // An anchored seek whose anchor has already passed when the window's re-observe takes
+        // it applies at once, at `frame` plus the lateness, by the block's own clock: block 8
+        // plays frame 104, and only the skipped block at frame 100 is discarded.
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let (output, report) =
+            render_with_producer_in_window(&mut consumer, SeekClock::At(8), || {
+                host.try_seek(seek_at(2, 100, 4)).unwrap();
+                host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
+                    .expect("accepted");
+                host.submit(chunk(2, 104, &[&[2.5; 4]], 4, false))
+                    .expect("accepted");
+            });
+        assert_eq!(
+            output, [2.5; 4],
+            "late by one block: frame 104 plays at block 8"
+        );
+        assert!(report.generation_changed);
+        assert_eq!(consumer.active_generation, SourceGeneration(2));
+        assert_eq!(
+            consumer.stale_generation_discard_count, 1,
+            "the late-skipped block"
+        );
+    }
+
+    /// #1274 follow-ups NIT-2. Red if `prepare_seek` grants readiness for the playing generation
+    /// at its own position while a newer anchored seek is held: the caller would take the old
+    /// generation as prepared while the source is about to jump.
+    #[test]
+    fn prepare_seek_of_the_playing_generation_is_not_ready_while_a_seek_is_held() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 64)).unwrap();
+        render_at(&mut consumer, 0);
+        assert!(consumer.held_seek.is_some());
+        let next = consumer.next_frame;
+        assert!(!consumer.prepare_seek(SourceGeneration(1), next));
+        assert!(
+            consumer.held_seek.is_some(),
+            "the held seek survives preparation"
+        );
     }
 
     #[test]
@@ -2077,7 +2642,11 @@ mod tests {
         mappings: Vec<SourceGraphTrackMapping>,
     ) -> SourceGraphSourceSetDriver {
         SourceGraphSourceSetDriver {
-            sources: vec![GraphSourceEntry { consumer }].into_boxed_slice(),
+            sources: vec![GraphSourceEntry {
+                channel_count: consumer.channel_count(),
+                consumer: Some(consumer),
+            }]
+            .into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: 4,
             block_validity: GraphObservationValidity::CLEAR,
@@ -2846,6 +3415,793 @@ mod tests {
             .expect("first block");
         let mut driver = test_driver(consumer, Vec::new());
         driver.begin_block(0, 4).expect("zero-claim begin");
-        assert!(driver.sources[0].consumer.played_plane(0).is_none());
+        assert!(
+            driver.sources[0]
+                .consumer
+                .as_ref()
+                .expect("occupied")
+                .played_plane(0)
+                .is_none()
+        );
+    }
+
+    /// Slice #1271: a successor graph plan takes the predecessor's source consumer at the swap
+    /// block, through a vacant entry and an installed carry program.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod carry {
+        use super::*;
+        use core::num::NonZeroUsize;
+        use effect_contract::{LatencySamples, TailSamples};
+        use engine::{
+            QuantumFrames,
+            realtime::{
+                CarryOutcome, PlanExchangeConfig, PlanarBufferMut, PreparedRenderPlan,
+                RenderEnvelope, RenderIo, SwapOutcome, plan_exchange,
+            },
+        };
+        use graph::{
+            DependencyLevel, GraphCarryInstallError, GraphCarryProgram, GraphEdge, GraphEdgeId,
+            GraphNode, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
+            GraphObservationValidity, GraphPortId, GraphPortKind, GraphResourceEstimate,
+            GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, GraphSpec,
+            PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        const FRAMES: u32 = 4;
+        const BLOCKS: usize = 8;
+        const SWAP_BLOCK: usize = 4;
+
+        type Block = [u32; 2 * FRAMES as usize];
+
+        struct Noop;
+        impl GraphRuntimeProcessor for Noop {
+            fn process(
+                &mut self,
+                _block: graph::GraphBindingBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                Ok(())
+            }
+        }
+
+        /// The last block's source facts: bit 0 underrun, bit 1 generation change, bit 2 seen.
+        struct Validity(Arc<AtomicU8>);
+        impl GraphRuntimeObserver for Validity {
+            fn observe(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                Ok(())
+            }
+
+            fn observe_with_validity(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+                validity: GraphObservationValidity,
+            ) -> Result<(), engine::realtime::RenderError> {
+                let bits = u8::from(validity.source_underrun)
+                    | u8::from(validity.source_generation_changed) << 1
+                    | 4;
+                self.0.store(bits, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        /// `(source_underrun, source_generation_changed)` of the last observed block.
+        fn take_validity(cell: &AtomicU8) -> (bool, bool) {
+            let bits = cell.swap(0, Ordering::Relaxed);
+            assert_ne!(bits & 4, 0, "the observer saw no block");
+            (bits & 1 != 0, bits & 2 != 0)
+        }
+
+        fn envelope() -> RenderEnvelope {
+            RenderEnvelope {
+                sample_rate: RATE,
+                quantum: QuantumFrames(FRAMES),
+                output_channels: NonZeroUsize::new(2).expect("two"),
+            }
+        }
+
+        fn track(id: &str) -> GraphNodeId {
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(id).expect("track ID"),
+                stage: TrackStage::Input,
+            }
+        }
+
+        fn output() -> GraphNodeId {
+            GraphNodeId::Output {
+                output_id: StableGraphId::parse("main").expect("output ID"),
+            }
+        }
+
+        fn inputs() -> [GraphNodeId; 2] {
+            [track("a"), track("b")]
+        }
+
+        /// Two track inputs summed into the output: the fan-out test's shape with two claims.
+        fn graph_plan() -> PreparedGraphPlan {
+            let edge = |source: GraphNodeId, route: &str| GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse(route).expect("route ID"),
+                },
+                source: GraphPortId {
+                    node: source,
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: format!("$.{route}"),
+            };
+            let [a, b] = inputs();
+            let schedule = vec![a.clone(), b.clone(), output()];
+            PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 1,
+                spec: GraphSpec {
+                    nodes: schedule
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                    ports: Vec::new(),
+                    edges: vec![edge(a.clone(), "a"), edge(b.clone(), "b")],
+                },
+                sequential_schedule: schedule.clone(),
+                dependency_levels: vec![
+                    DependencyLevel {
+                        level: 0,
+                        nodes: vec![a, b],
+                    },
+                    DependencyLevel {
+                        level: 1,
+                        nodes: vec![output()],
+                    },
+                ],
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: GraphResourceEstimate {
+                    logical_nodes: 0,
+                    materialized_nodes: 0,
+                    edges: 0,
+                    schedule_items: 0,
+                    dependency_levels: 0,
+                    reductions: 0,
+                    routes: 0,
+                    effects: 0,
+                    audio_buffer_samples: 0,
+                    total_delay_samples: 0,
+                    delay_bytes: 0,
+                    graph_metadata_bytes: 0,
+                    declared_effect_bytes: 0,
+                    effect_bank_count: 0,
+                    effect_bank_scratch_bytes: 0,
+                    effect_bank_runtime_buffer_bytes: 0,
+                    effect_bank_metadata_bytes: 0,
+                    builtin_bank_bytes: 0,
+                    builtin_bank_scratch_bytes: 0,
+                    builtin_bank_count: 0,
+                    largest_allocation_bytes: 0,
+                    incremental_plan_bytes: 0,
+                    session_plus_plan_bytes: 0,
+                },
+                envelope: envelope(),
+                required_bindings: schedule,
+                routes: Vec::new(),
+                track_delays: Vec::new(),
+                effects: Vec::new(),
+                effect_controls: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers: Vec::new(),
+                effect_observations: Vec::new(),
+            })
+        }
+
+        /// Claim `a` reads channels `(0, 1)` and claim `b` reads `(1, 0)`, both of source 0.
+        fn mappings() -> Vec<SourceGraphTrackMapping> {
+            let [a, b] = inputs();
+            vec![
+                SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+                SourceGraphTrackMapping {
+                    node: b,
+                    source_index: 0,
+                    left_channel: 1,
+                    right_channel: 0,
+                },
+            ]
+        }
+
+        /// Bind a graph plan over `source`, observing the output's source facts into `validity`.
+        fn bind(source: SourceGraphSource, validity: &Arc<AtomicU8>) -> PreparedRenderPlan {
+            bind_with(vec![source], mappings(), validity)
+        }
+
+        /// Bind a graph plan over `sources` read through `mappings`.
+        fn bind_with(
+            sources: Vec<SourceGraphSource>,
+            mappings: Vec<SourceGraphTrackMapping>,
+            validity: &Arc<AtomicU8>,
+        ) -> PreparedRenderPlan {
+            let set = prepare_graph_source_set(envelope(), sources, mappings).expect("source set");
+            let bindings = GraphRuntimeBindings {
+                envelope: envelope(),
+                nodes: vec![graph::GraphNodeBinding::new(output(), Box::new(Noop))],
+                observers: vec![GraphNodeObserverBinding::new(
+                    output(),
+                    1,
+                    Box::new(Validity(Arc::clone(validity))),
+                )],
+            };
+            match graph_plan().bind_with_source_set(bindings, set) {
+                Ok(plan) => plan,
+                Err(failure) => panic!("bind failed: {}", failure.code),
+            }
+        }
+
+        /// Channel 0 is `1 + frame` and channel 1 is `0.25 * (1 + frame)`: no exact-zero sample,
+        /// and every frame distinct.
+        fn frame_samples(start: u64) -> [[f32; FRAMES as usize]; 2] {
+            let first = core::array::from_fn(|frame| (start as f32) + frame as f32 + 1.0);
+            [first, first.map(|value: f32| 0.25 * value)]
+        }
+
+        /// A two-channel ring holding all `BLOCKS` blocks of generation 1, from frame 0.
+        fn filled_source() -> (HostChunkProvider, SourceGraphSource) {
+            let config = PcmSourceRingConfig {
+                channel_count: 2,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: BLOCKS as u64 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            for block in 0..BLOCKS as u64 {
+                let planes = frame_samples(block * u64::from(FRAMES));
+                host.submit(chunk(
+                    1,
+                    block * u64::from(FRAMES),
+                    &[&planes[0], &planes[1]],
+                    FRAMES,
+                    false,
+                ))
+                .expect("source PCM");
+            }
+            (host, SourceGraphSource::new(consumer, resources, 0, 0))
+        }
+
+        fn io(output: &mut [f32; 2 * FRAMES as usize]) -> RenderIo<'_> {
+            RenderIo {
+                output: PlanarBufferMut::try_new(output, 2, FRAMES as usize, FRAMES as usize)
+                    .expect("output"),
+            }
+        }
+
+        fn bits(output: &[f32; 2 * FRAMES as usize]) -> Block {
+            output.map(f32::to_bits)
+        }
+
+        fn plan_block(plan: &mut PreparedRenderPlan) -> Block {
+            let mut output = [f32::NAN; 2 * FRAMES as usize];
+            let sample = plan.next_absolute_sample();
+            plan.render_contiguous(io(&mut output), sample)
+                .expect("render");
+            bits(&output)
+        }
+
+        /// One unswapped plan over the filled ring, for `BLOCKS` blocks.
+        fn reference() -> Vec<Block> {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_host, source) = filled_source();
+            let mut plan = bind(source, &validity);
+            let blocks: Vec<Block> = (0..BLOCKS).map(|_| plan_block(&mut plan)).collect();
+            assert!(
+                blocks
+                    .iter()
+                    .flatten()
+                    .all(|word| f32::from_bits(*word) != 0.0)
+            );
+            blocks
+        }
+
+        fn exchange_config() -> PlanExchangeConfig {
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(1).expect("one"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            }
+        }
+
+        /// Plan A over the filled ring for `SWAP_BLOCK` blocks through a plan exchange, then the
+        /// vacant plan B, given the program `program(identity of A)`, for the rest. Returns every
+        /// block, the swap block's carry outcome, and each block's `(underrun, generation)` facts.
+        fn swap(
+            program: impl FnOnce(u64) -> Option<GraphCarryProgram>,
+        ) -> (Vec<Block>, CarryOutcome, Vec<(bool, bool)>) {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_host, source) = filled_source();
+            let mut predecessor = bind(source, &validity);
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let (mut publisher, mut owner, _retirer) =
+                plan_exchange(predecessor, exchange_config()).expect("exchange");
+            let mut blocks = Vec::new();
+            let mut facts = Vec::new();
+            let mut carry = CarryOutcome::NotRequested;
+            let mut successor = Some(bind(SourceGraphSource::vacant(2), &validity));
+            let mut program = Some(program);
+            for block in 0..BLOCKS {
+                if block == SWAP_BLOCK {
+                    let mut plan = successor.take().expect("successor");
+                    if let Some(program) = (program.take().expect("program"))(identity) {
+                        graph::install_carry_program(&mut plan, program).expect("install");
+                    }
+                    assert!(publisher.publish(plan).is_ok());
+                }
+                let mut output = [f32::NAN; 2 * FRAMES as usize];
+                let sample = owner.next_absolute_sample();
+                let report = owner
+                    .render_contiguous(io(&mut output), sample)
+                    .expect("render");
+                let expected_swap = if block == SWAP_BLOCK {
+                    carry = report.carry;
+                    SwapOutcome::Applied
+                } else {
+                    assert_eq!(report.carry, CarryOutcome::NotRequested);
+                    SwapOutcome::None
+                };
+                assert_eq!(report.swap, expected_swap, "block {block}");
+                blocks.push(bits(&output));
+                facts.push(take_validity(&validity));
+            }
+            (blocks, carry, facts)
+        }
+
+        fn carry_source_zero(predecessor: u64) -> GraphCarryProgram {
+            GraphCarryProgram {
+                predecessor,
+                sources: vec![(0, 0)].into_boxed_slice(),
+            }
+        }
+
+        /// Gate 1. Red if the consumer is not moved into the vacant entry at the swap block (the
+        /// successor would render silence there) or the move lands a block late.
+        #[test]
+        fn a_carried_consumer_continues_the_predecessor_audio_gap_free() {
+            let reference = reference();
+            let (blocks, carry, facts) = swap(|identity| Some(carry_source_zero(identity)));
+            assert_eq!(blocks, reference);
+            assert_eq!(carry, CarryOutcome::Carried);
+            assert!(
+                facts.iter().all(|&fact| fact == (false, false)),
+                "{facts:?}"
+            );
+        }
+
+        /// Gate 2. Red if a mismatched predecessor still hands its ring over (the successor
+        /// would play the predecessor's audio) or a vacant entry renders anything but `+0.0`
+        /// without flagging an underrun.
+        #[test]
+        fn a_vacant_source_without_a_matching_carry_renders_silence_and_an_underrun() {
+            let reference = reference();
+            let silence: Block = [0.0_f32.to_bits(); 2 * FRAMES as usize];
+            let outcomes = [
+                (CarryOutcome::NotRequested, None),
+                (CarryOutcome::PredecessorMismatch, Some(1_u64)),
+            ];
+            for (expected, offset) in outcomes {
+                let (blocks, carry, facts) = swap(|identity| {
+                    offset.map(|offset| carry_source_zero(identity.wrapping_add(offset)))
+                });
+                assert_eq!(carry, expected);
+                assert_eq!(blocks[..SWAP_BLOCK], reference[..SWAP_BLOCK]);
+                assert!(blocks[SWAP_BLOCK..].iter().all(|block| *block == silence));
+                assert!(
+                    facts[..SWAP_BLOCK]
+                        .iter()
+                        .all(|&fact| fact == (false, false))
+                );
+                assert!(
+                    facts[SWAP_BLOCK..]
+                        .iter()
+                        .all(|&fact| fact == (true, false))
+                );
+            }
+            // A predecessor index the predecessor does not have refuses the whole move.
+            let (blocks, carry, _) = swap(|identity| {
+                Some(GraphCarryProgram {
+                    predecessor: identity,
+                    sources: vec![(0, 1)].into_boxed_slice(),
+                })
+            });
+            assert_eq!(carry, CarryOutcome::PredecessorMismatch);
+            assert!(blocks[SWAP_BLOCK..].iter().all(|block| *block == silence));
+        }
+
+        /// Gate 3. Red if the carry drops the predecessor's pending generation change: the
+        /// successor's first block would claim continuity across a seek.
+        #[test]
+        fn a_seek_prepared_before_the_swap_is_reported_in_the_successors_first_block() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let config = PcmSourceRingConfig {
+                channel_count: 2,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: 4 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let first = frame_samples(0);
+            host.submit(chunk(1, 0, &[&first[0], &first[1]], FRAMES, false))
+                .expect("first block");
+            let mut predecessor =
+                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity);
+            plan_block(&mut predecessor);
+            assert_eq!(take_validity(&validity), (false, false));
+
+            const SEEK: u64 = 1_000;
+            host.try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(SEEK),
+            })
+            .expect("seek");
+            let sought = [frame_samples(SEEK), frame_samples(SEEK + u64::from(FRAMES))];
+            for (index, planes) in sought.iter().enumerate() {
+                let start = SEEK + index as u64 * u64::from(FRAMES);
+                host.submit(chunk(2, start, &[&planes[0], &planes[1]], FRAMES, false))
+                    .expect("sought block");
+            }
+            assert!(predecessor.prepare_source_seek(0, 2, SEEK));
+
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
+            graph::install_carry_program(&mut successor, carry_source_zero(identity))
+                .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::Carried
+            );
+            for (index, planes) in sought.iter().enumerate() {
+                let block = plan_block(&mut successor);
+                let sum: Vec<u32> = (0..FRAMES as usize)
+                    .map(|frame| (planes[0][frame] + planes[1][frame]).to_bits())
+                    .collect();
+                assert_eq!(block[..FRAMES as usize], sum[..], "left, block {index}");
+                assert_eq!(block[FRAMES as usize..], sum[..], "right, block {index}");
+                assert_eq!(
+                    take_validity(&validity),
+                    (false, index == 0),
+                    "block {index}"
+                );
+            }
+        }
+
+        /// Gate 4. Red if install accepts a program that names a source index the successor does
+        /// not have, a source that already owns a ring, or one index twice.
+        #[test]
+        fn install_refuses_out_of_range_occupied_and_repeated_sources() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut vacant = bind(SourceGraphSource::vacant(2), &validity);
+            let (_host, source) = filled_source();
+            let mut occupied = bind(source, &validity);
+            let program = |sources: &[(u32, u32)]| GraphCarryProgram {
+                predecessor: 1,
+                sources: sources.into(),
+            };
+            assert_eq!(
+                graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
+                Err(GraphCarryInstallError::SourceIndexOutOfRange)
+            );
+            assert_eq!(
+                graph::install_carry_program(&mut occupied, program(&[(0, 0)])),
+                Err(GraphCarryInstallError::SourceNotVacant)
+            );
+            assert_eq!(
+                graph::install_carry_program(&mut vacant, program(&[(0, 0), (0, 1)])),
+                Err(GraphCarryInstallError::DuplicateSourceIndex)
+            );
+            let mut plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
+                plan_id: 1,
+                envelope: envelope(),
+                scratch: &[],
+            })
+            .expect("plain plan");
+            assert_eq!(
+                graph::install_carry_program(&mut plain, program(&[(0, 0)])),
+                Err(GraphCarryInstallError::NotAGraphPlan)
+            );
+            assert_eq!(graph::plan_identity(&mut plain), None);
+            // A refused install charges nothing; an accepted one charges its move table.
+            assert_eq!(graph::carry_program_retained_bytes(&mut vacant), 0);
+            graph::install_carry_program(&mut vacant, program(&[(0, 0)])).expect("install");
+            assert_eq!(
+                graph::carry_program_retained_bytes(&mut vacant),
+                core::mem::size_of::<(u32, u32)>() as u64
+            );
+            let vacant_identity = graph::plan_identity(&mut vacant).expect("identity");
+            let occupied_identity = graph::plan_identity(&mut occupied).expect("identity");
+            assert_ne!(vacant_identity, occupied_identity);
+            assert!(vacant_identity != 0 && occupied_identity != 0);
+        }
+
+        /// D1. Red if a vacant source charges ring bytes or is not counted apart.
+        #[test]
+        fn a_vacant_source_charges_no_ring_and_is_counted_apart() {
+            let (_host, occupied_source) = filled_source();
+            let ring = occupied_source.resources.expect("ring report");
+            let occupied = prepare_graph_source_set(envelope(), vec![occupied_source], mappings())
+                .expect("occupied set");
+            let vacant = prepare_graph_source_set(
+                envelope(),
+                vec![SourceGraphSource::vacant(2)],
+                mappings(),
+            )
+            .expect("vacant set");
+            let (occupied_report, vacant_report) =
+                (occupied.resource_report(), vacant.resource_report());
+            assert_eq!(vacant_report.pcm_payload_already_charged_bytes, 0);
+            assert_eq!(
+                occupied_report.overhead_bytes - vacant_report.overhead_bytes,
+                ring.overhead_bytes
+            );
+            assert_eq!(
+                vacant_report.total_engine_owned_bytes,
+                vacant_report.overhead_bytes
+            );
+            assert_eq!(
+                (occupied.vacant_source_count(), vacant.vacant_source_count()),
+                (0, 1)
+            );
+            // Mappings are still checked against a vacant source's channel count.
+            assert!(matches!(
+                prepare_graph_source_set(
+                    envelope(),
+                    vec![SourceGraphSource::vacant(1)],
+                    mappings()
+                ),
+                Err(SourceGraphSourceSetError::ChannelIndex)
+            ));
+        }
+
+        /// Claim `a` reads source 0 and claim `b` reads source 1, both as `(0, 1)`.
+        fn two_source_mappings() -> Vec<SourceGraphTrackMapping> {
+            let [a, b] = inputs();
+            vec![
+                SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+                SourceGraphTrackMapping {
+                    node: b,
+                    source_index: 1,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+            ]
+        }
+
+        fn silence() -> Block {
+            [0.0_f32.to_bits(); 2 * FRAMES as usize]
+        }
+
+        /// Follow-up MINOR 1. Red if the swap block checks and moves one source at a time: a
+        /// valid first move would land before the second is refused, so a carry reported as a
+        /// mismatch would still play source 0.
+        #[test]
+        fn a_refused_second_move_moves_nothing() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_first, first) = filled_source();
+            let (_second, second) = filled_source();
+            let mut predecessor = bind_with(vec![first, second], two_source_mappings(), &validity);
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
+                two_source_mappings(),
+                &validity,
+            );
+            graph::install_carry_program(
+                &mut successor,
+                GraphCarryProgram {
+                    predecessor: identity,
+                    sources: vec![(0, 0), (1, 5)].into_boxed_slice(),
+                },
+            )
+            .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+        }
+
+        /// Follow-up MINOR 2. Red if install checks only the successor index for repeats: two
+        /// moves from one predecessor source would both pass the swap-block check, the second
+        /// swap would trade two vacancies, and the carry would report success with successor
+        /// source 1 silent.
+        #[test]
+        fn install_refuses_a_repeated_predecessor_index() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
+                two_source_mappings(),
+                &validity,
+            );
+            assert_eq!(
+                graph::install_carry_program(
+                    &mut successor,
+                    GraphCarryProgram {
+                        predecessor: 1,
+                        sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
+                    },
+                ),
+                Err(GraphCarryInstallError::DuplicateSourceIndex)
+            );
+        }
+
+        /// Follow-up MINOR 3 and NIT. Red if a vacant claim leaves the caller's buffers as they
+        /// were (a reused input buffer would replay stale audio) or a vacant entry accepts a seek.
+        #[test]
+        fn a_vacant_claim_writes_positive_zero_over_dirty_buffers_and_refuses_seek() {
+            let [a, _] = inputs();
+            let mut driver = SourceGraphSourceSetDriver {
+                sources: vec![GraphSourceEntry {
+                    consumer: None,
+                    channel_count: 2,
+                }]
+                .into_boxed_slice(),
+                mappings: vec![SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                }]
+                .into_boxed_slice(),
+                quantum_frames: FRAMES,
+                block_validity: GraphObservationValidity::CLEAR,
+                pending_generation_change: false,
+            };
+            assert!(!driver.can_prepare_source_seek(0));
+            assert!(!driver.prepare_source_seek(0, 2, 0));
+            driver.begin_block(0, FRAMES).expect("begin");
+            let mut left = [f32::NAN; FRAMES as usize];
+            let mut right = [-1.0_f32; FRAMES as usize];
+            driver
+                .copy_track_input(0, &mut left, &mut right)
+                .expect("copy");
+            assert!(left.iter().chain(&right).all(|word| word.to_bits() == 0));
+        }
+
+        /// Follow-up MINOR 4. Red if a successor with an installed program reports
+        /// `NotRequested` (or `Carried`) when its predecessor is not a graph plan: it asked for
+        /// state and got none, so the swap must count a mismatch.
+        #[test]
+        fn a_program_facing_a_plain_predecessor_reports_a_mismatch() {
+            struct Silent;
+            impl engine::realtime::PreparedPlanExecutor for Silent {
+                fn render(
+                    &mut self,
+                    _arena: &mut engine::realtime::BufferArena,
+                    mut output: PlanarBufferMut<'_>,
+                    _time: engine::realtime::RenderTime,
+                ) -> Result<(), engine::realtime::RenderError> {
+                    for channel in 0..output.channels() {
+                        output.plane_mut(channel)?.fill(0.0);
+                    }
+                    Ok(())
+                }
+            }
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut predecessor = PreparedRenderPlan::prepare_with_executor(
+                engine::realtime::PrepareRenderPlan {
+                    plan_id: 1,
+                    envelope: envelope(),
+                    scratch: &[],
+                },
+                Box::new(Silent),
+            )
+            .expect("plain plan");
+            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
+            graph::install_carry_program(&mut successor, carry_source_zero(1)).expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+        }
+
+        /// Follow-up MINOR 7. Red if the swap block stops comparing channel counts (a one-channel
+        /// consumer would land under two-channel mappings and fail render) or quantum sizes.
+        #[test]
+        fn the_swap_block_refuses_other_channel_counts_and_quanta() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let [a, b] = inputs();
+            let config = PcmSourceRingConfig {
+                channel_count: 1,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: BLOCKS as u64 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            for block in 0..BLOCKS as u64 {
+                let planes = frame_samples(block * u64::from(FRAMES));
+                host.submit(chunk(
+                    1,
+                    block * u64::from(FRAMES),
+                    &[&planes[0]],
+                    FRAMES,
+                    false,
+                ))
+                .expect("source PCM");
+            }
+            let mono = |node: GraphNodeId, right_channel| SourceGraphTrackMapping {
+                node,
+                source_index: 0,
+                left_channel: 0,
+                right_channel,
+            };
+            let mut predecessor = bind_with(
+                vec![SourceGraphSource::new(consumer, resources, 0, 0)],
+                vec![mono(a.clone(), 0), mono(b.clone(), 0)],
+                &validity,
+            );
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2)],
+                vec![mono(a, 1), mono(b, 1)],
+                &validity,
+            );
+            graph::install_carry_program(&mut successor, carry_source_zero(identity))
+                .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+
+            // The quantum guard, at the driver: plans of one envelope cannot disagree, so only
+            // a driver built by hand reaches it.
+            let (_host, source) = filled_source();
+            let driver =
+                |sources: Vec<GraphSourceEntry>, quantum_frames| SourceGraphSourceSetDriver {
+                    sources: sources.into_boxed_slice(),
+                    mappings: Vec::new().into_boxed_slice(),
+                    quantum_frames,
+                    block_validity: GraphObservationValidity::CLEAR,
+                    pending_generation_change: false,
+                };
+            let mut predecessor = driver(
+                vec![GraphSourceEntry {
+                    consumer: source.consumer,
+                    channel_count: 2,
+                }],
+                FRAMES,
+            );
+            let vacant = || {
+                vec![GraphSourceEntry {
+                    consumer: None,
+                    channel_count: 2,
+                }]
+            };
+            let mut other_quantum = driver(vacant(), 2 * FRAMES);
+            assert!(!other_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
+            assert!(other_quantum.sources[0].consumer.is_none());
+            let mut same_quantum = driver(vacant(), FRAMES);
+            assert!(same_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
+        }
     }
 }

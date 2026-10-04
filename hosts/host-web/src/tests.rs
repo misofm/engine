@@ -965,6 +965,10 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
         );
         assert_eq!(engine.report.observation_retained_bytes, 0);
         assert_eq!(engine.report.builtin_meter_payload_bytes, 0);
+        // The prepared plan's state inventory the browser keeps for a successor (#1272), walked
+        // from the inventory itself rather than read from the report row.
+        let inventory_bytes = engine.inventory.retained_bytes();
+        assert!(inventory_bytes > 0, "{name}: the inventory holds its rows");
 
         let host =
             AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
@@ -1004,6 +1008,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .bridge_metadata_bytes
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(inventory_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge metadata arithmetic");
@@ -1012,6 +1017,7 @@ fn decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_m
             .bridge_retained_bytes
             .checked_add(source_control_bytes)
             .and_then(|bytes| bytes.checked_add(session_model_bytes))
+            .and_then(|bytes| bytes.checked_add(inventory_bytes))
             .and_then(|bytes| bytes.checked_add(decoded_bytes))
             .and_then(|bytes| bytes.checked_add(input_shadow_bytes))
             .expect("bridge retained arithmetic");
@@ -3472,7 +3478,8 @@ fn effect_control_browser_table_and_payload_reach_exact_budget_gate() {
         let effect_payload = string_payload + owner_payload;
         let effect_largest = string_largest.max(owner_largest);
         let effect_retained = dense_table + effect_payload;
-        let ready_metadata = source_control_bytes + session_model_bytes;
+        let ready_metadata =
+            source_control_bytes + session_model_bytes + engine.inventory.retained_bytes();
         let expected_bridge_metadata = projection
             .report
             .bridge_metadata_bytes

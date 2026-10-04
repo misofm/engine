@@ -59,12 +59,16 @@ pub const FEATURE_SOURCE_SEEK: u64 = 1 << 2;
 pub const FEATURE_PLANAR_STEREO_RENDER: u64 = 1 << 3;
 /// Issue-005 capability-command support.
 pub const FEATURE_CAPABILITY_COMMAND: u64 = 1 << 4;
+/// Anchored source-seek capability: `miso_engine_v1_source_seek_at` (issue #1275), an in-place V1
+/// amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_SOURCE_SEEK_AT: u64 = 1 << 5;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
     | FEATURE_SOURCE_SEEK
     | FEATURE_PLANAR_STEREO_RENDER
-    | FEATURE_CAPABILITY_COMMAND;
+    | FEATURE_CAPABILITY_COMMAND
+    | FEATURE_SOURCE_SEEK_AT;
 
 /// Engine creation configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -478,7 +482,8 @@ mod tests {
     fn masks_and_result_codes_are_frozen() {
         assert_eq!(ABI_VERSION, 0x0001_0000);
         assert_eq!(EXACT_LAUNCH_RATE_MASK, 0x0f);
-        assert_eq!(FEATURE_MASK, 0x1f);
+        assert_eq!(FEATURE_SOURCE_SEEK_AT, 32);
+        assert_eq!(FEATURE_MASK, 0x3f);
         assert_eq!(
             [
                 RESULT_OK,

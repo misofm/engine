@@ -17,7 +17,8 @@ extern "C" {
  *                miso_engine_v1_last_error on the engine).
  *   session      Control thread. At most one thread at a time calls
  *                miso_engine_v1_source_submit_planar_f32, miso_engine_v1_source_seek,
- *                miso_engine_v1_submit_command, miso_engine_v1_dequeue_event, or
+ *                miso_engine_v1_source_seek_at, miso_engine_v1_submit_command,
+ *                miso_engine_v1_dequeue_event, or
  *                miso_engine_v1_last_error on the session; they are serialized with each other.
  *   plan         Split ownership.
  *                miso_engine_v1_render_f32_planar: render thread only, never concurrently with
@@ -53,8 +54,12 @@ extern "C" {
  * its revision are unchanged, and the host retries after a render call. An
  * acknowledged live edit is never dropped. A live edit commits the same response and the same
  * reliable events as a replacement, so the host drains the reliable event lane after each edit
- * either way. A host still detects a replacement as before: its next source submission is refused
- * until it seeks; after a live edit, submission simply continues.
+ * either way. After either one the host goes on submitting every source the transaction left
+ * unchanged, with no seek; after a replacement it acts only on a source the transaction added,
+ * changed or removed (see "Sources across a structural transaction" and "Starting an added stem
+ * in time" below). The ABI gives no signal that tells a live edit from a replacement, and a host
+ * needs none. (miso_engine_v1_plan_resources describes whichever plan is active, so a replacement
+ * may change it, but an unchanged report does not mean that no replacement happened.)
  *
  * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.
@@ -76,6 +81,31 @@ extern "C" {
  * built for (issue 083, master plan D4 -- the engine dispatches nothing at runtime, so the check
  * happens once at boot instead of inside a render callback). No other entry point returns it. An
  * embedder that receives it must not retry; the library and the CPU do not match.
+ *
+ * Sources across a structural transaction (issue 1273). A SESSION_TRANSACTION_APPLY that replaces
+ * the plan keeps every source it leaves unchanged playing: the source keeps its ring, its
+ * generation and its read position, so the host neither seeks nor refills it, and must not reseek
+ * it. From the moment the command returns OK, source submissions and seeks address the newest
+ * committed session, whether or not its plan has been swapped in yet. A source the transaction
+ * removed is refused as "source.id.unknown"; PCM already accepted for it is discarded with its
+ * plan. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
+ * A source whose declaration the transaction changed restarts like an added one: in a new ring at
+ * generation 1, frame 0, with the PCM accepted for it before the command discarded with its plan;
+ * the host restarts its feed.
+ *
+ * Starting an added stem in time (issue 1275). miso_engine_v1_source_seek_at is
+ * miso_engine_v1_source_seek with an anchor: source_frame enters the graph in the block that starts
+ * at absolute render sample anchor_sample, the clock miso_engine_v1_render_f32_planar takes and
+ * every plan swap continues; the output hears it the plan's latency later. The anchor must be a
+ * multiple of the plan's quantum, or the call returns MISO_ENGINE_V1_INVALID_ARGUMENT with
+ * "source.seek.anchor_unaligned". A host checks MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT before
+ * calling it. To start a stem a transaction added, after the command returns OK: pick A, a
+ * quantum multiple a few quanta past the last rendered block; call
+ * miso_engine_v1_source_seek_at(id, g, F, A), where g is above the source's generation (2 for a
+ * just-added source) and F is the source frame the playing stems read at A; then submit generation
+ * g from F before the block at A renders. Until A the stem renders silence, and those blocks
+ * count as source underruns; from A it plays F on. Should the render reach the seek only after A,
+ * the stem starts at F plus the lateness, so it stays in time.
  */
 
 #define MISO_ENGINE_V1_ABI_VERSION UINT32_C(0x00010000)
@@ -108,7 +138,8 @@ extern "C" {
 #define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK UINT64_C(4)
 #define MISO_ENGINE_V1_FEATURE_PLANAR_STEREO_RENDER UINT64_C(8)
 #define MISO_ENGINE_V1_FEATURE_CAPABILITY_COMMAND UINT64_C(16)
-#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(31)
+#define MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT UINT64_C(32)
+#define MISO_ENGINE_V1_FEATURE_MASK UINT64_C(63)
 
 #define MISO_ENGINE_V1_ENGINE_CONFIG_SIZE UINT32_C(40)
 #define MISO_ENGINE_V1_COMPILE_LIMITS_SIZE UINT32_C(208)
@@ -264,6 +295,12 @@ uint32_t miso_engine_v1_source_seek(miso_engine_v1_session *session,
                                     uint64_t source_id_bytes,
                                     uint64_t generation,
                                     uint64_t source_frame);
+uint32_t miso_engine_v1_source_seek_at(miso_engine_v1_session *session,
+                                       const uint8_t *source_id,
+                                       uint64_t source_id_bytes,
+                                       uint64_t generation,
+                                       uint64_t source_frame,
+                                       uint64_t anchor_sample);
 uint32_t miso_engine_v1_submit_command(miso_engine_v1_session *session,
                                        const uint8_t *request,
                                        uint64_t request_bytes,

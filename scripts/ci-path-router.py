@@ -62,6 +62,9 @@ SELF_TEST_INPUTS = {
         "scripts/test-conformance-boundaries.sh",
     },
     "console-benchmark": {
+        # The rebuild harness (web-mixing-automation-benchmark.mjs) imports the SDK's
+        # prepared-control owner and reads the ABI layout, so either one alone selects the suite.
+        "hosts/host-web/web/prepared-control.js",
         "scripts/build-web-audioworklet.sh",
         "scripts/check-bench-preconditions.sh",
         "scripts/console-benchmark-record-lib.jq",
@@ -73,6 +76,7 @@ SELF_TEST_INPUTS = {
         "scripts/web-mixing-automation-benchmark.mjs",
         "scripts/web-mixing-automation-lib.jq",
         "scripts/web-mixing-automation-validator.jq",
+        "sdk/assets/miso-engine-v1-abi-layout.json",
     },
     "sdk-deletions": {
         "scripts/check-sdk-deletions.py",

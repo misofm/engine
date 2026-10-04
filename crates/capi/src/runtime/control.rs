@@ -19,12 +19,15 @@ pub(crate) struct StripLanes {
 /// One epoch's worth of host-owned source producers, strip live-control producers and effect
 /// live-control producers.
 ///
-/// The tables themselves live in `host-core`; this wrapper adds the epoch tag, the epoch's own
-/// capi resource rows (`capi`, which the live admission reads, #1257 D4) and the lifecycle
-/// counters the structural-replacement tests observe.
+/// The tables themselves live in `host-core`; this wrapper adds the epoch tag, the plan's state
+/// inventory its successor is prepared from (issue #1273 D1), the epoch's own capi resource rows
+/// (`capi`, which the live admission reads, #1257 D4) and the lifecycle counters the
+/// structural-replacement tests observe.
 pub(crate) struct ProviderEpoch {
     pub(crate) epoch: u64,
     pub(crate) sources: SourceControlSet,
+    /// What this epoch's plan holds, for preparing its successor (issue #1273 D1).
+    pub(crate) inventory: PlanStateInventory,
     /// The live fader and matrix producers of this epoch's plan (#1256 D2).
     pub(crate) strips: StripLanes,
     /// One live-control producer per prepared effect instance of this epoch's plan, console slots
@@ -41,6 +44,7 @@ pub(crate) struct ProviderEpoch {
 impl ProviderEpoch {
     pub(crate) fn current(
         sources: SourceControlSet,
+        inventory: PlanStateInventory,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
@@ -48,6 +52,7 @@ impl ProviderEpoch {
         let owner = Self {
             epoch: 0,
             sources,
+            inventory,
             strips,
             effects,
             capi,
@@ -59,6 +64,7 @@ impl ProviderEpoch {
 
     pub(crate) fn candidate(
         sources: SourceControlSet,
+        inventory: PlanStateInventory,
         strips: StripLanes,
         effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
@@ -66,6 +72,7 @@ impl ProviderEpoch {
         let owner = Self {
             epoch: u64::MAX,
             sources,
+            inventory,
             strips,
             effects,
             capi,
@@ -89,14 +96,6 @@ impl Drop for ProviderEpoch {
     }
 }
 
-/// Structural plans own independent source rings; buffered host state never crosses an epoch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StructuralSourceStatePolicy {
-    ResetAtReplacementBoundary,
-}
-
-pub(crate) const STRUCTURAL_SOURCE_STATE_POLICY: StructuralSourceStatePolicy =
-    StructuralSourceStatePolicy::ResetAtReplacementBoundary;
 pub(crate) const RENDER_DIAGNOSTIC_SLOTS: usize = 2;
 pub(crate) const RENDER_DIAGNOSTIC_CODE: &str = "capi.render.activity";
 
@@ -109,6 +108,8 @@ pub(crate) enum TestStructuralFaultPhase {
     AfterAdmission,
     AfterPlanReservation,
     BeforeProtocolCommit,
+    /// The protocol commit itself returns `Err` (issue #1273 gate 3).
+    ProtocolCommit,
     /// The live arm, after every fallible check and before its first push (#1257 D7).
     BeforeLivePush,
 }
@@ -354,6 +355,16 @@ impl ObservedPreparedToken {
         controller: &mut ObservedController,
     ) -> Result<protocol::CommittedCommandFrame, ()> {
         let prepared = self.inner.take().expect("observed token commits once");
+        #[cfg(test)]
+        let committed = if take_test_fault_state(TestStructuralFaultPhase::ProtocolCommit) {
+            drop(prepared);
+            Err(())
+        } else {
+            controller
+                .commit_prepared_structural(*prepared)
+                .map_err(|_| ())
+        };
+        #[cfg(not(test))]
         let committed = controller.commit_prepared_structural(*prepared);
         #[cfg(test)]
         update_test_owners(|owners| {
@@ -891,12 +902,16 @@ impl SessionState {
                     drop(prepared);
                     return Err(CommandError::Backpressure);
                 }
-                let prepared_runtime = match STRUCTURAL_SOURCE_STATE_POLICY {
-                    StructuralSourceStatePolicy::ResetAtReplacementBoundary => prepare_runtime(
-                        prepared.get().prospective_session().compiled(),
-                        self.limits,
-                    ),
-                }
+                // Issue #1273 D1: the candidate succeeds the newest plan, so every source the
+                // transaction leaves unchanged is prepared to carry that plan's ring.
+                let prepared_runtime = prepare_runtime(
+                    prepared.get().prospective_session().compiled(),
+                    self.limits,
+                    Some(SuccessorBase {
+                        inventory: &self.newest_providers().inventory,
+                        committed: self.controller.session().compiled().normalized_model(),
+                    }),
+                )
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     sources,
@@ -904,11 +919,13 @@ impl SessionState {
                     effects,
                     plan: candidate_plan,
                     resources,
+                    carried,
+                    inventory,
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                 } = prepared_runtime;
                 let mut candidate_provider =
-                    ProviderEpoch::candidate(sources, strips, effects, prospective_capi);
+                    ProviderEpoch::candidate(sources, inventory, strips, effects, prospective_capi);
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]
                 {
@@ -922,6 +939,7 @@ impl SessionState {
                 validate_replacement_peak(
                     self.replacement_base_report()?,
                     resources,
+                    carried,
                     prospective_capi,
                     compiled_model_admission(
                         self.controller.session().compiled(),
@@ -989,6 +1007,16 @@ impl SessionState {
                 let committed = prepared
                     .commit(&mut self.controller)
                     .map_err(|_| CommandError::Internal)?;
+                // Issue #1273 D2: the protocol commit was the last fallible step, so the
+                // persisting producers move now and never move back. Infallible.
+                // The newest epoch, spelled by field: the reservation borrows the publisher.
+                let newest = self
+                    .pending_providers
+                    .last_mut()
+                    .unwrap_or(&mut self.providers);
+                candidate_provider
+                    .sources
+                    .adopt_persisting(&mut newest.sources);
                 self.controller
                     .provider_mut()
                     .replace_session_catalog(candidate_catalog);
@@ -1455,6 +1483,21 @@ impl SessionState {
         &self.response_scratch[..bytes]
     }
 
+    /// The producers of the newest committed session: the pending candidate's while one waits
+    /// for its swap, else the current plan's (issue #1273 D3).
+    pub(crate) fn newest_providers(&self) -> &ProviderEpoch {
+        self.pending_providers.last().unwrap_or(&self.providers)
+    }
+
+    fn newest_providers_mut(&mut self) -> &mut ProviderEpoch {
+        self.pending_providers
+            .last_mut()
+            .unwrap_or(&mut self.providers)
+    }
+
+    /// Feeds a source of the newest committed session. A source that persists across a pending
+    /// structural transaction is fed through its moved producer into the ring the running plan
+    /// still renders and its successor carries (issue #1273 D3).
     pub(crate) fn submit(
         &mut self,
         id: &[u8],
@@ -1462,7 +1505,7 @@ impl SessionState {
     ) -> Result<source::SubmitReport, SourceFailure> {
         self.synchronize_plan_epochs()
             .map_err(|_| SourceFailure::Internal)?;
-        self.providers
+        self.newest_providers_mut()
             .sources
             .submit(id, submission)
             .map_err(SourceFailure::Control)
@@ -1476,9 +1519,26 @@ impl SessionState {
     ) -> Result<(), SourceFailure> {
         self.synchronize_plan_epochs()
             .map_err(|_| SourceFailure::Internal)?;
-        self.providers
+        self.newest_providers_mut()
             .sources
             .seek(id, generation, source_frame)
+            .map_err(SourceFailure::Control)
+    }
+
+    /// Queues an anchored seek on a source of the newest committed session: `source_frame` enters
+    /// the graph in the block that starts at absolute render sample `anchor_sample` (issue #1275).
+    pub(crate) fn seek_at(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        source_frame: u64,
+        anchor_sample: u64,
+    ) -> Result<(), SourceFailure> {
+        self.synchronize_plan_epochs()
+            .map_err(|_| SourceFailure::Internal)?;
+        self.newest_providers_mut()
+            .sources
+            .seek_at(id, generation, source_frame, anchor_sample)
             .map_err(SourceFailure::Control)
     }
 }

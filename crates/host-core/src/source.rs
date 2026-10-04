@@ -20,7 +20,9 @@ pub(crate) struct ControlSource {
     channel_count: u32,
     region_start: u64,
     region_end: u64,
-    provider: HostChunkProvider,
+    /// `None` while vacant: the plan was prepared to carry this source's ring from its
+    /// predecessor, and the producer arrives through [`SourceControlSet::adopt_persisting`].
+    provider: Option<HostChunkProvider>,
 }
 
 /// One borrowed planar chunk offered to a named source.
@@ -63,6 +65,11 @@ pub enum SourceControlError {
     Chunk(HostChunkError),
     /// The producer ring rejected the seek.
     Seek(SourceSeekError),
+    /// The source exists but this set holds no producer for it: the set belongs to a successor
+    /// plan whose producer has not been handed over yet ([`SourceControlSet::adopt_persisting`]),
+    /// or to a predecessor whose producer has already moved to its successor. Neither
+    /// backpressure nor an engine invariant: the caller feeds the newest set.
+    Vacated,
 }
 
 impl SourceControlError {
@@ -90,6 +97,8 @@ impl SourceControlError {
             Self::Chunk(HostChunkError::Full { .. }) => "source.backpressure",
             Self::Chunk(HostChunkError::InternalInvariant) => "source.internal",
             Self::Seek(SourceSeekError::Backpressure { .. }) => "source.seek.backpressure",
+            Self::Vacated => "source.ring.vacated",
+            Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
         }
     }
 
@@ -147,6 +156,10 @@ impl SourceControlSet {
     ) -> Result<SubmitReport, SourceControlError> {
         let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
         let source = &mut self.sources[index];
+        let provider = source
+            .provider
+            .as_mut()
+            .ok_or(SourceControlError::Vacated)?;
         let end = submission
             .start_frame
             .checked_add(u64::from(submission.frames))
@@ -171,8 +184,7 @@ impl SourceControlSet {
         }
         let generation = SourceGeneration::new(submission.generation)
             .ok_or(SourceControlError::GenerationZero)?;
-        source
-            .provider
+        provider
             .submit(HostPlanarChunk {
                 sample_rate_hz: SampleRateHz(submission.sample_rate_hz),
                 generation,
@@ -191,20 +203,61 @@ impl SourceControlSet {
         generation: u64,
         frame: u64,
     ) -> Result<(), SourceControlError> {
+        self.queue_seek(id, generation, frame, None)
+    }
+
+    /// Queue one strictly increasing, generation-tagged seek whose source `frame` enters the graph
+    /// in the block that starts at absolute render sample `anchor_sample` (issue #1274).
+    ///
+    /// `anchor_sample` is on the plan's absolute render clock, the one a host renders with and
+    /// every plan swap continues; it names when `frame` enters the graph, and the output hears it
+    /// the plan's latency later. It must be a multiple of the quantum, or the seek is refused with
+    /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
+    ///
+    /// On success the source accepts the new generation's PCM from `frame` at once; submit it
+    /// before the anchor block renders and the source plays it from exactly that block, even when
+    /// the render pops that PCM before it pops the seek. Should the render reach the seek only
+    /// after the anchor block has passed, it starts at `frame` plus the lateness, so it stays in
+    /// time. Until the anchor block, PCM already queued for the playing generation keeps playing;
+    /// when that runs out, the source renders silence and reports an underrun.
+    pub fn seek_at(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        frame: u64,
+        anchor_sample: u64,
+    ) -> Result<(), SourceControlError> {
+        self.queue_seek(id, generation, frame, Some(anchor_sample))
+    }
+
+    fn queue_seek(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        frame: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SourceControlError> {
         let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
         let source = &mut self.sources[index];
+        let provider = source
+            .provider
+            .as_mut()
+            .ok_or(SourceControlError::Vacated)?;
         if !(source.region_start..=source.region_end).contains(&frame) {
             return Err(SourceControlError::OutsideRegion);
         }
         let generation =
             SourceGeneration::new(generation).ok_or(SourceControlError::GenerationZero)?;
-        source
-            .provider
-            .try_seek(SourceCommand::Seek {
+        let frame = SourceFrame(frame);
+        let command = match anchor_sample {
+            None => SourceCommand::Seek { generation, frame },
+            Some(anchor_sample) => SourceCommand::SeekAt {
                 generation,
-                frame: SourceFrame(frame),
-            })
-            .map_err(SourceControlError::Seek)
+                frame,
+                anchor_sample,
+            },
+        };
+        provider.try_seek(command).map_err(SourceControlError::Seek)
     }
 
     /// The mapped source region of the named source, as `start..end` in source frames.
@@ -215,6 +268,36 @@ impl SourceControlSet {
         let index = self.index_of(id)?;
         let source = &self.sources[index];
         Some(source.region_start..source.region_end)
+    }
+
+    /// Move into this set the producer of every source it holds vacant, from `predecessor`'s
+    /// entry with the same ID, leaving that entry vacant. Returns how many producers moved.
+    ///
+    /// A host calls this after preparing a successor with
+    /// [`crate::prepare_host_runtime_successor`] (or its live-control form) and after its last
+    /// fallible step, so the move is never undone. Infallible and allocation-free: a vacant
+    /// entry whose ID the predecessor does not hold, or holds vacant itself, stays vacant and
+    /// refuses PCM with [`SourceControlError::Vacated`]. Keyed by source ID, never by index.
+    ///
+    /// The producers move before the plan swap that moves their consumers. Should that swap's
+    /// carry report `PredecessorMismatch` -- unreachable on both hosts by construction (issue
+    /// #1269 P11) -- the successor's vacant sources render `+0.0` from the swap block on, since
+    /// their producers have already moved here and their rings stay with the retired plan.
+    pub fn adopt_persisting(&mut self, predecessor: &mut SourceControlSet) -> usize {
+        let mut moved = 0;
+        for index in 0..self.sources.len() {
+            if self.sources[index].provider.is_some() {
+                continue;
+            }
+            let Some(from) = predecessor.index_of(self.id(&self.sources[index])) else {
+                continue;
+            };
+            if let Some(provider) = predecessor.sources[from].provider.take() {
+                self.sources[index].provider = Some(provider);
+                moved += 1;
+            }
+        }
+        moved
     }
 
     /// Number of sources in the set.
@@ -301,7 +384,7 @@ impl ControlSourceBuilder {
         channel_count: u32,
         region_start: u64,
         region_end: u64,
-        provider: HostChunkProvider,
+        provider: Option<HostChunkProvider>,
     ) {
         let id_offset = self.ids.len();
         self.ids.extend_from_slice(id.as_bytes());

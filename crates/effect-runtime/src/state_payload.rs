@@ -32,10 +32,17 @@
 //! `effect.state.history`, `effect.state.payload`, `effect.state.envelope`, `effect.state.phase`
 //! — describe an effect's own value validation, which stays with the effect.
 //!
+//! # Ramps
+//!
+//! [`write_ramp`], [`read_ramp`] and [`ramp_path_within`] carry a [`LinearRamp`] as four words,
+//! its step included, so a restored mid-flight ramp continues bit for bit (#1278).
+//!
 //! # Endianness
 //!
 //! Little-endian, unconditionally, on every target. A state payload crosses hosts and
 //! architectures; making it depend on the writer's byte order would make a session non-portable.
+
+use crate::ramp::LinearRamp;
 
 /// The payload's length did not match what its layout requires.
 pub const STATE_LENGTH_CODE: &str = "effect.state.length";
@@ -175,6 +182,8 @@ pub const fn expected_sizes(layout: &StateLayout) -> StatePayloadSizes {
     }
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the word and ramp codec the effects' payload calls run in the
+// plan-swap block.
 /// Writes `value` to word `word` of `bytes`, little-endian.
 ///
 /// # Panics
@@ -223,6 +232,91 @@ pub fn read_u32(bytes: &[u8], word: usize) -> u32 {
 pub fn read_f32(bytes: &[u8], word: usize) -> f32 {
     f32::from_bits(read_u32(bytes, word))
 }
+
+/// Words a [`LinearRamp`] occupies in a payload: `current`, `target`, `step`, `remaining`.
+///
+/// A payload that carries a ramp carries all four, the step included (#1278 D2a): a restore that
+/// re-derived the step as `(target - current) / remaining` would resume a mid-flight ramp on
+/// another path than the one the continued ramp walks, because the iterated `current` is rounded
+/// at every sample.
+pub const RAMP_WORDS: usize = 4;
+
+/// Writes `ramp` to words `word .. word + RAMP_WORDS` of `bytes`.
+///
+/// # Panics
+///
+/// As [`write_u32`].
+pub fn write_ramp(bytes: &mut [u8], word: usize, ramp: LinearRamp) {
+    write_f32(bytes, word, ramp.current);
+    write_f32(bytes, word + 1, ramp.target);
+    write_f32(bytes, word + 2, ramp.step);
+    write_u32(bytes, word + 3, ramp.remaining);
+}
+
+/// Reads the ramp [`write_ramp`] wrote at `word`, unvalidated.
+///
+/// # Panics
+///
+/// As [`read_u32`].
+#[must_use]
+pub fn read_ramp(bytes: &[u8], word: usize) -> LinearRamp {
+    LinearRamp {
+        current: read_f32(bytes, word),
+        target: read_f32(bytes, word + 1),
+        step: read_f32(bytes, word + 2),
+        remaining: read_u32(bytes, word + 3),
+    }
+}
+
+/// Whether every value a restored ramp can take lies in `[low - slack, high + slack]`: its
+/// `current` and `target`, and each value its remaining steps visit before the snap to the target,
+/// iterated exactly as [`LinearRamp::next_value`] iterates them.
+///
+/// A ramp also needs `remaining <= max_remaining` (checked first, so the walk is bounded) and a
+/// finite step, and a settled ramp (`remaining == 0`) must carry the `+0.0` step that
+/// [`LinearRamp::fixed`], [`LinearRamp::snap`], [`LinearRamp::set_target`] and the last
+/// [`LinearRamp::next_value`] all write.
+///
+/// `slack` is a rounding budget for an effect whose own iterated ramps may round a few ulps past
+/// an endpoint; it is not a domain widening. The walk reads nothing but its argument and allocates
+/// nothing, so a restore may run it on the render thread.
+#[must_use]
+pub fn ramp_path_within(
+    ramp: LinearRamp,
+    (low, high): (f32, f32),
+    slack: f32,
+    max_remaining: u32,
+) -> bool {
+    ramp_path_inside(ramp, (low - slack, high + slack), max_remaining)
+}
+
+/// Whether every value a restored ramp can take lies in the closed interval `[low, high]`, with
+/// the same `remaining`, step and walk rules as [`ramp_path_within`]. For an effect whose
+/// rounding budget is one-sided: a smoother coefficient, for example, may round a few ulps above
+/// its top but never below zero, where the recurrence diverges.
+#[must_use]
+pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining: u32) -> bool {
+    let inside = |value: f32| (low..=high).contains(&value);
+    if ramp.remaining > max_remaining
+        || !ramp.step.is_finite()
+        || !inside(ramp.current)
+        || !inside(ramp.target)
+    {
+        return false;
+    }
+    if ramp.remaining == 0 {
+        return ramp.step.to_bits() == 0;
+    }
+    let mut value = ramp.current;
+    for _ in 1..ramp.remaining {
+        value += ramp.step;
+        if !inside(value) {
+            return false;
+        }
+    }
+    true
+}
+// REALTIME_POLICY_END
 
 /// Checks the three sections against the layout.
 ///

@@ -33,7 +33,7 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
     for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(quality.tail, TailSamples::Finite(0));
-        assert_eq!(quality.maximum_state.total(), Some(88));
+        assert_eq!(quality.maximum_state.total(), Some(112));
         assert_eq!(quality.maximum_state.common_bytes, 0);
         assert_eq!(quality.maximum_state.left_bytes, LANE_STATE_BYTES as u32);
         assert_eq!(quality.maximum_state.right_bytes, LANE_STATE_BYTES as u32);
@@ -130,13 +130,13 @@ fn independent_coefficients_time_constants_layout_and_both_caps_are_exact() {
 /// The D11 ramp law, pinned sample by sample, and an exact mid-ramp restore.
 ///
 /// The four pinned values are exact in `f32` under both the pre-audit per-sample division and the
-/// D11 precomputed step, which is why this contract fixture did not move. The restore is where the
-/// two laws could have diverged: `step` is not persisted, it is derived as
-/// `(target - current) / remaining`, and for this row `(-1 - 0.96875) / 63` is exactly `-0.03125`,
-/// the same increment the uninterrupted ramp is carrying.
+/// D11 precomputed step, which is why this contract fixture did not move. The payload carries the
+/// ramp's `step` (word 4) beside its `current`, `target` and `remaining` (#1278 D2a), so the
+/// restored instance continues on the increment the uninterrupted ramp is carrying, `-0.03125`
+/// here, rather than on one re-derived from the other three words.
 ///
-/// Red mutation: `set_target` dividing by 63 instead of 64; or `read_lane` deriving `step` from
-/// `RAMP_SAMPLES` instead of `remaining`, which makes the restored continuation differ.
+/// Red mutation: `set_target` dividing by 63 instead of 64; or `read_lane` replacing the carried
+/// `step` with `(target - current) / RAMP_SAMPLES`, which makes the restored continuation differ.
 #[test]
 fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly() {
     let values = initial_values();
@@ -169,7 +169,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         (1.0_f32 / 64.0).to_bits()
     );
     assert_eq!(state_f32(&after_one.0, 3).to_bits(), 1.0_f32.to_bits());
-    assert_eq!(state_u32(&after_one.0, 4), 63);
+    assert_eq!(state_u32(&after_one.0, 5), 63);
     assert_eq!(after_one.1, initial_right);
 
     render(&mut effect, 62, 1, &[]);
@@ -178,7 +178,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         state_f32(&after_sixty_three.0, 2).to_bits(),
         (63.0_f32 / 64.0).to_bits()
     );
-    assert_eq!(state_u32(&after_sixty_three.0, 4), 1);
+    assert_eq!(state_u32(&after_sixty_three.0, 5), 1);
     assert_eq!(after_sixty_three.1, initial_right);
 
     render(&mut effect, 1, 63, &[]);
@@ -187,7 +187,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         state_f32(&after_sixty_four.0, 2).to_bits(),
         1.0_f32.to_bits()
     );
-    assert_eq!(state_u32(&after_sixty_four.0, 4), 0);
+    assert_eq!(state_u32(&after_sixty_four.0, 5), 0);
     assert_eq!(after_sixty_four.1, initial_right);
 
     render(
@@ -199,7 +199,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
     let active = snapshot(effect.as_ref());
     assert_eq!(state_f32(&active.0, 2).to_bits(), 0.96875_f32.to_bits());
     assert_eq!(state_f32(&active.0, 3).to_bits(), (-1.0_f32).to_bits());
-    assert_eq!(state_u32(&active.0, 4), 63);
+    assert_eq!(state_u32(&active.0, 5), 63);
     assert_eq!(active.1, initial_right);
 
     let mut restored = prepare(&values);
@@ -395,21 +395,25 @@ fn state_restore_validates_version_length_envelope_and_parameters() {
     let sizes = effect.metadata().state_sizes;
     let good = snapshot(effect.as_ref());
 
-    assert_eq!(
-        effect.restore_state_payload(
-            2,
-            StatePayloadInput::new(&[], &good.0, &good.1, sizes).expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.version"
-        })
-    );
+    for version in [0, 2] {
+        assert_eq!(
+            effect.restore_state_payload(
+                version,
+                StatePayloadInput::new(&[], &good.0, &good.1, sizes).expect("input"),
+            ),
+            Err(StatePayloadError {
+                code: "effect.state.version"
+            }),
+            "version {version}"
+        );
+    }
 
     for (word, bits, code) in [
         (0_usize, f32::NAN.to_bits(), "effect.state.envelope"),
         (1, (-1.0_f32).to_bits(), "effect.state.envelope"),
         (2, 2.0_f32.to_bits(), "effect.state.parameter"),
-        (4, 65_u32, "effect.state.parameter"),
+        (4, f32::INFINITY.to_bits(), "effect.state.parameter"),
+        (5, 65_u32, "effect.state.parameter"),
     ] {
         let mut bad = good.0.clone();
         bad[word * 4..word * 4 + 4].copy_from_slice(&bits.to_le_bytes());

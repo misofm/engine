@@ -22,7 +22,9 @@
 //! * Finiteness — once per block per lane, over the output, the ring write window and the damping
 //!   state (D7, master plan §4.4). A failing lane has its output zeroed and its history dropped.
 //! * Ramps — [`effect_runtime::ramp::LinearRamp`]: one division at event time, iterated
-//!   additions, an exact assignment of the target on the final sample (D11).
+//!   additions, an exact assignment of the target on the final sample (D11). The state payload
+//!   carries each ramp whole, step included, so a restored instance continues bit-identically
+//!   (#1278 D2a).
 //! * Transcendentals — `math` designs damping coefficients during preparation and accepted
 //!   block-start automation (D6); the per-sample kernel has none.
 //!
@@ -49,7 +51,9 @@ use effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
 };
 use effect_runtime::ramp::LinearRamp;
-use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
+use effect_runtime::state_payload::{
+    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
+};
 use lane::{Lane, flush};
 
 pub mod corpus;
@@ -59,11 +63,16 @@ const ORDINARY_RAMP_COUNT: usize = 3;
 const PARAMETER_COUNT: usize = 5;
 const RAMP_SAMPLES: u32 = 64;
 const TRANSITION_SAMPLES: u32 = 128;
-const COMMON_BYTES: u32 = 16;
+/// The common state section: the ring cursor word and the cross-feedback ramp.
+const COMMON_BYTES: u32 = (1 + RAMP_WORDS as u32) * 4;
 const FIXED_BYTES: u64 = 36;
 
-/// Words of the per-lane state header, before the ring.
-const LANE_HEADER_WORDS: usize = 16;
+/// Words of the per-lane state header, before the ring: seven scalar words, then the feedback,
+/// damping and mix ramps of [`RAMP_WORDS`] each, step included (#1278 D2a).
+const LANE_HEADER_WORDS: usize = LANE_RAMP_WORD + ORDINARY_RAMP_COUNT * RAMP_WORDS;
+
+/// First word of the lane header's ramps.
+const LANE_RAMP_WORD: usize = 7;
 
 /// Largest number of frames one chunk of [`PreparedDelay::process`] renders.
 ///
@@ -247,7 +256,7 @@ const PORTS: [PortDescriptor; 2] = [
 
 const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
     let ring_words = sample_rate * 2 + 3;
-    let lane_bytes = (ring_words + 16) * 4;
+    let lane_bytes = (ring_words + LANE_HEADER_WORDS as u32) * 4;
     effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
@@ -298,7 +307,7 @@ struct Resources {
 fn resources(sample_rate: u32) -> Option<Resources> {
     let max_delay = sample_rate.checked_mul(2)?;
     let ring_words_u32 = max_delay.checked_add(3)?;
-    let lane_words = ring_words_u32.checked_add(16)?;
+    let lane_words = ring_words_u32.checked_add(LANE_HEADER_WORDS as u32)?;
     let lane_bytes = lane_words.checked_mul(4)?;
     let ring_words = usize::try_from(ring_words_u32).ok()?;
     if usize::try_from(lane_bytes).is_err() || isize::try_from(lane_bytes).is_err() {
@@ -367,7 +376,7 @@ fn damping_coefficient(c: f32, sample_rate: u32) -> f32 {
 
 /// Largest coefficient [`damping_coefficient`] can produce at `sample_rate`.
 ///
-/// The restore domain of the damping ramp triple: the state words hold `g`, not `c`, so the
+/// The restore domain of the damping ramp: the state words hold `g`, not `c`, so the
 /// descriptor's `[0, 0.995]` is not the interval a restored word has to lie in.
 fn damping_coefficient_max(sample_rate: u32) -> f32 {
     let big_g = math::tan(core::f64::consts::PI * DAMPING_MAX_CUTOFF_HZ / f64::from(sample_rate));
@@ -1330,7 +1339,7 @@ impl PreparedNativeEffect for PreparedDelay {
         if cursor >= self.resources.ring_words {
             return Err(state_error("effect.state.cursor"));
         }
-        let cross = read_ramp(input.common, 1, &PARAMETER_SPECS[4])?;
+        let cross = read_carried_ramp(input.common, 1, &PARAMETER_SPECS[4])?;
         // Everything is validated as a pure function of the bytes before anything is written, so a
         // rejected restore cannot leave the effect half updated -- and validating the rings in
         // place is what removes the two ring-sized allocations the old path made on every restore
@@ -1491,7 +1500,7 @@ fn write_lane(bytes: &mut [u8], lane: &DelayLane, cursor: usize) {
     write_u32(bytes, 5, lane.transition_remaining);
     write_u32(bytes, 6, lane.valid_history);
     for (index, ramp) in lane.ramps.iter().enumerate() {
-        write_ramp(bytes, 7 + index * 3, *ramp);
+        write_ramp(bytes, LANE_RAMP_WORD + index * RAMP_WORDS, *ramp);
     }
     for (index, value) in lane.ring.iter().copied().enumerate() {
         write_f32(
@@ -1533,13 +1542,13 @@ fn read_lane_header(
     {
         return Err(state_error("effect.state.lane"));
     }
-    // The damping triple holds the mapped coefficient, so its domain is the coefficient's, not the
+    // The damping ramp holds the mapped coefficient, so its domain is the coefficient's, not the
     // control's; the other two hold their descriptor values.
     let damping_domain = ParameterSpec::continuous(0.0, damping_coefficient_max(sample_rate), 0.0);
     let specs = [&PARAMETER_SPECS[1], &damping_domain, &PARAMETER_SPECS[3]];
     let mut ramps = [LinearRamp::fixed(0.0); ORDINARY_RAMP_COUNT];
     for (index, ramp) in ramps.iter_mut().enumerate() {
-        *ramp = read_ramp(bytes, 7 + index * 3, specs[index])?;
+        *ramp = read_carried_ramp(bytes, LANE_RAMP_WORD + index * RAMP_WORDS, specs[index])?;
     }
     Ok(LaneHeader {
         damping_state,
@@ -1595,36 +1604,35 @@ fn normal_or_zero(value: f32) -> bool {
     value.is_normal() || value == 0.0
 }
 
-fn write_ramp(bytes: &mut [u8], word: usize, ramp: LinearRamp) {
-    write_f32(bytes, word, ramp.current);
-    write_f32(bytes, word + 1, ramp.target);
-    write_u32(bytes, word + 2, ramp.remaining);
-}
-
-/// Reads a ramp triple and re-derives its D11 step.
+/// Reads and validates one ramp, its step carried verbatim (#1278 D2a).
 ///
-/// The payload stores `(current, target, remaining)`. Restore derives a step from this triple
-/// through `LinearRamp::set_target`; an iteratively rounded current need not reconstruct the
-/// original increment. `remaining == 0` must come with `current == target`, which is
-/// `LinearRamp`'s invariant and which every snapshot this effect writes satisfies.
-fn read_ramp(
+/// The payload holds the whole `LinearRamp`, so the restored ramp continues with the step the
+/// snapshotted instance carries rather than one re-derived from an iterated `current`. The target,
+/// and a settled current, must lie in `spec`'s domain; a moving ramp's every remaining value is
+/// held to that domain with a 64-ulp rounding budget (`ramp_path_within`), because a ramp toward
+/// an edge may round a few ulps past it and the effect must accept its own snapshot. Allocates
+/// nothing.
+fn read_carried_ramp(
     bytes: &[u8],
     word: usize,
     spec: &ParameterSpec,
 ) -> Result<LinearRamp, StatePayloadError> {
-    let current = read_f32(bytes, word);
-    let target = read_f32(bytes, word + 1);
-    let remaining = read_u32(bytes, word + 2);
-    if !parameter_value_valid(spec, current)
-        || !parameter_value_valid(spec, target)
-        || remaining > RAMP_SAMPLES
-        || (remaining == 0 && current != target)
+    let read = read_ramp(bytes, word);
+    let (low, high) = (spec.minimum, spec.maximum);
+    let slack = 64.0 * f32::EPSILON * low.abs().max(high.abs());
+    let current_valid = read.remaining != 0 || parameter_value_valid(spec, read.current);
+    if !current_valid
+        || !parameter_value_valid(spec, read.target)
+        || !ramp_path_within(read, (low, high), slack, RAMP_SAMPLES)
+        || (read.remaining == 0 && read.current != read.target)
     {
         return Err(state_error("effect.state.parameter"));
     }
-    let mut ramp = LinearRamp::fixed(normalize_zero(current));
-    ramp.set_target(normalize_zero(target), remaining);
-    Ok(ramp)
+    Ok(LinearRamp {
+        current: normalize_zero(read.current),
+        target: normalize_zero(read.target),
+        ..read
+    })
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
@@ -1774,10 +1782,10 @@ mod tests {
             LinkModeSet::DUAL_MONO
         );
         let expected = [
-            (44_100, 88_203, 352_876, 705_768),
-            (48_000, 96_003, 384_076, 768_168),
-            (88_200, 176_403, 705_676, 1_411_368),
-            (96_000, 192_003, 768_076, 1_536_168),
+            (44_100, 88_203, 352_888, 705_796),
+            (48_000, 96_003, 384_088, 768_196),
+            (88_200, 176_403, 705_688, 1_411_396),
+            (96_000, 192_003, 768_088, 1_536_196),
         ];
         let values = initial_values();
         for (sample_rate, ring_words, lane_bytes, total_state) in expected {
@@ -2624,5 +2632,177 @@ mod tests {
         assert_eq!(effect.left.ramps[2].target.to_bits(), 0.5_f32.to_bits());
         assert_eq!(effect.left.ramps[0].current.to_bits(), 0.35_f32.to_bits());
         assert_eq!(effect.cross.target.to_bits(), 0.0_f32.to_bits());
+    }
+
+    /// #1278 D2a: a delay restored mid-ramp continues bit-identically to the instance it was taken
+    /// from. Feedback, damping and mix on both channels and the shared cross-feedback are all mid
+    /// ramp at the snapshot, each at a point where re-deriving the step from `(current, target,
+    /// remaining)` gives a different step than the one the instance carries. Red on a restore that
+    /// re-derives the step instead of carrying it: the restored snapshot catches every ramp's step
+    /// at once, and the render catches the damping and mix ramps' (feedback and cross only reach
+    /// the output through the ring, after this window).
+    #[test]
+    fn a_mid_ramp_restore_continues_bit_identically() {
+        const SPLIT: usize = 23;
+        fn render(
+            effect: &mut PreparedDelay,
+            first: u64,
+            frames: usize,
+            spans: &[PreparedAutomationSpan],
+        ) -> (Vec<f32>, Vec<f32>) {
+            let mut left: Vec<f32> = (0..frames)
+                .map(|i| ((first as usize + i) * 37 % 101) as f32 / 101.0 - 0.5)
+                .collect();
+            let mut right: Vec<f32> = (0..frames)
+                .map(|i| ((first as usize + i) * 53 % 97) as f32 / 97.0 - 0.5)
+                .collect();
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    first,
+                    spans,
+                    effect.metadata.quantum,
+                )
+                .expect("block"),
+            );
+            (left, right)
+        }
+        let mut values = initial_values();
+        values[0].value = 1.0;
+        values[1].value = 1.5;
+        let spans = [
+            point(1, ParameterChannel::Left, 0, 0.9),
+            point(1, ParameterChannel::Right, 0, -0.7),
+            point(2, ParameterChannel::Left, 0, 0.6),
+            point(2, ParameterChannel::Right, 0, 0.3),
+            point(3, ParameterChannel::Left, 0, 0.8),
+            point(3, ParameterChannel::Right, 0, 0.13),
+            point(4, ParameterChannel::Both, 0, 0.77),
+        ];
+        let mut original = prepare(&values);
+        render(&mut original, 0, SPLIT, &spans);
+        let carried = [
+            original.left.ramps[0],
+            original.left.ramps[1],
+            original.left.ramps[2],
+            original.right.ramps[0],
+            original.right.ramps[1],
+            original.right.ramps[2],
+            original.cross,
+        ];
+        for (index, ramp) in carried.iter().enumerate() {
+            let mut rederived = LinearRamp::fixed(ramp.current);
+            rederived.set_target(ramp.target, ramp.remaining);
+            assert!(ramp.remaining > 0, "ramp {index} must be mid-ramp");
+            assert_ne!(
+                rederived.step.to_bits(),
+                ramp.step.to_bits(),
+                "ramp {index} must carry a step its triple does not re-derive"
+            );
+        }
+        let (common, left, right) = snapshot(&original);
+        let mut twin = prepare(&values);
+        twin.restore_state_payload(
+            1,
+            StatePayloadInput::new(&common, &left, &right, twin.metadata.state_sizes)
+                .expect("input"),
+        )
+        .expect("the delay restores its own mid-ramp snapshot");
+        assert_eq!(
+            snapshot(&twin),
+            (common, left, right),
+            "the restored twin writes back every carried word, each ramp's step included"
+        );
+        let mut first = SPLIT as u64;
+        for frames in [41, 128, 128] {
+            let expected = render(&mut original, first, frames, &[]);
+            let actual = render(&mut twin, first, frames, &[]);
+            for (channel, (e, a)) in [(&expected.0, &actual.0), (&expected.1, &actual.1)]
+                .into_iter()
+                .enumerate()
+            {
+                for (frame, (e, a)) in e.iter().zip(a).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        e.to_bits(),
+                        "channel {channel} frame {}: restored twin diverged",
+                        first as usize + frame
+                    );
+                }
+            }
+            first += frames as u64;
+        }
+        assert_eq!(snapshot(&twin), snapshot(&original));
+    }
+    /// #1278 D2a: a carried ramp is validated whole before anything is committed. Each row
+    /// rewrites one word of the left feedback ramp of a mid-ramp snapshot: a non-finite step, a
+    /// `remaining` past the 64-sample ramp, a step whose remaining path leaves the domain, and a
+    /// settled ramp that still carries a step. Each must be refused with the effect unchanged. Red
+    /// when `read_carried_ramp` drops its `ramp_path_within` clause, which every other delay test
+    /// survives.
+    #[test]
+    fn a_carried_ramp_is_refused_unless_its_whole_path_is_valid() {
+        let values = initial_values();
+        let mut effect = prepare(&values);
+        let mut left = [0.25_f32; 23];
+        let mut right = [-0.125_f32; 23];
+        effect.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                0,
+                &[point(1, ParameterChannel::Left, 0, 0.9)],
+                128,
+            )
+            .expect("block"),
+        );
+        assert!(
+            effect.left.ramps[0].is_ramping(),
+            "the feedback ramp is in flight"
+        );
+        let valid = snapshot(&effect);
+        let word = LANE_RAMP_WORD;
+        let rows: [(&str, usize, u32); 7] = [
+            ("NaN step", word + 2, f32::NAN.to_bits()),
+            ("infinite step", word + 2, f32::INFINITY.to_bits()),
+            ("remaining 65", word + 3, RAMP_SAMPLES + 1),
+            ("remaining u32::MAX", word + 3, u32::MAX),
+            ("path past the domain", word + 2, 0.1_f32.to_bits()),
+            (
+                "path past the domain, downward",
+                word + 2,
+                (-0.1_f32).to_bits(),
+            ),
+            ("settled with a step", usize::MAX, 0),
+        ];
+        for (row, index, bits) in rows {
+            let mut invalid = valid.1.clone();
+            if index == usize::MAX {
+                write_f32(&mut invalid, word, 0.5);
+                write_f32(&mut invalid, word + 1, 0.5);
+                write_f32(&mut invalid, word + 2, 1.0e-3);
+                write_u32(&mut invalid, word + 3, 0);
+            } else {
+                write_u32(&mut invalid, index, bits);
+            }
+            let refused = effect.restore_state_payload(
+                1,
+                StatePayloadInput::new(&valid.0, &invalid, &valid.2, effect.metadata.state_sizes)
+                    .expect("payload shape"),
+            );
+            assert_eq!(
+                refused.map_err(|error| error.code),
+                Err("effect.state.parameter"),
+                "{row}"
+            );
+            assert_eq!(
+                snapshot(&effect),
+                valid,
+                "{row}: a refused restore wrote state"
+            );
+        }
     }
 }

@@ -501,63 +501,82 @@ fn live_fader_mute_and_pan_edits_change_the_running_plan_bit_exactly() {
     }
 }
 
-/// Gate 2: a live mute is in the committed model, so a later rebuild keeps it.
-fn persistence_run(live_mute: bool) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+/// How gate 2's run mutes every other track.
+#[derive(Clone, Copy, PartialEq)]
+enum Mute {
+    /// Live, one block before the rebuild.
+    Live,
+    /// In the rebuild's own transaction.
+    Baked,
+    /// Never.
+    Unmuted,
+}
+
+/// Gate 2 run: three blocks, every other track muted per `mute`, one more block, then a content
+/// edit rebuilds; the swap, a seek, and six blocks, which it returns. Every run feeds the same
+/// source over the same blocks and swaps at the same block, so whatever the swap carries (the
+/// strip input sections, #1276) is the same in every run, and the rebuilt blocks differ only by
+/// what the successor was prepared from.
+fn persistence_run(mute: Mute) -> Vec<Vec<f32>> {
     let document = long_session(10, 48_000);
     let mut rig = Rig::new(&document);
     let model = parse_session_json(&document).expect("model");
+    let muted: Vec<SessionEdit> = mute_all(&model, true).into_iter().step_by(2).collect();
     for _ in 0..3 {
         rig.step();
     }
-    if live_mute {
-        assert_eq!(rig.apply(&mute_all(&model, true)), crate::RESULT_OK);
-        assert_eq!(rig.summary().3, 0, "the mute is live");
-        let committed = rig.model();
-        assert!(
-            committed
-                .tracks
-                .iter()
-                .all(|track| track.fader.left_mute && track.fader.right_mute),
-            "SessionSnapshotGet returns the live mute"
-        );
-        rig.step();
+    let mut structural = vec![content_edit(&model)];
+    match mute {
+        Mute::Live => {
+            assert_eq!(rig.apply(&muted), crate::RESULT_OK);
+            assert_eq!(rig.summary().3, 0, "the mute is live");
+            let committed = rig.model();
+            assert!(
+                committed.tracks.iter().enumerate().all(|(index, track)| {
+                    track.fader.left_mute == (index % 2 == 0)
+                        && track.fader.right_mute == (index % 2 == 0)
+                }),
+                "SessionSnapshotGet returns the live mute"
+            );
+        }
+        Mute::Baked => structural.extend(muted),
+        Mute::Unmuted => {}
     }
-    assert_eq!(rig.apply(&[content_edit(&model)]), crate::RESULT_OK);
+    rig.step();
+    assert_eq!(rig.apply(&structural), crate::RESULT_OK);
     assert_eq!(rig.summary().3, 1, "a content edit prepares a candidate");
-    let snapshot = rig.snapshot();
-    // The render call swaps the candidate in; its fresh rings then wait for a seek.
+    // The render call swaps the candidate in; its fresh ring then waits for a seek.
     rig.render();
     rig.seek_to_start();
-    let rebuilt: Vec<_> = (0..6).map(|_| rig.step()).collect();
-    (rebuilt, Reference::run(&snapshot, 6))
+    let rebuilt = (0..6).map(|_| rig.step()).collect();
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(rig.plan),
+        (1, 0),
+        "the swap carried the input sections, so a fresh compile is no oracle"
+    );
+    rebuilt
 }
 
+/// Gate 2: a live mute is in the committed model, so a later rebuild keeps it. Red if the plan a
+/// later rebuild prepares does not follow the committed live mute (it renders like the unmuted
+/// run, or unlike a rebuild that bakes the mute into its own transaction from the same history).
 #[test]
 fn a_live_mute_survives_a_later_rebuild() {
-    let (rebuilt, reference) = persistence_run(true);
+    let blocks = |run: Vec<Vec<f32>>| run.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>();
+    let live = blocks(persistence_run(Mute::Live));
+    let baked = blocks(persistence_run(Mute::Baked));
+    let unmuted = blocks(persistence_run(Mute::Unmuted));
     assert_eq!(
-        rebuilt.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
-        reference.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
-        "the rebuilt plan renders the final snapshot"
+        live, baked,
+        "the rebuild after a live mute renders like a rebuild that bakes it"
     );
     assert!(
-        rebuilt.iter().flatten().all(|sample| *sample == 0.0),
-        "the rebuilt plan is muted"
+        live.iter()
+            .flatten()
+            .any(|&sample| f32::from_bits(sample) != 0.0),
+        "the unmuted half plays"
     );
-
-    let (control, control_reference) = persistence_run(false);
-    assert_eq!(
-        control.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
-        control_reference
-            .iter()
-            .map(|pcm| bits(pcm))
-            .collect::<Vec<_>>(),
-        "the control rebuild renders its snapshot"
-    );
-    assert!(
-        control.iter().flatten().any(|sample| *sample != 0.0),
-        "without the live mute the rebuild carries signal"
-    );
+    assert_ne!(live, unmuted, "the mute is audible after the rebuild");
 }
 
 fn left_db_edit(track_id: &str, left_db: f32) -> SessionEdit {
@@ -758,22 +777,27 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     assert_eq!(rig.room(Epoch::Pending, "eq3"), (depth - 3, depth - 1));
     assert_eq!(rig.room(Epoch::Current, "eq3"), (depth, depth));
 
-    let snapshot = rig.snapshot();
     rig.render();
     rig.seek_to_start();
-    // The candidate ramps its pan from its prepared value; the reference starts at the target.
+    // The candidate ramps its pan from its prepared value; the control starts at the target.
     let k = window(rig.latency(), 8, rig.quantum);
     let blocks = k + 3;
     let rendered: Vec<_> = (0..blocks).map(|_| rig.step()).collect();
-    let reference = Reference::run(&snapshot, blocks);
-    let unedited = Reference::run(
-        &{
-            let mut model = model.clone();
-            model.sources[0] = parse_session_json(&snapshot).expect("final").sources[0].clone();
-            session::canonical_session_json(&model).expect("pre-edit candidate")
-        },
-        blocks,
-    );
+    // The controls take the same rebuild from the same history, so they carry what the candidate
+    // carried (#1276); one bakes the edits into the rebuild's transaction, one leaves them out.
+    let control = |baked: &[SessionEdit]| {
+        let mut control = Rig::new(&document);
+        control.step();
+        let mut structural = vec![content_edit(&model)];
+        structural.extend_from_slice(baked);
+        assert_eq!(control.apply(&structural), crate::RESULT_OK);
+        assert_eq!(control.summary().3, 1, "the control rebuilds");
+        control.render();
+        control.seek_to_start();
+        (0..blocks).map(|_| control.step()).collect::<Vec<_>>()
+    };
+    let reference = control(&edits);
+    let unedited = control(&[]);
     let mut differs = false;
     for block in k as usize..blocks as usize {
         let expected = &reference[block];
@@ -789,6 +813,130 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
         differs,
         "the edit is audible against the candidate's own values"
     );
+}
+
+/// A live fader edit beside a C ABI structural transaction whose successor carries the source
+/// ring (#1053 merged into #1269): one track of a stateless session at 0 dB goes to -6 dB live,
+/// and a muted track whose ID sorts first is added (`add_muted_track`), with no render between.
+/// `live_first` sends the fader edit before the structural commit, so its record waits undrained
+/// in the running plan's queue at the swap; otherwise after it, while the successor is pending, so
+/// it reaches the successor's producer. From the swap block on, the plan renders -6 dB of the
+/// input, bit-identical to the committed session compiled fresh (a stateless strip carries
+/// nothing that a fresh plan does not start with) and fed the same source without a seek.
+fn live_fader_across_a_carrying_swap(live_first: bool) {
+    let label = if live_first {
+        "live first"
+    } else {
+        "live second"
+    };
+    let mut model = super::tests::stateless_session(48_000);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    model.sources[0].frames = SOURCE_FRAMES;
+    let fader = model.tracks[0].fader.clone();
+    assert_eq!((fader.left_db, fader.right_db), (0.0, 0.0));
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let structural = super::tests::add_muted_track(&model, "a-muted");
+    let live = [fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            ..fader
+        },
+    )];
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let mut rig = Rig::new(&document);
+    for _ in 0..4 {
+        rig.step();
+    }
+    let swap = rig.block;
+    if live_first {
+        assert_eq!(rig.apply(&live), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.summary().3, 0, "{label}: the fader edit is live");
+        assert!(rig.room(Epoch::Current, "eq0").0 < depth, "{label}");
+        assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.summary().3, 1, "{label}: the transaction rebuilds");
+        assert_eq!(
+            rig.room(Epoch::Pending, "eq0"),
+            (depth, depth),
+            "{label}: the successor bakes -6 dB and inherits no record"
+        );
+    } else {
+        assert_eq!(rig.apply(&structural), crate::RESULT_OK, "{label}");
+        assert_eq!(rig.summary().3, 1, "{label}: the transaction rebuilds");
+        assert_eq!(
+            rig.apply(&live),
+            crate::RESULT_OK,
+            "{label}: the live edit reaches the pending successor"
+        );
+        assert_eq!(rig.summary().3, 1, "{label}: still the one candidate");
+        assert!(rig.room(Epoch::Pending, "eq0").0 < depth, "{label}");
+        assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth), "{label}");
+    }
+    let committed = rig.model();
+    let track = committed
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == "eq0")
+        .expect("eq0");
+    assert_eq!(
+        (track.fader.left_db, track.fader.right_db),
+        (-6.0, -6.0),
+        "{label}: the readback is the live value"
+    );
+    let snapshot = rig.snapshot();
+    let rendered: Vec<_> = (0..4).map(|_| rig.step()).collect();
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(rig.plan),
+        (1, 0),
+        "{label}: one swap, and it carried the source ring"
+    );
+    let reference = Reference::run(&snapshot, rig.block);
+    let unity = Reference::run(&document, rig.block);
+    // 10^(-6 / 20).
+    let gain = 0.501_187_2_f32;
+    for (offset, pcm) in rendered.iter().enumerate() {
+        let block = (swap as usize) + offset;
+        assert_eq!(
+            bits(pcm),
+            bits(&reference[block]),
+            "{label}: block {block} renders the committed session"
+        );
+        // The fixture pans both lanes to one side, where they sum (and can nearly cancel); the
+        // other side holds a residue near 1e-20. Neither near-zero ratio says anything.
+        let mut audible = 0;
+        for (sample, unity) in pcm.iter().zip(&unity[block]) {
+            if unity.abs() < 1.0e-3 {
+                continue;
+            }
+            audible += 1;
+            assert!(
+                (sample / unity - gain).abs() < 1.0e-5,
+                "{label}: block {block} is -6 dB of the input: {sample} against {unity}"
+            );
+        }
+        assert!(
+            audible >= pcm.len() / 4,
+            "{label}: block {block} carries signal"
+        );
+    }
+}
+
+/// Red if a live fader edit committed while a carrying successor is pending is not applied from
+/// the successor's very first (swap) block: the pending-candidate test compares only later blocks,
+/// so a successor that skips its lane drain on the swap block is caught here alone.
+#[test]
+fn a_live_fader_after_a_carrying_structural_commit_reaches_the_successor() {
+    live_fader_across_a_carrying_swap(false);
+}
+
+/// Red if a live fader record still undrained in the retiring plan's queue at a carrying
+/// structural commit reaches the successor's queue (it must arrive only baked into the committed
+/// model the successor is prepared from), the "drain, then carry" rule #1277 D3 must keep.
+#[test]
+fn a_live_fader_left_undrained_before_a_carrying_structural_commit_is_baked() {
+    live_fader_across_a_carrying_swap(true);
 }
 
 fn assert_rebuilds(document: &str, edits: &[SessionEdit], label: &str) {
@@ -2568,22 +2716,47 @@ fn an_eq_bypass_and_targets_without_room_for_both_refuse_before_anything_changes
 /// #1266 gate 3, decision 14 F4. Red if the C ABI acks a multiband compressor bypass change, in
 /// either direction, on the running plan, which holds that bypass prepared and would never render
 /// it: the change prepares a new plan, and once it renders, its output follows the committed model.
+/// The oracle is a control that holds the committed bypass from the start and rebuilds through
+/// content edits on the same blocks, so it carries what the bypass rebuild carried (#1276).
 #[test]
 fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
-    let document = with_model(&long_session(10, 48_000), |model| {
-        let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
-        multiband.id = StableId::parse("mb").expect("multiband");
-        multiband.identity = session::EffectIdentity::Native {
-            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
-        };
-        multiband.params.clear();
-        multiband.bypass = false;
-        model.tracks[0].inserts.effects.push(multiband);
-    });
+    let with_bypass = |bypass: bool| {
+        with_model(&long_session(10, 48_000), |model| {
+            let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+            multiband.id = StableId::parse("mb").expect("multiband");
+            multiband.identity = session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
+            };
+            multiband.params.clear();
+            multiband.bypass = bypass;
+            model.tracks[0].inserts.effects.push(multiband);
+        })
+    };
+    let document = with_bypass(false);
+    // The blocks after the swap of `rebuilds` successive rebuilds, each one block, the swap, a
+    // seek and six blocks, by content edits from a document holding the multiband at `bypass`.
+    let control = |bypass: bool, rebuilds: u8| {
+        let document = with_bypass(bypass);
+        let model = parse_session_json(&document).expect("control model");
+        let mut control = Rig::new(&document);
+        control.step();
+        let mut rebuilt = Vec::new();
+        for tag in 0..rebuilds {
+            let mut edit = content_edit(&model);
+            if let SessionEdit::SetSourceContent { content, .. } = &mut edit {
+                *content = format!("blake3:{}", format!("{:02x}", 0xc0 + tag).repeat(32));
+            }
+            assert_eq!(control.apply(&[edit]), crate::RESULT_OK);
+            assert_eq!(control.summary().3, 1, "the control rebuilds");
+            control.render();
+            control.seek_to_start();
+            rebuilt = (0..6).map(|_| bits(&control.step())).collect::<Vec<_>>();
+        }
+        rebuilt
+    };
     let mut rig = Rig::new(&document);
     rig.step();
-    let mut previous = Reference::run(&document, 6);
-    for bypass in [true, false] {
+    for (rebuilds, bypass) in [(1, true), (2, false)] {
         let (revision, _, epoch, pending) = rig.summary();
         assert_eq!(pending, 0);
         assert_eq!(
@@ -2606,25 +2779,23 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
                 .bypass,
             bypass
         );
-        // The render call swaps the candidate in; its fresh rings then wait for a seek.
+        // The render call swaps the candidate in; the host then restarts the source.
         rig.render();
         rig.seek_to_start();
-        let rebuilt: Vec<_> = (0..6).map(|_| rig.step()).collect();
+        let rebuilt: Vec<_> = (0..6).map(|_| bits(&rig.step())).collect();
         let (_, _, swapped, pending) = rig.summary();
         assert_eq!(pending, 0, "bypass {bypass}: the candidate was taken");
         assert_ne!(swapped, epoch, "bypass {bypass}: a new epoch renders");
-        let reference = Reference::run(&snapshot, 6);
+        let reference = control(bypass, rebuilds);
         assert_eq!(
-            rebuilt.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
-            reference.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            rebuilt, reference,
             "bypass {bypass}: the rebuilt plan renders the committed model"
         );
         assert_ne!(
-            reference.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
-            previous.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            reference,
+            control(!bypass, rebuilds),
             "bypass {bypass}: the change is audible"
         );
-        previous = reference;
     }
 }
 

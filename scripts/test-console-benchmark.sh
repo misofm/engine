@@ -1789,6 +1789,101 @@ done
 rm -rf -- "$runner_tmp"
 trap - EXIT
 
+# ---------------------------------------------------------------------------------------------
+# #1289 (slice B1 of #1269): the browser rebuild-cost validator, `web-mixing-automation-benchmark.mjs
+# rebuild-validate`. The real validator on synthetic records; nothing is booted or timed. The base
+# pair is what `rebuild-run` writes: two measured rounds of four frozen documents, 25 boots each,
+# every summary the raw times' own. `resum` recomputes a document's summaries after an edit to its
+# raw times, so a case is refused by the rule it names and not by a stale p50.
+# ---------------------------------------------------------------------------------------------
+rebuild_tmp=$(mktemp -d)
+trap 'rm -rf -- "$rebuild_tmp"' EXIT
+rebuild_valid() {
+    printf '%s\n' "$1" >"$rebuild_tmp/records.jsonl"
+    node "$scripts_dir/web-mixing-automation-benchmark.mjs" rebuild-validate "$rebuild_tmp/records.jsonl" >/dev/null 2>&1
+}
+expect_rebuild_accept() {
+    if ! rebuild_valid "$1"; then printf 'expected rebuild accept: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+expect_rebuild_reject() {
+    if rebuild_valid "$1"; then printf 'expected rebuild reject: %s\n' "$2" >&2; failures=$((failures + 1)); fi
+}
+resum='def resum: .boot_p50_ns = (.boot_ns | sort | .[(((length * 50) + 99) / 100 | floor) - 1])
+    | .boot_max_ns = (.boot_ns | max) | .boot_min_ns = (.boot_ns | min);'
+rebuild_round=$(jq -cn --arg a "$digest_a" --arg commit "$commit_a" "$resum"'
+  def doc($kind; $fixture; $tracks; $base; $digit): {
+    workload_kind: $kind, fixture_id: $fixture, document_sha256: ($a[0:63] + $digit),
+    document_bytes: 14193, tracks: $tracks, observations: 25, booted: 25, failed_boots: 0,
+    audible_after_boot: 25, disposed: 25,
+    boot_ns: [range(25) | $base + ((. * 7) % 25) * 1000],
+    dispose_p50_ns: 30000, dispose_max_ns: 54000, peak_memory_bytes: 1835008} | resum;
+  {schema_version: 1, issue: 1289, record: "web_rebuild_cost", round: 1, module_sha256: $a,
+   module_matches_pin: false, node_version: "v22.23.2", v8_version: "12.4.254.21-node.56",
+   node_flags: ["--no-liftoff"], sample_rate_hz: 48000, quantum_frames: 128,
+   quantum_budget_ns: (128 * 1e9 / 48000), live_control_command_queue_records: 64,
+   source_ring_frames: 5120, observations_per_document: 25,
+   pairing: "four documents alternated per observation; a fresh instance per boot", units: "ns",
+   percentile_method: "nearest_rank",
+   documents: [
+     doc("nine_track_eq"; "fixtures/session/v1/parametric-eq-nine-track.json"; 9; 2600000; "1"),
+     doc("sixty_four_track_console"; "fixtures/session/v1/console-sixty-four-track.json"; 64; 23000000; "2"),
+     doc("sixty_four_track_app_shape"; "fixtures/session/v1/console-sixty-four-track-app.json"; 64; 23000000; "3"),
+     doc("sixty_four_track_console_sends"; "fixtures/session/v1/console-sixty-four-track-sends.json"; 64; 38000000; "4")],
+   loadavg_start: "0.01 0.02 0.00 1/1 1", loadavg_end: "0.01 0.02 0.00 1/1 1", descriptive_only: true,
+   candidate_commit: $commit, prepared_commit: $commit,
+   measurement_control: "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived loadavg_above_ceiling; loadavg 28.07; affinity cpu 31",
+   cpu_affinity: "31"}')
+rebuild_pair=$(printf '%s' "$rebuild_round" | jq -c '., (.round = 2)')
+# One edit applied to both rounds, so only a per-record rule can refuse it.
+rebuild_mutation() { expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s "$resum map($1) | .[]")" "$2"; }
+# One edit applied to round two only, which only the cross-round rule can refuse.
+rebuild_round_mutation() { expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s "$resum .[1] |= ($1) | .[]")" "$2"; }
+
+expect_rebuild_accept "$rebuild_pair" 'the two measured rebuild rounds'
+# The protocol: exactly rounds 1 and 2, the warmup discarded.
+expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s '.[0]')" 'one measured rebuild round'
+expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s '[.[0] | .round = 0] + . | .[]')" 'the warmup kept beside two rounds'
+expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s '.[0].round = 0 | .[1].round = 1 | .[]')" 'the warmup published as round one'
+expect_rebuild_reject "$(printf '%s\n' "$rebuild_pair" | jq -c -s '.[1].round = 1 | .[]')" 'two rebuild records of round one'
+# Gate 2: a failed or silent boot is fast because it returns early; the record must refuse it.
+rebuild_mutation '.documents[2] |= (.failed_boots = 1 | .booted = 24 | .audible_after_boot = 24 | .disposed = 24 | .boot_ns[0] = 1200 | resum)' \
+    'a failed boot timed at 1.2 us'
+rebuild_mutation '.documents[3].audible_after_boot = 24' 'a boot that rendered silence'
+rebuild_mutation 'del(.documents[0].failed_boots)' 'a document that does not count its failed boots'
+rebuild_mutation '.documents[1].disposed = 24' 'a dispose that failed'
+# Gate 2: all four documents, in the frozen order, each from its frozen fixture.
+rebuild_mutation '.documents |= .[0:3]' 'a round without the bus-and-send document'
+rebuild_mutation '.documents |= [.[1], .[0], .[2], .[3]]' 'documents in another order'
+rebuild_mutation '.documents |= . + [.[0]]' 'a fifth document'
+rebuild_mutation '.documents[1] |= (.fixture_id = "fixtures/session/v1/parametric-eq-nine-track.json" | .tracks = 9)' \
+    'the sixty-four-track console booted from the nine-track fixture'
+rebuild_mutation '.documents[2].tracks = 16' 'an app shape that is not sixty-four tracks'
+rebuild_mutation '.documents[0].document_sha256 = "x"' 'a document digest that is not a digest'
+# The observations, and the summaries the report prints from them.
+rebuild_mutation '.documents[1] |= (.boot_ns |= .[0:24] | .observations = 24 | .booted = 24 | .audible_after_boot = 24 | .disposed = 24 | resum)' \
+    'a short round'
+rebuild_mutation '.observations_per_document = 0' 'a round that states no observations per document'
+rebuild_mutation '.documents[0] |= (.boot_ns[3] = 0 | resum)' 'a zero boot time'
+rebuild_mutation '.documents[0] |= (.boot_ns[3] = 2600000.5 | resum)' 'a fractional boot time'
+rebuild_mutation '.documents[3].boot_p50_ns = 1000' 'a p50 that is not the raw times'"'"' own'
+rebuild_mutation '.documents[3].boot_max_ns += 1' 'a max that is not the raw times'"'"' own'
+rebuild_mutation '.documents[3].boot_min_ns -= 1' 'a min that is not the raw times'"'"' own'
+rebuild_mutation '.documents[2].dispose_p50_ns = 60000' 'a dispose p50 above its max'
+rebuild_mutation '.documents[2].dispose_p50_ns = null' 'a dispose that was never timed'
+rebuild_mutation 'del(.documents[0].peak_memory_bytes)' 'a document with no peak memory'
+# The frozen workload and the run's admissibility.
+rebuild_mutation '.quantum_frames = 256' 'a round in another quantum'
+rebuild_mutation 'del(.measurement_control)' 'a round that does not state its control'
+rebuild_mutation '.measurement_control = " "' 'a round with a blank control statement'
+rebuild_mutation '.schema_version = 2' 'a record of another schema'
+# Across the rounds: one module, one commit, the same documents.
+rebuild_round_mutation '.module_sha256 = "'"$digest_b"'"' 'rebuild rounds of two modules'
+rebuild_round_mutation '.candidate_commit = "'"$commit_b"'"' 'rebuild rounds at two commits'
+rebuild_round_mutation '.prepared_commit = "'"$commit_b"'"' 'rebuild rounds of two prepares'
+rebuild_round_mutation '.documents[2].document_sha256 = "'"$digest_c"'"' 'rebuild rounds that booted two app-shape documents'
+rm -rf -- "$rebuild_tmp"
+trap - EXIT
+
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2
     exit 1

@@ -49,7 +49,7 @@ fn request_configured<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 176,
+            maximum_total_state_bytes: 296,
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },
@@ -348,7 +348,7 @@ fn mono_reopen_drives_the_next_render_from_the_copied_state() {
         support::restore_track(
             reopened.as_mut(),
             track as u32,
-            1,
+            support::STATE_VERSION,
             &uniform_left,
             &ragged_right,
             sizes.as_ref(),
@@ -357,7 +357,7 @@ fn mono_reopen_drives_the_next_render_from_the_copied_state() {
         support::restore_track(
             oracle.as_mut(),
             track as u32,
-            1,
+            support::STATE_VERSION,
             &uniform_left,
             &uniform_right,
             sizes.as_ref(),

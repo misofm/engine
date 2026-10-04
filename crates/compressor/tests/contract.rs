@@ -23,7 +23,8 @@ use support::{
 /// Descriptor rows, latency, payload sizes, scratch and the resource envelope are frozen.
 ///
 /// Red mutation: `scratch_fixed_bytes: 0` or `STATE_HEADER_WORDS = 26` — RED here, which is the
-/// point: the causal resource envelope and exact 22-word channel payload are both contract data.
+/// point: the causal resource envelope and exact 37-word channel payload (#1278) are
+/// both contract data.
 #[test]
 fn descriptor_rows_and_resource_envelope_are_frozen() {
     validate_descriptor(&COMPRESSOR_DESCRIPTOR).expect("descriptor");
@@ -32,10 +33,10 @@ fn descriptor_rows_and_resource_envelope_are_frozen() {
     assert_eq!(COMPRESSOR_PARAMETERS.len(), PARAMETER_COUNT);
     for (quality, (rate, latency, lane_bytes, total_bytes)) in
         COMPRESSOR_DESCRIPTOR.qualities.iter().zip([
-            (44_100_u32, 0_u64, 88_u32, 176_u64),
-            (48_000, 0, 88, 176),
-            (88_200, 0, 88, 176),
-            (96_000, 0, 88, 176),
+            (44_100_u32, 0_u64, 148_u32, 296_u64),
+            (48_000, 0, 148, 296),
+            (88_200, 0, 148, 296),
+            (96_000, 0, 148, 296),
         ])
     {
         assert_eq!(quality.sample_rate, rate);

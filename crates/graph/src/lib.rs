@@ -217,8 +217,9 @@ use effect_contract::{
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::realtime::{
-    BufferArena, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor,
-    PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError, ResponseSnapshotSink,
+    BufferArena, CarryOutcome, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan,
+    PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError,
+    ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -1284,6 +1285,57 @@ pub type BuiltinPairFactory = fn(
 pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     fn as_any(&self) -> &dyn Any;
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
+    /// This processor as mutable `Any`, so [`Self::adopt_input_lane`] can downcast a predecessor
+    /// processor to its own concrete type at a plan swap (issue #1276 D3). `None` (the default)
+    /// offers nothing.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+    /// How many populated input-section lanes this bank can hand over or take at a plan swap
+    /// (issue #1276), or `None` (the default) for a bank whose lanes do not carry. Read off the
+    /// render thread, when a carry program is installed.
+    fn carried_input_lanes(&self) -> Option<usize> {
+        None
+    }
+    /// Whether [`Self::adopt_input_lane`] would take `predecessor`'s lane `predecessor_lane` into
+    /// this bank's lane `lane`: both banks carry input lanes, are of one concrete type and width,
+    /// and both lanes are populated. `false` (the default) takes nothing. Render-thread code:
+    /// allocation-free and bounded.
+    fn can_adopt_input_lane(
+        &self,
+        lane: usize,
+        predecessor: &dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        let _ = (lane, predecessor, predecessor_lane);
+        false
+    }
+    /// Copy `predecessor`'s lane `predecessor_lane` -- its whole input-section state and its live
+    /// channel-symmetry terms -- into this bank's lane `lane`, at the swap block (issue #1276
+    /// D2). The caller has drained `predecessor`'s live queues first
+    /// ([`Self::drain_for_carry`]). `false` (the default) copies nothing. Render-thread code:
+    /// allocation-free and bounded.
+    fn adopt_input_lane(
+        &mut self,
+        lane: usize,
+        predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        let _ = (lane, predecessor, predecessor_lane);
+        false
+    }
+    /// Apply every live-control record waiting at entry to lane state, exactly as
+    /// [`Self::begin_block`] would at the next block, before a plan swap exports this bank's
+    /// lanes (issue #1276 D4). A record drained here takes effect on the successor's first
+    /// sample, the sample it would have reached without the swap.
+    ///
+    /// Every record present at entry is consumed: one whose apply is refused is counted and the
+    /// drain goes on, so no later record of the lane or the bank stays behind in a queue that
+    /// never renders again. Returns the refused count, which admission validation makes zero.
+    /// The default drains nothing and returns zero.
+    fn drain_for_carry(&mut self) -> usize {
+        0
+    }
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::Concurrent
@@ -2148,6 +2200,35 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn played_planes(&self, _claim_index: usize) -> Option<(&[f32], &[f32])> {
         None
     }
+    /// This driver as `Any`, so a successor's [`Self::adopt_sources`] can downcast its
+    /// predecessor to the concrete type it knows how to take sources from. `None` (the default)
+    /// offers nothing.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+    /// Whether source `source_index` is vacant (bound with no ring, waiting for a carried one),
+    /// or `None` when the index is out of range or the driver has no vacancy concept (the
+    /// default). Read off the render thread, by [`install_carry_program`].
+    fn source_vacancy(&self, _source_index: usize) -> Option<bool> {
+        None
+    }
+    /// Sources bound vacant, counted apart from the resource report (they charge no PCM payload
+    /// and no ring overhead).
+    fn vacant_source_count(&self) -> usize {
+        0
+    }
+    /// Take sources from the predecessor's driver at the swap block: for each `(successor
+    /// index, predecessor index)` move the predecessor's source into this driver's vacant entry,
+    /// leaving the predecessor's entry vacant. All or nothing: `false` (the default) moves
+    /// nothing. Render-thread code: no allocation, free, lock or syscall, bounded by
+    /// `moves.len()`.
+    fn adopt_sources(
+        &mut self,
+        _predecessor: &mut dyn GraphPreparedSourceSetDriver,
+        _moves: &[(u32, u32)],
+    ) -> bool {
+        false
+    }
 }
 
 /// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
@@ -2240,6 +2321,14 @@ impl GraphPreparedSourceSet {
     /// Copy bounded render-owner telemetry only after the prepared plan is disarmed.
     pub fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
         self.driver.copy_after_disarm_telemetry(output)
+    }
+
+    /// Sources bound vacant: no ring until a [`GraphCarryProgram`] moves one in at the swap
+    /// block. They are counted here, apart from [`Self::resource_report`], which charges them
+    /// no PCM payload and no ring overhead.
+    #[must_use]
+    pub fn vacant_source_count(&self) -> usize {
+        self.driver.vacant_source_count()
     }
 }
 
@@ -2639,6 +2728,202 @@ struct GraphExecutor {
     /// at bind; the inert units stay in `runtime.units`, so the census, `unit_eligibility` and
     /// every walk over the units still see them.
     active_units: Box<[u32]>,
+    /// Process-unique, nonzero identity taken at bind ([`plan_identity`]): what a successor's
+    /// [`GraphCarryProgram::predecessor`] names. Every host passes the same `plan_id`, so the
+    /// plan id cannot tell two plans apart.
+    identity: u64,
+    /// The hand-over a successor runs at its swap block, installed before publication.
+    carry: Option<GraphCarryProgram>,
+    /// The builtin-input section of the hand-over (issue #1276 D6), sorted by predecessor
+    /// location; empty (and never allocated) when no strip input section carries.
+    carry_inputs: Box<[GraphLaneMove]>,
+}
+
+/// Next graph executor identity; identities start at 1, so zero never names a plan.
+static NEXT_GRAPH_IDENTITY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Take a fresh process-unique identity, at bind (off the render thread).
+fn next_graph_identity() -> u64 {
+    NEXT_GRAPH_IDENTITY.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a successor graph plan takes from the plan it displaces, at the swap block.
+///
+/// `sources` lists `(successor source index, predecessor source index)` pairs: each moves the
+/// predecessor's source consumer (ring, queued blocks, generation, read position and pending
+/// generation change) into the successor's vacant entry. The move happens only when the
+/// displaced plan is the graph plan whose identity is `predecessor`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphCarryProgram {
+    /// [`plan_identity`] of the plan this successor is built to displace.
+    pub predecessor: u64,
+    /// `(successor source index, predecessor source index)` pairs.
+    pub sources: Box<[(u32, u32)]>,
+}
+
+impl GraphCarryProgram {
+    /// Heap bytes the installed program retains in its plan (its move table), charged to the
+    /// plan by [`carry_program_retained_bytes`].
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(core::mem::size_of_val::<[(u32, u32)]>(&self.sources)).unwrap_or(u64::MAX)
+    }
+}
+
+/// Refusal to install a [`GraphCarryProgram`], off the render thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphCarryInstallError {
+    /// The plan was not bound by this crate.
+    NotAGraphPlan,
+    /// The plan has no source set to carry sources into.
+    NoSourceSet,
+    /// A successor source index is beyond the plan's source set.
+    SourceIndexOutOfRange,
+    /// A successor source index already owns a ring.
+    SourceNotVacant,
+    /// A successor or predecessor source index appears twice.
+    DuplicateSourceIndex,
+    /// A builtin-input carry was installed before the plan's [`GraphCarryProgram`], which names
+    /// the predecessor.
+    NoCarryProgram,
+    /// A successor location is not a populated lane of a builtin bank whose input lanes carry.
+    InputLaneOutOfRange,
+    /// A successor or predecessor input lane appears twice.
+    DuplicateInputLane,
+}
+
+/// Where one builtin bank lane sits in a bound graph plan: its runtime unit, its bank chain slot
+/// and its lane (issue #1276 D6). Valid only for the plan it was read from.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GraphLaneLocation {
+    /// The runtime unit (a bank chain).
+    pub unit: u32,
+    /// The chain slot.
+    pub slot: u16,
+    /// The bank lane.
+    pub lane: u16,
+}
+
+/// One strip input section a successor takes from its predecessor at the swap block: the lane
+/// state of `predecessor` in the displaced plan is copied into `successor` (issue #1276 D6).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphLaneMove {
+    /// The lane in the successor, the plan the move is installed in.
+    pub successor: GraphLaneLocation,
+    /// The lane in the plan the successor displaces.
+    pub predecessor: GraphLaneLocation,
+}
+
+/// Every banked strip input section of a bound graph plan, as `(strip ID, location)` pairs in
+/// program order (issue #1276 D6); `None` for any other plan. Read off the render thread, before
+/// publication: a successor's preparation joins its own lanes with its predecessor's (recorded
+/// when that plan was prepared) by strip ID, never by location.
+pub fn builtin_input_lanes(
+    plan: &mut PreparedRenderPlan,
+) -> Option<Vec<(Box<str>, GraphLaneLocation)>> {
+    let executor = plan.executor_any_mut()?.downcast_mut::<GraphExecutor>()?;
+    Some(executor.runtime.builtin_input_lanes())
+}
+
+/// Install the builtin-input section of the hand-over this graph plan runs when it displaces its
+/// predecessor (issue #1276 D6), after its [`GraphCarryProgram`], which names that predecessor.
+///
+/// Refused, leaving any earlier section in place, when the plan is not a graph plan, has no carry
+/// program, a successor location is not a populated lane of a builtin bank whose input lanes
+/// carry, or a successor or predecessor location repeats. Predecessor locations are checked
+/// against the predecessor at the swap block, where one that does not resolve refuses the whole
+/// hand-over. The moves are kept sorted by predecessor location, so the swap block drains each
+/// predecessor bank once.
+pub fn install_builtin_input_carry(
+    plan: &mut PreparedRenderPlan,
+    mut moves: Vec<GraphLaneMove>,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    if executor.carry.is_none() {
+        return Err(GraphCarryInstallError::NoCarryProgram);
+    }
+    for (index, step) in moves.iter().enumerate() {
+        if !executor.runtime.has_input_lane(step.successor) {
+            return Err(GraphCarryInstallError::InputLaneOutOfRange);
+        }
+        if moves[..index].iter().any(|earlier| {
+            earlier.successor == step.successor || earlier.predecessor == step.predecessor
+        }) {
+            return Err(GraphCarryInstallError::DuplicateInputLane);
+        }
+    }
+    moves.sort_unstable_by_key(|step| step.predecessor);
+    executor.carry_inputs = moves.into_boxed_slice();
+    Ok(())
+}
+
+/// The process-unique identity of a graph plan, taken at bind; `None` for any other plan.
+pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    plan.executor_any_mut()?
+        .downcast_mut::<GraphExecutor>()
+        .map(|executor| executor.identity)
+}
+
+/// Install the hand-over this graph plan runs when it displaces its predecessor.
+///
+/// Call it before publication. Refused, leaving any earlier program in place, when the plan is
+/// not a graph plan, has no source set, or a successor index is out of range, not vacant or
+/// repeated, or a predecessor index is repeated. Predecessor indices are checked against the
+/// predecessor at the swap block, where an out-of-range index refuses the whole move.
+pub fn install_carry_program(
+    plan: &mut PreparedRenderPlan,
+    program: GraphCarryProgram,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    // A program that moves no source needs no source set (issue #1276: a plan may carry only
+    // strip state).
+    let set = match executor.source_set.as_ref() {
+        Some(set) => Some(set),
+        None if program.sources.is_empty() => None,
+        None => return Err(GraphCarryInstallError::NoSourceSet),
+    };
+    for (index, &(successor, predecessor)) in program.sources.iter().enumerate() {
+        let Some(set) = set else {
+            return Err(GraphCarryInstallError::NoSourceSet);
+        };
+        match set.driver.source_vacancy(successor as usize) {
+            None => return Err(GraphCarryInstallError::SourceIndexOutOfRange),
+            Some(false) => return Err(GraphCarryInstallError::SourceNotVacant),
+            Some(true) => {}
+        }
+        if program.sources[..index]
+            .iter()
+            .any(|&(s, p)| s == successor || p == predecessor)
+        {
+            return Err(GraphCarryInstallError::DuplicateSourceIndex);
+        }
+    }
+    executor.carry = Some(program);
+    Ok(())
+}
+
+/// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
+/// any other plan.
+pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .map_or(0, |executor| {
+            let sources = executor
+                .carry
+                .as_ref()
+                .map_or(0, GraphCarryProgram::retained_bytes);
+            let inputs = u64::try_from(core::mem::size_of_val::<[GraphLaneMove]>(
+                &executor.carry_inputs,
+            ))
+            .unwrap_or(u64::MAX);
+            sources.saturating_add(inputs)
+        })
 }
 
 /// Bytes of one entry of each executor table sized at bind (issue #936): `(active_units,
@@ -2719,6 +3004,9 @@ struct GraphExecutorWithoutSplitPairTable {
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
     active_units: Box<[u32]>,
+    identity: u64,
+    carry: Option<GraphCarryProgram>,
+    carry_inputs: Box<[GraphLaneMove]>,
 }
 
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
@@ -2826,11 +3114,69 @@ impl GraphExecutor {
             source_set,
             source_input_buffers,
             active_units,
+            identity: next_graph_identity(),
+            carry: None,
+            carry_inputs: Box::default(),
         }
     }
 }
 
 impl PreparedPlanExecutor for GraphExecutor {
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        Some(self)
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
+    /// plan, and copy the strip input lanes [`install_builtin_input_carry`] names (issue #1276),
+    /// at the swap block: a bounded series of swaps and fixed-size lane copies, nothing allocated
+    /// or freed.
+    ///
+    /// No program, or a predecessor that is not a graph plan, takes nothing (`NotRequested`). A
+    /// predecessor of another identity, an input lane that does not resolve on either side, a
+    /// source set missing on either side, or a driver that refuses the moves takes nothing and
+    /// reports `PredecessorMismatch`.
+    fn adopt_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
+        let Some(program) = self.carry.as_ref() else {
+            return CarryOutcome::NotRequested;
+        };
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            // A program asks for state; a predecessor that is not a graph plan has none to give.
+            return CarryOutcome::PredecessorMismatch;
+        };
+        if predecessor.identity != program.predecessor {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        // Issue #1276: every builtin-input move must resolve before anything moves, so a refused
+        // hand-over moves nothing at all.
+        if !self
+            .runtime
+            .can_carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs)
+        {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        if !program.sources.is_empty() {
+            let (Some(successor_set), Some(predecessor_set)) =
+                (self.source_set.as_mut(), predecessor.source_set.as_mut())
+            else {
+                return CarryOutcome::PredecessorMismatch;
+            };
+            if !successor_set
+                .driver
+                .adopt_sources(&mut *predecessor_set.driver, &program.sources)
+            {
+                return CarryOutcome::PredecessorMismatch;
+            }
+        }
+        self.runtime
+            .carry_input_lanes(&mut predecessor.runtime, &self.carry_inputs);
+        CarryOutcome::Carried
+    }
+    // REALTIME_POLICY_END
+
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
         self.source_set
             .as_ref()
@@ -2891,6 +3237,9 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
             active_units,
+            identity: _,
+            carry: _,
+            carry_inputs: _,
         } = self;
         #[cfg(any(test, feature = "test-support"))]
         let mut probe = test_only_phase_profile::Probe::start();
