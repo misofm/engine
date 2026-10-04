@@ -3144,7 +3144,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             .as_any_mut()
             .and_then(|any| any.downcast_mut::<Self>())
         else {
-            return CarryOutcome::NotRequested;
+            // A program asks for state; a predecessor that is not a graph plan has none to give.
+            return CarryOutcome::PredecessorMismatch;
         };
         if predecessor.identity != program.predecessor {
             return CarryOutcome::PredecessorMismatch;

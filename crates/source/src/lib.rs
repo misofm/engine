@@ -3581,8 +3581,16 @@ mod tests {
 
         /// Bind a graph plan over `source`, observing the output's source facts into `validity`.
         fn bind(source: SourceGraphSource, validity: &Arc<AtomicU8>) -> PreparedRenderPlan {
-            let set =
-                prepare_graph_source_set(envelope(), vec![source], mappings()).expect("source set");
+            bind_with(vec![source], mappings(), validity)
+        }
+
+        /// Bind a graph plan over `sources` read through `mappings`.
+        fn bind_with(
+            sources: Vec<SourceGraphSource>,
+            mappings: Vec<SourceGraphTrackMapping>,
+            validity: &Arc<AtomicU8>,
+        ) -> PreparedRenderPlan {
+            let set = prepare_graph_source_set(envelope(), sources, mappings).expect("source set");
             let bindings = GraphRuntimeBindings {
                 envelope: envelope(),
                 nodes: vec![graph::GraphNodeBinding::new(output(), Box::new(Noop))],
@@ -3918,6 +3926,235 @@ mod tests {
                 ),
                 Err(SourceGraphSourceSetError::ChannelIndex)
             ));
+        }
+
+        /// Claim `a` reads source 0 and claim `b` reads source 1, both as `(0, 1)`.
+        fn two_source_mappings() -> Vec<SourceGraphTrackMapping> {
+            let [a, b] = inputs();
+            vec![
+                SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+                SourceGraphTrackMapping {
+                    node: b,
+                    source_index: 1,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+            ]
+        }
+
+        fn silence() -> Block {
+            [0.0_f32.to_bits(); 2 * FRAMES as usize]
+        }
+
+        /// Follow-up MINOR 1. Red if the swap block checks and moves one source at a time: a
+        /// valid first move would land before the second is refused, so a carry reported as a
+        /// mismatch would still play source 0.
+        #[test]
+        fn a_refused_second_move_moves_nothing() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_first, first) = filled_source();
+            let (_second, second) = filled_source();
+            let mut predecessor = bind_with(vec![first, second], two_source_mappings(), &validity);
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
+                two_source_mappings(),
+                &validity,
+            );
+            graph::install_carry_program(
+                &mut successor,
+                GraphCarryProgram {
+                    predecessor: identity,
+                    sources: vec![(0, 0), (1, 5)].into_boxed_slice(),
+                },
+            )
+            .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+        }
+
+        /// Follow-up MINOR 2. Red if install checks only the successor index for repeats: two
+        /// moves from one predecessor source would both pass the swap-block check, the second
+        /// swap would trade two vacancies, and the carry would report success with successor
+        /// source 1 silent.
+        #[test]
+        fn install_refuses_a_repeated_predecessor_index() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2), SourceGraphSource::vacant(2)],
+                two_source_mappings(),
+                &validity,
+            );
+            assert_eq!(
+                graph::install_carry_program(
+                    &mut successor,
+                    GraphCarryProgram {
+                        predecessor: 1,
+                        sources: vec![(0, 0), (1, 0)].into_boxed_slice(),
+                    },
+                ),
+                Err(GraphCarryInstallError::DuplicateSourceIndex)
+            );
+        }
+
+        /// Follow-up MINOR 3 and NIT. Red if a vacant claim leaves the caller's buffers as they
+        /// were (a reused input buffer would replay stale audio) or a vacant entry accepts a seek.
+        #[test]
+        fn a_vacant_claim_writes_positive_zero_over_dirty_buffers_and_refuses_seek() {
+            let [a, _] = inputs();
+            let mut driver = SourceGraphSourceSetDriver {
+                sources: vec![GraphSourceEntry {
+                    consumer: None,
+                    channel_count: 2,
+                }]
+                .into_boxed_slice(),
+                mappings: vec![SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                }]
+                .into_boxed_slice(),
+                quantum_frames: FRAMES,
+                block_validity: GraphObservationValidity::CLEAR,
+                pending_generation_change: false,
+            };
+            assert!(!driver.can_prepare_source_seek(0));
+            assert!(!driver.prepare_source_seek(0, 2, 0));
+            driver.begin_block(0, FRAMES).expect("begin");
+            let mut left = [f32::NAN; FRAMES as usize];
+            let mut right = [-1.0_f32; FRAMES as usize];
+            driver
+                .copy_track_input(0, &mut left, &mut right)
+                .expect("copy");
+            assert!(left.iter().chain(&right).all(|word| word.to_bits() == 0));
+        }
+
+        /// Follow-up MINOR 4. Red if a successor with an installed program reports
+        /// `NotRequested` (or `Carried`) when its predecessor is not a graph plan: it asked for
+        /// state and got none, so the swap must count a mismatch.
+        #[test]
+        fn a_program_facing_a_plain_predecessor_reports_a_mismatch() {
+            struct Silent;
+            impl engine::realtime::PreparedPlanExecutor for Silent {
+                fn render(
+                    &mut self,
+                    _arena: &mut engine::realtime::BufferArena,
+                    mut output: PlanarBufferMut<'_>,
+                    _time: engine::realtime::RenderTime,
+                ) -> Result<(), engine::realtime::RenderError> {
+                    for channel in 0..output.channels() {
+                        output.plane_mut(channel)?.fill(0.0);
+                    }
+                    Ok(())
+                }
+            }
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut predecessor = PreparedRenderPlan::prepare_with_executor(
+                engine::realtime::PrepareRenderPlan {
+                    plan_id: 1,
+                    envelope: envelope(),
+                    scratch: &[],
+                },
+                Box::new(Silent),
+            )
+            .expect("plain plan");
+            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
+            graph::install_carry_program(&mut successor, carry_source_zero(1)).expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+        }
+
+        /// Follow-up MINOR 7. Red if the swap block stops comparing channel counts (a one-channel
+        /// consumer would land under two-channel mappings and fail render) or quantum sizes.
+        #[test]
+        fn the_swap_block_refuses_other_channel_counts_and_quanta() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let [a, b] = inputs();
+            let config = PcmSourceRingConfig {
+                channel_count: 1,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: BLOCKS as u64 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            for block in 0..BLOCKS as u64 {
+                let planes = frame_samples(block * u64::from(FRAMES));
+                host.submit(chunk(
+                    1,
+                    block * u64::from(FRAMES),
+                    &[&planes[0]],
+                    FRAMES,
+                    false,
+                ))
+                .expect("source PCM");
+            }
+            let mono = |node: GraphNodeId, right_channel| SourceGraphTrackMapping {
+                node,
+                source_index: 0,
+                left_channel: 0,
+                right_channel,
+            };
+            let mut predecessor = bind_with(
+                vec![SourceGraphSource::new(consumer, resources, 0, 0)],
+                vec![mono(a.clone(), 0), mono(b.clone(), 0)],
+                &validity,
+            );
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind_with(
+                vec![SourceGraphSource::vacant(2)],
+                vec![mono(a, 1), mono(b, 1)],
+                &validity,
+            );
+            graph::install_carry_program(&mut successor, carry_source_zero(identity))
+                .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(plan_block(&mut successor), silence());
+
+            // The quantum guard, at the driver: plans of one envelope cannot disagree, so only
+            // a driver built by hand reaches it.
+            let (_host, source) = filled_source();
+            let driver =
+                |sources: Vec<GraphSourceEntry>, quantum_frames| SourceGraphSourceSetDriver {
+                    sources: sources.into_boxed_slice(),
+                    mappings: Vec::new().into_boxed_slice(),
+                    quantum_frames,
+                    block_validity: GraphObservationValidity::CLEAR,
+                    pending_generation_change: false,
+                };
+            let mut predecessor = driver(
+                vec![GraphSourceEntry {
+                    consumer: source.consumer,
+                    channel_count: 2,
+                }],
+                FRAMES,
+            );
+            let vacant = || {
+                vec![GraphSourceEntry {
+                    consumer: None,
+                    channel_count: 2,
+                }]
+            };
+            let mut other_quantum = driver(vacant(), 2 * FRAMES);
+            assert!(!other_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
+            assert!(other_quantum.sources[0].consumer.is_none());
+            let mut same_quantum = driver(vacant(), FRAMES);
+            assert!(same_quantum.adopt_sources(&mut predecessor, &[(0, 0)]));
         }
     }
 }

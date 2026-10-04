@@ -44,7 +44,9 @@ successor plan whose unchanged sources keep playing* (slice 3) builds the host-c
   vacant. Stored in the `GraphExecutor`; its bytes are charged to the plan's report; a plan without
   one charges nothing.
 - **D4. Render-side move.** `GraphExecutor::adopt_predecessor`:
-  1. downcasts the predecessor (`as_any_mut`); another type returns `NotRequested`;
+  1. downcasts the predecessor (`as_any_mut`); another type returns `PredecessorMismatch`
+     (amended by the phase-1 follow-ups: the successor installed a program, so it asked for state
+     and the predecessor had none to give; `NotRequested` would skip the mismatch counter);
   2. compares the predecessor's identity with the program's; a mismatch returns
      `PredecessorMismatch` and moves nothing;
   3. for each pair, calls a new `GraphPreparedSourceSetDriver::adopt_sources(&mut self, predecessor:
@@ -175,3 +177,34 @@ exactly. Mutations (each run red, reverted, run green): the slot cloned instead 
 - `bash scripts/check-cross-targets.sh`: exit 0, with only the known #1018 iOS `memset_pattern16` expected failures.
 - Worklet chain into fresh directories: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts` and `test-web-audioworklet.sh` all green. `sourceTotalBytes` is 3294 of 3648, which is +8 B per source entry for the vacancy-aware entry.
 - **ARTIFACT CHANGED**: the shipped module is `92415199cfb8bf6e7a08926acce85bf1737d1e4619eb658bb3fda47fb6b5d335`. Per `docs/RELEASE.md` ("Between releases"), nothing re-pins between releases, so the pin file is untouched.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`5488fb2f5`, `1a911e31f`) | `1271-attempt1.md` | PASS | Real-ring carry gap-free and allocation-free (verifier probe `(0, 0)`); 7 MINOR (all-or-none, repeated predecessor, vacant copy path, non-graph predecessor, channel/quantum guards untested; 5 and 6 handed to #1272), 3 NIT. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`; tests in `crates/source/src/lib.rs`
+`tests::carry`, each red under its mutation and green after the revert):
+- MINOR 1: `a_refused_second_move_moves_nothing` (two real rings, program `[(0, 0), (1, 5)]`).
+  M6 (check-and-swap one move at a time): red.
+- MINOR 2: `install_refuses_a_repeated_predecessor_index` (`[(0, 0), (1, 0)]` on two vacancies).
+  M5a (install checks only the successor index): red.
+- MINOR 3 and NIT 1: `a_vacant_claim_writes_positive_zero_over_dirty_buffers_and_refuses_seek`
+  (driver-level, NaN and -1.0 buffers). M7 (vacant branch's `fill(0.0)` deleted): red; M13
+  (`can_prepare_source_seek` true for a vacancy): red.
+- MINOR 4: D4.1 amended above; `GraphExecutor::adopt_predecessor` returns `PredecessorMismatch`
+  for a non-graph predecessor. `a_program_facing_a_plain_predecessor_reports_a_mismatch` uses a
+  predecessor whose executor is not a graph executor (a plan with no executor at all stops in
+  `PreparedRenderPlan::carry_from` first, #1270 NIT-4). M9 (the old `NotRequested`): red.
+- MINOR 7: `the_swap_block_refuses_other_channel_counts_and_quanta` (one-channel consumer into a
+  two-channel vacancy through `adopt_predecessor_plan`; the quantum guard at the driver, since two
+  plans of one envelope cannot disagree). M10 (channel guard deleted): red; M11 (quantum guard
+  deleted): red.
+
+MINOR 5 (real-driver allocation proof) and MINOR 6 (charging the carry program) were handed to
+#1272 and closed there. Stays open: NIT 2 (the pending generation change is per set; over-reports,
+safe, as D4 step 3 specifies) and NIT 3 (install refuses a plan without a source set; later slices
+that carry non-source state into such a plan must relax it).
