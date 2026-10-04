@@ -656,6 +656,12 @@ mod tests {
         /// as a unit phasor, so the test needs no transcendental call.
         const ROTATION: (f64, f64) = (0.9973293845450933, 0.07303491441020102);
 
+        std::thread_local! {
+            /// Whether the last hand-over on this thread ran inside a render scope.
+            static HOOK_IN_RENDER_SCOPE: core::cell::Cell<Option<bool>> =
+                const { core::cell::Cell::new(None) };
+        }
+
         /// A sine oscillator whose phase (a unit phasor `(cos, sin)`) is its only state.
         struct Oscillator {
             phase: (f64, f64),
@@ -673,6 +679,7 @@ mod tests {
                 predecessor: &mut dyn PreparedPlanExecutor,
             ) -> CarryOutcome {
                 self.hooks.fetch_add(1, Ordering::Relaxed);
+                HOOK_IN_RENDER_SCOPE.set(Some(audit::is_render_scope_active()));
                 if !self.carry {
                     return CarryOutcome::NotRequested;
                 }
@@ -942,6 +949,130 @@ mod tests {
                 .commit();
             drop(owner);
             assert_eq!(hooks.load(Ordering::Relaxed), 0);
+
+            // A legacy candidate deferred behind a full retirement queue waits in `pending`;
+            // dropping the owner must not hand over to it either.
+            let (mut publisher, mut owner, _retirer) =
+                plan_exchange(oscillator(0, true, &hooks), config(1)).expect("exchange");
+            assert!(publisher.publish(oscillator(1, true, &hooks)).is_ok());
+            assert_eq!(owner_block(&mut owner).1.swap, SwapOutcome::Applied);
+            assert!(publisher.publish(oscillator(2, true, &hooks)).is_ok());
+            assert_eq!(
+                owner_block(&mut owner).1.swap,
+                SwapOutcome::DeferredRetirementFull
+            );
+            let before = hooks.load(Ordering::Relaxed);
+            drop(owner);
+            assert_eq!(hooks.load(Ordering::Relaxed), before);
+        }
+
+        #[test]
+        fn the_non_contiguous_render_reports_the_hand_over() {
+            let reference = reference();
+            let hooks = Arc::new(AtomicUsize::new(0));
+            let (mut publisher, mut owner, _retirer) =
+                plan_exchange(oscillator(0, true, &hooks), config(1)).expect("exchange");
+            let mut blocks = Vec::new();
+            for block in 0..BLOCKS {
+                if block == 5 {
+                    publisher
+                        .reserve_replacement(oscillator(1, true, &hooks))
+                        .expect("reserve")
+                        .commit();
+                }
+                let mut output = [0.0_f32; FRAMES as usize];
+                let report = owner
+                    .render(
+                        RenderIo {
+                            output: PlanarBufferMut::try_new(
+                                &mut output,
+                                1,
+                                FRAMES as usize,
+                                FRAMES as usize,
+                            )
+                            .expect("output"),
+                        },
+                        RenderTime {
+                            absolute_sample: block as u64 * u64::from(FRAMES),
+                        },
+                    )
+                    .expect("render");
+                let carry = if block == 5 {
+                    CarryOutcome::Carried
+                } else {
+                    CarryOutcome::NotRequested
+                };
+                assert_eq!(report.carry, carry, "block {block}");
+                blocks.push(output);
+            }
+            assert_eq!(blocks, reference);
+            assert_eq!(owner.carried_count(), 1);
+        }
+
+        /// The hand-over is part of the swap block: the realtime audit must see it, in the
+        /// exchange path and in the synchronous form a host calls outside any render.
+        #[cfg(feature = "realtime-audit")]
+        #[test]
+        fn the_hand_over_runs_inside_a_render_scope() {
+            let hooks = Arc::new(AtomicUsize::new(0));
+            let mut predecessor = oscillator(0, true, &hooks);
+            let mut successor = oscillator(1, true, &hooks);
+            HOOK_IN_RENDER_SCOPE.set(None);
+            assert!(!audit::is_render_scope_active());
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::Carried
+            );
+            assert_eq!(HOOK_IN_RENDER_SCOPE.get(), Some(true));
+
+            HOOK_IN_RENDER_SCOPE.set(None);
+            let (_, reports, _, _) = swap_at_block_five(true);
+            assert_eq!(reports[5].carry, CarryOutcome::Carried);
+            assert_eq!(HOOK_IN_RENDER_SCOPE.get(), Some(true));
+        }
+
+        #[test]
+        fn a_synchronous_predecessor_of_another_envelope_is_refused() {
+            let hooks = Arc::new(AtomicUsize::new(0));
+            let mut predecessor = PreparedRenderPlan::prepare_with_executor(
+                PrepareRenderPlan {
+                    plan_id: 0,
+                    envelope: RenderEnvelope {
+                        quantum: QuantumFrames(FRAMES * 2),
+                        ..envelope()
+                    },
+                    scratch: &[],
+                },
+                Box::new(Oscillator {
+                    phase: (1.0, 0.0),
+                    carry: true,
+                    hooks: Arc::clone(&hooks),
+                }),
+            )
+            .expect("plan");
+            let mut output = [0.0_f32; 2 * FRAMES as usize];
+            predecessor
+                .render_contiguous(
+                    RenderIo {
+                        output: PlanarBufferMut::try_new(
+                            &mut output,
+                            1,
+                            2 * FRAMES as usize,
+                            2 * FRAMES as usize,
+                        )
+                        .expect("output"),
+                    },
+                    0,
+                )
+                .expect("render");
+            let mut successor = oscillator(1, true, &hooks);
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::PredecessorMismatch
+            );
+            assert_eq!(successor.next_absolute_sample(), 0);
+            assert_eq!(hooks.load(Ordering::Relaxed), 0);
+            assert_eq!(plan_block(&mut successor), reference()[0]);
         }
 
         #[test]

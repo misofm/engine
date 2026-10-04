@@ -96,9 +96,13 @@ returns an incompatible plan. A full queue also returns ownership and does not c
 
 At each `RealtimePlanOwner::render` entry, the owner polls at most one candidate. It reserves a
 retirement slot before moving the active owner. When retirement is full, the candidate stays in the
-single pending slot and the unchanged active plan renders. When a reservation succeeds, the whole
-candidate becomes active, the whole displaced plan is published to retirement, and only then does
-the block render. Publication is never observed mid-block.
+single pending slot and the unchanged active plan renders. When a reservation succeeds, the
+candidate adopts the displaced plan's clock, then takes whatever state its executor's
+`adopt_predecessor` hand-over moves from the displaced plan (allocation-free, inside the render
+scope, on this applied block only), the whole candidate becomes active, the whole displaced plan is
+published to retirement, and only then does the block render. Publication is never observed
+mid-block. A synchronous host makes the same hand-over with
+`PreparedRenderPlan::adopt_predecessor_plan`, which refuses a predecessor of another envelope.
 
 Actual reclamation is ownership transfer, not hazard-pointer or epoch garbage collection. Epochs
 identify plan revisions. `PlanRetirer::try_reclaim` returns ownership to the

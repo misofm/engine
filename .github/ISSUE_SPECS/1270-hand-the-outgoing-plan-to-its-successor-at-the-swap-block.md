@@ -143,8 +143,9 @@ at 5 x quantum before the successor renders), `a_mismatched_predecessor_is_repor
 | M6 mismatch counted as carried | mismatch |
 | M7 `adopt_predecessor_plan` skips the executor hook | gate 5 |
 
-"Hook after the successor's first render" is not expressible as a mutation of this shape (the
-predecessor is retired in the same `enter_block`), so its stand-in is M1.
+"Hook after the successor's first render" is expressible (the verifier's M5: stash the
+predecessor, render, then carry and retire); gate 1 turns red on it (block 5 restarts at 0.5).
+An earlier draft of this record wrongly called it inexpressible.
 
 **Gates** (all on the final tree unless noted):
 - `cargo test --locked -p engine`: ok (36 lib + 4 + 1); `--features realtime-audit`: ok (38 + 4 + 1).
@@ -156,9 +157,42 @@ predecessor is retired in the same `enter_block`), so its stand-in is M1.
 - `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh` (54 regions in
   15 files), `test-realtime-policy.sh`, `check-capi-abi.sh`: ok.
 - `audit capi`: 0 allocations, 0 syscalls, 0 violations.
-- `check-cross-targets.sh`: PASS (the two #1018 expected iOS `memset_pattern16` failures unchanged).
+- `check-cross-targets.sh`: PASS (the ten #1018 expected-failure crate rows for iOS `memset_pattern16`, each at its ceiling, unchanged).
 - Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
   --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
-  `test-web-audioworklet.sh`: ok. **ARTIFACT CHANGED**: shipped module `5d21f73e...2675` at
+  `test-web-audioworklet.sh`: ok. **ARTIFACT CHANGED**: shipped module `30d075d3...aeff4` at
   `41517fc35` (built `--module-only` from a detached checkout) to `a28285eb...d144`. Per
   `docs/RELEASE.md` no per-change re-pin.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`22c9bd5a1`) | `1270-attempt1.md` | PASS | D1-D5 conform, all gates green; 3 MINOR (render-scope arming untested, wrong base digest in this record, no envelope guard on the synchronous form), 7 NIT. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`):
+- MINOR-1: `the_hand_over_runs_inside_a_render_scope` (`realtime-audit` only) records
+  `audit::is_render_scope_active()` inside the test oscillator's hand-over and asserts it for
+  `adopt_predecessor_plan` called outside any render and for an exchange swap. Mutation M9
+  (bare `self.carry_from(predecessor)` in `adopt_predecessor_plan`): red; reverted: green.
+- MINOR-2: the base digest above now reads `30d075d3...aeff4`.
+- MINOR-3: `adopt_predecessor_plan` refuses a predecessor whose `RenderEnvelope` differs, with
+  `CarryOutcome::PredecessorMismatch`, without touching the clock or calling the hook.
+  `a_synchronous_predecessor_of_another_envelope_is_refused` (double-quantum predecessor rendered
+  one block): mutation "guard disabled" turns it red (clock adopted, hook called); reverted: green.
+- NIT-1: `adopt_absolute_sample`'s rustdoc names both callers.
+- NIT-2: the record above now cites the verifier's M5 instead of the stand-in note.
+- NIT-3: `dropping_the_owner_never_hands_over_to_an_unapplied_candidate` also drops an owner whose
+  legacy candidate is deferred in `pending`. Mutation M3b (Drop hands the `pending` candidate the
+  active plan's state): red; reverted: green.
+- NIT-5: `the_non_contiguous_render_reports_the_hand_over` swaps through
+  `RealtimePlanOwner::render`. Mutation "`render` reports `NotRequested` instead of the carry
+  outcome": red; reverted: green.
+- NIT-6: `docs/REALTIME_MEMORY.md`'s swap sequence now includes the hand-over step.
+- NIT-7: the memset wording above is corrected.
+
+Stays open: NIT-4 (a successor that wants state from a predecessor without an executor reports
+`NotRequested`, not a mismatch) is unreachable in production; #1271 owns the graph-level mismatch
+reporting.

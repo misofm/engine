@@ -611,8 +611,9 @@ impl PreparedRenderPlan {
     }
     /// Adopt a continuing timeline, for a plan that replaces a running one.
     ///
-    /// Only [`super::RealtimePlanOwner`] calls this, at a block boundary, so a plan swap does not
-    /// restart the host's clock at zero.
+    /// [`super::RealtimePlanOwner`] (at an applied swap) and
+    /// [`PreparedRenderPlan::adopt_predecessor_plan`] (for a synchronous host) call this, at a
+    /// block boundary, so a plan swap does not restart the host's clock at zero.
     pub(crate) const fn adopt_absolute_sample(&mut self, absolute_sample: u64) {
         self.next_absolute_sample = absolute_sample;
     }
@@ -890,7 +891,15 @@ impl PreparedRenderPlan {
     /// boundary, before this plan renders, and render `predecessor` no more. The hand-over runs
     /// inside a render scope (arming one when called outside), so the realtime audit sees it in
     /// every host.
+    ///
+    /// A predecessor with a different [`RenderEnvelope`] (rate, quantum or output channels) is
+    /// not a predecessor this plan can continue: it reports
+    /// [`CarryOutcome::PredecessorMismatch`] and leaves this plan's clock and state untouched,
+    /// the same envelope rule the exchange path enforces at publication.
     pub fn adopt_predecessor_plan(&mut self, predecessor: &mut Self) -> CarryOutcome {
+        if self.program.envelope != predecessor.program.envelope {
+            return CarryOutcome::PredecessorMismatch;
+        }
         self.adopt_absolute_sample(predecessor.next_absolute_sample);
         super::audit::in_render_scope(|| self.carry_from(predecessor))
     }
