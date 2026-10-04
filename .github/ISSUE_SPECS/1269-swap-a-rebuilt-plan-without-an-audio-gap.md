@@ -479,8 +479,10 @@ now charges the plan state inventory, and the engine envelope guard, the graph c
 
 - The delay refuses its own edge-ramp snapshots (feedback, mix, cross feedback); slice 12 moves
   rather than restores it.
-- Soft-clip's two open non-finite history cases, and soft-clip validating an in-flight current by
-  its line rather than by `ramp_path_within` (#1278).
+- Soft-clip's two open non-finite history cases (filed as #1300), and soft-clip validating an
+  in-flight current by its line rather than by `ramp_path_within` (#1278; not filed).
+- The shared edge-ramp restore probe costs about 70 s per PR in debug (#1278 delay follow-up
+  MINOR-3; filed as #1301).
 - Owner review of the in-place C ABI amendment: `miso_engine_v1_source_seek_at` and
   `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (feature bit 32, mask 63) added under ABI version
   `0x00010000` (#1275).

@@ -46,7 +46,10 @@ recommended default.
   reference session's graph move from 128,984 bytes to about 48 KB, and much more at a large S.
   This is a mobile memory question, not a defect.
 
-## Follow-up candidates (recorded, not implemented)
+## Follow-up candidates (filed 2026-10-04)
+
+Filed after PR #1298 merged: N1 of #1253 as #1302, N1 of #1255 as #1303, N2 of #1263 as #1304, N2
+and N3 of #1264 as #1305, and Q5 as the owner question #1306.
 
 - **#1253 N1.** The realtime-policy unbounded `try_pop` rule is a single-line regex. Replace it
   with a structural rule (a `try_pop(` in a marked body needs `available_at_entry` in the same

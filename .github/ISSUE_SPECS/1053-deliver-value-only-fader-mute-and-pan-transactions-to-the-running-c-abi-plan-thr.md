@@ -321,6 +321,13 @@ as superseded.
   the submix half of decision 14's F5. It depends on #1225, #1262, #1265 and #1266.
 - *Elide a builtin input filter section again after a live disable settles it to identity* (#1268):
   a performance gap that live filter disables have on both hosts (found for #1262).
+- Batch review follow-ups, filed 2026-10-04 after PR #1298 merged
+  (`docs/handoffs/live-updates-1053/README.md`, "Follow-up candidates"):
+  - *Make the realtime-policy drain rule structural instead of one regex line* (#1302), #1253 N1;
+  - *Route the builtins fader domain checks through checked_fader_gain* (#1303), #1255 N1;
+  - *Tighten the four-lane reference graph ceilings from measured AArch64 rows* (#1304), #1263 N2;
+  - *Find live C ABI edit targets without linear scans* (#1305), #1264 N2 and N3;
+  - *Bound C ABI live effect windows by lane depth (owner question)* (#1306), Q5 below.
 
 ## Closing the umbrella
 
