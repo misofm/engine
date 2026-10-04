@@ -351,8 +351,32 @@ Land them one at a time.
 
 **Notes for the verifier.**
 - No path outside the authorized list changed.
-- The classifier does not check `maximum_smoothing_samples` (a preparation capacity, not a
-  domain, and the classifier has no caps); the post-commit model's admission (#1053 D8) is where
-  a too-long matrix smoothing is refused.
+- The classifier does not check `maximum_smoothing_samples`. (Corrected after the verdict,
+  MINOR 2: the earlier reason, that #1053 D8's admission refuses a too-long smoothing, was wrong;
+  D8 has no smoothing term.) The real reason: no production cap exists. host-core passes
+  `maximum_smoothing_samples: u32::MAX` (`crates/host-core/src/prepare.rs`, `strip_parameters`'
+  caller), capi does not override it, and the render setter (`set_target_over`) accepts any `u32`
+  window, so every committed smoothing stays preparable.
 - Domain is checked per track in order, before that track's follow guard, as this spec's D2
   step 4 states.
+
+### Follow-ups applied (after the attempt 1 PASS, verdict MINOR 1-2 and NIT 1)
+
+- MINOR 1 (D5 test): `fader_records_address_exactly_the_changed_lanes` gains a case: track 1 muted
+  left in both models, `left_db` moved to -6 -> exactly `[FaderDb { Left, -6.0, 0 }]`. Gate 3
+  (`pushed_records_render_the_rebuilt_plan`) now also mutes track 8's left lane in the source, moves
+  its `left_db` to -9 while it stays muted, then classifies and pushes a second delta that unmutes
+  it, renders the next `BLOCKS` and compares them with the second half of a rebuild of the unmuted
+  model rendered over `2 * BLOCKS` (asserted non-silent). Downstream of the fader every stage is
+  stateless in this fixture (zero-smoothing pan, output sum), which is what makes the rebuild's
+  second half the reference. Test value: red if a fader move on a lane muted in both models is
+  dropped as redundant; the follow-on makes the stale gain audible. Mutation V9 (`gain_changed`
+  false when the lane is muted in both models): red in both
+  (`fader_records_address_exactly_the_changed_lanes` and the gate 3 follow-on assertion); reverted,
+  green.
+- MINOR 2: the note above is corrected, and `classify_live_delta`'s doc now says that a finite
+  smoothing cap in preparation would have to be refused here as `Domain`.
+- NIT 1: `checked_fader_gain`'s doc no longer claims that no caller spells the range a second
+  time; it names `prepare_sections` and builtins-compiler's `gain_path` as the two remaining
+  spellings. Routing those two through `checked_fader_gain` is left as a follow-up issue
+  candidate, not done here.

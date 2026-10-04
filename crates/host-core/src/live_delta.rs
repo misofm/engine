@@ -111,6 +111,11 @@ pub enum LiveRebuild {
 /// lane that stays muted still gets its record, so the stage remembers the gain for a later
 /// unmute.
 ///
+/// No smoothing window is checked: host-core preparation passes `maximum_smoothing_samples:
+/// u32::MAX` and the render setters accept any `u32` window. If preparation ever gets a finite
+/// smoothing cap, this classifier must refuse a smoothing above it as [`LiveRebuild::Domain`];
+/// otherwise a live commit could leave a committed model that its own rebuild refuses.
+///
 /// # Allocation
 ///
 /// Control thread only. The masked clone and the two canonical JSON strings are allocated and

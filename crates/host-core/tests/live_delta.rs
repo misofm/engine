@@ -237,6 +237,18 @@ fn fader_records_address_exactly_the_changed_lanes() {
         }),
         Ok(Vec::new())
     );
+    // #1255 D5: a fader move on a lane muted in both models still gets its record, so the stage
+    // remembers the gain for a later unmute.
+    let mut muted = current.clone();
+    muted.tracks[1].fader.left_mute = true;
+    assert_eq!(
+        classify(&muted, |next| next.tracks[1].fader.left_db = -6.0),
+        Ok(vec![(
+            track_id(&muted, 1),
+            vec![fader_db(Left, -6.0, 0)],
+            None
+        )])
+    );
 }
 
 /// Gate 1(c). Red if a mute record goes to the wrong lane or merges two lanes that change to
@@ -589,10 +601,19 @@ fn feed(frames: usize) -> [Vec<f32>; 2] {
 
 /// Renders `BLOCKS` blocks from sample 0, feeding `planes`, and returns the output bits.
 fn render(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
+    render_blocks(host, planes, 0..BLOCKS)
+}
+
+/// Renders `blocks`, feeding `planes`, and returns the output bits.
+fn render_blocks(
+    host: &mut PreparedHost,
+    planes: &[Vec<f32>; 2],
+    blocks: core::ops::Range<usize>,
+) -> Vec<u32> {
     let quantum = host.report.quantum_frames as usize;
     let rate = host.report.sample_rate_hz;
-    let mut bits = Vec::with_capacity(quantum * 2 * BLOCKS);
-    for block in 0..BLOCKS {
+    let mut bits = Vec::with_capacity(quantum * 2 * blocks.len());
+    for block in blocks {
         let range = block * quantum..(block + 1) * quantum;
         host.sources
             .submit(
@@ -623,12 +644,15 @@ fn render(host: &mut PreparedHost, planes: &[Vec<f32>; 2]) -> Vec<u32> {
 }
 
 /// Gate 3. Red if a record targets a value other than the one preparation bakes from `next`: a
-/// wrong lane, a wrong lowering or a dropped `Both`.
+/// wrong lane, a wrong lowering or a dropped `Both`. Its follow-on unmutes a lane whose fader
+/// moved while it stayed muted, so it is also red if that move's record was dropped (#1255 D5):
+/// the unmuted lane would play the stale gain.
 #[test]
 fn pushed_records_render_the_rebuilt_plan() {
     let mut source = parse_session_json(FIXTURE).expect("fixture parses");
     settle(&mut source);
     source.tracks[6].fader.left_mute = true;
+    source.tracks[8].fader.left_mute = true;
     let current_compiled = compile(&source);
     let current = current_compiled.normalized_model().clone();
     let centre = pan_matrix(0.0, 0.0).expect("pan");
@@ -654,6 +678,7 @@ fn pushed_records_render_the_rebuilt_plan() {
         tracks[6].fader.right_mute = true;
         tracks[7].fader.left_db = -12.0;
         tracks[7].fader.left_mute = true;
+        tracks[8].fader.left_db = -9.0;
         tracks[8].matrix_or_pan = MatrixOrPan::Pan {
             left: -1.0,
             right: 1.0,
@@ -676,6 +701,51 @@ fn pushed_records_render_the_rebuilt_plan() {
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
+    push_delta(&mut handles, &delta);
+    let prepare = |compiled: &session::CompiledSession| {
+        prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        })
+    };
+    let planes = feed(4_096);
+    let expected = render(&mut prepare(&compile(&next)), &planes);
+    assert_ne!(
+        expected,
+        render(&mut prepare(&current_compiled), &planes),
+        "the edits change the output"
+    );
+    assert_eq!(render(&mut live, &planes), expected);
+
+    // Follow-on: unmute the lane whose fader moved while muted, and compare the next `BLOCKS`
+    // with a rebuild of that model. Downstream of the fader every stage is stateless here (a
+    // zero-smoothing pan and the output sum), so the rebuild's second half is the reference.
+    let unmuted = normalized(&edited(&next, |next| {
+        next.tracks[8].fader.left_mute = false
+    }));
+    let unmute = classify_live_delta(&next, &unmuted, STEP).expect("live");
+    assert_eq!(
+        flatten(&unmute),
+        vec![(
+            track_id(&next, 8),
+            vec![mute(BuiltinLaneSelector::Left, false, 0)],
+            None
+        )]
+    );
+    push_delta(&mut handles, &unmute);
+    let rebuilt = render_blocks(&mut prepare(&compile(&unmuted)), &planes, 0..2 * BLOCKS);
+    let second_half = rebuilt[rebuilt.len() / 2..].to_vec();
+    assert!(
+        second_half.iter().any(|bits| f32::from_bits(*bits) != 0.0),
+        "the reference window is not silent"
+    );
+    assert_eq!(
+        render_blocks(&mut live, &planes, BLOCKS..2 * BLOCKS),
+        second_half
+    );
+}
+
+/// Pushes every record of `delta` to its strip's lanes.
+fn push_delta(handles: &mut host_core::HostLiveControlHandles, delta: &LiveDelta<'_>) {
     for strip in &delta.strips {
         let control = handles
             .strip_controls
@@ -692,17 +762,4 @@ fn pushed_records_render_the_rebuilt_plan() {
                 .expect("matrix queue room");
         }
     }
-    let prepare = |compiled: &session::CompiledSession| {
-        prepare_host_runtime(compiled, &caps()).unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        })
-    };
-    let planes = feed(4_096);
-    let expected = render(&mut prepare(&compile(&next)), &planes);
-    assert_ne!(
-        expected,
-        render(&mut prepare(&current_compiled), &planes),
-        "the edits change the output"
-    );
-    assert_eq!(render(&mut live, &planes), expected);
 }

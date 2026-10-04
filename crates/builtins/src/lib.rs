@@ -4106,9 +4106,11 @@ impl FaderMuteRampBuiltins {
 /// The domain is `fader_db`'s own, so a live move is admitted on exactly the terms a declared one
 /// is; sharing this with preparation is what keeps the two from drifting.
 ///
-/// This is the one fader-domain authority (issue #1255 D3): preparation (`fader_lanes`), the
-/// render-side setter ([`BuiltinFaderBank::set_fader_db`]) and host-core's live-delta classifier
-/// all call it, so no caller spells the `[-144, 24]` dB range a second time.
+/// Issue #1255 D3: preparation's `fader_lanes`, the render-side setter
+/// ([`BuiltinFaderBank::set_fader_db`]) and host-core's live-delta classifier share this one
+/// function, so those three cannot disagree on the domain. Two other checks still spell the
+/// `[-144, 24]` dB range themselves (`prepare_sections` here and builtins-compiler's `gain_path`);
+/// they agree with it today.
 ///
 /// # Errors
 ///
