@@ -371,7 +371,8 @@ impl HostLiveLanes {
         effects: true,
         routes: true,
     };
-    /// Only each strip's fader/mute and matrix/pan lanes (the C ABI's selection, #1256).
+    /// Only each strip's fader/mute and matrix/pan lanes. The C ABI's selection adds the effect
+    /// lanes to this (#1256, #1263).
     pub const FADER_AND_MATRIX: Self = Self {
         strip_input: false,
         effects: false,
@@ -441,9 +442,10 @@ pub struct HostLiveControlHandles {
     /// output have none: they keep their prepared constants and their fold.
     ///
     /// The browser prepares with [`HostLiveLanes::ALL`] and gets these. C ABI plans prepare with
-    /// [`HostLiveLanes::FADER_AND_MATRIX`] (#1053 D5, #1256) and get none; their route lanes
-    /// arrive with the slice that pushes to them (#1225). A settled record's bits are a
-    /// static route's by construction, because [`RouteControlProducer::record`] takes its target
+    /// the fader, matrix and effect lanes and no route lane (#1053 D5, #1256, #1263) and get
+    /// none; their route lanes arrive with the slice that pushes to them (#1225). A settled
+    /// record's bits are a static route's by construction, because
+    /// [`RouteControlProducer::record`] takes its target
     /// from `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
     /// route's constants with.
     pub route_controls: Vec<RouteControlProducer>,

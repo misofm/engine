@@ -201,8 +201,9 @@ pub enum LiveRebuild {
 ///
 /// Control thread only. The masked clone, the two canonical JSON strings and, when an effect's
 /// `params` differ, the lowered racks, the launch registry, the resolved values and an EQ's target
-/// designer are allocated and freed on every call, on the control-plane precedent of #369 (the protocol already compiles a
-/// whole session per edit). Nothing it allocates is retained apart from the returned entries.
+/// designer are allocated and freed on every call, on the control-plane precedent of #369 (the
+/// protocol already compiles a whole session per edit). Nothing it allocates is retained apart
+/// from the returned entries.
 ///
 /// # Errors
 ///

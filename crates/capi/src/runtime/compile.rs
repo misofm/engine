@@ -173,15 +173,21 @@ pub(crate) fn capi_resources(
     // the producers, and with them each parametric EQ's prepared-target owner. host-core walks
     // them over the built producers (`HostPrepareReport::effect_control_resources`). Their rings
     // and target staging are the graph estimate's rows (`effect_control_resource`), so they are
-    // not charged again here.
+    // not charged again here. The payload is admitted twice all the same: host-core's preparation
+    // admission also adds `effect_control_resources.total_bytes()` to the graph row and the
+    // compiled model against `maximum_graph_session_plus_plan_bytes`. That is a recorded,
+    // conservative double admission (#1263 verdict MINOR 1), like #1256 D4's above: the initial
+    // compile needs graph row + compiled model + this payload under the graph cap.
     let effect_row = effect_controls
         .total_bytes()
         .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let control_table_row = host_core::control_table_bytes(source_count)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let source_id_row = host_core::source_id_arena_bytes(source_id_bytes)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let epoch_rows = [
-        host_core::control_table_bytes(source_count)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
-        host_core::source_id_arena_bytes(source_id_bytes)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+        control_table_row,
+        source_id_row,
         strip_table_bytes,
         effect_row,
     ];
@@ -232,9 +238,8 @@ pub(crate) fn capi_resources(
     // allocations, so feeding the whole row overstates the largest single allocation when that
     // row is the maximum. The error only ever refuses earlier.
     // The effect row is several allocations; its own largest one stands for it.
-    let largest = epoch_rows[..epoch_rows.len() - 1]
-        .iter()
-        .copied()
+    let largest = [control_table_row, source_id_row, strip_table_bytes]
+        .into_iter()
         .chain([effect_controls.largest_allocation_bytes()])
         .chain(fixed_allocation_rows)
         .chain(prepared_protocol_allocation_rows)

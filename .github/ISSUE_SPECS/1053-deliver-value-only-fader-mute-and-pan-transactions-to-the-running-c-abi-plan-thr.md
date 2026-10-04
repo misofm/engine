@@ -269,6 +269,8 @@ as superseded.
   by *Deliver value-only VCA edits to the running C ABI plan* (#1247).
 - **G4. EQ parameters** (inside this umbrella). #1264 classifies every parametric EQ parameter
   change as a rebuild; #1265 lifts it for the EQ's live parameters.
+  **Superseded: lifted by #1265** (`b055a48d4`, Sol attempt 1 PASS) for every EQ parameter whose
+  `automation_rate` is `Block`; a band's `enabled` and `kind` stay prepared (decision 14, F2).
 
 ## Slices, in dependency order
 

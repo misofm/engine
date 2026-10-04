@@ -109,7 +109,8 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 /// One prepared live-control channel for one effect instance, or one lane of one bank slot.
 ///
 /// The consumer half of a [`bounded_spsc`](engine::realtime::bounded_spsc); the producer
-/// stays with the host's control plane. A producer must be dropped before the plan that owns this.
+/// stays with the host's control plane. The ring is shared, so either half may drop first and the
+/// last owner frees it; the C ABI drops a reclaimed plan before its producers, on the control thread.
 ///
 /// # A lane without a channel (issue #1087)
 ///

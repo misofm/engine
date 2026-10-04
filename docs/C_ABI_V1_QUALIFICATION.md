@@ -278,7 +278,8 @@ lane per prepared effect instance, console slots and inserts alike, on tracks an
 lane's ring holds `min(16, the effect's automation capacity)` records, and a parametric EQ's lane
 also carries its prepared-target staging. capi keeps the producers with the plan's provider epoch;
 each EQ's producer owns its prepared-target owner. #1264 pushes live effect parameter edits
-through them, and #1265 publishes live EQ targets through the owners (below). No input or route lane is attached.
+through them, and #1265 publishes live EQ targets through the owners (below). No input or route
+lane is attached.
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
@@ -286,11 +287,17 @@ through them, and #1265 publishes live EQ targets through the owners (below). No
   nine-track EQ reference session and on the one- and ten-track parity sessions (the ten-track
   one has a bypassed limiter insert) at the four launch rates.
 - **Charges.** The rings, the target staging and the banked live-control owner the lanes make the
-  plan build are graph rows, charged in `graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes`
-  and `graph_metadata_bytes`. The producer table, its strip and effect IDs and the EQ owners are
-  charged once, in `capi_retained_bytes`. Both enter the replacement and live admissions through
-  those rows.
-- **Resource movement on the nine-track EQ reference session** (x86-64, eight lanes):
+  plan build are graph rows, charged in `graph_session_plus_plan_bytes`,
+  `graph_incremental_plan_bytes` and `graph_metadata_bytes`. The producer table, its strip and
+  effect IDs and the EQ owners are reported once, in `capi_retained_bytes`. Both enter the
+  replacement and live admissions through those rows. The producer payload is admitted twice, a
+  conservative double admission: at preparation host-core also admits it against
+  `maximum_graph_session_plus_plan_bytes`, so the initial compile needs the graph row plus the
+  compiled model plus the payload `capi_retained_bytes` charges for the producers (15,361 bytes on
+  the reference session below). A replacement's two-plan peak and the live admission dominate it.
+- **Resource movement on the nine-track EQ reference session** at the reference `limits()`
+  (`maximum_automation_spans_per_block` S = 128, a 128-frame quantum; x86-64, eight lanes). These
+  are that session's figures, not general ones:
 
   | row | before | after |
   |---|---|---|
@@ -299,13 +306,23 @@ through them, and #1265 publishes live EQ targets through the owners (below). No
   | `capi_retained_bytes` | 258,231 | 273,640 |
   | `largest_named_allocation_bytes` | 90,720 | 90,720 |
 
-  The graph rows grow by 2,104 bytes per effect instance plus 55,024 per eight-lane effect bank
-  (+128,984 here); `capi_retained_bytes` grows by the producer table and its payload (15,361
-  bytes: nine 104-byte producers, their IDs and the nine EQ owners) and 16 bytes in each of the
-  three provider-epoch slots. Every other row is unchanged. A session without effects moves only
-  `capi_retained_bytes`, by 48 bytes. A caller whose `maximum_graph_session_plus_plan_bytes` or
-  `maximum_capi_retained_bytes` was exact before this change must raise it; a structural
-  replacement charges both plans' graph rows, so its peak grows by twice the graph move.
+- **The general formula.** The graph rows grow by a per-member term plus a per-bank term:
+
+  - each parametric EQ member 2,104 bytes, each other effect member 1,208 (no 896-byte target
+    staging);
+  - at a 128-frame quantum, each eight-lane effect bank 8,944 + 360 * S bytes, plus 64 * L for a
+    prepared latency of L samples, and each four-lane bank 4,560 + 200 * S. S is the caller's
+    `maximum_automation_spans_per_block`, because each lane's packed window equals the automation
+    capacity, so the bank term scales with it: at S = 4,096 a four-lane bank is about 824 KB.
+
+  On the reference session that is nine EQ members and two eight-lane banks at S = 128 and L = 0:
+  9 * 2,104 + 2 * 55,024 = +128,984. `capi_retained_bytes` grows by the producer table and its
+  payload (15,361 bytes there: nine 104-byte producers, their IDs and the nine EQ owners) and 16
+  bytes in each of the three provider-epoch slots. Every other row is unchanged. A session without
+  effects moves only `capi_retained_bytes`, by 48 bytes. A caller whose
+  `maximum_graph_session_plus_plan_bytes` or `maximum_capi_retained_bytes` was exact before this
+  change must raise it; a structural replacement charges both plans' graph rows, so its peak grows
+  by twice the graph move.
 
 ## Value-only effect parameter edits on the running plan (#1264)
 
@@ -327,9 +344,9 @@ and compares the resolved values bit by bit.
   parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
   targets; see "Value-only parametric EQ edits" below.
 - **Rebuild for everything else about an effect**: identity, quality, link mode, a prepared bypass
-  (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix strip, and
-  `params` that preparation refuses (reported as `COMPILE_REJECTED` with the preparation
-  diagnostic).
+  (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix
+  strip, and `params` that preparation refuses (reported as `COMPILE_REJECTED` with the
+  preparation diagnostic).
 - **A transaction too large for a lane.** An effect lane holds `min(16, automation capacity)`
   records. A transaction whose records for one instance outnumber that capacity could never fit,
   so it takes the rebuild path instead of an endless `BACKPRESSURE`. A transaction that fits the
@@ -381,7 +398,8 @@ A transaction that switches the bypass of a track's console-slot entry or insert
 the rack's latency-preserving bypass shunt (decision 14).
 
 - **Live.** One bypass record carrying the new bypass goes to the instance's lane in the newest
-  plan, ahead of the instance's parameter records or, for a parametric EQ, ahead of its targets.
+  plan. It rides with the instance's parameter records or, for a parametric EQ, its targets, under
+  the one-quantum allowance of #1053 D2; no order between them is promised.
   The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
   so the effect's state continues either way and prepared latency does not change. The switch is a
   step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.
@@ -393,7 +411,12 @@ the rack's latency-preserving bypass shunt (decision 14).
   of #1264 before the first push; for an EQ the room must hold the record and the whole target
   prefix together, or the transaction is `BACKPRESSURE` with `control.live.backpressure` and
   changes nothing.
-- **Equal to a rebuild.** Because the wet path keeps running, from E + ceil(latency / quantum) + 1
-  on, a live bypass or lift renders bit-identically to a plan compiled from the committed snapshot
-  and fed the same source from sample 0, on one and ten tracks at the four launch rates.
+- **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
+  instance's own state is the same either way. An effect downstream of it keeps the live history,
+  as after any live edit, so the from-sample-0 oracle holds only while that downstream memory fits
+  the window. On the gate fixture (a compressor insert, then a soft-clip console slot), from
+  E + ceil(latency / quantum) + 1 on, a live bypass or lift renders bit-identically to a plan
+  compiled from the committed snapshot and fed the same source from sample 0, on one and ten
+  tracks at the four launch rates. A second stateful effect after the switched one (a compressor
+  after a compressor) does not converge within that window; its difference decays.
 - **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.

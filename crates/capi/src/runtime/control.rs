@@ -1022,9 +1022,10 @@ impl SessionState {
     /// whose records, or an EQ's targets, outnumber its queue's whole capacity could never fit,
     /// so the token goes back for a rebuild instead of an endless `BACKPRESSURE` (#1264 D3,
     /// #1265 D2). An instance's `Bypass` record (#1266 D2) is an ordinary pushed record on every
-    /// instance, the EQ's included, where it goes ahead of the targets and counts toward their
-    /// room. Only then does it push every record, publish every EQ owner's targets, commit
-    /// the token and commit every owner, and none of them can fail: the room was checked, every
+    /// instance, the EQ's included, where it rides with the targets (no order is promised to the
+    /// host, under #1053 D2) and counts toward their room. Only then does it push every record,
+    /// publish every EQ owner's targets, commit the token and commit every owner, and none of
+    /// them can fail: the room was checked, every
     /// effect record passed its producer's preflight and every target prefix its owner's, the
     /// control thread is the only producer, a render pop only grows the room, and the predicate is
     /// the commit's own under this `&mut` borrow. So no acked edit is ever dropped, and no refused
