@@ -1026,6 +1026,23 @@ impl SessionState {
             .seek(id, generation, source_frame)
             .map_err(SourceFailure::Control)
     }
+
+    /// Queues an anchored seek on a source of the newest committed session: `source_frame` enters
+    /// the graph in the block that starts at absolute render sample `anchor_sample` (issue #1275).
+    pub(crate) fn seek_at(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        source_frame: u64,
+        anchor_sample: u64,
+    ) -> Result<(), SourceFailure> {
+        self.synchronize_plan_epochs()
+            .map_err(|_| SourceFailure::Internal)?;
+        self.newest_providers_mut()
+            .sources
+            .seek_at(id, generation, source_frame, anchor_sample)
+            .map_err(SourceFailure::Control)
+    }
 }
 
 /// A source submission or seek that the C boundary must report.

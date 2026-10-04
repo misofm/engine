@@ -257,3 +257,24 @@ The race file passed eight repeated runs. Gates re-run green:
 - fmt; clippy (workspace, all targets, all features)
 - the workspace and realtime policies and their mutation tests
 - `check-cross-targets.sh`; `check-capi-abi.sh`
+
+### Follow-ups after attempt 1 PASS
+
+The attempt-1 verdict's three MINORs, closed in the #1275 slice:
+
+1. **D1's pre-transaction committed model is defended at the C ABI.** The verdict's suggested
+   `carried_count() == 1` no longer holds since #1276: the second, source-changing swap still
+   carries the strip input sections, so the count is 2 without any defect. The check is
+   behavioural instead: after the second swap,
+   `structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic` submits generation 1
+   from frame 0 to the changed source and expects it accepted (a new ring). Under V10 (pass the
+   prospective model as `committed`) it is red: `NonContiguous { expected: SourceFrame(256),
+   actual: SourceFrame(0) }`, the old ring carried.
+2. **D3's seek routing is defended.** Gate 2 (`removing_a_track_and_its_source_keeps_the_other_
+   source_playing`) asserts that a seek on the removed source after the commit reports
+   `(RESULT_INVALID_ARGUMENT, "source.id.unknown")`. Under V4 (`seek` back to `self.providers`) it
+   is red; `structural_command_keeps_…` stays green under V4, so this is the only catch.
+3. **The host contract covers a changed source.** The header,
+   `docs/C_ABI_V1_QUALIFICATION.md` and `docs/CONTROL_PROTOCOL_SEMANTICS.md` each gained one
+   sentence: a source whose declaration the transaction changed restarts in a new ring at
+   generation 1, frame 0, its accepted PCM discarded with its plan, and the host restarts its feed.

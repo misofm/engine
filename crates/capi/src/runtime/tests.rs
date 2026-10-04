@@ -150,6 +150,29 @@ fn submit_c(
     right: &[f32],
     final_chunk: bool,
 ) {
+    submit_c_to(
+        session,
+        b"fixture-source",
+        generation,
+        start_frame,
+        sample_rate_hz,
+        left,
+        right,
+        final_chunk,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_c_to(
+    session: *mut crate::Session,
+    source_id: &[u8],
+    generation: u64,
+    start_frame: u64,
+    sample_rate_hz: u32,
+    left: &[f32],
+    right: &[f32],
+    final_chunk: bool,
+) {
     let planes = [left.as_ptr(), right.as_ptr()];
     let chunk = crate::SourceChunk {
         struct_size: crate::SOURCE_CHUNK_SIZE,
@@ -171,7 +194,7 @@ fn submit_c(
     };
     assert_eq!(left.len(), right.len());
     assert_eq!(
-        crate::ffi::test_source_submit(session, b"fixture-source", &chunk, &mut report,),
+        crate::ffi::test_source_submit(session, source_id, &chunk, &mut report),
         crate::RESULT_OK
     );
     assert_eq!(report.accepted_frames, left.len() as u64);
@@ -769,6 +792,23 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         .session
         .synchronize_plan_epochs()
         .expect("second provider promotion and retirement");
+    // #1273 D1: the successor is diffed against the committed model before the transaction, so
+    // the source whose declaration changed (frames 512) restarts in a new ring at generation 1,
+    // frame 0, rather than carrying its old ring (written to frame 256) into the new plan.
+    children
+        .session
+        .submit(
+            b"fixture-source",
+            SourceSubmission {
+                generation: 1,
+                start_frame: 0,
+                sample_rate_hz: 48_000,
+                planes: &[&left, &right],
+                frames: 128,
+                end_of_region: false,
+            },
+        )
+        .expect("a changed source restarts its feed at generation 1, frame 0");
     assert_eq!(children.session.providers.epoch, 2);
     assert_eq!(source_region_end(&children.session.providers.sources), 512);
     assert!(children.session.pending_providers.is_empty());
@@ -1032,6 +1072,143 @@ fn a_c_abi_structural_transaction_keeps_the_source_playing() {
     structural_transaction_keeps_the_source_playing_at(96_000);
 }
 
+/// Issue #1275 gate 1: a stem a C ABI structural transaction adds (`UpsertSource`, `UpsertTrack`
+/// on it and its route) starts in exact time through `miso_engine_v1_source_seek_at`. The host
+/// anchors generation 2 at frame `A` to render sample `A`, two blocks past the next render (which
+/// also swaps the plan in), and submits it from `A`. Every block is bit-identical to the post-edit
+/// session compiled fresh, fed the first stem from frame 0 and the added stem zeros for frames
+/// below `A` and the same PCM from `A`.
+///
+/// Test value: red if the export forwards to the plain seek (observation timing): the seek then
+/// applies at the swap block, two blocks before the anchor, and the stem is out of time from the
+/// anchor block on (block 8 differs); red as well if the anchored seek goes to the running plan's
+/// source set, which does not hold the added source until the swap.
+fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
+    const ADDED: &[u8] = b"s2-source";
+    const ANCHOR_BLOCK: u64 = 8;
+    let anchor = ANCHOR_BLOCK * 128;
+    let mut model = stateless_session(sample_rate_hz);
+    model.tracks.truncate(1);
+    model.routes.truncate(1);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let (left, right) = continuity_block(0, 0);
+    submit_c(c_session, 1, 0, sample_rate_hz, &left, &right, false);
+    let mut swapped = feed_and_render_c(c_session, c_plan, sample_rate_hz, 0, 6);
+
+    let mut source = model.sources[0].clone();
+    source.id = session::StableId::parse("s2-source").expect("source ID");
+    let mut track = model.tracks[0].clone();
+    track.id = session::StableId::parse("t2").expect("track ID");
+    track.source_id = source.id.clone();
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse("t2-main").expect("route ID");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    let edits = [
+        protocol::SessionEdit::UpsertSource { source },
+        protocol::SessionEdit::UpsertTrack { track },
+        protocol::SessionEdit::UpsertRoute { route },
+    ];
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    assert_eq!(command_c(c_session, &transaction).0, crate::RESULT_OK);
+    assert_eq!(
+        crate::ffi::test_source_seek_at(c_session, ADDED, 2, anchor, anchor),
+        crate::RESULT_OK
+    );
+    for block in 6..16 {
+        let next = block + 1;
+        let (left, right) = continuity_block(next, 0);
+        submit_c(
+            c_session,
+            1,
+            next * 128,
+            sample_rate_hz,
+            &left,
+            &right,
+            false,
+        );
+        if next >= ANCHOR_BLOCK {
+            let (left, right) = continuity_block(next, 1);
+            submit_c_to(
+                c_session,
+                ADDED,
+                2,
+                next * 128,
+                sample_rate_hz,
+                &left,
+                &right,
+                false,
+            );
+        }
+        swapped.push(render_c(c_plan, block));
+    }
+    assert_eq!(
+        crate::ffi::test_plan_carry_counts(c_plan),
+        (1, 0),
+        "one swap, and it carried the first stem"
+    );
+    let committed = snapshot_c(c_session);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+
+    let (r_session, r_plan) = boxed_c_children(&committed);
+    let feed_reference = |block: u64| {
+        let (left, right) = continuity_block(block, 0);
+        submit_c(
+            r_session,
+            1,
+            block * 128,
+            sample_rate_hz,
+            &left,
+            &right,
+            false,
+        );
+        let (left, right) = if block < ANCHOR_BLOCK {
+            (vec![0.0; 128], vec![0.0; 128])
+        } else {
+            continuity_block(block, 1)
+        };
+        submit_c_to(
+            r_session,
+            ADDED,
+            1,
+            block * 128,
+            sample_rate_hz,
+            &left,
+            &right,
+            false,
+        );
+    };
+    feed_reference(0);
+    let reference = (0..16)
+        .map(|block| {
+            feed_reference(block + 1);
+            render_c(r_plan, block)
+        })
+        .collect::<Vec<_>>();
+    crate::ffi::test_plan_destroy(r_plan);
+    crate::ffi::test_session_destroy(r_session);
+    assert_bit_identical(
+        &format!("{sample_rate_hz} Hz added stem"),
+        0,
+        &swapped,
+        &reference,
+    );
+}
+
+#[test]
+fn an_added_c_abi_source_starts_at_its_anchored_render_sample() {
+    an_added_source_starts_at_its_anchor_at(48_000);
+    an_added_source_starts_at_its_anchor_at(96_000);
+}
+
 /// Submits block `block` of each of `ids`' signals (salted by position) through the session state.
 fn submit_direct(children: &mut CompiledChildren, ids: &[&[u8]], block: u64) {
     for (salt, id) in ids.iter().enumerate() {
@@ -1163,6 +1340,14 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
     );
     let Err(refusal) = refused else {
         panic!("a submit for the removed source is refused")
+    };
+    assert_eq!(
+        refusal.report(),
+        (crate::RESULT_INVALID_ARGUMENT, &b"source.id.unknown"[..])
+    );
+    // #1273 D3: a seek, like a submit, addresses the newest committed session from the commit on.
+    let Err(refusal) = children.session.seek(AUX, 2, 0) else {
+        panic!("a seek for the removed source is refused")
     };
     assert_eq!(
         refusal.report(),

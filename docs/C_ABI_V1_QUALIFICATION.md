@@ -65,9 +65,12 @@ commit succeeds, which is the last fallible step, so a refused transaction moves
 commit on, `miso_engine_v1_source_submit_planar_f32` and `miso_engine_v1_source_seek` address the
 newest committed session: a host keeps feeding an unchanged source contiguously and must not reseek
 it. A removed source is refused as `source.id.unknown`, and PCM already accepted for it is discarded
-with its plan. An added source starts at generation 1, frame 0, until the host seeks it. For a
-session whose unchanged paths hold no DSP state, the output across the swap is bit-identical to the
-post-edit session compiled fresh and fed the same PCM from frame 0 (`runtime::tests`'
+with its plan. An added source starts at generation 1, frame 0, until the host seeks it. A source
+whose declaration the transaction changed restarts the same way, in a new ring at generation 1,
+frame 0; PCM accepted for it before the commit is discarded with its plan, so the host restarts
+its feed. For a session whose unchanged paths hold no DSP state, the output across the swap is
+bit-identical to the post-edit session compiled fresh and fed the same PCM from frame 0
+(`runtime::tests`'
 `a_c_abi_structural_transaction_keeps_the_source_playing`). The replacement's resource report counts
 the rings it carries and its carry program, as the plan will own them once active; the double-live
 admission counts a carried ring once, with the plan it displaces; and capi's epoch row charges the
@@ -99,6 +102,23 @@ itself, independent of `maximum_tracks` and `maximum_submixes`; a session over i
 `host.resource.count`. No released library accepted a VCA before this word existed (VCA groups
 arrive in the same batch, #1240), so zero changes no previously accepted session; a library older
 than #1243 refuses a nonzero word with `RESULT_INVALID_ARGUMENT`.
+
+A host starts a stem a structural transaction added in exact time through
+`miso_engine_v1_source_seek_at` (#1275, slice 6 of #1269), an in-place V1 amendment: one new
+exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (32) in the capability
+report, whose feature mask becomes 63; no struct, size or `ABI_VERSION` changes. It is
+`miso_engine_v1_source_seek` with an anchor: the seek's source frame enters the graph in the
+block that starts at absolute render sample `anchor_sample`, which must be a multiple of the
+quantum or the call returns `RESULT_INVALID_ARGUMENT` with `source.seek.anchor_unaligned`; its
+thread rule, argument checks and every other result are the plain seek's. The host checks the bit
+before calling the symbol, since a library older than #1275 does not export it. After the
+transaction returns, the host picks `A` a few quanta past the last rendered block, calls
+`seek_at(id, g, F, A)` with `F` the frame the playing stems read at `A`, then submits generation
+`g` from `F`; the stem renders silence until `A` and plays `F` from `A` on, bit-identical to the
+post-edit session compiled fresh and fed that PCM from frame 0 (`runtime::tests`'
+`an_added_c_abi_source_starts_at_its_anchored_render_sample`). The frozen exported set is now 15
+`miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
+where the new symbol is only an undefined reference).
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was

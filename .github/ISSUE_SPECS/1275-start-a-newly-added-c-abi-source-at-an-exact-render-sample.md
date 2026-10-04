@@ -86,3 +86,86 @@ the anchored seek of *Hold an anchored source seek until its render sample* (#12
 
 - *Keep sources playing across a C ABI structural transaction* (#1273).
 - *Hold an anchored source seek until its render sample* (#1274).
+
+## Attempt record
+
+### Attempt 1 (implementer)
+
+**What changed.**
+
+- D1: `miso_engine_v1_source_seek_at` in `crates/capi/src/ffi.rs`. The two seek exports share one
+  private body (`source_seek_entry`), so the argument checks, result codes, thread rule and
+  `last_error` handling are the plain seek's. `SessionState::seek_at`
+  (`runtime/control.rs`) mirrors `SessionState::seek`: it synchronizes epochs and forwards to
+  `SourceControlSet::seek_at` on the newest committed providers.
+- D2: `FEATURE_SOURCE_SEEK_AT = 1 << 5` in `abi.rs`, and the mask is now `0x3f`. The header
+  defines `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` as 32 and the mask as 63.
+- D3: `docs/C_ABI_V1_QUALIFICATION.md` records the in-place amendment and the new symbol count of
+  15. No struct, size or `ABI_VERSION` changed.
+- D4: the header explains how to start an added stem: pick `A`, call `seek_at(id, g, F, A)`,
+  then submit `g` from `F`.
+- `lib.rs` needed no change, because it already re-exports `ffi::*` and `abi::*`.
+- `scripts/check-capi-abi.sh`: the frozen set gains the symbol. A new self-test case,
+  `seek-at-undefined-reference`, lists the real definitions without the new symbol (as a
+  defined-only listing would show it if the symbol were only an undefined reference), and the
+  checker rejects it.
+- `crates/capi/tests/c/abi_smoke.c`: static asserts for bit 32 and mask 63, a signature pointer,
+  and one call to the new symbol after checking the bit. The call uses a null session and expects
+  `MISO_ENGINE_V1_INVALID_ARGUMENT`.
+- The #1273 attempt-1 MINORs are closed here too. See that spec's "Follow-ups after attempt 1
+  PASS".
+
+**Tests, with test value.**
+
+- Gate 1, `runtime::tests::an_added_c_abi_source_starts_at_its_anchored_render_sample`, at 48 and
+  96 kHz, entirely through the exported entries.
+  - Steps: 6 blocks on `s1`, then the `UpsertSource`/`UpsertTrack`/`UpsertRoute` transaction.
+    Then `seek_at(s2, 2, 1024, 1024)` (anchor block 8, two blocks past the next render, which is
+    also the swap block). `s2` generation 2 is submitted from frame 1024, and 10 more blocks
+    render.
+  - All 16 blocks are bit-identical to the committed snapshot compiled fresh, fed `s1` from
+    frame 0 and `s2` zeros below 1024, then the same PCM.
+  - Test value: it goes red if the export forwards to the plain seek (M1), or if `seek_at`
+    addresses the running plan's set instead of the newest one (M5).
+- Gate 2, `ffi::tests::version_and_capabilities_are_exact`: the mask is now `0x3f` and bit 32 is
+  set. `abi::tests::masks_and_result_codes_are_frozen` pins bit 32 and mask `0x3f`.
+  - Test value: it goes red if the bit is left out of the mask (M2).
+- Gate 3, `ffi::tests::anchored_seek_refusals_reach_the_c_host_as_their_own_diagnostic`.
+  - Results checked: a null session gives `INVALID_ARGUMENT` and an engine handle gives
+    `WRONG_HANDLE`.
+  - Each refusal comes back as `INVALID_ARGUMENT` with its own `last_error` string: anchor 129
+    gives `source.seek.anchor_unaligned`, an absent source gives `source.id.unknown`, and a second
+    generation-2 seek gives `source.generation.stale`. An accepted seek clears the diagnostic.
+  - Test value: it goes red if the export drops its anchor (M1: the unaligned anchor is accepted).
+
+**Mutations.** Each was applied, run, and then restored from a backup.
+
+| Mutation | Result |
+|---|---|
+| M1: `seek_at` export calls the plain `seek` | gate 1 red at "added stem block 8"; gate 3 red (`left: 0`, `right: 1`) |
+| M2: `FEATURE_SOURCE_SEEK_AT` left out of `FEATURE_MASK` | `version_and_capabilities_are_exact` red (31 vs 63); `masks_and_result_codes_are_frozen` red |
+| M5: `SessionState::seek_at` uses `self.providers` | gate 1 red: the seek returns 1 (`source.id.unknown`) before the swap |
+| V10 (#1273 MINOR 1): `committed` = prospective model | `structural_command_keeps_…` red: `NonContiguous { expected: 256, actual: 0 }` |
+| V4 (#1273 MINOR 2): `seek` uses `self.providers` | `removing_a_track_…` red; `structural_command_keeps_…` green, so the new assertion is the only catch |
+
+**Gates.** All passed locally on x86-64.
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `RUSTDOCFLAGS=-Dwarnings cargo doc --locked --workspace --no-deps` | exit 0 |
+| workspace policy check and its mutation test | ok / ok |
+| realtime policy check and its mutation test | ok (58 regions in 16 files) / ok |
+| `cargo test --locked -p capi` | lib 40, `plan_swap_race` 2, `resource_lifecycle` 9: all pass |
+| `cargo test --locked -p audit` | 33 pass |
+| `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` | 100,000 calls, every violation counter 0 |
+| `check-capi-abi.sh` | ok (shared and static) |
+| `check-capi-abi.sh --self-test` | ok, including `seek-at-undefined-reference` |
+| `check-cross-targets.sh` | PASS; only the expected #1018 iOS `memset_pattern16` rows fail |
+
+- `audit capi`'s `pcm_digest` is `c60671f6593fa603`. The audit makes no seek, and no live gate
+  pins the digest.
+- No crate compiled into the browser Wasm module changed (capi only), so the worklet chain was
+  not run and the artifact is unchanged.
+- `Simd4` runs only in CI's aarch64 legs. Like #1273, the slice adds no bank code.

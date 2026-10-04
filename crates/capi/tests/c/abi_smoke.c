@@ -19,7 +19,8 @@ ABI_ASSERT(MISO_ENGINE_V1_INTERNAL == 255);
 ABI_ASSERT(MISO_ENGINE_V1_TAIL_FINITE == 0);
 ABI_ASSERT(MISO_ENGINE_V1_TAIL_INFINITE == 1);
 ABI_ASSERT(MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK == 15);
-ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 31);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT == 32);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 63);
 
 ABI_ASSERT(sizeof(miso_engine_v1_engine_config) == MISO_ENGINE_V1_ENGINE_CONFIG_SIZE);
 ABI_ASSERT(sizeof(miso_engine_v1_compile_limits) == MISO_ENGINE_V1_COMPILE_LIMITS_SIZE);
@@ -82,6 +83,12 @@ static uint32_t (*const source_seek_signature)(miso_engine_v1_session *,
                                                uint64_t,
                                                uint64_t,
                                                uint64_t) = miso_engine_v1_source_seek;
+static uint32_t (*const source_seek_at_signature)(miso_engine_v1_session *,
+                                                  const uint8_t *,
+                                                  uint64_t,
+                                                  uint64_t,
+                                                  uint64_t,
+                                                  uint64_t) = miso_engine_v1_source_seek_at;
 static uint32_t (*const submit_command_signature)(miso_engine_v1_session *,
                                                   const uint8_t *,
                                                   uint64_t,
@@ -124,6 +131,14 @@ int main(void) {
         return 2;
     }
     engine_destroy_signature(engine);
+
+    /* A host checks the anchored-seek bit before calling the symbol (issue 1275); a null session
+     * is refused before any other argument is read. */
+    if ((capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT) == 0 ||
+        source_seek_at_signature(NULL, (const uint8_t *)"s", 1, 2, 0, 0) !=
+            MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        return 4;
+    }
 
     return compile_session_signature == NULL || source_submit_signature == NULL ||
                    source_seek_signature == NULL || submit_command_signature == NULL ||

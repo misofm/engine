@@ -89,6 +89,16 @@ capi_abi_self_test() {
     expect_failure symbol-removal \
         "${common_env[@]}" NM="$nm_remove" REAL_NM="$real_nm" bash "$0" "$workspace_root"
 
+    # Issue #1275: a library whose miso_engine_v1_source_seek_at is only an undefined reference.
+    # The defined-only listing (`nm -D --defined-only`, or `-gU` on Apple) omits such a symbol,
+    # so the wrapper lists the real definitions minus that one; the frozen set must refuse it.
+    nm_undefined="$scratch_root/nm-undefined"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        '"${REAL_NM}" "$@" | sed "/miso_engine_v1_source_seek_at$/d"' >"$nm_undefined"
+    chmod +x "$nm_undefined"
+    expect_failure seek-at-undefined-reference \
+        "${common_env[@]}" NM="$nm_undefined" REAL_NM="$real_nm" bash "$0" "$workspace_root"
+
     bad_library="$scratch_root/not-a-library.so"
     printf '%s\n' 'not a native library' >"$bad_library"
     expect_failure link-failure \
@@ -187,6 +197,7 @@ printf '%s\n' \
     miso_engine_v1_render_f32_planar \
     miso_engine_v1_session_destroy \
     miso_engine_v1_source_seek \
+    miso_engine_v1_source_seek_at \
     miso_engine_v1_source_submit_planar_f32 \
     miso_engine_v1_submit_command \
     | sort >"$expected_symbols"
