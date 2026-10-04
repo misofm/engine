@@ -58,6 +58,16 @@ use lane::Backend;
 /// harness cannot read an effect's ramps, so this is what "mid-ramp" means to its coverage.
 const IN_FLIGHT_SAMPLES: u64 = 64;
 
+/// The render quanta a scenario runs at (128 twice, as the common host quantum).
+///
+/// A differential that banks natively indexes them by its seed rather than drawing one, so every
+/// five consecutive seeds visit every quantum (`32` at seed 3) at every bank width the build has,
+/// and [`assert_reached`]'s quantum-32 clause holds by construction rather than by a draw. A
+/// 4-lane (NEON/simd128) build binds one width per seed where an AVX2 build may bind two, and
+/// drawn, twelve multiband seeds left the 4-lane build no automated quantum-32 scenario (#1278
+/// follow-up). The scalar-only differential, which no quantum clause reaches, still draws one.
+const QUANTA: [u32; 5] = [128, 128, 64, 32, 256];
+
 /// One state payload's three sections, as `snapshot_state_payload` writes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Payload {
@@ -337,6 +347,10 @@ struct Shape {
     mono: bool,
     /// Hostile input words and hostile payload words are drawn.
     hostile: bool,
+    /// Under [`Known::RampCutsMoveBits`]: the scenario carries automation (on one lane) rather
+    /// than chunked blocks. Indexed by the seed like the quantum, so every ten consecutive seeds
+    /// pair every quantum with both, at every width (seed 3 automates at quantum 32).
+    automate: bool,
 }
 
 fn scenario(
@@ -354,13 +368,18 @@ fn scenario(
     let mono = draw.chance(1, 3);
     let shape = Shape {
         quality: draw.pick(descriptor.qualities),
-        quantum: draw.pick(&[128_u32, 128, 64, 32, 256]),
+        quantum: if spec.banks_natively {
+            QUANTA[(seed % QUANTA.len() as u64) as usize]
+        } else {
+            draw.pick(&QUANTA)
+        },
         link: draw.pick(&links),
         bypass: draw.chance(1, 8),
         ports: draw_ports(&mut draw, descriptor),
         capacity: draw.pick(&[1_u32, 2, 4, 8, 16]),
         mono,
         hostile: !mono && draw.chance(1, 2),
+        automate: (seed / QUANTA.len() as u64).is_multiple_of(2),
     };
     let bound = coverage.banks.iter().sum::<u64>();
     for &width in BankWidth::ALL {
@@ -859,7 +878,7 @@ fn run_width(
     // `Some(lane)`: only that lane carries automation; `Some(lanes)`: none does.
     let ramp_cuts = spec.known.contains(&Known::RampCutsMoveBits);
     let automated = ramp_cuts.then(|| {
-        if draw.chance(1, 2) {
+        if shape.automate {
             draw.below(lanes)
         } else {
             lanes
@@ -879,6 +898,10 @@ fn run_width(
     let mut continuation: Option<Continuation> = None;
     // Per lane, the sample before which a ramp its automation started may still be in flight.
     let mut in_flight_until = vec![0_u64; lanes];
+    // Whether a continuation has been taken while a ramp may be in flight: the first boundary
+    // that offers one always takes it, so a scenario whose automation starts a ramp reaches a
+    // mid-ramp continuation by construction rather than by a draw.
+    let mut taken_in_flight = false;
     // Prepared targets (#1278 attempt 3): an effect that refuses raw spans and takes its
     // automation as prepared targets (the EQ) gets ramps only this way. Per lane, the candidate
     // the lane was last given, and the target words it is known to be heading for (initially its
@@ -952,7 +975,8 @@ fn run_width(
         let flying: Vec<usize> = (0..lanes)
             .filter(|&lane| first < in_flight_until[lane])
             .collect();
-        let take = if !flying.is_empty() && draw.chance(1, 2) {
+        let take = if !flying.is_empty() && (!taken_in_flight || draw.chance(1, 2)) {
+            taken_in_flight = true;
             Some(draw.pick(&flying))
         } else if continuation.is_none() && draw.chance(1, 3) {
             Some(draw.below(lanes))
@@ -2450,6 +2474,7 @@ pub fn d7_report_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         capacity: 1,
         mono: false,
         hostile: false,
+        automate: false,
     };
     let values: Vec<InitialParameterValue> = default_initial_values(descriptor).collect();
     let frames = QUANTUM as usize;
@@ -2692,6 +2717,7 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
             capacity: 2,
             mono: false,
             hostile: false,
+            automate: false,
         };
         let sizes = quality.maximum_state;
         for (index, parameter) in descriptor.parameters.iter().enumerate() {

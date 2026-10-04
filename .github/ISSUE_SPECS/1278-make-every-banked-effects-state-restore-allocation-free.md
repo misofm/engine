@@ -572,3 +572,27 @@ Stays open (successors, listed in #1269's "Phase 1 status"): the delay refuses i
 snapshots (feedback, mix, cross feedback); soft-clip's two open non-finite history cases;
 soft-clip validates an in-flight current by its line, not by `ramp_path_within`. The EQ's `Simd4`
 legs are verified only in CI aarch64.
+
+CI follow-up (PR #1299, run 37196277320, `AArch64 product crate debug tests (NEON Simd4, FPCR)`):
+the multiband differential's reach clause failed on arm64 with `continuations_in_flight_at_32: 0`.
+A generator-reach defect, not a product one. The quantum was drawn per seed, and under
+`RampCutsMoveBits` automation was on in half the scenarios. Both of the twelve seeds that drew
+quantum 32 drew no automation at four lanes. An AVX2 build passed only because its second, `Eight`
+pass draws its automation lane again. Reproduced on x86 with `Backend::current()`, `Native`,
+`Backend::VECTOR` and `BankWidth::ALL` forced to `Simd4`/`Four` in a scratch copy: the coverage
+matched CI's word for word. The fix (`crates/conformance/src/randomized.rs`), applied to every
+differential that banks natively:
+- the quantum is indexed by the seed (`QUANTA[seed % 5]`, so seed 3 runs at 32);
+- `Shape::automate` alternates automation every five seeds (seed 3 automates);
+- the first boundary with a ramp in flight always takes the continuation.
+Evidence: all eight effect differentials pass at native `Eight` and at forced `Four`. Multiband
+`continuations_in_flight_at_32` is 15 at `Eight`+`Four` and 9 at `Four` alone. Taking no
+continuations, or none while a ramp is in flight, turns the clause red at both widths. The
+scalar-only path (the delay) still draws its quantum, so its scenarios are unchanged. Indexing it
+too exposed a separate, width-independent product defect, which needs a successor issue. The
+delay's `read_ramp` re-derives a ramp's step from `(current, target, remaining)` on restore, so an
+instance restored mid-ramp drifts 1-2 ulp from the instance it continues. `run_scalar`'s
+restored-against-continued check catches it (forced `Four` seed 4 with the quantum indexed; x86,
+old generator, `MISO_ENGINE_RANDOMIZED_SCALE=20`, seed 53). No product path reaches it today: the
+carry moves the delay (slice 12). The nightly's scale-100 run includes seed 53. Its red was
+confirmed here only in the debug profile, not in the nightly's release profile.
