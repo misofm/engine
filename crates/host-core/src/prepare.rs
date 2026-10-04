@@ -465,6 +465,23 @@ impl HostLiveControlHandles {
     }
 }
 
+/// Bytes a host that keeps the strip producers as one exactly sized boxed slice retains: the
+/// slice of `strip_count` [`TrackControlProducer`]s plus each producer's `track_id`, whose text is
+/// `strip_id_bytes` long in total (#1256 D3).
+///
+/// This is the mirror a host's pre-flight resource projection reads, as `control_table_bytes` is
+/// for the source producers: a function of the producer's own layout, so the host never spells
+/// it. The rings the producers share with the plan are not here; builtins charges them in
+/// `builtin_retained_payload_bytes`.
+#[must_use]
+pub fn strip_control_table_bytes(strip_count: usize, strip_id_bytes: usize) -> Option<u64> {
+    let table = core::alloc::Layout::array::<TrackControlProducer>(strip_count).ok()?;
+    let ids = core::alloc::Layout::array::<u8>(strip_id_bytes).ok()?;
+    u64::try_from(table.size())
+        .ok()?
+        .checked_add(u64::try_from(ids.size()).ok()?)
+}
+
 /// One prepared session: the render plan, the control-side source set, and the resource report.
 ///
 /// Field order is the drop order: the plan (which owns the source consumers) drops before the

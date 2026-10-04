@@ -143,7 +143,7 @@ pub use prepare::{
     prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    prepare_host_session, prepare_host_session_with_live_controls,
+    prepare_host_session, prepare_host_session_with_live_controls, strip_control_table_bytes,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -221,6 +221,10 @@ pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
 /// so a host that pushes `classify_live_delta`'s records names them without depending on
 /// `builtins-compiler` or `builtins`.
 pub use builtins::BuiltinLaneSelector;
+/// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
+/// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
+/// depending on `builtins-compiler`.
+pub use builtins_compiler::TrackControlProducer;
 pub use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 

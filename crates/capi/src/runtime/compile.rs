@@ -8,8 +8,13 @@ pub(crate) struct CompiledChildren {
     pub(crate) plan: PlanState,
 }
 
+/// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
+pub(crate) const LIVE_QUEUE_DEPTH: NonZeroUsize =
+    NonZeroUsize::new(16).expect("sixteen is nonzero");
+
 pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
+    pub(crate) strips: StripLanes,
     pub(crate) plan: PreparedRenderPlan,
     pub(crate) resources: PlanResourceReport,
     pub(crate) control_catalog: PreparedSessionControlCatalog,
@@ -110,6 +115,8 @@ pub(crate) fn capi_resources(
     limits: CompileLimits,
     source_count: usize,
     source_id_bytes: usize,
+    strip_count: usize,
+    strip_id_bytes: usize,
     quantum_frames: usize,
     provider: host_core::SessionControlProviderResources,
 ) -> Result<CapiResources, CompileFailure> {
@@ -144,10 +151,15 @@ pub(crate) fn capi_resources(
     // The session's canonical JSON is not a capi row. The compiled session owns it, and its
     // `compiled_model_bytes` already charges it to the graph cap, current and prospective alike
     // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
+    //
+    // The strip producer table (#1256 D3) is the epoch's too, through host-core's mirror. Its
+    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`.
     let epoch_rows = [
         host_core::control_table_bytes(source_count)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         host_core::source_id_arena_bytes(source_id_bytes)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
@@ -228,6 +240,16 @@ pub(crate) fn prepared_capi_resources(
                     .checked_add(source.id.as_str().len())
                     .ok_or_else(|| failure("capi.resource.arithmetic"))
             })?;
+    // Every strip, tracks and submixes alike, carries one producer whose `track_id` is its ID.
+    let (strip_count, strip_id_bytes) = compiled.normalized_model().strips().try_fold(
+        (0_usize, 0_usize),
+        |(count, bytes), strip| {
+            bytes
+                .checked_add(strip.id.as_str().len())
+                .map(|bytes| (count + 1, bytes))
+                .ok_or_else(|| failure("capi.resource.arithmetic"))
+        },
+    )?;
     let provider = SessionControlProvider::resource_report(
         catalog,
         controller_retained_capacity(limits)?,
@@ -238,6 +260,8 @@ pub(crate) fn prepared_capi_resources(
         limits,
         compiled.source_count(),
         source_id_bytes,
+        strip_count,
+        strip_id_bytes,
         compiled.quantum().0 as usize,
         provider,
     )
@@ -418,7 +442,31 @@ pub(crate) fn prepare_runtime(
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
+    // #1256 D1: every plan carries each strip's fader/mute and matrix/pan lanes, and nothing else
+    // live: no input lane (its tail would turn infinite), no effect or route lane.
+    let (prepared, handles) = prepare_host_runtime_with_live_lanes(
+        compiled,
+        &caps,
+        &HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..HostLiveControlRequest::default()
+        },
+        HostLiveLanes::FADER_AND_MATRIX,
+    )
+    .map_err(prepare_failure)?;
+    // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
+    // empty drop here, on the control thread; each producer keeps its own `track_id`. The
+    // producer vector is built at exactly one entry per strip, so the boxed slice does not
+    // reallocate.
+    let host_core::HostLiveControlHandles {
+        strip_controls,
+        track_count,
+        ..
+    } = handles;
+    let strips = StripLanes {
+        controls: strip_controls.into_boxed_slice(),
+        track_count,
+    };
     let capi = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
@@ -433,6 +481,7 @@ pub(crate) fn prepare_runtime(
     };
     Ok(PreparedRuntime {
         sources: prepared.sources,
+        strips,
         plan: prepared.plan,
         resources: PlanResourceReport {
             struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
@@ -518,6 +567,7 @@ pub(crate) fn compile_children(
     let retained_capacity = controller_retained_capacity(limits)?;
     let PreparedRuntime {
         sources,
+        strips,
         plan,
         resources,
         control_catalog,
@@ -585,7 +635,7 @@ pub(crate) fn compile_children(
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources),
+            providers: ProviderEpoch::current(sources, strips),
             pending_providers,
             retired_providers,
             publisher,

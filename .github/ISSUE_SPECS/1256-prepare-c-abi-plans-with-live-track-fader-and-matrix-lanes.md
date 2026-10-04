@@ -197,3 +197,96 @@ Run every command from the repository root.
 - "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, base `a2a417c9a`)
+
+**What landed.**
+- `crates/capi/src/runtime/compile.rs`: `LIVE_QUEUE_DEPTH` (16); `prepare_runtime` calls
+  `prepare_host_runtime_with_live_lanes` with D1's request and `HostLiveLanes::FADER_AND_MATRIX`,
+  destructures the handles keeping only `strip_controls` (boxed slice) and `track_count`, and drops
+  the rest on the control thread. `PreparedRuntime` gains `strips`. `capi_resources` takes
+  `strip_count`/`strip_id_bytes` and adds `host_core::strip_control_table_bytes` to `epoch_rows`;
+  `prepared_capi_resources` computes them over `normalized_model().strips()` (tracks and submixes).
+- `crates/capi/src/runtime/control.rs`: `StripLanes { controls, track_count }`; `ProviderEpoch`
+  gains `strips`, and `::current`/`::candidate` take it; the structural arm passes the candidate's.
+  `StripLanes` and the `strips` field carry `#[allow(dead_code)]` (held for ownership; only tests
+  read them until #1257).
+- `crates/capi/src/runtime/mod.rs`: imports only.
+- `crates/host-core/src/prepare.rs`: `pub fn strip_control_table_bytes(strip_count,
+  strip_id_bytes)`; `lib.rs` re-exports it and `TrackControlProducer`.
+- `crates/builtins-compiler/src/lib.rs`: `TrackControlProducer`'s stale drop-order sentences
+  corrected (documentation only). `EffectControlProducer`'s is left to #1263.
+- `tools/bench/src/console.rs`: the one module-doc sentence. `docs/C_ABI_V1_QUALIFICATION.md`: the
+  D5 paragraph.
+- `crates/capi/tests/resource_lifecycle.rs`: D4 (below), and the two builtin payload budgets
+  raised with their reason.
+- Nothing outside the authorized paths. No push, no classifier, no input/effect/route lane.
+
+**The producer vector does not reallocate.** builtins-compiler builds it with
+`Vec::with_capacity(controls.len())` and pushes exactly one per request, so `into_boxed_slice()`
+is a no-op; the oracle's window includes it and is exact.
+
+**New or changed tests and their test values.**
+- `c_abi_plans_with_live_lanes_render_like_lanes_free_plans` (`crates/capi/src/runtime/tests.rs`,
+  gate 1): 1 and 10 tracks x 44.1/48/88.2/96 kHz, on `generated_parity_session` and on
+  `bare_parity_session` (empty console, no inserts, both filters off; its lanes-free tail is
+  asserted `TAIL_FINITE`). 8 blocks bit-identical against `host_core::prepare_host_runtime` of the
+  same session (and at least one non-zero sample), equal `latency_samples`/`tail_kind`/
+  `tail_samples`, one producer per strip in canonical order, `input == None`, `track_count`.
+  *Red if capi attaches the input lane, changes a rendered bit, or drops the producers.*
+- `resource_lifecycle` oracle (D4): `host_half` replays the same live-lane preparation and keeps
+  only the boxed producer slice; `HostOwners.strips` is dropped first; the owner sum is five;
+  `assert_capi_retained_bytes_are_complete` adds `owners.strips`; `assert_host_owners_are_charged`
+  asserts `owners.strips == strip_control_table_bytes(..)` over the compiled session's strips. The
+  double-live oracle adds the prospective strip table, measured from the kept slice
+  (`size_of_val` + ID bytes), to its capi epoch term. *Red if capi keeps the producer table but
+  does not charge it, or charges more than it keeps.*
+
+**Mutation runs** (each reverted; tree restored from a saved copy):
+- M1 `strip_input: true` in capi's lane selection: gate 1 red ("no strip carries an input lane").
+- M1b the same, with the test's `input.is_none()` assertion disabled: red on
+  "bare 1 tracks at 44100 Hz: tail kind" (left 1, right 0); the parity session passed the tail
+  check, so only the bare session discriminates, as the spec says.
+- M2 producers dropped (`controls` empty): red ("one producer per strip").
+- M5 a fader `Mute` record pushed onto strip 0 at preparation: red, "parity 1 tracks at 44100 Hz:
+  block 0" (bits differ).
+- M3 `routes: true` and M4 `effects: true`: gate 1 stays green. Candid: on these sessions a live
+  route or effect lane moves no bit and no tail by construction, so gate 1 does not catch them;
+  they show only as larger resource rows, which the budget test bounds.
+- O1 strip row charged as zero: `capi_retained_bytes_charge_every_byte_the_compile_retains` red
+  (left 258,135 observed, right 256,884).
+- O2 strip row charged for one extra strip: red (left 258,135, right 258,271).
+
+**Resource rows, nine-track EQ fixture, x86-64** (before at `a2a417c9a` -> after):
+- `builtin_retained_payload_bytes` (= `builtin_processor_payload_bytes`): 17,451 -> 28,521
+  (+11,070, 1,230 per strip): two 16-record rings per strip plus builtins' producer-vector entry and
+  control-seal row. Budget raised 19,200 -> 31,424 (value + 10 %, rounded to 64) in
+  `REFERENCE_BUDGETS`, with the reason in its doc.
+- `capi_retained_bytes`: 256,812 -> 258,135 (+1,323): the strip table, nine 136-byte producers
+  plus 27 ID bytes (1,251), and `ProviderEpoch` growing 40 -> 64 bytes in its three charged slots
+  (current inside the session, pending, retired: 72). Inside its 282,432 budget.
+- Double-live requirements: builtin 34,902 -> 57,042; capi 167,558 -> 170,132. Both oracles exact.
+- Recorded, not removed (D4): builtins' processor accumulator also charges the producer vector
+  (`add_vector_layout::<TrackControlProducer>`), so the table is charged once to the builtin cap
+  and once to the capi cap. Conservative; it predates this slice.
+
+**Gates** (all on the implementation tree):
+- `cargo test --locked -p capi`: 36 + 11 passed. `--test resource_lifecycle`: 11 passed.
+- `cargo test --locked -p host-core --all-features`: pass.
+- The workspace test command (gate 3): pass.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`: pass.
+  `./target/release/audit capi`: 100,000 calls, allocations 0, deallocations 0, locks 0,
+  syscalls 0, total_violations 0.
+- `check-capi-abi.sh` and `--self-test`: pass. `check-scalar-oracle-absent.py --native
+  target/release/libcapi.so`: pass. `cargo test --locked --release -p audit -p bench -p
+  console-workload`: pass.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+- host-core, realtime and workspace policy check + self-test: pass. `check-cross-targets.sh`:
+  pass (no new `memset_pattern16` in capi). `check-ci-path-routing.py`: pass.
+- Worklet chain (host-core is in the browser module): `build-web-audioworklet.sh --named-twin`,
+  `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`: pass.
+- 4-lane NEON (`run-aarch64-tests.sh debug`): CI only, not run locally.

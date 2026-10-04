@@ -499,14 +499,20 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
 
 /// The host-core half of one `miso_engine_v1_compile_session`, replayed through the public API.
 ///
-/// capi parses the document into a `SessionStore` and prepares the plan, its source producers and
-/// its parameter catalog through `host-core` before it allocates anything of its own; it then
-/// moves all of them into its two handles without copying them. What the compile leaves live
-/// beyond this half is therefore exactly what capi itself allocated.
+/// capi parses the document into a `SessionStore` and prepares the plan, its source producers,
+/// its strip live-control producers and its parameter catalog through `host-core` before it
+/// allocates anything of its own; it then moves all of them into its two handles without copying
+/// them. What the compile leaves live beyond this half is therefore exactly what capi itself
+/// allocated.
 struct HostHalf {
     store: protocol::SessionStore,
     prepared: host_core::PreparedHost,
+    /// Each strip's fader/mute and matrix/pan producers, kept as capi keeps them (#1256 D2).
+    strips: Box<[host_core::TrackControlProducer]>,
 }
+
+/// capi's live-lane depth, `LIVE_QUEUE_DEPTH` (#1053 D4), which is crate-private.
+const LIVE_QUEUE_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::new(16).unwrap();
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
     let caps = host_caps(compile_limits);
@@ -517,9 +523,26 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
         .unwrap_or_else(|_| panic!("the reference session's compile caps"));
     let store = protocol::SessionStore::new(model, compile_caps)
         .unwrap_or_else(|_| panic!("the reference session compiles"));
-    let prepared = host_core::prepare_host_runtime(store.compiled(), &caps)
-        .unwrap_or_else(|_| panic!("the reference session prepares"));
-    HostHalf { store, prepared }
+    // The same request capi makes (#1256 D1), and inside the caller's observed window the same
+    // disposal (D2): the strip ID list and the vectors this selection leaves empty drop here, so
+    // only the producers survive, as one boxed slice. Keeping the ID list would count bytes capi
+    // does not keep.
+    let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
+        store.compiled(),
+        &caps,
+        &host_core::HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..host_core::HostLiveControlRequest::default()
+        },
+        host_core::HostLiveLanes::FADER_AND_MATRIX,
+    )
+    .unwrap_or_else(|_| panic!("the reference session prepares"));
+    let host_core::HostLiveControlHandles { strip_controls, .. } = handles;
+    HostHalf {
+        store,
+        prepared,
+        strips: strip_controls.into_boxed_slice(),
+    }
 }
 
 impl HostHalf {
@@ -562,10 +585,11 @@ fn freed_by_drop<T>(value: T) -> u64 {
 
 /// What each owner the host-core half hands capi retains, observed by dropping it.
 ///
-/// The drop order is the attribution: the source producers go first, so a ring the producers
-/// share with the plan is freed -- and counted -- with the plan that renders from it, and the
-/// producers' own bytes are their control table and ID arena alone.
+/// The drop order is the attribution: the strip and source producers go first, so a ring the
+/// producers share with the plan is freed -- and counted -- with the plan that renders from it,
+/// and the producers' own bytes are their tables and IDs alone.
 struct HostOwners {
+    strips: u64,
     sources: u64,
     catalog: u64,
     plan: u64,
@@ -582,6 +606,8 @@ struct CompileObservation {
     /// Bytes the replayed host-core half left live, and the same bytes owner by owner.
     host_live: u64,
     owners: HostOwners,
+    /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
+    strip_table_charge: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -600,7 +626,20 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     let host = host_half(document, compile_limits);
     let host_live = live_bytes(finish());
     let model = host.model_estimate();
-    let HostHalf { store, prepared } = host;
+    let HostHalf {
+        store,
+        prepared,
+        strips,
+    } = host;
+    let (strip_count, strip_id_bytes) = store
+        .compiled()
+        .normalized_model()
+        .strips()
+        .fold((0, 0), |(count, bytes), strip| {
+            (count + 1, bytes + strip.id.as_str().len())
+        });
+    let strip_table_charge = host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+        .expect("the strip table's charge");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -608,15 +647,16 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_catalog,
     } = prepared;
     let owners = HostOwners {
+        strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
         plan: freed_by_drop(plan),
         store: freed_by_drop(store),
     };
     assert_eq!(
-        owners.sources + owners.catalog + owners.plan + owners.store,
+        owners.strips + owners.sources + owners.catalog + owners.plan + owners.store,
         host_live,
-        "the four owners hold every byte the host-core half retains"
+        "the five owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -625,6 +665,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         compile_live,
         host_live,
         owners,
+        strip_table_charge,
     }
 }
 
@@ -656,10 +697,15 @@ impl CompileObservation {
         let decode_field_rounding =
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
         assert_eq!(
-            capi_allocated + self.owners.sources + self.owners.catalog + decode_field_rounding,
+            capi_allocated
+                + self.owners.strips
+                + self.owners.sources
+                + self.owners.catalog
+                + decode_field_rounding,
             self.report.capi_retained_bytes,
-            "{label}: capi's own allocations + the source producers + the parameter catalog + the \
-             decode-field rounding, all observed (left), against `capi_retained_bytes` (right)"
+            "{label}: capi's own allocations + the strip producers + the source producers + the \
+             parameter catalog + the decode-field rounding, all observed (left), against \
+             `capi_retained_bytes` (right)"
         );
     }
 
@@ -687,6 +733,10 @@ impl CompileObservation {
     ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
+        assert_eq!(
+            owners.strips, self.strip_table_charge,
+            "{label}: strip producer table and its track IDs"
+        );
         assert_eq!(
             owners.sources, self.host_report.control_retained_bytes,
             "{label}: source control table and ID arena"
@@ -750,7 +800,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
 fn prepared_parameter_catalog_charge_covers_its_allocations() {
     let host = host_half(SESSION, &limits());
     let charge = host.catalog_charge();
-    let HostHalf { store, prepared } = host;
+    let HostHalf {
+        store, prepared, ..
+    } = host;
     let host_core::PreparedHost {
         control_catalog, ..
     } = prepared;
@@ -827,6 +879,13 @@ impl Budget {
 /// eight-lane move less four mask bytes). The graph rows moved by the same amounts and stay inside
 /// their budgets (253,934 of 261,248 at eight lanes).
 /// | largest named allocation | 90,720 | the same |
+///
+/// #1256 raised the two builtin payload rows, a structural move: every C ABI plan now carries each
+/// strip's fader/mute and matrix/pan lanes, two 16-record rings per strip plus builtins' producer
+/// vector and control seal, 17,451 -> 28,521 (+11,070, 1,230 per strip on nine strips). The new
+/// ceiling is 28,521 plus 10 %, rounded up to 64, at both widths. capi retained moved 256,812 ->
+/// 258,135 (+1,323) inside its budget: the strip table, nine 136-byte producers and their 27 ID
+/// bytes (1,251), and 24 bytes in each of the three provider-epoch slots (72).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
@@ -915,8 +974,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_processor_payload_bytes",
         value: |report| report.builtin_processor_payload_bytes,
-        eight_lanes: 19_200,
-        four_lanes: 19_200,
+        eight_lanes: 31_424,
+        four_lanes: 31_424,
     },
     Budget {
         row: "builtin_meter_payload_bytes",
@@ -927,8 +986,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 19_200,
-        four_lanes: 19_200,
+        eight_lanes: 31_424,
+        four_lanes: 31_424,
     },
     Budget {
         row: "capi_retained_bytes",
@@ -1352,8 +1411,16 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     })
     .unwrap_or_else(|_| panic!("replay resource report"));
     // The prospective session's canonical JSON is charged once, with its model in the graph row;
-    // capi's epoch row is the prospective source producers' control table and ID arena.
-    let prospective_epoch = prospective_host.prepared.report.control_retained_bytes;
+    // capi's epoch row is the prospective source producers' control table and ID arena, and its
+    // strip producers' table and track IDs (#1256), measured from the kept slice.
+    let prospective_strips = size_of_val(&*prospective_host.strips) as u64
+        + prospective_host
+            .strips
+            .iter()
+            .map(|producer| producer.track_id.len() as u64)
+            .sum::<u64>();
+    let prospective_epoch =
+        prospective_host.prepared.report.control_retained_bytes + prospective_strips;
     let prepared_protocol = limits().maximum_control_frame_bytes
         + size_of::<protocol::PreparedStructuralCommand>() as u64
         + replay.retained_payload_bytes

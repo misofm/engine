@@ -196,3 +196,16 @@ expectations include one additional eight-byte graph owner on Wasm; PCM digests 
 builder invocation refused a missing output directory before compilation (exit 2);
 the corrected invocation with an existing empty directory completed successfully.
 Historical artifact and qualification records above retain their original identities.
+
+## Live fader and matrix lanes on every plan (#1256)
+
+Every C ABI plan, at compile and at every structural replacement, carries two live lanes per
+strip, tracks and submixes alike: a 16-record fader/mute ring and a 16-record matrix/pan ring
+(#1053 D4). The rings are charged in `builtin_retained_payload_bytes`. capi keeps the strips'
+producers with the plan's provider epoch, and that producer table (one producer per strip plus
+its strip ID bytes) is charged in `capi_retained_bytes`. On the nine-track EQ reference session the
+two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
+`maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
+must raise both. No input, effect or route lane is attached, so rendering, `latency_samples`,
+`tail_kind` and `tail_samples` do not change. Nothing pushes to the lanes yet; #1257 delivers
+fader, mute and pan edits through them.

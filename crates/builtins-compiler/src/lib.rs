@@ -248,8 +248,9 @@ pub struct TrackControlRequest {
 /// The control-side producer half of one prepared live-control channel.
 ///
 /// The consumer half is owned by the track's matrix processor inside the render plan, exactly as
-/// `MeterConsumer` is the mirror image for metering. A producer must be dropped before the plan
-/// that owns its consumer.
+/// `MeterConsumer` is the mirror image for metering. Each ring is an `Arc` shared by the producer
+/// and the consumer, so either may drop first: the last owner frees the ring, on the control
+/// thread, since the render thread never drops a plan.
 pub struct TrackControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
@@ -260,8 +261,7 @@ pub struct TrackControlProducer {
     ///
     /// It is a field of the same struct rather than a second vector so that "one track, one
     /// live-control channel" stays one object with one lifetime: all three halves are created
-    /// together, handed to the caller together, and dropped before the plan that owns their
-    /// consumers.
+    /// together, handed to the caller together, and dropped together.
     pub fader: Producer<TrackFaderRecord>,
     /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
     /// depth, for the reason the field above states. `None` when the request set

@@ -1989,6 +1989,172 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     crate::ffi::test_session_destroy(c_session);
 }
 
+/// The parity session stripped to a chain whose builtin tail is finite: no console slot, no
+/// insert, and both input filters off. Only such a session tells a live input lane apart, because
+/// the input lane makes a strip's builtin tail infinite (#1256 gate 1).
+fn bare_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&generated_parity_session(track_count, sample_rate_hz))
+        .expect("accepted parity session");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 0.0;
+        }
+    }
+    session::canonical_session_json(&model).expect("canonical bare session")
+}
+
+/// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session.
+fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
+    let mut c = compile_children(document, limits()).unwrap_or_else(|failure| {
+        panic!(
+            "{label}: compile: {}",
+            String::from_utf8_lossy(&failure.diagnostics)
+        )
+    });
+    let caps = prepare_caps(limits());
+    let compiled = host_core::compile_host_session(document, &caps)
+        .unwrap_or_else(|_| panic!("{label}: host compile"));
+    let host_core::PreparedHost {
+        mut plan,
+        mut sources,
+        report: host,
+        ..
+    } = host_core::prepare_host_runtime(&compiled, &caps)
+        .unwrap_or_else(|_| panic!("{label}: lanes-free host prepare"));
+
+    // Same latency and tail as the lanes-free plan.
+    let resources = c.plan.resources();
+    let (tail_kind, tail_samples) = match host.output_tail {
+        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
+        TailSamples::Infinite => (TAIL_INFINITE, 0),
+    };
+    if expect_finite {
+        assert_eq!(
+            tail_kind, TAIL_FINITE,
+            "{label}: the lanes-free tail is finite"
+        );
+    }
+    assert_eq!(resources.latency_samples, host.latency_samples, "{label}");
+    assert_eq!(resources.tail_kind, tail_kind, "{label}: tail kind");
+    assert_eq!(
+        resources.tail_samples, tail_samples,
+        "{label}: tail samples"
+    );
+
+    // One producer per strip, in canonical strip order, with no input lane.
+    let model = compiled.normalized_model();
+    let strips = &c.session.providers.strips;
+    assert_eq!(strips.track_count, model.tracks.len(), "{label}");
+    assert_eq!(
+        strips
+            .controls
+            .iter()
+            .map(|producer| &*producer.track_id)
+            .collect::<Vec<_>>(),
+        model
+            .strips()
+            .map(|strip| strip.id.as_str())
+            .collect::<Vec<_>>(),
+        "{label}: one producer per strip, in canonical order"
+    );
+    assert!(
+        strips
+            .controls
+            .iter()
+            .all(|producer| producer.input.is_none()),
+        "{label}: no strip carries an input lane"
+    );
+
+    // Eight blocks fed the same source chunks are bit-identical.
+    let rate = compiled.sample_rate().0;
+    let quantum = 128_usize;
+    let mut first_left = vec![0.0_f32; quantum];
+    let mut first_right = vec![0.0_f32; quantum];
+    first_left[1] = 0.25;
+    first_right[1] = -0.5;
+    first_left[7] = -1.0;
+    first_right[9] = 0.75;
+    let final_left = vec![0.125_f32; 64];
+    let final_right = vec![-0.25_f32; 64];
+    let mut audible = false;
+    for block in 0..8_u64 {
+        let chunk = match block {
+            0 => Some((0, &first_left, &first_right, false)),
+            1 => Some((128, &final_left, &final_right, true)),
+            _ => None,
+        };
+        if let Some((start_frame, left, right, end_of_region)) = chunk {
+            let planes = [left.as_slice(), right.as_slice()];
+            let submission = || SourceSubmission {
+                generation: 1,
+                start_frame,
+                sample_rate_hz: rate,
+                planes: &planes,
+                frames: left.len() as u32,
+                end_of_region,
+            };
+            c.session
+                .submit(b"fixture-source", submission())
+                .unwrap_or_else(|_| panic!("{label}: C submit"));
+            sources
+                .submit(b"fixture-source", submission())
+                .unwrap_or_else(|_| panic!("{label}: host submit"));
+        }
+        let mut c_pcm = vec![f32::NAN; quantum * 2];
+        c.plan
+            .render(
+                block * quantum as u64,
+                PlanarBufferMut::try_new(&mut c_pcm, 2, quantum, quantum).expect("C output"),
+            )
+            .unwrap_or_else(|code| panic!("{label}: C render {code}"));
+        let mut host_pcm = vec![f32::NAN; quantum * 2];
+        plan.render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut host_pcm, 2, quantum, quantum)
+                    .expect("host output"),
+            },
+            block * quantum as u64,
+        )
+        .unwrap_or_else(|_| panic!("{label}: host render"));
+        assert_eq!(
+            c_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            host_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "{label}: block {block}"
+        );
+        audible |= c_pcm.iter().any(|sample| *sample != 0.0);
+    }
+    assert!(audible, "{label}: the compared blocks carry signal");
+}
+
+#[test]
+fn c_abi_plans_with_live_lanes_render_like_lanes_free_plans() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        for track_count in [1, 10] {
+            assert_live_lanes_render_like_lanes_free(
+                &generated_parity_session(track_count, sample_rate_hz),
+                &format!("parity {track_count} tracks at {sample_rate_hz} Hz"),
+                false,
+            );
+            assert_live_lanes_render_like_lanes_free(
+                &bare_parity_session(track_count, sample_rate_hz),
+                &format!("bare {track_count} tracks at {sample_rate_hz} Hz"),
+                true,
+            );
+        }
+    }
+}
+
 #[test]
 fn direct_and_c_render_match_one_and_ten_tracks_across_launch_rates() {
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {

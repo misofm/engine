@@ -2,27 +2,50 @@
 
 use super::*;
 
-/// One epoch's worth of host-owned source producers.
+/// One plan's live fader/mute and matrix/pan producers (#1256 D2), kept with its provider epoch.
 ///
-/// The table itself lives in `host-core`; this wrapper adds only the epoch tag and the
+/// `controls` is in `HostLiveControlHandles::strips` order: the tracks, then the submixes. Each
+/// producer's `input` is `None`, because the C ABI attaches no input lane. Nothing pushes to them
+/// yet (#1257 does). The rings are `Arc`s shared with the plan's consumers, so they outlive
+/// whichever of the plan and the epoch drops last, and that owner frees them on the control
+/// thread: `synchronize_plan_epochs` drops a reclaimed plan before its provider.
+// Held for ownership; only the tests read the fields until #1257 pushes through them.
+#[allow(dead_code)]
+pub(crate) struct StripLanes {
+    pub(crate) controls: Box<[host_core::TrackControlProducer]>,
+    /// How many leading entries of `controls` are tracks.
+    pub(crate) track_count: usize,
+}
+
+/// One epoch's worth of host-owned source producers and strip live-control producers.
+///
+/// The tables themselves live in `host-core`; this wrapper adds only the epoch tag and the
 /// lifecycle counters the structural-replacement tests observe.
 pub(crate) struct ProviderEpoch {
     pub(crate) epoch: u64,
     pub(crate) sources: SourceControlSet,
+    // Held for ownership: it keeps the producers alive with this epoch's plan (#1256 D2).
+    #[allow(dead_code)]
+    pub(crate) strips: StripLanes,
 }
 
 impl ProviderEpoch {
-    pub(crate) fn current(sources: SourceControlSet) -> Self {
-        let owner = Self { epoch: 0, sources };
+    pub(crate) fn current(sources: SourceControlSet, strips: StripLanes) -> Self {
+        let owner = Self {
+            epoch: 0,
+            sources,
+            strips,
+        };
         #[cfg(test)]
         update_test_owners(|owners| owners.current_provider_constructed += 1);
         owner
     }
 
-    pub(crate) fn candidate(sources: SourceControlSet) -> Self {
+    pub(crate) fn candidate(sources: SourceControlSet, strips: StripLanes) -> Self {
         let owner = Self {
             epoch: u64::MAX,
             sources,
+            strips,
         };
         #[cfg(test)]
         update_test_owners(|owners| owners.candidate_provider_constructed += 1);
@@ -754,12 +777,13 @@ impl SessionState {
                 .map_err(CommandError::CompileRejected)?;
                 let PreparedRuntime {
                     sources,
+                    strips,
                     plan: candidate_plan,
                     resources,
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                 } = prepared_runtime;
-                let mut candidate_provider = ProviderEpoch::candidate(sources);
+                let mut candidate_provider = ProviderEpoch::candidate(sources, strips);
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]
                 {
