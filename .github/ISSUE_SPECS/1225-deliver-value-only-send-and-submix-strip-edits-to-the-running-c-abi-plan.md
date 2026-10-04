@@ -1,9 +1,13 @@
 # Deliver value-only send and submix-strip edits to the running C ABI plan
 
 Slice 27 of *Submix strips and live aux sends* (#1196). It is in batch C1, with *Let C ABI sends follow their
-source strip's mute live* (#1226). It starts only after #1053 has closed and after batch K3 (*Let a send
-follow its source strip's mute live in the browser*, #1224) is on `main`. **Re-verify every anchor after
-#1053 lands:** #1053 adds the classifier and the live commit path this slice extends.
+source strip's mute live* (#1226). It starts only after the core of #1053 (*Apply value-only track
+fader, mute and pan transactions to the running C ABI plan*, #1257, and *Qualify live C ABI edits
+against a concurrently rendering plan*, #1258) has closed, and after batch K3 (*Let a send follow its
+source strip's mute live in the browser*, #1224) is on `main`. **Re-verify every anchor after #1257
+lands:** it adds the classifier and the live commit path this slice extends. (Amended 2026-10-04,
+when #1053 became an umbrella of slices #1253-#1266; the references below follow its decision
+record.)
 
 The design record cited below (`DESIGN`, `VERIFY-1` to `VERIFY-3`, `REVISION-1`, `REVISION-2` and
 `APPLIED-3`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
@@ -23,11 +27,11 @@ Today such a change costs, as the probe measured through the C ABI (`DESIGN.md` 
 - `source.frame.noncontiguous` until the host seeks;
 - a hard step to the new value.
 
-After this slice the change lands on the same plan as a declicked ramp of the length #1053 ruled,
-and it is never lost. A mute on a strip that a `follows_mute` send follows is still a plan
+After this slice the change lands on the same plan, with the ramp length #1053 gives (a step
+until #1054), and it is never lost. A mute on a strip that a `follows_mute` send follows is still a plan
 replacement here; *Let C ABI sends follow their source strip's mute live* makes it live.
 
-## Context (verified on `fe8ac679`; re-verify after #1053 lands)
+## Context (verified on `fe8ac679`; re-verify after #1257 lands)
 
 - **Today every C ABI transaction is structural.** `command()` (`crates/capi/src/runtime/control.rs:694`)
   runs its `Structural` arm (`:718-857`) in order:
@@ -38,41 +42,35 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
      (`crates/capi/src/runtime/compile.rs:408-410`, `prepare_host_runtime(compiled, &caps)`);
   5. `compiled_model_admission` (`:777`);
   6. reserve, then commit.
-- **#1053** (`.github/ISSUE_SPECS/1053-deliver-value-only-fader-mute-and-pan-transactions-to-the-running-c-abi-plan-thr.md`)
-  is the machinery this slice extends. It must not be forked.
-  - **Scope 2 and 3 (`:22-26`):** capi prepares with live controls, keeps `track_controls` in
-    `ProviderEpoch`, and adds host-core's `live_builtin_delta` behind the `control-provider` feature
-    (`crates/host-core/Cargo.toml:15`; capi enables it, `crates/capi/Cargo.toml:19`).
-  - **D1 (`:38-40`):** a committed-model delta is live when `fader` and `matrix_or_pan` are the only
-    fields that differ and every value passes the render-side setter's domain. Edit opcodes are not
-    inspected.
-  - **A1.2 (`:122-124`), open when this was written:** the same `control_queue_depth` also attaches
-    every effect lane. #1053 either keeps those producers or adds a **builtins-only** live-control
-    request to host-core. Read which one landed.
-  - **A1.3 (`:126-130`):** address tracks by ID, never by index; call the same domain checkers that
-    preparation and the render-side setters use.
-  - **A1.4 (`:131-134`):** admission and the room check, then push, then an infallible commit.
-  - **A2 D3 (`:155-161`):** a ramp, not a step. A step on a mute is a click (out-of-band energy
-    -31 dB against -70 dB for a one-quantum ramp). Suggested: a fixed 5-10 ms derived from the session
-    rate at preparation, at least one quantum. Read the length #1053 actually ruled and implemented.
-  - **Gate 1 (`:51-55`, corrected by A3 `:167-170`):** four launch rates, 1 and 10 tracks, compared
-    `latency_samples` plus one quantum after the edit.
-  - **Gate 4 (A3 `:181-186`):** a two-thread barrier test in `crates/capi/tests/resource_lifecycle.rs`
-    that races live and structural edits against render, counting allocations around each render
-    call only.
+- **#1053** (`.github/ISSUE_SPECS/1053-deliver-value-only-fader-mute-and-pan-transactions-to-the-running-c-abi-plan-thr.md`,
+  an umbrella since 2026-10-04) is the machinery this slice extends. It must not be forked. Its
+  decision record says:
+  - **D1:** host-core's `classify_live_delta(current, next, ramps)` (#1255, behind the
+    `control-provider` feature, `crates/host-core/Cargo.toml:15`; capi enables it,
+    `crates/capi/Cargo.toml:19`) masks each track's `fader` and `matrix_or_pan`, compares the
+    canonical JSON bytes, and returns a `LiveDelta` of per-strip records. Strips are addressed by
+    ID, never by index, and every value passes the setter's own domain checker.
+  - **D5:** the C ABI prepares through host-core's `HostLiveLanes` selection (#1254, #1256):
+    the fader and matrix lanes of every strip, submixes included; no route lanes.
+  - **D6:** `commit_live` runs admission, resolve, the room check on every queue, the protocol
+    token check, then the pushes, then the commit, which cannot fail after the check.
+  - **D3:** fader and mute records take their lengths from `host_core::LiveRamps::for_session`,
+    0 (a step) until #1054; a pan or matrix record carries the model's `smoothing_samples`.
+  - **D7:** records go to the newest epoch, the pending candidate if any.
+  - **Gates:** #1257's live-PCM gate (1 and 10 tracks, the four launch rates, compared from
+    `latency_samples` plus one quantum after the edit) and #1258's two-thread race in
+    `crates/capi/tests/resource_lifecycle.rs`.
 - **What the wire carries for ramps.** A route edit carries no smoothing: route keys are `id`,
   `source`, `destination`, `channel_matrix`, `gain_db` (`crates/session/src/visit.rs:106`), plus
   `mute` and `follows_mute` after slices 18b and 20. A route `channel_matrix` has no smoothing field
-  (`crates/session/src/visit.rs:109`). A strip fader (`DualMonoFader`, `crates/session/src/model.rs:537-546`)
+  (`crates/session/src/visit.rs:109`). A strip fader (`DualMonoFader`, `crates/session/src/model.rs:642-651`)
   carries none either; a strip `pan` or `matrix` carries `smoothing_samples` (`visit.rs:103`).
-- **The P13 guard** (`DESIGN.md` P13). Slice 00 annotated #1053's spec, and *Declare the submix
-  strip in the session grammar and wire* (#1199, submix-strip fields) and *Let a route into a submix
-  follow its source strip's mute in the session* (#1218, follow sources) implemented the guard in
-  `live_builtin_delta` if #1053 had already landed; otherwise #1053 carries it. Either way a delta
-  that changes `left_mute` or `right_mute` of a strip that, in the post-commit model, is the source of
-  a `follows_mute` route is **structural**, and so is any delta to a **submix strip's** fields.
-  This slice lifts the submix-strip part. The follow-source part stays until *Let C ABI sends follow
-  their source strip's mute live*.
+- **The P13 guard** (`DESIGN.md` P13). #1053 carries it as guards G1-G3 in `classify_live_delta`
+  (#1255). A delta that changes `left_mute` or `right_mute` of a strip that, in the post-commit
+  model, is the source of a `follows_mute` route is **structural** (G2), and so is any delta to a
+  **submix strip's** fields (G1: only track fields are masked). This slice lifts G1 and marks it
+  superseded in #1053's spec. G2 stays until *Let C ABI sends follow their source strip's mute
+  live*.
 - **After batch K3:**
   - host-core attaches one `RouteControlProducer` per route into a submix, in canonical route-ID
     order, whenever live controls are requested (`HostLiveControlHandles.route_controls`, *Produce
@@ -111,37 +109,39 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
     kept until *Deliver value-only VCA edits to the running C ABI plan*, #1247; added at filing of
     *VCA groups*, #1239): D3's `source_lane_muted` reads raw committed mutes, which would reopen a
     VCA-muted member's following send.
-- **D2. Ramp lengths.** Every live record, strip and route alike, uses the fixed ramp length #1053
-  ruled for its fader and mute records (its A2 D3), derived at preparation. A per-change smoothing is
+- **D2. Ramp lengths.** Every live record, strip and route alike, uses the ramp length #1053 gives
+  its fader and mute records (its D3, `LiveRamps::for_session`). A per-change smoothing is
   used only where the wire carries one: a strip `pan` or `matrix` uses its own `smoothing_samples`,
-  as #1053 does. Route records always use the ruled length. Every length is checked against
-  `ROUTE_RAMP_LENGTH_MAXIMUM` by `RouteControlProducer::record`. If #1053 ruled a step (length 0),
-  route records step too; say so in the PR.
+  as #1053 does. A route gain or matrix record uses `LiveRamps::for_session(next).fader_samples`;
+  a route mute record uses `mute_samples`. Every length is checked against
+  `ROUTE_RAMP_LENGTH_MAXIMUM` by `RouteControlProducer::record`. While `LiveRamps::for_session`
+  returns 0 (until #1054), route records step too; say so in the PR.
 - **D3. Route values.** A route record carries the post-commit model's `gain_db`, `channel_matrix`
   and `mute`, and `source_lane_muted = [false; 2]` for a route without `follows_mute`. For a route
   **with** `follows_mute`, `source_lane_muted` is its source strip's committed
   `[left_mute, right_mute]`. That value cannot change in a live delta here, because D1 keeps every
   follow-source mute change structural.
-- **D4. Commit order** is #1053's, across every destination:
+- **D4. Commit order** is #1053's D6, across every destination:
   1. every domain check (`RouteControlProducer::record`, the strip setters' shared checkers, the
      length bound), with nothing pushed;
-  2. the room check on **every** queue (strip queues and route queues);
-  3. the pushes;
-  4. the infallible commit.
+  2. the live admission (`validate_live_peak`, #1053 D8);
+  3. the room check on **every** queue (strip queues and route queues);
+  4. `check_prepared_structural` on the protocol token;
+  5. the pushes;
+  6. the commit, which cannot fail after step 4.
 
   A full queue is typed `Backpressure`, with the model, revision and replay unchanged and nothing
   pushed.
 - **D5. Resources.** The route producer table, its `Box<str>` IDs and the route queues are charged
   in `capi_resources`, and the two `resource_lifecycle` oracles change by exactly those rows.
-- **D6. Live controls in capi.** capi requests host-core live controls exactly as #1053 does; the
-  route producers come with that request. If #1053 added a builtins-only live-control request to
-  host-core (its A1.2), this slice extends that request so it also attaches route controls; effect
-  lanes stay unattached. No new symbol, opcode or field is added.
+- **D6. Live controls in capi.** capi prepares through #1053's `HostLiveLanes` selection (#1254,
+  #1256), and this slice sets `routes: true` in it. The input and effect lanes stay as #1053's
+  later slices left them (#1261, #1263). No new symbol, opcode or field is added.
 
 ## Deliverables
 
-1. D1 in host-core's `live_builtin_delta` (or the classifier #1053 named), widened from tracks to
-   strips and to routes into submixes.
+1. D1 in host-core's `classify_live_delta`, widened from tracks to strips and to routes into
+   submixes.
 2. D2-D4 in capi's live commit path: strip records through `strip_controls`, route records through
    `route_controls`.
 3. D5 and D6.
@@ -156,10 +156,12 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
 - `crates/capi/src/runtime/{control.rs,compile.rs}`, and any capi runtime module #1053 added for its
   live commit path
 - `crates/capi/tests/resource_lifecycle.rs` and one new capi test file
-- `crates/host-core/src/` (the `live_builtin_delta` classifier and the live-control request #1053
-  added; nothing else) and `crates/host-core/tests/` (one new file, if the classifier is tested
+- `crates/host-core/src/` (the `classify_live_delta` classifier and the `HostLiveLanes` selection
+  #1053 added; nothing else) and `crates/host-core/tests/` (one new file, if the classifier is tested
   there)
 - `docs/C_ABI_V1_QUALIFICATION.md`, `docs/CONTROL_PROTOCOL_SEMANTICS.md`
+- `.github/ISSUE_SPECS/1053-*.md` (guard G1's bullet only, marked superseded), if the spec is still in
+  the directory
 - this spec
 
 ## Non-goals
@@ -168,7 +170,8 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
   source strip's mute live*).
 - No new C symbol, struct layout change or opcode.
 - No live output routes (deferred item O9).
-- No effect parameters through the C ABI (#1053's L2).
+- No effect parameters or input section on a submix strip; on tracks those are #1053's later
+  slices (#1261-#1266).
 - No VCA (*Deliver value-only VCA edits to the running C ABI plan*).
 - No `controlSmoothing` dependency beyond D2's rule.
 
@@ -191,7 +194,7 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
   its settled comparison point is `latency_samples` plus the ramp plus its compensation delay.
   Compare from there, not earlier.
 - **Addressing.** Strips are addressed by ID through `strips`, routes by ID through
-  `route_controls`; never by index into the model's vectors (#1053 A1.3).
+  `route_controls`; never by index into the model's vectors (#1053 D1).
 - **A divergent model.** A delta classified live that some prepared value also depends on renders
   something other than the committed model. The follow guard (D1) is exactly that case; do not drop
   it here.
@@ -205,7 +208,7 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
    - `020f` (strip fader, `SetTrackFader`) and `0210` (strip pan) on the submix `b`.
 
    Each changes the **same** plan: no new epoch, no pending provider, no re-seek and no silent
-   block. After `latency_samples`, plus the ruled ramp, plus the edited route's compensation delay
+   block. After `latency_samples`, plus the ramp `LiveRamps::for_session` gives, plus the edited route's compensation delay
    where it has one, the output is bit-identical to a plan compiled from the committed model and fed
    the same sources from sample 0. The destination strip has no stateful insert, an identity input
    section and an empty console, so the comparison is exact. Run with 1 and 10 tracks, at each of the
@@ -235,8 +238,8 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
 
    *Test value: it turns red if a route record is pushed before every queue's room is checked, if
    the commit can still fail after a push, or if an acked edit is lost at a plan swap.*
-4. **Realtime.** Extend the two-thread barrier test (#1053's gate 4 shape, in
-   `crates/capi/tests/resource_lifecycle.rs`) to race send and bus edits against render and a
+4. **Realtime.** Extend the two-thread race of *Qualify live C ABI edits against a concurrently
+   rendering plan* (#1258, in `crates/capi/tests/resource_lifecycle.rs`) to race send and bus edits against render and a
    structural swap, over 20 runs: `allocations == 0` and `frees == 0` around every render call,
    measured with the file's allocator counters after warm-up; zero `INTERNAL` results; and the final
    block bit-identical to a fresh plan of the final committed model.
@@ -261,18 +264,21 @@ replacement here; *Let C ABI sends follow their source strip's mute live* makes 
 
 - The output of every gate command above, from the PR's head commit.
 - Each new test's name with its one-sentence test-value answer.
-- The ramp length #1053 ruled, and which live-control request (full or builtins-only) it landed.
+- The ramp length `LiveRamps::for_session` gives at the head commit.
 - The `resource_lifecycle` row changes, each with its reason.
 
 ## Dependencies
 
-- *Deliver value-only fader, mute and pan transactions to the running C ABI plan through the live
-  console lanes* (#1053)
+- *Apply value-only track fader, mute and pan transactions to the running C ABI plan* (#1257), the
+  core of the umbrella *Deliver value-only fader, mute and pan transactions to the running C ABI
+  plan through the live console lanes* (#1053)
+- *Qualify live C ABI edits against a concurrently rendering plan* (#1258)
 - *Let a send follow its source strip's mute live in the browser* (#1224, batch K3 closed and pushed)
 
 ## Standing rules for the implementer
 
-- Work from this body and #1053's merged code. Extend its delta and commit path; do not fork them.
+- Work from this body and the merged code of #1053's slices. Extend its classifier and commit path;
+  do not fork them.
 - The commit after the first push is infallible by construction. No ack precedes a drop.
 - Never emit a redundant record: a delta whose values equal the committed ones pushes nothing.
 - "Bit-identical" gates are hard stops. NaNs are folded (decision 10).

@@ -92,9 +92,10 @@ fader value, and #1225's route records and #1226's follow mirror read the source
 committed mutes, so each would drop a VCA. Until *Deliver value-only VCA edits to the running C ABI
 plan* (#1247) lands, a C ABI committed-model delta is **structural whenever the pre- or post-commit
 model declares at least one VCA**. The filing commit amended #1053's spec (A2 D1, "Coordination"),
-#1225's D1 structural list and #1226's D5 to say so. Whichever of #1053 and *Apply VCA offsets and
-mutes at preparation* (#1242) lands second implements it in `live_builtin_delta`; #1247 replaces it
-with composition.
+#1225's D1 structural list and #1226's D5 to say so. #1242 landed first, so #1053 implements it, as
+guard G3 in `classify_live_delta` (*Classify a committed session delta as a live track fader, mute
+and pan update or a rebuild*, #1255; #1053 became an umbrella on 2026-10-04); #1247 replaces it with
+composition.
 
 ## Slices
 
