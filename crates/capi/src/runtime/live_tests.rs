@@ -923,16 +923,17 @@ fn live_fader_across_a_carrying_swap(live_first: bool) {
     }
 }
 
-/// Red if a live fader edit committed while a carrying successor is pending goes anywhere but
-/// that successor's producer (the retiring plan's queue, or none) or is refused as `Internal`.
+/// Red if a live fader edit committed while a carrying successor is pending is not applied from
+/// the successor's very first (swap) block: the pending-candidate test compares only later blocks,
+/// so a successor that skips its lane drain on the swap block is caught here alone.
 #[test]
 fn a_live_fader_after_a_carrying_structural_commit_reaches_the_successor() {
     live_fader_across_a_carrying_swap(false);
 }
 
-/// Red if the successor of a structural commit that follows an undrained live fader edit is
-/// prepared from anything but the committed model holding it (the record dies with the retiring
-/// plan's queue).
+/// Red if a live fader record still undrained in the retiring plan's queue at a carrying
+/// structural commit reaches the successor's queue (it must arrive only baked into the committed
+/// model the successor is prepared from), the "drain, then carry" rule #1277 D3 must keep.
 #[test]
 fn a_live_fader_left_undrained_before_a_carrying_structural_commit_is_baked() {
     live_fader_across_a_carrying_swap(true);
