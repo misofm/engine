@@ -249,3 +249,16 @@ candidly. Verdict copy: `docs/handoffs/seamless-swap-phase1-2026-10-04/1289-atte
 `rebuild-run` pre-launch refusal of an existing `web-rebuild-cost.unparsed.txt`;
 `scripts/test-console-benchmark.sh` PASS; `check-` and `test-workspace-policy.sh`;
 `check-` and `test-script-reachability.py`. No workflow or nightly command changed.
+
+**Router follow-up (closes MINOR-2's note).** `scripts/ci-path-router.py`'s `console-benchmark`
+self-test key now names `hosts/host-web/web/prepared-control.js` and
+`sdk/assets/miso-engine-v1-abi-layout.json`, the two files the real rebuild harness loads, so a
+change to either alone selects `scripts/test-console-benchmark.sh` in `gate-self-tests` instead of
+reaching it only nightly. `scripts/test-ci-path-routing.py` names both independently of the table.
+Router answers (`--event pull_request --path <p> --flags`): `prepared-control.js` gives
+`route=full`, `self_tests=["console-benchmark"]`; the ABI layout gives `route=sdk`,
+`self_tests=["console-benchmark","sdk-deletions"]` (it was `["sdk-deletions"]` through the `sdk/`
+prefix). Mutation: deleting either entry from the router's table turns
+`test-ci-path-routing.py` red on that path's assertion (`('hosts/host-web/web/prepared-control.js',
+[])`, `('sdk/assets/miso-engine-v1-abi-layout.json', ['sdk-deletions'])`); restored, green. Gates:
+`check-ci-path-routing.py` and `test-ci-path-routing.py` PASS; `check-workspace-policy.sh` PASS.
