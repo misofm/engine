@@ -442,13 +442,19 @@ const MAXIMUM_BANK_LANES: usize = 8;
 impl BuiltinBankProcessor {
     /// Apply every record waiting at entry on each lane's queue to lane state: the body of
     /// [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the plan-swap drain.
-    fn drain_controls(&mut self) -> Result<(), RenderError> {
+    ///
+    /// `carry` picks what a refused apply does. The block drain (`false`) stops at it and returns
+    /// the error, as it always has. The carry drain (`true`) counts it and goes on, because this
+    /// bank never drains again: every record present at entry is consumed, and the result is the
+    /// refused count.
+    fn drain_controls(&mut self, carry: bool) -> Result<usize, BuiltinParameterError> {
         let Self {
             bank,
             controls,
             live,
             ..
         } = self;
+        let mut refused = 0_usize;
         for (lane, control) in controls.iter_mut().enumerate() {
             let Some(control) = control.as_mut() else {
                 continue;
@@ -464,28 +470,29 @@ impl BuiltinBankProcessor {
                 if let Some(witness) = live.get_mut(lane) {
                     witness.admit(&record);
                 }
-                match record {
+                let applied = match record {
                     TrackInputRecord::TrimDb {
                         lanes,
                         db,
                         smoothing_samples,
-                    } => bank
-                        .set_trim_db(lane, lanes, db, smoothing_samples)
-                        .map_err(render_error)?,
+                    } => bank.set_trim_db(lane, lanes, db, smoothing_samples),
                     TrackInputRecord::PolarityInvert {
                         lanes,
                         inverted,
                         smoothing_samples,
-                    } => bank
-                        .set_polarity_invert(lane, lanes, inverted, smoothing_samples)
-                        .map_err(render_error)?,
-                    TrackInputRecord::PreparedFilter { target } => bank
-                        .apply_prepared_filter(lane, target)
-                        .map_err(render_error)?,
+                    } => bank.set_polarity_invert(lane, lanes, inverted, smoothing_samples),
+                    TrackInputRecord::PreparedFilter { target } => {
+                        bank.apply_prepared_filter(lane, target)
+                    }
+                };
+                match applied {
+                    Ok(()) => {}
+                    Err(error) if !carry => return Err(error),
+                    Err(_) => refused = refused.saturating_add(1),
                 }
             }
         }
-        Ok(())
+        Ok(refused)
     }
 }
 
@@ -509,7 +516,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     /// documentation for why that ordering is the whole reason this is not folded into `process`.
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
         let _ = first_sample;
-        self.drain_controls()
+        self.drain_controls(false).map(|_| ()).map_err(render_error)
     }
 
     // REALTIME_POLICY_BEGIN
@@ -568,9 +575,12 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
 
     /// Issue #1276 D4. A record reached this queue only after validation, so applying it cannot
-    /// fail; were it to, the carry still copies the lane as it stands.
-    fn drain_for_carry(&mut self) {
-        let _ = self.drain_controls();
+    /// fail; were it to, that record is counted and every other record present at entry is
+    /// still applied, so the carry loses none of them.
+    fn drain_for_carry(&mut self) -> usize {
+        // The carry drain counts a refused apply instead of returning it, so `Err` is not
+        // produced; were it, it is reported as one refused record, never as none.
+        self.drain_controls(true).unwrap_or(1)
     }
     // REALTIME_POLICY_END
 
@@ -12371,6 +12381,73 @@ mod tests {
             BTreeSet::from([0, 1, 2, 127, 128, u32::MAX])
         );
         assert!(classes.into_iter().all(core::convert::identity));
+    }
+
+    /// The plan-swap drain consumes every record present at entry, past a refused one (issue
+    /// #1276 D4). The bank never drains again after the carry, so a record left in its queue is
+    /// an acknowledged edit lost with the retired plan.
+    ///
+    /// Red mutation: let the carry drain stop at the first refused apply, as the block drain does
+    /// -> lane 0's later trim and lane 1's trim stay queued and the trims never move.
+    #[test]
+    fn the_carry_drain_applies_every_record_past_a_refused_one() {
+        let backend = Backend::current();
+        let width = BankWidth::for_backend(backend).expect("a banking backend");
+        let input = || {
+            BuiltinChain::new(48_000, BuiltinParameters::default())
+                .expect("chain")
+                .into_input_builtins()
+        };
+        let queue = || {
+            bounded_spsc::<TrackInputRecord>(
+                NonZeroUsize::new(4).expect("depth"),
+                QueueGeneration(0),
+            )
+            .expect("queue")
+        };
+        let (mut first, first_control) = queue();
+        let (mut second, second_control) = queue();
+        let silence = |db: f32| TrackInputRecord::TrimDb {
+            lanes: BuiltinLaneSelector::Both,
+            db,
+            smoothing_samples: 0,
+        };
+        // Admission would refuse a NaN trim; it stands in for any apply that fails.
+        first.try_push(silence(f32::NAN)).expect("room");
+        first.try_push(silence(-144.0)).expect("room");
+        second.try_push(silence(-144.0)).expect("room");
+        let mut controls: Vec<Option<Consumer<TrackInputRecord>>> =
+            (0..width.lanes()).map(|_| None).collect();
+        controls[0] = Some(first_control);
+        controls[1] = Some(second_control);
+        let mut processor = BuiltinBankProcessor {
+            bank: BuiltinInputBank::new(backend, width, vec![input(), input()]).expect("bank"),
+            controls: controls.into_boxed_slice(),
+            live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
+            process_calls: 0,
+            frames_processed: 0,
+        };
+
+        assert_eq!(
+            processor.drain_for_carry(),
+            1,
+            "the NaN trim is refused and counted"
+        );
+        for lane in 0..2 {
+            for channel in 0..2 {
+                let trim = processor.bank.trim_signed(lane, channel);
+                assert!(
+                    trim.abs() < 1.0e-6,
+                    "lane {lane} channel {channel} trim {trim}"
+                );
+            }
+        }
+        for control in processor.controls.iter_mut().flatten() {
+            assert!(
+                control.try_pop().is_err(),
+                "every record present at entry is consumed"
+            );
+        }
     }
 
     /// The per-node live-control input processor: the arm a scalar-backend host binds (#210 phase

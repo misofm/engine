@@ -224,3 +224,121 @@ agents had uncommitted edits in the shared tree):
 swaps synchronously but has no successor path, Q6); unmeasured where the bytes go. The agreement
 flag's AND is defended by the proof counter, not by bits, because no carried effect can sit in a
 gap-free prefix until slices 9-12.
+
+### Attempt 1 verdict (FAIL): summary
+
+One MAJOR, four MINORs, four NITs (`/home/bl/misofm/submix-verdicts/1276-attempt1.md`).
+
+- **MAJOR-1.** The carry ANDed the predecessor chain's `collapse_channels_agree` into the successor,
+  but rack maintains that flag only on a chain that can collapse; an unarmed chain (stereo-source
+  neighbour, asymmetric input delay) keeps `true` from bind. A successor could then collapse a
+  carried lane whose channels disagree and move output bits, reachable on the C ABI by a
+  structural transaction that makes an asymmetric delay symmetric.
+- **MINOR-1.** D1's comparator was defended for `hpf_hz` only; trim, lpf, polarity, the
+  control-kind and strip-kind clauses had no test.
+- **MINOR-2.** `drain_for_carry` discarded a drain error, and the drain stopped at the first
+  refused record, leaving that bank's later records in a queue that never renders again.
+- **MINOR-3.** The flag's documentation did not mention the carry.
+- **MINOR-4.** The browser module grew by 44.5 KB, about 30 KB of it prepare-time sort and
+  `BTreeMap` instantiations in the join.
+- **NITs.** A weakened `debug_assert`, unmarked render-thread helpers, untested cache refreshes
+  in `import_lane`, and a forward note on routing admission to the newest plan (NIT-4, no action
+  in this slice).
+
+### Attempt 2 (implementer, on `55690373d`)
+
+**Changes.**
+
+- MAJOR-1 / MINOR-3 (`crates/rack`, `crates/graph`): `BankChain::carried_channel_agreement()`
+  is `can_collapse() && collapse_channels_agree`, and the carry reads it instead of the raw
+  flag. The `Coming back` clause list gains a fifth clause (the carry's AND and its premise);
+  `collapse_channels_agree()` now says the flag is maintained only while `can_collapse` holds
+  and points outside readers at the new accessor.
+- MINOR-2 (`crates/builtins-compiler`, `crates/graph`): `drain_controls(carry)` applies every
+  record present at entry; the block drain still stops at a refused apply and returns it, the
+  carry drain counts it and goes on. `GraphPreparedBuiltinBankProcessor::drain_for_carry` now
+  returns the refused count (default 0); the runtime `debug_assert_eq!`s it to zero. No
+  allocation, no `RenderError` built on the carry path.
+- MINOR-4 (`crates/host-core/src/prepare.rs`): both `BTreeMap`s of the join are gone. The
+  committed strip is found by binary search in its own segment of the normalized committed
+  model (`committed_input_section`), which also makes the strip-kind clause structural (a track
+  is searched among tracks, a submix among submixes; `same_strip_kind` removed). The successor's
+  own rows are sorted once (the inventory needs that sort anyway) and the join binary-searches
+  them. `SuccessorBase::committed` documents that it is a normalized model (every caller passes
+  `normalized_model()`); a search that misses only leaves a strip at rest.
+- NIT-1: `debug_assert_eq!(moves.len(), carried_inputs.len())` and the retained-bytes assertion
+  back to `debug_assert_eq!`. NIT-2: `REALTIME_POLICY` regions around `builtin_processor_mut` /
+  `input_lane_mut`, `InputStage` and `BuiltinInputBank` `export_lane` / `import_lane`, and rack's
+  `slot_stage_mut` .. `inherit_channel_agreement` (58 -> 62 regions). NIT-3: a comment in
+  `import_lane` says both cache refreshes are defence and why no test sees them.
+
+**Tests** (`crates/host-core/tests/successor_swap.rs`, `crates/builtins-compiler` unit test).
+
+- `a_diverged_lane_keeps_its_chain_dual_after_the_swap_at_{eight,four}_lanes`: three arms per
+  width. (1) Stereo neighbour: `eq6` (R trim 6 dB below L) pools beside stereo `eq5` in an unarmed
+  chain; a `Both` record two blocks before the swap equalises the trims; B commits them and adds
+  a muted track. (2) Armed: the same without the stereo neighbour, so `eq6`'s chain cleared its
+  flag. Both compare the collapsing and the forced-dual successor bit for bit with the reference
+  (A plus the muted track, same record, same block). (3) Delay, no live queue: `eq6` has R delay
+  37 in A, B makes it symmetric; the collapsing successor equals the forced-dual one bit for bit.
+- `a_strip_whose_input_section_changed_starts_at_rest` replaces
+  `a_strip_whose_filter_changed_starts_at_rest`: the same at-rest oracle for an `hpf_hz`, an
+  `lpf_hz`, a `trim_db` and a `polarity_invert` edit.
+- `a_changed_control_kind_carries_no_input_section`: plain -> live and live -> plain successors
+  move only the source (8 bytes); the same kind on both sides moves nine lanes.
+- `a_track_replaced_by_a_submix_of_its_name_does_not_carry`: B replaces track `eq0` by a submix
+  `eq0` with the same input section, fed by `eq1`; only the source and `eq1` move.
+- `tests::the_carry_drain_applies_every_record_past_a_refused_one` (builtins-compiler): lane 0
+  holds a NaN trim then a valid one, lane 1 a valid one; the carry drain returns 1, applies both
+  valid trims and empties both queues.
+
+**Mutations** (each applied, run red, reverted; logs in the worker scratchpad `mut1276/`):
+
+| Mutation | Red test(s) |
+| --- | --- |
+| MA1, carry reads `collapse_channels_agree()` (attempt 1) | diverged-lane, both widths: stereo-neighbour arm at block 6; with that arm skipped, the delay arm red; the armed arm stays green (its flag is maintained), as it should |
+| MA2, `inherit_channel_agreement` ignores `agree` | diverged-lane, both widths; with the stereo arm skipped, the armed arm red at block 6 |
+| Mh / Ml / Mt / Mp, drop the hpf / lpf / trim / polarity comparison | `a_strip_whose_input_section_changed_starts_at_rest`, each |
+| Md, `row.live == live_input` -> `true` | `a_changed_control_kind_carries_no_input_section` (152 bytes, not 8) |
+| Mk, a submix also found among the committed tracks | `a_track_replaced_by_a_submix_of_its_name_does_not_carry` (40 bytes, not 24) |
+| Mdrain, the carry drain stops at a refused apply | `the_carry_drain_applies_every_record_past_a_refused_one` |
+
+**Gates** (in `/home/bl/misofm/wt-swap`, all exit 0):
+
+- `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features
+  -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`.
+- `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh` (62 marked
+  regions in 16 files), `test-realtime-policy.sh`, `check-capi-abi.sh` (shared and static).
+- Focused `cargo test --locked -p builtins -p builtins-compiler -p graph -p rack -p host-core
+  --features builtins-compiler/test-support,graph/test-support,host-core/test-support`: 581
+  passed, 0 failed (`successor_swap` 28/28, avx2 build so the `Simd8` rows ran);
+  `rt11_swap_carry_alloc` green; `cargo test -p capi` and `-p console-workload`: 117 passed, 0
+  failed (static digests unmoved).
+- `cargo build --locked --release -p audit -p capi`; `audit capi`: 0 allocations, 0
+  deallocations, 0 syscalls, 0 violations, `pcm_digest` `c60671f6593fa603`.
+- `trace-builtins-audit.sh`, `trace-builtins-graph-audit.sh`: PASS; `check-builtins-fixtures.sh`
+  (50 files), `test-builtins-fixtures.sh`: ok.
+- `check-cross-targets.sh`: PASS, only the known #1018 iOS `memset_pattern16` expected failures.
+- Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`
+  (graphSessionPlusPlanBytes 29794 of 35648, sourceTotalBytes 3358 of 3648),
+  `check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`: green.
+- **ARTIFACT CHANGED**: the shipped module is
+  `e0fef6988d081ed4f8fd763562f25b771f8615f189e96452eb00c347b9235e63` (2,895,964 B). Against
+  the attempt-1 tree (`f41388939`, 2,914,664 B per the verdict; `55690373d` changes only capi
+  files, so its module is the same) that is -18,700 B; against the pre-#1276 base `0297efa8c`
+  (2,870,096 B) the slice now costs +25,868 B instead of +44,568 B. Not re-pinned
+  (`docs/RELEASE.md`).
+
+**The `audit capi` digest.** `807b48547` moved `pcm_digest` from `7281b6c931e05dcc` to
+`c60671f6593fa603`; attempt 2 leaves it at `c60671f6593fa603`. The audit renders the nine-track
+fixture, whose input sections run a 20 Hz high-pass and a 20 kHz low-pass, and applies one
+structural transaction (a muted track) after its first render call. Before #1276 the successor's
+input filters restarted at rest on the swap block; since #1276 every unchanged section carries its
+integrators, so the PCM from the swap block on is the gap-free continuation, and the digest of it
+differs. Nothing live pins this digest.
+
+**Open points.** NIT-4 stands as a forward note for the first slice that gives a host input live
+edits across a published successor. The carried agreement from an unarmed chain is now `false`,
+which costs at most one agreement proof on the successor (a lane that does agree proves it at
+once, since input banks answer `channels_agree`).

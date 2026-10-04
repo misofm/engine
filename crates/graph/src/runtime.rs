@@ -4066,6 +4066,7 @@ impl BankStage for BuiltinStage {
     }
 }
 
+// REALTIME_POLICY_BEGIN
 /// The builtin bank processor slot `slot` of `chain` holds, if that slot is a builtin stage
 /// (issue #1276 D3). Allocation-free: a slot borrow and two downcasts.
 fn builtin_processor_mut(
@@ -4094,6 +4095,7 @@ fn input_lane_mut(
         crate::runtime::RuntimeUnit::Op(_) => None,
     }
 }
+// REALTIME_POLICY_END
 
 impl crate::runtime::Runtime {
     /// Every banked strip input section of this runtime: `(strip ID, location)`, in program order
@@ -4186,12 +4188,18 @@ impl crate::runtime::Runtime {
                 chain.disengage_for_carry();
                 disengaged = Some(step.predecessor.unit);
             }
-            let agree = chain.collapse_channels_agree();
+            let agree = chain.carried_channel_agreement();
             let Some(from) = builtin_processor_mut(chain, slot) else {
                 continue;
             };
             if drained != Some((step.predecessor.unit, step.predecessor.slot)) {
-                from.drain_for_carry();
+                // Admission validated every record, so none is refused; a refused one is still
+                // consumed, and the rest of the bank's records with it.
+                let refused = from.drain_for_carry();
+                debug_assert_eq!(
+                    refused, 0,
+                    "an admitted input record was refused at the carry"
+                );
                 drained = Some((step.predecessor.unit, step.predecessor.slot));
             }
             let Some((chain, slot, lane)) = input_lane_mut(&mut self.units, step.successor) else {

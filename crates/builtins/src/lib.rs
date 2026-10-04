@@ -2435,6 +2435,7 @@ impl<L: Lane> InputStage<L> {
         self.refresh_filter_plan();
     }
 
+    // REALTIME_POLICY_BEGIN
     /// One populated lane's whole per-lane state ([`InputLaneState`], issue #1276 D2).
     fn export_lane(&self, lane: usize) -> InputLaneState {
         debug_assert!(lane < self.members && lane < L::WIDTH);
@@ -2528,9 +2529,15 @@ impl<L: Lane> InputStage<L> {
                     .any(|remaining| *remaining != 0)
             })
         });
+        // Both refreshes are defence rather than load-bearing today: a settled carried lane
+        // holds the coefficients its successor prepared, a ramping lane's body ignores the
+        // elision plan, and `lane_channel_symmetry`'s debug assertion backs the symmetry bit, so
+        // no test turns red without them. They are kept so the caches always describe the words
+        // just written, whatever a later carry imports.
         self.refresh_filter_plan();
         self.refresh_channel_symmetry_lane(lane);
     }
+    // REALTIME_POLICY_END
 }
 
 /// One input bank lane's whole state, both channels: what a plan swap hands from the
@@ -3728,6 +3735,7 @@ impl BuiltinInputBank {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.reset())
     }
 
+    // REALTIME_POLICY_BEGIN
     /// Populated lane `lane`'s whole state (issue #1276 D2), or `None` for a padding lane or one
     /// past the bank. Allocation-free; bounded by the lane's fixed word count.
     #[must_use]
@@ -3756,6 +3764,7 @@ impl BuiltinInputBank {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
         Ok(())
     }
+    // REALTIME_POLICY_END
 }
 
 /// The dispatched fader-ramp stage of a bank, at the width the selected backend chose.

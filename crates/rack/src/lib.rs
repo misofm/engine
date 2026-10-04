@@ -1856,7 +1856,12 @@ impl<'a> ResidentOutputLane<'a> {
 ///   ([`ChannelSymmetryWitness::AGREEING`]) -- equal inputs over equal state with equal words
 ///   leave equal state, which is the same induction the engage direction has always rested on;
 /// * it is **cleared by any dual block that does not**, and after that only a proof brings it
-///   back ([`BankStage::channels_agree`]).
+///   back ([`BankStage::channels_agree`]);
+/// * at a plan swap it is **ANDed with what each carried lane's predecessor chain hands over**
+///   ([`inherit_channel_agreement`](Self::inherit_channel_agreement), issue #1276 D5), and a
+///   predecessor hands over [`carried_channel_agreement`](Self::carried_channel_agreement): its
+///   flag only where the clauses above maintained it, `false` from a chain that can never
+///   collapse, whose flag is never maintained and so says nothing about its channels.
 ///
 /// So the reachable cycle -- collapse, disengage on a forced-off arm or a lifted-then-restored
 /// bypass, re-engage when the switch or the term comes back -- is a cycle the chain takes, and the
@@ -1908,7 +1913,7 @@ pub struct BankChain {
     /// The two channels' state agrees at the boundary of the next **dual** block.
     ///
     /// The premise the engage direction needs and the witness does not supply. See the type's
-    /// `Coming back` section for the four clauses that maintain it; the awkward "next *dual*
+    /// `Coming back` section for the five clauses that maintain it; the awkward "next *dual*
     /// block" in the sentence above is the one wrinkle and it is deliberate. A collapsed block
     /// freezes the right channel, so between the block that engages and the block that stops the
     /// two channels genuinely disagree -- but nothing dual reads them in that window, and
@@ -2784,12 +2789,31 @@ impl BankChain {
     ///
     /// The re-engage rule's premise, and `false` is the retirement M2 latched: a chain whose
     /// channels have been driven apart does not collapse again until something proves they agree.
-    /// Evidence only.
+    /// Maintained only while [`can_collapse`](Self::can_collapse) holds: a chain that can never
+    /// collapse keeps the `true` it was bound with whatever its channels hold, so a reader outside
+    /// this chain's own dispatch reads [`carried_channel_agreement`](Self::carried_channel_agreement)
+    /// instead. Evidence only.
     #[must_use]
     pub const fn collapse_channels_agree(&self) -> bool {
         self.collapse_channels_agree
     }
 
+    /// The channel agreement this chain hands a successor chain that takes carried lane state
+    /// from it at a plan swap (issue #1276 D5): [`collapse_channels_agree`](Self::collapse_channels_agree)
+    /// where the dispatch maintains it, and `false` on a chain that can never collapse.
+    ///
+    /// The second half is the premise the flag alone does not carry. The dispatch keeps the flag
+    /// only on a chain that can collapse, so an unarmed chain -- a stereo-source neighbour in the
+    /// bank, or a mono-source track with an asymmetric input delay -- still reads `true` after its
+    /// two channels have been driven apart. Handing that `true` to an armed successor would let it
+    /// collapse a lane whose channels disagree, which moves output bits. `false` costs at most one
+    /// proof ([`BankStage::channels_agree`]) on the successor.
+    #[must_use]
+    pub const fn carried_channel_agreement(&self) -> bool {
+        self.can_collapse() && self.collapse_channels_agree
+    }
+
+    // REALTIME_POLICY_BEGIN
     /// Lend slot `slot`'s stage mutably, or `None` past the last slot (issue #1276 D3).
     ///
     /// For the crate that built the stage, at bind and at a plan swap's carry, to reach its own
@@ -2810,13 +2834,15 @@ impl BankChain {
     }
 
     /// Fold in the channel agreement of a chain this one takes carried lane state from (issue
-    /// #1276 D5): this chain's flag becomes the AND of its own and `agree`. A chain built at bind
+    /// #1276 D5): this chain's flag becomes the AND of its own and `agree`, which is that chain's
+    /// [`carried_channel_agreement`](Self::carried_channel_agreement). A chain built at bind
     /// agrees, and a lane at rest agrees, so a successor whose lanes came from chains that agreed
     /// may collapse at once; one that took a lane from a chain whose channels had been driven
     /// apart waits for a proof ([`BankStage::channels_agree`]), as that chain would have.
     pub fn inherit_channel_agreement(&mut self, agree: bool) {
         self.collapse_channels_agree &= agree;
     }
+    // REALTIME_POLICY_END
 
     /// `[disengages, re-engages, agreement proofs]` for this chain. Evidence only.
     ///

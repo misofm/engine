@@ -550,10 +550,7 @@ impl PlanStateInventory {
     /// The row of strip `id`'s input section, if the plan banks one.
     #[must_use]
     pub(crate) fn input_section(&self, id: &str) -> Option<&InputSectionInventoryRow> {
-        self.input_sections
-            .binary_search_by(|row| (*row.id).cmp(id))
-            .ok()
-            .map(|index| &self.input_sections[index])
+        input_section_row(&self.input_sections, id)
     }
 
     /// Heap bytes this inventory retains: its row tables and their ID text.
@@ -586,7 +583,8 @@ impl PlanStateInventory {
 pub struct SuccessorBase<'a> {
     /// The predecessor's [`PreparedHost::inventory`].
     pub inventory: &'a PlanStateInventory,
-    /// The predecessor's committed session model.
+    /// The predecessor's committed session model, normalized
+    /// ([`CompiledSession::normalized_model`]): strips are looked up in it by ID.
     pub committed: &'a SessionModel,
 }
 
@@ -1146,24 +1144,15 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_input = live_controls.control_queue_depth.is_some();
     let carried_inputs: Vec<(&str, graph::GraphLaneLocation)> = match successor {
         None => Vec::new(),
-        Some(base) => {
-            let committed: BTreeMap<&str, session::StripRef<'_>> = base
-                .committed
-                .strips()
-                .map(|strip| (strip.id.as_str(), strip))
-                .collect();
-            model
-                .strips()
-                .filter_map(|strip| {
-                    let row = base.inventory.input_section(strip.id.as_str())?;
-                    let before = committed.get(strip.id.as_str())?;
-                    (row.live == live_input
-                        && same_strip_kind(before, &strip)
-                        && same_input_section(before.builtins, strip.builtins))
+        Some(base) => model
+            .strips()
+            .filter_map(|strip| {
+                let row = base.inventory.input_section(strip.id.as_str())?;
+                let before = committed_input_section(base.committed, &strip)?;
+                (row.live == live_input && same_input_section(before, strip.builtins))
                     .then_some((strip.id.as_str(), row.location))
-                })
-                .collect()
-        }
+            })
+            .collect(),
     };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
@@ -1665,33 +1654,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_carry_program(&mut plan, program)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
-    // Issue #1276 D6: this plan's own input lanes, by strip ID, for the join below and for its
-    // successor's.
-    let input_lanes = graph::builtin_input_lanes(&mut plan)
-        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
-    if !carried_inputs.is_empty() {
-        let successor_lanes: BTreeMap<&str, graph::GraphLaneLocation> = input_lanes
-            .iter()
-            .map(|(id, location)| (&**id, *location))
-            .collect();
-        let moves: Vec<graph::GraphLaneMove> = carried_inputs
-            .iter()
-            .filter_map(|(id, predecessor)| {
-                successor_lanes
-                    .get(id)
-                    .map(|successor| graph::GraphLaneMove {
-                        successor: *successor,
-                        predecessor: *predecessor,
-                    })
-            })
-            .collect();
-        graph::install_builtin_input_carry(&mut plan, moves)
-            .map_err(|_| graph_failure("host.carry.install"))?;
-    }
-    let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
-    debug_assert!(carry_program_retained_bytes <= carry_program_bytes);
-    inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
-    let mut input_sections: Vec<InputSectionInventoryRow> = input_lanes
+    // Issue #1276 D6: this plan's own input lanes, sorted by strip ID: the inventory its
+    // successor joins with, and the table the join below looks this plan's lanes up in.
+    let mut input_sections: Vec<InputSectionInventoryRow> = graph::builtin_input_lanes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?
         .into_iter()
         .map(|(id, location)| InputSectionInventoryRow {
             id,
@@ -1700,6 +1666,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         })
         .collect();
     input_sections.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    if !carried_inputs.is_empty() {
+        let moves: Vec<graph::GraphLaneMove> = carried_inputs
+            .iter()
+            .filter_map(|(id, predecessor)| {
+                input_section_row(&input_sections, id).map(|row| graph::GraphLaneMove {
+                    successor: row.location,
+                    predecessor: *predecessor,
+                })
+            })
+            .collect();
+        // Every strip banks its input section in a shipped plan, so every carried strip finds
+        // its lane here; one that did not would silently restart at rest.
+        debug_assert_eq!(moves.len(), carried_inputs.len());
+        graph::install_builtin_input_carry(&mut plan, moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
+    debug_assert_eq!(carry_program_retained_bytes, carry_program_bytes);
+    inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
             .ok_or_else(|| graph_failure("host.inventory.identity"))?,
@@ -1794,13 +1779,39 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     ))
 }
 
-/// Whether two strips are of one kind: both tracks or both submixes (issue #1276 D1).
-fn same_strip_kind(left: &session::StripRef<'_>, right: &session::StripRef<'_>) -> bool {
-    matches!(
-        (left.kind, right.kind),
-        (session::StripKind::Track(_), session::StripKind::Track(_))
-            | (session::StripKind::Submix(_), session::StripKind::Submix(_))
-    )
+/// Strip `id`'s row of `rows`, which are sorted by strip ID.
+fn input_section_row<'a>(
+    rows: &'a [InputSectionInventoryRow],
+    id: &str,
+) -> Option<&'a InputSectionInventoryRow> {
+    rows.binary_search_by(|row| (*row.id).cmp(id))
+        .ok()
+        .map(|index| &rows[index])
+}
+
+/// The input section `strip` had in the predecessor's committed model, looked up among strips of
+/// its own kind (issue #1276 D1): a track among the tracks, a submix among the submixes, so a
+/// strip whose kind changed is not found and does not carry.
+///
+/// `committed` is a normalized model, whose tracks and submixes are each in canonical ID order;
+/// a strip a search does not find starts at rest, never takes another strip's state.
+fn committed_input_section<'a>(
+    committed: &'a SessionModel,
+    strip: &session::StripRef<'_>,
+) -> Option<&'a session::DualMonoBuiltins> {
+    let id = strip.id.as_str();
+    match strip.kind {
+        session::StripKind::Track(_) => committed
+            .tracks
+            .binary_search_by(|track| track.id.as_str().cmp(id))
+            .ok()
+            .map(|index| &committed.tracks[index].builtins),
+        session::StripKind::Submix(_) => committed
+            .submixes
+            .binary_search_by(|submix| submix.id.as_str().cmp(id))
+            .ok()
+            .map(|index| &committed.submixes[index].builtins),
+    }
 }
 
 /// Whether two strips' input sections are bit-equal (issue #1276 D1): polarity, trim and both

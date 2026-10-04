@@ -1233,12 +1233,10 @@ fn collapsed_strips_keep_collapsing_across_a_swap_at_four_lanes() {
     collapsed_strips_keep_collapsing(Backend::Simd4, true);
 }
 
-/// Gate 4 of #1276. B changes `eq0`'s high-pass cutoff in the same transaction that adds a muted
-/// track, so `eq0`'s input section does not carry (Q1's default): from the swap block on it renders
-/// exactly what a fresh plan of B renders from rest on the same PCM. Red if a section whose values
-/// changed is carried: the old filter keeps running.
-#[test]
-fn a_strip_whose_filter_changed_starts_at_rest() {
+/// Gate 4 of #1276, one edit. B applies `edit` to `eq0`'s input section in the same transaction
+/// that adds a muted track, so `eq0`'s section does not carry (Q1's default): from the swap block
+/// on it renders exactly what a fresh plan of B renders from rest on the same PCM.
+fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoBuiltins)) {
     let one_track = |model: SessionModel| {
         let mut model = model;
         model.tracks.retain(|track| track.id.as_str() == "eq0");
@@ -1247,8 +1245,7 @@ fn a_strip_whose_filter_changed_starts_at_rest() {
     };
     let a = Session::compile(one_track(filtered_session(false)));
     let mut b_model = one_track(filtered_session(false));
-    b_model.tracks[0].builtins.left.hpf_hz = 160.0;
-    b_model.tracks[0].builtins.right.hpf_hz = 170.0;
+    edit(&mut b_model.tracks[0].builtins);
     let b = Session::compile(with_muted_track(b_model));
     let feed = Feed::new(SOURCE, 11);
     for backend in backends() {
@@ -1261,7 +1258,7 @@ fn a_strip_whose_filter_changed_starts_at_rest() {
         assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
         assert_eq!(
             run.successor.carry_program_retained_bytes, 8,
-            "{backend:?}: the source moves, the changed section does not"
+            "{name}, {backend:?}: the source moves, the changed section does not"
         );
         for block in 0..BLOCKS {
             let expected = if block < SWAP_BLOCK {
@@ -1271,9 +1268,121 @@ fn a_strip_whose_filter_changed_starts_at_rest() {
             };
             assert_eq!(
                 &run.blocks[block].bits, expected,
-                "{backend:?}: block {block}"
+                "{name}, {backend:?}: block {block}"
             );
         }
+    }
+}
+
+/// Gate 4 for each value D1 compares. Red if the comparison of the changed value is dropped: the
+/// section carries, the old high-pass or low-pass keeps running, or the old trim or polarity
+/// stays on the strip after an acknowledged edit.
+#[test]
+fn a_strip_whose_input_section_changed_starts_at_rest() {
+    a_changed_section_starts_at_rest("hpf_hz", |builtins| {
+        builtins.left.hpf_hz = 160.0;
+        builtins.right.hpf_hz = 170.0;
+    });
+    a_changed_section_starts_at_rest("lpf_hz", |builtins| {
+        builtins.right.lpf_hz = 3_500.0;
+    });
+    a_changed_section_starts_at_rest("trim_db", |builtins| {
+        builtins.left.trim_db += 1.5;
+    });
+    a_changed_section_starts_at_rest("polarity_invert", |builtins| {
+        builtins.right.polarity_invert = true;
+    });
+}
+
+/// D1's control-kind clause: a successor that attaches a live queue to its strips when the
+/// predecessor did not, or the reverse, carries no input section; only the source moves. Red if
+/// the clause is dropped (nine lane moves).
+#[test]
+fn a_changed_control_kind_carries_no_input_section() {
+    let a = Session::compile(filtered_session(false));
+    let b = Session::compile(with_muted_track(filtered_session(false)));
+    let backend = Backend::Simd4;
+    let source_only = 8;
+    // Predecessor without live controls, successor with them.
+    let plain = a.prepare(backend);
+    let live = LivePlan::successor(&b, &plain.inventory, &a.model, backend);
+    assert_eq!(
+        live.prepared.report.carry_program_retained_bytes, source_only,
+        "plain -> live"
+    );
+    // Predecessor with live controls, successor without them.
+    let live = LivePlan::fresh(&a, backend);
+    let plain = b
+        .prepare_successor(&live.prepared.inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    assert_eq!(
+        plain.report.carry_program_retained_bytes, source_only,
+        "live -> plain"
+    );
+    // The control: the same kind on both sides carries all nine sections.
+    let plain = b
+        .prepare_successor(&a.prepare(backend).inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    assert_eq!(
+        plain.report.carry_program_retained_bytes,
+        source_only + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+    );
+}
+
+/// D1's strip-kind clause: B removes track `eq0` and adds a submix named `eq0`, with `eq0`'s input
+/// section, that `eq1` feeds. The submix's section is not the track's and does not carry; `eq1`'s
+/// does. Red if a strip is looked up by ID alone, whatever its kind (two lane moves).
+#[test]
+fn a_track_replaced_by_a_submix_of_its_name_does_not_carry() {
+    let two_tracks = || {
+        let mut model = filtered_session(false);
+        model
+            .tracks
+            .retain(|track| matches!(track.id.as_str(), "eq0" | "eq1"));
+        model
+            .routes
+            .retain(|route| matches!(route.id.as_str(), "eq0-main" | "eq1-main"));
+        model
+    };
+    let a = Session::compile(two_tracks());
+    let mut b_model = two_tracks();
+    let track = b_model.tracks.remove(0);
+    assert_eq!(track.id.as_str(), "eq0");
+    let mut submix = session::Submix::unity(id("eq0"), &b_model.console);
+    submix.builtins = track.builtins.clone();
+    b_model.submixes.push(submix);
+    let template = b_model
+        .routes
+        .iter()
+        .position(|route| route.id.as_str() == "eq0-main")
+        .expect("eq0-main");
+    let mut out = b_model.routes.remove(template);
+    let RouteSource::Track { tap, .. } = out.source else {
+        panic!("a track route");
+    };
+    out.source = RouteSource::Submix {
+        submix_id: id("eq0"),
+        tap,
+    };
+    let feed_route = b_model
+        .routes
+        .iter_mut()
+        .find(|route| route.id.as_str() == "eq1-main")
+        .expect("eq1-main");
+    feed_route.destination = session::RouteDestination::SubmixInput {
+        submix_id: id("eq0"),
+    };
+    b_model.routes.push(out);
+    let b = Session::compile(b_model);
+    for backend in backends() {
+        let prepared = b
+            .prepare_successor(&a.prepare(backend).inventory, &a.model, &caps(), backend)
+            .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+        assert_eq!(
+            prepared.report.carry_program_retained_bytes,
+            8 + core::mem::size_of::<graph::GraphLaneMove>() as u64,
+            "{backend:?}: the source and eq1's section move, the submix's section does not"
+        );
     }
 }
 
@@ -1381,6 +1490,149 @@ fn a_one_channel_record_keeps_its_chain_dual_after_the_swap() {
             "{backend:?}: the successor keeps that chain dual"
         );
     }
+}
+
+/// The all-mono [`filtered_session`] with `eq6`'s right trim 6 dB below its left unless
+/// `eq6_symmetric`, so `eq6`'s two channels are driven apart; with `stereo_neighbour`, `eq5` reads
+/// two source channels, so the chain that pools `eq6` beside it can never collapse.
+fn diverged_session(stereo_neighbour: bool, eq6_symmetric: bool) -> SessionModel {
+    let mut model = filtered_session(true);
+    for track in &mut model.tracks {
+        match track.id.as_str() {
+            "eq5" if stereo_neighbour => track.right_source_channel = 1,
+            "eq6" if !eq6_symmetric => {
+                track.builtins.right.trim_db = track.builtins.left.trim_db - 6.0;
+            }
+            _ => {}
+        }
+    }
+    model
+}
+
+/// The carried channel agreement, at one width (#1276 attempt 1 MAJOR-1). `eq6` renders with
+/// asymmetric trims until a `Both` record two blocks before the swap equalises them; its filter
+/// integrators still disagree at the swap. The transaction commits the equal trims and adds a
+/// muted track, so `eq6`'s section carries into a successor chain that can collapse.
+///
+/// * With `stereo_neighbour`, `eq6`'s predecessor chain can never collapse and never maintained
+///   its agreement flag; it must hand over `false`, not the `true` it was bound with.
+/// * Without it, `eq6`'s predecessor chain is armed and its flag was cleared; the successor must
+///   keep it cleared.
+///
+/// Either way the successor waits for a proof, which the diverged lane cannot give, and renders
+/// the reference's bits: A with the muted track, fed the same record at the same block.
+fn a_diverged_lane_keeps_its_chain_dual_after_the_swap(backend: Backend, stereo_neighbour: bool) {
+    let a = Session::compile(diverged_session(stereo_neighbour, false));
+    let trim_db = a
+        .model
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == "eq6")
+        .expect("eq6")
+        .builtins
+        .left
+        .trim_db;
+    let writes = [LiveWrite {
+        block: SWAP_BLOCK - 2,
+        strip: "eq6",
+        record: builtins_compiler::TrackInputRecord::TrimDb {
+            lanes: builtins::BuiltinLaneSelector::Both,
+            db: trim_db,
+            smoothing_samples: 0,
+        },
+    }];
+    let committed = diverged_session(stereo_neighbour, true);
+    let b = Session::compile(with_muted_track(committed.clone()));
+    let reference_session =
+        Session::compile(with_muted_track(diverged_session(stereo_neighbour, false)));
+    let feed = Feed::new(SOURCE, 21);
+    let reference = direct_run(
+        &reference_session,
+        None,
+        &feed,
+        QUANTUM,
+        &writes,
+        backend,
+        false,
+    );
+    for successor_dual in [false, true] {
+        let run = direct_run(
+            &a,
+            Some((&b, &committed)),
+            &feed,
+            QUANTUM,
+            &writes,
+            backend,
+            successor_dual,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+        assert_eq!(
+            first_direct_difference(&run, &reference),
+            None,
+            "{backend:?}, stereo neighbour {stereo_neighbour}, successor dual {successor_dual}"
+        );
+        if !successor_dual {
+            assert!(
+                run.collapses[1][0] > 0,
+                "{backend:?}: the successor's other chains still collapse"
+            );
+        }
+    }
+}
+
+/// The carried agreement from a chain that can never collapse, with no live record: `eq6` has an
+/// asymmetric input delay in A, so no chain holding it is armed and its filter integrators
+/// diverge. B makes the delay symmetric and adds a muted track; delay is not a value D1 compares,
+/// so the section carries (a C ABI structural transaction prepares exactly this successor). The
+/// delay line itself does not carry, so the oracle is the same successor forced dual: collapse is
+/// class A and must not move a bit.
+fn a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(backend: Backend) {
+    let mut a_model = filtered_session(true);
+    let eq6 = a_model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq6")
+        .expect("eq6");
+    eq6.builtins.right.delay_samples = 37;
+    let a = Session::compile(a_model);
+    let b = Session::compile(with_muted_track(filtered_session(true)));
+    let feed = Feed::new(SOURCE, 23);
+    let dual = direct_run(&a, Some((&b, &a.model)), &feed, QUANTUM, &[], backend, true);
+    let run = direct_run(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        QUANTUM,
+        &[],
+        backend,
+        false,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert!(
+        run.collapses[1][0] > 0,
+        "{backend:?}: the successor collapses"
+    );
+    assert_eq!(first_direct_difference(&run, &dual), None, "{backend:?}");
+}
+
+/// The carried agreement at eight lanes. Red if a predecessor chain that can never collapse hands
+/// over the unmaintained `true` it was bound with (the stereo-neighbour and delay cases), or if
+/// the successor ignores a cleared flag (the armed case): the successor collapses a lane whose
+/// channels disagree.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_at_eight_lanes() {
+    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd8, true);
+    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd8, false);
+    a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(Backend::Simd8);
+}
+
+/// The carried agreement at four lanes.
+#[test]
+fn a_diverged_lane_keeps_its_chain_dual_after_the_swap_at_four_lanes() {
+    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd4, true);
+    a_diverged_lane_keeps_its_chain_dual_after_the_swap(Backend::Simd4, false);
+    a_lane_from_a_delayed_strip_keeps_its_chain_dual_after_the_swap(Backend::Simd4);
 }
 
 /// D6 and P11 of #1276. Installing the input section refuses a plan with no carry program (no

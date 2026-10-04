@@ -1327,8 +1327,15 @@ pub trait GraphPreparedBuiltinBankProcessor: Send + Any {
     /// Apply every live-control record waiting at entry to lane state, exactly as
     /// [`Self::begin_block`] would at the next block, before a plan swap exports this bank's
     /// lanes (issue #1276 D4). A record drained here takes effect on the successor's first
-    /// sample, the sample it would have reached without the swap. The default drains nothing.
-    fn drain_for_carry(&mut self) {}
+    /// sample, the sample it would have reached without the swap.
+    ///
+    /// Every record present at entry is consumed: one whose apply is refused is counted and the
+    /// drain goes on, so no later record of the lane or the bank stays behind in a queue that
+    /// never renders again. Returns the refused count, which admission validation makes zero.
+    /// The default drains nothing and returns zero.
+    fn drain_for_carry(&mut self) -> usize {
+        0
+    }
     /// Preparation metadata only; render never reads this policy.
     fn control_delivery(&self) -> BuiltinControlDelivery {
         BuiltinControlDelivery::Concurrent
