@@ -21,8 +21,10 @@ so cargo never compiles them; the committed follow-up tests were shaped from the
 | #1261 | live input trim and polarity | none | 0 | skipped: waits for owner Q4 | none |
 | #1262 | live input HPF and LPF | none | 0 | blocked: depends only on #1261 | none |
 
-Each slice spec's "Attempt record" in `.github/ISSUE_SPECS/` holds the evidence, the mutation runs,
-the verdict line and the follow-ups applied.
+Each slice spec's "Attempt record" holds the evidence, the mutation runs, the verdict line and the
+follow-ups applied. The slices closed with PR #1298, so their specs left `.github/ISSUE_SPECS/`; read
+them where they last stood, at
+[`d2fe0555a`](https://github.com/misofm/engine/tree/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS).
 
 ## Open owner questions
 
@@ -44,7 +46,10 @@ recommended default.
   reference session's graph move from 128,984 bytes to about 48 KB, and much more at a large S.
   This is a mobile memory question, not a defect.
 
-## Follow-up candidates (recorded, not implemented)
+## Follow-up candidates (filed 2026-10-04)
+
+Filed after PR #1298 merged: N1 of #1253 as #1302, N1 of #1255 as #1303, N2 of #1263 as #1304, N2
+and N3 of #1264 as #1305, and Q5 as the owner question #1306.
 
 - **#1253 N1.** The realtime-policy unbounded `try_pop` rule is a single-line regex. Replace it
   with a structural rule (a `try_pop(` in a marked body needs `available_at_entry` in the same

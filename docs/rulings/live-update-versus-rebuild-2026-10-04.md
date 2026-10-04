@@ -101,6 +101,9 @@ Ruling:
   `main`").
 - On the C ABI, "rebuild" means that every committed transaction replaces the plan, as it does for
   every edit on `main`.
+- The C ABI column records `main` at `54b0a1bf8`. Since then #1053's slices made several of its
+  rows live; see "Factual amendment: the C ABI after PR #1298 and PR #1299" below, which supersedes
+  that column where they differ.
 
 **Strip builtins.** These apply to every strip, tracks and submixes alike (decision 13 O3 (b) and
 Q5).
@@ -204,6 +207,43 @@ that no launch effect declares `AutomationRate::None`; they are stale, since fou
 - **Known gap: plan swaps are not seamless on either host.** Under C2, value changes stay live
   even after swaps become seamless, so the gap matters only for structural edits.
 
+### Factual amendment: the C ABI after PR #1298 and PR #1299
+
+Recorded on 2026-10-04 after #1053's live updates (PR #1298) and phase 1 of *Swap a rebuilt plan
+without an audio gap* (#1269, PR #1299) merged (`d2fe0555a`). It corrects what the record says
+`main` does on the C ABI. It is not a new owner decision: no rule, class or follow-up's authority
+changes. The C ABI bullets above, and the C ABI column of the tables, describe `main` at
+`54b0a1bf8`; where they differ, this section holds (the contract text is the header,
+`crates/capi/include/miso_engine_v1.h`, "Live edits" and "Sources across a structural
+transaction").
+
+- **Live updates on the C ABI.** A committed transaction whose changes are all live is applied to
+  the running plan, with no replacement:
+  - a track's fader level, mute, and pan or matrix values (#1253-#1258);
+  - a changed value of a track effect parameter whose `automation_rate` is `Block`, on a console
+    slot or an insert (#1263, #1264), the parametric EQ's live parameters included, through
+    prepared targets (#1265);
+  - a track effect's bypass (#1266), except the delay's and the multiband compressor's, which
+    rebuild (F4's prepared bypass).
+- **Model-only edits commit without a rebuild** (#1260): a transaction that changes only the
+  session ID, a profile's ID or the stored automation table replaces no plan. F8 is closed.
+- **Still rebuilds on the C ABI:**
+  - input `trim_db` and `polarity_invert` (#1261) and input `hpf_hz` and `lpf_hz` (#1262), both
+    waiting for the owner's answer to #1053's Q4 (an infinite tail for live input filters);
+  - every submix-strip value (#1225, #1267), any edit of a session that declares a VCA (#1247),
+    and the mute of a track that a `follows_mute` send reads (#1226);
+  - every structural row above.
+- **A structural rebuild no longer resets source rings** (#1273). `StructuralSourceStatePolicy`
+  is deleted. The replacement keeps every source the transaction left unchanged playing, with its
+  ring, generation and read position; the host neither seeks nor refills it. A source the
+  transaction added or changed starts in a fresh ring at generation 1, frame 0; the host places it
+  in time with `miso_engine_v1_source_seek_at` (#1274, #1275). The swap block is no longer silent:
+  the predecessor hands over at the swap block (#1270), and the strip input sections carry their
+  state across it (#1276). The replacement's fader ramps and effect state still start from
+  preparation; #1277-#1284 carry them.
+- **F5** is filed: effect parameters and bypass as #1263-#1266 (closed), the input trim and
+  polarity as #1261 and the input HPF and LPF as #1262 (open, waiting for Q4).
+
 ### Follow-ups: where `main` breaks the rule
 
 Each follow-up is root's finding, subject to owner review. None is filed by this record, and no
@@ -284,6 +324,8 @@ code changed.
 - **F8, C1: model-only edits rebuild the plan on the C ABI.** The edits in the "Model-only edits"
   row change no render state, yet each is a full plan rebuild today, with the source-ring reset
   and the silent block. #1053's classifier is the natural place to commit them without a rebuild.
+  **Closed by #1260** (see the factual amendment): they now commit with no replacement, and a
+  structural rebuild no longer resets source rings or renders a silent block (#1270, #1273).
 - **F9, rule 1: VCA membership on the C ABI.** #1247 D1 keeps membership structural for reach
   drift, a planner decision. Under this rule's reading of new memory, membership on the C ABI needs
   none, so #1247's brief should give a rule 3 reason or make it live.

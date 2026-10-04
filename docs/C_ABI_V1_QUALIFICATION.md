@@ -181,8 +181,9 @@ admission. Host-core's default feature graph remains protocol-free; only capi en
 
 `resource_lifecycle` checks these charges against the allocator (#1060). Its counting allocator
 observes a C ABI compile and a replay of its host-core half owner by owner, and nothing is taken
-from the accounting it checks. What capi allocates itself, plus the observed source producers,
-parameter catalog and plan state inventory (#1273), must equal `capi_retained_bytes` to the byte.
+from the accounting it checks. What capi allocates itself, plus the observed effect live-control
+producers (#1263), strip live-control producers (#1256), source producers, parameter catalog and
+plan state inventory (#1273), must equal `capi_retained_bytes` to the byte.
 The session store must fit its compiled-model estimate, and the prepared plan its engine rows (a
 bound; see the test). The canonical JSON is charged once, with the compiled model in the graph cap:
 capi's epoch row no longer charges it a second time. The double-live admission is derived from the two live reports

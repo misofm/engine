@@ -1260,7 +1260,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     }
     // Issue #1276 D1: the strip input sections that carry, with the predecessor lane each one
     // copies from. Every strip of this plan attaches the same control kind.
-    let live_input = live_controls.control_queue_depth.is_some();
+    let live_input = live_controls.control_queue_depth.is_some() && lanes.strip_input;
     let carried_inputs: Vec<(&str, graph::GraphLaneLocation)> = match successor {
         None => Vec::new(),
         Some(base) => {

@@ -479,14 +479,26 @@ now charges the plan state inventory, and the engine envelope guard, the graph c
 
 - The delay refuses its own edge-ramp snapshots (feedback, mix, cross feedback); slice 12 moves
   rather than restores it.
-- Soft-clip's two open non-finite history cases, and soft-clip validating an in-flight current by
-  its line rather than by `ramp_path_within` (#1278).
+- Soft-clip's two open non-finite history cases (filed as #1300), and soft-clip validating an
+  in-flight current by its line rather than by `ramp_path_within` (#1278; not filed).
+- The shared edge-ramp restore probe costs about 70 s per PR in debug (#1278 delay follow-up
+  MINOR-3; filed as #1301).
 - Owner review of the in-place C ABI amendment: `miso_engine_v1_source_seek_at` and
   `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (feature bit 32, mask 63) added under ABI version
   `0x00010000` (#1275).
 - Records admitted to a predecessor's input queue after the swap-block drain are never applied;
   when a host gains that path (P5, #1257), admission must route to the newest plan (#1276
-  attempt-1 NIT-4).
+  attempt-1 NIT-4). **Verified after the #1053 merge, no issue filed.** The #1269 merge verdict
+  (section 3, "The newest-plan interaction") found no defect: the C ABI's `commit_live` targets
+  `pending_providers.last_mut()`, the newest candidate; the structural arm prepares from the
+  newest inventory and the committed model; a second structural transaction while one is pending
+  is refused with backpressure, so a candidate holding acknowledged records is never displaced
+  unrendered; and at the swap block the carry runs before the successor drains its own queues.
+  The C ABI attaches no input lane today, so no live record shares state the carry overwrites. The
+  rule stays a constraint on the first host path that adds one: #1261 on the C ABI and B3 (#1291)
+  on the browser must route input records to the newest plan, as `commit_live` does.
+- #1289's numbers and its reading against the budget are posted on this issue (the umbrella comment
+  #1289's Deliverable 3 asked for); B2 waits for the owner's ruling on Q4.
 - `audit capi`'s `pcm_digest` moved `7281b6c931e05dcc` to `c60671f6593fa603` with #1276's carried
   input filters (`807b48547`); the PR that lands this batch must say so (#1273 already moved it
   from `ff6cdcb96cdcdad5`).
