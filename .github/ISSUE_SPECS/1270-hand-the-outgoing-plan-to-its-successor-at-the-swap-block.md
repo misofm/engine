@@ -108,3 +108,57 @@ and 7-14 fill it.
 ## Dependencies
 
 None.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `41517fc35`)
+
+**Change.** D1-D4 as frozen. `PreparedPlanExecutor` gains `as_any_mut` and `adopt_predecessor`
+(defaults `None` / `NotRequested`); `CarryOutcome` is exported from `engine::realtime`.
+`PreparedRenderPlan` gains the public `adopt_predecessor_plan` (adopts the clock, then runs the
+hand-over inside `audit::in_render_scope`, which nests) and a `pub(crate) carry_from`, both inside
+`plan.rs`'s existing realtime-policy region. `enter_block` calls `carry_from` on the `Applied` path
+only, after `adopt_absolute_sample` and before the retirement commit, and returns the outcome with
+the swap; `RealtimeRenderReport` gains `carry`; `RealtimePlanOwner` gains `carried_count` and
+`carry_mismatch_count` (saturating). `lib.rs` needed no change (it re-exports nothing from
+`realtime`). The test oscillator advances a unit phasor by a fixed rotation instead of calling
+`f64::sin` (clippy's D6 `disallowed_methods`; `engine` does not depend on `math`).
+
+**Tests** (`crates/engine/src/realtime/mod.rs`, `tests::carry`):
+`successor_continues_the_predecessor_state_gap_free` (gate 1, plus carry-off differs at block 6),
+`hand_over_runs_only_on_the_applied_block` (gate 2: two applied swaps, three deferred blocks, hook
+call count per block, gate-1 equality across them), `dropping_the_owner_never_hands_over_to_an_unapplied_candidate`
+(gate 3), `synchronous_hand_over_continues_state_and_clock` (gate 5: equality and a capture stamped
+at 5 x quantum before the successor renders), `a_mismatched_predecessor_is_reported_not_carried`
+(the `PredecessorMismatch` report and counter).
+
+**Mutation runs** (each applied, focused tests run red, reverted, green again):
+
+| Mutation | Red |
+|---|---|
+| M1 `enter_block` never calls the hook | gate 1, gate 2, mismatch |
+| M2 hook also runs on the deferred (retirement-full) path | gate 2 |
+| M3 `Drop for RealtimePlanOwner` hands over to queued candidates | gate 3 |
+| M4 `adopt_predecessor_plan` skips the clock adoption | gate 5 |
+| M6 mismatch counted as carried | mismatch |
+| M7 `adopt_predecessor_plan` skips the executor hook | gate 5 |
+
+"Hook after the successor's first render" is not expressible as a mutation of this shape (the
+predecessor is retired in the same `enter_block`), so its stand-in is M1.
+
+**Gates** (all on the final tree unless noted):
+- `cargo test --locked -p engine`: ok (36 lib + 4 + 1); `--features realtime-audit`: ok (38 + 4 + 1).
+- loom `spsc_loom`: ok.
+- `cargo build --locked --release -p audit`; `trace-realtime-audit.sh target/release/audit 1000000`:
+  ok (1000000 blocks); `trace-builtins-graph-audit.sh`: PASS.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: ok.
+- `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh` (54 regions in
+  15 files), `test-realtime-policy.sh`, `check-capi-abi.sh`: ok.
+- `audit capi`: 0 allocations, 0 syscalls, 0 violations.
+- `check-cross-targets.sh`: PASS (the two #1018 expected iOS `memset_pattern16` failures unchanged).
+- Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`: ok. **ARTIFACT CHANGED**: shipped module `5d21f73e...2675` at
+  `41517fc35` (built `--module-only` from a detached checkout) to `a28285eb...d144`. Per
+  `docs/RELEASE.md` no per-change re-pin.

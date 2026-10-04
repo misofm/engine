@@ -10,7 +10,7 @@ use super::{Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscErro
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlanEpoch(pub u64);
-use super::{PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime};
+use super::{CarryOutcome, PreparedRenderPlan, RenderError, RenderIo, RenderReport, RenderTime};
 use core::{
     alloc::Layout,
     cell::Cell,
@@ -85,6 +85,8 @@ pub struct RealtimePlanOwner {
     retirement_credits: Arc<AtomicUsize>,
     legacy_outstanding: Arc<AtomicUsize>,
     deferred: u64,
+    carried: u64,
+    carry_mismatched: u64,
     _not_sync: Cell<()>,
 }
 /// Fixed report proving which complete plan owned a rendered block.
@@ -92,6 +94,8 @@ pub struct RealtimePlanOwner {
 pub struct RealtimeRenderReport {
     /// Boundary publication decision made before processing the block.
     pub swap: SwapOutcome,
+    /// What the incoming plan took from its predecessor; `NotRequested` unless `swap` is `Applied`.
+    pub carry: CarryOutcome,
     /// Epoch of the plan that rendered the block.
     pub active_epoch: PlanEpoch,
     /// Inner prepared-plan render report.
@@ -215,6 +219,8 @@ pub fn plan_exchange(
             retirement_credits: Arc::clone(&retirement_credits),
             legacy_outstanding,
             deferred: 0,
+            carried: 0,
+            carry_mismatched: 0,
             _not_sync: Cell::new(()),
         },
         PlanRetirer {
@@ -355,14 +361,25 @@ impl RealtimePlanOwner {
     pub const fn deferred_count(&self) -> u64 {
         self.deferred
     }
-    fn enter_block(&mut self) -> SwapOutcome {
+    /// Saturating count of applied swaps whose incoming plan took state from its predecessor.
+    #[must_use]
+    pub const fn carried_count(&self) -> u64 {
+        self.carried
+    }
+    /// Saturating count of applied swaps whose incoming plan asked for state its predecessor's
+    /// shape could not supply.
+    #[must_use]
+    pub const fn carry_mismatch_count(&self) -> u64 {
+        self.carry_mismatched
+    }
+    fn enter_block(&mut self) -> (SwapOutcome, CarryOutcome) {
         if self.pending.is_none()
             && let Ok(candidate) = self.publication.try_pop()
         {
             self.pending = Some(candidate);
         }
         let Some(_) = self.pending.as_ref() else {
-            return SwapOutcome::None;
+            return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
         let old_epoch = self.active.0;
         let retirement_reserved = self
@@ -371,7 +388,10 @@ impl RealtimePlanOwner {
             .is_some_and(|candidate| candidate.retirement_reserved);
         if !retirement_reserved && !try_take_retirement_credit(&self.retirement_credits) {
             self.deferred = self.deferred.saturating_add(1);
-            return SwapOutcome::DeferredRetirementFull;
+            return (
+                SwapOutcome::DeferredRetirementFull,
+                CarryOutcome::NotRequested,
+            );
         }
         // A consumed credit proves a queue slot exists. A conservative failed CAS above leaves
         // the unreserved candidate pending; a reserved candidate never makes a new decision.
@@ -382,17 +402,30 @@ impl RealtimePlanOwner {
                     self.retirement_credits.fetch_add(1, Ordering::Release);
                 }
                 self.deferred = self.deferred.saturating_add(1);
-                return SwapOutcome::DeferredRetirementFull;
+                return (
+                    SwapOutcome::DeferredRetirementFull,
+                    CarryOutcome::NotRequested,
+                );
             }
         };
         let Some(candidate) = self.pending.take() else {
-            return SwapOutcome::None;
+            return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
         let continuing = self.active.1.next_absolute_sample();
-        let old = core::mem::replace(&mut self.active, (candidate.epoch, candidate.plan));
+        let mut old = core::mem::replace(&mut self.active, (candidate.epoch, candidate.plan));
         // The timeline belongs to the host, not to any one plan: a plan that takes over mid-stream
         // continues the outgoing plan's clock instead of restarting at zero.
         self.active.1.adopt_absolute_sample(continuing);
+        // The incoming plan's one chance to take state from the outgoing one: after the clock
+        // adoption, before it renders, and before the outgoing plan leaves for retirement.
+        let carry = self.active.1.carry_from(&mut old.1);
+        match carry {
+            CarryOutcome::Carried => self.carried = self.carried.saturating_add(1),
+            CarryOutcome::PredecessorMismatch => {
+                self.carry_mismatched = self.carry_mismatched.saturating_add(1);
+            }
+            CarryOutcome::NotRequested => {}
+        }
         placeholder.commit(RetiredPlan {
             epoch: old_epoch,
             plan: old.1,
@@ -400,7 +433,7 @@ impl RealtimePlanOwner {
         if !candidate.retirement_reserved {
             self.legacy_outstanding.fetch_sub(1, Ordering::AcqRel);
         }
-        SwapOutcome::Applied
+        (SwapOutcome::Applied, carry)
     }
     /// The absolute sample the next contiguous block must start at.
     ///
@@ -418,7 +451,7 @@ impl RealtimePlanOwner {
         absolute_sample: u64,
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
-            let swap = self.enter_block();
+            let (swap, carry) = self.enter_block();
             let active_epoch = self.active.0;
             let expected = self.active.1.next_absolute_sample();
             if absolute_sample != expected {
@@ -430,6 +463,7 @@ impl RealtimePlanOwner {
                 .render_inner(io, RenderTime { absolute_sample })?;
             Ok(RealtimeRenderReport {
                 swap,
+                carry,
                 active_epoch,
                 render,
             })
@@ -442,11 +476,12 @@ impl RealtimePlanOwner {
         time: RenderTime,
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
-            let swap = self.enter_block();
+            let (swap, carry) = self.enter_block();
             let active_epoch = self.active.0;
             let render = self.active.1.render_inner(io, time)?;
             Ok(RealtimeRenderReport {
                 swap,
+                carry,
                 active_epoch,
                 render,
             })
