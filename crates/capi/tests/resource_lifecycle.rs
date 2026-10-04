@@ -525,6 +525,9 @@ struct HostHalf {
     prepared: host_core::PreparedHost,
     /// Each strip's fader/mute and matrix/pan producers, kept as capi keeps them (#1256 D2).
     strips: Box<[host_core::TrackControlProducer]>,
+    /// One producer per prepared effect instance, with each EQ's owner, kept as capi keeps them
+    /// (#1263 D2).
+    effects: Box<[host_core::EffectControlProducer]>,
 }
 
 /// capi's live-lane depth, `LIVE_QUEUE_DEPTH` (#1053 D4), which is crate-private.
@@ -539,10 +542,11 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
         .unwrap_or_else(|_| panic!("the reference session's compile caps"));
     let store = protocol::SessionStore::new(model, compile_caps)
         .unwrap_or_else(|_| panic!("the reference session compiles"));
-    // The same request capi makes (#1256 D1), and inside the caller's observed window the same
-    // disposal (D2): the strip ID list and the vectors this selection leaves empty drop here, so
-    // only the producers survive, as one boxed slice. Keeping the ID list would count bytes capi
-    // does not keep.
+    // The same request capi makes (#1256 D1, #1263 D1: fader/mute, matrix/pan and effect lanes,
+    // no input or route lane), spelled here independently, and inside the caller's observed
+    // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
+    // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
+    // count bytes capi does not keep.
     let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
         store.compiled(),
         &caps,
@@ -550,14 +554,23 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
             control_queue_depth: Some(LIVE_QUEUE_DEPTH),
             ..host_core::HostLiveControlRequest::default()
         },
-        host_core::HostLiveLanes::FADER_AND_MATRIX,
+        host_core::HostLiveLanes {
+            strip_input: false,
+            effects: true,
+            routes: false,
+        },
     )
     .unwrap_or_else(|_| panic!("the reference session prepares"));
-    let host_core::HostLiveControlHandles { strip_controls, .. } = handles;
+    let host_core::HostLiveControlHandles {
+        strip_controls,
+        effect_controls,
+        ..
+    } = handles;
     HostHalf {
         store,
         prepared,
         strips: strip_controls.into_boxed_slice(),
+        effects: effect_controls.into_boxed_slice(),
     }
 }
 
@@ -588,8 +601,9 @@ impl HostHalf {
     /// owning crate's report: `epoch_retained` and `prepared_protocol_retained`.
     ///
     /// The session's canonical JSON is charged once, with its model in the graph row. The epoch
-    /// term is the source producers' control table and ID arena, and the strip producers' table
-    /// and track IDs (#1256), measured from the kept slice. The prepared-protocol term is the
+    /// term is the source producers' control table and ID arena, the strip producers' table
+    /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
+    /// owned payload (#1263), from host-core's walk over them. The prepared-protocol term is the
     /// response buffer, the affine token, the replay cache and the parameter catalog.
     fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
         let replay =
@@ -609,7 +623,13 @@ impl HostHalf {
                 .iter()
                 .map(|producer| producer.track_id.len() as u64)
                 .sum::<u64>();
-        let epoch = self.prepared.report.control_retained_bytes + strips;
+        let effects = self
+            .prepared
+            .report
+            .effect_control_resources
+            .total_bytes()
+            .expect("the effect producers' charge");
+        let epoch = self.prepared.report.control_retained_bytes + strips + effects;
         let prepared_protocol = compile_limits.maximum_control_frame_bytes
             + size_of::<protocol::PreparedStructuralCommand>() as u64
             + replay.retained_payload_bytes
@@ -636,10 +656,11 @@ fn freed_by_drop<T>(value: T) -> u64 {
 
 /// What each owner the host-core half hands capi retains, observed by dropping it.
 ///
-/// The drop order is the attribution: the strip and source producers go first, so a ring the
-/// producers share with the plan is freed -- and counted -- with the plan that renders from it,
-/// and the producers' own bytes are their tables and IDs alone.
+/// The drop order is the attribution: the effect, strip and source producers go first, so a ring
+/// the producers share with the plan is freed -- and counted -- with the plan that renders from
+/// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
 struct HostOwners {
+    effects: u64,
     strips: u64,
     sources: u64,
     catalog: u64,
@@ -681,6 +702,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         store,
         prepared,
         strips,
+        effects,
     } = host;
     let (strip_count, strip_id_bytes) = store
         .compiled()
@@ -698,6 +720,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_catalog,
     } = prepared;
     let owners = HostOwners {
+        effects: freed_by_drop(effects),
         strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
@@ -705,9 +728,14 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         store: freed_by_drop(store),
     };
     assert_eq!(
-        owners.strips + owners.sources + owners.catalog + owners.plan + owners.store,
+        owners.effects
+            + owners.strips
+            + owners.sources
+            + owners.catalog
+            + owners.plan
+            + owners.store,
         host_live,
-        "the five owners hold every byte the host-core half retains"
+        "the six owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -749,13 +777,14 @@ impl CompileObservation {
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
         assert_eq!(
             capi_allocated
+                + self.owners.effects
                 + self.owners.strips
                 + self.owners.sources
                 + self.owners.catalog
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
-            "{label}: capi's own allocations + the strip producers + the source producers + the \
-             parameter catalog + the decode-field rounding, all observed (left), against \
+            "{label}: capi's own allocations + the effect producers + the strip producers + the \
+             source producers + the parameter catalog + the decode-field rounding, all observed (left), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -784,6 +813,14 @@ impl CompileObservation {
     ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
+        assert_eq!(
+            owners.effects,
+            self.host_report
+                .effect_control_resources
+                .total_bytes()
+                .expect("the effect producers' charge"),
+            "{label}: effect producer table, its IDs and the EQ owners"
+        );
         assert_eq!(
             owners.strips, self.strip_table_charge,
             "{label}: strip producer table and its track IDs"
@@ -940,24 +977,40 @@ impl Budget {
 /// ceiling is 28,521 plus 10 %, rounded up to 64, at both widths. capi retained moved 256,812 ->
 /// 258,135 (+1,323) inside its budget: the strip table, nine 136-byte producers and their 27 ID
 /// bytes (1,251), and 24 bytes in each of the three provider-epoch slots (72).
+///
+/// #1263 raised the three graph rows, a structural move: every C ABI plan now carries one live
+/// lane per prepared effect instance, here the nine console-slot EQs. The graph estimate charges
+/// each lane's ring and target staging and the banked live-control owner the lanes make bind build
+/// (`effect_control_resource`): 2,104 bytes per member plus 55,024 per eight-lane bank, measured
+/// on x86-64 by track count. graph session+plan and incremental move 253,934 -> 382,918 and graph
+/// metadata 56,137 -> 185,121 (+128,984 each); the prepared plan's observed bytes move by exactly
+/// as much, so the slack above is unchanged. The eight-lane ceilings are the new values plus 10 %,
+/// rounded up to 64. The four-lane ceilings are derived, not measured: the four-lane baseline
+/// (230,845 + #1098's 16,453 for session+plan; 56,840 + 69 for metadata) plus the eight-lane
+/// move, plus 10 %. That move is an upper bound at four lanes, because three four-lane banks
+/// hold fewer lanes (12) than two eight-lane banks (16) and a bank's per-lane terms (the packed
+/// span window, the lane array, the shunt over the AoSoA block) outweigh its per-bank staging
+/// window. capi retained moved 258,231 -> 273,640 (+15,409) inside its budget: the effect
+/// producer table (nine 104-byte producers) and its owned payload, the EQ owners and the effect
+/// and strip IDs (14,425), and 16 bytes in each of the three provider-epoch slots (48).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
-        eight_lanes: 261_248,
-        four_lanes: 253_952,
+        eight_lanes: 421_248,
+        four_lanes: 413_952,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
-        eight_lanes: 261_248,
-        four_lanes: 253_952,
+        eight_lanes: 421_248,
+        four_lanes: 413_952,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
-        eight_lanes: 61_696,
-        four_lanes: 62_528,
+        eight_lanes: 203_648,
+        four_lanes: 204_544,
     },
     Budget {
         row: "graph_delay_bytes",

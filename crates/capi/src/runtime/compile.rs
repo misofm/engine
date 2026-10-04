@@ -12,9 +12,19 @@ pub(crate) struct CompiledChildren {
 pub(crate) const LIVE_QUEUE_DEPTH: NonZeroUsize =
     NonZeroUsize::new(16).expect("sixteen is nonzero");
 
+/// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
+/// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
+/// no route lane (#1225). An effect lane's depth is `min(LIVE_QUEUE_DEPTH, automation capacity)`.
+pub(crate) const C_ABI_LIVE_LANES: HostLiveLanes = HostLiveLanes {
+    effects: true,
+    ..HostLiveLanes::FADER_AND_MATRIX
+};
+
 pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
     pub(crate) strips: StripLanes,
+    /// One live-control producer per prepared effect instance (#1263 D2).
+    pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     pub(crate) plan: PreparedRenderPlan,
     pub(crate) resources: PlanResourceReport,
     pub(crate) control_catalog: PreparedSessionControlCatalog,
@@ -115,10 +125,10 @@ pub(crate) fn capi_resources(
     limits: CompileLimits,
     source_count: usize,
     source_id_bytes: usize,
-    strip_count: usize,
-    strip_id_bytes: usize,
+    strip_table_bytes: u64,
     quantum_frames: usize,
     provider: host_core::SessionControlProviderResources,
+    effect_controls: host_core::EffectControlResources,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -158,13 +168,22 @@ pub(crate) fn capi_resources(
     // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
     // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
     // either side is a deliberate decision, not a cleanup.
+    //
+    // The effect producer table and its owned payload (#1263 D3) are the epoch's too: capi keeps
+    // the producers, and with them each parametric EQ's prepared-target owner. host-core walks
+    // them over the built producers (`HostPrepareReport::effect_control_resources`). Their rings
+    // and target staging are the graph estimate's rows (`effect_control_resource`), so they are
+    // not charged again here.
+    let effect_row = effect_controls
+        .total_bytes()
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let epoch_rows = [
         host_core::control_table_bytes(source_count)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         host_core::source_id_arena_bytes(source_id_bytes)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
-        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+        strip_table_bytes,
+        effect_row,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure("capi.resource.platform"))?
@@ -212,8 +231,11 @@ pub(crate) fn capi_resources(
     // Conservative: the strip row is the producer slice plus every `track_id`, which are separate
     // allocations, so feeding the whole row overstates the largest single allocation when that
     // row is the maximum. The error only ever refuses earlier.
-    let largest = epoch_rows
-        .into_iter()
+    // The effect row is several allocations; its own largest one stands for it.
+    let largest = epoch_rows[..epoch_rows.len() - 1]
+        .iter()
+        .copied()
+        .chain([effect_controls.largest_allocation_bytes()])
         .chain(fixed_allocation_rows)
         .chain(prepared_protocol_allocation_rows)
         .chain([
@@ -235,6 +257,7 @@ pub(crate) fn capi_resources(
 pub(crate) fn prepared_capi_resources(
     compiled: &CompiledSession,
     catalog: &PreparedSessionControlCatalog,
+    effect_controls: host_core::EffectControlResources,
     limits: CompileLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
@@ -267,10 +290,11 @@ pub(crate) fn prepared_capi_resources(
         limits,
         compiled.source_count(),
         source_id_bytes,
-        strip_count,
-        strip_id_bytes,
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         compiled.quantum().0 as usize,
         provider,
+        effect_controls,
     )
 }
 
@@ -512,8 +536,9 @@ pub(crate) fn prepare_runtime(
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    // #1256 D1: every plan carries each strip's fader/mute and matrix/pan lanes, and nothing else
-    // live: no input lane (its tail would turn infinite), no effect or route lane.
+    // #1256 D1: every plan carries each strip's fader/mute and matrix/pan lanes, and #1263 D1 one
+    // lane per prepared effect instance; nothing else live: no input lane (its tail would turn
+    // infinite) and no route lane (#1225).
     let (prepared, handles) = prepare_host_runtime_with_live_lanes(
         compiled,
         &caps,
@@ -521,7 +546,7 @@ pub(crate) fn prepare_runtime(
             control_queue_depth: Some(LIVE_QUEUE_DEPTH),
             ..HostLiveControlRequest::default()
         },
-        HostLiveLanes::FADER_AND_MATRIX,
+        C_ABI_LIVE_LANES,
     )
     .map_err(prepare_failure)?;
     // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
@@ -531,13 +556,22 @@ pub(crate) fn prepare_runtime(
     let host_core::HostLiveControlHandles {
         strip_controls,
         track_count,
+        effect_controls,
         ..
     } = handles;
     let strips = StripLanes {
         controls: strip_controls.into_boxed_slice(),
         track_count,
     };
-    let capi = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
+    // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
+    // boxed slice is the allocation host-core walked for `effect_control_resources`.
+    let effects = effect_controls.into_boxed_slice();
+    let capi = prepared_capi_resources(
+        compiled,
+        &prepared.control_catalog,
+        prepared.report.effect_control_resources,
+        limits,
+    )?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
@@ -552,6 +586,7 @@ pub(crate) fn prepare_runtime(
     Ok(PreparedRuntime {
         sources: prepared.sources,
         strips,
+        effects,
         plan: prepared.plan,
         resources: PlanResourceReport {
             struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
@@ -638,6 +673,7 @@ pub(crate) fn compile_children(
     let PreparedRuntime {
         sources,
         strips,
+        effects,
         plan,
         resources,
         control_catalog,
@@ -705,7 +741,7 @@ pub(crate) fn compile_children(
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources, strips, capi),
+            providers: ProviderEpoch::current(sources, strips, effects, capi),
             pending_providers,
             retired_providers,
             publisher,

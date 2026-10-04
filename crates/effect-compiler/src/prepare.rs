@@ -630,8 +630,9 @@ fn prepare_with_console_eligibility(
 /// One prepared live-control channel for one effect instance (issue #140 A).
 ///
 /// The producer half stays on the control plane; the consumer half rode into the plan inside the
-/// entry. A producer must be dropped before the plan that owns its consumer, which is why
-/// `PreparedHost`'s field order puts the plan first.
+/// entry. The ring is an `Arc` the two halves share, so either may drop first and the last owner
+/// frees it: `PreparedHost` drops its plan first, and capi drops a reclaimed plan before the
+/// provider epoch that keeps its producers (#1263 D5), both on the control thread.
 pub struct EffectControlProducer {
     /// Session-stable identity of the strip (a track or a submix) this channel addresses.
     pub track_id: Box<str>,

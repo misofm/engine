@@ -265,3 +265,39 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   current epoch in the session plus its two reserved epoch slots. On the nine-track EQ reference
   session the row moves 258,135 -> 258,231 bytes. A caller whose `maximum_capi_retained_bytes` was
   exact must raise it.
+
+## Live effect lanes on every plan (#1263)
+
+Every C ABI plan, at compile and at every structural replacement, also carries one live control
+lane per prepared effect instance, console slots and inserts alike, on tracks and submixes. Each
+lane's ring holds `min(16, the effect's automation capacity)` records, and a parametric EQ's lane
+also carries its prepared-target staging. capi keeps the producers with the plan's provider epoch;
+each EQ's producer owns its prepared-target owner. Nothing pushes to them yet: effect edits still
+rebuild the plan until #1264. No input or route lane is attached.
+
+- **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
+  the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
+  `tail_samples` equal those of the same plan without effect lanes. Both are checked on the
+  nine-track EQ reference session and on the one- and ten-track parity sessions (the ten-track
+  one has a bypassed limiter insert) at the four launch rates.
+- **Charges.** The rings, the target staging and the banked live-control owner the lanes make the
+  plan build are graph rows, charged in `graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes`
+  and `graph_metadata_bytes`. The producer table, its strip and effect IDs and the EQ owners are
+  charged once, in `capi_retained_bytes`. Both enter the replacement and live admissions through
+  those rows.
+- **Resource movement on the nine-track EQ reference session** (x86-64, eight lanes):
+
+  | row | before | after |
+  |---|---|---|
+  | `graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes` | 253,934 | 382,918 |
+  | `graph_metadata_bytes` | 56,137 | 185,121 |
+  | `capi_retained_bytes` | 258,231 | 273,640 |
+  | `largest_named_allocation_bytes` | 90,720 | 90,720 |
+
+  The graph rows grow by 2,104 bytes per effect instance plus 55,024 per eight-lane effect bank
+  (+128,984 here); `capi_retained_bytes` grows by the producer table and its payload (15,361
+  bytes: nine 104-byte producers, their IDs and the nine EQ owners) and 16 bytes in each of the
+  three provider-epoch slots. Every other row is unchanged. A session without effects moves only
+  `capi_retained_bytes`, by 48 bytes. A caller whose `maximum_graph_session_plus_plan_bytes` or
+  `maximum_capi_retained_bytes` was exact before this change must raise it; a structural
+  replacement charges both plans' graph rows, so its peak grows by twice the graph move.

@@ -16,7 +16,8 @@ pub(crate) struct StripLanes {
     pub(crate) track_count: usize,
 }
 
-/// One epoch's worth of host-owned source producers and strip live-control producers.
+/// One epoch's worth of host-owned source producers, strip live-control producers and effect
+/// live-control producers.
 ///
 /// The tables themselves live in `host-core`; this wrapper adds the epoch tag, the epoch's own
 /// capi resource rows (`capi`, which the live admission reads, #1257 D4) and the lifecycle
@@ -26,6 +27,15 @@ pub(crate) struct ProviderEpoch {
     pub(crate) sources: SourceControlSet,
     /// The live fader and matrix producers of this epoch's plan (#1256 D2).
     pub(crate) strips: StripLanes,
+    /// One live-control producer per prepared effect instance of this epoch's plan, console slots
+    /// and inserts alike, in `HostLiveControlHandles::effect_controls` order (#1263 D2). A
+    /// parametric EQ's producer also owns its prepared-target owner. Nothing pushes to them yet
+    /// (#1264). As for the strip producers, the rings are `Arc`s shared with the plan's lanes, so
+    /// the epoch may drop after its plan, and does: `synchronize_plan_epochs` drops a reclaimed
+    /// plan before its provider.
+    // Kept alive only until #1264 pushes through them; the tests read them.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     /// The capi resources this epoch's plan was prepared with (#1257 D4).
     pub(crate) capi: CapiResources,
 }
@@ -34,12 +44,14 @@ impl ProviderEpoch {
     pub(crate) fn current(
         sources: SourceControlSet,
         strips: StripLanes,
+        effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
     ) -> Self {
         let owner = Self {
             epoch: 0,
             sources,
             strips,
+            effects,
             capi,
         };
         #[cfg(test)]
@@ -50,12 +62,14 @@ impl ProviderEpoch {
     pub(crate) fn candidate(
         sources: SourceControlSet,
         strips: StripLanes,
+        effects: Box<[host_core::EffectControlProducer]>,
         capi: CapiResources,
     ) -> Self {
         let owner = Self {
             epoch: u64::MAX,
             sources,
             strips,
+            effects,
             capi,
         };
         #[cfg(test)]
@@ -827,13 +841,14 @@ impl SessionState {
                 let PreparedRuntime {
                     sources,
                     strips,
+                    effects,
                     plan: candidate_plan,
                     resources,
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                 } = prepared_runtime;
                 let mut candidate_provider =
-                    ProviderEpoch::candidate(sources, strips, prospective_capi);
+                    ProviderEpoch::candidate(sources, strips, effects, prospective_capi);
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]
                 {

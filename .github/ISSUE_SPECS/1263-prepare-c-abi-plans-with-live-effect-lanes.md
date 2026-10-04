@@ -119,3 +119,107 @@ Run every command from the repository root.
 - "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `31b53b62c`)
+
+**Changes.**
+- D1: `compile.rs` adds `C_ABI_LIVE_LANES` (`effects: true` over `FADER_AND_MATRIX`; input and route
+  lanes stay off) and `prepare_runtime` prepares with it.
+- D2: `ProviderEpoch` gains `effects: Box<[host_core::EffectControlProducer]>`, in
+  `HostLiveControlHandles::effect_controls` order, built from the host-core vector at its exact
+  capacity, at compile and at every structural replacement. It is dropped with the epoch, after its
+  plan. Nothing reads it outside tests until #1264, so it carries
+  `#[cfg_attr(not(test), allow(dead_code))]`. No `host-core/src/lib.rs` change was needed: it
+  already re-exports `EffectControlProducer` and `EffectControlResources`.
+- D3: `capi_resources` takes `HostPrepareReport::effect_control_resources` and adds its
+  `total_bytes()` as an epoch row, so it is in `epoch_retained`, `active_retained`
+  (`capi_retained_bytes`), `validate_replacement_peak` and `validate_live_peak`. Its
+  `largest_allocation_bytes()` (not the row sum) feeds `largest`. The rings and target staging are
+  not charged again. To stay within clippy's argument limit, `capi_resources` now takes the strip
+  table's bytes precomputed instead of the strip count and ID bytes.
+- D4: `resource_lifecycle.rs`'s host half spells the selection independently
+  (`HostLiveLanes { strip_input: false, effects: true, routes: false }`), keeps the effect
+  producers as a boxed slice, and `HostOwners` gains `effects`, dropped first. The exact
+  `capi_retained_bytes` equation adds `owners.effects`, `assert_host_owners_are_charged` checks
+  `owners.effects == effect_control_resources.total_bytes()`, and `capi_epoch_terms` adds the
+  effect charge.
+- D5: the `EffectControlProducer` comment now says the ring is a shared `Arc` and either half may
+  drop first.
+- D6: `docs/C_ABI_V1_QUALIFICATION.md` gains a "Live effect lanes on every plan (#1263)" section.
+
+**Tail and latency.** Attaching the effect lanes moves neither, on any gate-1 session: the nine-track
+EQ fixture, the one- and ten-track parity sessions (the latter with the bypassed limiter insert)
+and the bare sessions, at the four launch rates.
+
+**Resource rows, nine-track EQ fixture, x86-64 eight lanes, `limits()`** (before is `31b53b62c`):
+
+| row | before | after |
+|---|---|---|
+| `graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes` | 253,934 | 382,918 |
+| `graph_metadata_bytes` | 56,137 | 185,121 |
+| `capi_retained_bytes` | 258,231 | 273,640 |
+| `largest_named_allocation_bytes` | 90,720 | 90,720 |
+| every other row | unchanged | unchanged |
+
+The capi move is +15,409 = the effect producer table (9 x 104 = 936) + owned payload (14,425: the
+IDs and the nine EQ owners) + 16 bytes in each of the three provider-epoch slots. The effect-control
+total, 15,361, matches the 2026-09-28 prototype exactly. The graph rows were not anticipated by this
+spec: they move +128,984 because the lanes make bind build the live-control owner (the banked
+`LiveControlEffectBankStage` with its packed span window and shunt) as well as the rings and the
+EQ target staging, all already charged by `effect_control_resource`. A scratch measurement by track
+count (not committed) gives 2,104 bytes per member and 55,024 per eight-lane bank. The prepared
+plan's observed bytes move by exactly +128,984 (152,857 -> 281,841), so the oracle's slack is
+unchanged. `REFERENCE_BUDGETS` raises the three graph ceilings with that reason: eight lanes
+measured + 10 %; four lanes derived as an upper bound (the four-lane baseline plus the eight-lane
+move, plus 10 %), because AArch64 runs only in CI. The other oracle sessions: soft-clip nine-track
+capi 143,931 -> 145,023; browser identity (no effect) 132,021 -> 132,069 (+48, the epoch slots
+only); routed submix 149,142 -> 151,020.
+
+**Tests and their value.**
+- `c_abi_plans_with_live_lanes_render_like_lanes_free_plans` (extended): it now also runs the
+  nine-track EQ fixture at the four rates, compares latency and tail with the C ABI selection
+  less its effect lanes, and checks one producer per effect instance (strip ID, effect ID) with
+  an owner exactly on the parametric EQs. It turns red if attaching the effect lanes changes a
+  rendered bit or the tail, or if capi drops or loses producers.
+- `capi_retained_bytes_charge_every_byte_the_compile_retains` (updated oracle): it turns red if an
+  effect producer or owner is retained but not charged, or charged twice.
+
+**Mutation runs** (each introduced, run, reverted):
+- M1, `C_ABI_LIVE_LANES` with `effects: false`: the render test is red (producer list) and the
+  oracle is red (the host half selects effects independently).
+- M2, the effect row charged as 0: the oracle is red (`capi_retained_bytes` equation).
+- M3, the effect row charged twice: the oracle is red.
+- M4, capi drops the producers and keeps an empty slice: the render test is red (producer list) and
+  the oracle is red.
+- M5, `attach_effect_live_controls` seeds a non-target lane with `false` instead of the session
+  bypass (`effect-compiler`, temporary): the render test is red at the bit comparison (the
+  ten-track session's bypassed limiter).
+
+**Gates** (from the working tree that is committed; logs in `/tmp/claude-1002/w1263-a1/`):
+- `cargo fmt --all -- --check`: pass.
+- `cargo test --locked -p capi`: pass (50 lib, 13 `resource_lifecycle`, doc).
+- `cargo test --locked -p effect-compiler`: pass.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
+  `./target/release/audit capi`: allocations 0, deallocations 0, locks 0, syscalls 0,
+  total_violations 0.
+- `bash scripts/check-capi-abi.sh && bash scripts/check-capi-abi.sh --self-test`: pass.
+- `for x in host-core realtime workspace protocol-control; do bash scripts/check-$x-policy.sh &&
+  bash scripts/test-$x-policy.sh || exit 1; done`: pass.
+- `bash scripts/check-cross-targets.sh`: PASS; the iOS `memset_pattern16` ceilings did not move.
+- 4-lane (NEON), `bash scripts/run-aarch64-tests.sh debug`: not run locally (CI-only). The derived
+  four-lane graph ceilings are first measured there.
+- The worklet chain: not run. No line compiled into the browser module changed; the only
+  non-capi edit is a doc comment in `effect-compiler`.
+
+**Open items for review.**
+- `host-core/src/prepare.rs` docs still say the C ABI prepares with `FADER_AND_MATRIX`
+  (`HostLiveLanes::FADER_AND_MATRIX`, `HostLiveControlHandles::route_controls`). That file is
+  outside this slice's authorized paths, so they are unchanged.
+- The graph-row move (+128,984 on the reference session; about 2.1 KB per effect plus 55 KB per
+  eight-lane bank) is a real memory cost on mobile that the spec did not foresee. It is charged
+  and documented; whether to defer building the banked live-control owner until a push needs it
+  is an owner question, not this slice's.

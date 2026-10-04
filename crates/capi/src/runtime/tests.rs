@@ -2017,7 +2017,8 @@ fn bare_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     session::canonical_session_json(&model).expect("canonical bare session")
 }
 
-/// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session.
+/// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session
+/// (#1256 gate 1), and against the C ABI's lane selection without its effect lanes (#1263 gate 1).
 fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
     let mut c = compile_children(document, limits()).unwrap_or_else(|failure| {
         panic!(
@@ -2053,6 +2054,81 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     assert_eq!(
         resources.tail_samples, tail_samples,
         "{label}: tail samples"
+    );
+
+    // #1263 gate 1: attaching the effect lanes moves neither latency nor tail. The reference is
+    // the C ABI's selection less its effect lanes, prepared at the same depth.
+    let (without_effects, _) = host_core::prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps,
+        &HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..HostLiveControlRequest::default()
+        },
+        HostLiveLanes {
+            effects: false,
+            ..C_ABI_LIVE_LANES
+        },
+    )
+    .unwrap_or_else(|_| panic!("{label}: host prepare without effect lanes"));
+    let without_effects = without_effects.report;
+    assert_eq!(
+        resources.latency_samples, without_effects.latency_samples,
+        "{label}: latency without effect lanes"
+    );
+    assert_eq!(
+        (resources.tail_kind, resources.tail_samples),
+        match without_effects.output_tail {
+            TailSamples::Finite(samples) => (TAIL_FINITE, samples),
+            TailSamples::Infinite => (TAIL_INFINITE, 0),
+        },
+        "{label}: tail without effect lanes"
+    );
+
+    // #1263 gate 1: one effect producer per prepared effect instance -- every strip's console
+    // slots and inserts -- and an owner exactly on the parametric EQs.
+    let normalized = compiled.normalized_model();
+    let mut expected = normalized
+        .strips()
+        .flat_map(|strip| {
+            let racks = normalized.lower_strip(&strip);
+            let id = strip.id.as_str().to_owned();
+            racks
+                .in_chain_order()
+                .into_iter()
+                .flatten()
+                .map(|effect| {
+                    let native = match &effect.identity {
+                        session::EffectIdentity::Native { effect_id } => effect_id.as_str(),
+                        _ => panic!("{label}: a native effect"),
+                    };
+                    (
+                        id.clone(),
+                        effect.id.as_str().to_owned(),
+                        native == "miso.parametric-eq",
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut kept = c
+        .session
+        .providers
+        .effects
+        .iter()
+        .map(|producer| {
+            (
+                producer.track_id.to_string(),
+                producer.effect_id.to_string(),
+                producer.has_owner(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    kept.sort();
+    assert_eq!(
+        kept, expected,
+        "{label}: one producer per effect instance, owners on the EQs"
     );
 
     // One producer per strip, in canonical strip order, with no input lane.
@@ -2149,6 +2225,15 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
 #[test]
 fn c_abi_plans_with_live_lanes_render_like_lanes_free_plans() {
     for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        // #1263 gate 1: the nine-track EQ fixture itself, at the helper's 192-frame source.
+        let mut nine = parse_session_json(SESSION).expect("accepted nine-track fixture");
+        nine.sample_rate_hz = sample_rate_hz;
+        nine.sources[0].frames = 192;
+        assert_live_lanes_render_like_lanes_free(
+            &session::canonical_session_json(&nine).expect("canonical nine-track session"),
+            &format!("nine-track EQ fixture at {sample_rate_hz} Hz"),
+            false,
+        );
         for track_count in [1, 10] {
             assert_live_lanes_render_like_lanes_free(
                 &generated_parity_session(track_count, sample_rate_hz),
