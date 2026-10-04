@@ -260,8 +260,12 @@ revert):
 - MINOR 1: `hosts/host-web/src/lib.rs` adds `engine.inventory_retained_bytes` to the bridge's
   `ready_metadata`, so `bridge_retained_bytes`, and through it `exact_retained_bytes` and the boot
   budget, charge the inventory `PreparedHost` keeps; the `exact_retained_bytes` rustdoc names it.
-  No new test: no host-web test measures live heap against the exact sum (capi's allocator oracle
-  covers the row's value). The browser module's bytes change (see #1269 "Phase 1 status").
+  The two exact bridge-row tests in `hosts/host-web/src/tests.rs`
+  (`decoded_command_resource_is_exact_for_live_control_modes_without_effects_or_meters` and
+  `effect_control_browser_table_and_payload_reach_exact_budget_gate`) now add the inventory's
+  walked `PlanStateInventory::retained_bytes()` to their expected bridge metadata and retained
+  sums. With the charge removed again from `ready_metadata`, both are red (97 and 99 bytes
+  short); restored: green. The browser module's bytes change (see #1269 "Phase 1 status").
 - MINOR 2: `the_carry_program_is_charged_to_the_graph_cap` (the successor's smallest admitting
   graph cap equals a fresh plan's plus `carry_program_retained_bytes`). V1 (program bytes left
   out of the admission sum): red.
