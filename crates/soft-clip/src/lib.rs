@@ -249,12 +249,16 @@ fn converted_domain(index: usize) -> Option<(f32, f32)> {
     }
 }
 
-/// `true` if a converted value is finite, not `-0.0`, not subnormal, and inside its range.
+/// `true` if a converted value is finite, not `-0.0`, and inside its range.
+///
+/// A subnormal is accepted wherever the range holds one: only the mix's `[0, 1]` does (the two
+/// gains' converted ranges start at `-24 dB`, a normal gain), and a subnormal mix is a legal value
+/// the effect holds and renders with, so its own snapshot must restore it (#1071).
 ///
 /// This is control-plane validation of a restored or prepared coefficient, not a render-path
 /// check: the render path has none (D7).
 fn converted_value_valid(index: usize, value: f32) -> bool {
-    if is_negative_zero(value) || !value.is_finite() || value.is_subnormal() {
+    if is_negative_zero(value) || !value.is_finite() {
         return false;
     }
     converted_domain(index).is_some_and(|(low, high)| value >= low && value <= high)
@@ -630,10 +634,21 @@ struct LaneRestore {
 
 /// Validates the 104 payload words of layout 1.
 ///
-/// Ramp currents and targets must be inside the *converted* domain (a linear gain, not decibels),
-/// must not be `-0.0` and must not be subnormal; `step` must be finite and normal-or-zero;
-/// `remaining` must not exceed the smoothing window; every history word must be finite and either
-/// zero or normal. The cursor belongs to the bank and is not carried in the payload.
+/// The rule is "accept every word the effect itself can hold, refuse the rest" (#1071), so a
+/// snapshot always survives its own restore and a restored lane continues bit for bit:
+///
+/// * ramp currents and targets must be inside the *converted* domain (a linear gain, not
+///   decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;
+/// * `step` must be finite: a ramp toward or from a subnormal mix divides a subnormal difference;
+/// * `remaining` must not exceed the smoothing window;
+/// * the interpolation and decimation histories (`X`, `e`) must be finite and zero or normal,
+///   because the kernel flushes both before they enter a history (D7);
+/// * the dry history must be finite: it holds the input unflushed by design, so the identity
+///   path can reproduce any input sample, subnormals included.
+///
+/// Flushing on snapshot instead would change rendered bits (a subnormal dry sample is the output
+/// at `mix == 0`) and break the exact continuation the plan-swap carry relies on (#1278 D2a).
+/// The cursor belongs to the bank and is not carried in the payload.
 fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
     let mut ramps = [LinearRamp::fixed(0.0); PARAMETER_COUNT];
@@ -645,7 +660,7 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         let remaining = words[base + 3];
         if !converted_value_valid(parameter, current)
             || !converted_value_valid(parameter, target)
-            || !normal_or_zero(step)
+            || !step.is_finite()
             || remaining > RAMP_SAMPLES
         {
             return Err(StatePayloadError {
@@ -665,14 +680,14 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         e: [0.0; E_HISTORY_AGES],
         dry: [0.0; DRY_HISTORY_AGES],
     };
-    for (slot, offset) in [
-        (&mut restore.x[..], X_HISTORY_WORD),
-        (&mut restore.e[..], E_HISTORY_WORD),
-        (&mut restore.dry[..], DRY_HISTORY_WORD),
+    for (slot, offset, flushed) in [
+        (&mut restore.x[..], X_HISTORY_WORD, true),
+        (&mut restore.e[..], E_HISTORY_WORD, true),
+        (&mut restore.dry[..], DRY_HISTORY_WORD, false),
     ] {
         for (age, value) in slot.iter_mut().enumerate() {
             let word = f32::from_bits(words[offset + age]);
-            if !normal_or_zero(word) {
+            if !word.is_finite() || (flushed && !normal_or_zero(word)) {
                 return Err(StatePayloadError {
                     code: STATE_HISTORY_CODE,
                 });

@@ -82,6 +82,73 @@ fn a_snapshot_restores_into_a_fresh_instance_and_continues_bit_for_bit() {
     );
 }
 
+/// #1071: every word the effect itself can hold restores, subnormals included, and the restored
+/// instance continues bit for bit. A subnormal mix is inside its `[0, 1]` domain, a ramp between
+/// two subnormal mixes steps by a subnormal, and the dry history holds the input unflushed.
+#[test]
+fn a_snapshot_holding_subnormal_words_restores_and_continues_bit_for_bit() {
+    const MIX_CURRENT: usize = 8;
+    const MIX_STEP: usize = 10;
+    const NEWEST_DRY: usize = 73;
+    let tiny = |ulps: u32| f32::from_bits(ulps);
+    let values = values_from([(6.0, -6.0), (0.0, 3.0), (tiny(200), tiny(7))]);
+    let mut source = prepare(&values);
+    let input = |index: usize, lane: usize| {
+        if index.is_multiple_of(3) {
+            tiny(5 + index as u32 + lane as u32)
+        } else {
+            signal(index, lane)
+        }
+    };
+    // 16 frames in, the last of them subnormal, with the left mix ramping toward zero.
+    let mut left: Vec<f32> = (0..16).map(|index| input(index, 0)).collect();
+    let mut right: Vec<f32> = (0..16).map(|index| input(index, 1)).collect();
+    let spans = [support::point(2, ParameterChannel::Left, 0.0, 0)];
+    process(source.as_mut(), &mut left, &mut right, 0, &spans);
+    let payload = support::snapshot(source.as_ref());
+    for (section, name) in [(&payload.1, "left"), (&payload.2, "right")] {
+        assert!(
+            support::word_f32(section, MIX_CURRENT).is_subnormal(),
+            "{name} mix current"
+        );
+        assert!(
+            support::word_f32(section, NEWEST_DRY).is_subnormal(),
+            "{name} newest dry"
+        );
+    }
+    assert!(
+        support::word_f32(&payload.1, MIX_STEP).is_subnormal(),
+        "left mix step"
+    );
+
+    let mut destination = prepare(&values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]));
+    destination
+        .restore_state_payload(1, as_input(&payload))
+        .expect("the effect's own snapshot restores");
+    assert_eq!(support::snapshot(destination.as_ref()), payload);
+
+    let mut expected_left: Vec<f32> = (0..128).map(|index| input(index + 16, 0)).collect();
+    let mut expected_right: Vec<f32> = (0..128).map(|index| input(index + 16, 1)).collect();
+    let mut actual_left = expected_left.clone();
+    let mut actual_right = expected_right.clone();
+    process(
+        source.as_mut(),
+        &mut expected_left,
+        &mut expected_right,
+        16,
+        &[],
+    );
+    process(
+        destination.as_mut(),
+        &mut actual_left,
+        &mut actual_right,
+        16,
+        &[],
+    );
+    assert_eq!(bits(&actual_left), bits(&expected_left));
+    assert_eq!(bits(&actual_right), bits(&expected_right));
+}
+
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
 #[test]
 fn a_bank_track_restore_is_position_independent_and_lane_local() {
@@ -235,6 +302,11 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     // A NaN history word, and a subnormal one.
     bad(12, f32::NAN.to_bits(), "effect.state.history");
     bad(43, 1, "effect.state.history");
+    // #1071 accepts only the subnormals the effect can hold: never in the flushed `X` history,
+    // never as a gain (the gains' converted range starts at -24 dB).
+    bad(12, 1, "effect.state.history");
+    bad(0, 1, "effect.state.parameter");
+    bad(73, f32::NAN.to_bits(), "effect.state.history");
     bad(103, f32::INFINITY.to_bits(), "effect.state.history");
 
     // A rejected restore leaves the effect untouched.

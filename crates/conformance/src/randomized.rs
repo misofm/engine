@@ -78,15 +78,6 @@ pub enum Known {
     ///
     /// Owned by #1070.
     BindDeclinesBeforeValidating,
-    /// The effect holds subnormal words it was legally given -- a subnormal parameter value
-    /// inside the declared domain, a subnormal input sample in its history -- and its own restore
-    /// then refuses the snapshot that carries them, so a snapshot does not survive its own
-    /// restore. Narrowing: a refused own snapshot is accepted only with `effect.state.parameter`
-    /// or `effect.state.history`, and so long as the scalar instance and every bank lane refuse it
-    /// alike.
-    ///
-    /// Owned by #1071.
-    SubnormalStateRefusedOnRestore,
     /// A lane's rendered bits depend on where its in-flight ramps are cut: by another lane's
     /// retarget in the same bank (so the bank is not its scalar instances), and by a block
     /// boundary (so the render is not partition-invariant, master plan P1). Narrowing: a scenario
@@ -400,13 +391,10 @@ fn run_scalar(
                 };
                 for effect in [&mut *oracle, &mut *twin] {
                     if let Err(error) = effect.restore_state_payload(version, input()) {
-                        assert!(
-                            spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
-                                && SUBNORMAL_REFUSAL_CODES.contains(&error.code),
+                        panic!(
                             "{context}: lane {lane}'s own snapshot refused ({})",
                             error.code
                         );
-                        continue;
                     }
                     assert!(
                         same_payload(&snapshot_scalar(effect.as_ref(), sizes), &payload),
@@ -1509,9 +1497,6 @@ fn compare_state(
     }
 }
 
-/// The refusals #1071 forgives: a restore that wants a word zero or normal and finds it subnormal.
-const SUBNORMAL_REFUSAL_CODES: [&str; 2] = ["effect.state.parameter", "effect.state.history"];
-
 /// Edge words for a payload rewrite at any block: both zeros, subnormals, the smallest normal,
 /// `+-1`, and small counts. Every one is a finite `f32`.
 const PAYLOAD_WORDS: [u32; 13] = [
@@ -1648,10 +1633,7 @@ fn restore(
         Ok(()) => coverage.restores += 1,
         Err(_) => coverage.refused_restores += 1,
     }
-    // #1071's allowance: only its own two refusal codes, the words the restore wants zero or normal.
-    let tolerated = spec.known.contains(&Known::SubnormalStateRefusedOnRestore)
-        && scalar.is_err_and(|code| SUBNORMAL_REFUSAL_CODES.contains(&code));
-    if !rewritten && (scalar.is_ok() || (source == lane && !tolerated)) {
+    if !rewritten && (scalar.is_ok() || source == lane) {
         // An untouched snapshot restores and writes itself back word for word, from the scalar
         // instance and from the bank lane. The lane's own always restores; another lane's may be
         // refused where a payload is bound to its lane's configuration (the EQ's is).
