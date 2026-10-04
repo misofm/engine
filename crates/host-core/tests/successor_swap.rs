@@ -185,8 +185,9 @@ fn added_muted_track_keeps_playing(backend: Backend) {
         fresh.source_overhead_bytes
     );
     assert_eq!(
-        report.carry_program_retained_bytes, 8,
-        "one (u32, u32) move"
+        report.carry_program_retained_bytes,
+        8 + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+        "one (u32, u32) source move and the two unchanged input sections (#1276)"
     );
 
     // The oracle can fail: today's fresh rebuild leaves the swap block silent.
@@ -276,7 +277,11 @@ fn a_changed_source_gets_its_own_ring() {
             .expect("successor");
         let fresh = b.prepare(backend).report;
         assert_eq!(prepared.report.carried_source_total_bytes, 0);
-        assert_eq!(prepared.report.carry_program_retained_bytes, 0);
+        assert_eq!(
+            prepared.report.carry_program_retained_bytes,
+            2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+            "no source move; only the two unchanged input sections (#1276)"
+        );
         assert_eq!(
             prepared.report.source_total_bytes, fresh.source_total_bytes,
             "{backend:?}: the successor allocates and charges a new ring"
@@ -705,4 +710,813 @@ fn seek_at_refuses_an_unaligned_anchor() {
     sources
         .seek_at(SOURCE.as_bytes(), 2, 0, QUANTUM as u64)
         .expect("aligned anchor");
+}
+
+// Issue #1276 (slice 7 of #1269): a strip input section the transaction left unchanged -- owner
+// key `(strip ID, PostInputBuiltins)` -- keeps its exact state through the swap: the filter
+// integrators, the coefficients in use and any coefficient ramp, and the trim and polarity ramp.
+// Lanes are ordered by strip ID, so the added muted track, which sorts first, moves every kept
+// lane: a copy keyed by lane or index lands on the wrong strip.
+
+/// The nine-track fixture with both console sections and every insert rack empty, every track's
+/// high-pass and low-pass enabled at its own cutoffs and a nonzero trim. `mono` maps both channels
+/// of every track to the source's left channel and makes every per-channel value equal, so the
+/// banks collapse; otherwise the cutoffs and trims differ per channel and track `eq3`'s right
+/// channel is polarity-inverted.
+fn filtered_session(mono: bool) -> SessionModel {
+    let mut model = parse_session_json(FIXTURE).expect("fixture parses");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        track.console.clear();
+        track.inserts.effects.clear();
+        if mono {
+            track.right_source_channel = track.left_source_channel;
+        }
+        let step = index as f32;
+        for (channel, builtins) in [&mut track.builtins.left, &mut track.builtins.right]
+            .into_iter()
+            .enumerate()
+        {
+            let side = if mono { 0.0 } else { channel as f32 };
+            builtins.hpf_hz = 30.0 + 11.0 * step + 7.0 * side;
+            builtins.lpf_hz = 9_000.0 - 450.0 * step - 600.0 * side;
+            builtins.trim_db = -2.25 + 0.5 * step + 0.125 * side;
+            builtins.polarity_invert = !mono && index == 3 && channel == 1;
+        }
+    }
+    model
+}
+
+/// `model` plus [`MUTED_TRACK`], a muted copy of `eq0` that sorts first.
+fn with_muted_track(mut model: SessionModel) -> SessionModel {
+    add_track(&mut model, "eq0", MUTED_TRACK, SOURCE, true);
+    model
+}
+
+/// Gate 1 of #1276, at one width.
+fn filtered_strips_keep_their_state(backend: Backend) {
+    let a = Session::compile(filtered_session(false));
+    let b = Session::compile(with_muted_track(filtered_session(false)));
+    assert_eq!(
+        b.compiled.normalized_model().tracks[0].id.as_str(),
+        MUTED_TRACK
+    );
+    let feed = Feed::new(SOURCE, 3);
+    let reference = reference_run(&b, &[&feed], backend);
+    let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+    assert_eq!(
+        (run.blocks[SWAP_BLOCK].swap, run.blocks[SWAP_BLOCK].carry),
+        (SwapOutcome::Applied, CarryOutcome::Carried),
+        "{backend:?}: the swap block"
+    );
+    assert_eq!(
+        first_difference(&run.blocks, &reference),
+        None,
+        "{backend:?}: every block equals the post-edit session rendered from frame 0"
+    );
+    assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
+    // Nine input sections recorded, and all nine carry: one source move and nine lane moves.
+    assert_eq!(a.prepare(backend).inventory.input_section_count(), 9);
+    assert_eq!(
+        run.successor.carry_program_retained_bytes,
+        8 + 9 * core::mem::size_of::<graph::GraphLaneMove>() as u64
+    );
+}
+
+/// Gate 1 at eight lanes: banks of eight and one become eight and two, so every kept lane moves
+/// and two cross into the next bank. Red if a filter restarts at rest, or a lane is imported at
+/// its old lane index instead of its strip's new one.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn filtered_strips_keep_their_state_across_a_swap_at_eight_lanes() {
+    filtered_strips_keep_their_state(Backend::Simd8);
+}
+
+/// Gate 1 at four lanes: banks of four, four and one become four, four and two.
+#[test]
+fn filtered_strips_keep_their_state_across_a_swap_at_four_lanes() {
+    filtered_strips_keep_their_state(Backend::Simd4);
+}
+
+/// A live input record pushed into a run's queue for `strip` before block `block` renders.
+struct LiveWrite {
+    block: usize,
+    strip: &'static str,
+    record: builtins_compiler::TrackInputRecord,
+}
+
+/// One plan prepared with a live-control queue on every strip, and its handles.
+struct LivePlan {
+    prepared: host_core::PreparedHost,
+    handles: host_core::HostLiveControlHandles,
+}
+
+impl LivePlan {
+    fn request() -> host_core::HostLiveControlRequest {
+        host_core::HostLiveControlRequest {
+            control_queue_depth: Some(core::num::NonZeroUsize::new(8).expect("depth")),
+            ..host_core::HostLiveControlRequest::default()
+        }
+    }
+
+    fn fresh(session: &Session, backend: Backend) -> Self {
+        let (prepared, handles) = host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &session.compiled,
+            &caps(),
+            &Self::request(),
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"));
+        Self { prepared, handles }
+    }
+
+    fn successor(
+        session: &Session,
+        predecessor: &host_core::PlanStateInventory,
+        committed: &SessionModel,
+        backend: Backend,
+    ) -> Self {
+        let (prepared, handles) =
+            host_core::test_only_prepare_host_runtime_with_live_controls_successor_on(
+                &session.compiled,
+                &caps(),
+                &Self::request(),
+                host_core::SuccessorBase {
+                    inventory: predecessor,
+                    committed,
+                },
+                backend,
+            )
+            .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+        Self { prepared, handles }
+    }
+
+    fn push(&mut self, write: &LiveWrite) {
+        let index = self
+            .handles
+            .strips
+            .iter()
+            .position(|strip| &**strip == write.strip)
+            .expect("strip");
+        self.handles.strip_controls[index]
+            .input
+            .try_push(write.record)
+            .unwrap_or_else(|_| panic!("queue room"));
+    }
+
+    fn submit(&mut self, feed: &Feed, quantum: usize, block: usize) {
+        let range = block * quantum..(block + 1) * quantum;
+        self.prepared
+            .sources
+            .submit(
+                SOURCE.as_bytes(),
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: range.start as u64,
+                    sample_rate_hz: 48_000,
+                    planes: &[&feed.planes[0][range.clone()], &feed.planes[1][range]],
+                    frames: quantum as u32,
+                    end_of_region: false,
+                },
+            )
+            .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
+    }
+
+    fn render(&mut self, quantum: usize) -> Vec<u32> {
+        let mut output = vec![f32::NAN; quantum * 2];
+        self.render_into(&mut output, quantum);
+        output.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// Render one block into `output`, which holds `quantum * 2` samples. Allocation-free.
+    fn render_into(&mut self, output: &mut [f32], quantum: usize) {
+        let sample = self.prepared.plan.next_absolute_sample();
+        self.prepared
+            .plan
+            .render_contiguous(
+                engine::realtime::RenderIo {
+                    output: engine::realtime::PlanarBufferMut::try_new(output, 2, quantum, quantum)
+                        .expect("output"),
+                },
+                sample,
+            )
+            .unwrap_or_else(|error| panic!("render: {error:?}"));
+    }
+}
+
+/// What a direct run (a synchronous host: the successor adopts its predecessor itself) hands back.
+struct DirectRun {
+    blocks: Vec<Vec<u32>>,
+    carry: CarryOutcome,
+    /// `(allocations, reallocations, deallocations)` and the render audit's `(allocations,
+    /// deallocations)` over the hand-over plus the successor's first block.
+    swap_allocator: ((u64, u64, u64), (u64, u64)),
+    /// `bank_collapse_counters()` of the predecessor at the swap and of the last plan at the end.
+    collapses: [[u64; 2]; 2],
+    /// `bank_collapse_transitions()` of the last plan at the end.
+    transitions: [u64; 3],
+}
+
+/// Render `a` for [`SWAP_BLOCK`] blocks of `quantum` frames, then -- when `b` is given -- prepare
+/// it as `a`'s successor from `committed`, hand over, and render to [`BLOCKS`]. `writes` go to
+/// whichever plan renders their block next, so a write for the swap block is pending in `a`'s
+/// queue at the hand-over. `successor_dual` forces the successor's mono collapse off.
+fn direct_run(
+    a: &Session,
+    b: Option<(&Session, &SessionModel)>,
+    feed: &Feed,
+    quantum: usize,
+    writes: &[LiveWrite],
+    backend: Backend,
+    successor_dual: bool,
+) -> DirectRun {
+    use bench_support::alloc as bench_alloc;
+    let mut plan = LivePlan::fresh(a, backend);
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    let mut carry = CarryOutcome::NotRequested;
+    let mut swap_allocator = ((0, 0, 0), (0, 0));
+    let mut collapses = [[0; 2]; 2];
+    plan.submit(feed, quantum, 0);
+    for block in 0..BLOCKS {
+        for write in writes.iter().filter(|write| write.block == block) {
+            plan.push(write);
+        }
+        let swap = block == SWAP_BLOCK && b.is_some();
+        if let (true, Some((session, committed))) = (swap, b) {
+            collapses[0] = plan.prepared.plan.bank_collapse_counters();
+            let mut successor =
+                LivePlan::successor(session, &plan.prepared.inventory, committed, backend);
+            successor
+                .prepared
+                .plan
+                .force_mono_collapse_off(successor_dual);
+            assert_eq!(
+                successor
+                    .prepared
+                    .sources
+                    .adopt_persisting(&mut plan.prepared.sources),
+                1
+            );
+            if block + 1 < BLOCKS {
+                successor.submit(feed, quantum, block + 1);
+            }
+            let mut output = vec![f32::NAN; quantum * 2];
+            engine::realtime::audit::reset();
+            let mark = bench_alloc::current_thread_counters();
+            carry = successor
+                .prepared
+                .plan
+                .adopt_predecessor_plan(&mut plan.prepared.plan);
+            successor.render_into(&mut output, quantum);
+            let delta = bench_alloc::current_thread_delta_since(mark);
+            let audit = engine::realtime::audit::snapshot();
+            swap_allocator = (
+                (delta.allocations, delta.reallocations, delta.deallocations),
+                (audit.allocations, audit.deallocations),
+            );
+            blocks.push(output.iter().map(|sample| sample.to_bits()).collect());
+            plan = successor;
+            continue;
+        }
+        if block + 1 < BLOCKS {
+            plan.submit(feed, quantum, block + 1);
+        }
+        blocks.push(plan.render(quantum));
+    }
+    collapses[1] = plan.prepared.plan.bank_collapse_counters();
+    DirectRun {
+        blocks,
+        carry,
+        swap_allocator,
+        collapses,
+        transitions: plan.prepared.plan.bank_collapse_transitions(),
+    }
+}
+
+/// [`filtered_session`] with every track at `quantum` frames.
+fn at_quantum(mut model: SessionModel, quantum: usize) -> SessionModel {
+    model.quantum_frames = quantum as u32;
+    model
+}
+
+/// The first block whose bits differ between two direct runs.
+fn first_direct_difference(left: &DirectRun, right: &DirectRun) -> Option<usize> {
+    left.blocks
+        .iter()
+        .zip(&right.blocks)
+        .position(|(left, right)| left != right)
+}
+
+/// Gate 2 of #1276, first case: a trim record admitted to A after block 5, committed in the model
+/// B is prepared from, is pending in A's queue at the swap. The carry drains it into the lane
+/// before copying, so B's first block starts the trim ramp exactly where A would have.
+fn a_pending_trim_record_survives_the_swap(backend: Backend) {
+    const NEW_TRIM_DB: f32 = 4.5;
+    let record = builtins_compiler::TrackInputRecord::TrimDb {
+        lanes: builtins::BuiltinLaneSelector::Both,
+        db: NEW_TRIM_DB,
+        smoothing_samples: 300,
+    };
+    let write = |block| LiveWrite {
+        block,
+        strip: "eq2",
+        record,
+    };
+    let a = Session::compile(filtered_session(false));
+    let mut committed = filtered_session(false);
+    let strip = committed
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq2")
+        .expect("eq2");
+    strip.builtins.left.trim_db = NEW_TRIM_DB;
+    strip.builtins.right.trim_db = NEW_TRIM_DB;
+    let b = Session::compile(with_muted_track(committed.clone()));
+    let reference_session = Session::compile(with_muted_track(filtered_session(false)));
+    let feed = Feed::new(SOURCE, 5);
+    let writes = [write(SWAP_BLOCK)];
+    let reference = direct_run(
+        &reference_session,
+        None,
+        &feed,
+        QUANTUM,
+        &writes,
+        backend,
+        false,
+    );
+    let run = direct_run(
+        &a,
+        Some((&b, &committed)),
+        &feed,
+        QUANTUM,
+        &writes,
+        backend,
+        false,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        first_direct_difference(&run, &reference),
+        None,
+        "{backend:?}: the record takes effect on the swap block's first sample"
+    );
+    // The record moved the output: without it the swap block differs.
+    let unwritten = direct_run(
+        &reference_session,
+        None,
+        &feed,
+        QUANTUM,
+        &[],
+        backend,
+        false,
+    );
+    assert_eq!(
+        first_direct_difference(&unwritten, &reference),
+        Some(SWAP_BLOCK)
+    );
+}
+
+/// Gate 2 at eight lanes. Red if the carry exports a lane before draining its queue: the record
+/// is lost with the retired plan.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_pending_trim_record_survives_the_swap_at_eight_lanes() {
+    a_pending_trim_record_survives_the_swap(Backend::Simd8);
+}
+
+/// Gate 2 at four lanes.
+#[test]
+fn a_pending_trim_record_survives_the_swap_at_four_lanes() {
+    a_pending_trim_record_survives_the_swap(Backend::Simd4);
+}
+
+/// Gate 2 of #1276, second case: at a 32-frame quantum, a high-pass target admitted before block
+/// 5 starts its 64-sample coefficient ramp in A's block 5, so the ramp is half done at the swap.
+/// B's first block must finish it from the carried coefficients, target, step and countdown.
+fn a_high_pass_ramp_in_flight_finishes_after_the_swap(backend: Backend) {
+    const QUANTUM_32: usize = 32;
+    const NEW_HPF_HZ: f32 = 210.0;
+    let base = at_quantum(filtered_session(false), QUANTUM_32);
+    let track = base
+        .tracks
+        .iter()
+        .find(|track| track.id.as_str() == "eq4")
+        .expect("eq4")
+        .clone();
+    let mut writes = Vec::new();
+    for (lanes, channel) in [
+        (builtins::BuiltinLaneSelector::Left, &track.builtins.left),
+        (builtins::BuiltinLaneSelector::Right, &track.builtins.right),
+    ] {
+        let mut target = builtins::prepare_input_filter_pair(48_000, NEW_HPF_HZ, channel.lpf_hz)
+            .expect("designed")
+            .targets[0];
+        target.lanes = lanes;
+        writes.push(LiveWrite {
+            block: SWAP_BLOCK - 1,
+            strip: "eq4",
+            record: builtins_compiler::TrackInputRecord::PreparedFilter { target },
+        });
+    }
+    let a = Session::compile(base.clone());
+    let mut committed = base.clone();
+    let strip = committed
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq4")
+        .expect("eq4");
+    strip.builtins.left.hpf_hz = NEW_HPF_HZ;
+    strip.builtins.right.hpf_hz = NEW_HPF_HZ;
+    let b = Session::compile(with_muted_track(committed.clone()));
+    let reference_session = Session::compile(with_muted_track(base));
+    let feed = Feed::new(SOURCE, 7);
+    let reference = direct_run(
+        &reference_session,
+        None,
+        &feed,
+        QUANTUM_32,
+        &writes,
+        backend,
+        false,
+    );
+    let run = direct_run(
+        &a,
+        Some((&b, &committed)),
+        &feed,
+        QUANTUM_32,
+        &writes,
+        backend,
+        false,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert_eq!(
+        first_direct_difference(&run, &reference),
+        None,
+        "{backend:?}: the ramp in flight finishes after the swap"
+    );
+}
+
+/// Gate 2, ramp case, at eight lanes. Red if the coefficient target, step or countdown is not
+/// carried: the successor's lane would jump to its prepared coefficients or freeze mid-ramp.
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_high_pass_ramp_in_flight_finishes_after_the_swap_at_eight_lanes() {
+    a_high_pass_ramp_in_flight_finishes_after_the_swap(Backend::Simd8);
+}
+
+/// Gate 2, ramp case, at four lanes.
+#[test]
+fn a_high_pass_ramp_in_flight_finishes_after_the_swap_at_four_lanes() {
+    a_high_pass_ramp_in_flight_finishes_after_the_swap(Backend::Simd4);
+}
+
+/// Gate 3 of #1276, at one width. Every track reads one source channel, so A's chains collapse,
+/// and B adds a muted mono track that sorts first. The successor's chains keep collapsing on
+/// every block after the swap, as the reference's do, and engage on the agreement they inherit
+/// rather than on a proof. With `successor_dual` the successor's collapse is forced off, so every
+/// carried lane's right channel is read from the swap block on: it must hold the state the
+/// collapsed predecessor never wrote there until the carry's disengage copy.
+fn collapsed_strips_keep_collapsing(backend: Backend, successor_dual: bool) {
+    let a = Session::compile(filtered_session(true));
+    let b = Session::compile(with_muted_track(filtered_session(true)));
+    let feed = Feed::new(SOURCE, 9);
+    let reference = direct_run(&b, None, &feed, QUANTUM, &[], backend, false);
+    let run = direct_run(
+        &a,
+        Some((&b, &a.model)),
+        &feed,
+        QUANTUM,
+        &[],
+        backend,
+        successor_dual,
+    );
+    assert_eq!(run.carry, CarryOutcome::Carried, "{backend:?}");
+    assert!(
+        run.collapses[0][0] > 0,
+        "{backend:?}: the predecessor rendered collapsed before the swap"
+    );
+    assert_eq!(
+        first_direct_difference(&run, &reference),
+        None,
+        "{backend:?}, successor dual {successor_dual}"
+    );
+    assert!(reference.collapses[1][0] > 0);
+    if successor_dual {
+        assert_eq!(run.collapses[1][0], 0, "{backend:?}: forced dual");
+    } else {
+        // Every chain that collapses in the reference collapses on every block after the swap,
+        // and none needed an agreement proof to engage.
+        assert_eq!(
+            run.collapses[1][0] * BLOCKS as u64,
+            reference.collapses[1][0] * (BLOCKS - SWAP_BLOCK) as u64,
+            "{backend:?}: successor collapsed blocks"
+        );
+        assert_eq!(run.transitions[2], 0, "{backend:?}: agreement proofs");
+    }
+}
+
+/// Gate 3 at eight lanes. Red if a successor chain that receives carried lanes clears its
+/// channel-agreement flag (it needs a proof to engage, and a chain with an effect in its prefix,
+/// which declines the proof, would never collapse again), or if the carry skips the disengage
+/// copy of a collapsed predecessor (the dual successor reads a stale right channel).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn collapsed_strips_keep_collapsing_across_a_swap_at_eight_lanes() {
+    collapsed_strips_keep_collapsing(Backend::Simd8, false);
+    collapsed_strips_keep_collapsing(Backend::Simd8, true);
+}
+
+/// Gate 3 at four lanes.
+#[test]
+fn collapsed_strips_keep_collapsing_across_a_swap_at_four_lanes() {
+    collapsed_strips_keep_collapsing(Backend::Simd4, false);
+    collapsed_strips_keep_collapsing(Backend::Simd4, true);
+}
+
+/// Gate 4 of #1276. B changes `eq0`'s high-pass cutoff in the same transaction that adds a muted
+/// track, so `eq0`'s input section does not carry (Q1's default): from the swap block on it renders
+/// exactly what a fresh plan of B renders from rest on the same PCM. Red if a section whose values
+/// changed is carried: the old filter keeps running.
+#[test]
+fn a_strip_whose_filter_changed_starts_at_rest() {
+    let one_track = |model: SessionModel| {
+        let mut model = model;
+        model.tracks.retain(|track| track.id.as_str() == "eq0");
+        model.routes.retain(|route| route.id.as_str() == "eq0-main");
+        model
+    };
+    let a = Session::compile(one_track(filtered_session(false)));
+    let mut b_model = one_track(filtered_session(false));
+    b_model.tracks[0].builtins.left.hpf_hz = 160.0;
+    b_model.tracks[0].builtins.right.hpf_hz = 170.0;
+    let b = Session::compile(with_muted_track(b_model));
+    let feed = Feed::new(SOURCE, 11);
+    for backend in backends() {
+        let before = reference_run(&a, &[&feed], backend);
+        let tail_feed = spliced(SOURCE, &feed, |block| {
+            (block + SWAP_BLOCK < BLOCKS).then_some(block + SWAP_BLOCK)
+        });
+        let at_rest = reference_run(&b, &[&tail_feed], backend);
+        let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
+        assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+        assert_eq!(
+            run.successor.carry_program_retained_bytes, 8,
+            "{backend:?}: the source moves, the changed section does not"
+        );
+        for block in 0..BLOCKS {
+            let expected = if block < SWAP_BLOCK {
+                &before[block].bits
+            } else {
+                &at_rest[block - SWAP_BLOCK].bits
+            };
+            assert_eq!(
+                &run.blocks[block].bits, expected,
+                "{backend:?}: block {block}"
+            );
+        }
+    }
+}
+
+/// Gate 5 of #1276. The hand-over that drains a pending record, disengages collapsed predecessor
+/// chains and copies every input lane, plus the successor's first block, makes no allocator call
+/// and no audited allocation. Red if the carry clones, boxes or drops anything on the render
+/// thread.
+#[test]
+fn the_input_carry_allocates_and_frees_nothing() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let a = Session::compile(filtered_session(true));
+    let mut committed = filtered_session(true);
+    let builtins = &mut committed.tracks[1].builtins;
+    for channel in [&mut builtins.left, &mut builtins.right] {
+        channel.trim_db = 3.0;
+    }
+    let b = Session::compile(with_muted_track(committed.clone()));
+    let writes = [LiveWrite {
+        block: SWAP_BLOCK,
+        strip: "eq1",
+        record: builtins_compiler::TrackInputRecord::TrimDb {
+            lanes: builtins::BuiltinLaneSelector::Both,
+            db: 3.0,
+            smoothing_samples: 200,
+        },
+    }];
+    let feed = Feed::new(SOURCE, 13);
+    for backend in backends() {
+        let run = direct_run(
+            &a,
+            Some((&b, &committed)),
+            &feed,
+            QUANTUM,
+            &writes,
+            backend,
+            false,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert!(run.collapses[0][0] > 0, "the predecessor was collapsed");
+        assert_eq!(
+            run.swap_allocator,
+            ((0, 0, 0), (0, 0)),
+            "{backend:?}: allocator calls and audited allocations at the swap block"
+        );
+    }
+}
+
+/// Gate 3 of #1276, live term. On the all-mono session a left-only trim record that leaves the
+/// trim where it was is pending in A's queue at the swap. It moves no word, but it is a one-channel
+/// write, so its strip's chain must render dual from the swap block on, as the reference's does
+/// from the block it drains the record. Red if the carry drops the lane's live symmetry terms: the
+/// successor would collapse a chain the predecessor had retired from collapsing.
+#[test]
+fn a_one_channel_record_keeps_its_chain_dual_after_the_swap() {
+    let a = Session::compile(filtered_session(true));
+    let b = Session::compile(with_muted_track(filtered_session(true)));
+    let trim_db = a.model.tracks[2].builtins.left.trim_db;
+    let writes = [LiveWrite {
+        block: SWAP_BLOCK,
+        strip: "eq2",
+        record: builtins_compiler::TrackInputRecord::TrimDb {
+            lanes: builtins::BuiltinLaneSelector::Left,
+            db: trim_db,
+            smoothing_samples: 0,
+        },
+    }];
+    let feed = Feed::new(SOURCE, 15);
+    for backend in backends() {
+        let reference = direct_run(&b, None, &feed, QUANTUM, &writes, backend, false);
+        let run = direct_run(
+            &a,
+            Some((&b, &a.model)),
+            &feed,
+            QUANTUM,
+            &writes,
+            backend,
+            false,
+        );
+        assert_eq!(run.carry, CarryOutcome::Carried);
+        assert_eq!(
+            first_direct_difference(&run, &reference),
+            None,
+            "{backend:?}"
+        );
+        // Every collapsible chain collapsed before the swap block; one fewer after it.
+        let [collapsed, chains] = reference.collapses[1];
+        assert_eq!(
+            collapsed,
+            chains * BLOCKS as u64 - (BLOCKS - SWAP_BLOCK) as u64,
+            "{backend:?}: the reference retires exactly one chain at the record"
+        );
+        assert_eq!(
+            run.collapses[1][0],
+            (chains - 1) * (BLOCKS - SWAP_BLOCK) as u64,
+            "{backend:?}: the successor keeps that chain dual"
+        );
+    }
+}
+
+/// D6 and P11 of #1276. Installing the input section refuses a plan with no carry program (no
+/// predecessor named), a padding lane, and a repeated successor or predecessor lane. At the swap
+/// block a predecessor lane that does not resolve refuses the whole hand-over, before any lane
+/// moves. Red if install accepts a padding lane, or if the swap block copies the lanes that
+/// resolve and skips the rest.
+#[test]
+fn a_bad_input_move_is_refused_whole() {
+    use graph::{
+        GraphCarryInstallError, GraphCarryProgram, GraphLaneLocation, GraphLaneMove,
+        install_builtin_input_carry, install_carry_program,
+    };
+    let backend = Backend::Simd4;
+    let a = Session::compile(filtered_session(false));
+    let b = Session::compile(with_muted_track(filtered_session(false)));
+    let mut predecessor = a.prepare(backend);
+    let lanes = graph::builtin_input_lanes(&mut predecessor.plan).expect("a graph plan");
+    assert_eq!(lanes.len(), 9);
+    let at = |strip: &str| {
+        lanes
+            .iter()
+            .find(|(id, _)| &**id == strip)
+            .expect("strip")
+            .1
+    };
+    // Four-lane banks of eq0-eq3, eq4-eq7 and eq8 alone.
+    let (eq0, eq8) = (at("eq0"), at("eq8"));
+    assert_eq!(eq8.lane, 0);
+    let step = |successor, predecessor| GraphLaneMove {
+        successor,
+        predecessor,
+    };
+
+    let mut successor = b.prepare(backend);
+    let successor_lanes = graph::builtin_input_lanes(&mut successor.plan).expect("a graph plan");
+    let into = successor_lanes
+        .iter()
+        .find(|(id, _)| &**id == "eq0")
+        .expect("eq0")
+        .1;
+    assert_eq!(
+        install_builtin_input_carry(&mut successor.plan, vec![step(into, eq0)]),
+        Err(GraphCarryInstallError::NoCarryProgram)
+    );
+    install_carry_program(
+        &mut successor.plan,
+        GraphCarryProgram {
+            predecessor: predecessor.inventory.plan_identity(),
+            sources: Box::default(),
+        },
+    )
+    .expect("a program that moves no source");
+    // The successor's last bank holds eq7 and eq8; its lanes 2 and 3 are padding.
+    let last = successor_lanes
+        .iter()
+        .find(|(id, _)| &**id == "eq8")
+        .expect("eq8")
+        .1;
+    let members = successor_lanes
+        .iter()
+        .filter(|(_, location)| location.unit == last.unit)
+        .count();
+    assert_eq!(members, 2);
+    let padding = GraphLaneLocation { lane: 2, ..last };
+    assert_eq!(
+        install_builtin_input_carry(&mut successor.plan, vec![step(padding, eq0)]),
+        Err(GraphCarryInstallError::InputLaneOutOfRange)
+    );
+    assert_eq!(
+        install_builtin_input_carry(&mut successor.plan, vec![step(into, eq0), step(into, eq8)]),
+        Err(GraphCarryInstallError::DuplicateInputLane)
+    );
+    // A predecessor location past every unit: it sorts after eq0's valid move.
+    let nowhere = GraphLaneLocation {
+        unit: u32::MAX,
+        ..eq8
+    };
+    let other = successor_lanes
+        .iter()
+        .find(|(id, _)| &**id == "eq1")
+        .expect("eq1")
+        .1;
+    install_builtin_input_carry(
+        &mut successor.plan,
+        vec![step(into, eq0), step(other, nowhere)],
+    )
+    .expect("successor lanes resolve; predecessor lanes are checked at the swap block");
+
+    // Render the predecessor so eq0's filters hold state, then hand over.
+    let feed = Feed::new(SOURCE, 17);
+    let rate = predecessor.report.sample_rate_hz;
+    for block in 0..SWAP_BLOCK {
+        feed.submit(&mut predecessor.sources, rate, block);
+        let mut output = [0.0_f32; QUANTUM * 2];
+        let sample = predecessor.plan.next_absolute_sample();
+        predecessor
+            .plan
+            .render_contiguous(
+                engine::realtime::RenderIo {
+                    output: engine::realtime::PlanarBufferMut::try_new(
+                        &mut output,
+                        2,
+                        QUANTUM,
+                        QUANTUM,
+                    )
+                    .expect("output"),
+                },
+                sample,
+            )
+            .expect("render");
+    }
+    assert_eq!(
+        successor.plan.adopt_predecessor_plan(&mut predecessor.plan),
+        CarryOutcome::PredecessorMismatch
+    );
+    // Nothing moved: the successor's first block is a fresh plan's first block on the same PCM.
+    let reference = reference_run(&b, &[&feed], backend);
+    feed.submit(&mut successor.sources, rate, 0);
+    let mut output = [f32::NAN; QUANTUM * 2];
+    let sample = successor.plan.next_absolute_sample();
+    successor
+        .plan
+        .render_contiguous(
+            engine::realtime::RenderIo {
+                output: engine::realtime::PlanarBufferMut::try_new(
+                    &mut output,
+                    2,
+                    QUANTUM,
+                    QUANTUM,
+                )
+                .expect("output"),
+            },
+            sample,
+        )
+        .expect("render");
+    let bits: Vec<u32> = output.iter().map(|sample| sample.to_bits()).collect();
+    assert_eq!(bits, reference[0].bits);
 }

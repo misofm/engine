@@ -501,6 +501,21 @@ pub struct PlanStateInventory {
     plan_identity: u64,
     /// Sorted by ID.
     sources: Box<[SourceInventoryRow]>,
+    /// Sorted by strip ID.
+    input_sections: Box<[InputSectionInventoryRow]>,
+}
+
+/// One banked strip input section of a prepared plan, owner key `(strip ID,
+/// PostInputBuiltins)`, as its successor's preparation sees it (issue #1276 D1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InputSectionInventoryRow {
+    /// The strip ID: a track's or a submix's.
+    pub(crate) id: Box<str>,
+    /// Where the section's lane sits in this plan. Meaningful only to this plan's successor's
+    /// carry program, which names it as the lane to copy from.
+    pub(crate) location: graph::GraphLaneLocation,
+    /// Whether this plan attached a live-control queue to the section.
+    pub(crate) live: bool,
 }
 
 impl PlanStateInventory {
@@ -526,12 +541,36 @@ impl PlanStateInventory {
             .map(|index| &self.sources[index])
     }
 
-    /// Heap bytes this inventory retains: its row table and its source ID text.
+    /// Banked strip input sections, one row each (issue #1276).
+    #[must_use]
+    pub fn input_section_count(&self) -> usize {
+        self.input_sections.len()
+    }
+
+    /// The row of strip `id`'s input section, if the plan banks one.
+    #[must_use]
+    pub(crate) fn input_section(&self, id: &str) -> Option<&InputSectionInventoryRow> {
+        self.input_sections
+            .binary_search_by(|row| (*row.id).cmp(id))
+            .ok()
+            .map(|index| &self.input_sections[index])
+    }
+
+    /// Heap bytes this inventory retains: its row tables and their ID text.
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
-        let ids: usize = self.sources.iter().map(|row| row.id.len()).sum();
-        u64::try_from(core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources) + ids)
-            .unwrap_or(u64::MAX)
+        let ids: usize = self.sources.iter().map(|row| row.id.len()).sum::<usize>()
+            + self
+                .input_sections
+                .iter()
+                .map(|row| row.id.len())
+                .sum::<usize>();
+        u64::try_from(
+            core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources)
+                + core::mem::size_of_val::<[InputSectionInventoryRow]>(&self.input_sections)
+                + ids,
+        )
+        .unwrap_or(u64::MAX)
     }
 }
 
@@ -1102,18 +1141,56 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             index,
         });
     }
+    // Issue #1276 D1: the strip input sections that carry, with the predecessor lane each one
+    // copies from. Every strip of this plan attaches the same control kind.
+    let live_input = live_controls.control_queue_depth.is_some();
+    let carried_inputs: Vec<(&str, graph::GraphLaneLocation)> = match successor {
+        None => Vec::new(),
+        Some(base) => {
+            let committed: BTreeMap<&str, session::StripRef<'_>> = base
+                .committed
+                .strips()
+                .map(|strip| (strip.id.as_str(), strip))
+                .collect();
+            model
+                .strips()
+                .filter_map(|strip| {
+                    let row = base.inventory.input_section(strip.id.as_str())?;
+                    let before = committed.get(strip.id.as_str())?;
+                    (row.live == live_input
+                        && same_strip_kind(before, &strip)
+                        && same_input_section(before.builtins, strip.builtins))
+                    .then_some((strip.id.as_str(), row.location))
+                })
+                .collect()
+        }
+    };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.
     let carry_program = match successor {
-        Some(base) if !carried_sources.is_empty() => Some(graph::GraphCarryProgram {
-            predecessor: base.inventory.plan_identity(),
-            sources: carried_sources.into_boxed_slice(),
-        }),
+        Some(base) if !carried_sources.is_empty() || !carried_inputs.is_empty() => {
+            Some(graph::GraphCarryProgram {
+                predecessor: base.inventory.plan_identity(),
+                sources: carried_sources.into_boxed_slice(),
+            })
+        }
         _ => None,
     };
+    // The input moves' table is charged at its full length: every strip banks its input section
+    // in a shipped plan, so each carried strip finds its successor lane after bind.
     let carry_program_bytes = carry_program
         .as_ref()
-        .map_or(0, graph::GraphCarryProgram::retained_bytes);
+        .map_or(0, graph::GraphCarryProgram::retained_bytes)
+        .checked_add(
+            u64::try_from(
+                carried_inputs
+                    .len()
+                    .checked_mul(core::mem::size_of::<graph::GraphLaneMove>())
+                    .ok_or_else(|| resource("host.resource.arithmetic"))?,
+            )
+            .map_err(|_| resource("host.resource.arithmetic"))?,
+        )
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
     let sources = builder.finish();
 
     // Source semantics: tracks only.
@@ -1588,13 +1665,46 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         graph::install_carry_program(&mut plan, program)
             .map_err(|_| graph_failure("host.carry.install"))?;
     }
+    // Issue #1276 D6: this plan's own input lanes, by strip ID, for the join below and for its
+    // successor's.
+    let input_lanes = graph::builtin_input_lanes(&mut plan)
+        .ok_or_else(|| graph_failure("host.inventory.identity"))?;
+    if !carried_inputs.is_empty() {
+        let successor_lanes: BTreeMap<&str, graph::GraphLaneLocation> = input_lanes
+            .iter()
+            .map(|(id, location)| (&**id, *location))
+            .collect();
+        let moves: Vec<graph::GraphLaneMove> = carried_inputs
+            .iter()
+            .filter_map(|(id, predecessor)| {
+                successor_lanes
+                    .get(id)
+                    .map(|successor| graph::GraphLaneMove {
+                        successor: *successor,
+                        predecessor: *predecessor,
+                    })
+            })
+            .collect();
+        graph::install_builtin_input_carry(&mut plan, moves)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
     let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
-    debug_assert_eq!(carry_program_retained_bytes, carry_program_bytes);
+    debug_assert!(carry_program_retained_bytes <= carry_program_bytes);
     inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let mut input_sections: Vec<InputSectionInventoryRow> = input_lanes
+        .into_iter()
+        .map(|(id, location)| InputSectionInventoryRow {
+            id,
+            location,
+            live: live_input,
+        })
+        .collect();
+    input_sections.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     let inventory = PlanStateInventory {
         plan_identity: graph::plan_identity(&mut plan)
             .ok_or_else(|| graph_failure("host.inventory.identity"))?,
         sources: inventory_sources.into_boxed_slice(),
+        input_sections: input_sections.into_boxed_slice(),
     };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
@@ -1682,6 +1792,28 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         },
         spectrum_capture,
     ))
+}
+
+/// Whether two strips are of one kind: both tracks or both submixes (issue #1276 D1).
+fn same_strip_kind(left: &session::StripRef<'_>, right: &session::StripRef<'_>) -> bool {
+    matches!(
+        (left.kind, right.kind),
+        (session::StripKind::Track(_), session::StripKind::Track(_))
+            | (session::StripKind::Submix(_), session::StripKind::Submix(_))
+    )
+}
+
+/// Whether two strips' input sections are bit-equal (issue #1276 D1): polarity, trim and both
+/// filter cutoffs, per channel.
+fn same_input_section(left: &session::DualMonoBuiltins, right: &session::DualMonoBuiltins) -> bool {
+    [(&left.left, &right.left), (&left.right, &right.right)]
+        .into_iter()
+        .all(|(left, right)| {
+            left.polarity_invert == right.polarity_invert
+                && left.trim_db.to_bits() == right.trim_db.to_bits()
+                && left.hpf_hz.to_bits() == right.hpf_hz.to_bits()
+                && left.lpf_hz.to_bits() == right.lpf_hz.to_bits()
+        })
 }
 
 /// Total effect instances across every strip: one per console entry, since each lowers to one

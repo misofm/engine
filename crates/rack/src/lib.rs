@@ -734,6 +734,13 @@ pub trait BankStage: Send {
     fn channels_agree(&self) -> bool {
         false
     }
+
+    /// This stage as `Any`, so the crate that built it can reach its own stage type through
+    /// [`BankChain::slot_stage_mut`] -- at bind, and at a plan swap's carry (issue #1276 D3).
+    /// `None` (the default) offers nothing. Allocation-free.
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -2781,6 +2788,34 @@ impl BankChain {
     #[must_use]
     pub const fn collapse_channels_agree(&self) -> bool {
         self.collapse_channels_agree
+    }
+
+    /// Lend slot `slot`'s stage mutably, or `None` past the last slot (issue #1276 D3).
+    ///
+    /// For the crate that built the stage, at bind and at a plan swap's carry, to reach its own
+    /// stage type through [`BankStage::as_any_mut`]. Never called by [`run`](Self::run).
+    pub fn slot_stage_mut(&mut self, slot: usize) -> Option<&mut dyn BankStage> {
+        Some(self.slots.get_mut(slot)?.stage.as_mut())
+    }
+
+    /// Prepare this chain to hand lane state to a successor plan (issue #1276 D5): when it
+    /// rendered its last block collapsed, take the disengage boundary now, so both channels of
+    /// every prefix stage hold real state. The chain renders no more. Allocation-free; a no-op
+    /// on a chain that rendered dual.
+    pub fn disengage_for_carry(&mut self) {
+        if self.collapsed {
+            self.disengage_collapse();
+            self.collapsed = false;
+        }
+    }
+
+    /// Fold in the channel agreement of a chain this one takes carried lane state from (issue
+    /// #1276 D5): this chain's flag becomes the AND of its own and `agree`. A chain built at bind
+    /// agrees, and a lane at rest agrees, so a successor whose lanes came from chains that agreed
+    /// may collapse at once; one that took a lane from a chain whose channels had been driven
+    /// apart waits for a proof ([`BankStage::channels_agree`]), as that chain would have.
+    pub fn inherit_channel_agreement(&mut self, agree: bool) {
+        self.collapse_channels_agree &= agree;
     }
 
     /// `[disengages, re-engages, agreement proofs]` for this chain. Evidence only.

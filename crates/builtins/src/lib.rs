@@ -2434,6 +2434,142 @@ impl<L: Lane> InputStage<L> {
         }
         self.refresh_filter_plan();
     }
+
+    /// One populated lane's whole per-lane state ([`InputLaneState`], issue #1276 D2).
+    fn export_lane(&self, lane: usize) -> InputLaneState {
+        debug_assert!(lane < self.members && lane < L::WIDTH);
+        let read = |value: L| lane_read::<L>(value)[lane];
+        let words = |coef: &SvfCoef<L>| {
+            [
+                read(coef.c1),
+                read(coef.a2),
+                read(coef.a3),
+                read(coef.m0),
+                read(coef.m1),
+                read(coef.m2),
+            ]
+        };
+        InputLaneState {
+            channels: core::array::from_fn(|channel| InputChannelState {
+                trim: read(self.coef.trim[channel]),
+                ramp: [
+                    read(self.ramp.current[channel]),
+                    read(self.ramp.target[channel]),
+                    read(self.ramp.step[channel]),
+                    read(self.ramp.remaining[channel]),
+                ],
+                remaining: self.remaining[channel][lane],
+                sections: core::array::from_fn(|section| InputSectionState {
+                    coef: words(&self.coef.section[channel][section]),
+                    target: words(&self.filter_target[channel][section]),
+                    step: words(&self.filter_step[channel][section]),
+                    remaining: self.filter_remaining[channel][section][lane],
+                    integrators: [
+                        read(self.state.section[channel][section].ic1),
+                        read(self.state.section[channel][section].ic2),
+                    ],
+                }),
+            }),
+        }
+    }
+
+    /// Overwrite one populated lane with `state`, word for word, and re-derive only the caches
+    /// those words feed: the two ramping flags, the elision plan and the lane's channel-symmetry
+    /// bit. The lane then renders exactly what the lane it was exported from would have.
+    ///
+    /// The prepared endpoint (`filter_initial`) is this stage's own and stays: a full reset
+    /// returns to what *this* plan prepared.
+    fn import_lane(&mut self, lane: usize, state: &InputLaneState) {
+        debug_assert!(lane < self.members && lane < L::WIDTH);
+        fn put<L: Lane>(value: &mut L, lane: usize, word: f32) {
+            let mut words = lane_read::<L>(*value);
+            words[lane] = word;
+            *value = lane_words::<L>(&words);
+        }
+        fn put_coef<L: Lane>(coef: &mut SvfCoef<L>, lane: usize, words: &[f32; 6]) {
+            put(&mut coef.c1, lane, words[0]);
+            put(&mut coef.a2, lane, words[1]);
+            put(&mut coef.a3, lane, words[2]);
+            put(&mut coef.m0, lane, words[3]);
+            put(&mut coef.m1, lane, words[4]);
+            put(&mut coef.m2, lane, words[5]);
+        }
+        for (channel, carried) in state.channels.iter().enumerate() {
+            put(&mut self.coef.trim[channel], lane, carried.trim);
+            put(&mut self.ramp.current[channel], lane, carried.ramp[0]);
+            put(&mut self.ramp.target[channel], lane, carried.ramp[1]);
+            put(&mut self.ramp.step[channel], lane, carried.ramp[2]);
+            put(&mut self.ramp.remaining[channel], lane, carried.ramp[3]);
+            self.remaining[channel][lane] = carried.remaining;
+            for (section, words) in carried.sections.iter().enumerate() {
+                put_coef(&mut self.coef.section[channel][section], lane, &words.coef);
+                put_coef(
+                    &mut self.filter_target[channel][section],
+                    lane,
+                    &words.target,
+                );
+                put_coef(&mut self.filter_step[channel][section], lane, &words.step);
+                self.filter_remaining[channel][section][lane] = words.remaining;
+                let integrators = &mut self.state.section[channel][section];
+                put(&mut integrators.ic1, lane, words.integrators[0]);
+                put(&mut integrators.ic2, lane, words.integrators[1]);
+            }
+        }
+        // The flags `settle` and `settle_filter` would publish at a block boundary.
+        self.ramping = self
+            .remaining
+            .iter()
+            .any(|channel| channel[..L::WIDTH].iter().any(|remaining| *remaining != 0));
+        self.filter_ramping = self.filter_remaining.iter().any(|channel| {
+            channel.iter().any(|section| {
+                section
+                    .iter()
+                    .take(self.members)
+                    .any(|remaining| *remaining != 0)
+            })
+        });
+        self.refresh_filter_plan();
+        self.refresh_channel_symmetry_lane(lane);
+    }
+}
+
+/// One input bank lane's whole state, both channels: what a plan swap hands from the
+/// predecessor's lane to the successor's (issue #1276 D2).
+///
+/// Plain data, fixed size, no heap: the filter integrators, the coefficients in use, any
+/// coefficient ramp in flight (target, per-sample step and countdown), and the trim ramp
+/// (current, target, step, the kernel's countdown word and the authoritative countdown). The
+/// polarity is the trim's sign. In-memory state handed across a plan replacement, never persisted
+/// (AGENTS.md, R6b).
+#[derive(Clone, Copy, Debug)]
+pub struct InputLaneState {
+    channels: [InputChannelState; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputChannelState {
+    /// `coef.trim`, the live trim word the kernel loads.
+    trim: f32,
+    /// `ramp.{current, target, step, remaining}`.
+    ramp: [f32; 4],
+    /// The authoritative trim countdown.
+    remaining: u32,
+    /// High-pass, then low-pass.
+    sections: [InputSectionState; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InputSectionState {
+    /// `[c1, a2, a3, m0, m1, m2]` in use.
+    coef: [f32; 6],
+    /// The accepted target, same order.
+    target: [f32; 6],
+    /// The per-sample coefficient step, same order.
+    step: [f32; 6],
+    /// The authoritative coefficient-ramp countdown.
+    remaining: u32,
+    /// `[ic1, ic2]`.
+    integrators: [f32; 2],
 }
 
 /// The fader and mute stage at one width: one multiply and one mask clear per sample.
@@ -3590,6 +3726,35 @@ impl BuiltinInputBank {
     /// Resets only the per-lane filter state; prepared coefficients remain unchanged.
     pub fn reset(&mut self) {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.reset())
+    }
+
+    /// Populated lane `lane`'s whole state (issue #1276 D2), or `None` for a padding lane or one
+    /// past the bank. Allocation-free; bounded by the lane's fixed word count.
+    #[must_use]
+    pub fn export_lane(&self, lane: usize) -> Option<InputLaneState> {
+        if lane >= self.members {
+            return None;
+        }
+        Some(per_width!(InputStageKernel(stage) in &self.stage => stage.export_lane(lane)))
+    }
+
+    /// Overwrite populated lane `lane` with `state` (issue #1276 D2): every word verbatim, then the
+    /// caches re-derived, so the lane renders bit-exactly what the exported lane would have.
+    /// Refused, changing nothing, for a padding lane or one past the bank. Allocation-free.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn import_lane(
+        &mut self,
+        lane: usize,
+        state: &InputLaneState,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        per_width!(InputStageKernel(stage) in &mut self.stage => stage.import_lane(lane, state));
+        Ok(())
     }
 }
 

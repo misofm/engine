@@ -439,23 +439,10 @@ struct BuiltinBankProcessor {
 /// Widest bank any backend selects (`BankWidth::Eight`), as a plain array bound.
 const MAXIMUM_BANK_LANES: usize = 8;
 
-impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-        self
-    }
-    fn response_snapshot_declared(&self) -> bool {
-        true
-    }
-    fn response_snapshot_native_id(&self) -> Option<&'static str> {
-        Some("miso.builtin.input-filters")
-    }
-    /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
-    /// documentation for why that ordering is the whole reason this is not folded into `process`.
-    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
-        let _ = first_sample;
+impl BuiltinBankProcessor {
+    /// Apply every record waiting at entry on each lane's queue to lane state: the body of
+    /// [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the plan-swap drain.
+    fn drain_controls(&mut self) -> Result<(), RenderError> {
         let Self {
             bank,
             controls,
@@ -500,6 +487,92 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
         }
         Ok(())
     }
+}
+
+impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+    fn response_snapshot_declared(&self) -> bool {
+        true
+    }
+    fn response_snapshot_native_id(&self) -> Option<&'static str> {
+        Some("miso.builtin.input-filters")
+    }
+    /// The third drain. Runs before the collapse dispatch reads the witness -- see the type's
+    /// documentation for why that ordering is the whole reason this is not folded into `process`.
+    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        let _ = first_sample;
+        self.drain_controls()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    fn carried_input_lanes(&self) -> Option<usize> {
+        Some(self.bank.active_lanes())
+    }
+
+    fn can_adopt_input_lane(
+        &self,
+        lane: usize,
+        predecessor: &dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        predecessor
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|predecessor| {
+                predecessor.bank.width() == self.bank.width()
+                    && lane < self.bank.active_lanes()
+                    && predecessor_lane < predecessor.bank.active_lanes()
+            })
+    }
+
+    /// Issue #1276 D2: the lane's whole input-section state and its live symmetry terms. The
+    /// queue consumer stays: every record this lane's predecessor admitted was applied to lane
+    /// state by [`Self::drain_for_carry`], and the successor's own queue takes every later one.
+    fn adopt_input_lane(
+        &mut self,
+        lane: usize,
+        predecessor: &mut dyn GraphPreparedBuiltinBankProcessor,
+        predecessor_lane: usize,
+    ) -> bool {
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return false;
+        };
+        if predecessor.bank.width() != self.bank.width() {
+            return false;
+        }
+        let (Some(state), Some(live)) = (
+            predecessor.bank.export_lane(predecessor_lane),
+            predecessor.live.get(predecessor_lane).copied(),
+        ) else {
+            return false;
+        };
+        let Some(slot) = self.live.get_mut(lane) else {
+            return false;
+        };
+        if self.bank.import_lane(lane, &state).is_err() {
+            return false;
+        }
+        *slot = live;
+        true
+    }
+
+    /// Issue #1276 D4. A record reached this queue only after validation, so applying it cannot
+    /// fail; were it to, the carry still copies the lane as it stands.
+    fn drain_for_carry(&mut self) {
+        let _ = self.drain_controls();
+    }
+    // REALTIME_POLICY_END
 
     fn process(
         &mut self,
