@@ -960,3 +960,66 @@ fn a_live_track_edit_beside_a_submix_strip_reaches_its_track() {
         assert_eq!(bits(&live), bits(expected), "submix session block {block}");
     }
 }
+
+/// #1258 gate 4: with the two-slot reliable-event lane full, a live edit is the protocol's own
+/// `Backpressure` response under `RESULT_OK`, decided before a token exists, so it reaches no lane.
+///
+/// Test value: red if the live arm pushes its records before the reliable-event capacity check (a
+/// strip's room would drop with no commit), or if that check stops refusing a live transaction.
+#[test]
+fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_nothing() {
+    let mut rig = Rig::new(&long_session(10, 48_000));
+    rig.step();
+    // Two live edits, never dequeued: each commits one `SESSION_COMMITTED` event.
+    for db in [-1.0, -2.0] {
+        let bytes = rig.transaction(&[left_db_edit("eq0", db)]);
+        assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
+    }
+    let depth = LIVE_QUEUE_DEPTH.get();
+    assert_eq!(rig.room(Epoch::Current, "eq0"), (depth - 2, depth));
+    let rooms = crate::ffi::test_transaction_snapshot(rig.session).live_rooms;
+    let (revision, ..) = rig.summary();
+
+    let edits = [
+        left_db_edit("eq1", -3.0),
+        SessionEdit::SetTrackMatrixOrPan {
+            track_id: StableId::parse("eq2").expect("eq2"),
+            matrix_or_pan: MatrixOrPan::Pan {
+                left: 0.5,
+                right: 0.25,
+                smoothing_samples: 16,
+            },
+        },
+    ];
+    let bytes = rig.transaction(&edits);
+    let (result, response) = command_c(rig.session, &bytes);
+    assert_eq!(result, crate::RESULT_OK, "a protocol refusal is RESULT_OK");
+    let mut fields = [0_u16; 64];
+    let header = match ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("refusal response")
+    {
+        protocol::DecodedTypedResponseFrame::NonOk { header, .. } => header,
+        protocol::DecodedTypedResponseFrame::Success { header, .. } => {
+            panic!(
+                "expected Backpressure, got success at revision {}",
+                header.revision.0
+            )
+        }
+    };
+    assert_eq!(header.status, protocol::StatusCode::Backpressure);
+    assert_eq!(rig.summary().0, revision, "the revision is unchanged");
+    assert_eq!(rig.summary().3, 0, "no plan was prepared");
+    assert_eq!(
+        crate::ffi::test_transaction_snapshot(rig.session).live_rooms,
+        rooms,
+        "no strip queue's room changed"
+    );
+
+    // Once the events are dequeued, the same edit under a new request ID commits live.
+    rig.drain_reliable();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK);
+    assert_eq!(rig.summary().0, revision + 1);
+    assert_eq!(rig.room(Epoch::Current, "eq1"), (depth - 1, depth));
+    assert_eq!(rig.room(Epoch::Current, "eq2"), (depth, depth - 1));
+}

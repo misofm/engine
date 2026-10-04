@@ -1,4 +1,10 @@
 //! Non-timed Issue-022 audit plan for the exported C render entrypoint.
+//!
+//! Every [`LIVE_EDIT_PERIOD`]th call first commits a live edit through
+//! `miso_engine_v1_submit_command` (#1258 gate 2, D3): a mute toggle on one track and a pan move on
+//! another, alternating, so the audited render drains non-empty fader and matrix lanes. Each edit
+//! and each event dequeue runs on this thread outside the audited scope; only the render call is
+//! inside it, one scope per call.
 
 #![allow(unsafe_code)]
 
@@ -7,15 +13,25 @@ use std::ptr;
 
 use capi::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits, ENGINE_CONFIG_SIZE,
-    Engine, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput, RESULT_INTERNAL, RESULT_OK,
-    SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk, SubmitReport,
-    miso_engine_v1_compile_session, miso_engine_v1_engine_create, miso_engine_v1_engine_destroy,
-    miso_engine_v1_plan_destroy, miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
-    miso_engine_v1_source_submit_planar_f32,
+    EVENT_LANE_RELIABLE, Engine, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput,
+    RESULT_INTERNAL, RESULT_OK, SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk,
+    SubmitReport, miso_engine_v1_compile_session, miso_engine_v1_dequeue_event,
+    miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
+    miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
+    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
+use protocol::{
+    CommandPayload, DecodeScratch, DecodedTypedResponseFrame, ExpectedRevision, ProtocolCodec,
+    RequestId, SessionEdit, SessionRevision, StatusCode, TypedCommandFrame,
+};
+use session::{DualMonoFader, MatrixOrPan, StableId};
 
 const CALLS: u64 = 100_000;
+/// Every this many render calls, one live edit precedes the call (#1258 D3).
+const LIVE_EDIT_PERIOD: u64 = 64;
+/// The fixture's committed revision.
+const INITIAL_REVISION: u64 = 42;
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: usize = 128;
 const SESSION_JSON: &[u8] =
@@ -133,6 +149,134 @@ impl Drop for AuditHandles {
     }
 }
 
+/// The control-thread side of the audit: live fader-mute and pan edits, committed through the C
+/// entry point between render calls.
+struct LiveEditor {
+    session: *mut Session,
+    revision: u64,
+    request_id: u64,
+    edits: u64,
+    muted: bool,
+    panned: bool,
+    command: Vec<u8>,
+    response: [u8; 4_096],
+    event: [u8; 4_096],
+}
+
+impl LiveEditor {
+    fn new(session: *mut Session) -> Self {
+        Self {
+            session,
+            revision: INITIAL_REVISION,
+            request_id: 0,
+            edits: 0,
+            muted: false,
+            panned: false,
+            command: vec![0; 4_096],
+            response: [0; 4_096],
+            event: [0; 4_096],
+        }
+    }
+
+    /// The next edit: a mute toggle on `eq0`, then a pan move on `eq1`, alternating. Every edit
+    /// changes its value, so each one pushes one record to a lane.
+    fn next_edit(&mut self) -> SessionEdit {
+        let edit = if self.edits.is_multiple_of(2) {
+            self.muted = !self.muted;
+            SessionEdit::SetTrackFader {
+                track_id: StableId::parse("eq0").expect("fixture track"),
+                fader: DualMonoFader {
+                    left_db: 0.0,
+                    right_db: 0.0,
+                    left_mute: self.muted,
+                    right_mute: self.muted,
+                },
+            }
+        } else {
+            self.panned = !self.panned;
+            let left = if self.panned { 0.5 } else { 1.0 };
+            SessionEdit::SetTrackMatrixOrPan {
+                track_id: StableId::parse("eq1").expect("fixture track"),
+                matrix_or_pan: MatrixOrPan::Pan {
+                    left,
+                    right: 1.0,
+                    smoothing_samples: 16,
+                },
+            }
+        };
+        self.edits += 1;
+        edit
+    }
+
+    /// Commits the next edit, then dequeues every reliable event so the next transaction finds
+    /// room for its `SESSION_COMMITTED` event (#1258 D3). Any refusal fails the audit.
+    fn commit_next(&mut self) {
+        let edit = self.next_edit();
+        self.request_id += 1;
+        self.command.resize(4_096, 0);
+        let len = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(self.request_id).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Exact(SessionRevision(self.revision)),
+                    payload: CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+                },
+                &mut self.command,
+            )
+            .expect("live edit command");
+        self.command.truncate(len);
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: self.response.as_mut_ptr(),
+            capacity_bytes: self.response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the command and response
+        // buffers are owned and complete for the synchronous call.
+        let result = unsafe {
+            miso_engine_v1_submit_command(
+                self.session,
+                self.command.as_ptr(),
+                self.command.len() as u64,
+                &mut output,
+            )
+        };
+        assert_eq!(result, RESULT_OK, "live edit {}", self.edits);
+        let mut fields = [0_u16; 64];
+        let header = match ProtocolCodec::default()
+            .decode_typed_response(
+                &self.response[..output.required_bytes as usize],
+                &mut DecodeScratch::new(&mut fields),
+            )
+            .expect("live edit response")
+        {
+            DecodedTypedResponseFrame::Success { header, .. }
+            | DecodedTypedResponseFrame::NonOk { header, .. } => header,
+        };
+        assert_eq!(header.status, StatusCode::Ok, "live edit {}", self.edits);
+        self.revision += 1;
+        assert_eq!(header.revision, SessionRevision(self.revision));
+        loop {
+            let mut event = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: self.event.as_mut_ptr(),
+                capacity_bytes: self.event.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: As above; the event descriptor names complete owned storage.
+            let result = unsafe {
+                miso_engine_v1_dequeue_event(self.session, EVENT_LANE_RELIABLE, &mut event)
+            };
+            assert_eq!(result, RESULT_OK, "reliable dequeue");
+            if event.required_bytes == 0 {
+                break;
+            }
+        }
+    }
+}
+
 struct PreparedAudit {
     handles: AuditHandles,
     output: [f32; QUANTUM_FRAMES * 2],
@@ -161,28 +305,33 @@ impl PreparedAudit {
         let mut render_errors = 0_u64;
         let mut output_address_changes = 0_u64;
         let mut pcm_digest = 0xcbf2_9ce4_8422_2325_u64;
+        let mut editor = LiveEditor::new(self.handles.session);
         audit::warm_up();
         audit::reset();
-        audit::in_render_scope(|| {
-            for call in 0..CALLS {
-                // SAFETY: The plan is live and exclusive, the descriptor points to the same
-                // complete writable output for every synchronous call, and exact time is bounded.
-                let result = unsafe {
-                    miso_engine_v1_render_f32_planar(plan, call * QUANTUM_FRAMES as u64, &output)
-                };
-                if result != RESULT_OK {
-                    render_errors = render_errors.saturating_add(1);
-                }
-                if self.output.as_ptr() as usize != output_address {
-                    output_address_changes = output_address_changes.saturating_add(1);
-                }
-                for sample in &self.output {
-                    pcm_digest ^= u64::from(sample.to_bits());
-                    pcm_digest = pcm_digest.wrapping_mul(0x0000_0100_0000_01b3);
-                }
+        for call in 0..CALLS {
+            // The edit, its allocations and its event dequeues are control-thread work: they
+            // run before the call's audited scope opens (#1258 D3).
+            if call.is_multiple_of(LIVE_EDIT_PERIOD) {
+                editor.commit_next();
             }
-        });
+            // SAFETY: The plan is live and exclusive, the descriptor points to the same complete
+            // writable output for every synchronous call, and exact time is bounded.
+            let result = audit::in_render_scope(|| unsafe {
+                miso_engine_v1_render_f32_planar(plan, call * QUANTUM_FRAMES as u64, &output)
+            });
+            if result != RESULT_OK {
+                render_errors = render_errors.saturating_add(1);
+            }
+            if self.output.as_ptr() as usize != output_address {
+                output_address_changes = output_address_changes.saturating_add(1);
+            }
+            for sample in &self.output {
+                pcm_digest ^= u64::from(sample.to_bits());
+                pcm_digest = pcm_digest.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
         let snapshot = audit::snapshot();
+        assert_eq!(editor.edits, CALLS.div_ceil(LIVE_EDIT_PERIOD));
         assert_eq!(render_errors, 0);
         assert_eq!(output_address_changes, 0);
         assert_eq!(snapshot.total(), 0);

@@ -153,3 +153,187 @@ Run every command from the repository root.
 - "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `ef5ac335c`)
+
+**What changed.** Tests and the audit only. No product code changed: no gate found a defect in
+#1257's live arm. Every change is inside the authorized paths.
+
+- `crates/capi/tests/resource_lifecycle.rs`: the gate 1 race, the gate 3 cap test, their C ABI
+  helpers (`submit_header`, `last_error_c`, `drain_events_c`, `snapshot_c`, `ConstantFeed`,
+  `fed_render_c`, `transaction`), and #1256 MINOR-1 (below). The capi epoch terms the double-live
+  oracle computed inline are now `HostHalf::capi_epoch_terms`, shared by both cap tests.
+- `tools/audit/src/capi.rs` (gate 2, D3): every 64th call first commits a live edit through
+  `miso_engine_v1_submit_command`, alternating a mute toggle on `eq0` and a pan move on `eq1`, and
+  dequeues the reliable lane until it is empty. The one `in_render_scope` around all 100,000 calls
+  is now one scope per render call, and the edits and dequeues run outside it. The record's shape
+  is unchanged. Only `pcm_digest` moved (`ff6cdcb96cdcdad5` -> `18e56b897a3abf17`), which CI checks
+  only for its form. The audit asserts that all 1,563 edits commit. With 16-record lanes, the 17th
+  mute toggle would be refused if a render did not drain the lane, so the drains really run inside
+  the audited scope.
+- `crates/capi/src/runtime/live_tests.rs` (gate 4): one test.
+- No new audit mode, command or test-file pattern, so the CI router lists and the workflows are
+  unchanged (lesson c). Nothing compiled into the browser module changed, so the worklet chain was
+  not run.
+
+**Lesson (d), and why the race does not call `render_while_producing`.** `bench_support` installs
+its own `#[global_allocator]`. `resource_lifecycle.rs` has its own counting allocator, and the
+gate's counts come from it, so the two cannot link into one test binary. capi also does not
+depend on `bench-support`, and its `Cargo.toml` is outside the authorized paths. So the race keeps
+this file's own pattern from `race_plan_swaps` and applies the lesson by hand:
+- the render thread never asserts. It records a refused block and stops;
+- every wait on the control thread has a 10 s deadline (`PROGRESS_DEADLINE`) and fails with a
+  message;
+- `StopOnDrop` stops the render thread however the control thread leaves the scope, so a failure
+  on either side ends the run instead of hanging the join.
+
+**New tests, each with its test value and the mutation runs that prove it.** For each run the
+defect was introduced, the test went red, and the defect was reverted.
+
+- `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` (gate 1, 20
+  runs). The race session follows D1: the nine-track fixture with an empty console, no inserts,
+  HPF/LPF off, zero delay, and a constant source of `[0.375, -0.21875]`. Each run makes 156 edits:
+  live fader, pan (smoothing 16-128) and mute edits cycling over the nine tracks, with distinct
+  values, and a `SetSourceContent` structural edit every eighth (D2). The control thread waits for
+  render progress every third edit, so several edits land in each render period. It feeds the
+  source, seeks under a new generation after every swap (it detects a swap by
+  `source.generation.stale`), and drains both event lanes after every call. Halfway through each
+  run, the render thread parks, as a paused audio session does. Meanwhile the control thread fills
+  `eq0`'s fader lane until the arm refuses with `control.live.backpressure`, commits a structural
+  edit, and submits a second one that is refused with `control.plan.backpressure`. Both are retried
+  under new request IDs once rendering resumes. Without the pause the render thread drains lanes
+  faster than a debug control thread fills them, and no retry ever ran: the first draft counted 0
+  of each.
+
+  Every `RESULT_BACKPRESSURE` must carry one of the two diagnostics. A retry is bounded by 256
+  rendered blocks after the edit's first refusal (as `WEDGE_BLOCKS` bounds `race_plan_swaps`). Any
+  other result, `INTERNAL` included, fails the run. The render thread's allocations and frees,
+  counted after `begin()` warms the statics, must be exactly 0 over all its render calls. After the
+  last edit, the plan renders `latency_samples` plus one quantum (every pan ramp is at most one
+  quantum), and its next block must be bit-identical to the matching block of a fresh C ABI plan
+  compiled from the final `SessionSnapshotGet` snapshot and fed the same constant source. That block
+  must also be non-zero on both lanes.
+
+  The last structural edit is edit 151, so the run ends with four live edits that no later rebuild
+  re-prepares. In the first draft the run ended with a structural edit, and mutation M1-a survived:
+  the final rebuild prepares from the committed model and so healed every lost live edit.
+
+  Counts over 20 runs, on each of three base runs: 3,080 live and 420 structural commits; 20 live
+  and 20-21 plan `RESULT_BACKPRESSURE`; 40-41 retries; 0 protocol event backpressure; 380-381 seeks
+  after swaps; 3,160-3,161 control calls that overlapped a render call; about 10,400 race blocks.
+  Each run takes about 7 s in debug.
+
+  *Test value:* red if a fader or matrix drain allocates or frees on the render thread, if a live
+  edit that races a swap reaches the retiring plan or is lost, if epoch synchronization returns
+  `INTERNAL` under live traffic, or if a `RESULT_BACKPRESSURE` carries another diagnostic or never
+  clears. Mutation runs:
+  - **M1-b**, a `Box` allocated per record in `drain_matrix_controls`: red, with
+    `Snapshot { allocations: 47, .. }` on the render thread. No other capi test catches it: the
+    full `cargo test -p capi` without this test was green with M1-b.
+  - **M1-a**, the live arm pushing to `self.providers` instead of the newest epoch: red in run 0,
+    where the final block was `[0.08013036, 0.31109753]` against `[0.014650766, 0.3247056]`. The
+    existing `a_live_edit_while_a_candidate_is_pending_reaches_the_candidate` also catches it.
+  - **M1-c**, `synchronize_plan_epochs` keeping only the atomic's and the pending rows (the current
+    provider's row dropped): red with
+    `edit 24: live edit: result 255 ... last error control.internal`. Three existing swap-window
+    tests in `runtime/tests.rs` also catch it.
+
+- `live_edits_are_admitted_at_their_exact_graph_and_capi_peaks_and_refused_one_byte_below`
+  (gate 3). The edit moves `eq0`'s left fader from `-6.0` to `-6.0123`, which grows the canonical
+  JSON (the test asserts the model grows). Each peak is derived from observations, never from the
+  arm:
+  - the C report of the current plan and, with a candidate pending, of the candidate (read after
+    the render that swaps it in);
+  - each compiled model's own estimate;
+  - the capi epoch terms from their owning crates' reports.
+
+  The three cases: graph, 292,807; capi, 397,315; graph with a `SetSourceContent` candidate
+  pending, 546,741. At each peak the edit commits at revision + 1. One byte below, it returns
+  `RESULT_COMPILE_REJECTED` with `graph.resource.limit\t$\n` or `capi.resource.limit\t$\n`. Its
+  `SessionSnapshotGet` snapshot and the header revision are unchanged, and the plan renders 4 blocks
+  bit-identical to a plan that never saw the edit. So no record reached a lane. The C ABI exposes no
+  room counter; it is a test-only hook inside the crate. As a positive control, the edit admitted at
+  the peak changes the rendered block. In the pending case, the test asserts that the structural
+  edit's own peak is below the live peak, so the structural edit is admitted one byte below.
+
+  The capi row with a pending candidate is not driven through the C ABI. For a candidate that keeps
+  the catalog, the live pending peak (candidate row + current `epoch_retained` + the
+  prepared-protocol term) equals the structural edit's own capi peak. One byte below would
+  therefore refuse the structural edit first. Its arithmetic is covered by #1257's
+  `the_live_admission_accepts_each_cap_and_refuses_one_byte_below`.
+
+  *Test value:* red if the live arm admits an edit whose peak is over the caller's cap, or refuses
+  one within it, on either row, or if a cap refusal leaves a record or a revision behind. Mutation
+  runs:
+  - **M3-e**, `live_admission` passing the current model as the prospective one: red (admitted one
+    byte below).
+  - **M3-f**, `live_admission` ignoring the pending candidate: red (pending case admitted one byte
+    below).
+  - **M3-d**, `>=` for `>` on the capi row: red (refused at the peak).
+
+  M3-e and M3-f are input errors that #1257's unit test cannot see. With both applied, the full
+  `cargo test -p capi` without this test was green.
+
+  During the attempt an apparent over-cap admission was traced to the test, not the arm: a
+  request ID lower than the snapshot's (902 after 1001) is `ReplayExpired` under `RESULT_OK`. The
+  test now uses increasing request IDs.
+
+- `a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_nothing` (gate 4,
+  `live_tests.rs`). It makes two live edits without dequeuing. A third edit, a fader and a pan on
+  two other tracks, returns `RESULT_OK` with protocol status `Backpressure`. The revision is
+  unchanged, no plan is prepared, and every strip queue's room (`live_rooms`, all epochs) is
+  unchanged. After a dequeue, the same edits under a new request ID commit live, taking one record
+  of room each.
+
+  *Test value:* red if a live push comes before the reliable-event capacity check, or that check
+  stops refusing a live transaction. Mutation run **M4**, the capacity check in
+  `ProtocolController` disabled (`if false && ...`): red, with `RESULT_INTERNAL` from the commit
+  predicate instead of the protocol refusal. The pinned `EVENT_FULL` vector
+  (`exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact`) also catches M4
+  for a rebuild edit. This test is the live-arm case, and the only one that checks that no lane
+  moved.
+
+- Gate 2, audit mutations. Each was run through the release `audit capi`:
+  - **G2-M1**, a `Box` per record in `drain_matrix_controls`: the audit aborts at the allocation
+    (exit 134). Control: the same mutation against the pre-#1258 audit (`HEAD`'s `capi.rs`) stays
+    green with total_violations 0, because that audit never submits an edit.
+  - **G2-M2**, the same in `drain_fader_controls`: aborts (exit 134).
+
+**Folded in: #1256 MINOR-1.** No exact resource oracle ran a session with submix strips or a route
+into a submix. `capi_retained_bytes_charge_every_byte_the_compile_retains` now also observes
+`two_track_routed_submix_session`: two tracks and three submix strips, with the first track routed
+through `bus0` to the main output. Its line reads: capi 149,142 observed; store 10,711 of 11,225;
+plan 89,452 of 174,270. Mutation runs:
+- **O3**, `prepared_capi_resources` counting `normalized_model().tracks` instead of `.strips()`:
+  red on the routed-submix case only (observed 149,142 against charged 148,722).
+- **M3**, `HostLiveLanes { routes: true, ..FADER_AND_MATRIX }` in the C ABI lane selection: red
+  on the routed-submix case only (150,085 against 149,142).
+
+The three earlier sessions stay green under both mutations, which is the gap the verifier found.
+
+**Gates, all run from the attempt's tree.**
+- `cargo test --locked -p capi`: lib 47 passed, `resource_lifecycle` 13 passed.
+- `bash scripts/check-capi-abi.sh && bash scripts/check-capi-abi.sh --self-test`: ok.
+- `cargo fmt --all -- --check`: ok.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: ok. The first
+  run flagged three `manual_is_multiple_of` and one unsafe block without a safety comment in the
+  new code; all four are fixed.
+- `for x in realtime workspace; do bash scripts/check-$x-policy.sh && bash scripts/test-$x-policy.sh || exit 1; done`:
+  ok.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`: ok.
+- `./target/release/audit capi`: one record with every forbidden counter 0. The CI step "Validate
+  Issue-544 runtime audit records", extracted from `qualification.yml` and run on that record,
+  passes.
+- `cargo test --locked --release -p audit -p bench -p console-workload`: ok.
+- `bash scripts/check-cross-targets.sh`: PASS, with the iOS `memset_pattern16` rows reported as the
+  expected failures (#1018). No product code moved (lesson b).
+- AArch64 (`bash scripts/run-aarch64-tests.sh release`, which runs `audit capi` on arm64, and
+  `debug`) is CI-only and was not run locally.
+
+**Housekeeping.** The disk was full when the attempt started: 0 MB free, and the tool's own
+temporary output failed with ENOSPC. 12.9 GB of older duplicate test executables in
+`target/debug/deps` were deleted (the newest build of each test binary was kept), all in this
+worktree's own target directory and while no cargo process was using it. Cargo relinks a deleted
+binary on demand.
