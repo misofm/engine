@@ -245,3 +245,40 @@ this: the C ABI in slice 4, the browser in B2.
 - **ARTIFACT CHANGED**: the shipped module is
   `feeb20c3da85e7eef1199edff06f979f5ff0c00914bf981f1e7b0911765a1d47` (2869086 B). Following
   `docs/RELEASE.md` ("Between releases"), the pin is not re-pinned.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`2a6f2c10c`) | `1272-attempt1.md` | PASS | D1-D6 hold, gap-free at both widths, swap block `(0, 0, 0)`; 4 MINOR (browser retains the inventory uncharged; carry-program graph charge, ring-config/declaration halves of D3, carried overhead cap and largest-allocation fold untested), 6 NIT. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`; new tests in
+`crates/host-core/tests/successor_swap.rs`, each red under its mutation and green after the
+revert):
+- MINOR 1: `hosts/host-web/src/lib.rs` adds `engine.inventory_retained_bytes` to the bridge's
+  `ready_metadata`, so `bridge_retained_bytes`, and through it `exact_retained_bytes` and the boot
+  budget, charge the inventory `PreparedHost` keeps; the `exact_retained_bytes` rustdoc names it.
+  No new test: no host-web test measures live heap against the exact sum (capi's allocator oracle
+  covers the row's value). The browser module's bytes change (see #1269 "Phase 1 status").
+- MINOR 2: `the_carry_program_is_charged_to_the_graph_cap` (the successor's smallest admitting
+  graph cap equals a fresh plan's plus `carry_program_retained_bytes`). V1 (program bytes left
+  out of the admission sum): red.
+- MINOR 3: `another_ring_size_or_changed_content_carries_no_ring` (half-size `source_ring_frames`;
+  a content-only change; the unchanged control case carries). V3 (`row.ring == ring` dropped):
+  red; V5 (declaration compared on frames and channels only): red.
+- MINOR 4: gate 4 (`a_successor_charges_allocated_and_carried_rings_to_the_source_cap`) also
+  refuses one byte below allocated plus carried overhead (V2, overhead cap counting allocated
+  rings only: red), and `the_largest_allocation_counts_a_carried_ring` uses rings 256 times
+  longer, so the ring is the largest allocation (65552 B against 14933 B without it). V4
+  (`.max(carried_largest_bytes)` dropped): red.
+- NIT 3: the gate-1 and #1276 program-byte assertions state the source move as
+  `size_of::<(u32, u32)>()` instead of the literal 8.
+- NIT 4: `crates/host-core/src/lib.rs`'s comment on `limiter_linked_session` no longer claims
+  `tests/` cannot reach a width seam.
+
+Stays open (no action): NIT 1 (path list; later briefs that add a `SourceControlError` variant
+list `tests/source_diagnostics.rs`), NIT 2 (a wrong predecessor goes unrecorded when nothing
+carries; becomes "any owner carries" in the slice-7+ briefs), NIT 5 and NIT 6 (accepted by the
+verdict).

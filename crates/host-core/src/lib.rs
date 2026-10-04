@@ -110,9 +110,9 @@ pub mod solo;
 pub mod source;
 pub mod spectrum;
 pub mod vca;
-// Issues #996 and #997: the true-peak limiter's linked-pair session test. A unit test rather than
-// a `tests/` file because it prepares at every bank width through the `#[cfg(test)]` backend seam
-// in `prepare`, which `tests/` cannot see.
+// Issues #996 and #997: the true-peak limiter's linked-pair session test. It predates the
+// `test-support` width seam (`test_only_prepare_host_runtime_with_live_controls_on`) that
+// `tests/` files now use, and stays a unit test on the `#[cfg(test)]` backend seam in `prepare`.
 #[cfg(test)]
 mod limiter_linked_session;
 

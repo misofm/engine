@@ -6520,8 +6520,9 @@ fn projected_retained_bytes(
 /// Exact aggregate retained bytes reported by the fully prepared engine plus the browser bridge.
 ///
 /// `source_total_bytes` owns the source-ring PCM charge plus source overhead. The graph row does
-/// not repeat it, and `bridge_retained_bytes` already includes the compiled model and the facade's
-/// control table/ID arena. These three disjoint rows are therefore the complete retained set.
+/// not repeat it, and `bridge_retained_bytes` already includes the compiled model, the facade's
+/// control table/ID arena and the prepared plan's state inventory. These three disjoint rows are
+/// therefore the complete retained set.
 fn exact_retained_bytes(report: &WebResourceReport) -> Result<u64, BootFailure> {
     report
         .bridge_retained_bytes
@@ -6684,9 +6685,13 @@ fn compile_ready(
     let id_arena = source_id_arena_bytes(engine.source_id_bytes as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     // Charged because the browser bridge retains them: the facade's control table and ID arena
-    // (`control_retained_bytes` is exactly those two) and the compiled session model.
-    let ready_metadata =
-        checked_sum_prepare([engine.control_retained_bytes, engine.session_model_bytes])?;
+    // (`control_retained_bytes` is exactly those two), the compiled session model, and the
+    // prepared plan's state inventory (issue #1272), which `PreparedHost` keeps for a successor.
+    let ready_metadata = checked_sum_prepare([
+        engine.control_retained_bytes,
+        engine.session_model_bytes,
+        engine.inventory_retained_bytes,
+    ])?;
     let mut bridge_metadata = report
         .bridge_metadata_bytes
         .checked_add(ready_metadata)

@@ -186,7 +186,8 @@ fn added_muted_track_keeps_playing(backend: Backend) {
     );
     assert_eq!(
         report.carry_program_retained_bytes,
-        8 + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
+        core::mem::size_of::<(u32, u32)>() as u64
+            + 2 * core::mem::size_of::<graph::GraphLaneMove>() as u64,
         "one (u32, u32) source move and the two unchanged input sections (#1276)"
     );
 
@@ -324,6 +325,146 @@ fn a_successor_charges_allocated_and_carried_rings_to_the_source_cap() {
         .expect_err("one byte below allocated plus carried");
     assert_eq!(refused.kind(), PrepareRejection::Resource);
     assert_eq!(refused.as_bytes(), b"host.source.resource.limit\t$\n");
+
+    // The overhead cap counts carried overhead too.
+    assert!(roomy.carried_source_overhead_bytes > 0);
+    let mut below = caps();
+    below.maximum_source_overhead_bytes =
+        roomy.source_overhead_bytes + roomy.carried_source_overhead_bytes - 1;
+    let refused = b
+        .prepare_successor(&predecessor.inventory, &a.model, &below, backend)
+        .expect_err("one byte below allocated plus carried overhead");
+    assert_eq!(refused.as_bytes(), b"host.source.resource.limit\t$\n");
+}
+
+/// #1272 follow-up MINOR 3. Red if the carry rule stops comparing the ring configuration (the
+/// carried bytes would be charged at the successor's ring size, not the ring carried) or compares
+/// only part of the declaration (a content change would carry the old stem's ring).
+#[test]
+fn another_ring_size_or_changed_content_carries_no_ring() {
+    let a = Session::compile(session_a());
+    let mut b_model = session_a();
+    add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let predecessor = a.prepare(backend);
+    let same = b
+        .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
+        .expect("successor");
+    assert!(
+        same.report.carried_source_total_bytes > 0,
+        "the control case carries"
+    );
+    let mut smaller = caps();
+    smaller.source_ring_frames /= 2;
+    let resized = b
+        .prepare_successor(&predecessor.inventory, &a.model, &smaller, backend)
+        .expect("successor with smaller rings");
+    assert_eq!(resized.report.carried_source_total_bytes, 0);
+
+    let mut c_model = session_a();
+    let template = c_model.sources[0].clone();
+    c_model.sources[0] = Source {
+        content: template.content.replace("7e94", "0b0b"),
+        ..template
+    };
+    assert_ne!(c_model.sources[0].content, a.model.sources[0].content);
+    let c = Session::compile(c_model);
+    let changed = c
+        .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
+        .expect("successor with changed content");
+    assert_eq!(changed.report.carried_source_total_bytes, 0);
+}
+
+/// #1272 follow-up MINOR 4. Red if the largest-allocation fold leaves out a carried ring: with
+/// rings long enough to be the session's largest allocation, a successor that carries its only
+/// ring would report less than a fresh plan, and the named-allocation cap would not see it.
+#[test]
+fn the_largest_allocation_counts_a_carried_ring() {
+    let mut long_rings = caps();
+    long_rings.source_ring_frames *= 256;
+    let a = Session::compile(session_a());
+    let mut b_model = session_a();
+    add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let prepare = |session: &Session| {
+        host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &session.compiled,
+            &long_rings,
+            &host_core::HostLiveControlRequest::default(),
+            backend,
+        )
+        .unwrap_or_else(|failure| panic!("prepare: {failure:?}"))
+        .0
+    };
+    let predecessor = prepare(&a);
+    let fresh = prepare(&b).report;
+    let successor = b
+        .prepare_successor(&predecessor.inventory, &a.model, &long_rings, backend)
+        .expect("successor")
+        .report;
+    assert!(successor.carried_source_total_bytes > 0);
+    assert_eq!(
+        successor.largest_engine_allocation_bytes,
+        fresh.largest_engine_allocation_bytes
+    );
+}
+
+/// #1272 follow-up MINOR 2. Red if the carry program's bytes are left out of the graph cap: the
+/// successor's smallest admitting `maximum_graph_session_plus_plan_bytes` would equal a fresh
+/// plan's although the successor retains the program too.
+#[test]
+fn the_carry_program_is_charged_to_the_graph_cap() {
+    fn smallest_admitting(admits: impl Fn(u64) -> bool) -> u64 {
+        let (mut low, mut high) = (0_u64, caps().maximum_graph_session_plus_plan_bytes);
+        assert!(admits(high));
+        while low + 1 < high {
+            let middle = low + (high - low) / 2;
+            if admits(middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        high
+    }
+    let a = Session::compile(session_a());
+    let mut b_model = session_a();
+    add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let predecessor = a.prepare(backend);
+    let program = b
+        .prepare_successor(&predecessor.inventory, &a.model, &caps(), backend)
+        .expect("successor")
+        .report
+        .carry_program_retained_bytes;
+    assert!(program > 0);
+    let with_graph_cap = |cap| {
+        let mut caps = caps();
+        caps.maximum_graph_session_plus_plan_bytes = cap;
+        caps
+    };
+    let fresh = smallest_admitting(|cap| {
+        host_core::test_only_prepare_host_runtime_with_live_controls_on(
+            &b.compiled,
+            &with_graph_cap(cap),
+            &host_core::HostLiveControlRequest::default(),
+            backend,
+        )
+        .is_ok()
+    });
+    let successor = smallest_admitting(|cap| {
+        b.prepare_successor(
+            &predecessor.inventory,
+            &a.model,
+            &with_graph_cap(cap),
+            backend,
+        )
+        .is_ok()
+    });
+    assert_eq!(successor, fresh + program);
 }
 
 /// Gate 5. After the warm-up block, every block of the swapped run -- the swap block, which runs
@@ -1257,7 +1398,8 @@ fn a_changed_section_starts_at_rest(name: &str, edit: fn(&mut session::DualMonoB
         let run = swapped_run(&a, &b, &[&feed], &[&feed], backend, Successor::Carry);
         assert_eq!(run.blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
         assert_eq!(
-            run.successor.carry_program_retained_bytes, 8,
+            run.successor.carry_program_retained_bytes,
+            core::mem::size_of::<(u32, u32)>() as u64,
             "{name}, {backend:?}: the source moves, the changed section does not"
         );
         for block in 0..BLOCKS {
