@@ -653,6 +653,7 @@ fn apply_automation<L: Lane>(
 // State payload, layout version 1
 // ---------------------------------------------------------------------------------------------
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
 /// Reads one lane of one channel into the 104 payload words of layout 1.
 fn write_lane_words<L: Lane>(channel: &Channel<L>, lane: usize, words: &mut [u32]) {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
@@ -714,10 +715,15 @@ struct LaneRestore {
 ///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
 /// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
 /// * `remaining` must not exceed the smoothing window;
-/// * the interpolation and decimation histories (`X`, `e`) must be finite and zero or normal.
-///   The kernel flushes both before they enter a history (D7), and `lane::flush` zeroes every
-///   magnitude below `FLUSH_EPS` (`1e-20`), so the kernel writes only zeros and magnitudes of at
-///   least `1e-20`; the check is the looser zero-or-normal, which refuses every subnormal;
+/// * the interpolation and decimation histories (`X`, `e`) must be zero or normal. The kernel
+///   flushes both before they enter a history (D7), and `lane::flush` zeroes every magnitude
+///   below `FLUSH_EPS` (`1e-20`), so the kernel writes only zeros and magnitudes of at least
+///   `1e-20`; the check is the looser zero-or-normal, which refuses every subnormal;
+/// * except that `X` may also hold an infinity ([`x_history_word_valid`]): `X` is
+///   `2 * drive * x`, which overflows for a finite input above about `2.7e36` at `+36 dB`. The
+///   cubic clamps the infinity to `±2/3`, so the output stays finite and D7 never clears it, and
+///   the effect holds it for 31 samples (#1278, #1071 attempt 1 MINOR-2). A NaN is never
+///   accepted, in any history;
 /// * the dry history must be finite: it holds the input unflushed by design, so the identity
 ///   path can reproduce any input sample, subnormals included.
 ///
@@ -755,14 +761,18 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         e: [0.0; E_HISTORY_AGES],
         dry: [0.0; DRY_HISTORY_AGES],
     };
-    for (slot, offset, flushed) in [
-        (&mut restore.x[..], X_HISTORY_WORD, true),
-        (&mut restore.e[..], E_HISTORY_WORD, true),
-        (&mut restore.dry[..], DRY_HISTORY_WORD, false),
-    ] {
+    let rules: [fn(f32) -> bool; 3] = [x_history_word_valid, normal_or_zero, f32::is_finite];
+    for ((slot, offset), valid) in [
+        (&mut restore.x[..], X_HISTORY_WORD),
+        (&mut restore.e[..], E_HISTORY_WORD),
+        (&mut restore.dry[..], DRY_HISTORY_WORD),
+    ]
+    .into_iter()
+    .zip(rules)
+    {
         for (age, value) in slot.iter_mut().enumerate() {
             let word = f32::from_bits(words[offset + age]);
-            if !word.is_finite() || (flushed && !normal_or_zero(word)) {
+            if !valid(word) {
                 return Err(StatePayloadError {
                     code: STATE_HISTORY_CODE,
                 });
@@ -771,6 +781,12 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         }
     }
     Ok(restore)
+}
+
+/// `true` if `value` is a word the interpolator input history `X` can hold: a zero, a normal, or
+/// the infinity a finite input overflows `2 * drive * x` to.
+fn x_history_word_valid(value: f32) -> bool {
+    normal_or_zero(value) || value.is_infinite()
 }
 
 /// `true` if `value` is finite and either a zero or a normal. Signed zeros are accepted.
@@ -873,6 +889,7 @@ fn restore_sections<L: Lane>(
 fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
+// REALTIME_POLICY_END
 
 // ---------------------------------------------------------------------------------------------
 // Prepared instances
@@ -1147,6 +1164,7 @@ impl PreparedNativeEffect for PreparedSoftClip {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -1167,6 +1185,7 @@ impl PreparedNativeEffect for PreparedSoftClip {
             input,
         )
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
@@ -1222,6 +1241,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1246,6 +1266,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             input,
         )
     }
+    // REALTIME_POLICY_END
 }
 
 fn bank_track_index<L: Lane>(track_index: u32) -> Result<usize, StatePayloadError> {

@@ -240,3 +240,20 @@ conformance::randomized_effect_test!(
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
     conformance::assert_d7_reports(&soft_clip::SoftClipFactory);
 }
+
+/// #1278: the plan-swap carry restores every lane it carries, so a restore must accept every state
+/// the effect itself reaches -- including a smoothed ramp to a domain edge whose iterated
+/// `current + step` has rounded past the edge, at every launch rate. Red on a restore that holds a
+/// moving ramp's `current` (or a subnormal step) to the strict domain.
+///
+/// The shared probe and [`a_restored_near_edge_ramp_continues_bit_for_bit`] overlap without either
+/// superseding the other. The probe is the harness-wide contract every banked effect runs: seedless,
+/// at every quality row, restoring after every sample of the ramp, so it reaches all six edges at
+/// every remaining count by construction, where the seeded test draws its snapshot points. But it
+/// only asserts that the restore is accepted. The seeded test also renders the
+/// restored lane, scalar and in a bank lane, and compares it bit for bit, so a restore that accepts
+/// an overshooting current and then clamps it into range is green here and red there.
+#[test]
+fn the_effects_own_edge_ramp_snapshots_restore() {
+    conformance::EffectDifferential::assert_edge_ramps_restore(&soft_clip::SoftClipFactory);
+}

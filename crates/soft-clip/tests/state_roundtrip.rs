@@ -192,7 +192,7 @@ fn restores_and_continues(
     let mut destination = prepare(&values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]));
     destination
         .restore_state_payload(1, as_input(payload))
-        .expect("the effect's own mid-ramp snapshot restores");
+        .expect("the effect's own snapshot restores");
     assert_eq!(&support::snapshot(destination.as_ref()), payload);
 
     let mut expected_left: Vec<f32> = (0..128).map(|index| signal(index + frames, 0)).collect();
@@ -336,6 +336,32 @@ fn a_drive_overshoot_retargeted_inward_restores_and_continues() {
         "the current is still past the top: {current:e} against {top:e}"
     );
     restores_and_continues(source, &payload, 64);
+}
+
+/// A finite input of `1e37` at `+36 dB` overflows `2 * drive * x` to an infinity in the `X`
+/// history, the cubic clamps it, and the output stays finite, so D7 never clears it: the effect
+/// holds that infinity for 31 samples, and its own snapshot must restore (#1278; #1071 attempt 1
+/// MINOR-2).
+#[test]
+fn a_snapshot_holding_an_overflowed_x_word_restores_and_continues_bit_for_bit() {
+    let values = values_from([(36.0, 36.0), (-6.0, 3.0), (0.5, 1.0)]);
+    let mut source = prepare(&values);
+    let mut left: Vec<f32> = (0..128).map(|index| signal(index, 0)).collect();
+    let mut right: Vec<f32> = (0..128).map(|index| signal(index, 1)).collect();
+    left[120] = 1.0e37;
+    right[118] = -1.0e37;
+    let report = process(source.as_mut(), &mut left, &mut right, 0, &[]);
+    assert_eq!(report.nonfinite_left_blocks, 0, "D7 did not fire");
+    assert_eq!(report.nonfinite_right_blocks, 0, "D7 did not fire");
+    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
+    let payload = support::snapshot(source.as_ref());
+    for (section, name) in [(&payload.1, "left"), (&payload.2, "right")] {
+        let infinite = (12..43)
+            .filter(|&index| support::word_f32(section, index).is_infinite())
+            .count();
+        assert_eq!(infinite, 1, "{name}: one infinity in the X history");
+    }
+    restores_and_continues(source, &payload, 128);
 }
 
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
@@ -502,6 +528,9 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(0, 1, "effect.state.parameter");
     bad(73, f32::NAN.to_bits(), "effect.state.history");
     bad(103, f32::INFINITY.to_bits(), "effect.state.history");
+    // `X` may hold an infinity (an overflowed `2 * drive * x`), but the shaped `e` never does:
+    // the cubic is bounded.
+    bad(43, f32::INFINITY.to_bits(), "effect.state.history");
 
     // The overshoot allowance is for in-flight ramps only (#1071 attempt 2 review, MINOR-2). An
     // output at rest at its +24 dB top with its current one ulp above the top: a ramp at rest

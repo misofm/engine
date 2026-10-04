@@ -223,3 +223,82 @@ of scope, still refuses).
 **Open.** Soft-clip's D3 markers and the edge probe in soft-clip's tests (after #1071's review).
 The delay refuses its own edge-ramp snapshots (feedback, mix, cross feedback). Slice 12 moves the
 delay rather than restoring it, but a successor should fix it.
+
+### Attempt 1 amendment: soft-clip completion (before attempt 1's review)
+
+#1071 passed review (attempt 2, `983ac85bd`; its review minors closed in the commit before this
+one), so `crates/soft-clip/` is free and attempt 1's soft-clip items are completed here, as part of
+attempt 1.
+
+- **D3:** `REALTIME_POLICY` regions around soft-clip's whole payload codec (`write_lane_words`
+  through `runtime_state_error`: snapshot sections, decode, apply, restore sections) and around
+  the four payload methods (scalar and bank). `check-realtime-policy.sh` now reports 72 regions
+  in 23 files; its floors (41, 12) are unchanged (the script is outside this slice's paths).
+  The pure validation helpers the decode calls (`converted_value_valid`, `ramp_current_valid`,
+  `ramp_step_valid`) sit in the parameter-conversion section, which `prepare` also uses, and are
+  unmarked, as the other effects' helpers are.
+- **Edge probe:** `crates/soft-clip/tests/randomized.rs` calls
+  `EffectDifferential::assert_edge_ramps_restore`, as the other five crates do. It is kept beside
+  #1071's seeded `a_restored_near_edge_ramp_continues_bit_for_bit`; neither supersedes the other.
+  The probe is the harness-wide, seedless contract: every quality row, a restore after every
+  sample, and it reaches all six soft-clip edges (drive, output and mix, bottom and top: 24
+  violations at four rates under the strict-current mutation). It only asserts acceptance. The
+  seeded test also renders the restored lane (scalar and a native bank lane) and compares it bit
+  for bit. Under the strict-current, subnormal-mix-step and two off-by-one rest-guard mutations
+  (`remaining <= 1`, `<= 2`) both turn red; under "accept, then clamp the current into range"
+  (`MK`) the probe stays green and the seeded test is red (and so are five deterministic
+  `state_roundtrip` cases). No mutation was found that only the probe catches for soft-clip; it
+  is kept as the uniform contract every banked effect runs, whose position coverage is by
+  construction rather than drawn.
+- **Allocation-free proof:** soft-clip's randomized differential (`known: &[]`, `banks_natively:
+  true`) runs every payload call inside the audited render scope (attempt 1's harness change).
+  Mutations: a `vec![0; 4]` in `restore_sections` turns it red (`restore_state_payload: forbidden
+  operations inside a render-thread call: allocations: 1, deallocations: 1`) and
+  `check-realtime-policy.sh` red (marked forbidden body); a `Box::new(0)` in
+  `snapshot_track_state_payload` turns it red (`snapshot_track_state_payload: ... allocations: 1`).
+  Green after each revert. The differential runs the native bank width (eight lanes on this AVX2
+  host); the four-lane path runs in CI's NEON and Wasm jobs.
+- **#1071 attempt-1 MINOR-2 (inf in `X` with finite output): partially fixed, with no rendered bit
+  changed.** `X` is `flush(2 * drive * x)`, which overflows to `±inf` for a finite input above
+  about `2.7e36` at `+36 dB`. One such word in the interpolation window gives `±inf`, the cubic
+  clamps it to `±2/3`, and the output stays finite, so D7 never fires and the effect holds the
+  infinity for 31 samples; its own snapshot was refused (`effect.state.history`). The restore now
+  accepts `±inf` in `X` (`x_history_word_valid`); `NaN` stays refused in every history and `inf`
+  stays refused in `e` (the cubic is bounded) and in the dry history. Only the control-plane
+  decode changed: the kernel, the snapshot and every rendered bit are untouched (console digests
+  and conformance fixtures unchanged; see the gates). New test
+  `a_snapshot_holding_an_overflowed_x_word_restores_and_continues_bit_for_bit` (`1e37` left and
+  `-1e37` right at `+36 dB`, mix 0.5 and 1.0, D7 not fired, output finite, one infinity per
+  channel in `X`; restore, snapshot identity, 128 samples bit for bit) and rejection row
+  `bad(43, inf)` (`e` age 0).
+  Mutations: `X` back to zero-or-normal: the new test red (`effect.state.history`); `X` accepting
+  any non-finite: `bad(12, NaN)` red; `e` accepting infinities: `bad(43, inf)` red.
+- **Open successor item (soft-clip non-finite history, not fixed here).** Two cases still leave
+  the effect holding a word its own restore refuses, so the carry would drop that lane to rest:
+  1. *Identity path, two overflows.* With mix `0` and output `0 dB` (`identity`, the output is
+     the dry path), two inputs of `±1e37` within the interpolation window at `+36 dB` (e.g. at
+     samples 118 and 120 of a 128-sample block) put two infinities in `X` whose tap-weighted sum is `inf - inf`, so
+     the interpolation is `NaN`; `e` then holds `NaN` (`0xffc00000` on x86-64) for 30 samples
+     while the identity output stays finite. Off the identity path the same input makes the
+     output `NaN` and D7 resets the lane, so nothing is held.
+  2. *Non-finite input.* An `inf` or `NaN` input sample in a block's last 31 samples reaches the
+     output only after the 31-sample dry delay, so the dry history (and `X`) hold it at the block
+     boundary and the snapshot is refused until D7 fires a block later.
+  Fixing either needs a decision this slice cannot make: accept `NaN` in `e` and non-finite dry
+  words (weakening #1071's hostile-word gate, and the NaN payload bits are platform-dependent), or
+  have D7 also check the histories at the block boundary (a render-path change that moves rendered
+  bits for these inputs). Reproducer: prepare at drive `+36 dB`, output `0 dB`, mix `0`; render
+  128 samples of a sine at `0.5` with `1e37` at 118 and `-1e37` at 120 (case 1) or `inf` at 120
+  (case 2); `restore_state_payload` of the snapshot returns `effect.state.history`.
+
+- **Gates (this amendment, on the committed tree):** fmt, workspace clippy `-D warnings`, rustdoc
+  `-D warnings`, workspace policy check/test, realtime policy check/test (72 regions, 23 files),
+  `check-capi-abi.sh`, `audit capi` (0 allocations, 0 deallocations, 0 locks, 0 syscalls),
+  `cargo test --locked -p soft-clip -p conformance -p effect-compiler`, `cargo test --locked
+  --release -p console-workload` (console digests unchanged), `conformance_fixtures -- --check`
+  (unchanged), `check-cross-targets.sh` (PASS; only the #1018 iOS rows, soft-clip
+  `memset_pattern16` 22, at its ceiling): all pass. Worklet chain (build `--named-twin`,
+  `check-web-audioworklet.sh --without-metadata-regeneration`, expected resources, test): pass.
+  **ARTIFACT CHANGED**: the shipped module is now `0f508f8ca5b3849d...` (attempt 1 built
+  `5aae9805...`), because soft-clip's restore decode, which is compiled into it, changed. Not
+  re-pinned (`docs/RELEASE.md`).
