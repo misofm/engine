@@ -4,8 +4,11 @@ Phase 1 of *Swap a rebuilt plan without an audio gap* (#1269,
 `.github/ISSUE_SPECS/1269-swap-a-rebuilt-plan-without-an-audio-gap.md`), built on the batch branch
 `codex/seamless-swap` from `41517fc35`. This folder keeps each slice's adversarial verdicts as the
 verifier wrote them; the verifiers' scratch logs and exports are not kept. Each slice's evidence
-and decision record is its spec's Attempt record. Commits are listed from
-`git log --oneline 41517fc35..` on the batch branch; merge commits are left out.
+and decision record is its spec's Attempt record; the slices closed with PR #1299, so their specs
+left `.github/ISSUE_SPECS/` and stand at
+[`d2fe0555a`](https://github.com/misofm/engine/tree/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS).
+Commits are listed from `git log --oneline 41517fc35..` on the batch branch; merge commits are left
+out.
 
 | Issue | Slice | Commit(s) | Attempts | Verdict | Verdict files |
 |---|---|---|---|---|---|

@@ -21,8 +21,10 @@ so cargo never compiles them; the committed follow-up tests were shaped from the
 | #1261 | live input trim and polarity | none | 0 | skipped: waits for owner Q4 | none |
 | #1262 | live input HPF and LPF | none | 0 | blocked: depends only on #1261 | none |
 
-Each slice spec's "Attempt record" in `.github/ISSUE_SPECS/` holds the evidence, the mutation runs,
-the verdict line and the follow-ups applied.
+Each slice spec's "Attempt record" holds the evidence, the mutation runs, the verdict line and the
+follow-ups applied. The slices closed with PR #1298, so their specs left `.github/ISSUE_SPECS/`; read
+them where they last stood, at
+[`d2fe0555a`](https://github.com/misofm/engine/tree/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS).
 
 ## Open owner questions
 

@@ -12,8 +12,8 @@ A closed issue's spec leaves `.github/ISSUE_SPECS/` at the batch after it closes
 #1197 and #1198 (closed by PR #1230) therefore link the spec at `5abde384`, the rows of
 #1199-#1205 (closed by PR #1231) link it at `b6b1bdf4`, the rows of #1206-#1214 (closed by
 PR #1233) link it at `cfa086d4`, the rows of #1215-#1224 (closed by PR #1238) link it at
-`6f1788f3`, and the rows of #1240-#1246 (closed by PR #1249) link it at `1cb677a7`, where each
-last stood.
+`6f1788f3`, the rows of #1240-#1246 (closed by PR #1249) link it at `1cb677a7`, and the rows of
+#1227-#1229 (closed by PR #1252) link it at `d2fe0555`, where each last stood.
 
 The umbrella's app-facing documents -- `APP-SDK.md`, the session migration script and, later,
 `APP-LIVE.md` -- live in [`docs/handoffs/submix-strips-and-sends/`](../submix-strips-and-sends/),
@@ -53,9 +53,9 @@ the verdicts (`verdicts/`).
 | 26 | #1224 | Let a send follow its source strip's mute live in the browser | [`1224-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md`](https://github.com/misofm/engine/blob/6f1788f3a206aae1d4ac05af96560deb911fe6d4/.github/ISSUE_SPECS/1224-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md) (retired, closed) | `26-let-a-send-follow-its-source-strips-mute-live-in-the-browser.md` |
 | 27 | #1225 | Deliver value-only send and submix-strip edits to the running C ABI plan | `.github/ISSUE_SPECS/1225-deliver-value-only-send-and-submix-strip-edits-to-the-running-c-abi-plan.md` | `27-deliver-value-only-send-and-submix-strip-edits-to-the-running-c-abi-plan.md` |
 | 28 | #1226 | Let C ABI sends follow their source strip's mute live | `.github/ISSUE_SPECS/1226-let-c-abi-sends-follow-their-source-strips-mute-live.md` | `28-let-c-abi-sends-follow-their-source-strips-mute-live.md` |
-| BM1 | #1227 | Add a bus-and-send row to the native console benchmark | `.github/ISSUE_SPECS/1227-add-a-bus-and-send-row-to-the-native-console-benchmark.md` | `BM1-add-a-bus-and-send-row-to-the-native-console-benchmark.md` |
-| BM2 | #1228 | Add the bus-and-send session to the browser mixing benchmark | `.github/ISSUE_SPECS/1228-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md` | `BM2-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md` |
-| BM3 | #1229 | Record the bus-and-send baseline and its route-work profile | `.github/ISSUE_SPECS/1229-record-the-bus-and-send-baseline-and-its-route-work-profile.md` | `BM3-record-the-bus-and-send-baseline-and-its-route-work-profile.md` |
+| BM1 | #1227 | Add a bus-and-send row to the native console benchmark | [`1227-add-a-bus-and-send-row-to-the-native-console-benchmark.md`](https://github.com/misofm/engine/blob/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS/1227-add-a-bus-and-send-row-to-the-native-console-benchmark.md) (retired, closed) | `BM1-add-a-bus-and-send-row-to-the-native-console-benchmark.md` |
+| BM2 | #1228 | Add the bus-and-send session to the browser mixing benchmark | [`1228-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md`](https://github.com/misofm/engine/blob/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS/1228-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md) (retired, closed) | `BM2-add-the-bus-and-send-session-to-the-browser-mixing-benchmark.md` |
+| BM3 | #1229 | Record the bus-and-send baseline and its route-work profile | [`1229-record-the-bus-and-send-baseline-and-its-route-work-profile.md`](https://github.com/misofm/engine/blob/d2fe0555a95cb531ef5b62bf44354301cfc09b4f/.github/ISSUE_SPECS/1229-record-the-bus-and-send-baseline-and-its-route-work-profile.md) (retired, closed) | `BM3-record-the-bus-and-send-baseline-and-its-route-work-profile.md` |
 
 BM1-BM3 (#1227-#1229) are standalone successors, not children of #1196. Their specs were re-verified
 against `1cb677a7` (K1-K3 and the VCA batch merged) on 2026-10-03.
