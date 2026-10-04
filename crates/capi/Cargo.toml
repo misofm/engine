@@ -23,6 +23,7 @@ session.workspace = true
 source.workspace = true
 
 [dev-dependencies]
+bench-support.workspace = true
 graph.workspace = true
 
 [lints]

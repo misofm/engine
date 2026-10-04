@@ -218,7 +218,42 @@ unchanged.
 | A1 audit applies no transaction | `audit capi` exits nonzero (carry counts `(0, 0)`) |
 | A2 (with M1) | `audit capi` exits nonzero (post-commit submit refused) |
 
-**Deviation.** The race tests keep their own `std::thread::scope` driver rather than
-`bench_support::producer::render_while_producing`: capi has no `bench-support` dev-dependency and
-`crates/capi/Cargo.toml` is outside the authorized paths. The render thread now holds its own
-`StopOnDrop`, so a panic on either side stops the other and the scope cannot hang.
+**Amendment (coordinator, after attempt 1's report).** Authorized paths gained
+`crates/capi/Cargo.toml` (a `bench-support` dev-dependency only), `Cargo.lock`, the new
+`crates/capi/tests/plan_swap_race.rs`, and one allowlist alternative in
+`scripts/check-realtime-policy.sh`. `race_plan_swaps` and its two tests move from
+`resource_lifecycle.rs` to `plan_swap_race.rs`. They cannot stay where they were:
+`bench_support::alloc` installs a `#[global_allocator]`, and naming any `bench_support` item from
+`resource_lifecycle.rs` fails to link next to that file's own `LifecycleAllocator` ("the
+`#[global_allocator]` in this crate conflicts with global allocator in: bench_support"). In the
+new file:
+
+- `render_while_producing` drives the control side. Its producer state is `&mut Control`, one
+  `Control::step` per iteration.
+- Each block waits until its own PCM is queued (`next_frame >= (rendered + 1) * 128`), or until
+  the race is over.
+- Allocation is checked with `bench_support::alloc`'s thread-scoped counters around every render
+  call. `assert_installed()` runs first and the JSON statics are warmed before that.
+- The reader threads keep an outer `std::thread::scope` with a `StopOnDrop` guard.
+- The block bound is `swaps * (WEDGE_BLOCKS + 2)`. Blocks after the last admission render
+  nothing.
+
+The dead `track_command`, `last_error_c`, `dequeue_c` and `StopOnDrop` were removed from
+`resource_lifecycle.rs`. `cargo tree -e normal,build -p capi` contains no `bench-support`.
+
+The added mutations all go red, none hangs, and each run sat under a 300 s timeout:
+
+| Mutation | Result |
+|---|---|
+| P1: render-side panic at block 5 | red in 0.06 s, both tests, including the two-reader variant |
+| P2: producer-side panic after 3 admissions | red in 0.07 s, through the poisoned lock |
+| P3: producer stops feeding | red after `QUEUED_DEADLINE` (10 s) |
+| P4: render-side allocation | red |
+| M1, M2, M3 | still red in `plan_swap_race`, on "a control call lost the race" |
+
+The race file passed eight repeated runs. Gates re-run green:
+
+- `cargo test --locked -p capi` (38 + 2 + 9)
+- fmt; clippy (workspace, all targets, all features)
+- the workspace and realtime policies and their mutation tests
+- `check-cross-targets.sh`; `check-capi-abi.sh`
