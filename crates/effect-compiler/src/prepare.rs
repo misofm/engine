@@ -385,104 +385,13 @@ fn prepare_with_console_eligibility(
                     });
                     continue;
                 }
-                let mut initial = Vec::new();
-                let mut invalid = false;
-                for (index, parameter) in descriptor.parameters.iter().enumerate() {
-                    let mut values = [None; 3];
-                    let mut duplicate = false;
-                    let mut unit_mismatch = false;
-                    for item in effect
-                        .params
-                        .iter()
-                        .filter(|item| item.parameter_id == parameter.id.0)
-                    {
-                        unit_mismatch |= !same_unit(item.unit, parameter.unit);
-                        let channel = match item.channel {
-                            SessionChannel::Left => 0,
-                            SessionChannel::Right => 1,
-                            SessionChannel::Both => 2,
-                        };
-                        duplicate |= values[channel].replace(item.value).is_some();
+                let initial = match resolve_initial_values(descriptor, &effect.params) {
+                    Ok(initial) => initial,
+                    Err(code) => {
+                        diagnostics.push(EffectDiagnostic { code, path });
+                        continue;
                     }
-                    if unit_mismatch {
-                        diagnostics.push(EffectDiagnostic {
-                            code: "effect.parameter.unit_mismatch",
-                            path: path.clone(),
-                        });
-                        invalid = true;
-                        break;
-                    }
-                    let [left, right, both] = values;
-                    match parameter.channel_policy {
-                        ParameterChannelPolicy::Shared => {
-                            if duplicate || left.is_some() || right.is_some() {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.parameter.channel",
-                                    path: path.clone(),
-                                });
-                                invalid = true;
-                                break;
-                            }
-                            initial.push(InitialParameterValue {
-                                parameter_index: index as u32,
-                                channel: ParameterChannel::Both,
-                                value: effect_contract::normalize_zero(
-                                    both.unwrap_or(parameter.default_value),
-                                ),
-                            });
-                        }
-                        ParameterChannelPolicy::PerLane => {
-                            if duplicate || (both.is_some() && (left.is_some() || right.is_some()))
-                            {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.parameter.duplicate_channel",
-                                    path: path.clone(),
-                                });
-                                invalid = true;
-                                break;
-                            }
-                            for (channel, requested) in [
-                                (ParameterChannel::Left, left),
-                                (ParameterChannel::Right, right),
-                            ] {
-                                initial.push(InitialParameterValue {
-                                    parameter_index: index as u32,
-                                    channel,
-                                    value: effect_contract::normalize_zero(
-                                        requested.or(both).unwrap_or(parameter.default_value),
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-                if invalid {
-                    continue;
-                }
-                if initial.iter().any(|item| {
-                    !effect_contract::parameter_value_valid(
-                        &descriptor.parameters[item.parameter_index as usize],
-                        item.value,
-                    )
-                }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.parameter.domain",
-                        path,
-                    });
-                    continue;
-                }
-                if effect.params.iter().any(|item| {
-                    !descriptor
-                        .parameters
-                        .iter()
-                        .any(|parameter| parameter.id.0 == item.parameter_id)
-                }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.parameter.unknown",
-                        path,
-                    });
-                    continue;
-                }
+                };
                 let declared_sidechain = descriptor
                     .ports
                     .iter()
@@ -1672,6 +1581,99 @@ fn declared_live_addresses(
         }
     }
     declared
+}
+
+/// Resolve one effect instance's session `params` into the initial values it is prepared with
+/// (issue #1264 D1): the one value authority that preparation and the live classifier share.
+///
+/// In order, for each declared parameter: a `params` entry whose unit is not the descriptor's is
+/// `effect.parameter.unit_mismatch`; a `Shared` parameter takes only a `Both` value
+/// (`effect.parameter.channel` otherwise) and resolves to one [`ParameterChannel::Both`] value; a
+/// `PerLane` parameter takes either one `Both` value or per-lane values
+/// (`effect.parameter.duplicate_channel` otherwise) and resolves to a `Left` and a `Right` value,
+/// the lane's own value before `Both`. A missing value is the descriptor's default, and every value
+/// goes through [`effect_contract::normalize_zero`]. Then a resolved value outside its domain
+/// ([`effect_contract::parameter_value_valid`]) is `effect.parameter.domain`, and a `params` entry
+/// naming no declared parameter is `effect.parameter.unknown`.
+///
+/// The values come back in descriptor order, `Left` before `Right`, so two resolutions against
+/// one descriptor pair up index by index.
+///
+/// # Errors
+///
+/// The diagnostic code of the first check that refuses.
+pub fn resolve_initial_values(
+    descriptor: &EffectDescriptor,
+    params: &[session::EffectParam],
+) -> Result<Vec<InitialParameterValue>, &'static str> {
+    let mut initial = Vec::new();
+    for (index, parameter) in descriptor.parameters.iter().enumerate() {
+        let mut values = [None; 3];
+        let mut duplicate = false;
+        let mut unit_mismatch = false;
+        for item in params
+            .iter()
+            .filter(|item| item.parameter_id == parameter.id.0)
+        {
+            unit_mismatch |= !same_unit(item.unit, parameter.unit);
+            let channel = match item.channel {
+                SessionChannel::Left => 0,
+                SessionChannel::Right => 1,
+                SessionChannel::Both => 2,
+            };
+            duplicate |= values[channel].replace(item.value).is_some();
+        }
+        if unit_mismatch {
+            return Err("effect.parameter.unit_mismatch");
+        }
+        let [left, right, both] = values;
+        match parameter.channel_policy {
+            ParameterChannelPolicy::Shared => {
+                if duplicate || left.is_some() || right.is_some() {
+                    return Err("effect.parameter.channel");
+                }
+                initial.push(InitialParameterValue {
+                    parameter_index: index as u32,
+                    channel: ParameterChannel::Both,
+                    value: effect_contract::normalize_zero(both.unwrap_or(parameter.default_value)),
+                });
+            }
+            ParameterChannelPolicy::PerLane => {
+                if duplicate || (both.is_some() && (left.is_some() || right.is_some())) {
+                    return Err("effect.parameter.duplicate_channel");
+                }
+                for (channel, requested) in [
+                    (ParameterChannel::Left, left),
+                    (ParameterChannel::Right, right),
+                ] {
+                    initial.push(InitialParameterValue {
+                        parameter_index: index as u32,
+                        channel,
+                        value: effect_contract::normalize_zero(
+                            requested.or(both).unwrap_or(parameter.default_value),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    if initial.iter().any(|item| {
+        !effect_contract::parameter_value_valid(
+            &descriptor.parameters[item.parameter_index as usize],
+            item.value,
+        )
+    }) {
+        return Err("effect.parameter.domain");
+    }
+    if params.iter().any(|item| {
+        !descriptor
+            .parameters
+            .iter()
+            .any(|parameter| parameter.id.0 == item.parameter_id)
+    }) {
+        return Err("effect.parameter.unknown");
+    }
+    Ok(initial)
 }
 
 fn same_unit(session: SessionUnit, contract: ParameterUnit) -> bool {

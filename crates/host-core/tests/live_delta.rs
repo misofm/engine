@@ -10,18 +10,19 @@ use core::num::NonZeroUsize;
 
 use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
 use dsp_reference::randomized::Draw;
-use effect_contract::BankWidth;
+use effect_contract::{BankWidth, EffectControlRecord, ParameterChannel as Lane};
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
     BuiltinLaneSelector, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta,
-    LiveRamps, LiveRebuild, LiveStripRecords, PreparedHost, SourceSubmission, TrackControlRecord,
-    TrackFaderRecord, classify_live_delta, compile_host_session, prepare_host_runtime,
-    prepare_host_runtime_with_live_controls,
+    LiveEffectAddress, LiveRamps, LiveRebuild, LiveStripRecords, PreparedHost, SourceSubmission,
+    TrackControlRecord, TrackFaderRecord, classify_live_delta, compile_host_session,
+    prepare_host_runtime, prepare_host_runtime_with_live_controls,
 };
 use session::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, DualMonoFader,
-    MatrixOrPan, ParameterChannel, ParameterUnit, RackName, RouteDestination, RouteSource, SendTap,
-    SessionModel, StableId, Submix, Vca, canonical_session_json, parse_session_json,
+    Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
+    ConsoleSlot, DualMonoFader, EffectIdentity, EffectParam, MatrixOrPan, ParameterChannel,
+    ParameterUnit, RackName, RouteDestination, RouteSource, SendTap, SessionModel, StableId,
+    Submix, Vca, canonical_session_json, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -855,4 +856,293 @@ fn push_delta(handles: &mut host_core::HostLiveControlHandles, delta: &LiveDelta
                 .expect("matrix queue room");
         }
     }
+}
+
+// Issue #1264: effect parameter records.
+
+/// One owned effect entry of a delta: its strip ID, its live address and its records.
+type EffectEntry = (String, LiveEffectAddress, Vec<EffectControlRecord>);
+
+fn param(
+    parameter_id: u32,
+    channel: ParameterChannel,
+    unit: ParameterUnit,
+    value: f32,
+) -> EffectParam {
+    EffectParam {
+        parameter_id,
+        channel,
+        unit,
+        value,
+    }
+}
+
+fn record(parameter_index: u32, channel: Lane, value: f32) -> EffectControlRecord {
+    EffectControlRecord::Parameter {
+        parameter_index,
+        channel,
+        value,
+    }
+}
+
+/// `two_tracks` with three inserts on the first track -- a compressor (`insert(0)`), a
+/// gate/expander (`insert(1)`) and a parametric EQ (`insert(2)`) -- and one `post_insert` console
+/// soft-clip slot on every track (`console(0)`), all at their defaults.
+fn with_effects() -> SessionModel {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    let template = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
+    let native = |instance: &str, effect: &str| {
+        let mut native = template.clone();
+        native.id = id(instance);
+        native.identity = EffectIdentity::Native {
+            effect_id: id(effect),
+        };
+        native.params.clear();
+        native
+    };
+    let mut model = two_tracks();
+    model.tracks[0].inserts.effects = vec![
+        native("comp", "miso.compressor"),
+        native("gate", "miso.gate-expander"),
+        native("eq", "miso.parametric-eq"),
+    ];
+    model.console.post_insert.push(ConsoleSlot {
+        slot: id("clip"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.soft-clip"),
+        },
+        quality: template.quality,
+        link_mode: template.link_mode,
+    });
+    for track in &mut model.tracks {
+        track.console.push(ConsoleEntry {
+            slot: id("clip"),
+            bypass: false,
+            params: Vec::new(),
+        });
+    }
+    normalized(&model)
+}
+
+fn classify_effects(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<(Vec<Strip>, Vec<EffectEntry>), LiveRebuild> {
+    let next = edited(current, edit);
+    classify_live_delta(current, &next, STEP).map(|delta| {
+        let effects = delta
+            .effects
+            .iter()
+            .map(|entry| {
+                assert!(!entry.records.is_empty(), "an entry carries a record");
+                (
+                    entry.strip_id.to_owned(),
+                    entry.address,
+                    entry.records.clone(),
+                )
+            })
+            .collect();
+        (flatten(&delta), effects)
+    })
+}
+
+fn inserts(next: &mut SessionModel, index: usize) -> &mut Vec<EffectParam> {
+    &mut next.tracks[0].inserts.effects[index].params
+}
+
+/// #1264 gate 1(a). Red if a live parameter change is not one record on exactly the lane, the
+/// descriptor index and the instance it changes, or if a console slot is addressed other than by
+/// its slot index.
+#[test]
+fn a_live_parameter_change_is_one_record_on_its_lane() {
+    let current = with_effects();
+    let first = track_id(&current, 0);
+    // Compressor threshold (ID 1, index 0), left lane only.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        }),
+        Ok((
+            Vec::new(),
+            vec![(
+                first.clone(),
+                LiveEffectAddress::insert(0),
+                vec![record(0, Lane::Left, -30.0)]
+            )]
+        ))
+    );
+    // Soft-clip drive (ID 1) on the second track's console slot, with a fader move beside it.
+    let second = track_id(&current, 1);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[1].console[0].params.push(param(
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Db,
+                6.0,
+            ));
+            next.tracks[0].fader.left_db = -6.0;
+        }),
+        Ok((
+            vec![(
+                first,
+                vec![fader_db(BuiltinLaneSelector::Left, -6.0, 0)],
+                None
+            )],
+            vec![(
+                second,
+                LiveEffectAddress::console(0),
+                vec![record(0, Lane::Left, 6.0), record(0, Lane::Right, 6.0)]
+            )]
+        ))
+    );
+}
+
+/// #1264 gate 1(b). Red if a rewritten representation emits a redundant record: a `Both` value
+/// split into per-lane values records only the lane whose value changes.
+#[test]
+fn a_both_value_split_into_lanes_records_only_the_changed_lane() {
+    let mut current = with_effects();
+    inserts(&mut current, 0).push(param(1, ParameterChannel::Both, ParameterUnit::Db, -20.0));
+    let current = normalized(&current);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            *inserts(next, 0) = vec![
+                param(1, ParameterChannel::Left, ParameterUnit::Db, -20.0),
+                param(1, ParameterChannel::Right, ParameterUnit::Db, -30.0),
+            ];
+        }),
+        Ok((
+            Vec::new(),
+            vec![(
+                track_id(&current, 0),
+                LiveEffectAddress::insert(0),
+                vec![record(0, Lane::Right, -30.0)]
+            )]
+        ))
+    );
+    // The same values in the other representation: no record at all.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            *inserts(next, 0) = vec![
+                param(1, ParameterChannel::Left, ParameterUnit::Db, -20.0),
+                param(1, ParameterChannel::Right, ParameterUnit::Db, -20.0),
+            ];
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
+}
+
+/// #1264 gate 1(c). Red if a removed parameter is not returned to the descriptor's default, as a
+/// rebuild would prepare it.
+#[test]
+fn a_removed_parameter_returns_to_its_default() {
+    let mut current = with_effects();
+    // Compressor ratio (ID 2, index 1; default 4).
+    inserts(&mut current, 0).push(param(2, ParameterChannel::Both, ParameterUnit::Ratio, 8.0));
+    let current = normalized(&current);
+    assert_eq!(
+        classify_effects(&current, |next| inserts(next, 0).clear()),
+        Ok((
+            Vec::new(),
+            vec![(
+                track_id(&current, 0),
+                LiveEffectAddress::insert(0),
+                vec![record(1, Lane::Left, 4.0), record(1, Lane::Right, 4.0)]
+            )]
+        ))
+    );
+}
+
+/// #1264 gate 1(d). Red if a parameter the plan keeps prepared -- a gate/expander attack
+/// (`automation_rate` `None`) or any parametric EQ parameter (G4, until #1265) -- is classified
+/// live: the edit would be acked and the effect would never apply it.
+#[test]
+fn prepared_parameter_changes_need_a_rebuild() {
+    let current = with_effects();
+    // Gate/expander attack (ID 5).
+    assert_eq!(
+        classify_effects(&current, |next| {
+            inserts(next, 1).push(param(
+                5,
+                ParameterChannel::Both,
+                ParameterUnit::Milliseconds,
+                10.0,
+            ));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+    // The gate's threshold (ID 1) is live.
+    assert!(
+        classify_effects(&current, |next| {
+            inserts(next, 1).push(param(1, ParameterChannel::Both, ParameterUnit::Db, -50.0));
+        })
+        .is_ok()
+    );
+    // EQ band 1 gain (ID 4): a `Block` parameter, but the EQ rides prepared targets.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            inserts(next, 2).push(param(4, ParameterChannel::Left, ParameterUnit::Db, 3.0));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+}
+
+/// #1264 gate 1(e). Red if the classifier admits `params` that preparation refuses (a unit
+/// mismatch, a value outside the domain, an unknown parameter ID), so that a live commit would
+/// leave a committed model its own rebuild refuses.
+#[test]
+fn params_preparation_refuses_need_a_rebuild() {
+    let current = with_effects();
+    let refused: [(&str, EffectParam); 3] = [
+        (
+            "unit mismatch",
+            param(1, ParameterChannel::Both, ParameterUnit::Ratio, -30.0),
+        ),
+        (
+            "domain",
+            param(
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Db,
+                0.0_f32.next_up(),
+            ),
+        ),
+        (
+            "unknown",
+            param(99, ParameterChannel::Both, ParameterUnit::Db, 0.0),
+        ),
+    ];
+    for (name, refused) in refused {
+        assert_eq!(
+            classify_effects(&current, |next| inserts(next, 0).push(refused)),
+            Err(LiveRebuild::Domain),
+            "{name}"
+        );
+    }
+    // The domain's own bound is live.
+    assert!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(1, ParameterChannel::Both, ParameterUnit::Db, 0.0));
+        })
+        .is_ok()
+    );
+}
+
+/// #1264 gate 1(f). Red if the params mask also hides a structural change of the instances: an
+/// insert reorder, or a bypass flip (#1266's) beside a parameter change.
+#[test]
+fn an_insert_reorder_is_structural() {
+    let current = with_effects();
+    assert_eq!(
+        classify_effects(&current, |next| next.tracks[0].inserts.effects.swap(0, 1)),
+        Err(LiveRebuild::Structure)
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[0].bypass = true;
+            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        }),
+        Err(LiveRebuild::Structure)
+    );
 }

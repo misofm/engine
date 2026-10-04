@@ -229,6 +229,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   state continue untouched. It may ride with fader, mute and pan edits. The automation term holds
   only while no host renders stored automation (#1058); every other profile field stays
   structural.
+- **Live effect parameters (#1264).** A track's console-slot entry or insert whose `params`
+  change only in live parameters is live too; see "Value-only effect parameter edits" below.
 - **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
   edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
@@ -272,8 +274,8 @@ Every C ABI plan, at compile and at every structural replacement, also carries o
 lane per prepared effect instance, console slots and inserts alike, on tracks and submixes. Each
 lane's ring holds `min(16, the effect's automation capacity)` records, and a parametric EQ's lane
 also carries its prepared-target staging. capi keeps the producers with the plan's provider epoch;
-each EQ's producer owns its prepared-target owner. Nothing pushes to them yet: effect edits still
-rebuild the plan until #1264. No input or route lane is attached.
+each EQ's producer owns its prepared-target owner. #1264 pushes live effect parameter edits
+through them (below). No input or route lane is attached.
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
@@ -301,3 +303,40 @@ rebuild the plan until #1264. No input or route lane is attached.
   `capi_retained_bytes`, by 48 bytes. A caller whose `maximum_graph_session_plus_plan_bytes` or
   `maximum_capi_retained_bytes` was exact before this change must raise it; a structural
   replacement charges both plans' graph rows, so its peak grows by twice the graph move.
+
+## Value-only effect parameter edits on the running plan (#1264)
+
+A transaction that changes, adds or removes `params` of a track's native effect -- a console
+slot's entry or an insert -- is live when every value it changes is live. The classifier resolves
+the pre- and post-commit `params` through `effect_compiler::resolve_initial_values`, the one
+function preparation uses (unit, channel policy, defaults, `-0.0` to `+0.0`, domain, unknown IDs),
+and compares the resolved values bit by bit.
+
+- **Live.** A changed value of a parameter whose descriptor is automatable with
+  `automation_rate` `Block`. The engine pushes one parameter record per changed
+  `(parameter, lane)` -- `Both` for a shared parameter, `Left` and `Right` apart for a per-lane one
+  -- to that instance's lane in the newest plan, and the effect ramps it with the descriptor's own
+  smoothing. A removed entry returns to the default. Rewriting a value in another representation
+  (a `both` value as equal `left` and `right` values) pushes nothing. It may ride with fader, mute,
+  pan and model-only edits in one transaction.
+- **Prepared, so a rebuild.** A changed value of a parameter that is not automatable or whose
+  `automation_rate` is `None` (for example the gate/expander's attack, hold and release), and any
+  parameter of the parametric EQ, whose parameters ride prepared targets until #1265.
+- **Rebuild for everything else about an effect**: identity, quality, link mode, bypass (until
+  #1266), sidechain, the insert order and the console slot set, any effect on a submix strip, and
+  `params` that preparation refuses (reported as `COMPILE_REJECTED` with the preparation
+  diagnostic).
+- **A transaction too large for a lane.** An effect lane holds `min(16, automation capacity)`
+  records. A transaction whose records for one instance outnumber that capacity could never fit,
+  so it takes the rebuild path instead of an endless `BACKPRESSURE`. A transaction that fits the
+  capacity but not the lane's current room returns `BACKPRESSURE` with
+  `control.live.backpressure`, exactly as a full fader lane does, and changes nothing.
+- **No ack before a drop.** Every record passes its producer's preflight, and every readback row
+  is looked up, before the first push, beside the room check of #1257.
+- **The readback follows.** After the commit, the protocol's parameter state
+  (`PARAMETER_STATE_GET`) reports each live value, exactly as a rebuild's catalog would. The
+  catalog's handles and metadata do not change.
+- **Effects keep their state.** A live parameter edit is not bit-identical to a fresh plan of the
+  edited session, because the effect's history differs; it is bit-identical to the browser's live
+  lane given the same records at the same block, at the four launch rates on one and ten tracks.
+- **No resource movement.** No row moves: the records ride the lanes #1263 attached.

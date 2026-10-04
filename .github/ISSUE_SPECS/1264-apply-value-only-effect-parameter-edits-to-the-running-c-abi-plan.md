@@ -158,3 +158,125 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `fe3bb37e8`)
+
+**Changes.**
+- D1: `effect-compiler/src/prepare.rs` moves the inline resolution into
+  `pub fn resolve_initial_values(descriptor, params) -> Result<Vec<InitialParameterValue>, &'static
+  str>`, unchanged in order (unit, channel policy, defaults, `normalize_zero`, domain, unknown ID);
+  preparation calls it and pushes the returned code at the instance's path. Every existing
+  effect-compiler test passes unchanged.
+- D2: `classify_live_delta` masks every track's console-entry and insert `params` (by position;
+  IDs, identity, quality, link mode, bypass, sidechain, insert order and slot set stay compared).
+  For each instance whose `params` differ (bitwise), it resolves both sides through
+  `resolve_initial_values` (failure: `Domain`) and compares the resolved bits. A changed value of
+  a parameter that is not automatable, whose `automation_rate` is not `Block`, or of a factory
+  with a prepared-target capability (the EQ; exactly the condition under which the producer's
+  `preflight` refuses a bare `Parameter`) is the new `LiveRebuild::Prepared`; any other is one
+  `EffectControlRecord::Parameter`. `LiveDelta` gains `effects: Vec<LiveEffectRecords>` (strip
+  ID, `LiveEffectAddress`, records). The launch registry is built lazily, only when an instance's
+  `params` differ. Live is `Block` only, per the umbrella; no launch descriptor declares `Sample`.
+  `LiveEffectRecords` is reachable as `host_core::live_delta::LiveEffectRecords`; it is not
+  re-exported from `host-core/src/lib.rs`, which is outside the authorized paths.
+- D3: `commit_live` resolves each instance by `(strip_id, address)` in the newest epoch's
+  `effects`. An instance with more records than its queue's `capacity()` hands the token back for
+  the rebuild path. Then the room check covers the effect queues (`BACKPRESSURE` with
+  `control.live.backpressure`), every record passes `preflight`, and every readback handle is
+  looked up, all before the protocol predicate and the first push. The resolution and the
+  capacity check run after the live admission, keeping D6's order (a rebuild's admission is
+  stricter than the live one, so the order cannot turn a rebuildable edit into a refusal).
+  `ProviderEpoch::effects` loses its `allow(dead_code)`.
+- D4: `SessionControlProvider::parameter_handle` (linear search over `parameter_metadata`) and
+  `set_parameter_value` (binary search, allocation-free, a missing handle changes nothing). capi
+  looks every handle up before any push (missing: `Internal`) and sets every value after the
+  commit.
+- Test support: `TestTransactionSnapshot` gains `effect_rooms` (test-only, in `control.rs`).
+- D5: `docs/C_ABI_V1_QUALIFICATION.md` gains "Value-only effect parameter edits on the running
+  plan (#1264)", a bullet in #1257's list, and #1263's "nothing pushes yet" line is updated.
+- No resource row moves: the delta and the readback list are transient control-thread
+  allocations, and the records ride the lanes #1263 attached.
+
+**Tests and their value.**
+- Gate 1 (`crates/host-core/tests/live_delta.rs`, on a two-track model with compressor,
+  gate/expander and EQ inserts and a `post_insert` soft-clip console slot):
+  - `a_live_parameter_change_is_one_record_on_its_lane`: compressor threshold on the left lane,
+    and a console soft-clip drive beside a fader move. Red if a live change is not exactly one
+    record on its lane, descriptor index and instance, or a console slot is addressed wrongly.
+  - `a_both_value_split_into_lanes_records_only_the_changed_lane`: red if a rewritten
+    representation emits a redundant record.
+  - `a_removed_parameter_returns_to_its_default`: red if a removed parameter does not return to
+    the default a rebuild prepares.
+  - `prepared_parameter_changes_need_a_rebuild`: gate/expander attack and EQ band-1 gain are
+    `Prepared`; the gate's threshold is live. Red if a prepared-only parameter goes live (an acked
+    edit the effect never applies).
+  - `params_preparation_refuses_need_a_rebuild`: unit mismatch, out-of-domain and unknown ID are
+    `Domain`; the domain bound is live. Red if the classifier admits `params` preparation refuses.
+  - `an_insert_reorder_is_structural`: a reorder, and a bypass flip beside a parameter change,
+    are `Structure`. Red if the params mask hides an instance change.
+- Gate 2 (`live_effect_parameter_edits_render_like_the_browsers_lane`, capi): compressor
+  threshold (left) and makeup (both) on the first track and a console soft-clip drive on the last
+  track, through `miso_engine_v1_submit_command`, against a `HostLiveLanes::ALL` host-core plan
+  that receives records built in the test from each producer's descriptor, at the same block;
+  bit-identical for 12 blocks, at 1 and 10 tracks and the four launch rates, with no rebuild, and
+  audibly different from an unedited plan. Red if the C ABI path addresses a different instance,
+  lane or parameter index than the browser's lane. (The `ALL`-lanes plan renders bit-identically
+  to the C ABI plan before the edit, so the input lanes do not perturb the comparison.)
+- Gate 3 (`the_parameter_readback_after_a_live_edit_equals_a_rebuilds`): a set (left lane), a
+  removal back to the default and a console set, live on one rig and, with a source content edit,
+  structural on another; every metadata row and every state record (handle, flags, value bits)
+  read back through the C ABI is identical, and differs from before the edit. Red if the readback
+  keeps the old value after a live edit.
+- Gate 4 (`an_effect_edit_larger_than_its_queue_rebuilds`): on a multiband-compressor insert,
+  8 per-lane parameters (16 records, the queue's capacity) are live and fill the queue; 9 (18
+  records) commit through the structural path (a candidate, nothing pushed to either epoch's
+  queue). Red if such a transaction would return `BACKPRESSURE` forever.
+- D3 room check (`a_full_effect_lane_refuses_before_anything_changes`): 16 single-record edits
+  fill the compressor's lane, the 17th is `BACKPRESSURE` with `control.live.backpressure` and
+  changes nothing, and it commits after one render. Red if the room check skips the effect
+  queues (an acked record would then fail to push).
+
+**Mutation runs** (each introduced, run, reverted; logs `/tmp/claude-1002/w1264-a1/M*.log`):
+- M1, classifier drops the `automatable`/`Block` test: `prepared_parameter_changes_need_a_rebuild` red.
+- M2, classifier treats no effect as target-capable: `prepared_parameter_changes_need_a_rebuild` red (EQ case).
+- M3, classifier emits a record for every value, changed or not: four gate-1 tests red.
+- M4, classifier resolves the pre-commit side as defaults (`&[]`): the lane-split and removal tests red.
+- M10, the mask skips console-entry `params`: `a_live_parameter_change_is_one_record_on_its_lane` red.
+- M11, a `post_insert` slot addressed as `console(index)` without the `pre_insert` offset: gates 2
+  and 3 red (the host-core gate-1 model has no `pre_insert` slot, so only the capi gates see it).
+- M5, capi resolves an effect producer by address only: gate 2 red (10 tracks).
+- M6, capi skips `set_parameter_value`: gate 3 red.
+- M7, capi drops the over-capacity rebuild: gate 4 red.
+- M8, capi drops the effect room check: the room-check test red (the push panics).
+- M9, capi maps the readback's `Left` and `Right` the wrong way round: gate 3 red.
+
+**Gates** (from the committed tree; logs in `/tmp/claude-1002/w1264-a1/`):
+- `cargo fmt --all -- --check`: pass.
+- `cargo test --locked -p effect-compiler --features test-support`: pass.
+- `cargo test --locked -p capi`: pass (54 lib, 13 `resource_lifecycle`, doc).
+- `cargo test --locked -p host-core --features control-provider,test-support`: pass (`live_delta` 22).
+- `cargo test --locked -p protocol --features test-support`: pass.
+- The workspace test command of #1257 gate 6: pass (1,342 tests, 0 failed).
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
+  `./target/release/audit capi`: allocations 0, deallocations 0, locks 0, syscalls 0,
+  total_violations 0.
+- `bash scripts/check-capi-abi.sh && bash scripts/check-capi-abi.sh --self-test`: pass.
+- `python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so`: pass.
+- `for x in host-core realtime workspace protocol-control; do ...check/test...; done`: pass.
+- `bash scripts/check-cross-targets.sh`: PASS; the iOS `memset_pattern16` expected-failure counts
+  did not move.
+- The worklet chain (effect-compiler is in the browser module): `build-web-audioworklet.sh
+  --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `check-scalar-oracle-absent.py --wasm` and
+  `test-web-audioworklet.sh`: pass.
+- 4-lane (NEON), `bash scripts/run-aarch64-tests.sh debug`: not run locally (CI-only).
+
+**Open items for review.**
+- The C header's "Live edits" comment (`crates/capi/include/miso_engine_v1.h:34-41`) and
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` still say only fader, mute and pan values are live.
+  Both are outside this slice's authorized paths, so they are unchanged; the qualification doc
+  is updated.

@@ -1368,3 +1368,530 @@ fn model_only_edits_commit_without_a_plan_rebuild() {
     assert_eq!(rig.generation, 1, "the host never seeked");
     assert_eq!(rig.summary().2, 0, "the first epoch still renders");
 }
+
+// Issue #1264: value-only effect parameter edits.
+
+/// `long_session` with a compressor insert (`comp`) on every track and a `post_insert` console
+/// soft-clip slot (`clip`), both at their defaults.
+fn effect_session(track_count: usize, sample_rate_hz: u32) -> String {
+    with_model(&long_session(track_count, sample_rate_hz), |model| {
+        let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        let clip = StableId::parse("clip").expect("clip slot");
+        for track in &mut model.tracks {
+            let mut compressor = template.clone();
+            compressor.id = StableId::parse("comp").expect("compressor");
+            compressor.identity = session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+            };
+            compressor.params.clear();
+            compressor.bypass = false;
+            track.inserts.effects.push(compressor);
+            track.console.push(session::ConsoleEntry {
+                slot: clip.clone(),
+                bypass: false,
+                params: Vec::new(),
+            });
+        }
+        model.console.post_insert.push(session::ConsoleSlot {
+            slot: clip,
+            identity: session::EffectIdentity::Native {
+                effect_id: StableId::parse("miso.soft-clip").expect("soft-clip ID"),
+            },
+            quality: template.quality,
+            link_mode: template.link_mode,
+        });
+    })
+}
+
+fn upsert(
+    track_id: &str,
+    rack_name: session::RackName,
+    effect_id: &str,
+    parameter_id: u32,
+    channel: session::ParameterChannel,
+    unit: session::ParameterUnit,
+    value: f32,
+) -> SessionEdit {
+    SessionEdit::UpsertEffectParam {
+        track_id: StableId::parse(track_id).expect("track ID"),
+        rack_name,
+        effect_id: StableId::parse(effect_id).expect("effect ID"),
+        param: session::EffectParam {
+            parameter_id,
+            channel,
+            unit,
+            value,
+        },
+    }
+}
+
+/// A `host_core` plan of one document prepared with every live lane, as the browser prepares,
+/// fed the same source, with its effect producers.
+struct LaneReference {
+    reference: Reference,
+    effects: Vec<host_core::EffectControlProducer>,
+}
+
+impl LaneReference {
+    fn new(document: &str) -> Self {
+        let caps = prepare_caps(limits());
+        let compiled = host_core::compile_host_session(document, &caps).expect("lane compile");
+        let (host, handles) = prepare_host_runtime_with_live_lanes(
+            &compiled,
+            &caps,
+            &HostLiveControlRequest {
+                control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+                ..HostLiveControlRequest::default()
+            },
+            HostLiveLanes::ALL,
+        )
+        .expect("lane prepare");
+        Self {
+            reference: Reference {
+                plan: host.plan,
+                sources: host.sources,
+                rate: compiled.sample_rate().0,
+                quantum: compiled.quantum().0 as usize,
+                block: 0,
+            },
+            effects: handles.effect_controls,
+        }
+    }
+
+    /// Pushes one parameter record, built from the descriptor, to the instance `effect_id` of
+    /// the strip `track_id`.
+    fn push(
+        &mut self,
+        track_id: &str,
+        effect_id: &str,
+        parameter_id: u32,
+        channel: effect_contract::ParameterChannel,
+        value: f32,
+    ) {
+        let producer = self
+            .effects
+            .iter_mut()
+            .find(|producer| &*producer.track_id == track_id && &*producer.effect_id == effect_id)
+            .expect("effect producer");
+        let parameter_index = producer
+            .descriptor
+            .parameters
+            .iter()
+            .position(|parameter| parameter.id.0 == parameter_id)
+            .expect("declared parameter") as u32;
+        producer
+            .try_push(effect_contract::EffectControlRecord::Parameter {
+                parameter_index,
+                channel,
+                value,
+            })
+            .expect("reference effect queue room");
+    }
+}
+
+/// #1264 gate 2 for one session.
+fn live_effect_pcm_shape(track_count: usize, sample_rate_hz: u32) {
+    use effect_contract::ParameterChannel::{Left, Right};
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let label = format!("{track_count} tracks at {sample_rate_hz} Hz");
+    let document = effect_session(track_count, sample_rate_hz);
+    let model = parse_session_json(&document).expect("model");
+    let first = model.tracks[0].id.as_str();
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let mut rig = Rig::new(&document);
+    let mut lanes = LaneReference::new(&document);
+    let mut unedited = Reference::new(&document);
+    // Past the plan's latency, so every compared block carries signal.
+    let warm_up = window(rig.latency(), 0, rig.quantum);
+    for block in 0..warm_up {
+        let live = rig.step();
+        assert_eq!(
+            bits(&live),
+            bits(&lanes.reference.step()),
+            "{label}: warm-up {block}"
+        );
+        assert_eq!(
+            bits(&live),
+            bits(&unedited.step()),
+            "{label}: warm-up {block}"
+        );
+    }
+
+    // Compressor threshold, left lane, and makeup on both lanes, on the first track; soft-clip
+    // drive on the last track's console slot.
+    let edits = [
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            1,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            -30.0,
+        ),
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            6,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            6.0,
+        ),
+        upsert(
+            last,
+            RackName::Console,
+            "clip",
+            1,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            12.0,
+        ),
+    ];
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+    let (after, _, after_epoch, pending) = rig.summary();
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 1, epoch, 0),
+        "{label}: the edit commits one revision and prepares no plan"
+    );
+    lanes.push(first, "comp", 1, Left, -30.0);
+    lanes.push(first, "comp", 6, Left, 6.0);
+    lanes.push(first, "comp", 6, Right, 6.0);
+    lanes.push(last, "clip", 1, Left, 12.0);
+    lanes.push(last, "clip", 1, Right, 12.0);
+
+    let mut audible = false;
+    for block in 0..12 {
+        let live = rig.step();
+        let expected = lanes.reference.step();
+        assert!(
+            expected.iter().any(|sample| *sample != 0.0),
+            "{label}: block {block} after the edit carries signal"
+        );
+        assert_eq!(
+            bits(&live),
+            bits(&expected),
+            "{label}: block {block} after the edit"
+        );
+        audible |= bits(&live) != bits(&unedited.step());
+    }
+    assert!(audible, "{label}: the edit changes the output");
+    assert_eq!(rig.summary().2, 0, "{label}: the first epoch still renders");
+}
+
+/// #1264 gate 2. Red if the C ABI path addresses a different instance, lane or parameter index
+/// than the browser's lane: hand-built records pushed into a host-core plan with every live lane
+/// must render the same bits as the C ABI edit.
+#[test]
+fn live_effect_parameter_edits_render_like_the_browsers_lane() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        for track_count in [1, 10] {
+            live_effect_pcm_shape(track_count, sample_rate_hz);
+        }
+    }
+}
+
+/// Every parameter row's descriptor (as text) and state record (handle, flags, value bits),
+/// paged through `ParameterMetadataGet` and `ParameterStateGet`.
+fn parameter_readback(rig: &mut Rig) -> (Vec<String>, Vec<(u32, u32, u32)>) {
+    let mut rows = Vec::new();
+    let mut handles = Vec::new();
+    let mut after_handle = 0;
+    loop {
+        let request = rig.next_request();
+        let bytes = command_bytes(
+            request,
+            protocol::CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
+                after_handle,
+                limit: 8,
+            }),
+        );
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        let mut fields = [0_u16; 512];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::ParameterMetadata(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("metadata response")
+        else {
+            panic!("expected a metadata page")
+        };
+        for descriptor in &page.descriptors {
+            rows.push(format!("{descriptor:?}"));
+            handles.push(descriptor.handle);
+        }
+        after_handle = page.last_handle;
+        if page.eof {
+            break;
+        }
+    }
+    let mut state = Vec::new();
+    for chunk in handles.chunks(32) {
+        let request = rig.next_request();
+        let bytes = command_bytes(
+            request,
+            protocol::CommandPayload::ParameterStateGet(&protocol::ParameterStateRequest {
+                handles: chunk.to_vec(),
+            }),
+        );
+        let (result, response) = command_c(rig.session, &bytes);
+        assert_eq!(result, crate::RESULT_OK);
+        let mut fields = [0_u16; 512];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::ParameterState(page),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("state response")
+        else {
+            panic!("expected a state page")
+        };
+        state.extend(
+            page.records
+                .iter()
+                .map(|record| (record.handle, record.flags, record.value.to_bits())),
+        );
+    }
+    (rows, state)
+}
+
+/// #1264 gate 3. Red if the parameter readback keeps the old value after a live edit, or reports
+/// a value a rebuild's catalog would not: a set, a lane split and a removal back to the default.
+#[test]
+fn the_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    // The first track's compressor starts with a ratio (ID 2) of 8 on both lanes.
+    let document = with_model(&effect_session(10, 48_000), |model| {
+        let compressor = model.tracks[0]
+            .inserts
+            .effects
+            .iter_mut()
+            .find(|effect| effect.id.as_str() == "comp")
+            .expect("compressor");
+        compressor.params.push(session::EffectParam {
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+            unit: ParameterUnit::Ratio,
+            value: 8.0,
+        });
+    });
+    let model = parse_session_json(&document).expect("model");
+    let first = model.tracks[0].id.as_str();
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let edits = vec![
+        upsert(
+            first,
+            RackName::Inserts,
+            "comp",
+            1,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            -30.0,
+        ),
+        SessionEdit::RemoveEffectParam {
+            track_id: StableId::parse(first).expect("track"),
+            rack_name: RackName::Inserts,
+            effect_id: StableId::parse("comp").expect("comp"),
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+        },
+        upsert(
+            last,
+            RackName::Console,
+            "clip",
+            1,
+            ParameterChannel::Both,
+            ParameterUnit::Db,
+            12.0,
+        ),
+    ];
+
+    let mut live = Rig::new(&document);
+    live.step();
+    let before = parameter_readback(&mut live);
+    assert_eq!(live.apply(&edits), crate::RESULT_OK);
+    assert_eq!(live.summary().3, 0, "the live rig did not rebuild");
+    let after = parameter_readback(&mut live);
+    assert_ne!(after.1, before.1, "the edit changes the readback");
+
+    let mut rebuilt = Rig::new(&document);
+    rebuilt.step();
+    let mut structural = edits;
+    structural.push(content_edit(&model));
+    assert_eq!(rebuilt.apply(&structural), crate::RESULT_OK);
+    assert_eq!(rebuilt.summary().3, 1, "the second rig rebuilt");
+    assert_eq!(parameter_readback(&mut rebuilt), after);
+}
+
+/// The value each eligible parameter is set to: a live (`Block`), continuous parameter's
+/// midpoint, or its minimum when the midpoint is its default.
+fn eligible_values(
+    descriptor: &effect_contract::EffectDescriptor,
+) -> Vec<(u32, session::ParameterUnit, f32)> {
+    use effect_contract::{AutomationRate, ParameterDomain, ParameterUnit as Unit};
+    descriptor
+        .parameters
+        .iter()
+        .filter(|parameter| {
+            parameter.automatable
+                && parameter.automation_rate == AutomationRate::Block
+                && parameter.domain == ParameterDomain::Continuous
+        })
+        .map(|parameter| {
+            let (minimum, maximum) = (
+                parameter.minimum.expect("continuous minimum"),
+                parameter.maximum.expect("continuous maximum"),
+            );
+            let middle = 0.5 * (minimum + maximum);
+            let value = if middle == parameter.default_value {
+                minimum
+            } else {
+                middle
+            };
+            let unit = match parameter.unit {
+                Unit::Db => session::ParameterUnit::Db,
+                Unit::Hz => session::ParameterUnit::Hz,
+                Unit::Milliseconds => session::ParameterUnit::Milliseconds,
+                Unit::Samples => session::ParameterUnit::Samples,
+                Unit::Linear => session::ParameterUnit::Linear,
+                Unit::Ratio => session::ParameterUnit::Ratio,
+            };
+            (parameter.id.0, unit, value)
+        })
+        .collect()
+}
+
+fn effect_room(rig: &Rig, epoch: Epoch, track_id: &str, effect_id: &str) -> usize {
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    let epoch = match epoch {
+        Epoch::Current => snapshot.provider_epoch,
+        Epoch::Pending => *snapshot
+            .pending_provider_epochs
+            .last()
+            .expect("a pending candidate"),
+    };
+    snapshot
+        .effect_rooms
+        .iter()
+        .find(|(row_epoch, track, effect, _)| {
+            *row_epoch == epoch && &**track == track_id && &**effect == effect_id
+        })
+        .map(|&(.., room)| room)
+        .expect("effect producer")
+}
+
+/// #1264 gate 4. Red if a transaction whose records for one instance outnumber its queue's whole
+/// capacity returns `BACKPRESSURE` (forever: no render ever makes room for it) instead of taking
+/// the structural path; the boundary case, records equal to the capacity, stays live.
+#[test]
+fn an_effect_edit_larger_than_its_queue_rebuilds() {
+    let document = with_model(&long_session(10, 48_000), |model| {
+        let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        multiband.id = StableId::parse("mb").expect("multiband");
+        multiband.identity = session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
+        };
+        multiband.params.clear();
+        multiband.bypass = false;
+        model.tracks[0].inserts.effects.push(multiband);
+    });
+    let descriptor = compile_children(&document, limits())
+        .expect("multiband session")
+        .session
+        .providers
+        .effects
+        .iter()
+        .find(|producer| &*producer.effect_id == "mb")
+        .expect("multiband producer")
+        .descriptor;
+    let values = eligible_values(descriptor);
+    let depth = LIVE_QUEUE_DEPTH.get();
+    assert!(2 * values.len() > depth, "enough live per-lane parameters");
+    let edits = |count: usize| {
+        values[..count]
+            .iter()
+            .map(|&(parameter_id, unit, value)| {
+                upsert(
+                    "eq0",
+                    session::RackName::Inserts,
+                    "mb",
+                    parameter_id,
+                    session::ParameterChannel::Both,
+                    unit,
+                    value,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // `depth / 2` per-lane parameters on both lanes: exactly the queue's capacity, live.
+    let mut rig = Rig::new(&document);
+    rig.step();
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "mb"), depth);
+    assert_eq!(rig.apply(&edits(depth / 2)), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "a full-capacity edit is live");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "mb"), 0);
+    drop(rig);
+
+    // One more parameter: it could never fit, so it rebuilds, and pushes nothing.
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let (revision, ..) = rig.summary();
+    let larger = edits(depth / 2 + 1);
+    assert_eq!(rig.apply(&larger), crate::RESULT_OK);
+    let (after, _, _, pending) = rig.summary();
+    assert_eq!(
+        (after, pending),
+        (revision + 1, 1),
+        "a rebuild prepares a candidate"
+    );
+    assert_eq!(
+        effect_room(&rig, Epoch::Current, "eq0", "mb"),
+        depth,
+        "the rendering plan got no record"
+    );
+    assert_eq!(effect_room(&rig, Epoch::Pending, "eq0", "mb"), depth);
+}
+
+/// #1264 D3. Red if the room check skips the effect queues: a 17th single-record edit with no
+/// render between would be acked and then fail to push. A full effect lane is typed backpressure
+/// before anything changes, and a retry after one render succeeds.
+#[test]
+fn a_full_effect_lane_refuses_before_anything_changes() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let mut rig = Rig::new(&effect_session(10, 48_000));
+    rig.step();
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let threshold = |value: f32| {
+        [upsert(
+            "eq0",
+            RackName::Inserts,
+            "comp",
+            1,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            value,
+        )]
+    };
+    for edit in 0..depth {
+        assert_eq!(
+            rig.apply(&threshold(-21.0 - edit as f32)),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), 0);
+    let before = refusal_state(&rig);
+    assert_eq!(rig.apply(&threshold(-40.0)), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure".to_vec());
+    assert_eq!(refusal_state(&rig), before);
+    assert_eq!(rig.summary().3, 0, "no rebuild");
+    rig.step();
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth);
+    assert_eq!(rig.apply(&threshold(-40.0)), crate::RESULT_OK);
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth - 1);
+}
