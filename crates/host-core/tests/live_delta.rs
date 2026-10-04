@@ -19,8 +19,9 @@ use host_core::{
     prepare_host_runtime_with_live_controls,
 };
 use session::{
-    Console, DualMonoFader, MatrixOrPan, RouteDestination, RouteSource, SendTap, SessionModel,
-    StableId, Submix, Vca, canonical_session_json, parse_session_json,
+    Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, DualMonoFader,
+    MatrixOrPan, ParameterChannel, ParameterUnit, RackName, RouteDestination, RouteSource, SendTap,
+    SessionModel, StableId, Submix, Vca, canonical_session_json, parse_session_json,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
@@ -476,7 +477,7 @@ fn any_vca_needs_a_rebuild() {
 #[test]
 fn structural_edits_need_a_rebuild() {
     let current = two_tracks();
-    let edits: [(&str, Edit); 5] = [
+    let edits: [(&str, Edit); 4] = [
         ("track removed", |next| {
             next.tracks.pop();
         }),
@@ -489,9 +490,6 @@ fn structural_edits_need_a_rebuild() {
             next.tracks[1].id = StableId::parse("zz-renamed").expect("id");
         }),
         ("route gain", |next| next.routes[0].gain_db = -1.0),
-        ("session id", |next| {
-            next.session_id = StableId::parse("another-session").expect("id");
-        }),
     ];
     for (name, edit) in edits {
         assert_eq!(
@@ -500,6 +498,101 @@ fn structural_edits_need_a_rebuild() {
             "{name}"
         );
     }
+}
+
+/// A fader ride on the first track's builtin strip: stored automation, which nothing renders.
+fn fader_ride(model: &SessionModel) -> Automation {
+    Automation {
+        id: id("fader-ride"),
+        target: AutomationTarget {
+            entity_id: model.tracks[0].id.clone(),
+            rack: RackName::Builtins,
+            effect_id: id(session::BUILTIN_AUTOMATION_EFFECT_ID),
+            parameter_id: 5,
+            channel: ParameterChannel::Both,
+        },
+        segments: vec![AutomationSegment {
+            shape: AutomationShape::Linear,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 0.0,
+            end_value: -3.0,
+            unit: ParameterUnit::Db,
+        }],
+    }
+}
+
+/// The four model-only edits of #1260 D1.
+fn model_only_edits() -> [(&'static str, Edit); 4] {
+    [
+        ("session id", |next| next.session_id = id("another-session")),
+        ("render profile id", |next| {
+            next.render_profile.id = id("another-render-profile");
+        }),
+        ("output profile id", |next| {
+            next.output_profile.id = id("another-output-profile");
+        }),
+        ("automation upsert", |next| {
+            let ride = fader_ride(next);
+            next.automation.push(ride);
+        }),
+    ]
+}
+
+/// #1260 gate 1. Red if a model-only field is still compared, or if one masks a live record.
+#[test]
+fn model_only_edits_are_live_with_no_records() {
+    use BuiltinLaneSelector::Left;
+    let current = two_tracks();
+    assert!(current.automation.is_empty());
+    for (name, edit) in model_only_edits() {
+        assert_eq!(classify(&current, edit), Ok(Vec::new()), "{name}");
+        assert_eq!(
+            classify(&current, |next| {
+                edit(next);
+                next.tracks[0].fader.left_db = -6.0;
+            }),
+            Ok(vec![(
+                track_id(&current, 0),
+                vec![fader_db(Left, -6.0, 0)],
+                None
+            )]),
+            "{name} with a fader move"
+        );
+    }
+    // All four together, with the fader move.
+    assert_eq!(
+        classify(&current, |next| {
+            for (_, edit) in model_only_edits() {
+                edit(next);
+            }
+            next.tracks[0].fader.left_db = -6.0;
+        }),
+        Ok(vec![(
+            track_id(&current, 0),
+            vec![fader_db(Left, -6.0, 0)],
+            None
+        )])
+    );
+    // Removing stored automation is model-only too.
+    let mut automated = current.clone();
+    automated.automation.push(fader_ride(&current));
+    assert_eq!(
+        classify(&automated, |next| next.automation.clear()),
+        Ok(Vec::new())
+    );
+}
+
+/// #1260 gate 1. Red if a profile field that preparation reads is masked with its profile's ID.
+#[test]
+fn an_output_profile_channel_change_is_structural() {
+    let current = two_tracks();
+    assert_eq!(
+        classify(&current, |next| {
+            next.output_profile.channels = 1;
+        }),
+        Err(LiveRebuild::Structure)
+    );
 }
 
 /// Gate 1(l). Red if the ramp seam is ignored: fader and mute records carry `LiveRamps`, the

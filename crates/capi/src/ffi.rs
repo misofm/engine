@@ -1650,8 +1650,17 @@ mod tests {
         );
         assert_eq!(event_out.required_bytes, 0);
 
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse("capi-ffi-replaced").expect("stable ID"),
+        // A structural edit that renders identically (#1260 D3): a session ID edit is model-only
+        // and would commit without the replacement plan this test applies below.
+        let model = session::parse_session_json(core::str::from_utf8(JSON).expect("UTF-8"))
+            .expect("fixture session");
+        let source = &model.sources[0];
+        let edit = protocol::SessionEdit::SetSourceContent {
+            source_id: source.id.clone(),
+            content: format!("blake3:{}", "cd".repeat(32)),
+            channels: source.channels,
+            bit_depth: source.bit_depth,
+            frames: source.frames,
         };
         let mut structural_request = vec![0_u8; 4_096];
         let structural_len = codec

@@ -189,9 +189,25 @@ fn limits() -> CompileLimits {
     }
 }
 
-fn command(request_id: u64, revision: u64, session_id: &'static str) -> Vec<u8> {
-    let edit = SessionEdit::SetSessionId {
-        session_id: StableId::parse(session_id).expect("static session ID"),
+/// `SESSION`'s source content identity, `blake3:` and `tag` repeated as hex: the same length as
+/// the fixture's.
+fn content(tag: u8) -> String {
+    format!("blake3:{}", format!("{tag:02x}").repeat(32))
+}
+
+/// A structural transaction that renders identically (#1260 D3): it changes only `SESSION`'s
+/// source content identity to `content(tag)`. A session ID edit is model-only and commits without
+/// a rebuild, so it no longer triggers one. Successive rebuilds need distinct tags.
+fn command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let source = &model.sources[0];
+    assert_ne!(source.content, content(tag), "the edit changes the content");
+    let edit = SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content: content(tag),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
     };
     let mut bytes = vec![0_u8; 4_096];
     let len = ProtocolCodec::default()
@@ -240,8 +256,8 @@ unsafe fn submit(session: *mut Session, request: &[u8], response: &mut [u8; 4_09
 
 fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
     let capability = capability_command();
-    let first = command(2, 42, "lifecycle-first");
-    let second = command(3, 43, "lifecycle-second");
+    let first = command(2, 42, 0x01);
+    let second = command(3, 43, 0x02);
     let config = EngineConfig {
         struct_size: ENGINE_CONFIG_SIZE,
         abi_version: ABI_VERSION,
@@ -1359,15 +1375,16 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 #[test]
 fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_document = scratch_session();
-    let prospective_document = session_document.replacen(
-        "\"session_id\": \"parametric-eq-nine-track\"",
-        "\"session_id\": \"double-live-cap\"",
-        1,
-    );
+    let prospective_document = {
+        let mut model = session::parse_session_json(&session_document).expect("oracle session");
+        model.sources[0].content = content(0x01);
+        session::canonical_session_json(&model).expect("prospective canonical session")
+    };
+    assert_ne!(prospective_document, session_document);
     assert_eq!(
-        prospective_document.len() + "parametric-eq-nine-track".len(),
-        session_document.len() + "double-live-cap".len(),
-        "the replacement renames the session and changes nothing else"
+        prospective_document.len(),
+        session_document.len(),
+        "the replacement changes the source's content identity and nothing else"
     );
 
     // The two live reports, read through the C ABI at roomy caps.
@@ -1375,7 +1392,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let (current, prospective) = unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
         let current = resources_c(plan);
-        let request = command(1, 42, "double-live-cap");
+        let request = command(1, 42, 0x01);
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
         let mut pcm = [f32::NAN; 256];
@@ -1397,17 +1414,17 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         miso_engine_v1_plan_destroy(plan);
         (current, prospective)
     };
-    // The two reports can be equal -- the replacement only renames the session, and the canonical
-    // JSON that the rename shortens is charged with the model, not in these rows -- so the swap is
-    // proved by admission instead: with one publication slot, a second replacement is admitted
-    // only once the render has swapped the first one in.
+    // The two reports can be equal -- the replacement only rewrites the source's content identity
+    // at the same length, and the canonical JSON is charged with the model, not in these rows -- so
+    // the swap is proved by admission instead: with one publication slot, a second replacement is
+    // admitted only once the render has swapped the first one in.
     // SAFETY: These handles are uniquely owned until their matching destroy calls.
     unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
-        let request = command(1, 42, "double-live-cap");
+        let request = command(1, 42, 0x01);
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
-        let again = command(2, 43, "parametric-eq-nine-track");
+        let again = command(2, 43, 0x02);
         assert_eq!(
             submit(session, &again, &mut response),
             RESULT_BACKPRESSURE,
@@ -1508,7 +1525,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
             assert_eq!(resources_c(plan), current, "{row}: the cap moves no row");
-            let request = command(1, 42, "double-live-cap");
+            let request = command(1, 42, 0x01);
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
             let mut pcm = [f32::NAN; 256];
@@ -1543,7 +1560,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         unsafe {
             let (session, plan) = compile_c(&session_document, &below_limits);
             let before = resources_c(plan);
-            let request = command(1, 42, "double-live-cap");
+            let request = command(1, 42, 0x01);
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(
                 submit(session, &request, &mut response),
@@ -1860,7 +1877,8 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
     /// Render blocks after an admission beyond which `RESULT_BACKPRESSURE` is a wedge. A healthy
     /// replacement is admitted again once its swapping block has rendered.
     const WEDGE_BLOCKS: u64 = 256;
-    const SESSION_IDS: [&str; 2] = ["race-even", "race-odd"];
+    /// The two content tags the replacements alternate between (#1260 D3).
+    const CONTENT_TAGS: [u8; 2] = [0x01, 0x02];
 
     /// One any-thread resource query through the exported entry.
     fn query(plan_address: usize) -> u32 {
@@ -1938,7 +1956,7 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
             let mut fields = [0_u16; 64];
             let mut revision = 42_u64;
             let mut request_id = 1_u64;
-            let mut request = command(request_id, revision, SESSION_IDS[0]);
+            let mut request = command(request_id, revision, CONTENT_TAGS[0]);
             let mut admitted = 0_u64;
             let mut overlapped = 0_u64;
             let mut failure = None;
@@ -2018,7 +2036,7 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
                         revision += 1;
                         request_id += 1;
                         request =
-                            command(request_id, revision, SESSION_IDS[(admitted % 2) as usize]);
+                            command(request_id, revision, CONTENT_TAGS[(admitted % 2) as usize]);
                         admission_block = rendered.load(Ordering::Acquire);
                     }
                     RESULT_BACKPRESSURE if blocks - admission_block <= WEDGE_BLOCKS => {}

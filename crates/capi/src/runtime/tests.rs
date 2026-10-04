@@ -108,6 +108,29 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020003000000100000000b000000000000002b00000000000000010000000000000001000301040000000100000000000000",
 ];
 
+/// A structural edit that renders identically, for a test that needs a plan rebuild (#1260 D3).
+///
+/// It changes only the first source's `content` identity, to `blake3:` and `tag` repeated as hex,
+/// keeping its length. A session ID edit is model-only and commits without a rebuild, so it can no
+/// longer trigger one. Successive rebuilds of one session need distinct tags: rewriting the
+/// committed content is a live, record-free delta.
+pub(super) fn rebuild_edit(document: &str, tag: u8) -> protocol::SessionEdit {
+    let model = parse_session_json(document).expect("rebuild edit session");
+    let source = &model.sources[0];
+    let content = format!("blake3:{}", format!("{tag:02x}").repeat(32));
+    assert_ne!(
+        content, source.content,
+        "the rebuild edit changes the content"
+    );
+    protocol::SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content,
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
+    }
+}
+
 pub(super) fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     let mut model = parse_session_json(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
@@ -625,9 +648,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         )
         .expect("old plan block");
     assert!(pcm.iter().any(|sample| *sample != 0.0), "old provider PCM");
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("capi-replaced").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let first_request = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
@@ -859,10 +880,8 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("first block");
-    let structural = |request_id: u64, revision: u64, session_id: &str| {
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse(session_id).expect("stable ID"),
-        };
+    let structural = |request_id: u64, revision: u64, tag: u8| {
+        let edit = rebuild_edit(SESSION, tag);
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
@@ -871,7 +890,7 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
     };
     let mut request_id = 1;
     let mut revision = 42;
-    let mut pending = structural(request_id, revision, "split-0");
+    let mut pending = structural(request_id, revision, 0x10);
     children
         .session
         .command(&pending, 4_096)
@@ -917,7 +936,11 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         let window_immediate = children.session.command(&capabilities, 4_096);
         let window_lossy = children.session.dequeue_event(EventLane::Lossy, 4_096);
         request_id += 1;
-        pending = structural(request_id, revision, &format!("split-{round}"));
+        pending = structural(
+            request_id,
+            revision,
+            0x10 + u8::try_from(round).expect("round"),
+        );
         let window_structural = children.session.command(&pending, 4_096);
         let window_revision = children.session.controller.session().revision().0;
         // The any-thread query reads the lagging atomic's row, which must still be there.
@@ -1123,10 +1146,7 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
         crate::RESULT_OK
     );
     let structural = |request_id: u64, revision: u64| {
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse(&format!("rejected-{request_id}"))
-                .expect("stable ID"),
-        };
+        let edit = rebuild_edit(SESSION, u8::try_from(request_id).expect("small request ID"));
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
@@ -1395,9 +1415,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
 fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
     crate::ffi::test_plan_destroy(c_plan);
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("destroyed-plan").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let request = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
@@ -1473,9 +1491,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             crate::ffi::test_reset_lifecycle_observer();
             let (c_session, c_plan) = boxed_c_children(SESSION);
             crate::ffi::test_set_structural_faults(c_session, [Some(first), Some(second)]);
-            let edit = protocol::SessionEdit::SetSessionId {
-                session_id: session::StableId::parse("fault-matrix").expect("stable ID"),
-            };
+            let edit = rebuild_edit(SESSION, 0x01);
             let request = command_bytes_at_revision(
                 1,
                 ExpectedRevision::Exact(SessionRevision(42)),
@@ -1543,9 +1559,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             expected.current_plan_disposed += 1;
             assert_eq!(crate::ffi::test_owner_counters(c_session), expected);
 
-            let retry_edit = protocol::SessionEdit::SetSessionId {
-                session_id: session::StableId::parse("fault-matrix-retry").expect("stable ID"),
-            };
+            let retry_edit = rebuild_edit(SESSION, 0x02);
             let retry = command_bytes_at_revision(
                 2,
                 ExpectedRevision::Exact(SessionRevision(43)),
@@ -1790,9 +1804,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         ),
         protocol::MessageId::DiagnosticsGet
     );
-    let structural = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("all-command-families").expect("stable ID"),
-    };
+    let structural = rebuild_edit(SESSION, 0x01);
     assert_eq!(
         dispatch!(
             ExpectedRevision::Exact(SessionRevision(42)),
@@ -1874,9 +1886,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     }
     dispatch!(first, StatusCode::ReplayExpired, pinned_hex(EXPIRED));
 
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("pressure-one").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let stale = command_bytes_at_revision(
         19,
         ExpectedRevision::Exact(SessionRevision(41)),
@@ -1923,9 +1933,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     assert_eq!(commit_event.0, crate::RESULT_OK);
     assert_eq!(commit_event.1, pinned_hex(COMMIT_EVENT));
 
-    let second_edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("pressure-two").expect("stable ID"),
-    };
+    let second_edit = rebuild_edit(SESSION, 0x02);
     let publication_full = command_bytes_at_revision(
         24,
         ExpectedRevision::Exact(SessionRevision(43)),

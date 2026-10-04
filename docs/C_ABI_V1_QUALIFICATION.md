@@ -222,6 +222,13 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   position continue, and the host keeps submitting with no seek. Fader and mute changes are steps
   until #1054 gives them ramps; a pan or matrix change carries the session's own
   `smoothing_samples`.
+- **Model-only (#1260).** A delta that changes only fields no prepared plan reads -- the session
+  ID, the render profile's `id`, the output profile's `id` and the stored `automation` table --
+  is live with no records: it commits through the same admission and protocol predicates, emits
+  the same response and `SESSION_COMMITTED`, and the running plan, its source rings and its effect
+  state continue untouched. It may ride with fader, mute and pan edits. The automation term holds
+  only while no host renders stored automation (#1058); every other profile field stays
+  structural.
 - **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
   edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as

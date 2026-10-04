@@ -94,8 +94,9 @@ pub enum LiveRebuild {
 /// The steps, in order:
 /// 1. [`LiveRebuild::Vca`] if either model declares a VCA.
 /// 2. [`LiveRebuild::Structure`] if the track IDs differ, by count or pairwise in order.
-/// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision and every track's fader and
-///    pan/matrix copied from `current`, has canonical JSON bytes other than `current`'s. Bytes,
+/// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
+///    output-profile IDs, stored automation, and every track's fader and pan/matrix copied from
+///    `current`, has canonical JSON bytes other than `current`'s. Bytes,
 ///    never `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit
 ///    from `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
 /// 4. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
@@ -103,6 +104,12 @@ pub enum LiveRebuild {
 ///    single authorities the render-side setters use); [`LiveRebuild::FollowedMute`] if a lane's
 ///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
 ///    track's records.
+///
+/// The session ID, the two profile IDs and the stored automation are model-only: no prepared plan
+/// reads them (#1260), so a delta that changes only them is live with no records. Masking
+/// `automation` is correct only while no host renders stored automation: the first issue that
+/// renders it (#1058) must remove it from the mask, or an automation edit would commit without
+/// reaching the running plan.
 ///
 /// A record is emitted only when the value the render plane holds changes (`solo.rs`: never a
 /// redundant record): a `FaderDb` per lane whose gain bits change (one `Both` when both change to
@@ -144,6 +151,13 @@ pub fn classify_live_delta<'a>(
     }
     let mut masked = next.clone();
     masked.revision = current.revision;
+    // #1260 D1: fields no prepared plan reads. Each profile's other fields stay compared.
+    masked.session_id = current.session_id.clone();
+    masked.render_profile.id = current.render_profile.id.clone();
+    masked.output_profile.id = current.output_profile.id.clone();
+    // #1260 D2: correct only while no host renders stored automation (#1058). The first issue
+    // that renders it must drop this line.
+    masked.automation = current.automation.clone();
     for (track, before) in masked.tracks.iter_mut().zip(&current.tracks) {
         track.fader = before.fader.clone();
         track.matrix_or_pan = before.matrix_or_pan.clone();

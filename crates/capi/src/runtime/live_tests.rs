@@ -1109,9 +1109,7 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
         )
         .expect("first block");
     let revision = children.session.controller.session().revision().0;
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: StableId::parse("swap-window").expect("stable ID"),
-    };
+    let edit = content_edit(&parse_session_json(SESSION).expect("session"));
     let structural = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(revision)),
@@ -1263,4 +1261,110 @@ fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
         reliable_event_kinds(&rig),
         ["SESSION_COMMITTED", "AUTOMATION_CANCELED"]
     );
+}
+
+/// The four model-only edits of #1260 D1, each a change no prepared plan reads.
+fn model_only_edits(model: &SessionModel) -> [(&'static str, SessionEdit); 4] {
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    [
+        (
+            "session ID",
+            SessionEdit::SetSessionId {
+                session_id: id("model-only-session"),
+            },
+        ),
+        (
+            "render profile ID",
+            SessionEdit::SetRenderProfile {
+                render_profile: session::RenderProfile {
+                    id: id("model-only-render-profile"),
+                    mode: model.render_profile.mode,
+                },
+            },
+        ),
+        (
+            "output profile ID",
+            SessionEdit::SetOutputProfile {
+                output_profile: session::OutputProfile {
+                    id: id("model-only-output-profile"),
+                    ..model.output_profile.clone()
+                },
+            },
+        ),
+        (
+            "automation upsert",
+            SessionEdit::UpsertAutomation {
+                automation: session::Automation {
+                    id: id("fader-ride"),
+                    target: session::AutomationTarget {
+                        entity_id: model.tracks[0].id.clone(),
+                        rack: session::RackName::Builtins,
+                        effect_id: id(session::BUILTIN_AUTOMATION_EFFECT_ID),
+                        parameter_id: 5,
+                        channel: session::ParameterChannel::Both,
+                    },
+                    segments: vec![session::AutomationSegment {
+                        shape: session::AutomationShape::Linear,
+                        start_sample: 0,
+                        end_sample: 960,
+                        start_value: 0.0,
+                        end_value: -3.0,
+                        unit: session::ParameterUnit::Db,
+                    }],
+                },
+            },
+        ),
+    ]
+}
+
+/// #1260 gate 2: a session ID, render-profile ID, output-profile ID or stored automation edit
+/// commits one revision with one `SESSION_COMMITTED`, shows in the snapshot, and leaves the running
+/// plan, its source ring and its output untouched: the host keeps feeding with no seek, and every
+/// block is bit-identical to an uninterrupted render of the original session.
+///
+/// Test value: red if a model-only edit still rebuilds the plan (a new provider epoch or a pending
+/// candidate, a source-ring reset that needs a seek, or a silent block), or if the classifier's
+/// mask drops the edit from the committed model.
+#[test]
+fn model_only_edits_commit_without_a_plan_rebuild() {
+    let document = long_session(10, 48_000);
+    let mut rig = Rig::new(&document);
+    let mut original = Reference::new(&document);
+    // Warm up past the plan's latency, so every compared block below carries signal.
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&original.step()), "warm-up");
+    }
+    let base = parse_session_json(&document).expect("model");
+    for (name, edit) in model_only_edits(&base) {
+        let mut expected = rig.model();
+        protocol::apply_session_edit(&mut expected, &edit).expect("edit applies");
+        let (revision, _, epoch, pending) = rig.summary();
+        assert_eq!(pending, 0, "{name}");
+        let bytes = rig.transaction(core::slice::from_ref(&edit));
+        assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK, "{name}");
+        let (after, _, after_epoch, after_pending) = rig.summary();
+        assert_eq!(
+            (after, after_epoch, after_pending),
+            (revision + 1, epoch, 0),
+            "{name}: one revision, the same provider epoch, no candidate"
+        );
+        assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"], "{name}");
+        expected.revision = after;
+        assert_eq!(
+            session::canonical_session_json(&rig.model()).expect("canonical committed"),
+            session::canonical_session_json(&expected).expect("canonical expected"),
+            "{name}: the snapshot holds the edit"
+        );
+        for _ in 0..3 {
+            let block = rig.block;
+            let reference = original.step();
+            assert!(
+                reference.iter().any(|sample| *sample != 0.0),
+                "{name}: block {block}: the reference carries signal"
+            );
+            assert_eq!(bits(&rig.step()), bits(&reference), "{name}: block {block}");
+        }
+    }
+    assert_eq!(rig.generation, 1, "the host never seeked");
+    assert_eq!(rig.summary().2, 0, "the first epoch still renders");
 }
