@@ -40,6 +40,13 @@
 // usage: node --no-liftoff web-mixing-automation-benchmark.mjs preflight MODULE.wasm CONTROLS.json
 //        node --no-liftoff web-mixing-automation-benchmark.mjs run MODULE.wasm CONTROLS.json ROUND
 //
+// A second mode (#1289, slice B1 of #1269) times a session boot rather than a render; its
+// `rebuild-*` commands need no control table and are described where they are defined:
+//        node --no-liftoff web-mixing-automation-benchmark.mjs rebuild-preflight MODULE.wasm
+//        node --no-liftoff web-mixing-automation-benchmark.mjs rebuild-round MODULE.wasm warmup|1|2
+//        node web-mixing-automation-benchmark.mjs rebuild-run WORKDIR OUTDIR CPU CONTROL
+//        node web-mixing-automation-benchmark.mjs rebuild-validate RECORDS.jsonl
+//
 // `preflight` is untimed: seven arms over the pre-roll and the preflight blocks, and the row's
 // premises asserted on their digests; then the three documents over the same blocks, each rendering
 // audible bits of its own. `run` asserts the same premises first, then times the three arms
@@ -48,9 +55,12 @@
 // console runner does). Every assertion throws, so a broken premise exits non-zero before any
 // number is printed.
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { createPreparedControl } from "../hosts/host-web/web/prepared-control.js";
 
 const ROOT = new URL("../", import.meta.url);
@@ -98,6 +108,406 @@ const SOURCE_RING_FRAMES = (() => {
   const { stallToleranceMs, reserveQuanta } = ABI_LAYOUT.constants.sourceRing;
   return (Math.ceil(Math.floor((RATE * stallToleranceMs) / 1000) / Q) + reserveQuanta) * Q;
 })();
+
+// ---------------------------------------------------------------------------------------------
+// The rebuild-cost mode (#1289, slice B1 of #1269): how long a session boot blocks the audio
+// thread. It needs no control table and returns before anything below reads one.
+//
+// The browser engine's Wasm instance lives inside the `AudioWorkletProcessor`, so a replacement
+// session will be prepared on the rendering thread between two `process()` calls (#1269 P12). A
+// boot runs the whole pipeline a replacement runs -- document parse, session compile, host-core
+// preparation, graph compile, PDC, bind -- so `miso_engine_web_v1_boot` on the shipped module is
+// the proxy this measures (decision D1) for four documents: the nine-track EQ session and the three
+// sixty-four-track console documents. Each timed boot is on a fresh instance of the shipped module
+// (its linear memory grows inside the clock, as a first boot in the worklet does), with the
+// browser's live-control boot options: the SDK's default command queue and no meters, observation
+// taps, master or spectrum. Only the boot export is inside the clock; the dispose that follows is
+// timed on its own and stated beside it, and after every timed boot the session is fed and must
+// render an audible block, outside the clock.
+//
+// `rebuild-preflight` is untimed: it boots every document once and asserts an audible block.
+// `rebuild-round` asserts the same premise, then times the four documents alternated per
+// observation and prints one JSON record. `rebuild-run` is the one timed invocation (launched by
+// `run-web-mixing-automation-benchmark.sh rebuild-run`, which chooses the CPU and the control
+// statement): before launching anything it refuses an existing output, modified tracked files and a
+// module not prepared at HEAD; then it launches one warmup round, whose record is discarded, and two
+// measured rounds, one process each, and writes the records, the validator's verdict and a short
+// report under OUTDIR. A refused run keeps its records under a name no reader accepts.
+// `rebuild-validate` applies the validator to a records file.
+// ---------------------------------------------------------------------------------------------
+
+const REBUILD_ROOT = fileURLToPath(ROOT);
+const REBUILD_SCRIPT = fileURLToPath(import.meta.url);
+// The frozen workload (D1).
+const REBUILD_DOCUMENTS = [
+  { kind: "nine_track_eq", fixture_id: "fixtures/session/v1/parametric-eq-nine-track.json", tracks: 9 },
+  { kind: "sixty_four_track_console", fixture_id: "fixtures/session/v1/console-sixty-four-track.json", tracks: 64 },
+  { kind: "sixty_four_track_app_shape", fixture_id: "fixtures/session/v1/console-sixty-four-track-app.json", tracks: 64 },
+  { kind: "sixty_four_track_console_sends", fixture_id: "fixtures/session/v1/console-sixty-four-track-sends.json", tracks: 64 },
+];
+const REBUILD_OBSERVATIONS = 25;
+// One quantum's budget: 128 / 48000 s.
+const REBUILD_BUDGET_NS = (Q * 1e9) / RATE;
+const REBUILD_BLOCKS = 8;
+const REBUILD_ROUNDS = { warmup: 0, 1: 1, 2: 2 };
+const REBUILD_RECORD = "web-rebuild-cost.jsonl";
+const REBUILD_REFUSED = "web-rebuild-cost.refused.jsonl";
+const REBUILD_VERDICT = "validator.json";
+const REBUILD_REPORT = "report.md";
+const REBUILD_STDERR = "web-rebuild-cost.stderr.log";
+const REBUILD_OUTPUTS = [REBUILD_RECORD, REBUILD_REFUSED, REBUILD_VERDICT, REBUILD_REPORT, REBUILD_STDERR];
+
+
+const rebuildSha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+// ---------------------------------------------------------------------------------------------
+// The validator (gate 2): a record set the report may be written from.
+// ---------------------------------------------------------------------------------------------
+
+// Every reason the records are refused; an empty list accepts them.
+function rebuildRefusalReasons(records) {
+  const reasons = [];
+  if (!Array.isArray(records) || records.length !== 2) {
+    return [`expected two measured records, found ${Array.isArray(records) ? records.length : "none"}`];
+  }
+  const rounds = records.map((record) => record?.round);
+  if (rounds[0] !== 1 || rounds[1] !== 2) reasons.push(`rounds are ${JSON.stringify(rounds)}, not [1,2]`);
+  records.forEach((record, index) => {
+    const at = `record ${index + 1}`;
+    if (record?.record !== "web_rebuild_cost" || record?.issue !== 1289 || record?.schema_version !== 1) {
+      reasons.push(`${at}: not a web_rebuild_cost schema 1 record`);
+      return;
+    }
+    if (record.sample_rate_hz !== RATE || record.quantum_frames !== Q
+        || record.quantum_budget_ns !== REBUILD_BUDGET_NS) {
+      reasons.push(`${at}: the rate, quantum or budget is not the frozen one`);
+    }
+    const docs = Array.isArray(record.documents) ? record.documents : [];
+    const kinds = docs.map((doc) => doc?.workload_kind);
+    if (JSON.stringify(kinds) !== JSON.stringify(REBUILD_DOCUMENTS.map((doc) => doc.kind))) {
+      reasons.push(`${at}: documents are ${JSON.stringify(kinds)}, not the four frozen ones`);
+    }
+    for (const doc of docs) {
+      const name = `${at} ${doc?.workload_kind}`;
+      const samples = doc?.boot_ns;
+      if (doc?.observations !== REBUILD_OBSERVATIONS || !Array.isArray(samples) || samples.length !== REBUILD_OBSERVATIONS) {
+        reasons.push(`${name}: not ${REBUILD_OBSERVATIONS} observations`);
+        continue;
+      }
+      if (!samples.every((value) => Number.isSafeInteger(value) && value > 0)) {
+        reasons.push(`${name}: a boot time is not a positive integer`);
+      }
+      // A refused boot returns early and fast; every timed boot must have prepared a session that
+      // renders audible bits.
+      if (doc.failed_boots !== 0 || doc.booted !== REBUILD_OBSERVATIONS || doc.audible_after_boot !== REBUILD_OBSERVATIONS) {
+        reasons.push(`${name}: a boot failed (failed ${doc.failed_boots}, booted ${doc.booted}, `
+          + `audible ${doc.audible_after_boot})`);
+      }
+      if (doc.disposed !== REBUILD_OBSERVATIONS) reasons.push(`${name}: a dispose failed`);
+      if (!(Number.isSafeInteger(doc.peak_memory_bytes) && doc.peak_memory_bytes > 0)) {
+        reasons.push(`${name}: no peak memory`);
+      }
+    }
+  });
+  if (reasons.length === 0) {
+    for (const key of ["module_sha256", "candidate_commit", "prepared_commit"]) {
+      if (records[0][key] !== records[1][key]) reasons.push(`the rounds disagree on ${key}`);
+    }
+  }
+  return reasons;
+}
+
+// ---------------------------------------------------------------------------------------------
+// One boot on a fresh instance of the shipped module.
+// ---------------------------------------------------------------------------------------------
+
+function rebuildDocument(doc) {
+  const text = readFileSync(path.join(REBUILD_ROOT, doc.fixture_id), "utf8");
+  const parsed = JSON.parse(text);
+  assert.equal(parsed.tracks.length, doc.tracks, `${doc.fixture_id}: track count`);
+  assert.equal(parsed.sample_rate_hz, RATE, `${doc.fixture_id}: rate`);
+  assert.equal(parsed.sources.length, 1, `${doc.fixture_id}: one source`);
+  assert.equal(parsed.sources[0].channels, 2, `${doc.fixture_id}: a stereo source`);
+  return {
+    ...doc,
+    bytes: new TextEncoder().encode(text),
+    sourceId: new TextEncoder().encode(parsed.sources[0].id),
+  };
+}
+
+function rebuildInstance(wasmModule) {
+  const e = new WebAssembly.Instance(wasmModule, {}).exports;
+  assert.equal(e.miso_engine_web_v1_abi_version(), ABI_LAYOUT.abiVersion);
+  const optionsPointer = e.miso_engine_web_v1_boot_options_ptr();
+  const options = new DataView(e.memory.buffer, optionsPointer, ABI_LAYOUT.structures.bootOptions.bytes);
+  const u32 = (name, value) => options.setUint32(field("bootOptions", name), value, true);
+  const u64 = (name, value) => options.setBigUint64(field("bootOptions", name), value, true);
+  u32("structSize", ABI_LAYOUT.structures.bootOptions.bytes);
+  u32("abiVersion", ABI_LAYOUT.abiVersion);
+  u32("requireSampleRateHz", RATE);
+  u32("requireQuantumFrames", Q);
+  u32("sourceRingFrames", SOURCE_RING_FRAMES);
+  u32("reserved0", 0);
+  u64("maximumMemoryBytes", 0n);
+  // The browser's live controls: the SDK's default command queue, nothing else attached.
+  u64("liveControlCommandQueueRecords", BigInt(COMMAND_QUEUE_RECORDS));
+  u64("liveControlMeterBlocks", 0n);
+  u64("liveControlObservationTaps", 0n);
+  u64("liveControlMasterTrackPlusOne", 0n);
+  return e;
+}
+
+function rebuildStage(e, document) {
+  const pointer = e.miso_engine_web_v1_document_ptr(document.bytes.byteLength);
+  assert.notEqual(pointer, 0, `${document.kind}: document staging`);
+  new Uint8Array(e.memory.buffer, pointer, document.bytes.byteLength).set(document.bytes);
+}
+
+// Feeds a few blocks of a sine on the one source and renders; true when a block was audible.
+// Outside every clock.
+function rebuildRendersAudibly(e, handle, document) {
+  let frame = 0n;
+  const feed = () => {
+    const idPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
+    const pcmPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM);
+    new Uint8Array(e.memory.buffer, idPointer, document.sourceId.length).set(document.sourceId);
+    const pcm = new Float32Array(e.memory.buffer, pcmPointer, 2 * Q);
+    for (let i = 0; i < Q; i++) {
+      const t = (Number(frame) + i) * 0.0575;
+      pcm[i] = Math.sin(t) * 0.25;
+      pcm[Q + i] = -Math.sin(t) * 0.2;
+    }
+    const result = e.miso_engine_web_v1_source_submit(
+      handle, document.sourceId.length, 1n, frame, 2, Q, 0);
+    assert.equal(result, RESULT_OK, `${document.kind}: source submit`);
+    frame += BigInt(Q);
+  };
+  for (let i = 0; i < 4; i++) feed();
+  let audible = false;
+  for (let block = 0; block < REBUILD_BLOCKS; block++) {
+    feed();
+    assert.equal(e.miso_engine_web_v1_render(handle, Q), RESULT_OK, `${document.kind}: render`);
+    const outputPointer = e.miso_engine_web_v1_buffer_ptr(handle, BUFFER_OUTPUT);
+    const output = new Float32Array(e.memory.buffer, outputPointer, 2 * Q);
+    audible ||= output.some((word) => word !== 0 && Number.isFinite(word));
+  }
+  return audible;
+}
+
+// One observation: a fresh instance, the document staged, `miso_engine_web_v1_boot` alone in the
+// clock, the result checked and rendered outside it, then the dispose timed on its own.
+function rebuildObserve(wasmModule, document) {
+  const e = rebuildInstance(wasmModule);
+  rebuildStage(e, document);
+  const start = process.hrtime.bigint();
+  const handle = e.miso_engine_web_v1_boot(document.bytes.byteLength);
+  const bootNs = Number(process.hrtime.bigint() - start);
+  const bootResult = e.miso_engine_web_v1_boot_result();
+  const memoryBytes = e.memory.buffer.byteLength;
+  if (handle === 0 || bootResult !== RESULT_OK) {
+    return { bootNs, booted: false, audible: false, disposed: false, disposeNs: 0, memoryBytes, bootResult };
+  }
+  const audible = rebuildRendersAudibly(e, handle, document);
+  const disposeStart = process.hrtime.bigint();
+  const disposeResult = e.miso_engine_web_v1_dispose(handle);
+  const disposeNs = Number(process.hrtime.bigint() - disposeStart);
+  return { bootNs, booted: true, audible, disposed: disposeResult === RESULT_OK, disposeNs, memoryBytes, bootResult };
+}
+
+// The premise, untimed: every document boots once and renders an audible block (gate 1).
+function rebuildPreflight(wasmModule, documents) {
+  return Object.fromEntries(documents.map((document) => {
+    const result = rebuildObserve(wasmModule, document);
+    assert.ok(result.booted, `preflight ${document.kind}: boot refused with result ${result.bootResult}`);
+    assert.ok(result.audible, `preflight ${document.kind}: rendered no audible block`);
+    assert.ok(result.disposed, `preflight ${document.kind}: dispose failed`);
+    return [document.kind, { audible: true, memory_bytes: result.memoryBytes }];
+  }));
+}
+
+function rebuildRound(modulePath, roundName) {
+  const moduleBytes = readFileSync(modulePath);
+  const wasmModule = new WebAssembly.Module(moduleBytes);
+  const documents = REBUILD_DOCUMENTS.map(loadDocument);
+  rebuildPreflight(wasmModule, documents);
+  const loadStart = readFileSync("/proc/loadavg", "utf8").trim();
+  const observations = documents.map(() => []);
+  for (let observation = 0; observation < REBUILD_OBSERVATIONS; observation++) {
+    documents.forEach((document, index) => observations[index].push(rebuildObserve(wasmModule, document)));
+  }
+  const loadEnd = readFileSync("/proc/loadavg", "utf8").trim();
+  return {
+    schema_version: 1,
+    issue: 1289,
+    record: "web_rebuild_cost",
+    round: REBUILD_ROUNDS[roundName],
+    module_sha256: rebuildSha256(moduleBytes),
+    // Whether the measured module is the one the last release shipped (#1061), not a re-pin.
+    module_matches_pin: rebuildSha256(moduleBytes) === readFileSync(path.join(REBUILD_ROOT, PIN_FILE), "utf8").trim(),
+    node_version: process.version,
+    v8_version: process.versions.v8,
+    node_flags: process.execArgv,
+    sample_rate_hz: RATE,
+    quantum_frames: Q,
+    quantum_budget_ns: REBUILD_BUDGET_NS,
+    live_control_command_queue_records: COMMAND_QUEUE_RECORDS,
+    source_ring_frames: SOURCE_RING_FRAMES,
+    observations_per_document: REBUILD_OBSERVATIONS,
+    pairing: "four documents alternated per observation; a fresh instance per boot",
+    units: "ns",
+    percentile_method: "nearest_rank",
+    documents: documents.map((document, index) => {
+      const rows = observations[index];
+      const boot = rows.map((row) => row.bootNs);
+      const dispose = rows.filter((row) => row.disposed).map((row) => row.disposeNs);
+      return {
+        workload_kind: document.kind,
+        fixture_id: document.fixture_id,
+        document_sha256: rebuildSha256(document.bytes),
+        document_bytes: document.bytes.byteLength,
+        tracks: document.tracks,
+        observations: rows.length,
+        booted: rows.filter((row) => row.booted).length,
+        failed_boots: rows.filter((row) => !row.booted).length,
+        audible_after_boot: rows.filter((row) => row.audible).length,
+        disposed: dispose.length,
+        boot_ns: boot,
+        boot_p50_ns: nearestRank(boot, 50),
+        boot_max_ns: Math.max(...boot),
+        boot_min_ns: Math.min(...boot),
+        dispose_p50_ns: dispose.length ? nearestRank(dispose, 50) : null,
+        dispose_max_ns: dispose.length ? Math.max(...dispose) : null,
+        peak_memory_bytes: Math.max(...rows.map((row) => row.memoryBytes)),
+      };
+    }),
+    loadavg_start: loadStart,
+    loadavg_end: loadEnd,
+    descriptive_only: true,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The one timed invocation.
+// ---------------------------------------------------------------------------------------------
+
+const rebuildGit = (...args) => execFileSync("git", ["-C", REBUILD_ROOT, ...args], { encoding: "utf8" }).trim();
+const rebuildTrackedClean = () => rebuildGit("status", "--porcelain=v1", "--untracked-files=no") === "";
+
+function rebuildReport(records) {
+  const ms = (ns) => (ns / 1e6).toFixed(3);
+  const ratio = (ns) => (ns / REBUILD_BUDGET_NS).toFixed(1);
+  const mib = (bytes) => (bytes / 1048576).toFixed(1);
+  const lines = [
+    "# Browser session rebuild cost (#1289, B1 of #1269)",
+    "",
+    `Module \`${records[0].module_sha256}\` at \`${records[0].candidate_commit}\`, Node ${records[0].node_version} `
+      + `(V8 ${records[0].v8_version}, ${records[0].node_flags.join(" ")}), `
+      + `${records[0].measurement_control}.`,
+    "",
+    `Time of \`miso_engine_web_v1_boot\` on a fresh instance, ${REBUILD_OBSERVATIONS} boots per document per round; `
+      + `one quantum's budget is ${Q} / ${RATE} s = ${ms(REBUILD_BUDGET_NS)} ms. Descriptive only.`,
+    "",
+    "| document | tracks | round | boot p50 ms | boot max ms | p50 / budget | max / budget | dispose p50 ms | peak Wasm memory MiB |",
+    "|---|---|---|---|---|---|---|---|---|",
+  ];
+  for (const record of records) {
+    for (const doc of record.documents) {
+      lines.push(`| ${doc.workload_kind} | ${doc.tracks} | ${record.round} | ${ms(doc.boot_p50_ns)} | `
+        + `${ms(doc.boot_max_ns)} | ${ratio(doc.boot_p50_ns)} | ${ratio(doc.boot_max_ns)} | `
+        + `${ms(doc.dispose_p50_ns)} | ${mib(doc.peak_memory_bytes)} |`);
+    }
+  }
+  lines.push("");
+  return `${lines.join("\n")}`;
+}
+
+function rebuildRun(workdir, outdir, cpu, control) {
+  const outputs = Object.fromEntries(REBUILD_OUTPUTS.map((name) => [name, path.join(outdir, name)]));
+  // Overwrite refusal and persistence, before anything is launched.
+  for (const file of Object.values(outputs)) {
+    // `lstat`, so a dangling symlink counts as present.
+    let present = true;
+    try { lstatSync(file); } catch { present = false; }
+    if (present) throw new Error(`refusing to overwrite ${file}`);
+  }
+  if (!rebuildTrackedClean()) throw new Error("the timed run requires unmodified tracked files");
+  const provenance = JSON.parse(readFileSync(path.join(workdir, "provenance.json"), "utf8"));
+  const modulePath = path.join(workdir, "host_web.wasm");
+  const commit = rebuildGit("rev-parse", "--verify", "HEAD");
+  if (provenance.commit !== commit) {
+    throw new Error(`the module was prepared at ${provenance.commit}, not at HEAD ${commit}; run prepare again`);
+  }
+  if (rebuildSha256(readFileSync(modulePath)) !== provenance.module_sha256) {
+    throw new Error("host_web.wasm changed after prepare recorded it");
+  }
+  if (!/^[0-9]+$/.test(cpu) || typeof control !== "string" || control === "") throw new Error("rebuild-run: CPU must be a number and CONTROL nonempty");
+  mkdirSync(outdir, { recursive: true, mode: 0o755 });
+  writeFileSync(outputs[REBUILD_STDERR], "", { flag: "wx" });
+
+  const records = [];
+  let failure = null;
+  for (const name of ["warmup", "1", "2"]) {
+    const child = spawnSync("taskset", ["-c", cpu, process.execPath, "--no-liftoff", REBUILD_SCRIPT, "rebuild-round", modulePath, name],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    writeFileSync(outputs[REBUILD_STDERR], child.stderr ?? "", { flag: "a" });
+    if (child.status !== 0) {
+      failure = `the ${name} launch failed (status ${child.status}); see ${REBUILD_STDERR}`;
+      break;
+    }
+    if (name === "warmup") continue;
+    const record = JSON.parse(child.stdout);
+    records.push({
+      ...record, candidate_commit: commit, prepared_commit: provenance.commit,
+      measurement_control: control, cpu_affinity: cpu,
+    });
+  }
+  if (failure === null && !rebuildTrackedClean()) failure = "a tracked file changed while the rounds ran";
+  if (failure === null && rebuildGit("rev-parse", "--verify", "HEAD") !== commit) failure = "HEAD moved while the rounds ran";
+  if (failure === null && rebuildSha256(readFileSync(modulePath)) !== provenance.module_sha256) {
+    failure = "host_web.wasm changed while the rounds ran";
+  }
+  const reasons = failure === null ? rebuildRefusalReasons(records) : [failure];
+  const jsonl = records.map((record) => `${JSON.stringify(record)}\n`).join("");
+  writeFileSync(outputs[REBUILD_VERDICT], `${JSON.stringify({ accepted: reasons.length === 0, reasons })}\n`, { flag: "wx" });
+  if (reasons.length !== 0) {
+    if (jsonl !== "") writeFileSync(outputs[REBUILD_REFUSED], jsonl, { flag: "wx" });
+    throw new Error(`the run is refused: ${reasons.join("; ")}`);
+  }
+  writeFileSync(outputs[REBUILD_RECORD], jsonl, { flag: "wx" });
+  writeFileSync(outputs[REBUILD_REPORT], rebuildReport(records), { flag: "wx" });
+  process.stdout.write(`${outputs[REBUILD_RECORD]}\n`);
+}
+
+// ---------------------------------------------------------------------------------------------
+
+function rebuildMain([command, ...rest]) {
+  if (command === "rebuild-preflight" && rest.length === 1) {
+    const documents = REBUILD_DOCUMENTS.map(rebuildDocument);
+    const result = rebuildPreflight(new WebAssembly.Module(readFileSync(rest[0])), documents);
+    process.stdout.write(`${JSON.stringify({ mode: command, documents: result })}\n`);
+    return 0;
+  }
+  if (command === "rebuild-round" && rest.length === 2 && Object.hasOwn(REBUILD_ROUNDS, rest[1])) {
+    process.stdout.write(`${JSON.stringify(rebuildRound(rest[0], rest[1]))}\n`);
+    return 0;
+  }
+  if (command === "rebuild-run" && rest.length === 4) {
+    rebuildRun(path.resolve(rest[0]), path.resolve(rest[1]), rest[2], rest[3]);
+    return 0;
+  }
+  if (command === "rebuild-validate" && rest.length === 1) {
+    const records = readFileSync(rest[0], "utf8").split("\n").filter((line) => line !== "")
+      .map((line) => JSON.parse(line));
+    const reasons = rebuildRefusalReasons(records);
+    process.stdout.write(`${JSON.stringify({ accepted: reasons.length === 0, reasons })}\n`);
+    return reasons.length === 0 ? 0 : 1;
+  }
+  process.stderr.write("usage: web-mixing-automation-benchmark.mjs rebuild-preflight MODULE.wasm "
+    + "| rebuild-round MODULE.wasm warmup|1|2 | rebuild-run WORKDIR OUTDIR CPU CONTROL "
+    + "| rebuild-validate RECORDS.jsonl\n");
+  return 2;
+}
+if (process.argv[2]?.startsWith("rebuild-")) process.exit(rebuildMain(process.argv.slice(2)));
 
 // ---------------------------------------------------------------------------------------------
 // Inputs: the module, the native row's control table, and the session document.
