@@ -359,3 +359,7 @@ binary on demand.
   passed in 5 more invocations (7.8-9.2 s each); `cargo fmt --all -- --check`, `cargo clippy --locked
   -p capi --all-targets --all-features -- -D warnings`, `scripts/check-capi-abi.sh`,
   `scripts/check-realtime-policy.sh` and `scripts/check-workspace-policy.sh` pass.
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1258-attempt1.md`). MINOR 1 (race mute edits now flip values) and NIT 1-2 applied in `fe3bb37e8`.

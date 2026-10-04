@@ -320,3 +320,7 @@ is a no-op; the oracle's window includes it and is exact.
   unchanged): all pass. Worklet chain not run: no line compiled into the browser module changed
   (host-core, host-web, builtins and builtins-compiler changed only in docs, comments and
   tests).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1256-attempt1.md`). MINOR 1 (an exact resource oracle with submix strips) folded into #1258 (`0fdb4f886`); NIT 1 and NIT 4 applied in `b6a91ef63`; NIT 2 (the `allow(dead_code)`) is gone at head, since #1257 and #1264 read every field, and NIT 3's wording ("outlive whichever ... drops first, and the last owner frees") is in `control.rs`.

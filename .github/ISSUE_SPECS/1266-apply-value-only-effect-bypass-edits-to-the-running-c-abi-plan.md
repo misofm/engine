@@ -74,6 +74,11 @@ Run every command from the repository root.
    E + ceil(`latency_samples` / quantum) + 1 on, the output is bit-identical to a plan compiled from
    the committed snapshot and fed the same source from sample 0. Run it for 1 and 10 tracks at the
    four launch rates.
+   *Scope (verdict MINOR 2, follow-up):* the equality covers the switched instance's own state. An
+   effect downstream of it keeps the live history, as after any live edit, so the from-sample-0
+   oracle holds only while that downstream memory fits the window, as on the gate fixture (a
+   compressor insert, then a soft-clip console slot with about 31 samples of memory). A second
+   compressor after the switched one does not converge within 42 blocks; its difference decays.
    *Test value: it turns red if a live bypass record differs from what preparation bakes, or lands
    on the wrong instance.*
 3. **The exception.** A multiband compressor bypass change through the C ABI produces a new epoch,
@@ -192,3 +197,63 @@ saved copy):
 - 4-lane (NEON): CI-only.
 
 **Outside the authorized paths:** nothing.
+
+### Follow-ups applied (after the attempt 1 PASS; final batch follow-ups worker)
+
+- **MINOR 1.** `an_eq_bypass_beside_targets_filling_its_queue_rebuilds` (capi `live_tests.rs`, from
+  the verifier's scratch): at `maximum_automation_spans_per_block: 4`, an eq0 bypass beside band
+  1-3 gain edits that design four targets is admitted (`RESULT_OK`), leaves one candidate pending
+  and the current room at 4. Mutation M9 (the over-capacity check counts only `targets.len()`,
+  dropping `bypass_records`): **red** (`BACKPRESSURE`); reverted. It survived the whole capi suite
+  before.
+- **MINOR 2.** The "equal to a rebuild" claim is scoped in `C_ABI_V1_QUALIFICATION.md` and in
+  gate 2 above: the switched instance's own state is the same either way; a stateful effect
+  downstream keeps the live history, so the from-sample-0 oracle holds only while that memory fits
+  the window, as on the gate fixture (compressor insert, then the soft-clip console slot).
+- **MINOR 3** (merged with #1264 MINOR 1): the C header and `CONTROL_PROTOCOL_SEMANTICS.md` name the
+  live bypass and its two exceptions.
+- **NIT 1.** The doc and `control.rs` now say the bypass record "rides with" the instance's
+  parameter records or targets, under #1053 D2, and promise no order. **NIT 2.** `live_delta.rs`
+  names #1267, not #1225, for submix effect bypass. **NIT 3.** Rewrapped. **NIT 5** (bypass-only EQ
+  PCM test) not added: optional, and the path reuses the compressor's push and preflight.
+- **NIT 4** (merged with #1265 MINOR 2). `tools/audit/src/capi.rs`: the session gains an enabled
+  compressor insert on `eq2`, and the live editor cycles five edits every 64th call: eq0 mute, eq1
+  pan, the compressor threshold (#1264 records), eq0's console EQ band 1 left gain (an enabled band:
+  #1265 targets) and the compressor bypass (#1266 record). After the run a liveness witness submits
+  the next contiguous generation-1 source chunk, which the first plan's ring accepts only if no
+  edit rebuilt. Record shape unchanged; the CI validator passes. Result: calls 100,000,
+  allocations 0, deallocations 0, locks 0, syscalls 0, total_violations 0, `pcm_digest`
+  `c91e6169ab281447` (moved from `18e56b897a3abf17`; not pinned). Mutations, each reverted:
+  - a heap allocation inside the effect lane drain's `Bypass` arm (`effect-contract/src/live.rs`):
+    the audit **aborts** (the audited allocator's render-scope violation, exit 134);
+  - the same inside the `PreparedTarget` staging arm: **aborts**;
+  - the same inside the `Parameter` arm: **aborts**;
+  - the compressor's bypass classified `PreparedBypass` (a live edit silently rebuilds): the
+    witness is **red** ("a live edit rebuilt the plan").
+  The old editor pushed no effect record, so none of the three drain arms ran under audit before.
+
+### Final batch gates (one run for the #1263-#1266 follow-up set; x86-64-v3)
+
+All pass: `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+--no-deps`; `cargo test --locked` for `host-core --all-features`, `capi`, `effect-compiler
+--all-features` and `protocol --features test-support`; the workspace test command (#1257 gate 6);
+`cargo build --locked --release -p audit -p bench -p capi -p session-validator`; `cargo test
+--locked --release -p audit -p bench -p console-workload`; `./target/release/audit capi` and the
+`qualification.yml` record validator; `check-capi-abi.sh` and its self-test;
+`check-scalar-oracle-absent.py --native` on the `-p capi` build; the host-core, realtime, workspace
+and protocol-control policy checks and self-tests; `check-cross-targets.sh`;
+`check-ci-path-routing.py`. The shipped browser module moved (`5045e3bb...` ->
+`7e7a4496baa63abf75999671ff7dd918bd9c54044dc825ff04a8a117154b062b`): the edits there are doc
+comments only, but they shift source lines that panic locations embed. So the worklet chain ran
+and passes: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py --wasm` and `test-web-audioworklet.sh`. The V8 spill gate (exact
+Node 22.23.2) and 4-lane (NEON) are CI-only.
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1266-attempt1.md`).
+MINOR 1 (EQ bypass boundary test), MINOR 2 (scoped rebuild-equality claim) and MINOR 3 (host-facing
+docs), with NIT 1-4, applied in the final batch follow-ups (above); NIT 5 declined as optional.
+

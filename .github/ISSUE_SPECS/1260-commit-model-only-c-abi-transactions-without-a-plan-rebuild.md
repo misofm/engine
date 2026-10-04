@@ -253,3 +253,7 @@ before (gate 3).
   ("a generation-1 chunk was refused"); they were green under this mutation before. Reverted.
 - Gates: as recorded in #1258's follow-ups note (capi tests, race x5, fmt, clippy, ABI, realtime and
   workspace policies).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1260-attempt1.md`). MINOR 1 (header and protocol semantics name model-only commits) and MINOR 2 (swap witness on the #1042 race tests) applied in `fe3bb37e8`.

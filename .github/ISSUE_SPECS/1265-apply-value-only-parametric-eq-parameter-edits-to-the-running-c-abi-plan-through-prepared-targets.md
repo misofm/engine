@@ -248,3 +248,29 @@ Run every command from the repository root.
   (`host-core/src/lib.rs` is outside the authorized paths).
 - The C header's "Live edits" comment and `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` (outside the
   authorized paths) still name only fader, mute and pan, as #1264 noted.
+
+### Follow-ups applied (after the attempt 1 PASS; final batch follow-ups worker)
+
+- **MINOR 1.** Gate 3 (`a_refused_eq_transaction_leaves_its_owner_idle`) gains a two-begun-owner
+  case: EQ edits on eq0 and eq1 while eq1's EQ lane is full give `BACKPRESSURE`; every owner, the
+  model, the replay cache, the events and both rooms are unchanged, eq0's owner is idle at its
+  revision, and the retry after a render commits both. Mutation: `OpenOwners::drop` discards only
+  the last begun owner: **red** at the new case's owner/state assertion; reverted. It was green on
+  every committed test before.
+- **MINOR 2.** `audit capi`'s live editor now cycles five edits, adding a compressor threshold
+  change, a parametric EQ band gain change and a compressor bypass toggle (#1266 N4) on a fixture
+  with a compressor insert added to `eq2`, plus a liveness witness (see the #1266 record). Record
+  shape unchanged.
+- **NITs.** Gate 2's eq4 edit is now audible: `eq_session` enables band 1 of eq4's console EQ at
+  +6 dB, so the Q edit lands on an enabled band. Check: dropping the reference's eq4 publication
+  turns gate 2 **red** now, and was green on the old fixture. The gate-1(a) docstring no longer
+  claims the 48 kHz design-rate catch. `live_delta.rs` and `C_ABI_V1_QUALIFICATION.md` overlong
+  lines are rewrapped. Umbrella G4 is marked lifted by #1265. NIT 3 (Domain mapping for a design
+  refusal) stays untested: capi rebuilds on any `Err`.
+- Gates: see "Final batch gates" in the #1266 record.
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1265-attempt1.md`).
+MINOR 1 (two-owner refusal) and MINOR 2 (audit coverage), with NIT 1, 2, 4 and 5, applied in the
+final batch follow-ups (above).

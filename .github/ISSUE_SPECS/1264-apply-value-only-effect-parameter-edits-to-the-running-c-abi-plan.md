@@ -280,3 +280,28 @@ Run every command from the repository root.
   `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` still say only fader, mute and pan values are live.
   Both are outside this slice's authorized paths, so they are unchanged; the qualification doc
   is updated.
+
+### Follow-ups applied (after the attempt 1 PASS; final batch follow-ups worker)
+
+- **MINOR 1.** `crates/capi/include/miso_engine_v1.h` (comment only; `check-capi-abi.sh` passes) and
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md` now state the whole live set: track fader, mute and
+  pan/matrix; model-only edits; live effect parameters (automation rate `Block`), the parametric
+  EQ's through prepared targets; effect bypass except the delay's and the multiband's, which
+  rebuild; every other change rebuilds, submix strips (G1), VCAs (G3) and follow-mute sources (G2)
+  included.
+- **MINOR 2.** `submix_effect_params_are_structural` (host-core `tests/live_delta.rs`, shaped from
+  the verifier's scratch): a submix console-entry and a submix insert `params` change are both
+  `Structure`, and the same model's track edit is live. Mutation: the step-3 mask also copies the
+  submixes' console-entry and insert `params`: **red** (the submix edits classify live); reverted.
+- **NIT 5.** Gate 1(b) gains the `-0.0` makeup case (no record). Mutation M12 (`normalize_zero`
+  dropped on the `PerLane` path of `resolve_initial_values`): **red** at the new assertion;
+  reverted. It was green on every committed test before.
+- NIT 1, NIT 2, NIT 3 and NIT 4 are not applied: NIT 2 and NIT 3 are control-thread performance
+  follow-up candidates; NIT 1 and NIT 4 are wording-level and harmless.
+- Gates: see "Final batch gates" in the #1266 record.
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1264-attempt1.md`).
+MINOR 1 (host-facing docs) and MINOR 2 (G1 effect regression test), with NIT 5, applied in the
+final batch follow-ups (above).

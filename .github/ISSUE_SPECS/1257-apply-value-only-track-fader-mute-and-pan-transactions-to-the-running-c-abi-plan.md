@@ -429,3 +429,7 @@ All tests are in `crates/capi/src/runtime/live_tests.rs`; each mutation was appl
   unchanged): all pass. Worklet chain not run: no line compiled into the browser module changed
   (host-core, host-web, builtins and builtins-compiler changed only in docs, comments and
   tests).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1257-attempt1.md`). MINOR 1 (room-check terms), MINOR 2 (the live arm skips the epoch-lag check), MINOR 3 (+96 B doc) and MINOR 4 (non-zero reference in the mute window), with NIT 2-4, applied in `978463341` (gates `0539791a1`).

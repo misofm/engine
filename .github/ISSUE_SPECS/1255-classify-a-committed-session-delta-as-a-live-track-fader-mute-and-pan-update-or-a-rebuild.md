@@ -390,3 +390,7 @@ Land them one at a time.
   unchanged): all pass. Worklet chain not run: no line compiled into the browser module changed
   (host-core, host-web, builtins and builtins-compiler changed only in docs, comments and
   tests).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1255-attempt1.md`). MINOR 1 (a fader move on a lane muted in both models still emits `FaderDb`) and MINOR 2 (the smoothing-cap note and the `classify_live_delta` doc) applied in `23c3048da`; NIT 1's reroute of `prepare_sections`/`gain_path` through `checked_fader_gain` stays a follow-up candidate.

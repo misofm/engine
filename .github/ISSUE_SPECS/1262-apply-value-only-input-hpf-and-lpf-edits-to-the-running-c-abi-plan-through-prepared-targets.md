@@ -118,3 +118,7 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Status
+
+Blocked: depends on #1261 (owner Q4); not started in this batch.

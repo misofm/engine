@@ -223,3 +223,37 @@ only); routed submix 149,142 -> 151,020.
   eight-lane bank) is a real memory cost on mobile that the spec did not foresee. It is charged
   and documented; whether to defer building the banked live-control owner until a push needs it
   is an owner question, not this slice's.
+
+### Follow-ups applied (after the attempt 1 PASS; final batch follow-ups worker)
+
+- **MINOR 1.** The effect-control payload is admitted twice, recorded as a conservative double
+  admission: a clause at the capi charge site (`crates/capi/src/runtime/compile.rs`), a sentence in
+  the "Charges" bullet of `docs/C_ABI_V1_QUALIFICATION.md` (the initial compile needs the graph row
+  plus the compiled model plus the payload `capi_retained_bytes` charges, 15,361 bytes on the
+  reference session), and this line. The optional oracle boundary pin was not added.
+- **MINOR 2.** The qualification doc now gives the formula (EQ member 2,104 B, other member
+  1,208 B; at a 128-frame quantum an eight-lane bank 8,944 + 360 * S plus 64 * L for latency L,
+  a four-lane bank 4,560 + 200 * S) and labels the table as the reference session's at
+  `limits()`.
+- **MINOR 3.** `host-core/src/prepare.rs` (`FADER_AND_MATRIX` and `route_controls` docs) and
+  `effect-contract/src/live.rs` (the ring is shared; the last owner frees it; capi drops the plan
+  first) are corrected. Doc comments only.
+- **NIT 1.** Resolved at head: #1264 reads the field and no `allow(dead_code)` remains.
+- **NIT 3.** Gate 1 (`c_abi_plans_with_live_lanes_render_like_lanes_free_plans`) gains
+  `mixed_effect_parity_session`: the ten-track parity session plus an enabled compressor insert on
+  two tracks and a bypassed delay and multiband insert on another, at the four rates. Mutation M6
+  (`attach_effect_live_controls` seeds every non-target lane `true`): **red** at "mixed effects 10
+  tracks at 44100 Hz: block 3"; reverted. At this head M6 also turns three #1264/#1266 PCM gates
+  red, but gate 1 is the only test that compares mixed non-EQ cohorts against a lanes-free plan.
+- **NIT 4.** `largest` chains the named rows (`control_table_row`, `source_id_row`,
+  `strip_table_bytes`) instead of slicing `epoch_rows[..len - 1]`. Behaviour-neutral: every capi
+  test and resource oracle passes unchanged.
+- **NIT 2** (tighten the four-lane ceilings) waits for the first AArch64 CI run; the owner FYI
+  (bound the windows by lane depth) is Q5 in `docs/handoffs/live-updates-1053/README.md`.
+- Gates: see "Final batch gates" in the #1266 record (one run for the #1263-#1266 follow-up set).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1263-attempt1.md`).
+MINOR 1 (double admission), MINOR 2 (formula) and MINOR 3 (stale docs), with NIT 3 and NIT 4,
+applied in the final batch follow-ups (above); NIT 2 and the window FYI stay follow-up candidates.

@@ -336,3 +336,7 @@ Land them one at a time and rebase.
   unchanged): all pass. Worklet chain not run: no line compiled into the browser module changed
   (host-core, host-web, builtins and builtins-compiler changed only in docs, comments and
   tests).
+
+### Verdict
+
+**Verdict.** Sol attempt 1: PASS (verdict file `docs/handoffs/live-updates-1053/1254-attempt1.md`). MINOR 1 (gate 1(a) asserts `Concurrent` delivery), MINOR 2 (`control_queue_depth` doc) and MINOR 3 (stale handle docs), with NIT 1-2, applied in `2142efb98`.

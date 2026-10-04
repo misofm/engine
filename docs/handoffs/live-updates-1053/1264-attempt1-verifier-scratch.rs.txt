@@ -1,0 +1,327 @@
+// #1264 attempt 1 verifier scratch tests (not committed).
+// Appended to crates/host-core/tests/live_delta.rs:
+
+// ---- Verifier scratch (#1264 attempt 1); not committed. ----
+
+fn v_native(template: &session::Effect, instance: &str, effect: &str) -> session::Effect {
+    let mut native = template.clone();
+    native.id = id(instance);
+    native.identity = EffectIdentity::Native {
+        effect_id: id(effect),
+    };
+    native.params.clear();
+    native.bypass = false;
+    native
+}
+
+fn v_template() -> session::Effect {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone()
+}
+
+/// with_effects plus submix `bus` (first track routed into it), carrying the console slot entry
+/// and a compressor insert of its own.
+fn v_with_effect_bus() -> SessionModel {
+    let mut model = with_effects();
+    let first = model.tracks[0].id.clone();
+    let bus = id("bus");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == first))
+        .expect("first track's route");
+    let output = core::mem::replace(
+        &mut route.destination,
+        RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        },
+    );
+    let mut bus_main = route.clone();
+    bus_main.id = id("bus-main");
+    bus_main.follows_mute = false;
+    bus_main.source = RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: SendTap::PostPan,
+    };
+    bus_main.destination = output;
+    model.routes.push(bus_main);
+    let mut submix = Submix::unity(bus, &model.console);
+    submix
+        .inserts
+        .effects
+        .push(v_native(&v_template(), "bcomp", "miso.compressor"));
+    model.submixes.push(submix);
+    normalized(&model)
+}
+
+#[test]
+fn v_submix_effect_params_are_structural() {
+    let current = v_with_effect_bus();
+    assert_eq!(current.submixes.len(), 1);
+    assert_eq!(current.submixes[0].console.len(), 1, "bus carries the clip slot");
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].console[0]
+                .params
+                .push(param(1, ParameterChannel::Both, ParameterUnit::Db, 6.0));
+        }),
+        Err(LiveRebuild::Structure),
+        "submix console entry"
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].inserts.effects[0]
+                .params
+                .push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        }),
+        Err(LiveRebuild::Structure),
+        "submix insert"
+    );
+    // Control: the same model's track edit is live.
+    assert!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        })
+        .is_ok()
+    );
+}
+
+#[test]
+fn v_pre_insert_offset_and_shared_and_prepared_variants() {
+    let template = v_template();
+    let mut model = with_effects();
+    model.console.pre_insert.push(ConsoleSlot {
+        slot: id("pre"),
+        identity: EffectIdentity::Native {
+            effect_id: id("miso.transient-shaper"),
+        },
+        quality: template.quality,
+        link_mode: template.link_mode,
+    });
+    for track in &mut model.tracks {
+        track.console.insert(
+            0,
+            ConsoleEntry {
+                slot: id("pre"),
+                bypass: false,
+                params: Vec::new(),
+            },
+        );
+    }
+    model.tracks[0].inserts.effects.push(v_native(&template, "dly", "miso.delay"));
+    model.tracks[0].inserts.effects.push(v_native(&template, "lim", "miso.true-peak-limiter"));
+    model.tracks[0].inserts.effects.push(v_native(&template, "mb", "miso.multiband-compressor"));
+    let current = normalized(&model);
+    let second = track_id(&current, 1);
+    let first = track_id(&current, 0);
+    // post_insert clip on track 2 is console(1) once a pre_insert slot exists.
+    let got = classify_effects(&current, |next| {
+        next.tracks[1].console[1]
+            .params
+            .push(param(1, ParameterChannel::Both, ParameterUnit::Db, 6.0));
+    })
+    .expect("live");
+    assert_eq!(got.1[0].0, second);
+    assert_eq!(got.1[0].1, LiveEffectAddress::console(1));
+    // pre_insert slot is console(0).
+    let got = classify_effects(&current, |next| {
+        next.tracks[1].console[0]
+            .params
+            .push(param(3, ParameterChannel::Both, ParameterUnit::Linear, 0.5));
+    })
+    .expect("live");
+    assert_eq!(got.1[0].1, LiveEffectAddress::console(0));
+    // Delay cross feedback (ID 5, index 4, Shared): one Both record.
+    let insert_index = |name: &str, model: &SessionModel| {
+        model.tracks[0]
+            .inserts
+            .effects
+            .iter()
+            .position(|e| e.id.as_str() == name)
+            .unwrap()
+    };
+    let dly = insert_index("dly", &current);
+    let got = classify_effects(&current, |next| {
+        next.tracks[0].inserts.effects[dly]
+            .params
+            .push(param(5, ParameterChannel::Both, ParameterUnit::Linear, 0.5));
+    })
+    .expect("live");
+    assert_eq!(
+        got.1,
+        vec![(
+            first.clone(),
+            LiveEffectAddress::insert(dly as u32),
+            vec![record(4, Lane::Both, 0.5)]
+        )]
+    );
+    // Shared parameter given Left: Domain (channel).
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[dly]
+                .params
+                .push(param(5, ParameterChannel::Left, ParameterUnit::Linear, 0.5));
+        }),
+        Err(LiveRebuild::Domain)
+    );
+    // Limiter lookahead (None): Prepared. Multiband crossover (None): Prepared. EQ HPF enabled
+    // (Boolean, Block): Prepared (G4).
+    let lim = insert_index("lim", &current);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[lim].params.push(param(
+                3,
+                ParameterChannel::Both,
+                ParameterUnit::Milliseconds,
+                2.0,
+            ));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+    let mb = insert_index("mb", &current);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[mb].params.push(param(
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Hz,
+                500.0,
+            ));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+    let eq = insert_index("eq", &current);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[eq].params.push(param(
+                65,
+                ParameterChannel::Left,
+                ParameterUnit::Linear,
+                1.0,
+            ));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+    // A live change beside a prepared one: the whole delta rebuilds.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[dly]
+                .params
+                .push(param(5, ParameterChannel::Both, ParameterUnit::Linear, 0.5));
+            next.tracks[0].inserts.effects[lim].params.push(param(
+                3,
+                ParameterChannel::Both,
+                ParameterUnit::Milliseconds,
+                2.0,
+            ));
+        }),
+        Err(LiveRebuild::Prepared)
+    );
+    // An unchanged lookahead rewritten explicitly at its default: live with no records.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[lim].params.push(param(
+                3,
+                ParameterChannel::Both,
+                ParameterUnit::Milliseconds,
+                5.0,
+            ));
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
+    // -0.0 for a default of +0.0 (compressor makeup): no record.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(6, ParameterChannel::Both, ParameterUnit::Db, -0.0));
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
+}
+
+// Appended to crates/capi/src/runtime/live_tests.rs:
+
+// ---- Verifier scratch (#1264 attempt 1); not committed. ----
+
+#[test]
+fn v_live_effect_edit_while_pending_reaches_candidate_and_readback() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = effect_session(10, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let edit = upsert(
+        "eq0",
+        RackName::Inserts,
+        "comp",
+        1,
+        ParameterChannel::Left,
+        ParameterUnit::Db,
+        -30.0,
+    );
+    let clip = upsert(
+        "eq9",
+        RackName::Console,
+        "clip",
+        2,
+        ParameterChannel::Right,
+        ParameterUnit::Db,
+        -3.0,
+    );
+    let mut rig = Rig::new(&document);
+    rig.step();
+    assert_eq!(rig.apply(&[content_edit(&model)]), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 1, "a candidate is pending");
+    assert_eq!(rig.apply(&[edit.clone(), clip.clone()]), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 1, "still one candidate");
+    assert_eq!(effect_room(&rig, Epoch::Pending, "eq0", "comp"), depth - 1);
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth);
+    assert_eq!(effect_room(&rig, Epoch::Pending, "eq9", "clip"), depth - 1);
+    let live = parameter_readback(&mut rig);
+
+    let mut rebuilt = Rig::new(&document);
+    rebuilt.step();
+    assert_eq!(
+        rebuilt.apply(&[content_edit(&model), edit, clip]),
+        crate::RESULT_OK
+    );
+    assert_eq!(rebuilt.summary().3, 1);
+    assert_eq!(parameter_readback(&mut rebuilt), live);
+    // The candidate installs and drains its queue.
+    rig.render();
+    rig.render();
+    assert_eq!(parameter_readback(&mut rig), live, "readback after the swap");
+    assert_eq!(rig.summary().3, 0, "the candidate is installed");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth);
+}
+
+#[test]
+fn v_submix_effect_param_edit_rebuilds() {
+    let document = with_model(&submix_session(false), |model| {
+        let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        let bus = model
+            .submixes
+            .iter_mut()
+            .find(|submix| submix.id.as_str() == "bus")
+            .expect("bus");
+        let mut compressor = template;
+        compressor.id = StableId::parse("bcomp").expect("bcomp");
+        compressor.identity = session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.compressor").expect("compressor ID"),
+        };
+        compressor.params.clear();
+        compressor.bypass = false;
+        bus.inserts.effects.push(compressor);
+    });
+    assert_rebuilds(
+        &document,
+        &[upsert(
+            "bus",
+            session::RackName::Inserts,
+            "bcomp",
+            1,
+            session::ParameterChannel::Left,
+            session::ParameterUnit::Db,
+            -30.0,
+        )],
+        "submix insert parameter",
+    );
+}
