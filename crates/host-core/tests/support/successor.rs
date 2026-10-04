@@ -52,7 +52,9 @@ pub(crate) fn caps() -> HostPrepareCaps {
     }
 }
 
-/// One session: the committed model and its compilation.
+/// One session: the committed model and its compilation. The committed model is the compiled
+/// session's normalized model, as the C ABI commits it, so a successor's join sees what production
+/// hands it.
 pub(crate) struct Session {
     pub(crate) model: SessionModel,
     pub(crate) compiled: CompiledSession,
@@ -65,7 +67,10 @@ impl Session {
             .unwrap_or_else(|_| panic!("compile caps"));
         let compiled = compile_host_model(&model, compile_caps)
             .unwrap_or_else(|failure| panic!("compile: {failure:?}"));
-        Self { model, compiled }
+        Self {
+            model: compiled.normalized_model().clone(),
+            compiled,
+        }
     }
 
     /// Prepared fresh, as a plan with no predecessor.

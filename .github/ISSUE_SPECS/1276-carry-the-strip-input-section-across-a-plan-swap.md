@@ -339,6 +339,40 @@ integrators, so the PCM from the swap block on is the gap-free continuation, and
 differs. Nothing live pins this digest.
 
 **Open points.** NIT-4 stands as a forward note for the first slice that gives a host input live
-edits across a published successor. The carried agreement from an unarmed chain is now `false`,
-which costs at most one agreement proof on the successor (a lane that does agree proves it at
-once, since input banks answer `channels_agree`).
+edits across a published successor. The carried agreement from an unarmed chain is now `false`.
+That is conservative: a successor whose collapse prefix holds only builtins re-arms after one
+agreement proof (input banks answer `channels_agree`), but one with a console or insert effect in
+that prefix stays dual for the rest of its plan, since every launch effect declines the proof
+(corrected by the phase-1 follow-ups; an earlier wording said "at most one proof").
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`807b48547`, `f41388939`) | `1276-attempt1.md` | FAIL | MAJOR: the D5 collapse agreement was inherited from a chain that cannot collapse, so a successor could collapse a carried lane whose channels disagree; 4 MINOR, 4 NIT. |
+| 2 (`e6302d8a8`) | `1276-attempt2.md` | PASS | MAJOR and attempt-1 minors closed; 1 MINOR (the binary-search join assumes a sorted committed model, unchecked; the harness passed raw models), 4 NIT. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`):
+- MINOR-1: `crates/host-core/src/prepare.rs` debug-asserts that a successor's committed tracks
+  and submixes are strictly in canonical ID order before the join, and the harness
+  (`tests/support/successor.rs`) now stores and passes `compiled.normalized_model()` as the
+  committed model, as the C ABI does. `a_successor_refuses_an_unnormalized_committed_model`
+  (debug builds; committed tracks reversed) is red with the assertion deleted and green with it.
+- NIT-1: `crates/rack/src/lib.rs`'s `carried_channel_agreement` rustdoc and the open point above
+  now say that `false` keeps a chain with an effect in its collapse prefix dual, and why that is
+  acceptable.
+- NIT-4: `a_changed_control_kind_carries_no_input_section` and
+  `the_carry_drain_applies_every_record_past_a_refused_one` now run at both shipped widths
+  (Simd8 where AVX2 is pinned, and Simd4); assertions unchanged. Re-run mutations: Md (live-queue
+  clause dropped) red at the first width; Mdrain (the carry drain uses the block drain's
+  stop-at-refusal) red.
+
+Stays open: NIT-2 (in a release build a refused carry record is counted and dropped, not
+surfaced; unreachable today, optional plan counter), NIT-3 (about 10 KB of browser-module growth
+from two sort instantiations; push inventory rows in strip order and group moves by predecessor
+to save it), and attempt 1's NIT-4 forward note -- records admitted to a predecessor after the
+swap-block drain must route to the newest plan when a host gains that path (listed in #1269's
+"Phase 1 status"). The `audit capi` `pcm_digest` move (`7281b6c931e05dcc` to `c60671f6593fa603`,
+by `807b48547`'s carried input filters) is recorded above.

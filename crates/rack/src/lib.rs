@@ -2806,8 +2806,12 @@ impl BankChain {
     /// only on a chain that can collapse, so an unarmed chain -- a stereo-source neighbour in the
     /// bank, or a mono-source track with an asymmetric input delay -- still reads `true` after its
     /// two channels have been driven apart. Handing that `true` to an armed successor would let it
-    /// collapse a lane whose channels disagree, which moves output bits. `false` costs at most one
-    /// proof ([`BankStage::channels_agree`]) on the successor.
+    /// collapse a lane whose channels disagree, which moves output bits. `false` is conservative:
+    /// a successor whose collapse prefix holds only builtins re-arms after one proof
+    /// ([`BankStage::channels_agree`]), but one with a console or insert effect in that prefix
+    /// stays dual for the rest of its plan, since every launch effect declines the proof. `false`
+    /// reaches an armed successor only from a chain that could not collapse, so in practice from
+    /// a track whose class changed in the transaction, whose channels really may differ.
     #[must_use]
     pub const fn carried_channel_agreement(&self) -> bool {
         self.can_collapse() && self.collapse_channels_agree

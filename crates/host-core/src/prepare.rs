@@ -1144,15 +1144,31 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let live_input = live_controls.control_queue_depth.is_some();
     let carried_inputs: Vec<(&str, graph::GraphLaneLocation)> = match successor {
         None => Vec::new(),
-        Some(base) => model
-            .strips()
-            .filter_map(|strip| {
-                let row = base.inventory.input_section(strip.id.as_str())?;
-                let before = committed_input_section(base.committed, &strip)?;
-                (row.live == live_input && same_input_section(before, strip.builtins))
-                    .then_some((strip.id.as_str(), row.location))
-            })
-            .collect(),
+        Some(base) => {
+            // `committed_input_section` binary-searches: a model that is not normalized would
+            // silently restart every strip at rest.
+            debug_assert!(
+                base.committed
+                    .tracks
+                    .windows(2)
+                    .all(|pair| pair[0].id < pair[1].id)
+                    && base
+                        .committed
+                        .submixes
+                        .windows(2)
+                        .all(|pair| pair[0].id < pair[1].id),
+                "a successor's committed model is normalized: strips in canonical ID order"
+            );
+            model
+                .strips()
+                .filter_map(|strip| {
+                    let row = base.inventory.input_section(strip.id.as_str())?;
+                    let before = committed_input_section(base.committed, &strip)?;
+                    (row.live == live_input && same_input_section(before, strip.builtins))
+                        .then_some((strip.id.as_str(), row.location))
+                })
+                .collect()
+        }
     };
     // The hand-over the successor runs at its swap block, built here so the plan charge below
     // counts it; installed after bind.

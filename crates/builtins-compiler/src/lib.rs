@@ -12391,7 +12391,16 @@ mod tests {
     /// -> lane 0's later trim and lane 1's trim stay queued and the trims never move.
     #[test]
     fn the_carry_drain_applies_every_record_past_a_refused_one() {
-        let backend = Backend::current();
+        for backend in [
+            #[cfg(target_feature = "avx2")]
+            Backend::Simd8,
+            Backend::Simd4,
+        ] {
+            carry_drain_applies_every_record_past_a_refused_one(backend);
+        }
+    }
+
+    fn carry_drain_applies_every_record_past_a_refused_one(backend: Backend) {
         let width = BankWidth::for_backend(backend).expect("a banking backend");
         let input = || {
             BuiltinChain::new(48_000, BuiltinParameters::default())

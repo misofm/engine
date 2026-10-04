@@ -1443,17 +1443,22 @@ fn a_strip_whose_input_section_changed_starts_at_rest() {
 fn a_changed_control_kind_carries_no_input_section() {
     let a = Session::compile(filtered_session(false));
     let b = Session::compile(with_muted_track(filtered_session(false)));
-    let backend = Backend::Simd4;
-    let source_only = 8;
+    for backend in backends() {
+        a_changed_control_kind_carries_no_input_section_at(&a, &b, backend);
+    }
+}
+
+fn a_changed_control_kind_carries_no_input_section_at(a: &Session, b: &Session, backend: Backend) {
+    let source_only = core::mem::size_of::<(u32, u32)>() as u64;
     // Predecessor without live controls, successor with them.
     let plain = a.prepare(backend);
-    let live = LivePlan::successor(&b, &plain.inventory, &a.model, backend);
+    let live = LivePlan::successor(b, &plain.inventory, &a.model, backend);
     assert_eq!(
         live.prepared.report.carry_program_retained_bytes, source_only,
         "plain -> live"
     );
     // Predecessor with live controls, successor without them.
-    let live = LivePlan::fresh(&a, backend);
+    let live = LivePlan::fresh(a, backend);
     let plain = b
         .prepare_successor(&live.prepared.inventory, &a.model, &caps(), backend)
         .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
@@ -1913,4 +1918,22 @@ fn a_bad_input_move_is_refused_whole() {
         .expect("render");
     let bits: Vec<u32> = output.iter().map(|sample| sample.to_bits()).collect();
     assert_eq!(bits, reference[0].bits);
+}
+
+/// #1276 attempt-2 MINOR-1. Red if a successor's preparation accepts a committed model whose
+/// strips are not in canonical ID order: the binary-search join would then find no committed
+/// section and silently restart every strip at rest, the click this slice removes.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "a successor's committed model is normalized")]
+fn a_successor_refuses_an_unnormalized_committed_model() {
+    let a = Session::compile(session_a());
+    let mut b_model = session_a();
+    add_track(&mut b_model, "eq0", MUTED_TRACK, SOURCE, true);
+    let b = Session::compile(b_model);
+    let backend = Backend::current();
+    let predecessor = a.prepare(backend);
+    let mut reversed = a.model.clone();
+    reversed.tracks.reverse();
+    let _ = b.prepare_successor(&predecessor.inventory, &reversed, &caps(), backend);
 }
