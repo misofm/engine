@@ -1,5 +1,5 @@
 //! Classify a committed session delta as a live track fader, mute, pan and effect-parameter
-//! update, or a rebuild (issues #1255 and #1264; umbrella #1053 D1, D3, D9 and D14).
+//! update, or a rebuild (issues #1255, #1264 and #1265; umbrella #1053 D1, D3, D9 and D14).
 //!
 //! A host that holds a running plan and commits a transaction has two models: the committed one
 //! the plan was prepared with (plus every record pushed into it since, #1053 D9), and the
@@ -13,10 +13,16 @@
 //! EQ and bypass records (#1265, #1266), submix strips and routes (#1225), followed mutes (#1226)
 //! and VCAs (#1247) -- they do not add a second one.
 
+use crate::control_preparation::{
+    EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer, EqTargetPreparerError,
+};
 use builtins::{BuiltinLaneSelector, checked_fader_gain};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, lower_matrix_or_pan};
 use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
-use effect_contract::{AutomationRate, EffectControlRecord, NativeEffectRegistry};
+use effect_contract::{
+    AutomationRate, EffectControlRecord, NativeEffectFactory, NativeEffectRegistry,
+    PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget,
+};
 use session::{
     DualMonoFader, Effect, EffectIdentity, EffectParam, RouteSource, SessionModel, Track,
     canonical_session_json,
@@ -68,7 +74,7 @@ impl LiveStripRecords<'_> {
     }
 }
 
-/// The records of one effect instance whose live parameter values change (#1264 D2).
+/// The records of one effect instance whose live parameter values change (#1264 D2, #1265 D1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveEffectRecords<'a> {
     /// The ID of the strip (a track) that owns the instance, borrowed from the post-commit model.
@@ -78,7 +84,16 @@ pub struct LiveEffectRecords<'a> {
     pub address: LiveEffectAddress,
     /// One [`EffectControlRecord::Parameter`] per `(parameter_index, channel)` whose resolved
     /// value changes, in descriptor order, `Left` before `Right`; never empty.
+    ///
+    /// For an instance with `targets` (the EQ) these are its owner's edits
+    /// (`EffectControlProducer::edit_owner`), never pushed: the queue gets the targets.
     pub records: Vec<EffectControlRecord>,
+    /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
+    /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
+    /// values and `records`, in the order its owner publishes them
+    /// (`EffectControlProducer::publish_candidate_targets`). `None` for every other effect, whose
+    /// `records` are pushed as they are.
+    pub targets: Option<Vec<PreparedEffectTarget>>,
 }
 
 /// A live delta: the records that bring the running plan to the post-commit model.
@@ -105,8 +120,9 @@ pub enum LiveRebuild {
     /// preparation diagnostic it always has.
     Domain,
     /// An effect parameter value changes that the plan keeps prepared: one that is not
-    /// automatable or whose `automation_rate` is not `Block`, or any parameter of an effect whose
-    /// parameters ride prepared targets (the parametric EQ, #1053 G4, until #1265).
+    /// automatable or whose `automation_rate` is not `Block` (an EQ band's `enabled` and `kind`
+    /// among them, decision 14 F2), or any parameter of a target-capable effect that
+    /// [`EqTargetPreparer`] does not accept.
     Prepared,
     /// A track's mute changes while a route with `follows_mute` sends from it (#1053 G2, until
     /// #1226).
@@ -136,12 +152,16 @@ pub enum LiveRebuild {
 ///    track's records. Then, for each of the track's effect instances in chain order whose
 ///    `params` differ: [`LiveRebuild::Domain`] if either model's `params` do not resolve through
 ///    [`resolve_initial_values`] (the one function preparation uses); [`LiveRebuild::Prepared`]
-///    if a resolved value whose bits change belongs to a parameter that is not automatable, whose
-///    `automation_rate` is not `Block`, or of an effect with a prepared-target capability (the
-///    EQ, whose producer refuses a bare parameter record); otherwise one
-///    [`EffectControlRecord::Parameter`] per changed `(parameter_index, channel)`, carrying the
-///    resolved post-commit value. A removed `params` entry resolves to the default, so its change
-///    is a record too.
+///    if a resolved value whose bits change belongs to a parameter that is not automatable or
+///    whose `automation_rate` is not `Block`; otherwise one [`EffectControlRecord::Parameter`]
+///    per changed `(parameter_index, channel)`, carrying the resolved post-commit value. A
+///    removed `params` entry resolves to the default, so its change is a record too. For an
+///    effect with a prepared-target capability (the EQ, whose producer refuses a bare parameter
+///    record, #1265 D1) those records are its owner's edits, and the instance also carries the
+///    targets [`EqTargetPreparer`] designs at `next`'s sample rate, seeded with the pre-commit
+///    resolved values (the values preparation and every later live commit gave its owner); a
+///    capability [`EqTargetPreparer`] does not accept is [`LiveRebuild::Prepared`], and a design
+///    refusal is [`LiveRebuild::Domain`].
 ///
 /// The session ID, the two profile IDs and the stored automation are model-only: no prepared plan
 /// reads them (#1260), so a delta that changes only them is live with no records. Masking
@@ -165,8 +185,8 @@ pub enum LiveRebuild {
 /// # Allocation
 ///
 /// Control thread only. The masked clone, the two canonical JSON strings and, when an effect's
-/// `params` differ, the lowered racks, the launch registry and the resolved values are allocated
-/// and freed on every call, on the control-plane precedent of #369 (the protocol already compiles a
+/// `params` differ, the lowered racks, the launch registry, the resolved values and an EQ's target
+/// designer are allocated and freed on every call, on the control-plane precedent of #369 (the protocol already compiles a
 /// whole session per edit). Nothing it allocates is retained apart from the returned entries.
 ///
 /// # Errors
@@ -331,24 +351,31 @@ fn effect_records<'a>(
         if same_params(&effect_before.params, &effect_after.params) {
             continue;
         }
-        let records = parameter_records(effect_before, effect_after, registry)?;
+        let (records, targets) =
+            parameter_records(effect_before, effect_after, next.sample_rate_hz, registry)?;
         if !records.is_empty() {
             output.push(LiveEffectRecords {
                 strip_id: after.id.as_str(),
                 address,
                 records,
+                targets,
             });
         }
     }
     Ok(())
 }
 
-/// The parameter records that bring one instance from `before`'s resolved values to `after`'s.
+/// The records of one instance, and the targets of a target-capable one.
+type InstanceRecords = (Vec<EffectControlRecord>, Option<Vec<PreparedEffectTarget>>);
+
+/// The parameter records that bring one instance from `before`'s resolved values to `after`'s,
+/// and, for a target-capable instance (the EQ), the targets that carry them (#1265 D1).
 fn parameter_records(
     before: &Effect,
     after: &Effect,
+    sample_rate_hz: u32,
     registry: &mut Option<NativeEffectRegistry>,
-) -> Result<Vec<EffectControlRecord>, LiveRebuild> {
+) -> Result<InstanceRecords, LiveRebuild> {
     // A third-party or unknown identity never prepared; the rebuild reports it.
     let EffectIdentity::Native { effect_id } = &after.identity else {
         return Err(LiveRebuild::Structure);
@@ -367,20 +394,13 @@ fn parameter_records(
         resolve_initial_values(descriptor, &before.params).map_err(|_| LiveRebuild::Domain)?;
     let values_after =
         resolve_initial_values(descriptor, &after.params).map_err(|_| LiveRebuild::Domain)?;
-    // The EQ's parameters ride its owner's prepared targets: its producer refuses a bare
-    // parameter record (`EffectControlProducer::preflight`), so every change is prepared until
-    // #1265 (#1053 G4).
-    let target_capable = factory.target_preparation().is_some();
     let mut records = Vec::new();
     for (value_before, value_after) in values_before.iter().zip(&values_after) {
         if value_before.value.to_bits() == value_after.value.to_bits() {
             continue;
         }
         let parameter = &descriptor.parameters[value_after.parameter_index as usize];
-        if target_capable
-            || !parameter.automatable
-            || parameter.automation_rate != AutomationRate::Block
-        {
+        if !parameter.automatable || parameter.automation_rate != AutomationRate::Block {
             return Err(LiveRebuild::Prepared);
         }
         records.push(EffectControlRecord::Parameter {
@@ -389,7 +409,58 @@ fn parameter_records(
             value: value_after.value,
         });
     }
-    Ok(records)
+    // The EQ's parameters ride its owner's prepared targets: its producer refuses a bare
+    // parameter record (`EffectControlProducer::preflight`), so the records become the owner's
+    // edits and the targets are designed here, on the control thread (#1265 D1).
+    if records.is_empty() || factory.target_preparation().is_none() {
+        return Ok((records, None));
+    }
+    let seeds: Vec<f32> = values_before.iter().map(|value| value.value).collect();
+    let targets = design_targets(factory, sample_rate_hz, &seeds, &records)?;
+    Ok((records, Some(targets)))
+}
+
+/// Designs a target-capable instance's targets with [`EqTargetPreparer`], from its pre-commit
+/// `seeds` (canonical row order) and its changed `records` (#1265 D1).
+fn design_targets(
+    factory: std::sync::Arc<dyn NativeEffectFactory>,
+    sample_rate_hz: u32,
+    seeds: &[f32],
+    records: &[EffectControlRecord],
+) -> Result<Vec<PreparedEffectTarget>, LiveRebuild> {
+    let descriptor = factory.descriptor();
+    // A capability other than the 60-row EQ's has no control-thread designer: rebuild.
+    let preparer = EqTargetPreparer::new(factory).map_err(|_| LiveRebuild::Prepared)?;
+    if seeds.len() != EQ_VALUE_COUNT {
+        return Err(LiveRebuild::Prepared);
+    }
+    let edits: Vec<EqTargetEdit> = records
+        .iter()
+        .map(|record| match *record {
+            EffectControlRecord::Parameter {
+                parameter_index,
+                channel,
+                value,
+            } => Ok(EqTargetEdit {
+                parameter_id: descriptor.parameters[parameter_index as usize].id.0,
+                channel,
+                value,
+            }),
+            _ => Err(LiveRebuild::Prepared),
+        })
+        .collect::<Result<_, _>>()?;
+    let mut out = [PreparedEffectTarget {
+        slot: 0,
+        channel: ParameterChannel::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, count) = preparer
+        .prepare(sample_rate_hz, seeds, &edits, &mut out)
+        .map_err(|error| match error {
+            EqTargetPreparerError::Unsupported => LiveRebuild::Prepared,
+            _ => LiveRebuild::Domain,
+        })?;
+    Ok(out[..count].to_vec())
 }
 
 /// Whether two `params` lists are the same entries, value bits included.

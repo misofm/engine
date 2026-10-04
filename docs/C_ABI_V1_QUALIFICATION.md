@@ -229,8 +229,9 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   state continue untouched. It may ride with fader, mute and pan edits. The automation term holds
   only while no host renders stored automation (#1058); every other profile field stays
   structural.
-- **Live effect parameters (#1264).** A track's console-slot entry or insert whose `params`
-  change only in live parameters is live too; see "Value-only effect parameter edits" below.
+- **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
+  `params` change only in live parameters, parametric EQ values included, is live too; see
+  "Value-only effect parameter edits" and "Value-only parametric EQ edits" below.
 - **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
   edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
@@ -275,7 +276,7 @@ lane per prepared effect instance, console slots and inserts alike, on tracks an
 lane's ring holds `min(16, the effect's automation capacity)` records, and a parametric EQ's lane
 also carries its prepared-target staging. capi keeps the producers with the plan's provider epoch;
 each EQ's producer owns its prepared-target owner. #1264 pushes live effect parameter edits
-through them (below). No input or route lane is attached.
+through them, and #1265 publishes live EQ targets through the owners (below). No input or route lane is attached.
 
 - **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
   the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
@@ -320,8 +321,9 @@ and compares the resolved values bit by bit.
   (a `both` value as equal `left` and `right` values) pushes nothing. It may ride with fader, mute,
   pan and model-only edits in one transaction.
 - **Prepared, so a rebuild.** A changed value of a parameter that is not automatable or whose
-  `automation_rate` is `None` (for example the gate/expander's attack, hold and release), and any
-  parameter of the parametric EQ, whose parameters ride prepared targets until #1265.
+  `automation_rate` is `None` (for example the gate/expander's attack, hold and release, and a
+  parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
+  targets; see "Value-only parametric EQ edits" below.
 - **Rebuild for everything else about an effect**: identity, quality, link mode, bypass (until
   #1266), sidechain, the insert order and the console slot set, any effect on a submix strip, and
   `params` that preparation refuses (reported as `COMPILE_REJECTED` with the preparation
@@ -340,3 +342,33 @@ and compares the resolved values bit by bit.
   edited session, because the effect's history differs; it is bit-identical to the browser's live
   lane given the same records at the same block, at the four launch rates on one and ten tracks.
 - **No resource movement.** No row moves: the records ride the lanes #1263 attached.
+
+## Value-only parametric EQ edits on the running plan (#1265)
+
+A parametric EQ instance (a console slot's entry or an insert of a track) takes its live values as
+prepared targets through its owner, never as bare parameter records.
+
+- **Live.** Each band's frequency, gain, Q and shelf slope, and the HPF's and the LPF's `enabled`,
+  frequency and Q (every EQ parameter whose `automation_rate` is `Block`).
+- **Prepared, so a rebuild.** A band's `enabled` and `kind` (decision 14, F2), and any EQ value
+  preparation refuses (`COMPILE_REJECTED`, as for any effect).
+- **Targets are designed on the control thread.** The classifier seeds host-core's
+  `EqTargetPreparer` with the instance's pre-commit values, resolved by the one function
+  preparation uses, passes the changed `(parameter, lane)` values as edits, and designs the
+  targets at the session's sample rate. Render only applies them, through the EQ's prepared-target
+  staging.
+- **All or nothing.** For each EQ instance, in the newest plan: `begin_owner` at the owner's
+  committed revision, `edit_owner` for each edit, and `preflight_candidate_targets` (revision,
+  validation and the whole target prefix's queue room), before the room checks and preflights of
+  #1264 and the protocol predicate. A lack of room is `BACKPRESSURE` with
+  `control.live.backpressure`; any other refusal is `INTERNAL`. A refusal at any of these steps
+  discards every owner begun and changes nothing. Then the records are pushed, each owner's targets
+  published, the protocol committed and each owner committed; none of them can fail.
+- **A transaction too large for a lane.** An EQ instance whose designed targets outnumber its
+  lane's whole capacity (at most 12 targets against `min(16, automation capacity)`) takes the
+  rebuild path, as #1264 does for records.
+- **The readback follows** every changed EQ value, as for #1264.
+- **Effects keep their state.** A live EQ edit renders bit-identically to the browser's lane given
+  targets that `EqTargetPreparer` designs from the owner's own committed values, published through
+  the owner at the same block, on the nine-track EQ fixture at the four launch rates.
+- **No resource movement.** The targets ride the EQ lanes and owners #1263 attached.

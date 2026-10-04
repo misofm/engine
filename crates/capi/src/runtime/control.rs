@@ -162,7 +162,15 @@ pub(crate) struct TestTransactionSnapshot {
     /// Every effect producer's free room, current epoch first, then each pending candidate:
     /// `(epoch, strip ID, effect instance ID, room)`.
     pub(crate) effect_rooms: Vec<(u64, Box<str>, Box<str>, usize)>,
+    /// Every EQ owner's state, current epoch first, then each pending candidate: `(epoch, strip
+    /// ID, effect instance ID, committed revision, phase, committed value bits, candidate value
+    /// bits)`.
+    pub(crate) effect_owners: Vec<TestOwnerState>,
 }
+
+/// One EQ owner's observable state in a [`TestTransactionSnapshot`].
+#[cfg(test)]
+pub(crate) type TestOwnerState = (u64, Box<str>, Box<str>, u64, String, Vec<u32>, Vec<u32>);
 
 #[cfg(test)]
 thread_local! {
@@ -394,6 +402,23 @@ pub(crate) enum LiveCommit {
     Done(Result<usize, CommandError>),
     /// The delta needs a plan rebuild; the token comes back untouched.
     Rebuild(ObservedPreparedToken),
+}
+
+/// The EQ owners a live commit has begun (#1265 D2). Dropping it discards every owner still in
+/// `begun`, so a refusal on any path after the first `begin_owner` leaves each owner idle at its
+/// committed revision; a commit takes `begun` first.
+struct OpenOwners<'a> {
+    effects: &'a mut [host_core::EffectControlProducer],
+    begun: Vec<usize>,
+}
+
+impl Drop for OpenOwners<'_> {
+    fn drop(&mut self) {
+        for &index in &self.begun {
+            // An open candidate always discards; an error would mean it was never begun.
+            let _ = self.effects[index].discard_owner();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -667,6 +692,26 @@ impl SessionState {
                             producer.effect_id.clone(),
                             producer.producer().available_capacity(),
                         )
+                    })
+                })
+                .collect(),
+            effect_owners: core::iter::once(&self.providers)
+                .chain(&self.pending_providers)
+                .flat_map(|provider| {
+                    provider.effects.iter().filter_map(|producer| {
+                        let owner = producer.owner()?;
+                        let bits = |rows: &[effect_contract::InitialParameterValue]| {
+                            rows.iter().map(|row| row.value.to_bits()).collect()
+                        };
+                        Some((
+                            provider.epoch,
+                            producer.track_id.clone(),
+                            producer.effect_id.clone(),
+                            owner.committed_revision(),
+                            format!("{:?}", owner.phase()),
+                            bits(owner.committed()),
+                            bits(owner.candidate()),
+                        ))
                     })
                 })
                 .collect(),
@@ -968,19 +1013,24 @@ impl SessionState {
     /// Classifies the committed model against the token's prospective one. A rebuild hands the
     /// token back untouched. A live delta runs, in order: the live admission (#1053 D8), the
     /// producer resolution by strip ID, and by strip ID and live address for an effect, in the
-    /// newest epoch (#1053 D7), the room check on every queue the delta touches, every effect
-    /// record's preflight and readback handle (#1264 D3, D4), and the protocol's own commit
-    /// predicate. Each of them refuses before anything changes. An effect instance whose records
-    /// outnumber its queue's whole capacity could never fit, so the token goes back for a rebuild
-    /// instead of an endless `BACKPRESSURE` (#1264 D3). Only then does it push every record and
-    /// commit the token, and neither can fail: the room was checked, every effect record passed
-    /// its producer's preflight, the control thread is the only producer, a render pop only grows
-    /// the room, and the predicate is the commit's own under this `&mut` borrow. So no acked edit
-    /// is ever dropped, and no refused edit leaves a record behind.
+    /// newest epoch (#1053 D7), each EQ owner's transaction -- `begin_owner`, `edit_owner` per
+    /// edit and `preflight_candidate_targets` for the classifier's designed targets (#1265 D2) --
+    /// the room check on every other queue the delta touches, every pushed effect record's
+    /// preflight and every changed value's readback handle (#1264 D3, D4), and the protocol's own
+    /// commit predicate. Each of them refuses before any queue or the model changes, and a refusal
+    /// after an owner was begun discards every begun owner (`OpenOwners`). An effect instance
+    /// whose records, or an EQ's targets, outnumber its queue's whole capacity could never fit,
+    /// so the token goes back for a rebuild instead of an endless `BACKPRESSURE` (#1264 D3,
+    /// #1265 D2). Only then does it push every record, publish every EQ owner's targets, commit
+    /// the token and commit every owner, and none of them can fail: the room was checked, every
+    /// effect record passed its producer's preflight and every target prefix its owner's, the
+    /// control thread is the only producer, a render pop only grows the room, and the predicate is
+    /// the commit's own under this `&mut` borrow. So no acked edit is ever dropped, and no refused
+    /// edit leaves a record, a target or an open owner behind.
     ///
     /// It never reserves a plan, adds a report row or replaces the provider catalog. After the
     /// commit it sets each live effect value in the catalog in place, so the parameter readback
-    /// reports what a rebuild's catalog would (#1264 D4).
+    /// reports what a rebuild's catalog would (#1264 D4, #1265 D3).
     fn commit_live(&mut self, prepared: ObservedPreparedToken) -> LiveCommit {
         let next = prepared
             .get()
@@ -1003,8 +1053,14 @@ impl SessionState {
         // 2. Resolve each strip's producer by ID in the newest epoch (#1053 D7). The delta and the
         // producer table are both in canonical track order, so the search resumes where the last
         // one stopped; it still finds a strip anywhere, since it wraps.
-        let newest = self.pending_providers.last().unwrap_or(&self.providers);
-        let tracks = &newest.strips.controls[..newest.strips.track_count];
+        let ProviderEpoch {
+            strips, effects, ..
+        } = match self.pending_providers.last_mut() {
+            Some(provider) => provider,
+            None => &mut self.providers,
+        };
+        let track_count = strips.track_count;
+        let tracks = &mut strips.controls[..track_count];
         let mut resolved = Vec::new();
         if resolved.try_reserve_exact(delta.strips.len()).is_err() {
             return LiveCommit::Done(Err(CommandError::Internal));
@@ -1022,29 +1078,80 @@ impl SessionState {
         }
 
         // The effect instances, by strip ID and live address (#1264 D3). An instance whose
-        // records outnumber its queue's whole capacity could never fit: rebuild instead.
+        // queue records -- its records, or an EQ's targets (#1265 D2) -- outnumber its queue's
+        // whole capacity could never fit: rebuild instead.
         let mut resolved_effects = Vec::new();
+        let mut begun = Vec::new();
         if resolved_effects
             .try_reserve_exact(delta.effects.len())
             .is_err()
+            || begun.try_reserve_exact(delta.effects.len()).is_err()
         {
             return LiveCommit::Done(Err(CommandError::Internal));
         }
         for instance in &delta.effects {
-            let Some(index) = newest.effects.iter().position(|producer| {
+            let Some(index) = effects.iter().position(|producer| {
                 &*producer.track_id == instance.strip_id && producer.address == instance.address
             }) else {
                 return LiveCommit::Done(Err(CommandError::Internal));
             };
-            if instance.records.len() > newest.effects[index].capacity() {
+            let producer = &effects[index];
+            let queued = match &instance.targets {
+                Some(targets) if producer.has_owner() => targets.len(),
+                Some(_) => return LiveCommit::Done(Err(CommandError::Internal)),
+                None => instance.records.len(),
+            };
+            if queued > producer.capacity() {
                 drop(delta);
                 return LiveCommit::Rebuild(prepared);
             }
             resolved_effects.push(index);
         }
 
-        // 3. Room on every queue the delta touches. Each strip and each effect instance appears
-        // once in the delta, so a queue's need is its own record count.
+        // 3. Each EQ owner's transaction (#1265 D2): begin at its committed revision, apply the
+        // edits, and preflight the designed targets (revision, validation and complete queue
+        // room). From here on, every refusal discards every owner begun, as `OpenOwners` drops.
+        let mut owners = OpenOwners { effects, begun };
+        for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
+            let Some(targets) = &instance.targets else {
+                continue;
+            };
+            let producer = &mut owners.effects[index];
+            let Some(base_revision) = producer.owner().map(|owner| owner.committed_revision())
+            else {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            };
+            if producer.begin_owner(base_revision).is_err() {
+                return LiveCommit::Done(Err(CommandError::Internal));
+            }
+            owners.begun.push(index);
+            for &record in &instance.records {
+                let effect_contract::EffectControlRecord::Parameter {
+                    parameter_index,
+                    channel,
+                    value,
+                } = record
+                else {
+                    return LiveCommit::Done(Err(CommandError::Internal));
+                };
+                if producer
+                    .edit_owner(parameter_index, channel, value)
+                    .is_err()
+                {
+                    return LiveCommit::Done(Err(CommandError::Internal));
+                }
+            }
+            match producer.preflight_candidate_targets(base_revision, targets) {
+                Ok(()) => {}
+                Err(host_core::EffectControlOwnerError::Capacity) => {
+                    return LiveCommit::Done(Err(CommandError::LiveBackpressure));
+                }
+                Err(_) => return LiveCommit::Done(Err(CommandError::Internal)),
+            }
+        }
+
+        // 4. Room on every other queue the delta touches. Each strip and each effect instance
+        // appears once in the delta, so a queue's need is its own record count.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
             let producer = &tracks[index];
             if producer.fader.available_capacity() < strip.fader_records().count()
@@ -1054,14 +1161,17 @@ impl SessionState {
             }
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            if newest.effects[index].producer().available_capacity() < instance.records.len() {
+            if instance.targets.is_none()
+                && owners.effects[index].producer().available_capacity() < instance.records.len()
+            {
                 return LiveCommit::Done(Err(CommandError::LiveBackpressure));
             }
         }
 
-        // Every effect record passes its producer's preflight, and each one's readback row
-        // exists, before the first push (#1264 D3, D4). The classifier refuses every record a
-        // producer would, so a refusal here is an internal fault.
+        // Every pushed effect record passes its producer's preflight, and each changed value's
+        // readback row exists, before the first push (#1264 D3, D4). The classifier refuses
+        // every record a producer would, so a refusal here is an internal fault. An EQ's records
+        // are its owner's edits, never pushed: its targets were preflighted above.
         let record_count = delta
             .effects
             .iter()
@@ -1073,7 +1183,7 @@ impl SessionState {
         }
         let provider = self.controller.provider_mut();
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            let producer = &newest.effects[index];
+            let producer = &owners.effects[index];
             let rack = match instance.address.rack {
                 host_core::LiveEffectRack::Console => protocol::ParameterRack::Console,
                 host_core::LiveEffectRack::Inserts => protocol::ParameterRack::Inserts,
@@ -1087,7 +1197,7 @@ impl SessionState {
                 else {
                     return LiveCommit::Done(Err(CommandError::Internal));
                 };
-                if producer.preflight(record).is_err() {
+                if instance.targets.is_none() && producer.preflight(record).is_err() {
                     return LiveCommit::Done(Err(CommandError::Internal));
                 }
                 let Some(parameter) = producer.descriptor.parameters.get(parameter_index as usize)
@@ -1112,7 +1222,7 @@ impl SessionState {
             }
         }
 
-        // 4. The protocol commit's own predicate.
+        // 5. The protocol commit's own predicate.
         if self
             .controller
             .check_prepared_structural(prepared.get())
@@ -1122,17 +1232,15 @@ impl SessionState {
         }
         #[cfg(test)]
         if take_test_fault_state(TestStructuralFaultPhase::BeforeLivePush) {
+            drop(owners);
             drop(prepared);
             return LiveCommit::Done(Err(CommandError::Backpressure));
         }
 
-        // 5. Push. Nothing above changed anything; nothing below can fail.
-        let newest = match self.pending_providers.last_mut() {
-            Some(provider) => provider,
-            None => &mut self.providers,
-        };
+        // 6. Push, then publish each EQ owner's targets. Nothing above changed anything but the
+        // owners' open candidates; nothing below can fail.
         for (strip, &index) in delta.strips.iter().zip(&resolved) {
-            let producer = &mut newest.strips.controls[index];
+            let producer = &mut tracks[index];
             for record in strip.fader_records() {
                 producer
                     .fader
@@ -1147,19 +1255,40 @@ impl SessionState {
             }
         }
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            let producer = &mut newest.effects[index];
-            for &record in &instance.records {
-                producer.try_push(record).unwrap_or_else(|_| {
-                    unreachable!("the effect queue's room and the preflight were checked")
-                });
+            let producer = &mut owners.effects[index];
+            match &instance.targets {
+                None => {
+                    for &record in &instance.records {
+                        producer.try_push(record).unwrap_or_else(|_| {
+                            unreachable!("the effect queue's room and the preflight were checked")
+                        });
+                    }
+                }
+                Some(targets) => {
+                    let base_revision = producer
+                        .owner()
+                        .map(|owner| owner.committed_revision())
+                        .expect("an owner was begun");
+                    producer
+                        .publish_candidate_targets(base_revision, targets)
+                        .expect("the owner's targets were preflighted");
+                }
             }
         }
         drop(delta);
+        let published = core::mem::take(&mut owners.begun);
 
-        // 6. Commit; the readback follows every live effect value (#1264 D4); 7. respond.
+        // 7. Commit, then each EQ owner; the readback follows every live effect value (#1264 D4,
+        // #1265 D3); 8. respond.
         let committed = prepared
             .commit(&mut self.controller)
             .expect("the commit predicate was checked under this borrow");
+        for index in published {
+            owners.effects[index]
+                .commit_owner()
+                .expect("the owner's targets were published");
+        }
+        drop(owners);
         let provider = self.controller.provider_mut();
         for (handle, value) in readback {
             provider.set_parameter_value(handle, value);

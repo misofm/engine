@@ -5,8 +5,8 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    SESSION, boxed_c_children, command_bytes, command_bytes_at_revision, command_c, event_c,
-    generated_parity_session, limits, submit_c,
+    SESSION, boxed_c_children_with_limits, command_bytes, command_bytes_at_revision, command_c,
+    event_c, generated_parity_session, limits, submit_c,
 };
 use super::*;
 use protocol::{ExpectedRevision, SessionEdit, SessionRevision};
@@ -65,7 +65,11 @@ struct Rig {
 
 impl Rig {
     fn new(document: &str) -> Self {
-        let (session, plan) = boxed_c_children(document);
+        Self::with_limits(document, limits())
+    }
+
+    fn with_limits(document: &str, limits: CompileLimits) -> Self {
+        let (session, plan) = boxed_c_children_with_limits(document, limits);
         let model = parse_session_json(document).expect("rig session");
         Self {
             session,
@@ -1894,4 +1898,423 @@ fn a_full_effect_lane_refuses_before_anything_changes() {
     assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth);
     assert_eq!(rig.apply(&threshold(-40.0)), crate::RESULT_OK);
     assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "comp"), depth - 1);
+}
+
+// Issue #1265: parametric EQ parameter edits through prepared targets.
+
+/// The nine-track EQ fixture at `sample_rate_hz`, with a source long enough for a whole run and
+/// an EQ insert (`eq-insert`: band 1 enabled at 500 Hz, +4 dB) on its last track beside the
+/// console EQ slot (`eq`) every track carries.
+fn eq_session(sample_rate_hz: u32) -> String {
+    use session::{EffectParam, ParameterChannel, ParameterUnit};
+    let mut model = parse_session_json(SESSION).expect("nine-track EQ fixture");
+    model.sample_rate_hz = sample_rate_hz;
+    model.sources[0].frames = SOURCE_FRAMES;
+    let mut insert = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    insert.id = StableId::parse("eq-insert").expect("EQ insert");
+    insert.bypass = false;
+    let both = |parameter_id, unit, value| EffectParam {
+        parameter_id,
+        channel: ParameterChannel::Both,
+        unit,
+        value,
+    };
+    insert.params = vec![
+        both(1, ParameterUnit::Linear, 1.0),
+        both(3, ParameterUnit::Hz, 500.0),
+        both(4, ParameterUnit::Db, 4.0),
+    ];
+    let last = model.tracks.len() - 1;
+    model.tracks[last].inserts.effects.push(insert);
+    session::canonical_session_json(&model).expect("canonical EQ session")
+}
+
+/// One EQ edit, by descriptor parameter ID.
+type EqEdit = (u32, effect_contract::ParameterChannel, f32);
+
+/// The targets `EqTargetPreparer` designs for `edits` from `seeds`, called directly.
+fn designed_eq_targets(
+    sample_rate_hz: u32,
+    seeds: &[f32],
+    edits: &[EqEdit],
+) -> Vec<effect_contract::PreparedEffectTarget> {
+    let preparer = host_core::EqTargetPreparer::new(
+        host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ target preparer");
+    let edits: Vec<host_core::EqTargetEdit> = edits
+        .iter()
+        .map(|&(parameter_id, channel, value)| host_core::EqTargetEdit {
+            parameter_id,
+            channel,
+            value,
+        })
+        .collect();
+    let mut out = [effect_contract::PreparedEffectTarget {
+        slot: 0,
+        channel: effect_contract::ParameterChannel::Both,
+        words: [0; effect_contract::PREPARED_EFFECT_TARGET_WORDS],
+    }; host_core::EQ_TARGET_CAPACITY];
+    let (_, count) = preparer
+        .prepare(sample_rate_hz, seeds, &edits, &mut out)
+        .expect("designed EQ targets");
+    out[..count].to_vec()
+}
+
+impl LaneReference {
+    fn eq_producer(
+        &mut self,
+        track_id: &str,
+        effect_id: &str,
+    ) -> &mut host_core::EffectControlProducer {
+        self.effects
+            .iter_mut()
+            .find(|producer| &*producer.track_id == track_id && &*producer.effect_id == effect_id)
+            .expect("EQ producer")
+    }
+
+    /// The EQ instance's committed rows, the seeds a designer starts from.
+    fn eq_seeds(&mut self, track_id: &str, effect_id: &str) -> Vec<f32> {
+        self.eq_producer(track_id, effect_id)
+            .owner()
+            .expect("EQ owner")
+            .committed()
+            .iter()
+            .map(|row| row.value)
+            .collect()
+    }
+
+    /// Runs one EQ owner transaction as the browser's lane does: the edits, targets designed in
+    /// the test by `EqTargetPreparer` from the owner's committed rows, publication and commit.
+    fn publish_eq(&mut self, track_id: &str, effect_id: &str, edits: &[EqEdit]) {
+        let rate = self.reference.rate;
+        let seeds = self.eq_seeds(track_id, effect_id);
+        let targets = designed_eq_targets(rate, &seeds, edits);
+        let producer = self.eq_producer(track_id, effect_id);
+        let base = producer.owner().expect("EQ owner").committed_revision();
+        producer.begin_owner(base).expect("begin");
+        for &(parameter_id, channel, value) in edits {
+            let index = producer
+                .descriptor
+                .parameters
+                .iter()
+                .position(|parameter| parameter.id.0 == parameter_id)
+                .expect("declared parameter") as u32;
+            producer.edit_owner(index, channel, value).expect("edit");
+        }
+        producer
+            .publish_candidate_targets(base, &targets)
+            .expect("reference publication");
+        producer.commit_owner().expect("reference commit");
+    }
+}
+
+/// #1265 gate 2 at one rate.
+fn live_eq_pcm_shape(sample_rate_hz: u32) {
+    use effect_contract::ParameterChannel::{Both, Left};
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let label = format!("nine tracks at {sample_rate_hz} Hz");
+    let document = eq_session(sample_rate_hz);
+    let model = parse_session_json(&document).expect("model");
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let mut rig = Rig::new(&document);
+    let mut lanes = LaneReference::new(&document);
+    let mut unedited = Reference::new(&document);
+    let warm_up = window(rig.latency(), 0, rig.quantum);
+    for block in 0..warm_up {
+        let live = rig.step();
+        assert_eq!(
+            bits(&live),
+            bits(&lanes.reference.step()),
+            "{label}: warm-up {block}"
+        );
+        assert_eq!(
+            bits(&live),
+            bits(&unedited.step()),
+            "{label}: warm-up {block}"
+        );
+    }
+
+    // Band 1 gain on eq0's left lane and band 1 Q on eq4's both lanes, on the console slot; the
+    // HPF enabled at 300 Hz on the last track's EQ insert.
+    let edits = [
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            3.0,
+        ),
+        upsert(
+            "eq4",
+            RackName::Console,
+            "eq",
+            5,
+            ParameterChannel::Both,
+            ParameterUnit::Ratio,
+            2.0,
+        ),
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            65,
+            ParameterChannel::Both,
+            ParameterUnit::Linear,
+            1.0,
+        ),
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            66,
+            ParameterChannel::Both,
+            ParameterUnit::Hz,
+            300.0,
+        ),
+    ];
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+    let (after, _, after_epoch, pending) = rig.summary();
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 1, epoch, 0),
+        "{label}: the edit commits one revision and prepares no plan"
+    );
+    lanes.publish_eq("eq0", "eq", &[(4, Left, 3.0)]);
+    lanes.publish_eq("eq4", "eq", &[(5, Both, 2.0)]);
+    lanes.publish_eq(last, "eq-insert", &[(65, Both, 1.0), (66, Both, 300.0)]);
+
+    let mut audible = false;
+    for block in 0..12 {
+        let live = rig.step();
+        let expected = lanes.reference.step();
+        assert!(
+            expected.iter().any(|sample| *sample != 0.0),
+            "{label}: block {block} after the edit carries signal"
+        );
+        assert_eq!(
+            bits(&live),
+            bits(&expected),
+            "{label}: block {block} after the edit"
+        );
+        audible |= bits(&live) != bits(&unedited.step());
+    }
+    assert!(audible, "{label}: the edit changes the output");
+    assert_eq!(rig.summary().2, 0, "{label}: the first epoch still renders");
+}
+
+/// #1265 gate 2. Red if the C ABI designs, addresses or publishes an EQ target differently from
+/// the browser's lane: targets designed in the test by `EqTargetPreparer` from the owner's own
+/// rows, published through the owner of a host-core plan with every live lane at the same block,
+/// must render the same bits as the C ABI edit.
+#[test]
+fn live_eq_parameter_edits_render_like_the_browsers_lane() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        live_eq_pcm_shape(sample_rate_hz);
+    }
+}
+
+fn effect_owners(rig: &Rig) -> Vec<TestOwnerState> {
+    crate::ffi::test_transaction_snapshot(rig.session).effect_owners
+}
+
+/// The committed revision and phase of one EQ owner in the current epoch.
+fn owner_phase(rig: &Rig, track_id: &str, effect_id: &str) -> (u64, String) {
+    let snapshot = crate::ffi::test_transaction_snapshot(rig.session);
+    snapshot
+        .effect_owners
+        .iter()
+        .find(|owner| {
+            owner.0 == snapshot.provider_epoch && &*owner.1 == track_id && &*owner.2 == effect_id
+        })
+        .map(|owner| (owner.3, owner.4.clone()))
+        .expect("EQ owner")
+}
+
+/// #1265 gate 3. Red if a refused transaction leaves an EQ owner begun or published: a fader
+/// lane's backpressure after the EQ owner's preflight, and a full EQ lane, each leave every
+/// owner, queue and the model as they were, and the retry after a render commits.
+#[test]
+fn a_refused_eq_transaction_leaves_its_owner_idle() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let mut rig = Rig::new(&eq_session(48_000));
+    rig.step();
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let gain = |value: f32| {
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            value,
+        )
+    };
+
+    // eq1's fader lane is full; the EQ edit on eq0 rides beside a fader edit on eq1.
+    for edit in 0..depth {
+        assert_eq!(
+            rig.apply(&[left_db_edit("eq1", -1.0 - edit as f32)]),
+            crate::RESULT_OK
+        );
+    }
+    let before = (refusal_state(&rig), effect_owners(&rig));
+    let rooms = effect_room(&rig, Epoch::Current, "eq0", "eq");
+    let transaction = [gain(3.0), left_db_edit("eq1", -30.0)];
+    assert_eq!(rig.apply(&transaction), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure");
+    assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), rooms);
+    assert_eq!(owner_phase(&rig, "eq0", "eq"), (0, "Idle".to_owned()));
+    rig.step();
+    assert_eq!(rig.apply(&transaction), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the retry is live");
+    assert_eq!(owner_phase(&rig, "eq0", "eq"), (1, "Idle".to_owned()));
+    rig.step();
+
+    // Each band-1 left gain edit designs one target: sixteen fill eq0's EQ lane, and the
+    // seventeenth is typed backpressure that changes nothing.
+    for edit in 0..depth {
+        assert_eq!(
+            rig.apply(&[gain(-1.0 - edit as f32)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 0);
+    let before = (refusal_state(&rig), effect_owners(&rig));
+    assert_eq!(rig.apply(&[gain(-20.0)]), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure");
+    assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
+    assert_eq!(rig.summary().3, 0, "no rebuild");
+    rig.step();
+    assert_eq!(rig.apply(&[gain(-20.0)]), crate::RESULT_OK);
+    assert_eq!(
+        owner_phase(&rig, "eq0", "eq"),
+        (2 + depth as u64, "Idle".to_owned())
+    );
+}
+
+/// #1265 gate 4. Red if an EQ edit whose designed targets outnumber its queue's whole capacity
+/// returns `BACKPRESSURE` (forever) instead of taking the structural path; one whose targets fit
+/// stays live. The queue is capped at four by `maximum_automation_spans_per_block`.
+#[test]
+fn an_eq_edit_designing_more_targets_than_its_queue_rebuilds() {
+    use effect_contract::ParameterChannel::Both;
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = eq_session(48_000);
+    let small = CompileLimits {
+        maximum_automation_spans_per_block: 4,
+        ..limits()
+    };
+    // Band gains on both lanes: band 1's lanes differ (two targets), bands 2-4 share one each.
+    let gains = [4, 20, 36, 52];
+    let seeds = LaneReference::new(&document).eq_seeds("eq0", "eq");
+    let edits = |bands: usize| {
+        // Per lane: the fixture sets band 1's gain per lane, so a `Both` entry would duplicate it.
+        gains[..bands]
+            .iter()
+            .flat_map(|&parameter_id| {
+                [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
+                    upsert(
+                        "eq0",
+                        RackName::Console,
+                        "eq",
+                        parameter_id,
+                        channel,
+                        ParameterUnit::Db,
+                        -5.0,
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let designed = |bands: usize| {
+        let edits: Vec<EqEdit> = gains[..bands]
+            .iter()
+            .map(|&parameter_id| (parameter_id, Both, -5.0))
+            .collect();
+        designed_eq_targets(48_000, &seeds, &edits).len()
+    };
+    assert_eq!((designed(3), designed(4)), (4, 5));
+
+    let mut rig = Rig::with_limits(&document, small);
+    rig.step();
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
+    assert_eq!(rig.apply(&edits(3)), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "four targets are live");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 0);
+    drop(rig);
+
+    let mut rig = Rig::with_limits(&document, small);
+    rig.step();
+    let (revision, ..) = rig.summary();
+    let owners = effect_owners(&rig);
+    assert_eq!(rig.apply(&edits(4)), crate::RESULT_OK);
+    let (after, _, _, pending) = rig.summary();
+    assert_eq!((after, pending), (revision + 1, 1), "five targets rebuild");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
+    assert_eq!(effect_room(&rig, Epoch::Pending, "eq0", "eq"), 4);
+    let current: Vec<_> = effect_owners(&rig)
+        .into_iter()
+        .filter(|owner| owner.0 == owners[0].0)
+        .collect();
+    assert_eq!(current, owners, "the rendering plan's owners are untouched");
+}
+
+/// #1265 gate 5. Red if the parameter readback keeps an EQ value's old state after a live edit,
+/// or reports one a rebuild's catalog would not.
+#[test]
+fn the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = eq_session(48_000);
+    let model = parse_session_json(&document).expect("model");
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let edits = vec![
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            3.0,
+        ),
+        upsert(
+            last,
+            RackName::Inserts,
+            "eq-insert",
+            66,
+            ParameterChannel::Both,
+            ParameterUnit::Hz,
+            300.0,
+        ),
+        SessionEdit::RemoveEffectParam {
+            track_id: StableId::parse(last).expect("track"),
+            rack_name: RackName::Inserts,
+            effect_id: StableId::parse("eq-insert").expect("EQ insert"),
+            parameter_id: 4,
+            channel: ParameterChannel::Both,
+        },
+    ];
+
+    let mut live = Rig::new(&document);
+    live.step();
+    let before = parameter_readback(&mut live);
+    assert_eq!(live.apply(&edits), crate::RESULT_OK);
+    assert_eq!(live.summary().3, 0, "the live rig did not rebuild");
+    let after = parameter_readback(&mut live);
+    assert_ne!(after.1, before.1, "the edit changes the readback");
+
+    let mut rebuilt = Rig::new(&document);
+    rebuilt.step();
+    let mut structural = edits;
+    structural.push(content_edit(&model));
+    assert_eq!(rebuilt.apply(&structural), crate::RESULT_OK);
+    assert_eq!(rebuilt.summary().3, 1, "the second rig rebuilt");
+    assert_eq!(parameter_readback(&mut rebuilt), after);
 }

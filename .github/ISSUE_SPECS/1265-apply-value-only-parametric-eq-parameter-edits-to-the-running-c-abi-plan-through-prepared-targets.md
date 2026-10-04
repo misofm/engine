@@ -136,3 +136,115 @@ Run every command from the repository root.
 - No ack precedes a drop. Never emit a redundant record.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `fbb311dfe`)
+
+**Changes.**
+- D1 (`crates/host-core/src/live_delta.rs`): for an instance whose factory has a prepared-target
+  capability, a changed `Block` value no longer gives `Prepared`. The changed values stay
+  `EffectControlRecord::Parameter` records (the owner's edits, never pushed), and the classifier
+  designs the targets with `EqTargetPreparer` at `next.sample_rate_hz`, seeded with the
+  pre-commit values from `resolve_initial_values` (canonical row order) and the changed
+  `(parameter_id, channel, value)` edits. `LiveEffectRecords` gains `targets:
+  Option<Vec<PreparedEffectTarget>>` (`Some` only for the EQ). A capability `EqTargetPreparer`
+  refuses at construction (any non-60-row one) is `Prepared`; a design refusal is `Domain`. A
+  band's `enabled` and `kind` (`automation_rate` `None`) stay `Prepared`, by the existing test.
+- D2 (`crates/capi/src/runtime/control.rs`, `commit_live`): after the producer resolution, an
+  instance whose queued count (records, or an EQ's targets) exceeds its queue's `capacity()`
+  hands the token back for the rebuild; an EQ instance without an owner is `Internal`. Then, for
+  each EQ instance, `begin_owner(committed_revision())`, `edit_owner` per edit and
+  `preflight_candidate_targets` (`Capacity` is `LiveBackpressure`, anything else `Internal`);
+  then the strip and non-EQ effect room checks, the non-EQ preflights, every readback handle and
+  the protocol predicate. The begun owners live in an `OpenOwners` guard whose `Drop` discards
+  every owner still begun, so every refusal path after the first `begin_owner` (including the
+  test fault before the push) discards them. Then the pushes, each owner's
+  `publish_candidate_targets`, the protocol commit and each `commit_owner`, each `expect`ed.
+- D3: the readback lookup and update cover the EQ's edits like any other record.
+- D4 (`docs/C_ABI_V1_QUALIFICATION.md`): a new "Value-only parametric EQ edits" section; the
+  #1263 and #1264 sections point at it.
+- Test support: `TestTransactionSnapshot` gains `effect_owners` (epoch, strip, instance,
+  committed revision, phase, committed and candidate value bits); test-only, in `control.rs`.
+  `live_tests.rs`'s `Rig` gains `with_limits`.
+- The browser module is unchanged: `live_delta` is compiled only with host-core's
+  `control-provider` feature, which only capi enables, so the worklet chain was not run.
+
+**Tests and their value.**
+- Gate 1 (`crates/host-core/tests/live_delta.rs`, on #1264's model with the EQ insert's band 1
+  shaped away from the defaults):
+  - `an_eq_band_gain_change_carries_its_edits_and_designed_targets`: red if the classifier seeds
+    the designer with values other than the ones preparation gave the owner (the seeds are read
+    from the owner of a host-core plan prepared from the same model), designs at another rate, or
+    passes other edits.
+  - `an_eq_hpf_enable_change_carries_targets`: red if the HPF's live `enabled` is refused or
+    carries no targets.
+  - `prepared_parameter_changes_need_a_rebuild` (rewritten): the EQ band-gain case is replaced by
+    band `enabled` and `kind` changes, each beside a live gain. Red if a prepared-only EQ
+    parameter goes live.
+  - `an_out_of_domain_eq_q_needs_a_rebuild`: red if an EQ Q above its domain is admitted live.
+- Gate 2 (`live_eq_parameter_edits_render_like_the_browsers_lane`, capi): band 1 gain (left) on
+  eq0's console EQ, band 1 Q (both) on eq4's, and HPF enabled + frequency on an EQ insert of the
+  last track, through `miso_engine_v1_submit_command`, against a `HostLiveLanes::ALL` host-core
+  plan whose EQ owners publish targets that the test designs with `EqTargetPreparer` from each
+  owner's committed rows, at the same block; bit-identical for 12 blocks on the nine-track
+  fixture at the four launch rates, with no rebuild, and audibly different from an unedited plan.
+  Red if the C ABI designs, addresses or publishes a target differently from the browser's lane.
+- Gate 3 (`a_refused_eq_transaction_leaves_its_owner_idle`): an EQ edit beside a fader edit on a
+  track whose fader lane is full is `BACKPRESSURE` after the EQ owner was begun and preflighted;
+  the model, revision, replay, reliable lane, every owner's revision, phase, committed and
+  candidate rows, and the EQ lane's room are unchanged, and the retry after a render commits
+  (owner revision 1, `Idle`). Then sixteen one-target edits fill the EQ lane and the seventeenth
+  is `BACKPRESSURE` with `control.live.backpressure`, changing nothing. Red if a refused
+  transaction leaves an EQ owner begun or published.
+- Gate 4 (`an_eq_edit_designing_more_targets_than_its_queue_rebuilds`): with
+  `maximum_automation_spans_per_block` 4 (EQ lane capacity 4), band gains on bands 1-3 design
+  4 targets (checked against `EqTargetPreparer` directly) and stay live, filling the lane; bands
+  1-4 design 5 and commit through the structural path, with the rendering plan's lane and owners
+  untouched. Red if an EQ edit that can never fit returns `BACKPRESSURE` forever.
+- Gate 5 (`the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds`): a console EQ set, an
+  insert HPF frequency set and an insert gain removal back to the default, live on one rig and,
+  with a source content edit, structural on another; every metadata row and state record is
+  identical and differs from before. Red if the readback keeps an EQ value's old state.
+
+**Mutation runs** (each introduced, run, reverted; logs `/tmp/claude-1002/w1265-a1/M*.log`):
+- M1, the classifier seeds the designer with the defaults: gate 1(a) red; capi gates 2-5 red (the
+  owner's preflight refuses the targets: `INTERNAL`).
+- M2, a target-capable effect's parameters skip the `automatable`/`Block` check:
+  `prepared_parameter_changes_need_a_rebuild` red (the designer then refuses band `enabled` as
+  `Domain`).
+- M3, the classifier designs at 48 kHz whatever the session's rate: gate 2 red.
+- M4, `OpenOwners` discards nothing: gate 3 red (the owner state differs after the refusal).
+- M5, capi counts an EQ's records, not its targets, against the capacity: gate 4 red.
+- M6, an owner preflight's `Capacity` maps to `INTERNAL`: gate 3 red.
+- M7, capi skips the readback update when an EQ is in the delta: gate 5 red.
+- M8, capi skips `commit_owner`: gate 3 red (the owner stays `Published` at revision 0).
+
+**Gates** (from the committed tree; logs `/tmp/claude-1002/w1265-a1/gate-*.log`):
+- `cargo fmt --all -- --check`: pass.
+- `cargo test --locked -p capi`: pass (58 lib, 13 `resource_lifecycle`, doc).
+- `cargo test --locked -p host-core --features control-provider,test-support`: pass (`live_delta`
+  25).
+- `cargo test --locked -p protocol --features test-support`: pass.
+- The workspace test command of #1257 gate 6: pass (1,349 tests, 0 failed).
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`: pass.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
+  `./target/release/audit capi`: allocations 0, deallocations 0, locks 0, syscalls 0,
+  total_violations 0.
+- `bash scripts/check-capi-abi.sh && bash scripts/check-capi-abi.sh --self-test`: pass.
+- `python3 -B scripts/check-scalar-oracle-absent.py --native target/release/libcapi.so`: pass.
+- `for x in host-core realtime workspace protocol-control; do ...check/test...; done`: pass.
+- `bash scripts/check-cross-targets.sh`: PASS (iOS `memset_pattern16` expected failures as
+  recorded by #1018).
+- Worklet chain: not run; no line compiled into the browser module changed (see Changes).
+- 4-lane (NEON), `bash scripts/run-aarch64-tests.sh debug`: not run locally (CI-only).
+
+**Open items for review.**
+- Order inside D2: the owner transactions run right after the producer resolution and before the
+  other room checks, as D2 lists them, so a fader-lane refusal is exercised after an owner was
+  begun (gate 3's first case).
+- `LiveEffectRecords` is still reachable only as `host_core::live_delta::LiveEffectRecords`
+  (`host-core/src/lib.rs` is outside the authorized paths).
+- The C header's "Live edits" comment and `docs/CONTROL_PROTOCOL_SEMANTICS.md:15` (outside the
+  authorized paths) still name only fader, mute and pan, as #1264 noted.

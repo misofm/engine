@@ -10,13 +10,17 @@ use core::num::NonZeroUsize;
 
 use builtins::{BuiltinFaderBank, BuiltinMatrixBank, BuiltinParameters, Matrix2x2, pan_matrix};
 use dsp_reference::randomized::Draw;
-use effect_contract::{BankWidth, EffectControlRecord, ParameterChannel as Lane};
+use effect_contract::{
+    BankWidth, EffectControlRecord, PREPARED_EFFECT_TARGET_WORDS, ParameterChannel as Lane,
+    PreparedEffectTarget,
+};
 use engine::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use host_core::{
-    BuiltinLaneSelector, HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta,
-    LiveEffectAddress, LiveRamps, LiveRebuild, LiveStripRecords, PreparedHost, SourceSubmission,
-    TrackControlRecord, TrackFaderRecord, classify_live_delta, compile_host_session,
-    prepare_host_runtime, prepare_host_runtime_with_live_controls,
+    BuiltinLaneSelector, EQ_TARGET_CAPACITY, EqTargetEdit, EqTargetPreparer,
+    HostLiveControlRequest, HostPrepareCaps, HostShapePolicy, LiveDelta, LiveEffectAddress,
+    LiveRamps, LiveRebuild, LiveStripRecords, PreparedHost, SourceSubmission, TrackControlRecord,
+    TrackFaderRecord, classify_live_delta, compile_host_session, prepare_host_runtime,
+    prepare_host_runtime_with_live_controls,
 };
 use session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, Console, ConsoleEntry,
@@ -1054,9 +1058,9 @@ fn a_removed_parameter_returns_to_its_default() {
     );
 }
 
-/// #1264 gate 1(d). Red if a parameter the plan keeps prepared -- a gate/expander attack
-/// (`automation_rate` `None`) or any parametric EQ parameter (G4, until #1265) -- is classified
-/// live: the edit would be acked and the effect would never apply it.
+/// #1264 gate 1(d), #1265 gate 1(c). Red if a parameter the plan keeps prepared -- a gate/expander
+/// attack, or an EQ band's `enabled` or `kind` (`automation_rate` `None`, decision 14 F2) -- is
+/// classified live: the edit would be acked and the effect would never apply it.
 #[test]
 fn prepared_parameter_changes_need_a_rebuild() {
     let current = with_effects();
@@ -1079,13 +1083,20 @@ fn prepared_parameter_changes_need_a_rebuild() {
         })
         .is_ok()
     );
-    // EQ band 1 gain (ID 4): a `Block` parameter, but the EQ rides prepared targets.
-    assert_eq!(
-        classify_effects(&current, |next| {
-            inserts(next, 2).push(param(4, ParameterChannel::Left, ParameterUnit::Db, 3.0));
-        }),
-        Err(LiveRebuild::Prepared)
-    );
+    // EQ band 1 `enabled` (ID 1) and `kind` (ID 2, a low shelf), each beside a live gain.
+    for prepared in [
+        param(1, ParameterChannel::Left, ParameterUnit::Linear, 1.0),
+        param(2, ParameterChannel::Both, ParameterUnit::Linear, 2.0),
+    ] {
+        assert_eq!(
+            classify_effects(&current, |next| {
+                inserts(next, 2).push(param(4, ParameterChannel::Left, ParameterUnit::Db, 3.0));
+                inserts(next, 2).push(prepared.clone());
+            }),
+            Err(LiveRebuild::Prepared),
+            "{prepared:?}"
+        );
+    }
 }
 
 /// #1264 gate 1(e). Red if the classifier admits `params` that preparation refuses (a unit
@@ -1144,5 +1155,165 @@ fn an_insert_reorder_is_structural() {
             inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
         }),
         Err(LiveRebuild::Structure)
+    );
+}
+
+// Issue #1265: parametric EQ parameters through prepared targets.
+
+/// `with_effects` with the EQ insert's band 1 enabled on both lanes at 1 kHz on the left and
+/// 3 kHz on the right, with +2 dB on the left: values other than the defaults, so a designer
+/// seeded with anything but them designs other targets.
+fn with_shaped_eq() -> SessionModel {
+    let mut model = with_effects();
+    *inserts(&mut model, 2) = vec![
+        param(1, ParameterChannel::Both, ParameterUnit::Linear, 1.0),
+        param(3, ParameterChannel::Left, ParameterUnit::Hz, 1_000.0),
+        param(3, ParameterChannel::Right, ParameterUnit::Hz, 3_000.0),
+        param(4, ParameterChannel::Left, ParameterUnit::Db, 2.0),
+    ];
+    normalized(&model)
+}
+
+/// The values preparation gave the EQ insert's owner: its committed rows, read from a host-core
+/// plan of `model` prepared with every live lane.
+fn prepared_eq_seeds(model: &SessionModel) -> Vec<f32> {
+    let request = HostLiveControlRequest {
+        control_queue_depth: Some(NonZeroUsize::new(16).expect("depth")),
+        ..HostLiveControlRequest::default()
+    };
+    let (_, handles) = prepare_host_runtime_with_live_controls(&compile(model), &caps(), &request)
+        .unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        });
+    let producer = handles
+        .effect_controls
+        .iter()
+        .find(|producer| {
+            *producer.track_id == *model.tracks[0].id.as_str() && &*producer.effect_id == "eq"
+        })
+        .expect("EQ producer");
+    producer
+        .owner()
+        .expect("EQ owner")
+        .committed()
+        .iter()
+        .map(|row| row.value)
+        .collect()
+}
+
+/// The targets `EqTargetPreparer` designs for `edits` from `seeds`, called directly.
+fn designed_targets(
+    sample_rate: u32,
+    seeds: &[f32],
+    edits: &[EqTargetEdit],
+) -> Vec<PreparedEffectTarget> {
+    let preparer = EqTargetPreparer::new(
+        host_core::parametric_eq_target_preparation_factory().expect("EQ capability"),
+    )
+    .expect("EQ preparer");
+    let mut out = [PreparedEffectTarget {
+        slot: 0,
+        channel: Lane::Both,
+        words: [0; PREPARED_EFFECT_TARGET_WORDS],
+    }; EQ_TARGET_CAPACITY];
+    let (_, count) = preparer
+        .prepare(sample_rate, seeds, edits, &mut out)
+        .expect("designed targets");
+    out[..count].to_vec()
+}
+
+/// The EQ insert's one delta entry: its records and its targets.
+fn eq_entry(
+    current: &SessionModel,
+    edit: impl FnOnce(&mut SessionModel),
+) -> Result<(Vec<EffectControlRecord>, Option<Vec<PreparedEffectTarget>>), LiveRebuild> {
+    let next = edited(current, edit);
+    let delta = classify_live_delta(current, &next, STEP)?;
+    assert!(delta.strips.is_empty(), "no strip record");
+    assert_eq!(delta.effects.len(), 1, "one instance");
+    let entry = &delta.effects[0];
+    assert_eq!(
+        (entry.strip_id, entry.address),
+        (current.tracks[0].id.as_str(), LiveEffectAddress::insert(2))
+    );
+    Ok((entry.records.clone(), entry.targets.clone()))
+}
+
+/// #1265 gate 1(a). Red if the classifier seeds the target designer with values other than the
+/// ones preparation gave the EQ's owner, designs at another rate, or passes other edits than the
+/// changed rows: its targets must equal `EqTargetPreparer`'s for the owner's committed rows.
+#[test]
+fn an_eq_band_gain_change_carries_its_edits_and_designed_targets() {
+    let current = with_shaped_eq();
+    let seeds = prepared_eq_seeds(&current);
+    // Band 1 gain (ID 4, index 3), left lane only.
+    let (records, targets) = eq_entry(&current, |next| {
+        inserts(next, 2)[3].value = 5.0;
+    })
+    .expect("live");
+    assert_eq!(records, vec![record(3, Lane::Left, 5.0)]);
+    let expected = designed_targets(
+        current.sample_rate_hz,
+        &seeds,
+        &[EqTargetEdit {
+            parameter_id: 4,
+            channel: Lane::Left,
+            value: 5.0,
+        }],
+    );
+    assert_eq!(expected.len(), 1, "one section on one lane");
+    assert_eq!(targets, Some(expected));
+}
+
+/// #1265 gate 1(b). Red if a live EQ cut-filter `enabled` change is refused or carries no targets:
+/// the HPF's `enabled` is `Block` rate and rides a target like any other live EQ value.
+#[test]
+fn an_eq_hpf_enable_change_carries_targets() {
+    let current = with_shaped_eq();
+    let seeds = prepared_eq_seeds(&current);
+    let (records, targets) = eq_entry(&current, |next| {
+        inserts(next, 2).push(param(
+            65,
+            ParameterChannel::Both,
+            ParameterUnit::Linear,
+            1.0,
+        ));
+    })
+    .expect("live");
+    // HPF enabled is index 24 (after the four bands' six fields), per lane.
+    assert_eq!(
+        records,
+        vec![record(24, Lane::Left, 1.0), record(24, Lane::Right, 1.0)]
+    );
+    let expected = designed_targets(
+        current.sample_rate_hz,
+        &seeds,
+        &[EqTargetEdit {
+            parameter_id: 65,
+            channel: Lane::Both,
+            value: 1.0,
+        }],
+    );
+    assert!(!expected.is_empty(), "the HPF is designed");
+    assert_eq!(targets, Some(expected));
+}
+
+/// #1265 gate 1(d). Red if the classifier admits an EQ value preparation refuses (a Q above its
+/// domain), so that a live commit would leave a committed model its own rebuild refuses.
+#[test]
+fn an_out_of_domain_eq_q_needs_a_rebuild() {
+    let current = with_shaped_eq();
+    assert_eq!(
+        eq_entry(&current, |next| {
+            inserts(next, 2).push(param(5, ParameterChannel::Left, ParameterUnit::Ratio, 18.5));
+        }),
+        Err(LiveRebuild::Domain)
+    );
+    // The domain's own bound is live.
+    assert!(
+        eq_entry(&current, |next| {
+            inserts(next, 2).push(param(5, ParameterChannel::Left, ParameterUnit::Ratio, 18.0));
+        })
+        .is_ok()
     );
 }
