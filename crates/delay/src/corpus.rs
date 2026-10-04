@@ -167,7 +167,7 @@ pub fn run_case(case: usize, out: &mut [u32]) {
             },
             initial_values: &values,
             limits: PrepareEffectLimits {
-                maximum_total_state_bytes: 768_168,
+                maximum_total_state_bytes: 768_196,
                 maximum_scratch_bytes: 36,
                 maximum_automation_spans_per_block: 16,
             },

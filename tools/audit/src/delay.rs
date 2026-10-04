@@ -166,7 +166,7 @@ fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
             },
             initial_values: &initial_values,
             limits: PrepareEffectLimits {
-                maximum_total_state_bytes: 768_168,
+                maximum_total_state_bytes: 768_196,
                 maximum_scratch_bytes: 36,
                 maximum_automation_spans_per_block: 16,
             },

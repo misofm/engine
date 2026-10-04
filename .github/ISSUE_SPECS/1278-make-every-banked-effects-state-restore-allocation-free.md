@@ -608,3 +608,58 @@ generator, scale 20 is red at seed 43 (twin 1 ulp from the oracle, chunked block
 was not separately confirmed. Either way, the nightly's release scale-100 run will turn red once
 this branch lands. No product path
 reaches the defect today: the carry moves the delay (slice 12).
+
+**Delay follow-up (fixed on this branch, before #1299 merges).** Root cause confirmed: the delay
+was the one effect still on the pre-D2a ramp triple. Its private `read_ramp` re-derived each step
+with `set_target`, and it held a moving ramp's `current` to the strict domain. The second rule is
+why it refused its own edge-ramp snapshots, so both findings share one restore path and one fix.
+The delay now writes and reads every ramp through `effect_runtime::state_payload`, all four words
+of each. A moving ramp is validated by `ramp_path_within` with a 64-ulp budget; a settled ramp and
+every target are validated strictly, as in the transient shaper.
+
+Layout:
+- common section: 16 to 20 bytes (the cursor plus the cross ramp);
+- lane header: 16 to 19 words;
+- 48 kHz total: 768_168 to 768_196 bytes;
+- `state_layout_version` stays 1 (D2a amendment). The payload is in-memory only (R6b).
+
+Re-pinned:
+- the delay's resource table and corpus limit;
+- `graph-compiler`'s launch-delay fixture (`768_196`; `declared_effect_bytes` 7_682_320);
+- `tools/audit/src/delay.rs`.
+
+Restore still validates everything before it commits and allocates nothing. Render is unchanged.
+
+Tests, each red on a recorded mutation (`crates/delay/tests/MUTATIONS.md`):
+
+| Test | Red on | Failure |
+| --- | --- | --- |
+| `a_mid_ramp_restore_continues_bit_identically` | M17 | 1 ulp at frame 23 |
+| (same test, restored-snapshot assertion) | M17b: re-derive the cross or feedback step only | the snapshot differs |
+| `the_effects_own_edge_ramp_snapshots_restore` | M18 | 24 refusals |
+| `a_carried_ramp_is_refused_unless_its_whole_path_is_valid` | M19 | accepts a NaN step |
+
+Evidence, delay differential (`MISO_ENGINE_RANDOMIZED_SCALE`). Before the fix it was red at scale 20: seed 43 natively and seed 58 at forced `Four`. After the fix, all of these are green:
+- scale 20, debug, native `Eight`;
+- scale 20, debug, forced `Four`;
+- scale 100, `--release`, native `Eight`;
+- scale 100, `--release`, forced `Four`.
+
+The fix changes only the carried step and the accept/refuse rule, and a refusal would panic as "own snapshot refused" rather than move a bit. That ties seed 43 to the step re-derivation.
+
+Gates, all pass:
+- fmt, clippy `-D warnings`, rustdoc `-D warnings`;
+- every lint-job policy pair;
+- test-debug-a and test-debug-b, both complete;
+- `audit` in release;
+- `check-cross-targets.sh`, with only the #1018 expected failures;
+- the worklet chain: `--named-twin`, check, expected resources, test.
+
+The shipped module is now `3e71bfc515da916e...`. Not re-pinned (`docs/RELEASE.md`).
+
+Verifier: an opus-xhigh agent. Verdict: PASS. It made three MINOR findings and two NITs:
+- MINOR-1: the unit test missed cross-only and feedback-only re-derivation. Fixed with the restored-snapshot assertion (M17b).
+- MINOR-2: nothing protected the path validation. Fixed with the refusal-table test (M19).
+- MINOR-3: open. The shared edge probe costs about 70 s in debug per PR, because all four rates are probed and the delay's rings are large. A rate filter belongs in the shared probe, which is outside this fix.
+- NIT-1: accepted. The symmetric slack admits a damping `g` down to about -6.6e-6 for at most 63 samples, which is harmless (TPT pole 1-2g).
+- NIT-2: predates this change. The delay's own differential passes `in_flight: None`, so it takes no per-PR mid-ramp continuation; the unit test covers that case.
