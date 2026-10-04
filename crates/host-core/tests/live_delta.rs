@@ -1140,20 +1140,13 @@ fn params_preparation_refuses_need_a_rebuild() {
     );
 }
 
-/// #1264 gate 1(f). Red if the params mask also hides a structural change of the instances: an
-/// insert reorder, or a bypass flip (#1266's) beside a parameter change.
+/// #1264 gate 1(f). Red if the params and bypass masks also hide a structural change of the
+/// instances: an insert reorder.
 #[test]
 fn an_insert_reorder_is_structural() {
     let current = with_effects();
     assert_eq!(
         classify_effects(&current, |next| next.tracks[0].inserts.effects.swap(0, 1)),
-        Err(LiveRebuild::Structure)
-    );
-    assert_eq!(
-        classify_effects(&current, |next| {
-            next.tracks[0].inserts.effects[0].bypass = true;
-            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
-        }),
         Err(LiveRebuild::Structure)
     );
 }
@@ -1315,5 +1308,176 @@ fn an_out_of_domain_eq_q_needs_a_rebuild() {
             inserts(next, 2).push(param(5, ParameterChannel::Left, ParameterUnit::Ratio, 18.0));
         })
         .is_ok()
+    );
+}
+
+// Issue #1266: effect bypass through the latency-preserving shunt.
+
+/// `with_effects` with the fixture's parametric EQ as a `pre_insert` console slot (`console(0)`,
+/// so the soft-clip moves to `console(1)`), bypassed on every track, and a delay (`insert(3)`)
+/// and a multiband compressor (`insert(4)`) after the first track's other inserts, enabled.
+fn with_bypassable() -> SessionModel {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    let template = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
+    let mut model = with_effects();
+    model
+        .console
+        .pre_insert
+        .insert(0, fixture.console.pre_insert[0].clone());
+    for track in &mut model.tracks {
+        track.console.insert(
+            0,
+            ConsoleEntry {
+                slot: fixture.console.pre_insert[0].slot.clone(),
+                bypass: true,
+                params: Vec::new(),
+            },
+        );
+    }
+    for (instance, effect) in [("dly", "miso.delay"), ("mb", "miso.multiband-compressor")] {
+        let mut native = template.clone();
+        native.id = id(instance);
+        native.identity = EffectIdentity::Native {
+            effect_id: id(effect),
+        };
+        native.params.clear();
+        native.bypass = false;
+        model.tracks[0].inserts.effects.push(native);
+    }
+    normalized(&model)
+}
+
+/// #1266 gate 1. Red if a bypass flip on an effect whose bypass rides its lane is not exactly one
+/// `Bypass` record carrying the post-commit value, on its instance's address, ahead of its
+/// parameter records -- or if the bypass mask hides a flip, so that it is acked and never pushed.
+#[test]
+fn a_live_bypass_flip_is_one_record_ahead_of_its_parameters() {
+    let current = with_bypassable();
+    let first = track_id(&current, 0);
+    let second = track_id(&current, 1);
+    // A compressor insert bypassed.
+    assert_eq!(
+        classify_effects(&current, |next| next.tracks[0].inserts.effects[0].bypass =
+            true),
+        Ok((
+            Vec::new(),
+            vec![(
+                first.clone(),
+                LiveEffectAddress::insert(0),
+                vec![EffectControlRecord::Bypass(true)]
+            )]
+        ))
+    );
+    // A console EQ entry un-bypassed on the second track: a bare record, no targets.
+    let next = edited(&current, |next| next.tracks[1].console[0].bypass = false);
+    let delta = classify_live_delta(&current, &next, STEP).expect("live");
+    assert_eq!(delta.effects.len(), 1);
+    let entry = &delta.effects[0];
+    assert_eq!(
+        (entry.strip_id, entry.address, entry.records.as_slice()),
+        (
+            second.as_str(),
+            LiveEffectAddress::console(0),
+            &[EffectControlRecord::Bypass(false)][..]
+        )
+    );
+    assert_eq!(entry.targets, None);
+    // A bypass flip beside a parameter change: the bypass first.
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.tracks[0].inserts.effects[0].bypass = true;
+            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        }),
+        Ok((
+            Vec::new(),
+            vec![(
+                first,
+                LiveEffectAddress::insert(0),
+                vec![
+                    EffectControlRecord::Bypass(true),
+                    record(0, Lane::Left, -30.0)
+                ]
+            )]
+        ))
+    );
+}
+
+/// #1266 D1 on the EQ. Red if an EQ's bypass record reaches its target designer (which refuses
+/// it, so the edit would rebuild) or displaces its parameter edits: the bypass goes first and the
+/// targets are the parameter edits' alone.
+#[test]
+fn an_eq_bypass_beside_a_gain_change_rides_ahead_of_its_targets() {
+    let current = with_shaped_eq();
+    let seeds = prepared_eq_seeds(&current);
+    let (records, targets) = eq_entry(&current, |next| {
+        next.tracks[0].inserts.effects[2].bypass = true;
+        inserts(next, 2)[3].value = 5.0;
+    })
+    .expect("live");
+    assert_eq!(
+        records,
+        vec![
+            EffectControlRecord::Bypass(true),
+            record(3, Lane::Left, 5.0)
+        ]
+    );
+    let expected = designed_targets(
+        current.sample_rate_hz,
+        &seeds,
+        &[EqTargetEdit {
+            parameter_id: 4,
+            channel: Lane::Left,
+            value: 5.0,
+        }],
+    );
+    assert_eq!(targets, Some(expected));
+}
+
+/// #1266 gate 1, decision 14 F4. Red if a prepared bypass -- the delay's or the multiband
+/// compressor's -- is classified live in either direction: the record would be acked and never
+/// heard, because the running plan holds that bypass in its prepared state.
+#[test]
+fn a_prepared_bypass_change_needs_a_rebuild() {
+    for index in [3, 4] {
+        let enabled = with_bypassable();
+        assert_eq!(
+            classify_effects(&enabled, |next| {
+                next.tracks[0].inserts.effects[index].bypass = true;
+            }),
+            Err(LiveRebuild::PreparedBypass),
+            "insert {index} bypassed"
+        );
+        let mut bypassed = enabled.clone();
+        bypassed.tracks[0].inserts.effects[index].bypass = true;
+        let bypassed = normalized(&bypassed);
+        assert_eq!(
+            classify_effects(&bypassed, |next| {
+                next.tracks[0].inserts.effects[index].bypass = false;
+            }),
+            Err(LiveRebuild::PreparedBypass),
+            "insert {index} lifted"
+        );
+    }
+}
+
+/// #1053 G1 on the bypass. Red if the bypass mask reaches a submix strip's effects: a submix
+/// effect's bypass stays structural until #1225.
+#[test]
+fn a_submix_effect_bypass_is_structural() {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    let mut model = with_bus(false);
+    let mut compressor = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
+    compressor.id = id("comp");
+    compressor.identity = EffectIdentity::Native {
+        effect_id: id("miso.compressor"),
+    };
+    compressor.params.clear();
+    compressor.bypass = false;
+    model.submixes[0].inserts.effects.push(compressor);
+    let current = normalized(&model);
+    assert_eq!(
+        classify(&current, |next| next.submixes[0].inserts.effects[0]
+            .bypass = true),
+        Err(LiveRebuild::Structure)
     );
 }

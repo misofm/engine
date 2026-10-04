@@ -231,7 +231,9 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   structural.
 - **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
   `params` change only in live parameters, parametric EQ values included, is live too; see
-  "Value-only effect parameter edits" and "Value-only parametric EQ edits" below.
+  "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
+  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
+  bypass edits" below.
 - **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
   edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
   reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
@@ -324,8 +326,8 @@ and compares the resolved values bit by bit.
   `automation_rate` is `None` (for example the gate/expander's attack, hold and release, and a
   parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
   targets; see "Value-only parametric EQ edits" below.
-- **Rebuild for everything else about an effect**: identity, quality, link mode, bypass (until
-  #1266), sidechain, the insert order and the console slot set, any effect on a submix strip, and
+- **Rebuild for everything else about an effect**: identity, quality, link mode, a prepared bypass
+  (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix strip, and
   `params` that preparation refuses (reported as `COMPILE_REJECTED` with the preparation
   diagnostic).
 - **A transaction too large for a lane.** An effect lane holds `min(16, automation capacity)`
@@ -372,3 +374,26 @@ prepared targets through its owner, never as bare parameter records.
   targets that `EqTargetPreparer` designs from the owner's own committed values, published through
   the owner at the same block, on the nine-track EQ fixture at the four launch rates.
 - **No resource movement.** The targets ride the EQ lanes and owners #1263 attached.
+
+## Value-only effect bypass edits on the running plan (#1266)
+
+A transaction that switches the bypass of a track's console-slot entry or insert is live through
+the rack's latency-preserving bypass shunt (decision 14).
+
+- **Live.** One bypass record carrying the new bypass goes to the instance's lane in the newest
+  plan, ahead of the instance's parameter records or, for a parametric EQ, ahead of its targets.
+  The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
+  so the effect's state continues either way and prepared latency does not change. The switch is a
+  step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
+  compressor: their session bypass is prepared into the effect, not lowered to the lane
+  (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
+  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+- **No ack before a drop.** The bypass record passes its producer's preflight and the room check
+  of #1264 before the first push; for an EQ the room must hold the record and the whole target
+  prefix together, or the transaction is `BACKPRESSURE` with `control.live.backpressure` and
+  changes nothing.
+- **Equal to a rebuild.** Because the wet path keeps running, from E + ceil(latency / quantum) + 1
+  on, a live bypass or lift renders bit-identically to a plan compiled from the committed snapshot
+  and fed the same source from sample 0, on one and ten tracks at the four launch rates.
+- **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.

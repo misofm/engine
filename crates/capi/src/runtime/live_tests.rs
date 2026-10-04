@@ -2318,3 +2318,247 @@ fn the_eq_parameter_readback_after_a_live_edit_equals_a_rebuilds() {
     assert_eq!(rebuilt.summary().3, 1, "the second rig rebuilt");
     assert_eq!(parameter_readback(&mut rebuilt), after);
 }
+
+// Issue #1266: value-only effect bypass edits through the latency-preserving shunt.
+
+fn bypass_edit(
+    track_id: &str,
+    rack_name: session::RackName,
+    effect_id: &str,
+    bypass: bool,
+) -> SessionEdit {
+    SessionEdit::SetEffectBypass {
+        track_id: StableId::parse(track_id).expect("track ID"),
+        rack_name,
+        effect_id: StableId::parse(effect_id).expect("effect ID"),
+        bypass,
+    }
+}
+
+/// #1266 gate 2 for one session: bypass the first track's compressor insert and the last track's
+/// console soft-clip live, then lift both.
+fn live_bypass_pcm_shape(track_count: usize, sample_rate_hz: u32) {
+    use session::RackName;
+    let label = format!("{track_count} tracks at {sample_rate_hz} Hz");
+    let document = effect_session(track_count, sample_rate_hz);
+    let model = parse_session_json(&document).expect("model");
+    let first = model.tracks[0].id.as_str();
+    let last = model.tracks[model.tracks.len() - 1].id.as_str();
+    let mut rig = Rig::new(&document);
+    let latency = rig.latency();
+    let quantum = rig.quantum;
+    for _ in 0..window(latency, 0, quantum) {
+        rig.step();
+    }
+
+    let mut was_audible = false;
+    for bypass in [true, false] {
+        let edits = [
+            bypass_edit(first, RackName::Inserts, "comp", bypass),
+            bypass_edit(last, RackName::Console, "clip", bypass),
+        ];
+        let (revision, _, epoch, _) = rig.summary();
+        assert_eq!(
+            rig.apply(&edits),
+            crate::RESULT_OK,
+            "{label}: bypass {bypass}"
+        );
+        let (after, _, after_epoch, pending) = rig.summary();
+        assert_eq!(
+            (after, after_epoch, pending),
+            (revision + 1, epoch, 0),
+            "{label}: bypass {bypass} commits one revision and prepares no plan"
+        );
+        let committed = rig.snapshot();
+        let settled = settle(&mut rig, window(latency, 0, quantum), 3);
+        let rebuilt = Reference::run(&committed, rig.block);
+        let unedited = Reference::run(&document, rig.block);
+        for (block, live) in settled {
+            let expected = &rebuilt[block as usize];
+            assert!(
+                expected.iter().any(|sample| *sample != 0.0),
+                "{label}: block {block} carries signal"
+            );
+            assert_eq!(
+                bits(&live),
+                bits(expected),
+                "{label}: bypass {bypass}, block {block}"
+            );
+            if bypass {
+                was_audible |= bits(&live) != bits(&unedited[block as usize]);
+            }
+        }
+    }
+    assert!(was_audible, "{label}: the bypass changes the output");
+    assert_eq!(rig.summary().2, 0, "{label}: the first epoch still renders");
+}
+
+/// #1266 gate 2. Red if a live bypass record differs from what preparation bakes for the
+/// committed bypass, or lands on another instance: from E + K on, the live plan must render the
+/// bits of a plan compiled from the committed snapshot and fed the same source from sample 0,
+/// after the bypass and again after the lift.
+#[test]
+fn live_effect_bypass_edits_render_like_a_rebuild() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        for track_count in [1, 10] {
+            live_bypass_pcm_shape(track_count, sample_rate_hz);
+        }
+    }
+}
+
+/// #1266 D2 on the EQ, at one rate.
+fn live_eq_bypass_pcm_shape(sample_rate_hz: u32) {
+    use effect_contract::ParameterChannel::Left;
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let label = format!("nine tracks at {sample_rate_hz} Hz");
+    let document = eq_session(sample_rate_hz);
+    let mut rig = Rig::new(&document);
+    let mut lanes = LaneReference::new(&document);
+    for block in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(
+            bits(&rig.step()),
+            bits(&lanes.reference.step()),
+            "{label}: warm-up {block}"
+        );
+    }
+    let edits = [
+        bypass_edit("eq0", RackName::Console, "eq", true),
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            3.0,
+        ),
+    ];
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK, "{label}");
+    assert_eq!(rig.summary().3, 0, "{label}: live");
+    lanes
+        .eq_producer("eq0", "eq")
+        .try_push(effect_contract::EffectControlRecord::Bypass(true))
+        .expect("reference bypass");
+    lanes.publish_eq("eq0", "eq", &[(4, Left, 3.0)]);
+    for block in 0..12 {
+        assert_eq!(
+            bits(&rig.step()),
+            bits(&lanes.reference.step()),
+            "{label}: block {block} after the edit"
+        );
+    }
+}
+
+/// #1266 D2. Red if an EQ's bypass record is dropped beside its owner's transaction (or taken
+/// for an owner edit, which refuses the commit): the C ABI must render the bits of a host-core plan
+/// with every live lane given the `Bypass` record and then the owner's designed targets.
+#[test]
+fn a_live_eq_bypass_beside_a_gain_change_renders_like_the_browsers_lane() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        live_eq_bypass_pcm_shape(sample_rate_hz);
+    }
+}
+
+/// #1266 D2, the acked-batch question. Red if the room check counts an EQ's targets without its
+/// `Bypass` record: with room for the targets alone, the bypass would be pushed and the
+/// publication would then fail after the transaction was admitted. It is typed backpressure
+/// instead, before anything changes, and a retry after one render succeeds.
+#[test]
+fn an_eq_bypass_and_targets_without_room_for_both_refuse_before_anything_changes() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let mut rig = Rig::new(&eq_session(48_000));
+    rig.step();
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let gain = |value| {
+        upsert(
+            "eq0",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            value,
+        )
+    };
+    // One left-lane band gain designs one target: fill the queue to one free slot.
+    for step in 1..depth {
+        assert_eq!(rig.apply(&[gain(step as f32 / 8.0)]), crate::RESULT_OK);
+    }
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 1);
+    let before = refusal_state(&rig);
+    let owners = effect_owners(&rig);
+    let edits = [
+        bypass_edit("eq0", RackName::Console, "eq", true),
+        gain(-3.0),
+    ];
+    assert_eq!(rig.apply(&edits), crate::RESULT_BACKPRESSURE);
+    assert_eq!(refusal_state(&rig), before, "the refusal changes nothing");
+    assert_eq!(effect_owners(&rig), owners, "every owner is left as it was");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 1);
+    rig.step();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the retry is live");
+}
+
+/// #1266 gate 3, decision 14 F4. Red if the C ABI acks a multiband compressor bypass change, in
+/// either direction, on the running plan, which holds that bypass prepared and would never render
+/// it: the change prepares a new plan, and once it renders, its output follows the committed model.
+#[test]
+fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
+    let document = with_model(&long_session(10, 48_000), |model| {
+        let mut multiband = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+        multiband.id = StableId::parse("mb").expect("multiband");
+        multiband.identity = session::EffectIdentity::Native {
+            effect_id: StableId::parse("miso.multiband-compressor").expect("multiband ID"),
+        };
+        multiband.params.clear();
+        multiband.bypass = false;
+        model.tracks[0].inserts.effects.push(multiband);
+    });
+    let mut rig = Rig::new(&document);
+    rig.step();
+    let mut previous = Reference::run(&document, 6);
+    for bypass in [true, false] {
+        let (revision, _, epoch, pending) = rig.summary();
+        assert_eq!(pending, 0);
+        assert_eq!(
+            rig.apply(&[bypass_edit("eq0", session::RackName::Inserts, "mb", bypass)]),
+            crate::RESULT_OK
+        );
+        assert_eq!(
+            rig.summary().3,
+            1,
+            "bypass {bypass}: the change prepares a candidate"
+        );
+        assert_eq!(rig.summary().0, revision + 1);
+        let snapshot = rig.snapshot();
+        assert_eq!(
+            parse_session_json(&snapshot).expect("snapshot").tracks[0]
+                .inserts
+                .effects
+                .last()
+                .expect("mb")
+                .bypass,
+            bypass
+        );
+        // The render call swaps the candidate in; its fresh rings then wait for a seek.
+        rig.render();
+        rig.seek_to_start();
+        let rebuilt: Vec<_> = (0..6).map(|_| rig.step()).collect();
+        let (_, _, swapped, pending) = rig.summary();
+        assert_eq!(pending, 0, "bypass {bypass}: the candidate was taken");
+        assert_ne!(swapped, epoch, "bypass {bypass}: a new epoch renders");
+        let reference = Reference::run(&snapshot, 6);
+        assert_eq!(
+            rebuilt.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            reference.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            "bypass {bypass}: the rebuilt plan renders the committed model"
+        );
+        assert_ne!(
+            reference.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            previous.iter().map(|pcm| bits(pcm)).collect::<Vec<_>>(),
+            "bypass {bypass}: the change is audible"
+        );
+        previous = reference;
+    }
+}

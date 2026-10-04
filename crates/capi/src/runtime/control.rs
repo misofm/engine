@@ -1021,7 +1021,9 @@ impl SessionState {
     /// after an owner was begun discards every begun owner (`OpenOwners`). An effect instance
     /// whose records, or an EQ's targets, outnumber its queue's whole capacity could never fit,
     /// so the token goes back for a rebuild instead of an endless `BACKPRESSURE` (#1264 D3,
-    /// #1265 D2). Only then does it push every record, publish every EQ owner's targets, commit
+    /// #1265 D2). An instance's `Bypass` record (#1266 D2) is an ordinary pushed record on every
+    /// instance, the EQ's included, where it goes ahead of the targets and counts toward their
+    /// room. Only then does it push every record, publish every EQ owner's targets, commit
     /// the token and commit every owner, and none of them can fail: the room was checked, every
     /// effect record passed its producer's preflight and every target prefix its owner's, the
     /// control thread is the only producer, a render pop only grows the room, and the predicate is
@@ -1097,7 +1099,10 @@ impl SessionState {
             };
             let producer = &effects[index];
             let queued = match &instance.targets {
-                Some(targets) if producer.has_owner() => targets.len(),
+                // An EQ's `Bypass` record (#1266 D2) is pushed ahead of its targets.
+                Some(targets) if producer.has_owner() => {
+                    bypass_records(&instance.records) + targets.len()
+                }
                 Some(_) => return LiveCommit::Done(Err(CommandError::Internal)),
                 None => instance.records.len(),
             };
@@ -1126,13 +1131,15 @@ impl SessionState {
             }
             owners.begun.push(index);
             for &record in &instance.records {
-                let effect_contract::EffectControlRecord::Parameter {
-                    parameter_index,
-                    channel,
-                    value,
-                } = record
-                else {
-                    return LiveCommit::Done(Err(CommandError::Internal));
+                let (parameter_index, channel, value) = match record {
+                    effect_contract::EffectControlRecord::Parameter {
+                        parameter_index,
+                        channel,
+                        value,
+                    } => (parameter_index, channel, value),
+                    // Pushed, not an owner edit (#1266 D2).
+                    effect_contract::EffectControlRecord::Bypass(_) => continue,
+                    _ => return LiveCommit::Done(Err(CommandError::Internal)),
                 };
                 if producer
                     .edit_owner(parameter_index, channel, value)
@@ -1160,10 +1167,14 @@ impl SessionState {
                 return LiveCommit::Done(Err(CommandError::LiveBackpressure));
             }
         }
+        // An EQ owner's preflight checked room for its targets alone; its `Bypass` record is
+        // pushed ahead of them, so their sum must fit (#1266 D2).
         for (instance, &index) in delta.effects.iter().zip(&resolved_effects) {
-            if instance.targets.is_none()
-                && owners.effects[index].producer().available_capacity() < instance.records.len()
-            {
+            let pushed = match &instance.targets {
+                None => instance.records.len(),
+                Some(targets) => bypass_records(&instance.records) + targets.len(),
+            };
+            if owners.effects[index].producer().available_capacity() < pushed {
                 return LiveCommit::Done(Err(CommandError::LiveBackpressure));
             }
         }
@@ -1189,13 +1200,20 @@ impl SessionState {
                 host_core::LiveEffectRack::Inserts => protocol::ParameterRack::Inserts,
             };
             for &record in &instance.records {
-                let effect_contract::EffectControlRecord::Parameter {
-                    parameter_index,
-                    channel,
-                    value,
-                } = record
-                else {
-                    return LiveCommit::Done(Err(CommandError::Internal));
+                let (parameter_index, channel, value) = match record {
+                    effect_contract::EffectControlRecord::Parameter {
+                        parameter_index,
+                        channel,
+                        value,
+                    } => (parameter_index, channel, value),
+                    // Pushed on every instance, the EQ's too; no parameter row reads it.
+                    effect_contract::EffectControlRecord::Bypass(_) => {
+                        if producer.preflight(record).is_err() {
+                            return LiveCommit::Done(Err(CommandError::Internal));
+                        }
+                        continue;
+                    }
+                    _ => return LiveCommit::Done(Err(CommandError::Internal)),
                 };
                 if instance.targets.is_none() && producer.preflight(record).is_err() {
                     return LiveCommit::Done(Err(CommandError::Internal));
@@ -1265,6 +1283,15 @@ impl SessionState {
                     }
                 }
                 Some(targets) => {
+                    for &record in &instance.records {
+                        if matches!(record, effect_contract::EffectControlRecord::Bypass(_)) {
+                            producer.try_push(record).unwrap_or_else(|_| {
+                                unreachable!(
+                                    "the effect queue's room and the preflight were checked"
+                                )
+                            });
+                        }
+                    }
                     let base_revision = producer
                         .owner()
                         .map(|owner| owner.committed_revision())
@@ -1485,4 +1512,12 @@ impl SourceFailure {
             }
         }
     }
+}
+
+/// How many of an instance's records are `Bypass` records: none or one (#1266 D2).
+fn bypass_records(records: &[effect_contract::EffectControlRecord]) -> usize {
+    records
+        .iter()
+        .filter(|record| matches!(record, effect_contract::EffectControlRecord::Bypass(_)))
+        .count()
 }

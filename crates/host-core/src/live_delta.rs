@@ -1,5 +1,6 @@
-//! Classify a committed session delta as a live track fader, mute, pan and effect-parameter
-//! update, or a rebuild (issues #1255, #1264 and #1265; umbrella #1053 D1, D3, D9 and D14).
+//! Classify a committed session delta as a live track fader, mute, pan, effect-parameter and
+//! effect-bypass update, or a rebuild (issues #1255, #1264, #1265 and #1266; umbrella #1053 D1,
+//! D3, D9 and D14).
 //!
 //! A host that holds a running plan and commits a transaction has two models: the committed one
 //! the plan was prepared with (plus every record pushed into it since, #1053 D9), and the
@@ -18,7 +19,9 @@ use crate::control_preparation::{
 };
 use builtins::{BuiltinLaneSelector, checked_fader_gain};
 use builtins_compiler::{TrackControlRecord, TrackFaderRecord, lower_matrix_or_pan};
-use effect_compiler::{LiveEffectAddress, launch_native_effect_registry, resolve_initial_values};
+use effect_compiler::{
+    LiveEffectAddress, launch_native_effect_registry, lowers_session_bypass, resolve_initial_values,
+};
 use effect_contract::{
     AutomationRate, EffectControlRecord, NativeEffectFactory, NativeEffectRegistry,
     PREPARED_EFFECT_TARGET_WORDS, ParameterChannel, PreparedEffectTarget,
@@ -74,7 +77,8 @@ impl LiveStripRecords<'_> {
     }
 }
 
-/// The records of one effect instance whose live parameter values change (#1264 D2, #1265 D1).
+/// The records of one effect instance whose live bypass or parameter values change (#1264 D2,
+/// #1265 D1, #1266 D1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveEffectRecords<'a> {
     /// The ID of the strip (a track) that owns the instance, borrowed from the post-commit model.
@@ -82,11 +86,13 @@ pub struct LiveEffectRecords<'a> {
     /// The instance's live address in its strip: a console slot by its slot index, an insert by
     /// its index. A producer is found by `(strip_id, address)`.
     pub address: LiveEffectAddress,
-    /// One [`EffectControlRecord::Parameter`] per `(parameter_index, channel)` whose resolved
+    /// One [`EffectControlRecord::Bypass`] first when the instance's bypass changes (#1266 D1),
+    /// then one [`EffectControlRecord::Parameter`] per `(parameter_index, channel)` whose resolved
     /// value changes, in descriptor order, `Left` before `Right`; never empty.
     ///
-    /// For an instance with `targets` (the EQ) these are its owner's edits
-    /// (`EffectControlProducer::edit_owner`), never pushed: the queue gets the targets.
+    /// For an instance with `targets` (the EQ) the `Parameter` records are its owner's edits
+    /// (`EffectControlProducer::edit_owner`), never pushed: the queue gets the targets. Its
+    /// `Bypass` record, like every other instance's, is pushed as it is, ahead of the targets.
     pub records: Vec<EffectControlRecord>,
     /// For an effect whose parameters ride prepared targets (the parametric EQ, #1265): the
     /// targets [`EqTargetPreparer`] designed on the control thread from the instance's pre-commit
@@ -112,8 +118,8 @@ pub struct LiveDelta<'a> {
 pub enum LiveRebuild {
     /// Either model declares a VCA (#1053 G3, until #1247).
     Vca,
-    /// The track set differs, or a field other than a track's fader, pan/matrix or effect
-    /// `params` differs.
+    /// The track set differs, or a field other than a track's fader, pan/matrix, effect `params`
+    /// or effect `bypass` differs.
     Structure,
     /// A fader or pan/matrix value is outside the domain its render-side setter accepts, or an
     /// effect's pre- or post-commit `params` do not resolve. The rebuild then reports the same
@@ -127,6 +133,11 @@ pub enum LiveRebuild {
     /// A track's mute changes while a route with `follows_mute` sends from it (#1053 G2, until
     /// #1226).
     FollowedMute,
+    /// The bypass of an effect whose session bypass is prepared changes, in either direction:
+    /// one for which [`lowers_session_bypass`] is false (the delay and the multiband compressor).
+    /// Its running plan holds the bypass in its prepared state, not on its lane, so a live record
+    /// would be acked and never heard (decision 14 F4, #1266 D1).
+    PreparedBypass,
 }
 
 /// Classifies the delta from `current` to `next` as live records or a rebuild (#1053 D1).
@@ -140,9 +151,10 @@ pub enum LiveRebuild {
 /// 2. [`LiveRebuild::Structure`] if the track IDs differ, by count or pairwise in order.
 /// 3. [`LiveRebuild::Structure`] if `next`, with `current`'s revision, session ID, render- and
 ///    output-profile IDs, stored automation, and every track's fader, pan/matrix, console-entry
-///    `params` and insert `params` copied from `current`, has canonical JSON bytes other than
-///    `current`'s. An effect's identity, quality, link mode, bypass and sidechain, the insert
-///    order and the console slot set stay compared (#1266 lifts bypass). Bytes,
+///    `params` and `bypass`, and insert `params` and `bypass` copied from `current`, has
+///    canonical JSON bytes other than `current`'s. An effect's identity, quality, link mode and
+///    sidechain, the insert order, the console slot set and every submix field stay compared
+///    (a submix strip's bypass stays structural, #1053 G1). Bytes,
 ///    never `PartialEq`: the canonical `f32` spelling keeps a zero's sign, so a `trim_db` edit
 ///    from `0.0` to `-0.0` is structural. A canonical JSON error is structural too.
 /// 4. Per track, in order: [`LiveRebuild::Domain`] if a fader dB is refused by
@@ -150,6 +162,9 @@ pub enum LiveRebuild {
 ///    single authorities the render-side setters use); [`LiveRebuild::FollowedMute`] if a lane's
 ///    mute changes and a `follows_mute` route in `next` sends from the track; otherwise the
 ///    track's records. Then, for each of the track's effect instances in chain order whose
+///    `bypass` differs: [`LiveRebuild::PreparedBypass`] if [`lowers_session_bypass`] is false
+///    for its effect, otherwise one [`EffectControlRecord::Bypass`] carrying the post-commit
+///    bypass, ahead of its parameter records (#1266 D1). And for each whose
 ///    `params` differ: [`LiveRebuild::Domain`] if either model's `params` do not resolve through
 ///    [`resolve_initial_values`] (the one function preparation uses); [`LiveRebuild::Prepared`]
 ///    if a resolved value whose bits change belongs to a parameter that is not automatable or
@@ -223,8 +238,10 @@ pub fn classify_live_delta<'a>(
         track.matrix_or_pan = before.matrix_or_pan.clone();
         // #1264 D2: only the values. Paired by position; a changed slot set or insert order
         // still differs below, by its IDs.
+        // #1266 D1: and the bypass, which `effect_records` classifies.
         for (entry, prior) in track.console.iter_mut().zip(&before.console) {
             entry.params.clone_from(&prior.params);
+            entry.bypass = prior.bypass;
         }
         for (effect, prior) in track
             .inserts
@@ -233,6 +250,7 @@ pub fn classify_live_delta<'a>(
             .zip(&before.inserts.effects)
         {
             effect.params.clone_from(&prior.params);
+            effect.bypass = prior.bypass;
         }
     }
     match (
@@ -309,9 +327,9 @@ pub fn classify_live_delta<'a>(
     Ok(delta)
 }
 
-/// Appends the parameter records of one track's effect instances whose `params` differ (#1264
-/// D2). The step-3 mask has already proved that the two tracks' instances agree in everything but
-/// their `params`.
+/// Appends the bypass and parameter records of one track's effect instances whose `bypass` or
+/// `params` differ (#1264 D2, #1266 D1). The step-3 mask has already proved that the two tracks'
+/// instances agree in everything but their `params` and `bypass`.
 fn effect_records<'a>(
     (current, before): (&SessionModel, &Track),
     (next, after): (&'a SessionModel, &'a Track),
@@ -348,11 +366,30 @@ fn effect_records<'a>(
                 }),
         );
     for (address, (effect_before, effect_after)) in instances {
-        if same_params(&effect_before.params, &effect_after.params) {
+        let bypass = (effect_before.bypass != effect_after.bypass).then_some(effect_after.bypass);
+        let params_differ = !same_params(&effect_before.params, &effect_after.params);
+        if bypass.is_none() && !params_differ {
             continue;
         }
-        let (records, targets) =
-            parameter_records(effect_before, effect_after, next.sample_rate_hz, registry)?;
+        if bypass.is_some() {
+            // A third-party or unknown identity never prepared; the rebuild reports it.
+            let EffectIdentity::Native { effect_id } = &effect_after.identity else {
+                return Err(LiveRebuild::Structure);
+            };
+            // The delay and the multiband compressor hold a session bypass in their prepared
+            // state, which no lane record reaches (decision 14 F4).
+            if !lowers_session_bypass(effect_id.as_str()) {
+                return Err(LiveRebuild::PreparedBypass);
+            }
+        }
+        let (mut records, targets) = if params_differ {
+            parameter_records(effect_before, effect_after, next.sample_rate_hz, registry)?
+        } else {
+            (Vec::new(), None)
+        };
+        if let Some(bypass) = bypass {
+            records.insert(0, EffectControlRecord::Bypass(bypass));
+        }
         if !records.is_empty() {
             output.push(LiveEffectRecords {
                 strip_id: after.id.as_str(),
