@@ -2017,6 +2017,37 @@ fn bare_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     session::canonical_session_json(&model).expect("canonical bare session")
 }
 
+/// The ten-track parity session with mixed effect cohorts (#1263 verdict NIT 3): an enabled
+/// compressor insert on the first and sixth tracks, and a bypassed delay and a bypassed multiband
+/// compressor insert on the second. Only an enabled non-EQ effect tells a non-target lane seeded
+/// bypassed apart, and the delay and the multiband keep their prepared bypass.
+fn mixed_effect_parity_session(sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&generated_parity_session(10, sample_rate_hz))
+        .expect("accepted parity session");
+    let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    let native = |instance: &str, effect: &str, bypass: bool| {
+        let mut native = template.clone();
+        native.id = session::StableId::parse(instance).expect("instance ID");
+        native.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse(effect).expect("effect ID"),
+        };
+        native.params.clear();
+        native.bypass = bypass;
+        native
+    };
+    for track in [0, 5] {
+        model.tracks[track]
+            .inserts
+            .effects
+            .push(native("comp", "miso.compressor", false));
+    }
+    model.tracks[1].inserts.effects.extend([
+        native("dly", "miso.delay", true),
+        native("mb", "miso.multiband-compressor", true),
+    ]);
+    session::canonical_session_json(&model).expect("canonical mixed-effect session")
+}
+
 /// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session
 /// (#1256 gate 1), and against the C ABI's lane selection without its effect lanes (#1263 gate 1).
 fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
@@ -2246,6 +2277,11 @@ fn c_abi_plans_with_live_lanes_render_like_lanes_free_plans() {
                 true,
             );
         }
+        assert_live_lanes_render_like_lanes_free(
+            &mixed_effect_parity_session(sample_rate_hz),
+            &format!("mixed effects 10 tracks at {sample_rate_hz} Hz"),
+            false,
+        );
     }
 }
 

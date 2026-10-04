@@ -1902,9 +1902,10 @@ fn a_full_effect_lane_refuses_before_anything_changes() {
 
 // Issue #1265: parametric EQ parameter edits through prepared targets.
 
-/// The nine-track EQ fixture at `sample_rate_hz`, with a source long enough for a whole run and
-/// an EQ insert (`eq-insert`: band 1 enabled at 500 Hz, +4 dB) on its last track beside the
-/// console EQ slot (`eq`) every track carries.
+/// The nine-track EQ fixture at `sample_rate_hz`, with a source long enough for a whole run, an
+/// EQ insert (`eq-insert`: band 1 enabled at 500 Hz, +4 dB) on its last track beside the console
+/// EQ slot (`eq`) every track carries, and band 1 of eq4's console EQ enabled at +6 dB, so an
+/// edit of its Q is audible.
 fn eq_session(sample_rate_hz: u32) -> String {
     use session::{EffectParam, ParameterChannel, ParameterUnit};
     let mut model = parse_session_json(SESSION).expect("nine-track EQ fixture");
@@ -1926,6 +1927,15 @@ fn eq_session(sample_rate_hz: u32) -> String {
     ];
     let last = model.tracks.len() - 1;
     model.tracks[last].inserts.effects.push(insert);
+    let eq4 = model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq4")
+        .expect("eq4");
+    eq4.console[0].params = vec![
+        both(1, ParameterUnit::Linear, 1.0),
+        both(4, ParameterUnit::Db, 6.0),
+    ];
     session::canonical_session_json(&model).expect("canonical EQ session")
 }
 
@@ -2035,8 +2045,8 @@ fn live_eq_pcm_shape(sample_rate_hz: u32) {
         );
     }
 
-    // Band 1 gain on eq0's left lane and band 1 Q on eq4's both lanes, on the console slot; the
-    // HPF enabled at 300 Hz on the last track's EQ insert.
+    // Band 1 gain on eq0's left lane and band 1 Q on eq4's both lanes (an enabled +6 dB band),
+    // on the console slot; the HPF enabled at 300 Hz on the last track's EQ insert.
     let edits = [
         upsert(
             "eq0",
@@ -2135,8 +2145,9 @@ fn owner_phase(rig: &Rig, track_id: &str, effect_id: &str) -> (u64, String) {
 }
 
 /// #1265 gate 3. Red if a refused transaction leaves an EQ owner begun or published: a fader
-/// lane's backpressure after the EQ owner's preflight, and a full EQ lane, each leave every
-/// owner, queue and the model as they were, and the retry after a render commits.
+/// lane's backpressure after the EQ owner's preflight, a full EQ lane, and a full EQ lane behind
+/// another begun owner each leave every owner, queue and the model as they were, and the retry
+/// after a render commits.
 #[test]
 fn a_refused_eq_transaction_leaves_its_owner_idle() {
     use session::{ParameterChannel, ParameterUnit, RackName};
@@ -2196,6 +2207,60 @@ fn a_refused_eq_transaction_leaves_its_owner_idle() {
     assert_eq!(
         owner_phase(&rig, "eq0", "eq"),
         (2 + depth as u64, "Idle".to_owned())
+    );
+    drop(rig);
+
+    // Two begun owners (#1265 verdict MINOR 1): EQ edits on eq0 and on eq1 while eq1's EQ lane
+    // is full. eq0's owner is begun and preflighted before eq1's refuses, and both are discarded.
+    let mut rig = Rig::new(&eq_session(48_000));
+    rig.step();
+    let eq1_gain = |value: f32| {
+        upsert(
+            "eq1",
+            RackName::Console,
+            "eq",
+            4,
+            ParameterChannel::Left,
+            ParameterUnit::Db,
+            value,
+        )
+    };
+    for edit in 0..depth {
+        assert_eq!(
+            rig.apply(&[eq1_gain(-1.0 - edit as f32)]),
+            crate::RESULT_OK,
+            "eq1 edit {edit}"
+        );
+    }
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq1", "eq"), 0);
+    let before = (refusal_state(&rig), effect_owners(&rig));
+    let rooms = (
+        effect_room(&rig, Epoch::Current, "eq0", "eq"),
+        effect_room(&rig, Epoch::Current, "eq1", "eq"),
+    );
+    let transaction = [gain(3.0), eq1_gain(-20.0)];
+    assert_eq!(rig.apply(&transaction), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure");
+    assert_eq!((refusal_state(&rig), effect_owners(&rig)), before);
+    assert_eq!(
+        (
+            effect_room(&rig, Epoch::Current, "eq0", "eq"),
+            effect_room(&rig, Epoch::Current, "eq1", "eq"),
+        ),
+        rooms
+    );
+    assert_eq!(owner_phase(&rig, "eq0", "eq"), (0, "Idle".to_owned()));
+    assert_eq!(
+        owner_phase(&rig, "eq1", "eq"),
+        (depth as u64, "Idle".to_owned())
+    );
+    rig.step();
+    assert_eq!(rig.apply(&transaction), crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the retry is live");
+    assert_eq!(owner_phase(&rig, "eq0", "eq"), (1, "Idle".to_owned()));
+    assert_eq!(
+        owner_phase(&rig, "eq1", "eq"),
+        (1 + depth as u64, "Idle".to_owned())
     );
 }
 
@@ -2561,4 +2626,51 @@ fn a_prepared_bypass_change_rebuilds_and_renders_the_committed_model() {
         );
         previous = reference;
     }
+}
+
+/// #1266 verdict MINOR 1. Red if the over-capacity check leaves an EQ's `Bypass` record out of the
+/// count: a bypass beside edits whose designed targets exactly fill the queue could never fit, so
+/// it must rebuild, never return an endless `BACKPRESSURE`.
+#[test]
+fn an_eq_bypass_beside_targets_filling_its_queue_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = eq_session(48_000);
+    let small = CompileLimits {
+        maximum_automation_spans_per_block: 4,
+        ..limits()
+    };
+    // Bands 1-3 gains on both lanes design four targets (gate 4), filling the queue of four.
+    let mut edits: Vec<SessionEdit> = [4, 20, 36]
+        .iter()
+        .flat_map(|&parameter_id| {
+            [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
+                upsert(
+                    "eq0",
+                    RackName::Console,
+                    "eq",
+                    parameter_id,
+                    channel,
+                    ParameterUnit::Db,
+                    -5.0,
+                )
+            })
+        })
+        .collect();
+    edits.insert(0, bypass_edit("eq0", RackName::Console, "eq", true));
+    let mut rig = Rig::with_limits(&document, small);
+    rig.step();
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
+    let (revision, ..) = rig.summary();
+    assert_eq!(
+        rig.apply(&edits),
+        crate::RESULT_OK,
+        "admitted, not backpressure"
+    );
+    let (after, _, _, pending) = rig.summary();
+    assert_eq!(
+        (after, pending),
+        (revision + 1, 1),
+        "a bypass and four targets rebuild"
+    );
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
 }

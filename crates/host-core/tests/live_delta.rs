@@ -1035,6 +1035,14 @@ fn a_both_value_split_into_lanes_records_only_the_changed_lane() {
         }),
         Ok((Vec::new(), Vec::new()))
     );
+    // `-0.0` for the makeup's `+0.0` default is the same prepared value: no record (#1264
+    // verdict NIT 5).
+    assert_eq!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(6, ParameterChannel::Both, ParameterUnit::Db, -0.0));
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
 }
 
 /// #1264 gate 1(c). Red if a removed parameter is not returned to the descriptor's default, as a
@@ -1233,8 +1241,10 @@ fn eq_entry(
 }
 
 /// #1265 gate 1(a). Red if the classifier seeds the target designer with values other than the
-/// ones preparation gave the EQ's owner, designs at another rate, or passes other edits than the
-/// changed rows: its targets must equal `EqTargetPreparer`'s for the owner's committed rows.
+/// ones preparation gave the EQ's owner, or passes other edits than the changed rows: its targets
+/// must equal `EqTargetPreparer`'s for the owner's committed rows. The fixture runs at 48 kHz, so
+/// a classifier that designs at a hardcoded 48 kHz stays green here; capi's gate 2 catches that
+/// at the other launch rates.
 #[test]
 fn an_eq_band_gain_change_carries_its_edits_and_designed_targets() {
     let current = with_shaped_eq();
@@ -1461,7 +1471,7 @@ fn a_prepared_bypass_change_needs_a_rebuild() {
 }
 
 /// #1053 G1 on the bypass. Red if the bypass mask reaches a submix strip's effects: a submix
-/// effect's bypass stays structural until #1225.
+/// effect's bypass stays structural until #1267.
 #[test]
 fn a_submix_effect_bypass_is_structural() {
     let fixture = parse_session_json(FIXTURE).expect("fixture parses");
@@ -1479,5 +1489,90 @@ fn a_submix_effect_bypass_is_structural() {
         classify(&current, |next| next.submixes[0].inserts.effects[0]
             .bypass = true),
         Err(LiveRebuild::Structure)
+    );
+}
+
+/// `with_effects` with the first track routed into submix `bus`, whose strip carries the console
+/// soft-clip slot's entry and a compressor insert of its own.
+fn with_effect_bus() -> SessionModel {
+    let fixture = parse_session_json(FIXTURE).expect("fixture parses");
+    let mut compressor = fixture.lower_track(&fixture.tracks[0]).pre_insert[0].clone();
+    compressor.id = id("bcomp");
+    compressor.identity = EffectIdentity::Native {
+        effect_id: id("miso.compressor"),
+    };
+    compressor.params.clear();
+    compressor.bypass = false;
+    let mut model = with_effects();
+    let first = model.tracks[0].id.clone();
+    let bus = id("bus");
+    let route = model
+        .routes
+        .iter_mut()
+        .find(|route| matches!(&route.source, RouteSource::Track { track_id, .. } if *track_id == first))
+        .expect("first track's route");
+    let output = core::mem::replace(
+        &mut route.destination,
+        RouteDestination::SubmixInput {
+            submix_id: bus.clone(),
+        },
+    );
+    let mut bus_main = route.clone();
+    bus_main.id = id("bus-main");
+    bus_main.follows_mute = false;
+    bus_main.source = RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: SendTap::PostPan,
+    };
+    bus_main.destination = output;
+    model.routes.push(bus_main);
+    let mut submix = Submix::unity(bus, &model.console);
+    submix.inserts.effects.push(compressor);
+    model.submixes.push(submix);
+    normalized(&model)
+}
+
+/// #1053 G1 on effect parameters (#1264 verdict MINOR 2). Red if the effect parameter mask or
+/// the record lowering walks submix strips, so that a submix console-entry or insert `params`
+/// change goes live before #1267.
+#[test]
+fn submix_effect_params_are_structural() {
+    let current = with_effect_bus();
+    assert_eq!(current.submixes.len(), 1);
+    assert_eq!(
+        current.submixes[0].console.len(),
+        1,
+        "bus carries the clip slot"
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].console[0].params.push(param(
+                1,
+                ParameterChannel::Both,
+                ParameterUnit::Db,
+                6.0,
+            ));
+        }),
+        Err(LiveRebuild::Structure),
+        "submix console entry"
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            next.submixes[0].inserts.effects[0].params.push(param(
+                1,
+                ParameterChannel::Left,
+                ParameterUnit::Db,
+                -30.0,
+            ));
+        }),
+        Err(LiveRebuild::Structure),
+        "submix insert"
+    );
+    // Control: the same model's track edit is live.
+    assert!(
+        classify_effects(&current, |next| {
+            inserts(next, 0).push(param(1, ParameterChannel::Left, ParameterUnit::Db, -30.0));
+        })
+        .is_ok()
     );
 }
