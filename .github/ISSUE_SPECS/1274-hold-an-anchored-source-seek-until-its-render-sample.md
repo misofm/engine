@@ -56,7 +56,9 @@ source crate and the host-core facade; *Start a newly added C ABI source at an e
   `begin_block()` without a time keeps today's behaviour and applies a `SeekAt` at once. No
   allocation: the held seek and the pending block are fixed fields.
 - **D4. Between-block preparation.** `prepare_seek` that observes a `SeekAt` holds it (as in D3) and
-  returns `false`; it never consumes and drops it.
+  returns `false`; it never consumes and drops it. (Amended by the phase-1 follow-ups: this
+  includes a seek a concurrent producer pushes while `prepare_seek` runs and the acquire's
+  re-observe takes -- plain or anchored, any newer seek observed there makes it return `false`.)
 - **D5. Facade.** `SourceControlSet::seek_at(id, generation, frame, anchor_sample)`, with `seek`'s
   region checks, and diagnostic `"source.seek.anchor_unaligned"` for D1's refusal.
 
@@ -246,3 +248,38 @@ export of `HEAD` (`0297efa8c`) plus this follow-up's two source files, under the
   `cdb03d38e6a9ba239cea3d91de6cd7172e68edd4a75bbaac3d10299f22bb7f14` (2870165 B; attempt 1's was
   `751122a9...9743`, 2870096 B). Per `docs/RELEASE.md` ("Between releases") the pin is not
   re-pinned.
+
+These counts and that module were measured on `0297efa8c` plus the two follow-up files, not on the
+follow-up commit `c14fde0ce`, which also contains #1276's attempt 1. The verifier measured the
+commit itself: 268 tests passed, shipped module `17429f47...` (2914664 B).
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`0297efa8c`) | `1274-attempt1.md` | PASS | Anchored seek held and applied at its block, allocation-free; 3 MINOR (region-end note untested, two out-of-path edits, pre-existing data-before-command race), 4 NIT. |
+| 1 follow-ups (`c14fde0ce`) | `1274-followups.md` | PASS | Race fix sound and allocation-free, MINORs closed; 1 MINOR (late-anchor race arm untested, M4-hold survives), 4 NIT (prepare_seek can grant readiness after observing a seek in its window; held-seek guard unpinned; record measured another tree; line widths). |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`; `crates/source/src/lib.rs` unless
+noted; each mutation applied alone, `cargo test -p source --lib`, restored):
+- MINOR-1: `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` gains a third arm:
+  `seek_at(2, 100, 4)` and frames 100 and 104 pushed inside block 8's window; block 8 plays frame
+  104 with `generation_changed`, and `stale_generation_discard_count == 1`. M4-hold (the
+  re-observe passes `SeekClock::Hold` instead of the block's clock): red.
+- NIT-1: `prepare_seek` checks again after its acquire and returns
+  `held_seek.is_none() && active_generation == generation`; D4 and the rustdoc are amended above.
+  No test: the window lies inside one call, so a unit test cannot put a producer there (the
+  verifier's probe re-implemented the body); the re-check is what makes the probe's verdict
+  `false`.
+- NIT-2: `prepare_seek_of_the_playing_generation_is_not_ready_while_a_seek_is_held`. Mutation
+  "both held-seek tests in `prepare_seek` removed": red. With NIT-1's re-check, removing only the
+  early guard stays green by design (the early guard now only saves the acquire).
+- NIT-3: the note above names the tree the follow-up evidence was measured on.
+- NIT-4: the #917 ownership paragraph is reflowed to 100 columns, and
+  `crates/host-core/src/source.rs`'s `seek_at` rustdoc is reflowed.
+
+Stays open: nothing from these verdicts. The observation that a plain-seek block arriving after
+the source underran past its frame is acked and then counted as a stale discard is the documented
+just-in-time rule, not a finding.

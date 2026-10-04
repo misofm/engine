@@ -977,10 +977,10 @@ fn validate_submission_metadata(
 /// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`) -- in
 /// addition to the pre-fetched `current` block it already held before #917 at the boundaries
 /// where `current.start_frame` is ahead of `next_frame`, or where `current` is a held anchored
-/// seek's pending block (#1274), of another generation and possibly behind `next_frame`. The hold is therefore "what it held
-/// before, plus one", which is what keeps the producer's admission sequence unchanged. The
-/// idle storage goes back to the producer's recycle queue only inside `begin_block`, at the moment
-/// a newer block becomes the played block. So:
+/// seek's pending block (#1274), of another generation and possibly behind `next_frame`. The hold
+/// is therefore "what it held before, plus one", which is what keeps the producer's admission
+/// sequence unchanged. The idle storage goes back to the producer's recycle queue only inside
+/// `begin_block`, at the moment a newer block becomes the played block. So:
 ///
 /// * a block is never recycled while a `played_plane` borrow is live: the only release point takes
 ///   `&mut self`, and a block is only ever reached by the producer through the recycle queue;
@@ -1043,7 +1043,9 @@ impl PcmSourceConsumer {
     /// Producers still only enqueue commands; this is not a shared controller handle.
     ///
     /// An anchored seek ([`SourceCommand::SeekAt`]) has no block time here: it is held, never
-    /// applied or dropped, until the render reaches its anchor, and this returns `false`.
+    /// applied or dropped, until the render reaches its anchor, and this returns `false`. That
+    /// holds for a seek a producer pushes while this runs, too: if the acquire's re-observe
+    /// (#1274 MINOR-3) takes a newer seek, plain or anchored, this returns `false`.
     pub fn prepare_seek(&mut self, generation: SourceGeneration, frame: SourceFrame) -> bool {
         self.end_block();
         self.flush_deferred_recycle();
@@ -1059,7 +1061,10 @@ impl PcmSourceConsumer {
             return false;
         }
         self.acquire_current_block(SeekClock::Hold);
-        true
+        // A producer running concurrently may push a newer seek and its block between the command
+        // pop above and the data pop in the acquire; the acquire's re-observe takes that seek.
+        // Readiness is granted for `generation` alone, so check again.
+        self.held_seek.is_none() && self.active_generation == generation
     }
 
     /// Immutable prepared ring shape shared with the producer endpoint.
@@ -2310,6 +2315,48 @@ mod tests {
             assert_eq!(consumer.stale_generation_discard_count, 0);
             assert_eq!(consumer.underrun_events, u64::from(anchored));
         }
+
+        // An anchored seek whose anchor has already passed when the window's re-observe takes
+        // it applies at once, at `frame` plus the lateness, by the block's own clock: block 8
+        // plays frame 104, and only the skipped block at frame 100 is discarded.
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        let (output, report) =
+            render_with_producer_in_window(&mut consumer, SeekClock::At(8), || {
+                host.try_seek(seek_at(2, 100, 4)).unwrap();
+                host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
+                    .expect("accepted");
+                host.submit(chunk(2, 104, &[&[2.5; 4]], 4, false))
+                    .expect("accepted");
+            });
+        assert_eq!(
+            output, [2.5; 4],
+            "late by one block: frame 104 plays at block 8"
+        );
+        assert!(report.generation_changed);
+        assert_eq!(consumer.active_generation, SourceGeneration(2));
+        assert_eq!(
+            consumer.stale_generation_discard_count, 1,
+            "the late-skipped block"
+        );
+    }
+
+    /// #1274 follow-ups NIT-2. Red if `prepare_seek` grants readiness for the playing generation
+    /// at its own position while a newer anchored seek is held: the caller would take the old
+    /// generation as prepared while the source is about to jump.
+    #[test]
+    fn prepare_seek_of_the_playing_generation_is_not_ready_while_a_seek_is_held() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 64)).unwrap();
+        render_at(&mut consumer, 0);
+        assert!(consumer.held_seek.is_some());
+        let next = consumer.next_frame;
+        assert!(!consumer.prepare_seek(SourceGeneration(1), next));
+        assert!(
+            consumer.held_seek.is_some(),
+            "the held seek survives preparation"
+        );
     }
 
     #[test]
