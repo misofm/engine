@@ -149,6 +149,132 @@ fn a_snapshot_holding_subnormal_words_restores_and_continues_bit_for_bit() {
     assert_eq!(bits(&actual_right), bits(&expected_right));
 }
 
+/// One parameter ramped from `start` to a domain edge, snapshotted `frames` samples in, where the
+/// D11 ramp has crossed that edge; the snapshot must restore into a fresh instance and continue
+/// bit for bit (#1071 attempt 2).
+fn an_overshooting_ramp_restores_and_continues(
+    parameter: u32,
+    start: f32,
+    edge: f32,
+    frames: usize,
+    outside: impl Fn(f32) -> bool,
+) {
+    let mut initial = [(6.0, -6.0), (0.0, 3.0), (1.0, 0.5)];
+    initial[parameter as usize] = (start, start);
+    let values = values_from(initial);
+    let mut source = prepare(&values);
+    let mut left: Vec<f32> = (0..frames).map(|index| signal(index, 0)).collect();
+    let mut right: Vec<f32> = (0..frames).map(|index| signal(index, 1)).collect();
+    let spans = [support::point(parameter, ParameterChannel::Left, edge, 0)];
+    process(source.as_mut(), &mut left, &mut right, 0, &spans);
+    let payload = support::snapshot(source.as_ref());
+    let base = parameter as usize * 4;
+    let current = support::word_f32(&payload.1, base);
+    assert!(
+        word(&payload.1, base + 3) > 0,
+        "the ramp is still in flight"
+    );
+    assert!(
+        outside(current),
+        "the ramp has crossed its edge: current {current:e} ({:#010x})",
+        current.to_bits()
+    );
+
+    let mut destination = prepare(&values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]));
+    destination
+        .restore_state_payload(1, as_input(&payload))
+        .expect("the effect's own mid-ramp snapshot restores");
+    assert_eq!(support::snapshot(destination.as_ref()), payload);
+
+    let mut expected_left: Vec<f32> = (0..128).map(|index| signal(index + frames, 0)).collect();
+    let mut expected_right: Vec<f32> = (0..128).map(|index| signal(index + frames, 1)).collect();
+    let mut actual_left = expected_left.clone();
+    let mut actual_right = expected_right.clone();
+    let first_sample = frames as u64;
+    process(
+        source.as_mut(),
+        &mut expected_left,
+        &mut expected_right,
+        first_sample,
+        &[],
+    );
+    process(
+        destination.as_mut(),
+        &mut actual_left,
+        &mut actual_right,
+        first_sample,
+        &[],
+    );
+    assert_eq!(bits(&actual_left), bits(&expected_left));
+    assert_eq!(bits(&actual_right), bits(&expected_right));
+    assert_eq!(
+        support::snapshot(source.as_ref()),
+        support::snapshot(destination.as_ref())
+    );
+}
+
+/// A decibel value next to `edge_db` (below it when `below`) whose gain is 34 to 60 ulps from the
+/// edge's gain: far enough for the ramp's rounded step to carry it past the edge.
+fn decibels_near(edge_db: f32, below: bool) -> f32 {
+    let edge = math::db_to_gain_f32(edge_db).to_bits();
+    let mut decibels = edge_db;
+    loop {
+        decibels = if below {
+            decibels.next_down()
+        } else {
+            decibels.next_up()
+        };
+        let distance = math::db_to_gain_f32(decibels).to_bits().abs_diff(edge);
+        if (34..=60).contains(&distance) {
+            return decibels;
+        }
+        assert!(distance < 60, "no start value near {edge_db} dB");
+    }
+}
+
+/// A subnormal mix ramped to `0.0` steps by a whole negative unit and crosses zero: the effect
+/// holds a negative subnormal mix for the rest of the ramp.
+#[test]
+fn a_mix_ramp_to_zero_that_crosses_into_negative_subnormals_restores() {
+    an_overshooting_ramp_restores_and_continues(2, f32::from_bits(40), 0.0, 48, |current| {
+        current < 0.0 && current.is_subnormal()
+    });
+}
+
+/// A mix ramped to `1.0` from 103 ulps below it ends above `1.0`.
+#[test]
+fn a_mix_ramp_to_one_that_crosses_above_one_restores() {
+    an_overshooting_ramp_restores_and_continues(
+        2,
+        f32::from_bits(1.0_f32.to_bits() - 103),
+        1.0,
+        60,
+        |current| current > 1.0,
+    );
+}
+
+/// A drive ramped to its `+36 dB` top from just below it ends above the top's gain.
+#[test]
+fn a_drive_ramp_to_its_top_that_crosses_above_it_restores() {
+    let top = math::db_to_gain_f32(36.0);
+    an_overshooting_ramp_restores_and_continues(0, decibels_near(36.0, true), 36.0, 60, |gain| {
+        gain > top
+    });
+}
+
+/// An output ramped to its `-24 dB` bottom from just above it ends below the bottom's gain.
+#[test]
+fn an_output_ramp_to_its_bottom_that_crosses_below_it_restores() {
+    let bottom = math::db_to_gain_f32(-24.0);
+    an_overshooting_ramp_restores_and_continues(
+        1,
+        decibels_near(-24.0, false),
+        -24.0,
+        60,
+        |gain| gain < bottom,
+    );
+}
+
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
 #[test]
 fn a_bank_track_restore_is_position_independent_and_lane_local() {
@@ -297,13 +423,18 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(1, (-0.0_f32).to_bits(), "effect.state.parameter");
     // A non-finite step.
     bad(2, f32::NAN.to_bits(), "effect.state.parameter");
+    // A subnormal gain step, on the left output's ramp at rest (so only the step is wrong): only
+    // the mix ever steps by a subnormal.
+    bad(6, 1, "effect.state.parameter");
     // `remaining` beyond the smoothing window.
     bad(3, 65, "effect.state.parameter");
     // A NaN history word, and a subnormal one.
     bad(12, f32::NAN.to_bits(), "effect.state.history");
     bad(43, 1, "effect.state.history");
     // #1071 accepts only the subnormals the effect can hold: never in the flushed `X` history,
-    // never as a gain (the gains' converted range starts at -24 dB).
+    // never as a gain (the gains' converted range starts at -24 dB). Word 0 is the in-flight drive
+    // ramp's current: a subnormal there is outside the range and far off the ramp's own line, so
+    // the overshoot allowance (#1071 attempt 2) does not admit it.
     bad(12, 1, "effect.state.history");
     bad(0, 1, "effect.state.parameter");
     bad(73, f32::NAN.to_bits(), "effect.state.history");

@@ -255,6 +255,9 @@ fn converted_domain(index: usize) -> Option<(f32, f32)> {
 /// gains' converted ranges start at `-24 dB`, a normal gain), and a subnormal mix is a legal value
 /// the effect holds and renders with, so its own snapshot must restore it (#1071).
 ///
+/// This is the rule for every value at rest and for every ramp target. An in-flight ramp's
+/// `current` may leave the range by a rounding margin; [`ramp_current_valid`] owns that case.
+///
 /// This is control-plane validation of a restored or prepared coefficient, not a render-path
 /// check: the render path has none (D7).
 fn converted_value_valid(index: usize, value: f32) -> bool {
@@ -262,6 +265,64 @@ fn converted_value_valid(index: usize, value: f32) -> bool {
         return false;
     }
     converted_domain(index).is_some_and(|(low, high)| value >= low && value <= high)
+}
+
+/// The spacing of the `f32` grid just above a positive finite `value`.
+fn ulp_at(value: f32) -> f32 {
+    f32::from_bits(value.to_bits() + 1) - value
+}
+
+/// `true` if `current` is a value parameter `index`'s ramp can hold with `target`, `step` and
+/// `remaining` (#1071 attempt 2).
+///
+/// Every current inside the converted range is accepted, as it always was. Outside it, only an
+/// in-flight ramp's rounding overshoot is: D11 rounds the step once and then adds it, so a ramp
+/// toward a range edge can cross that edge before its final sample assigns the target. A mix
+/// ramped from 40 subnormal units to `0.0` steps by `-1` unit (`-40/64` rounded up in magnitude)
+/// and holds negative subnormals for its last 24 samples; a gain ramped to `+36 dB` from a few
+/// dozen ulps below it ends a few ulps above it. Those are the effect's own words, so the restore
+/// must accept them.
+///
+/// The bound. Let the ramp start at `s` (any value the effect held, itself possibly an
+/// overshoot) toward a target `t` in the range `[low, high]`, with `step = fl(fl(t - s) / 64)`,
+/// and let it have added `step` `k = 64 - remaining` times (the snap leaves `remaining >= 1`
+/// while a ramp is in flight). Then
+/// `current = t - remaining * step + a + 64 * b + c`, where `a` is the rounding of `t - s` (at
+/// most half an ulp of `2 * high`, since `|t - s| < 2 * high`), `b` the rounding of the division
+/// (zero unless the quotient is subnormal, and then at most `2^-150`), and `c` the `k <= 63`
+/// rounded additions (each at most half an ulp of `2 * high`, since every running value is below
+/// `2 * high`). So the current lies within `32 * ulp(2 * high) + 2^-144` of the ramp's line
+/// `t - remaining * step`, and the check accepts `64 * ulp(2 * high)`. It runs in `f64`, whose
+/// rounding of these operands (below `2^-50` of an `f32` ulp of `2 * high` here) is far inside the
+/// spare `32` ulps.
+///
+/// Hostile words are refused as before but for that rounding margin: `-0.0`, non-finite values,
+/// a ramp at rest outside its range, and an in-flight current outside its range and off its own
+/// ramp's line.
+fn ramp_current_valid(index: usize, current: f32, target: f32, step: f32, remaining: u32) -> bool {
+    if converted_value_valid(index, current) {
+        return true;
+    }
+    if remaining == 0 || is_negative_zero(current) || !current.is_finite() || !step.is_finite() {
+        return false;
+    }
+    converted_domain(index).is_some_and(|(_, high)| {
+        let tolerance = f64::from(RAMP_SAMPLES) * f64::from(ulp_at(2.0 * high));
+        let line = f64::from(target) - f64::from(remaining) * f64::from(step);
+        (f64::from(current) - line).abs() <= tolerance
+    })
+}
+
+/// `true` if `step` is an increment parameter `index`'s ramp can hold.
+///
+/// Only the mix can step by a subnormal: a ramp toward or from a subnormal mix divides a subnormal
+/// difference. A gain step is `|Δ| / 64` with `|Δ|` at least an ulp of the `-24 dB` gain (about
+/// `7.5e-9`), so it is zero or normal, and a subnormal gain step is never self-produced.
+fn ramp_step_valid(index: usize, step: f32) -> bool {
+    match index {
+        2 => step.is_finite(),
+        _ => normal_or_zero(step),
+    }
 }
 
 /// Converts the six validated initial values into the two per-channel coefficient sets.
@@ -637,12 +698,16 @@ struct LaneRestore {
 /// The rule is "accept every word the effect itself can hold, refuse the rest" (#1071), so a
 /// snapshot always survives its own restore and a restored lane continues bit for bit:
 ///
-/// * ramp currents and targets must be inside the *converted* domain (a linear gain, not
-///   decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;
-/// * `step` must be finite: a ramp toward or from a subnormal mix divides a subnormal difference;
+/// * ramp targets, and the currents of ramps at rest, must be inside the *converted* domain (a
+///   linear gain, not decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;
+/// * an in-flight ramp's current may leave that domain only by the rounding overshoot the ramp
+///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
+/// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
 /// * `remaining` must not exceed the smoothing window;
-/// * the interpolation and decimation histories (`X`, `e`) must be finite and zero or normal,
-///   because the kernel flushes both before they enter a history (D7);
+/// * the interpolation and decimation histories (`X`, `e`) must be finite and zero or normal.
+///   The kernel flushes both before they enter a history (D7), and `lane::flush` zeroes every
+///   magnitude below `FLUSH_EPS` (`1e-20`), so the kernel writes only zeros and magnitudes of at
+///   least `1e-20`; the check is the looser zero-or-normal, which refuses every subnormal;
 /// * the dry history must be finite: it holds the input unflushed by design, so the identity
 ///   path can reproduce any input sample, subnormals included.
 ///
@@ -658,10 +723,10 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         let target = f32::from_bits(words[base + 1]);
         let step = f32::from_bits(words[base + 2]);
         let remaining = words[base + 3];
-        if !converted_value_valid(parameter, current)
+        if remaining > RAMP_SAMPLES
             || !converted_value_valid(parameter, target)
-            || !step.is_finite()
-            || remaining > RAMP_SAMPLES
+            || !ramp_step_valid(parameter, step)
+            || !ramp_current_valid(parameter, current, target, step, remaining)
         {
             return Err(StatePayloadError {
                 code: STATE_PARAMETER_CODE,

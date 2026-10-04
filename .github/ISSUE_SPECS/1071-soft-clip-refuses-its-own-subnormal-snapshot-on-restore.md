@@ -78,3 +78,96 @@ Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet
 (built with `lib.rs` at `41517fc35`) becomes
 `726f429104606359f9eddaac0001b3a01936501287411d8e2329cc16dddbe4d7`. Per `docs/RELEASE.md` no
 per-change re-pin; the pin file is untouched.
+
+### Attempt 1 verdict (verifier): FAIL
+
+MAJOR-1: a D11 ramp the effect runs itself overshoots a domain edge (the step is rounded once,
+then added up to 63 times), so its own mid-ramp snapshot is refused: mix `40` subnormal units to
+`0.0` (a negative subnormal current), mix to `1.0`, drive to `+36 dB`, output to `-24 dB`.
+MINOR-1: a subnormal gain step was accepted though the effect never writes one. MINOR-2: a finite
+`1e37` input at `+36 dB` leaves `inf` in `X` with finite output. NIT-1: the `X`/`e` doc. NIT-2:
+#1278's brief cites a deleted symbol.
+
+### Attempt 2 (implementer)
+
+**MAJOR-1: accept a ramp's own rounding overshoot, and nothing else outside the range.**
+`ramp_current_valid` (`crates/soft-clip/src/lib.rs`) keeps every rule of attempt 1 and adds one
+allowance: an in-flight ramp's current outside the converted range is accepted when it lies within
+`64 * ulp(2 * high)` of the ramp's own line `target - remaining * step`. Targets stay strictly in
+range (every stored target came through `convert_parameter`), and a ramp at rest is checked exactly
+as before. Derivation (in the function's doc): with `step = fl(fl(t - s) / 64)` and
+`k = 64 - remaining` additions, `current = t - remaining * step + a + 64b + c` with `|a|`, each of
+the `k <= 63` addition roundings in `c` at most half an ulp of `2 * high`, and `|64b| <= 2^-144`;
+so the current is within `32 * ulp(2 * high) + 2^-144` of the line, whatever the start (an earlier
+overshoot included). A chained-retarget simulation (200k starts per range, five retargets each,
+near-edge biased; scratch only) measured at most 7.9 ulp(2) for the mix and 15.75 ulp(2 * high)
+for the gains. Why not the verifier's "range widened by `64 * (|step| + ulp)`": with the drive ramp
+of the fixture in flight that widening is about `6.0`, so it would admit a subnormal drive current
+(`bad(0, 1)`), weakening hostile validation; the line check keeps that row refused. No rendered
+bit moves: only the control-plane decode changed; the kernel, ramp and snapshot are untouched.
+
+**MINOR-1:** `ramp_step_valid`: the mix step must be finite, a gain step zero or normal (a gain
+step is at least `ulp(gain(-24 dB)) / 64`, about `1.2e-10`). **NIT-1:** the `decode_lane_words`
+doc now states the real set: `lane::flush` zeroes magnitudes below `FLUSH_EPS = 1e-20`, so the
+kernel writes zeros and magnitudes of at least `1e-20`; the check stays the looser zero-or-normal.
+**MINOR-2** (`inf` in the `X` history after a finite `1e37` input at `+36 dB`, output finite, so D7
+does not fire and the effect's own snapshot is refused for up to 31 samples) is out of #1071's
+subnormal scope and is **handed to #1278**: its carry must either make D7 also catch a non-finite
+history word or define what it does with a refused own snapshot. NIT-2 belongs to #1278's brief.
+
+Tests:
+
+- `state_roundtrip.rs`: four deterministic cases, one per verifier row, each asserting the
+  snapshot's current really is past the edge (negative subnormal mix; mix above `1.0`; drive gain
+  above `gain(+36 dB)`; output gain below `gain(-24 dB)`), then restore into a fresh instance,
+  snapshot identity and 128 continued samples bit for bit. The rejection test's subnormal-step row
+  moved to word 6 (the left output's ramp at rest), because on the in-flight drive ramp (word 2) a
+  subnormal step is already refused by the line check, so that row could not see MINOR-1.
+- `randomized.rs`: new seeded `a_restored_near_edge_ramp_continues_bit_for_bit` (256 seeds per
+  PR, about 1.3 s in debug; scales with `MISO_ENGINE_RANDOMIZED_SCALE`): a random parameter ramped
+  from 1-40 dB ulps (1-256 ulps for the mix) inside a random edge to that edge, other parameters
+  drawn in domain, snapshot 1-63 frames in (three quarters in the last 32), restored into a fresh
+  scalar instance and into a random lane of a bank at the build's native width (eight lanes on
+  AVX2, four on NEON and Wasm, so CI covers both), and 96 continued samples compared by bits. It asserts every one of the six edges was
+  crossed by some snapshot (per PR: drive bottom 6, top 5; output bottom 7, top 6; mix bottom 5,
+  top 3). The shared harness's `craft` hook cannot reach this: a crafted payload's acceptance is not
+  asserted, and its own-snapshot restores seldom land inside a ramp's last samples. A craft writing
+  near-edge ramps was tried and stayed green under the strict-current mutation at 1x, 3x, 100x and
+  400x seeds against the committed harness, so it was not kept. #1278's harness work adds its own
+  edge-ramp check harness-wide.
+
+Mutation evidence (each applied in an export of HEAD plus these files, run, reverted; green
+after revert):
+
+| # | Mutation | Red | Green |
+|---|---|---|---|
+| MA | in-flight current back to the strict range (attempt 1) | all four new `state_roundtrip` cases; `a_restored_near_edge_ramp_continues_bit_for_bit` (seed 48: mix to `1.0`, 54 frames) | rest |
+| MC | in-flight current: any finite (no line check) | rejection test, at its first in-flight row `bad(0, 1e6)` (the assertion stops there) | the rest |
+| MD | gain step: any finite (MINOR-1 reverted) | rejection test, `bad(6, 1)` | the rest |
+| ME | tolerance `1 * ulp(2 * high)` instead of `64` | mix-to-one and drive-to-top cases; the seeded differential | the rest |
+
+Not covered by a test: a sign error in the line (`t + remaining * step`); at an overshoot
+`remaining * step` is far smaller than the tolerance, so no self-produced state tells the two
+apart; only a crafted hostile word placed on the wrong line could, which is not a plausible defect.
+
+Gates: run in an export of HEAD plus this attempt's files, because the shared worktree holds
+#1278's uncommitted, mid-edit `crates/conformance/src/randomized.rs` (it does not compile at the
+time of this attempt, so workspace gates in the worktree fail on that file, not on this slice).
+
+| Gate (export) | Result |
+|---|---|
+| `cargo fmt --all -- --check` | 0 |
+| `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | 0 (and `-p soft-clip` again after the last test edit: 0) |
+| `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | 0 |
+| `check-/test-workspace-policy`, `check-/test-realtime-policy`, `check-capi-abi` | all 0 |
+| `audit capi` | 0 allocations, 0 deallocations, 0 locks, 0 syscalls, 0 violations |
+| `cargo test --locked -p soft-clip -p conformance` | green |
+| `cargo test --locked --release -p console-workload` | green: console digests unchanged |
+| `cargo run -p conformance --example conformance_fixtures -- --check` | 0: conformance fixtures unchanged |
+| `check-cross-targets.sh` | PASS (#1018 expected iOS rows only; soft-clip `memset_pattern16` 22, at its ceiling). Its first run caught `BankWidth::Eight` in the new test on four-lane targets; the test now uses the native width, as the crate's other bank tests do |
+| Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh` | all 0 |
+
+**ARTIFACT CHANGED**: the shipped module is now
+`94c443c08f93ac6ee5b5f1fe14b7d488d3c92d6a35af2bd2efc4d17e154240ad` (attempt 1 built
+`726f4291...`, the parent `30d075d3...`); the restore decode compiled into it changed. Per
+`docs/RELEASE.md` there is no per-change re-pin, so the pin file is left alone.
