@@ -15,10 +15,14 @@
 // usage: node rebuild-cost.mjs MODULE.wasm OUT.json
 //
 // The arguments, the documents and the output are checked before the browser is launched, and the
-// output is created exclusively: an existing OUT.json is refused, never overwritten.
+// output is created exclusively: an existing OUT.json is refused, never overwritten. The record
+// states its own provenance and control (#1289 review MINOR-3): the commit, the Playwright version
+// and the load average before and after the browser runs.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import path from "node:path";
 import process from "node:process";
@@ -38,6 +42,10 @@ if (process.argv.length !== 4) {
   process.exit(2);
 }
 const [modulePath, outPath] = process.argv.slice(2).map((argument) => path.resolve(argument));
+// Provenance, read before anything else so a missing fact fails before the browser is launched.
+const CANDIDATE_COMMIT = execFileSync("git", ["-C", ROOT, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).trim();
+const PLAYWRIGHT_VERSION = JSON.parse(readFileSync(createRequire(import.meta.url).resolve("playwright/package.json"), "utf8")).version;
+const loadavg = () => readFileSync("/proc/loadavg", "utf8").trim();
 let present = true;
 try { lstatSync(outPath); } catch { present = false; }
 if (present) {
@@ -167,6 +175,7 @@ const server = createServer((request, response) => {
 }).listen(0, "127.0.0.1");
 await new Promise((resolve) => server.once("listening", resolve));
 
+const LOADAVG_START = loadavg();
 const browser = await chromium.launch({ args: ["--autoplay-policy=no-user-gesture-required", "--disable-dev-shm-usage"] });
 let outcome;
 try {
@@ -197,6 +206,7 @@ try {
   server.close();
 }
 
+const LOADAVG_END = loadavg();
 const { reply } = outcome;
 if (reply.error) throw new Error(`worklet: ${reply.error}`);
 assert.equal(reply.results.length, BOOTS);
@@ -227,6 +237,10 @@ const record = {
     first_run_of_module_code: index === 0,
     ...row,
   })),
+  candidate_commit: CANDIDATE_COMMIT,
+  playwright_version: PLAYWRIGHT_VERSION,
+  loadavg_start: LOADAVG_START,
+  loadavg_end: LOADAVG_END,
   descriptive_only: true,
 };
 writeFileSync(outPath, `${JSON.stringify(record)}\n`, { flag: "wx" });

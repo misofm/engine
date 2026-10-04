@@ -155,7 +155,10 @@ const REBUILD_REFUSED = "web-rebuild-cost.refused.jsonl";
 const REBUILD_VERDICT = "validator.json";
 const REBUILD_REPORT = "report.md";
 const REBUILD_STDERR = "web-rebuild-cost.stderr.log";
-const REBUILD_OUTPUTS = [REBUILD_RECORD, REBUILD_REFUSED, REBUILD_VERDICT, REBUILD_REPORT, REBUILD_STDERR];
+// A measured launch's stdout that does not parse, kept as printed (AGENTS.md: preserve raw output
+// when post-workload tooling fails). Not `*.log`, which is gitignored.
+const REBUILD_UNPARSED = "web-rebuild-cost.unparsed.txt";
+const REBUILD_OUTPUTS = [REBUILD_RECORD, REBUILD_REFUSED, REBUILD_VERDICT, REBUILD_REPORT, REBUILD_STDERR, REBUILD_UNPARSED];
 
 
 const rebuildSha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -182,13 +185,27 @@ function rebuildRefusalReasons(records) {
         || record.quantum_budget_ns !== REBUILD_BUDGET_NS) {
       reasons.push(`${at}: the rate, quantum or budget is not the frozen one`);
     }
+    if (record.observations_per_document !== REBUILD_OBSERVATIONS) {
+      reasons.push(`${at}: observations_per_document is not ${REBUILD_OBSERVATIONS}`);
+    }
+    // An uncontrolled run is admissible only when it says so (the report prints this field).
+    if (typeof record.measurement_control !== "string" || record.measurement_control.trim() === "") {
+      reasons.push(`${at}: no measurement_control`);
+    }
     const docs = Array.isArray(record.documents) ? record.documents : [];
     const kinds = docs.map((doc) => doc?.workload_kind);
     if (JSON.stringify(kinds) !== JSON.stringify(REBUILD_DOCUMENTS.map((doc) => doc.kind))) {
       reasons.push(`${at}: documents are ${JSON.stringify(kinds)}, not the four frozen ones`);
     }
-    for (const doc of docs) {
+    for (const [index, doc] of docs.entries()) {
       const name = `${at} ${doc?.workload_kind}`;
+      // The kind names the fixture it was booted from (#1289 review MINOR-1).
+      const frozen = REBUILD_DOCUMENTS.find((entry) => entry.kind === doc?.workload_kind);
+      if (frozen === undefined || REBUILD_DOCUMENTS[index]?.kind !== doc?.workload_kind
+          || doc.fixture_id !== frozen.fixture_id || doc.tracks !== frozen.tracks) {
+        reasons.push(`${name}: not booted from its frozen fixture`);
+      }
+      if (!/^[0-9a-f]{64}$/.test(doc?.document_sha256 ?? "")) reasons.push(`${name}: no document digest`);
       const samples = doc?.boot_ns;
       if (doc?.observations !== REBUILD_OBSERVATIONS || !Array.isArray(samples) || samples.length !== REBUILD_OBSERVATIONS) {
         reasons.push(`${name}: not ${REBUILD_OBSERVATIONS} observations`);
@@ -196,6 +213,15 @@ function rebuildRefusalReasons(records) {
       }
       if (!samples.every((value) => Number.isSafeInteger(value) && value > 0)) {
         reasons.push(`${name}: a boot time is not a positive integer`);
+      } else if (doc.boot_p50_ns !== nearestRank(samples, 50) || doc.boot_max_ns !== Math.max(...samples)
+          || doc.boot_min_ns !== Math.min(...samples)) {
+        // The report prints these; they must be the raw times' own (#1289 review MINOR-1).
+        reasons.push(`${name}: boot_p50_ns, boot_max_ns or boot_min_ns is not recomputed from boot_ns`);
+      }
+      // The record keeps no raw dispose times, so only their summary's shape is checkable.
+      if (!(Number.isSafeInteger(doc.dispose_p50_ns) && Number.isSafeInteger(doc.dispose_max_ns)
+          && doc.dispose_p50_ns > 0 && doc.dispose_p50_ns <= doc.dispose_max_ns)) {
+        reasons.push(`${name}: dispose_p50_ns and dispose_max_ns are not ordered positive integers`);
       }
       // A refused boot returns early and fast; every timed boot must have prepared a session that
       // renders audible bits.
@@ -213,6 +239,11 @@ function rebuildRefusalReasons(records) {
     for (const key of ["module_sha256", "candidate_commit", "prepared_commit"]) {
       if (records[0][key] !== records[1][key]) reasons.push(`the rounds disagree on ${key}`);
     }
+    records[0].documents.forEach((doc, index) => {
+      if (doc.document_sha256 !== records[1].documents[index].document_sha256) {
+        reasons.push(`the rounds disagree on ${doc.workload_kind}'s document_sha256`);
+      }
+    });
   }
   return reasons;
 }
@@ -458,7 +489,14 @@ function rebuildRun(workdir, outdir, cpu, control) {
       break;
     }
     if (name === "warmup") continue;
-    const record = JSON.parse(child.stdout);
+    let record;
+    try {
+      record = JSON.parse(child.stdout);
+    } catch (error) {
+      writeFileSync(outputs[REBUILD_UNPARSED], child.stdout ?? "", { flag: "wx" });
+      failure = `the ${name} launch printed no record (${error.message}); its stdout is kept in ${REBUILD_UNPARSED}`;
+      break;
+    }
     records.push({
       ...record, candidate_commit: commit, prepared_commit: provenance.commit,
       measurement_control: control, cpu_affinity: cpu,

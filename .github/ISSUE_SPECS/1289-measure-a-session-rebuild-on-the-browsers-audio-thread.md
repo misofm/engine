@@ -136,6 +136,9 @@ a silent boot, a missing document, a short round, a kept warmup, disagreeing mod
    Validator accepted. Record, verdict and report: `artifacts/steps/web-rebuild-base/`
    (`web-rebuild-cost.jsonl`, `validator.json`, `report.md`).
 
+**Umbrella comment (Deliverable 3), ready for the root to post on #1269 as written from here to
+the end of "Reading against the budget".**
+
 **Numbers (D3), V8 proxy, both rounds.** Budget: one quantum = 128 / 48000 s = 2.667 ms.
 
 | document | tracks | boot p50 ms | boot max ms | p50 / budget | max / budget | peak Wasm memory |
@@ -145,7 +148,8 @@ a silent boot, a missing document, a short round, a kept warmup, disagreeing mod
 | 64-track app shape | 64 | 23.4 / 23.5 | 32.4 / 33.0 | 8.8 | 12.1 / 12.4 | 5.50 MiB |
 | 64-track sends | 64 | 39.1 / 39.2 | 49.1 / 48.5 | 14.7 | 18.4 / 18.2 | 11.06 MiB |
 
-Minimums sit within 1-2 % of p50 (app shape 23.25 ms, sends 38.5 ms); dispose is 0.2-0.6 ms.
+Minimums sit within 1-2 % of p50 (app shape 23.25 ms, sends 38.5 ms). Dispose p50 is 0.2-0.5 ms
+for the 64-track documents and 0.03 ms for the nine-track one.
 
 **D2, one Chromium point** (HeadlessChrome 151.0.7922.34, Playwright 1.62.1, unpinned, loadavg
 25.2). The app shape booted inside a test `AudioWorkletProcessor.process()` on the rendering
@@ -154,6 +158,18 @@ first boot **141 ms** (the first run of the module's code, before V8's tier-up),
 fresh instance **47 ms**; both audible and disposed. `context.baseLatency` 11.6 ms, `outputLatency`
 0 (headless). Record: `artifacts/steps/web-rebuild-base/chromium.json`. The warm Chromium boot is
 about 2x the V8 proxy's p50; the cold one about 6x.
+
+**Caveats the numbers carry.**
+- The V8 figure is a lower bound for the browser. The proxy runs Node with `--no-liftoff`
+  (optimizing tier only); Chromium tiers up dynamically, and the D2 point above is 2x (warm) and 6x
+  (cold) the proxy's p50.
+- A boot is a proxy for a replacement, not the same work. It includes bridge allocation and Wasm
+  memory growth on a fresh instance, which a replacement mostly skips; it excludes the carry
+  program a replacement also builds and runs. Neither direction is measured here.
+- The budget compared is one quantum (2.667 ms). Headless Chromium reported `baseLatency` 11.6 ms;
+  every 64-track p50 under the V8 proxy exceeds even that margin 2x-3x.
+- The run was uncontrolled (loadavg 26-28 on 32 CPUs). The p50s are not load-dominated (minimums
+  within 1-2 % of p50); the maxima are not interpretable.
 
 **Reading against the budget (no Q4 recommendation).** Every 64-track boot exceeds one quantum's
 budget by 9x-15x at p50 under the V8 proxy and more in Chromium; the nine-track boot is at the
@@ -171,3 +187,65 @@ changed, and the prepared module's digest matches a module built before the harn
 
 **Not done here:** Deliverable 3 (the umbrella comment) needs GitHub, which this worker may not
 touch; the numbers above are its content.
+
+### Attempt 1 verdict (Sol)
+
+PASS with 3 MINOR and 4 NIT, no BLOCKER or MAJOR. The verifier re-ran every inherited gate, rebuilt
+the module byte-identical to the measured one (`30d075d3...`), reproduced M1-M3, ran 23 synthetic
+validator cases, ruled the relaunch after the refused launch 1 legitimate (no boot was timed, and
+the fix did not touch the frozen workload or the validator), and found the uncontrolled run stated
+candidly. Verdict copy: `docs/handoffs/seamless-swap-phase1-2026-10-04/1289-attempt1.md`.
+
+### Review follow-ups (no re-timing)
+
+- **MINOR-1 (validator does not cross-check the printed summaries).** `rebuildRefusalReasons` now
+  also requires: `boot_p50_ns` (nearest rank), `boot_max_ns` and `boot_min_ns` equal to their
+  recomputation from `boot_ns`; ordered positive integer `dispose_p50_ns <= dispose_max_ns` (the
+  record keeps no raw dispose times, so only the summary's shape is checkable);
+  `observations_per_document == 25`; a non-blank `measurement_control`; each document's
+  `fixture_id` and `tracks` equal to its frozen `REBUILD_DOCUMENTS` entry and a 64-hex
+  `document_sha256`; and the two rounds agree on every document's `document_sha256`. The committed
+  `artifacts/steps/web-rebuild-base/web-rebuild-cost.jsonl` re-validated with it: accepted (no
+  re-timing; `validator.json` left as written by the run, same verdict). The verifier's 23 cases
+  rerun: the 18 refusal cases and the valid case unchanged in verdict; the 4 probes it accepted
+  (p50 inconsistent, no control, wrong fixture under the same kind, document digests disagreeing),
+  plus `observations_per_document = 0`, are now refused.
+- **MINOR-2 (gate-2 cases not reproducible).** `scripts/test-console-benchmark.sh` now carries the
+  rebuild validator's cases beside the sibling browser arm's: a synthetic base pair (accepted) and
+  32 refusals run through the real `rebuild-validate` (protocol, failed/silent boot, documents and
+  fixtures, observations and summaries, frozen workload, cross-round agreement). Mutation evidence:
+  against the pre-follow-up validator (`git show HEAD:` copy) the suite fails exactly the 12 cases
+  of the new rules; with the failed/audible check replaced by `false` (M1) it fails "a boot that
+  rendered silence" and "a document that does not count its failed boots" (the failed-boot case is
+  still refused by the dispose check, as M1 found). Restored: PASS. Note: the suite now runs the
+  real harness, which at load reads `sdk/assets/miso-engine-v1-abi-layout.json` and imports
+  `hosts/host-web/web/prepared-control.js`; neither is in the `console-benchmark` router entry
+  (`scripts/ci-path-router.py`, not an authorized path), so a change there reaches this suite
+  only in `nightly.yml`.
+- **MINOR-3 (D2 record lacks control and provenance).** The committed `chromium.json` is not edited:
+  its load average ("25.2", one figure) and Playwright version (1.62.1) are recorded in prose only,
+  above, and the commit it ran at was not recorded anywhere (the harness was unchanged between
+  `52ac9f88d` and `d169ef5f8`, and the module digest equals the measured one, but the exact HEAD is
+  not a recoverable fact). `hosts/host-web/qualification/rebuild-cost.mjs` now records
+  `candidate_commit`, `playwright_version`, `loadavg_start` and `loadavg_end` for any rerun; the
+  commit and version are read before the overwrite check, so a missing fact fails before Chromium
+  launches (exercised untimed with an existing OUT path: provenance read, then "refusing to
+  overwrite", status 1; no browser launched).
+- **NIT 1 (raw stdout lost on a parse failure).** `rebuildRun` now keeps a measured launch's stdout
+  that does not parse in `web-rebuild-cost.unparsed.txt` (exclusive create, and in the pre-launch
+  overwrite refusal list; not `*.log`, which is gitignored) and refuses the run naming it.
+- **NIT 2.** The dispose sentence now gives 0.2-0.5 ms for the 64-track documents and 0.03 ms for
+  the nine-track one.
+- **NIT 3.** The umbrella comment above now carries the three caveats: the `--no-liftoff` V8 figure
+  is a lower bound for the browser; a boot includes bridge allocation and memory growth and
+  excludes the carry program a replacement also builds and runs; the budget is one quantum, and
+  even Chromium's 11.6 ms `baseLatency` is exceeded 2x-3x.
+- **NIT 4.** Accepted as is: the refused launch's stderr is gitignored; the essential line is
+  quoted in the timed-invocation entry above.
+
+**Follow-up gates.** `node --check` on both changed `.mjs`; `bash -n` on the changed `.sh`;
+`rebuild-validate` on the committed record (accepted); `rebuild-preflight` on the measured module
+(untimed, all four documents audible, memory figures equal to the record's `preflight`);
+`rebuild-run` pre-launch refusal of an existing `web-rebuild-cost.unparsed.txt`;
+`scripts/test-console-benchmark.sh` PASS; `check-` and `test-workspace-policy.sh`;
+`check-` and `test-script-reachability.py`. No workflow or nightly command changed.
