@@ -440,3 +440,58 @@ version 2 control block (B3-B8); and the splits 11b and B3b.
   one-callback spike is too high.
 - **Whole-bank move:** when a bank's lane-to-strip map is identical in both plans, swap the bank
   instead of copying each lane. Only if slice 16 shows lane copies dominate the swap block.
+
+## Phase 1 status
+
+Every phase-1 slice passed review on `codex/seamless-swap`; the batch follow-ups that close their
+remaining review findings follow `fe37db10f` (the #1289 merge). Each slice's spec carries its
+verdict table and a "Phase-1 follow-ups" section.
+
+| Slice | Passing commit | Follow-ups commit |
+|---|---|---|
+| #1270 hand-over at the swap block | `22c9bd5a1` | `46bc191af` |
+| #1271 move a source consumer | `5488fb2f5`, `1a911e31f` | `bbf4d8626` |
+| #1272 successor whose unchanged sources play | `2a6f2c10c` | `bf2b788e8`, `1d40c488d` |
+| #1273 C ABI structural transaction | `448baae85`, `1338b063c` (minors closed in #1275) | `41ed93566` (records, line widths) |
+| #1274 anchored seek | `0297efa8c`, follow-ups `c14fde0ce` | `2330610e6` |
+| #1275 added C ABI source at an exact sample | `55690373d` | `86ac2f359` |
+| #1276 strip input section | `e6302d8a8` (attempt 2) | `63432c193`, `25954f771` |
+| #1071 soft-clip own snapshots | `983ac85bd`, follow-ups `d6217a79d` | (records only, `41ed93566`) |
+| #1278 allocation-free effect restore | `251113c8f` (attempt 3) | `a3561163a` |
+| #1289 browser rebuild measurement | `d169ef5f8` and its review follow-ups | (handled by its own worker) |
+
+Batch-follow-ups gates, on the final tree: fmt, workspace clippy `-D warnings` and rustdoc
+`-D warnings` clean; workspace policy check and self-test ok; realtime policy ok (87 marked
+regions in 25 files, the new floors) and its self-test ok; `check-capi-abi.sh` and `--self-test`
+ok; `audit capi` 100,000 calls with 0 allocations, deallocations, locks and syscalls,
+`pcm_digest` `c60671f6593fa603`; `check-cross-targets.sh` PASS with the ten #1018 iOS
+`memset_pattern16` expected-failure rows; `cargo test` for engine (also `realtime-audit`),
+source, graph, host-core, capi, host-web, builtins-compiler, rack, parametric-eq and compressor
+with the test-support features, 1009 passed and 0 failed. Worklet chain (`--named-twin` build,
+`check-web-audioworklet.sh --without-metadata-regeneration`,
+`check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`) green;
+`bridgeRetainedBytes` 1167211 of 1181888. **ARTIFACT CHANGED**: the shipped module moved from
+`29d5e78e...5a16` (2886763 B, at `fe37db10f`) to `9c8f4f68...7e76` (2886837 B): the browser
+now charges the plan state inventory, and the engine envelope guard, the graph carry outcome and
+`prepare_seek`'s re-check compile into it. Not re-pinned (`docs/RELEASE.md`, "Between releases").
+
+**Successor items not done in phase 1:**
+
+- The delay refuses its own edge-ramp snapshots (feedback, mix, cross feedback); slice 12 moves
+  rather than restores it.
+- Soft-clip's two open non-finite history cases, and soft-clip validating an in-flight current by
+  its line rather than by `ramp_path_within` (#1278).
+- Owner review of the in-place C ABI amendment: `miso_engine_v1_source_seek_at` and
+  `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT` (feature bit 32, mask 63) added under ABI version
+  `0x00010000` (#1275).
+- Records admitted to a predecessor's input queue after the swap-block drain are never applied;
+  when a host gains that path (P5, #1257), admission must route to the newest plan (#1276
+  attempt-1 NIT-4).
+- `audit capi`'s `pcm_digest` moved `7281b6c931e05dcc` to `c60671f6593fa603` with #1276's carried
+  input filters (`807b48547`); the PR that lands this batch must say so (#1273 already moved it
+  from `ff6cdcb96cdcdad5`).
+- Smaller open review items, each recorded in its slice spec: #1270 NIT-4 (a missing predecessor
+  executor reports `NotRequested`), #1271 NIT 2 and 3, #1272 NIT 2 (install an empty program so a
+  wrong predecessor is counted even when nothing carries), #1273 NIT-3 (`ProtocolCommit` in the
+  fault matrix) and NIT-4 (double-live oracle trigger, #1260), #1276 NIT-2 and NIT-3 (about 10 KB
+  of sort instantiations), and #1274 attempt-1 NIT-2 (harness duplication).
