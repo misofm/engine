@@ -153,18 +153,16 @@ successor plan whose unchanged sources keep playing* (slice 3) builds the host-c
 - M5, drop the duplicate-index check at install: gate 4 red.
 - M6, a vacant entry that does not flag the underrun: gate 2 red.
 
-**Allocation proof: not committed (path blocker).** The test
-`the_swap_block_carry_allocates_and_frees_nothing` ran in `crates/graph/src/lib.rs` tests. It uses
-a heap-owning carried slot through `plan_exchange` and reads `bench_support::alloc`'s thread-scoped
-counters around the swap block, after four warm blocks. Run alone, it measured
-`(allocations, deallocations) == (0, 0)` with `Carried`. Two mutations turned it red: a cloned
-instead of swapped slot gave `(1, 0)`, and a `Box` in `adopt_predecessor` gave `(1, 1)`. It could
-not stay in the lib tests, because linking the audited allocator aborts existing graph lib tests
-that allocate inside a render scope
-(`runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`
-aborted first). It belongs in a new `crates/graph/tests/rt11_*.rs` integration binary, the pattern
-of `rt10_source_in_place_alloc.rs`. That path is outside this slice's authorized paths, so it waits
-on the coordinator.
+**Allocation proof.** The coordinator authorized `crates/graph/tests/rt11_swap_carry_alloc.rs`
+for the allocation proof. It is its own test binary, holding only this test, so the audited
+allocator it links cannot abort unrelated graph tests. No `Cargo.toml` entry is needed: CI's
+workspace debug step builds every target with `graph/test-support,engine/realtime-audit`, and the
+test passes under those features too. `the_swap_block_carry_allocates_and_frees_nothing` moves a
+heap-owning slot through `plan_exchange`, renders four warm blocks first, then reads
+`bench_support::alloc`'s thread-scoped counters around the swap block. It asserts `Applied` and
+`Carried`, that the carried value is rendered, and that `(allocations, deallocations) == (0, 0)`
+exactly. Mutations (each run red, reverted, run green): the slot cloned instead of swapped gave
+`(1, 0)`, and a `Box` in `GraphExecutor::adopt_predecessor` gave `(1, 1)`.
 
 **Commands.**
 
