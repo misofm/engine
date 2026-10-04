@@ -310,3 +310,13 @@ is a no-op; the oracle's window includes it and is exact.
 - MINOR 1 (a submix-routed session in the charge oracle) is folded into #1258; NIT 2 and NIT 3 are
   not in this follow-up's scope.
 - Comment-only code changes: no new test, so no mutation run.
+- Gates on the follow-up tree (`978463341`, x86-64-v3, one run for the whole #1253-#1257
+  follow-up set): `cargo fmt --all -- --check`; `cargo test --locked` for `host-core
+  --all-features`, `builtins`, `builtins-compiler`, `capi` and `host-web`; workspace clippy
+  `--all-targets --all-features -D warnings`; `cargo doc` with `-D warnings`; release build and
+  `./target/release/audit capi` (100,000 calls, allocations 0, syscalls 0, total_violations 0);
+  `check-capi-abi.sh`; realtime, workspace and host-core policy (check, plus the realtime and
+  workspace self-tests); `check-cross-targets.sh` (iOS `memset_pattern16` expected failures
+  unchanged): all pass. Worklet chain not run: no line compiled into the browser module changed
+  (host-core, host-web, builtins and builtins-compiler changed only in docs, comments and
+  tests).
