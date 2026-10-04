@@ -70,6 +70,9 @@ source crate and the host-core facade; *Start a newly added C ABI source at an e
 
 - `crates/source/src/lib.rs`
 - `crates/host-core/src/source.rs`, `crates/host-core/tests/successor_swap.rs`
+- `crates/host-core/tests/source_diagnostics.rs`, `crates/source/tests/randomized.rs`: the new
+  `SourceSeekError` variant's table row and exhaustive-match arms only (amended after attempt 1,
+  verdict MINOR-2)
 
 ## Non-goals
 
@@ -173,3 +176,73 @@ restored byte-identical (`cmp`) and the suite ran green.
   `751122a9ecdd05e96c8d5055bbefbb56ca4c75948d9692ade32ed01fa3959743` (2870096 B; #1272's, which
   `1338b063c` still builds, was `feeb20c3...1d47`, 2869086 B). Per `docs/RELEASE.md` ("Between
   releases") the pin is not re-pinned.
+
+### Follow-ups after attempt 1 PASS
+
+**Verdict summary** (`submix-verdicts/1274-attempt1.md`, commit `0297efa8c`): PASS with minors, no
+BLOCKER or MAJOR. MINOR-1: `apply_seek`'s keep-branch region-end note was untested (V10 survived).
+MINOR-2: two out-of-path edits. MINOR-3: the pre-existing data-before-command race could discard an
+acked block of a new generation. NIT-1: the observe-time discard of a replaced seek's pending block
+was unpinned (V9 survived) and a test doc overclaimed. NIT-3: the #917 ownership docs did not name
+the pending block. NIT-4: an `expect` on the render path and a guard in `prepare_seek` thought
+redundant. NIT-2 (harness duplication) belongs to the next slice that owns `support/successor.rs`.
+
+**Changes** (`crates/source/src/lib.rs` unless noted):
+
+- MINOR-1: new unit test `an_on_time_anchored_seek_to_a_last_short_block_ends_its_region`.
+- MINOR-2: the authorized paths above now list both files. No code change.
+- MINOR-3: `acquire_current_block` takes the block's `SeekClock`. Before judging a popped block
+  whose generation is newer than both the active generation and any held seek's, it observes the
+  command queue again (one `try_pop`, at most once per popped block, so bounded by
+  `transfer_block_count`; no allocation). This is sound because `try_seek` pushes the command
+  before any of that generation's PCM, on the producer thread, through release/acquire queues, so
+  the command is in the one-slot queue when its block is popped. A plain seek then applies and its
+  block plays at once; an anchored one is held and its block kept pending. The branch is reached
+  only in the race, so every other path is unchanged. `begin_block_with` is split into
+  `begin_block_observe` and `begin_block_play` (no behaviour change) so a test can put a producer
+  between the command pop and the data pop. New test
+  `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm` (plain and anchored arms).
+  `crates/host-core/src/source.rs`'s `seek_at` doc now states the promise holds even when the PCM
+  is popped before the seek.
+- NIT-1: `a_newer_anchored_seek_replaces_a_held_one` now pins the discard: after the replacement
+  is observed, the producer primes the newer generation to its full `transfer_block_count` before
+  that anchor, and all four blocks play in order. Its doc now says the replaced PCM cannot play
+  either way.
+- NIT-3: both #917 ownership docs (`RETAINED_TRANSFER_BLOCKS` and `PcmSourceConsumer`) name a held
+  seek's pending block.
+- NIT-4: the `expect` is now `Option::take_if`. The `held_seek.is_some()` guard in
+  `prepare_seek` stays, with a comment. It is not behaviour-neutral for every caller: preparing
+  the *playing* generation again while a newer anchored seek is held returns `false` with it and
+  could return `true` without it. V11 was equivalent only for callers that prepare the newest
+  generation.
+
+**Mutations** (each applied alone to the follow-up code; `cargo test -p source --lib`; restored
+and checked with `cmp`; suite green afterwards):
+
+| # | Mutation | Result |
+|---|---|---|
+| F1 (V10) | drop the region-end note in `apply_seek`'s keep branch | red: `an_on_time_anchored_seek_to_a_last_short_block_ends_its_region` only |
+| F2 | drop the re-observe in `acquire_current_block` (the pre-fix code) | red: `a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm`. Run with each arm alone, both red: plain (the block plays at once) and anchored (it plays at its anchor) |
+| F3 (V9) | keep the replaced seek's pending block when the newer seek is observed | red: `a_newer_anchored_seek_replaces_a_held_one` only (the newer generation's fourth priming block is refused with `Full`) |
+
+**Gates.** Another worker's uncommitted #1276 edits share this worktree, so the gates ran on an
+export of `HEAD` (`0297efa8c`) plus this follow-up's two source files, under the scratchpad:
+
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: exit 0.
+- `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh` (56 marked
+  regions in 15 files), `test-realtime-policy.sh`, `check-capi-abi.sh`: exit 0.
+- `audit capi` (release): 100000 calls, 0 allocations, 0 deallocations, 0 locks, 0 syscalls,
+  0 violations.
+- `check-cross-targets.sh`: PASS, with only the known #1018 `memset_pattern16` expected failures.
+- `cargo test --locked -p source -p host-core --features host-core/test-support,graph/test-support`:
+  256 passed, 0 failed (254 plus the two new tests). `cargo test --locked -p capi -p host-web`:
+  233 passed, 0 failed. This includes the pinned console and conformance digests.
+- Worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`
+  (`sourceTotalBytes` 3358 of 3648, unchanged; `graphSessionPlusPlanBytes` 29794 of 35648,
+  unchanged), `test-web-audioworklet.sh`: all exit 0.
+- **ARTIFACT CHANGED**: the shipped module is
+  `cdb03d38e6a9ba239cea3d91de6cd7172e68edd4a75bbaac3d10299f22bb7f14` (2870165 B; attempt 1's was
+  `751122a9...9743`, 2870096 B). Per `docs/RELEASE.md` ("Between releases") the pin is not
+  re-pinned.

@@ -649,7 +649,8 @@ impl PcmSourceRing {
 /// Transfer blocks the render consumer *retains* outside both queues at every block boundary:
 /// the played block while one is readable, otherwise the same storage idle (#917). This is in
 /// addition to the pre-fetched `current` block the consumer already held before #917 whenever its
-/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun).
+/// `start_frame` is ahead of `next_frame` (a gap after a seek or an underrun), or a held anchored
+/// seek's pending block (#1274), which is of another generation and may start behind `next_frame`.
 const RETAINED_TRANSFER_BLOCKS: usize = 1;
 
 struct PreparedShape {
@@ -975,7 +976,8 @@ fn validate_submission_metadata(
 /// one block outside both queues -- the played block while one is readable, otherwise the same
 /// storage idle (after an underrun, the end of the region, `end_block` or `prepare_seek`) -- in
 /// addition to the pre-fetched `current` block it already held before #917 at the boundaries
-/// where `current.start_frame` is ahead of `next_frame`. The hold is therefore "what it held
+/// where `current.start_frame` is ahead of `next_frame`, or where `current` is a held anchored
+/// seek's pending block (#1274), of another generation and possibly behind `next_frame`. The hold is therefore "what it held
 /// before, plus one", which is what keeps the producer's admission sequence unchanged. The
 /// idle storage goes back to the producer's recycle queue only inside `begin_block`, at the moment
 /// a newer block becomes the played block. So:
@@ -1048,13 +1050,15 @@ impl PcmSourceConsumer {
         // The prepared source command queue has one slot. Observe exactly that admitted
         // command, then check the requested identity before granting readiness.
         self.observe_seek_at_block_boundary(SeekClock::Hold);
+        // The held-seek test is not redundant: a caller may prepare the playing generation again
+        // while a newer anchored seek is held, and that is not ready.
         if self.held_seek.is_some()
             || self.active_generation != generation
             || self.next_frame != frame
         {
             return false;
         }
-        self.acquire_current_block();
+        self.acquire_current_block(SeekClock::Hold);
         true
     }
 
@@ -1108,11 +1112,23 @@ impl PcmSourceConsumer {
     }
 
     fn begin_block_with(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.begin_block_observe(clock);
+        self.begin_block_play(clock)
+    }
+
+    /// The first half of [`Self::begin_block_with`]: release the played block and observe the
+    /// admitted command. The two halves are separate so a test can interleave a producer between
+    /// the command pop and the data pop, the window `acquire_current_block` must close.
+    fn begin_block_observe(&mut self, clock: SeekClock) {
         self.end_block();
         self.flush_deferred_recycle();
         self.generation_changed = false;
         self.observe_seek_at_block_boundary(clock);
-        self.acquire_current_block();
+    }
+
+    /// The second half of [`Self::begin_block_with`]: acquire and play this block.
+    fn begin_block_play(&mut self, clock: SeekClock) -> SourceReadReport {
+        self.acquire_current_block(clock);
         let mut copied_frames = 0_u32;
         let mut underrun_frames = 0_u32;
         if self.end_reached() {
@@ -1316,10 +1332,11 @@ impl PcmSourceConsumer {
                     frame,
                     anchor_sample,
                 });
-                if self.current.as_ref().is_some_and(|block| {
-                    block.generation != self.active_generation && block.generation != generation
-                }) {
-                    let block = self.current.take().expect("checked current block");
+                let active = self.active_generation;
+                if let Some(block) = self
+                    .current
+                    .take_if(|block| block.generation != active && block.generation != generation)
+                {
                     self.discard_block(block);
                 }
             }
@@ -1363,7 +1380,8 @@ impl PcmSourceConsumer {
         }
     }
 
-    fn acquire_current_block(&mut self) {
+    /// Pop toward the block to play. `clock` is the block's, for a seek observed here.
+    fn acquire_current_block(&mut self, clock: SeekClock) {
         if self.current.is_some() {
             return;
         }
@@ -1374,6 +1392,14 @@ impl PcmSourceConsumer {
             self.native_decoder_sanitized_samples = self
                 .native_decoder_sanitized_samples
                 .max(block.native_decoder_sanitized_samples);
+            if self.is_unobserved_generation(block.generation) {
+                // This block's seek was pushed after this block's command pop. The producer pushes
+                // a seek's command before any of its PCM, on one thread, through release/acquire
+                // queues, so the command is in the one-slot command queue now: observe it before
+                // judging the block rather than discard accepted PCM (#1274 MINOR-3). Bounded:
+                // at most one command pop per popped block.
+                self.observe_seek_at_block_boundary(clock);
+            }
             if block.generation == self.active_generation
                 && block.start_frame.0 >= self.next_frame.0
             {
@@ -1395,6 +1421,14 @@ impl PcmSourceConsumer {
             }
             self.note_end_and_discard(block);
         }
+    }
+
+    /// Whether `generation` is newer than every seek this consumer has observed.
+    fn is_unobserved_generation(&self, generation: SourceGeneration) -> bool {
+        generation > self.active_generation
+            && self
+                .held_seek
+                .is_none_or(|held| generation > held.generation)
     }
 
     fn current_matches_next_frame(&self) -> bool {
@@ -2021,7 +2055,7 @@ mod tests {
             host.submit(chunk(1, 0, &[&old], 4, false)).unwrap();
             host.submit(chunk(1, 4, &[&old], 4, false)).unwrap();
             if retained {
-                consumer.acquire_current_block();
+                consumer.acquire_current_block(SeekClock::Now);
             }
             host.try_seek(SourceCommand::Seek {
                 generation: SourceGeneration(2),
@@ -2086,12 +2120,16 @@ mod tests {
     }
 
     /// #1274 D3. Red if a newer anchored seek does not replace a held one, or if the replaced
-    /// seek's pending block survives to play.
+    /// seek's pending block is kept when the newer seek is observed rather than discarded: kept
+    /// out of the queues until the newer anchor, it holds the producer one block short of priming
+    /// the newer generation to its full admission depth before that anchor. (Its PCM cannot play
+    /// either way: `apply_seek` and the generation compare already refuse it.)
     #[test]
     fn a_newer_anchored_seek_replaces_a_held_one() {
         let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 16)).unwrap();
         let mut host = producer.into_host_chunk_provider(RATE);
-        host.try_seek(seek_at(2, 100, 16)).unwrap();
+        let depth = consumer.transfer_block_capacity();
+        host.try_seek(seek_at(2, 100, 24)).unwrap();
         host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false)).unwrap();
         let (output, report) = render_at(&mut consumer, 0);
         assert_eq!(
@@ -2101,18 +2139,29 @@ mod tests {
         assert_eq!(report.active_generation, SourceGeneration(1));
         host.try_seek(seek_at(3, 200, 8)).unwrap();
         host.submit(chunk(3, 200, &[&[3.0; 4]], 4, false)).unwrap();
-        host.submit(chunk(3, 204, &[&[3.5; 4]], 4, false)).unwrap();
+        host.submit(chunk(3, 204, &[&[3.25; 4]], 4, false)).unwrap();
         let (output, report) = render_at(&mut consumer, 4);
         assert_eq!(output, [0.0; 4], "the replacement is held too");
         assert_eq!(report.active_generation, SourceGeneration(1));
-        let (output, report) = render_at(&mut consumer, 8);
-        assert_eq!(output, [3.0; 4], "the newer seek applies at its own anchor");
-        assert!(report.generation_changed);
-        assert_eq!(report.active_generation, SourceGeneration(3));
-        let (output, report) = render_at(&mut consumer, 12);
-        assert_eq!(output, [3.5; 4]);
-        assert_eq!(report.active_generation, SourceGeneration(3));
-        let (output, _) = render_at(&mut consumer, 16);
+        // Before its anchor the newer generation primes to the full admission depth.
+        let values = [3.0, 3.25, 3.5, 3.75];
+        for (block, value) in values.iter().enumerate().skip(2) {
+            let start = 200 + 4 * u64::try_from(block).unwrap();
+            host.submit(chunk(3, start, &[&[*value; 4]], 4, false))
+                .expect("the replaced seek's pending block was recycled");
+        }
+        assert_eq!(values.len(), depth);
+        for (block, value) in values.iter().enumerate() {
+            let first_sample = 8 + 4 * u64::try_from(block).unwrap();
+            let (output, report) = render_at(&mut consumer, first_sample);
+            assert_eq!(
+                output, [*value; 4],
+                "the newer seek applies at its own anchor"
+            );
+            assert_eq!(report.generation_changed, block == 0);
+            assert_eq!(report.active_generation, SourceGeneration(3));
+        }
+        let (output, _) = render_at(&mut consumer, 24);
         assert_eq!(output, [0.0; 4], "the replaced seek never applies");
         assert_eq!(consumer.active_generation, SourceGeneration(3));
     }
@@ -2180,6 +2229,87 @@ mod tests {
         assert!(report.end_of_region);
         assert_eq!(report.copied_frames, 0);
         assert_eq!(report.underrun_frames, 0, "past the end is not an underrun");
+    }
+
+    /// #1274 MINOR-1. Red if an on-time apply keeps the primed block without noting the region
+    /// end it carries: a stem whose primed block is its region's last, short block would then
+    /// report an underrun on every block after it ends, and never reach the end of its region.
+    #[test]
+    fn an_on_time_anchored_seek_to_a_last_short_block_ends_its_region() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+        let mut host = producer.into_host_chunk_provider(RATE);
+        host.try_seek(seek_at(2, 100, 8)).unwrap();
+        host.submit(chunk(2, 100, &[&[2.0, 2.0]], 2, true)).unwrap();
+        let (_, report) = render_at(&mut consumer, 4);
+        assert_eq!(report.active_generation, SourceGeneration(1));
+        let (output, report) = render_at(&mut consumer, 8);
+        assert_eq!(output, [2.0, 2.0, 0.0, 0.0]);
+        assert_eq!(report.active_generation, SourceGeneration(2));
+        assert_eq!(report.copied_frames, 2);
+        assert!(report.end_of_region);
+        let events = report.cumulative_underrun_events;
+        for first_sample in [12, 16] {
+            let (output, report) = render_at(&mut consumer, first_sample);
+            assert_eq!(output, [0.0; 4]);
+            assert!(report.end_of_region, "block {first_sample} is past the end");
+            assert_eq!(report.underrun_frames, 0, "the end is not an underrun");
+            assert_eq!(report.cumulative_underrun_events, events);
+        }
+    }
+
+    /// Render one block with a producer step between its command pop and its data pop: the
+    /// window in which a seek's PCM can reach the render before its command does.
+    fn render_with_producer_in_window(
+        consumer: &mut PcmSourceConsumer,
+        clock: SeekClock,
+        producer: impl FnOnce(),
+    ) -> ([f32; 4], SourceReadReport) {
+        consumer.begin_block_observe(clock);
+        producer();
+        let report = consumer.begin_block_play(clock);
+        let mut output = [f32::NAN; 4];
+        consumer.copy_channel(0, &mut output).unwrap();
+        consumer.end_block();
+        (output, report)
+    }
+
+    /// #1274 MINOR-3, the acked-batch question. Red if the render discards an accepted block of
+    /// a newer generation because the block's seek command was pushed after the block boundary
+    /// popped the command queue: the producer acked the PCM, and it must play (a plain seek at
+    /// once, an anchored one at its anchor) rather than count as a stale discard.
+    #[test]
+    fn a_seek_whose_pcm_arrives_inside_the_block_window_keeps_its_pcm() {
+        for anchored in [false, true] {
+            let (producer, mut consumer, _) = PcmSourceRing::prepare(config(1, 4, 8)).unwrap();
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let command = if anchored {
+                seek_at(2, 100, 8)
+            } else {
+                SourceCommand::Seek {
+                    generation: SourceGeneration(2),
+                    frame: SourceFrame(100),
+                }
+            };
+            let (output, report) =
+                render_with_producer_in_window(&mut consumer, SeekClock::At(4), || {
+                    host.try_seek(command).unwrap();
+                    host.submit(chunk(2, 100, &[&[2.0; 4]], 4, false))
+                        .expect("accepted");
+                });
+            if anchored {
+                assert_eq!(output, [0.0; 4], "held until its anchor");
+                assert_eq!(report.active_generation, SourceGeneration(1));
+                let (output, report) = render_at(&mut consumer, 8);
+                assert_eq!(output, [2.0; 4], "anchored: the acked block plays");
+                assert!(report.generation_changed);
+            } else {
+                assert_eq!(output, [2.0; 4], "plain: the acked block plays at once");
+                assert!(report.generation_changed);
+            }
+            assert_eq!(consumer.active_generation, SourceGeneration(2));
+            assert_eq!(consumer.stale_generation_discard_count, 0);
+            assert_eq!(consumer.underrun_events, u64::from(anchored));
+        }
     }
 
     #[test]

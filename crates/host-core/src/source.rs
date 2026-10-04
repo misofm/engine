@@ -215,7 +215,8 @@ impl SourceControlSet {
     /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
     ///
     /// On success the source accepts the new generation's PCM from `frame` at once; submit it
-    /// before the anchor block renders and the source plays it from exactly that block. Should the
+    /// before the anchor block renders and the source plays it from exactly that block, even when
+    /// the render pops that PCM before it pops the seek. Should the
     /// render reach the seek only after the anchor block has passed, it starts at `frame` plus the
     /// lateness, so it stays in time. Until the anchor block, PCM already queued for the playing
     /// generation keeps playing; when that runs out, the source renders silence and reports an
