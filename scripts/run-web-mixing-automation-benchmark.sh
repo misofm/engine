@@ -40,6 +40,17 @@
 #                          `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`, in which case the records say
 #                          `uncontrolled`, as the console runner's do.
 #
+# Two more subcommands time a session boot instead of a render (#1289, slice B1 of #1269), on the
+# module `prepare` built, with the harness's `rebuild-*` mode (which says what is timed and why):
+#
+#   rebuild-preflight WORKDIR      Untimed. Boots each of the four documents once and asserts it
+#                                  renders an audible block.
+#   rebuild-run WORKDIR --step N   The one timed invocation: one warmup launch and two measured
+#                                  launches pinned to the highest online CPU, validated, and written
+#                                  with a short report to `artifacts/steps/N/`. It refuses an
+#                                  existing output, modified tracked files, a module not prepared at
+#                                  HEAD, and a loaded host unless `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`.
+#
 # The module comes from `build-web-audioworklet.sh --module-only`, the delivery build's own cargo
 # line (#1061: no build mode but `--check-pin` holds it to the committed pin any more, so the copy
 # of that recipe this runner used to carry is gone). The record states the digest and whether it is
@@ -47,7 +58,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'usage: %s prepare WORKDIR | preflight WORKDIR | run WORKDIR --step NAME\n' "$0" >&2
+    printf 'usage: %s prepare WORKDIR | preflight WORKDIR | run WORKDIR --step NAME | rebuild-preflight WORKDIR | rebuild-run WORKDIR --step NAME\n' "$0" >&2
     exit 2
 }
 [[ "$#" -ge 2 ]] || usage
@@ -201,6 +212,29 @@ case "$command" in
         cat -- "$raw/rounds.jsonl" >"$record" ||
             refuse_run "$record appeared while the rounds ran; it is left as it was"
         printf '%s\n' "$record"
+        ;;
+    rebuild-preflight)
+        [[ "$#" == 2 ]] || usage
+        node --no-liftoff "$harness" rebuild-preflight "$workdir/host_web.wasm"
+        ;;
+    rebuild-run)
+        [[ "$#" == 4 && "$3" == --step ]] || usage
+        [[ "$4" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { printf 'invalid --step name: %s\n' "$4" >&2; exit 2; }
+        [[ -f "$workdir/host_web.wasm" && -f "$workdir/provenance.json" ]] ||
+            { printf 'run prepare first\n' >&2; exit 1; }
+        source "$root/scripts/check-bench-preconditions.sh"
+        cpu=$(bench_highest_cpu "$(< /sys/devices/system/cpu/online)")
+        loadavg_text=$(< /proc/loadavg)
+        loadavg_one=$(bench_loadavg_one_minute "$loadavg_text")
+        if bench_within_ceiling "$loadavg_one" "$MISO_ENGINE_BENCH_LOADAVG_CEILING"; then
+            control="controlled; loadavg $loadavg_text; ceiling $MISO_ENGINE_BENCH_LOADAVG_CEILING; affinity cpu $cpu"
+        elif [[ "${MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED:-}" == 1 ]]; then
+            control="uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived loadavg_above_ceiling; loadavg $loadavg_text; affinity cpu $cpu"
+        else
+            printf 'refusing an uncontrolled measurement: loadavg %s\n' "$loadavg_text" >&2
+            exit 1
+        fi
+        node "$harness" rebuild-run "$workdir" "$root/artifacts/steps/$4" "$cpu" "$control"
         ;;
     *) usage ;;
 esac
