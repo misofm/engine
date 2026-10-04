@@ -251,3 +251,108 @@ Land them one at a time.
 - Never emit a redundant record. "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, base `7436a64f9`)
+
+**What landed.**
+- `crates/host-core/src/live_delta.rs` (new, behind `control-provider`): `LiveRamps` (+
+  `for_session`, zeros), `LiveStripRecords` (+ `fader_records()` iterator), `LiveDelta`,
+  `LiveRebuild { Vca, Structure, Domain, FollowedMute }`, `classify_live_delta`. The D1 shape is
+  kept as specified (`[Option<TrackFaderRecord>; 4]`). Steps: VCA guard; track IDs by count and
+  pairwise; masked clone (revision, every track's `fader` and `matrix_or_pan` from `current`)
+  compared on `canonical_session_json` bytes, an error being `Structure`; then per track, in
+  order, `Domain` (pre and post fader through `checked_fader_gain`, pre and post pan/matrix
+  through `lower_matrix_or_pan`), `FollowedMute` (a lane mute changes and a `follows_mute` route in
+  `next` has `RouteSource::Track` with this ID), then records: `FaderDb` per lane whose
+  `checked_fader_gain` bits change (one `Both` when both change and the post-commit dB bits are
+  equal), `Mute` per changed lane (one `Both` when both change to the same value), fader before
+  mute and left before right, and a matrix record when a lowered coefficient's bits change,
+  carrying the post-commit smoothing. D4's transient allocations are documented on the function.
+- `crates/host-core/src/lib.rs`: the module and its re-exports (feature-gated); D6 re-exports
+  `BuiltinLaneSelector`, `TrackControlRecord`, `TrackFaderRecord` (unconditional). Nothing of
+  #1254's was touched.
+- `crates/builtins/src/lib.rs`: `checked_fader_gain` is `pub`, documented as the one fader-domain
+  authority. No other change.
+- `crates/builtins-compiler/src/lib.rs`: `pub fn lower_matrix_or_pan`, moved out of
+  `strip_parameters`, which calls it; `maximum_smoothing` stays in `strip_parameters`.
+- `crates/host-core/tests/live_delta.rs` (new, `#![cfg(feature = "control-provider")]`).
+
+**New tests and their test values** (`crates/host-core/tests/live_delta.rs`):
+- `a_revision_only_delta_is_live_with_no_records` (1a): red if a redundant record is emitted.
+- `fader_records_address_exactly_the_changed_lanes` (1b): red if a fader record goes to the wrong
+  lane, merges lanes wrongly, or is emitted for `0.0` -> `-0.0`.
+- `mute_records_address_exactly_the_changed_lanes` (1c): red if a mute record goes to the wrong
+  lane or merges lanes that change to different values.
+- `fader_records_precede_mute_records` (1d): red if the fader-then-mute order changes.
+- `a_matrix_record_is_emitted_only_when_the_lowered_target_changes` (1e): red if a pan record
+  carries a wrong target, or is emitted for a Pan->Matrix of the same target or a smoothing-only
+  change.
+- `values_outside_the_setter_domain_need_a_rebuild` (1f): red if 24/-144 dB or a 1.0 coefficient
+  is refused, or their next `f32` outward or `NaN` is classified live.
+- `a_sign_of_zero_trim_edit_is_structural` (1g): red if the mask comparison uses `PartialEq`.
+- `a_submix_fader_change_is_structural` (1h, G1), `a_followed_mute_change_needs_a_rebuild` (1i,
+  G2; a fader change on the same track stays live, and the same mute is live when the route does
+  not follow), `any_vca_needs_a_rebuild` (1j, G3, VCA in `current` only and `next` only): red if a
+  guard is dropped.
+- `structural_edits_need_a_rebuild` (1k): track removed/added/renamed, route gain, `session_id`.
+- `records_carry_the_ramps_and_the_model_smoothing` (1l): red if the ramp seam is ignored; also
+  pins `LiveRamps::for_session` to zeros.
+- `the_classifier_domain_is_the_render_setters` (gate 2): red if the classifier admits a dB or a
+  coefficient that `BuiltinFaderBank::set_fader_db` / `BuiltinMatrixBank::set_target_smoothed`
+  refuses, or the reverse, over the listed values.
+- `pushed_records_render_the_rebuilt_plan` (gate 3): nine-track EQ fixture, every track settled at
+  0 dB / centre pan / smoothing 0 (track 6 pre-muted left), edits of (b), (c), (d), (e) and a
+  sign-of-zero fader plus a Pan->Matrix of the same target on track 3 (no record); 8 strips of
+  records pushed with `LiveRamps { 0, 0 }` into a `prepare_host_runtime_with_live_controls` plan
+  (depth 16); 8 blocks are bit-identical to `prepare_host_runtime(next)`, and differ from
+  `current`'s plan. Red if a record targets a value other than the one preparation bakes.
+
+**Mutation runs** (each applied to `live_delta.rs`, the test file run, then reverted; all red):
+- M1 VCA guard removed: `any_vca_needs_a_rebuild`.
+- M2 masked comparison by `PartialEq` instead of bytes: `a_sign_of_zero_trim_edit_is_structural`.
+- M3 `Both` merge removed: 1b, 1c, 1l.
+- M4 mute records pushed before fader records: 1d, 1l.
+- M5 matrix record always emitted: 1a, 1b, 1c, 1d, 1e, 1i, 1l, gate 3.
+- M6 fader domain finiteness-only with a constant gain: 1b, 1d, 1f, 1i, 1l, gates 2 and 3.
+- M6b finite out-of-range dB admitted (gain otherwise unchanged): 1f, gate 2 only.
+- M7 follow guard removed: `a_followed_mute_change_needs_a_rebuild`.
+- M8 a `Both` fader record sent as `Left`: 1b, 1c, 1l, gate 3.
+- M9 fader ramp ignored: 1l.
+- M10 `matrix_or_pan` not masked: 1e, 1f, 1l, gates 2 and 3.
+- M11 fader change detected by dB bits instead of gain bits: 1b, gate 3.
+- M12 matrix record carries the pre-commit target: 1e, 1l, gate 3.
+- M13 post-commit matrix domain dropped: 1f, gate 2 only.
+
+**Gates** (from the head tree; logs in `/tmp/claude-1002/w1255-a1/logs`):
+- Gate 1-3: `cargo test --locked -p host-core --features control-provider,test-support --test
+  live_delta`: 14 passed.
+- Gate 4: `cargo test --locked --all-targets -p builtins --features builtins/test-support` pass;
+  `cargo test --locked -p builtins-compiler --features test-support` pass; the workspace test
+  command pass (117 test binaries ok, 0 failed); `cargo test --locked --release -p audit -p bench
+  -p console-workload` pass.
+- Module digests (`scripts/build-web-audioworklet.sh`, paths remapped): base `7436a64f9`
+  `04ce0d44483b5ebce30619c3abcf7991e9dd0d4d69719c3df30def529b3e6f52` (2,858,355 B); head
+  `ac35734286d38bab071e5be08a5c42b530aab388bdb69e2c4b73baa3f39fc45b` (2,857,637 B). **The module
+  moved** (-718 B): the classifier is compiled out of host-web, so the move is the two builtins
+  refactors (`lower_matrix_or_pan` out of line, `checked_fader_gain` public) changing codegen of
+  `strip_parameters`. Its behaviour is unchanged: the workspace tests, gate 3 and the worklet
+  chain pass.
+- Gate 5: `cargo fmt --all -- --check` pass; `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings` pass; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+  --no-deps` pass; host-core, realtime and workspace policy check+test scripts pass;
+  `scripts/check-cross-targets.sh` PASS (host-core's iOS `memset_pattern16` stays within its
+  #1018 expected-failure row); `run-aarch64-tests.sh debug` not run locally (CI-only).
+- Rule-file gates: `scripts/check-capi-abi.sh` and `--self-test` pass; `./target/release/audit
+  capi`: 0 allocations, 0 syscalls, 0 violations; worklet chain (`build-web-audioworklet.sh
+  --named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`,
+  `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`) pass.
+
+**Notes for the verifier.**
+- No path outside the authorized list changed.
+- The classifier does not check `maximum_smoothing_samples` (a preparation capacity, not a
+  domain, and the classifier has no caps); the post-commit model's admission (#1053 D8) is where
+  a too-long matrix smoothing is refused.
+- Domain is checked per track in order, before that track's follow guard, as this spec's D2
+  step 4 states.

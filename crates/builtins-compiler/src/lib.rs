@@ -4825,6 +4825,37 @@ fn own_fader(strip: &StripRef<'_>) -> ([f32; 2], [bool; 2]) {
     )
 }
 
+/// Lowers one strip's declared pan or matrix to the 2x2 target the matrix stage holds, and its
+/// smoothing window.
+///
+/// The one matrix-domain authority between the session and the stage (issue #1255 D3):
+/// preparation calls it from `strip_parameters`, and host-core's live-delta classifier calls it to
+/// decide whether a committed pan or matrix is live and what record it becomes. A pan lowers
+/// through [`pan_matrix`] and a matrix through [`Matrix2x2::checked`], so the result is exactly the
+/// target preparation bakes, bit for bit. The caller's `maximum_smoothing` cap is not checked here;
+/// it is a preparation capacity, not a domain.
+///
+/// # Errors
+///
+/// [`BuiltinParameterError::MatrixCoefficient`] when a pan position or a coefficient is outside
+/// `[-1, 1]` or is not finite.
+pub fn lower_matrix_or_pan(value: &MatrixOrPan) -> Result<(Matrix2x2, u32), BuiltinParameterError> {
+    match *value {
+        MatrixOrPan::Pan {
+            left,
+            right,
+            smoothing_samples,
+        } => Ok((pan_matrix(left, right)?, smoothing_samples)),
+        MatrixOrPan::Matrix {
+            ll,
+            lr,
+            rl,
+            rr,
+            smoothing_samples,
+        } => Ok((Matrix2x2 { ll, lr, rl, rr }.checked()?, smoothing_samples)),
+    }
+}
+
 /// The strip's lowered parameters, baking `fader_db` and `muted` (`[left, right]`) as its fader:
 /// the strip's own values for the domain preflight, its VCA-effective values
 /// (`SessionModel::effective_strip_faders`, #1242 D2) for lowering and the tail seal.
@@ -4849,20 +4880,7 @@ fn strip_parameters(
         fader_db: fader_db[1],
         muted: muted[1],
     };
-    let (matrix, smoothing_samples) = match *strip.matrix_or_pan {
-        MatrixOrPan::Pan {
-            left,
-            right,
-            smoothing_samples,
-        } => (pan_matrix(left, right)?, smoothing_samples),
-        MatrixOrPan::Matrix {
-            ll,
-            lr,
-            rl,
-            rr,
-            smoothing_samples,
-        } => (Matrix2x2 { ll, lr, rl, rr }.checked()?, smoothing_samples),
-    };
+    let (matrix, smoothing_samples) = lower_matrix_or_pan(strip.matrix_or_pan)?;
     if smoothing_samples > maximum_smoothing {
         return Err(BuiltinParameterError::MatrixSmoothing);
     }

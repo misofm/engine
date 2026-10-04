@@ -93,6 +93,8 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+#[cfg(feature = "control-provider")]
+pub mod live_delta;
 pub mod live_route_state;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
@@ -128,6 +130,8 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+#[cfg(feature = "control-provider")]
+pub use live_delta::{LiveDelta, LiveRamps, LiveRebuild, LiveStripRecords, classify_live_delta};
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
@@ -212,6 +216,12 @@ pub use spectrum::{
 /// that gather their tracks' inputs; a plan nobody joins never collapses, which is the safe default
 /// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
+
+/// The live fader/mute and matrix/pan records and their lane selector (issue #1255 D6), re-exported
+/// so a host that pushes `classify_live_delta`'s records names them without depending on
+/// `builtins-compiler` or `builtins`.
+pub use builtins::BuiltinLaneSelector;
+pub use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 
 #[doc(hidden)]
