@@ -1082,11 +1082,14 @@ fn a_c_abi_structural_transaction_keeps_the_source_playing() {
 /// Test value: red if the export forwards to the plain seek (observation timing): the seek then
 /// applies at the swap block, two blocks before the anchor, and the stem is out of time from the
 /// anchor block on (block 8 differs); red as well if the anchored seek goes to the running plan's
-/// source set, which does not hold the added source until the swap.
-fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
+/// source set, which does not hold the added source until the swap. With `source_frame` (`F`)
+/// unequal to the anchor (`A`), red too if the export or the session swaps the two.
+fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32, source_frame: u64) {
     const ADDED: &[u8] = b"s2-source";
     const ANCHOR_BLOCK: u64 = 8;
     let anchor = ANCHOR_BLOCK * 128;
+    // The stem's frame `F + n` holds the content the reference plays at render frame `A + n`.
+    let stem_frame = |render_frame: u64| render_frame - anchor + source_frame;
     let mut model = stateless_session(sample_rate_hz);
     model.tracks.truncate(1);
     model.routes.truncate(1);
@@ -1119,7 +1122,7 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
     );
     assert_eq!(command_c(c_session, &transaction).0, crate::RESULT_OK);
     assert_eq!(
-        crate::ffi::test_source_seek_at(c_session, ADDED, 2, anchor, anchor),
+        crate::ffi::test_source_seek_at(c_session, ADDED, 2, source_frame, anchor),
         crate::RESULT_OK
     );
     for block in 6..16 {
@@ -1140,7 +1143,7 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
                 c_session,
                 ADDED,
                 2,
-                next * 128,
+                stem_frame(next * 128),
                 sample_rate_hz,
                 &left,
                 &right,
@@ -1196,7 +1199,7 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
     crate::ffi::test_plan_destroy(r_plan);
     crate::ffi::test_session_destroy(r_session);
     assert_bit_identical(
-        &format!("{sample_rate_hz} Hz added stem"),
+        &format!("{sample_rate_hz} Hz added stem from frame {source_frame}"),
         0,
         &swapped,
         &reference,
@@ -1205,8 +1208,10 @@ fn an_added_source_starts_at_its_anchor_at(sample_rate_hz: u32) {
 
 #[test]
 fn an_added_c_abi_source_starts_at_its_anchored_render_sample() {
-    an_added_source_starts_at_its_anchor_at(48_000);
-    an_added_source_starts_at_its_anchor_at(96_000);
+    an_added_source_starts_at_its_anchor_at(48_000, 8 * 128);
+    an_added_source_starts_at_its_anchor_at(96_000, 8 * 128);
+    // `F != A`: the stem's frame 0 enters the graph at the anchor block.
+    an_added_source_starts_at_its_anchor_at(48_000, 0);
 }
 
 /// Submits block `block` of each of `ids`' signals (salted by position) through the session state.

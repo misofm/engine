@@ -90,11 +90,16 @@ capi_abi_self_test() {
         "${common_env[@]}" NM="$nm_remove" REAL_NM="$real_nm" bash "$0" "$workspace_root"
 
     # Issue #1275: a library whose miso_engine_v1_source_seek_at is only an undefined reference.
-    # The defined-only listing (`nm -D --defined-only`, or `-gU` on Apple) omits such a symbol,
-    # so the wrapper lists the real definitions minus that one; the frozen set must refuse it.
+    # The wrapper models one: a defined-only listing (`--defined-only`, or `-gU`/`-U` on Apple)
+    # omits the symbol, and any other listing shows it as `U`. The checker refuses this library
+    # only while it lists defined symbols alone and holds the frozen set exact.
     nm_undefined="$scratch_root/nm-undefined"
     printf '%s\n' '#!/usr/bin/env bash' \
-        '"${REAL_NM}" "$@" | sed "/miso_engine_v1_source_seek_at$/d"' >"$nm_undefined"
+        'if [[ " $* " == *" --defined-only "* || " $* " == *" -gU "* || " $* " == *" -U "* ]]; then' \
+        '    "${REAL_NM}" "$@" | sed "/miso_engine_v1_source_seek_at$/d"' \
+        'else' \
+        '    "${REAL_NM}" "$@" | sed "s/^.* \([A-Za-z]\) miso_engine_v1_source_seek_at$/                 U miso_engine_v1_source_seek_at/"' \
+        'fi' >"$nm_undefined"
     chmod +x "$nm_undefined"
     expect_failure seek-at-undefined-reference \
         "${common_env[@]}" NM="$nm_undefined" REAL_NM="$real_nm" bash "$0" "$workspace_root"

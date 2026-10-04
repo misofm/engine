@@ -70,11 +70,10 @@ whose declaration the transaction changed restarts the same way, in a new ring a
 frame 0; PCM accepted for it before the commit is discarded with its plan, so the host restarts
 its feed. For a session whose unchanged paths hold no DSP state, the output across the swap is
 bit-identical to the post-edit session compiled fresh and fed the same PCM from frame 0
-(`runtime::tests`'
-`a_c_abi_structural_transaction_keeps_the_source_playing`). The replacement's resource report counts
-the rings it carries and its carry program, as the plan will own them once active; the double-live
-admission counts a carried ring once, with the plan it displaces; and capi's epoch row charges the
-state inventory each epoch keeps.
+(`runtime::tests`' `a_c_abi_structural_transaction_keeps_the_source_playing`). The replacement's
+resource report counts the rings it carries and its carry program, as the plan will own them once
+active; the double-live admission counts a carried ring once, with the plan it displaces; and
+capi's epoch row charges the state inventory each epoch keeps.
 
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
@@ -118,7 +117,9 @@ transaction returns, the host picks `A` a few quanta past the last rendered bloc
 post-edit session compiled fresh and fed that PCM from frame 0 (`runtime::tests`'
 `an_added_c_abi_source_starts_at_its_anchored_render_sample`). The frozen exported set is now 15
 `miso_engine_v1_*` definitions (`scripts/check-capi-abi.sh`, whose self-test refuses a library
-where the new symbol is only an undefined reference).
+where the new symbol is only an undefined reference: its `nm` wrapper drops the symbol from a
+defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
+asking for defined symbols alone).
 
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
@@ -126,9 +127,9 @@ changed or rebuilt. The new consumer was corrected to submit generation 1 first,
 submit generation 2; all four consumer rows passed against the same once-built libraries. This is
 recorded as one consumer-fixture correction in `QUALIFICATION.tsv`.
 
-GNU `nm` found exactly the 14 frozen `miso_engine_v1_*` definitions in both library forms. The
-object parser classifies undefined references separately; a synthetic
-mutation replacing a definition with an identically named undefined reference is rejected.
+GNU `nm` found exactly the 14 frozen `miso_engine_v1_*` definitions (15 since #1275) in both
+library forms. The object parser classifies undefined references separately; a synthetic mutation
+replacing a definition with an identically named undefined reference is rejected.
 
 ## Runner and realtime evidence
 

@@ -169,3 +169,31 @@ the anchored seek of *Hold an anchored source seek until its render sample* (#12
 - No crate compiled into the browser Wasm module changed (capi only), so the worklet chain was
   not run and the artifact is unchanged.
 - `Simd4` runs only in CI's aarch64 legs. Like #1273, the slice adds no bank code.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`55690373d`) | `1275-attempt1.md` | PASS | Added C ABI source starts bit-exact at its anchor, no ack before a drop, #1273's minors closed; 1 MINOR (self-test "undefined reference" case does not model one), 4 NIT. Owner review of the in-place ABI amendment requested. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`):
+- MINOR 1: `scripts/check-capi-abi.sh`'s `seek-at-undefined-reference` wrapper now honours the
+  defined-only flags: with `--defined-only` (or `-gU`/`-U` on Apple) it drops the symbol, and
+  otherwise it rewrites the symbol's line to `U miso_engine_v1_source_seek_at`.
+  `docs/C_ABI_V1_QUALIFICATION.md` states that. Mutation S1 (the checker's `nm -D` call without
+  `--defined-only`): `--self-test` fails with "C ABI mutation unexpectedly passed:
+  seek-at-undefined-reference"; reverted: "C ABI mutation tests: ok".
+- NIT 1: gate 1 (`an_added_c_abi_source_starts_at_its_anchored_render_sample`) adds an `F != A`
+  run at 48 kHz: the stem's frame 0 enters at the anchor block (1024). M6 (frame and anchor
+  transposed in the export's call into the session): red in gate 1 alone; reverted: green.
+- NIT 2: the header says the blocks before `A` count as source underruns.
+- NIT 3: `ffi.rs`'s `miso_engine_v1_source_seek_at` rustdoc is wrapped at 100 columns.
+- NIT 4: `docs/C_ABI_V1_QUALIFICATION.md`'s orphaned line is rewrapped, and the historical
+  "14 frozen" now reads "(15 since #1275)".
+
+Stays open: the owner's review of the in-place C ABI amendment (`miso_engine_v1_source_seek_at`
+and `MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT`, feature bit 32, mask 63, under ABI version
+`0x00010000`) -- listed in #1269's "Phase 1 status". Apple `nm -gU` remains unverified here (no
+macOS host).

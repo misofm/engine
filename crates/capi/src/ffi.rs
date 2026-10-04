@@ -540,9 +540,9 @@ pub unsafe extern "C" fn miso_engine_v1_source_seek(
 }
 
 /// Queue one generation-tagged source seek whose `source_frame` enters the graph in the block that
-/// starts at absolute render sample `anchor_sample` (issue #1275). The argument checks, result codes
-/// and thread rule are [`miso_engine_v1_source_seek`]'s; an anchor that is not a multiple of the
-/// plan's quantum is refused as `source.seek.anchor_unaligned`.
+/// starts at absolute render sample `anchor_sample` (issue #1275). The argument checks, result
+/// codes and thread rule are [`miso_engine_v1_source_seek`]'s; an anchor that is not a multiple of
+/// the plan's quantum is refused as `source.seek.anchor_unaligned`.
 ///
 /// # Safety
 ///

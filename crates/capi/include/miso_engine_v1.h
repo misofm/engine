@@ -74,9 +74,9 @@ extern "C" {
  * quantum multiple a few quanta past the last rendered block; call
  * miso_engine_v1_source_seek_at(id, g, F, A), where g is above the source's generation (2 for a
  * just-added source) and F is the source frame the playing stems read at A; then submit generation
- * g from F before the block at A renders. Until A the stem renders silence; from A it plays F on.
- * Should the render reach the seek only after A, the stem starts at F plus the lateness, so it
- * stays in time.
+ * g from F before the block at A renders. Until A the stem renders silence, and those blocks
+ * count as source underruns; from A it plays F on. Should the render reach the seek only after A,
+ * the stem starts at F plus the lateness, so it stays in time.
  */
 
 #define MISO_ENGINE_V1_ABI_VERSION UINT32_C(0x00010000)
