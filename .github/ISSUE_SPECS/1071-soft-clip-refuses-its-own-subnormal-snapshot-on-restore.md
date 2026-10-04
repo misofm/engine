@@ -146,9 +146,11 @@ after revert):
 | MD | gain step: any finite (MINOR-1 reverted) | rejection test, `bad(6, 1)` | the rest |
 | ME | tolerance `1 * ulp(2 * high)` instead of `64` | mix-to-one and drive-to-top cases; the seeded differential | the rest |
 
-Not covered by a test: a sign error in the line (`t + remaining * step`); at an overshoot
-`remaining * step` is far smaller than the tolerance, so no self-produced state tells the two
-apart; only a crafted hostile word placed on the wrong line could, which is not a plausible defect.
+Not covered by a test in attempt 2: a sign error in the line (`t + remaining * step`). The
+attempt-2 claim that "no self-produced state tells the two apart" was **false** (review MINOR-1):
+a ramp that starts from an overshoot and is retargeted inward is still past the edge with
+`remaining = 63`, and there `remaining * step` is several times the tolerance. The review
+follow-up below adds that test.
 
 Gates: run in an export of HEAD plus this attempt's files, because the shared worktree holds
 #1278's uncommitted, mid-edit `crates/conformance/src/randomized.rs` (it does not compile at the
@@ -171,3 +173,47 @@ time of this attempt, so workspace gates in the worktree fail on that file, not 
 `94c443c08f93ac6ee5b5f1fe14b7d488d3c92d6a35af2bd2efc4d17e154240ad` (attempt 1 built
 `726f4291...`, the parent `30d075d3...`); the restore decode compiled into it changed. Per
 `docs/RELEASE.md` there is no per-change re-pin, so the pin file is left alone.
+
+### Attempt 2 verdict (verifier): PASS with two MINORs and two NITs
+
+The bound in `ramp_current_valid` was re-derived and confirmed (current within
+`32 * ulp(2h) + 2^-144` of the ramp's line, independent of the start); a 40,000-seed chained
+retarget probe restored all 1,339,910 of the effect's own snapshots (max `|current - line|` 15.75
+ulp(2h) for the gains, 7.875 ulp(2) for the mix). All gates green; **ARTIFACT CHANGED** to
+`94c443c0...` confirmed. Findings: MINOR-1, the line's `remaining * step` term was untested
+(mutations `line = t + remaining * step` and `line = t` left every committed test green) and the
+attempt record wrongly said no self-produced state could test it. MINOR-2, the two new hostile
+exclusions (`remaining == 0`, `-0.0` in flight) had no rejection rows. NIT-1, a crafted accepted
+payload can evolve into an own snapshot the restore refuses; the doc should say the accepted set
+is not closed under render. NIT-2 (for #1278's brief, outside this slice).
+
+### Review follow-ups (after the attempt 2 PASS)
+
+- **MINOR-1:** `state_roundtrip.rs` gains
+  `a_drive_overshoot_retargeted_inward_restores_and_continues`: the drive ramps to `+36 dB` over 63
+  frames from the start (of the 40 decibel ulps below the top) that ends furthest above it; a
+  1-frame block retargets it 50 decibel ulps inward. The test asserts `remaining == 63`, an inward
+  step and a current still above `gain(+36 dB)`, then restores into a fresh instance (snapshot
+  identity) and continues 128 samples bit for bit. The false sentence above is corrected.
+- **MINOR-2:** the rejection test gains two rows, each with its own fixture: an output prepared at
+  `+24 dB`, at rest, with its current set to `gain(+24 dB).next_up()`; and a mix ramp from 40
+  subnormal units to `0.0`, 48 frames in, with its current set to `-0.0`. Both must be refused
+  with `effect.state.parameter`.
+- **NIT-1:** `ramp_current_valid`'s doc says the accepted set is not closed under render once a
+  crafted word is in (the effect's own later snapshot of a crafted near-tolerance ramp may be
+  refused; only a crafted restore reaches it, and the plan-swap carry moves only self-produced
+  states), and `decode_lane_words`'s rule statement is narrowed to lanes that only held their own
+  words.
+- NIT-2 belongs to #1278 and is handled there.
+
+Mutation evidence (each applied to `crates/soft-clip/src/lib.rs`, the whole `cargo test -p
+soft-clip` suite run, the file restored and compared byte for byte):
+
+| # | Mutation | Red |
+|---|---|---|
+| MS | `line = target + remaining * step` | `a_drive_overshoot_retargeted_inward_restores_and_continues` (own snapshot refused, `effect.state.parameter`) |
+| ML | `line = target` | `a_drive_overshoot_retargeted_inward_restores_and_continues` |
+| MR | `remaining == 0 ||` dropped from the in-flight guard | rejection test, row "an output at rest one ulp above its top" |
+| MZ | `is_negative_zero(current) ||` dropped from the in-flight guard | rejection test, row "an in-flight mix current of -0.0" |
+
+Every other test stayed green under each mutation, and the suite is green after each restore.

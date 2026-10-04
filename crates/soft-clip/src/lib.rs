@@ -299,6 +299,14 @@ fn ulp_at(value: f32) -> f32 {
 /// Hostile words are refused as before but for that rounding margin: `-0.0`, non-finite values,
 /// a ramp at rest outside its range, and an in-flight current outside its range and off its own
 /// ramp's line.
+///
+/// The accepted set is not closed under render once a crafted word is in. A crafted in-flight
+/// ramp may hold a current near the tolerance's edge, far further off its line than any ramp of
+/// the effect's own drifts, and its later rounded additions can carry it past the tolerance, so
+/// the effect's own snapshot of it, some samples on, is refused. Only a crafted restore reaches this;
+/// every state the effect produces from its own automation stays restorable, and the plan-swap
+/// carry (#1278) moves only such states. Do not assume that a lane accepted from an arbitrary
+/// payload snapshots into one this check accepts.
 fn ramp_current_valid(index: usize, current: f32, target: f32, step: f32, remaining: u32) -> bool {
     if converted_value_valid(index, current) {
         return true;
@@ -696,7 +704,9 @@ struct LaneRestore {
 /// Validates the 104 payload words of layout 1.
 ///
 /// The rule is "accept every word the effect itself can hold, refuse the rest" (#1071), so a
-/// snapshot always survives its own restore and a restored lane continues bit for bit:
+/// snapshot of a lane that only ever held its own words always survives its own restore and a
+/// restored lane continues bit for bit (a lane restored from a crafted payload need not; see
+/// [`ramp_current_valid`]):
 ///
 /// * ramp targets, and the currents of ramps at rest, must be inside the *converted* domain (a
 ///   linear gain, not decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;

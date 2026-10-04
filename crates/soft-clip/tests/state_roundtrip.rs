@@ -179,12 +179,21 @@ fn an_overshooting_ramp_restores_and_continues(
         "the ramp has crossed its edge: current {current:e} ({:#010x})",
         current.to_bits()
     );
+    restores_and_continues(source, &payload, frames);
+}
 
+/// `payload`, the snapshot of `source` after `frames` samples, restores into a fresh instance
+/// with different initial values, snapshots back to itself, and the two continue bit for bit.
+fn restores_and_continues(
+    mut source: Box<dyn effect_contract::PreparedNativeEffect>,
+    payload: &(Vec<u8>, Vec<u8>, Vec<u8>),
+    frames: usize,
+) {
     let mut destination = prepare(&values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]));
     destination
-        .restore_state_payload(1, as_input(&payload))
+        .restore_state_payload(1, as_input(payload))
         .expect("the effect's own mid-ramp snapshot restores");
-    assert_eq!(support::snapshot(destination.as_ref()), payload);
+    assert_eq!(&support::snapshot(destination.as_ref()), payload);
 
     let mut expected_left: Vec<f32> = (0..128).map(|index| signal(index + frames, 0)).collect();
     let mut expected_right: Vec<f32> = (0..128).map(|index| signal(index + frames, 1)).collect();
@@ -273,6 +282,60 @@ fn an_output_ramp_to_its_bottom_that_crosses_below_it_restores() {
         60,
         |gain| gain < bottom,
     );
+}
+
+/// A drive ramp that has overshot `+36 dB` is retargeted one frame inward, so a new ramp starts
+/// from the overshoot and its current is still past the top with 63 samples to go (#1071 attempt 2
+/// review, MINOR-1). Its distance from its own line `target - remaining * step` is a fraction of an
+/// ulp, but `remaining * step` is about three times the restore's tolerance, so a restore that
+/// flips the line's sign or drops its slope (`line = target`) refuses this, the effect's own
+/// snapshot.
+#[test]
+fn a_drive_overshoot_retargeted_inward_restores_and_continues() {
+    let top = math::db_to_gain_f32(36.0);
+    let first_block = |start: f32| {
+        let values = values_from([(start, -6.0), (0.0, 3.0), (1.0, 0.5)]);
+        let mut source = prepare(&values);
+        let mut left: Vec<f32> = (0..63).map(|index| signal(index, 0)).collect();
+        let mut right: Vec<f32> = (0..63).map(|index| signal(index, 1)).collect();
+        let spans = [support::point(0, ParameterChannel::Left, 36.0, 0)];
+        process(source.as_mut(), &mut left, &mut right, 0, &spans);
+        source
+    };
+    // The start (a few dozen decibel ulps below the top) whose ramp ends furthest above it.
+    let overshoot =
+        |start: f32| support::word_f32(&support::snapshot(first_block(start).as_ref()).1, 0);
+    let mut start = 36.0_f32;
+    let mut best = start;
+    for _ in 0..40 {
+        start = start.next_down();
+        if overshoot(start) > overshoot(best) {
+            best = start;
+        }
+    }
+    let mut source = first_block(best);
+    let mut inward = 36.0_f32;
+    for _ in 0..50 {
+        inward = inward.next_down();
+    }
+    let mut left = [signal(63, 0)];
+    let mut right = [signal(63, 1)];
+    let spans = [support::point(0, ParameterChannel::Left, inward, 63)];
+    process(source.as_mut(), &mut left, &mut right, 63, &spans);
+    let payload = support::snapshot(source.as_ref());
+    let current = support::word_f32(&payload.1, 0);
+    let step = support::word_f32(&payload.1, 2);
+    assert_eq!(
+        word(&payload.1, 3),
+        63,
+        "the inward ramp has 63 samples to go"
+    );
+    assert!(step < 0.0, "the ramp moves inward");
+    assert!(
+        current > top,
+        "the current is still past the top: {current:e} against {top:e}"
+    );
+    restores_and_continues(source, &payload, 64);
 }
 
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
@@ -439,6 +502,40 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(0, 1, "effect.state.parameter");
     bad(73, f32::NAN.to_bits(), "effect.state.history");
     bad(103, f32::INFINITY.to_bits(), "effect.state.history");
+
+    // The overshoot allowance is for in-flight ramps only (#1071 attempt 2 review, MINOR-2). An
+    // output at rest at its +24 dB top with its current one ulp above the top: a ramp at rest
+    // holds exactly its target, so this is never the effect's own word.
+    let top = values_from([(6.0, -6.0), (24.0, 3.0), (1.0, 0.5)]);
+    let mut at_rest = support::snapshot(prepare(&top).as_ref());
+    assert_eq!(word(&at_rest.1, 7), 0, "the output ramp is at rest");
+    let above = math::db_to_gain_f32(24.0).next_up();
+    at_rest.1[16..20].copy_from_slice(&above.to_bits().to_le_bytes());
+    assert_eq!(
+        prepare(&top).restore_state_payload(1, as_input(&at_rest)),
+        Err(StatePayloadError {
+            code: "effect.state.parameter"
+        }),
+        "an output at rest one ulp above its top"
+    );
+    // And `-0.0` is never a current, even on an in-flight mix ramp toward `0.0` whose line is
+    // within the tolerance of zero: a mix from 40 subnormal units to zero, 48 frames in.
+    let subnormal = values_from([(6.0, -6.0), (0.0, 3.0), (f32::from_bits(40), 0.5)]);
+    let mut source = prepare(&subnormal);
+    let mut left = vec![0.25_f32; 48];
+    let mut right = left.clone();
+    let spans = [support::point(2, ParameterChannel::Left, 0.0, 0)];
+    process(source.as_mut(), &mut left, &mut right, 0, &spans);
+    let mut negative_zero = support::snapshot(source.as_ref());
+    assert!(word(&negative_zero.1, 11) > 0, "the mix ramp is in flight");
+    negative_zero.1[32..36].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
+    assert_eq!(
+        prepare(&subnormal).restore_state_payload(1, as_input(&negative_zero)),
+        Err(StatePayloadError {
+            code: "effect.state.parameter"
+        }),
+        "an in-flight mix current of -0.0"
+    );
 
     // A rejected restore leaves the effect untouched.
     let mut untouched = prepare(&values);
