@@ -1144,6 +1144,23 @@ pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
     )
 }
 
+/// How many plan replacements this plan handle's render thread has swapped in: the active plan's
+/// epoch, since the compiled plan is epoch 0 and each published replacement takes the next one.
+/// A live edit publishes no plan, so it leaves this count unchanged. Not part of the C ABI, like
+/// [`plan_carry_counts`]: `audit capi` and the live-edit race read it to prove that their live
+/// edits rebuilt nothing and their structural transactions each swapped in exactly one plan.
+///
+/// # Safety
+///
+/// As [`plan_carry_counts`]: a live plan handle with no concurrent render call or destroy.
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn plan_replacement_count(plan: *const Plan) -> u64 {
+    // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
+    // the render-thread state aliases no exclusive borrow.
+    unsafe { &(*plan).state }.owner.active_epoch().0
+}
+
 #[cfg(test)]
 pub(crate) fn test_plan_carry_counts(plan: *mut Plan) -> (u64, u64) {
     // SAFETY: Test callers retain the exclusively owned live plan, with no render in flight.

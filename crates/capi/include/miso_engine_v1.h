@@ -54,8 +54,12 @@ extern "C" {
  * its revision are unchanged, and the host retries after a render call. An
  * acknowledged live edit is never dropped. A live edit commits the same response and the same
  * reliable events as a replacement, so the host drains the reliable event lane after each edit
- * either way. A host still detects a replacement as before: its next source submission is refused
- * until it seeks; after a live edit, submission simply continues.
+ * either way. After either one the host goes on submitting every source the transaction left
+ * unchanged, with no seek; after a replacement it acts only on a source the transaction added,
+ * changed or removed (see "Sources across a structural transaction" and "Starting an added stem
+ * in time" below). The ABI gives no signal that tells a live edit from a replacement, and a host
+ * needs none. (miso_engine_v1_plan_resources describes whichever plan is active, so a replacement
+ * may change it, but an unchanged report does not mean that no replacement happened.)
  *
  * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.

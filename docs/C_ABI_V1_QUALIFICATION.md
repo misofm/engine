@@ -143,7 +143,8 @@ The exported C render audit completed 100,000 calls with stable caller storage a
 deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors.
 Since #1273 the audit applies one structural transaction (a muted track and its route) after its
 first call, outside the render scopes, so its second audited call is a swap block that carries the
-source's ring; the tool fails unless exactly that one swap carried. A
+source's ring; the tool fails unless that transaction's plan is the only one the render thread
+swapped in (so every periodic live edit was applied live, #1258 D3) and its swap carried. A
 separate functional one-million-block render/swap audit observed two accepted swaps, one retirement
 deferral, zero forbidden-operation counters, and zero syscalls between the explicit realtime trace
 markers. Neither audit selected a benchmark mode or recorded durations.
@@ -297,9 +298,13 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
 - **Same response and events.** A live edit returns `TransactionApplied` and emits one
   `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
   The reliable event lane holds two events, so a host drains it after each edit either way.
-- **Detecting a rebuild.** As before: after a replacement the next source submission is refused
-  until the host seeks. After a live edit, submission simply continues. No new symbol, opcode,
-  field, result code or event is added.
+- **No rebuild signal.** Since #1273 a host needs none. After a live edit or a replacement alike
+  it goes on submitting every source the transaction left unchanged, with no seek; after a
+  replacement it acts only on a source the transaction added, changed or removed (see the #1273
+  paragraph under "Linux artifact and consumer boundary", and `miso_engine_v1_source_seek_at`
+  (#1275) to start an added one in time). The ABI gives no way to tell the two apart: the response and the events are
+  the same, and `miso_engine_v1_plan_resources` describes whichever plan is active, which a
+  replacement may leave unchanged. No new symbol, opcode, field, result code or event is added.
 - **Live admission.** The prospective compiled model lives beside the current one until the
   commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
   `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the

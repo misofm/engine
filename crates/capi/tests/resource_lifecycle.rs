@@ -224,6 +224,47 @@ fn command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
     bytes
 }
 
+/// A structural transaction that renders identically and carries the source (#1273): `UpsertTrack`
+/// of a muted copy of `document`'s first track as `track_id`, plus a copy of that track's route.
+/// The new strip needs a new plan, and the source is unchanged, so the successor carries its ring.
+fn muted_track_command(document: &str, request_id: u64, revision: u64, track_id: &str) -> Vec<u8> {
+    let model = session::parse_session_json(document).expect("the session");
+    let mut track = model.tracks[0].clone();
+    let first = track.id.clone();
+    track.id = StableId::parse(track_id).expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    let mut route = model
+        .routes
+        .iter()
+        .find(|route| {
+            matches!(&route.source, session::RouteSource::Track { track_id, .. } if *track_id == first)
+        })
+        .expect("the first track's route")
+        .clone();
+    route.id = StableId::parse(&format!("{track_id}-route")).expect("route ID");
+    if let session::RouteSource::Track { track_id, .. } = &mut route.source {
+        *track_id = track.id.clone();
+    }
+    let edits = [
+        SessionEdit::UpsertTrack { track },
+        SessionEdit::UpsertRoute { route },
+    ];
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("structural command");
+    bytes.truncate(len);
+    bytes
+}
+
 fn capability_command() -> Vec<u8> {
     let mut bytes = vec![0_u8; 4_096];
     let len = ProtocolCodec::default()
@@ -1445,26 +1486,26 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 #[test]
 fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_document = scratch_session();
-    let prospective_document = {
-        let mut model = session::parse_session_json(&session_document).expect("oracle session");
-        model.sources[0].content = content(0x01);
-        session::canonical_session_json(&model).expect("prospective canonical session")
+    // The trigger adds a muted strip and its route and leaves the source unchanged, so the
+    // replacement carries the source's ring (#1273). A source-content edit would restart the
+    // source in a new ring, and a session-ID edit commits with no replacement (#1260).
+    let command = |request_id, revision, track_id| {
+        muted_track_command(&session_document, request_id, revision, track_id)
     };
-    assert_ne!(prospective_document, session_document);
-    assert_eq!(
-        prospective_document.len(),
-        session_document.len(),
-        "the replacement changes the source's content identity and nothing else"
-    );
 
-    // The two live reports, read through the C ABI at roomy caps.
+    // The two live reports, read through the C ABI at roomy caps, and the committed snapshot the
+    // replacement prepared from.
+    let mut snapshot_request = 100;
     // SAFETY: These handles are uniquely owned until their matching destroy calls.
-    let (current, prospective) = unsafe {
+    let (current, prospective, prospective_document) = unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
         let current = resources_c(plan);
-        let request = command(1, 42, 0x01);
+        let request = command(1, 42, "a-muted");
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
+        drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        let (revision, prospective_document) = snapshot_c(session, &mut snapshot_request);
+        assert_eq!(revision, 43, "the trigger committed");
         let mut pcm = [f32::NAN; 256];
         let output = PlanarOutput {
             struct_size: PLANAR_OUTPUT_SIZE,
@@ -1480,21 +1521,25 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             RESULT_OK
         );
         let prospective = resources_c(plan);
+        assert_eq!(
+            plan_carry_counts(plan),
+            (1, 0),
+            "vacuous: the swap carried no ring"
+        );
         miso_engine_v1_session_destroy(session);
         miso_engine_v1_plan_destroy(plan);
-        (current, prospective)
+        (current, prospective, prospective_document)
     };
-    // The two reports can be equal -- the replacement only rewrites the source's content identity
-    // at the same length, and the canonical JSON is charged with the model, not in these rows -- so
-    // the swap is proved by admission instead: with one publication slot, a second replacement is
+    assert_ne!(prospective_document, session_document);
+    // The swap is also proved by admission: with one publication slot, a second replacement is
     // admitted only once the render has swapped the first one in.
     // SAFETY: These handles are uniquely owned until their matching destroy calls.
     unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
-        let request = command(1, 42, 0x01);
+        let request = command(1, 42, "a-muted");
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
-        let again = command(2, 43, 0x02);
+        let again = muted_track_command(&prospective_document, 2, 43, "a-muted-2");
         assert_eq!(
             submit(session, &again, &mut response),
             RESULT_BACKPRESSURE,
@@ -1529,16 +1574,27 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let prospective_model = prospective_host.model_estimate();
     // The replacement leaves the source unchanged, so the prospective plan is prepared to carry
     // the current plan's ring (#1273): its report counts that ring, which the current plan owns
-    // until the swap, and the double-live peak counts once.
-    let successor = host_core::prepare_host_runtime_successor(
+    // until the swap, and the double-live peak counts once. It is prepared as capi prepares a
+    // successor, with the same live lanes (`host_half`'s request).
+    let successor = host_core::prepare_host_runtime_with_live_lanes_successor(
         prospective_host.store.compiled(),
         &host_caps(&limits()),
+        &host_core::HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..host_core::HostLiveControlRequest::default()
+        },
+        host_core::HostLiveLanes {
+            strip_input: false,
+            effects: true,
+            routes: false,
+        },
         host_core::SuccessorBase {
             inventory: &current_host.prepared.inventory,
             committed: current_host.store.compiled().normalized_model(),
         },
     )
     .unwrap_or_else(|_| panic!("the prospective session prepares as a successor"))
+    .0
     .report;
     assert!(
         successor.carried_source_total_bytes > 0,
@@ -1637,7 +1693,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
             assert_eq!(resources_c(plan), current, "{row}: the cap moves no row");
-            let request = command(1, 42, 0x01);
+            let request = command(1, 42, "a-muted");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
             let mut pcm = [f32::NAN; 256];
@@ -1668,11 +1724,34 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             unsafe { compile_rejected_c(&session_document, &below_limits) };
             continue;
         }
+        if row == "largest" && required == prospective_model.single_allocation_bytes {
+            // The prospective model's own largest allocation is the requirement (the added strip
+            // grows its canonical bound), so the protocol's compile caps refuse the transaction
+            // before capi prepares a plan: a typed `ValidationFailed` response, with the revision
+            // and the report unchanged.
+            // SAFETY: These handles are uniquely owned until their matching destroy calls.
+            unsafe {
+                let (session, plan) = compile_c(&session_document, &below_limits);
+                let before = resources_c(plan);
+                let (code, header) = submit_header(session, &command(1, 42, "a-muted"));
+                assert_eq!(code, RESULT_OK, "{row} one-below");
+                let header = header.expect("a response header");
+                assert_eq!(
+                    (header.status, header.revision),
+                    (StatusCode::ValidationFailed, SessionRevision(42)),
+                    "{row} one-below"
+                );
+                assert_eq!(resources_c(plan), before, "{row} atomic report");
+                miso_engine_v1_session_destroy(session);
+                miso_engine_v1_plan_destroy(plan);
+            }
+            continue;
+        }
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_document, &below_limits);
             let before = resources_c(plan);
-            let request = command(1, 42, 0x01);
+            let request = command(1, 42, "a-muted");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(
                 submit(session, &request, &mut response),
@@ -2161,7 +2240,6 @@ unsafe fn submit_constant_c(session: *mut Session, generation: u64, start_frame:
 struct ConstantFeed {
     generation: u64,
     fed: u64,
-    seeks: u64,
 }
 
 impl ConstantFeed {
@@ -2169,16 +2247,15 @@ impl ConstantFeed {
         Self {
             generation: 1,
             fed: 0,
-            seeks: 0,
         }
     }
 
     /// Submits constant quanta until the ring is full.
     ///
-    /// A stale generation means a render swapped in a fresh plan, whose rings start at generation
-    /// 1 and wait for a seek: the feed seeks to frame 0 under its next generation, as a host does
-    /// after a swap, and keeps feeding. The feed seeks once before its first submission, so a
-    /// fresh plan's generation 1 is always stale to it.
+    /// A stale generation means a transaction changed the source's declaration, which restarts it
+    /// in a new ring at generation 1, frame 0 (#1273): the feed seeks to frame 0 under its next
+    /// generation, as a host restarts its feed, and keeps feeding. The feed seeks once before its
+    /// first submission, so a restarted source's generation 1 is always stale to it.
     ///
     /// # Safety
     ///
@@ -2217,10 +2294,7 @@ impl ConstantFeed {
                         )
                     };
                     match code {
-                        RESULT_OK => {
-                            self.fed = 0;
-                            self.seeks += 1;
-                        }
+                        RESULT_OK => self.fed = 0,
                         RESULT_BACKPRESSURE => return Ok(()),
                         code => return Err(format!("seek after a swap: {code}")),
                     }
@@ -2405,7 +2479,8 @@ struct RaceCounts {
     plan_backpressure: u64,
     event_backpressure: u64,
     retries: u64,
-    seeks: u64,
+    /// Plan replacements the render thread swapped in (`plan_replacement_count`).
+    replacements: u64,
     overlapped: u64,
     blocks: u64,
 }
@@ -2706,11 +2781,11 @@ fn race_live_edits(run: usize) -> RaceCounts {
         }
         let final_block = fed_render_c(session, plan, &mut feed, block);
         let (committed_revision, final_document) = snapshot_c(session, &mut request_id);
+        counts.replacements = plan_replacement_count(plan);
         miso_engine_v1_session_destroy(session);
         miso_engine_v1_plan_destroy(plan);
         (committed_revision, final_document, latency, final_block)
     };
-    counts.seeks = feed.seeks;
     assert_eq!(
         committed_revision, revision,
         "run {run}: the snapshot's revision"
@@ -2819,7 +2894,8 @@ fn paused_bursts(
 /// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
 /// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from
 /// a fresh plan of the final snapshot), if epoch synchronization returns `RESULT_INTERNAL` under
-/// live traffic, or if a `RESULT_BACKPRESSURE` carries any other diagnostic or never clears.
+/// live traffic, if a `RESULT_BACKPRESSURE` carries any other diagnostic or never clears, or if a
+/// live edit rebuilds the plan or a structural one swaps in other than exactly one plan.
 #[test]
 fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free() {
     let mut total = RaceCounts::default();
@@ -2829,14 +2905,19 @@ fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_fr
         assert!(counts.live >= RACE_EDITS - RACE_EDITS / 8, "run {run}");
         assert!(counts.live_backpressure >= 1, "run {run}");
         assert!(counts.plan_backpressure >= 1, "run {run}");
-        assert!(counts.seeks > 0, "vacuous: run {run} swapped no plan in");
+        // Every admitted structural transaction swapped in exactly one plan, and no live edit
+        // swapped in one of its own: a live edit that silently rebuilt is counted here.
+        assert_eq!(
+            counts.replacements, counts.structural,
+            "run {run}: plan replacements against admitted structural transactions"
+        );
         total.live += counts.live;
         total.structural += counts.structural;
         total.live_backpressure += counts.live_backpressure;
         total.plan_backpressure += counts.plan_backpressure;
         total.event_backpressure += counts.event_backpressure;
         total.retries += counts.retries;
-        total.seeks += counts.seeks;
+        total.replacements += counts.replacements;
         total.overlapped += counts.overlapped;
         total.blocks += counts.blocks;
     }

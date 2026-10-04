@@ -25,6 +25,7 @@ use capi::{
     miso_engine_v1_engine_create, miso_engine_v1_engine_destroy, miso_engine_v1_plan_destroy,
     miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
     miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command, plan_carry_counts,
+    plan_replacement_count,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 use protocol::{
@@ -506,23 +507,25 @@ impl PreparedAudit {
         let snapshot = audit::snapshot();
         // SAFETY: The plan is live and no render call runs concurrently.
         let (carried, carry_mismatches) = unsafe { plan_carry_counts(plan) };
+        // SAFETY: As above.
+        let replacements = unsafe { plan_replacement_count(plan) };
         assert_eq!(editor.edits, CALLS.div_ceil(LIVE_EDIT_PERIOD));
-        // The liveness witness: every edit was live, so the first plan still renders and its
-        // source ring takes the next contiguous generation-1 chunk with no seek. After a
-        // replacement the ring would refuse it until a seek, so an edit that silently rebuilt
-        // fails the audit instead of auditing a path it never took.
-        assert_eq!(
-            submit_source_chunk(self.handles.session, 2 * QUANTUM_FRAMES as u64).0,
-            RESULT_OK,
-            "a live edit rebuilt the plan"
-        );
         assert_eq!(render_errors, 0);
         assert_eq!(output_address_changes, 0);
         assert_eq!(snapshot.total(), 0);
+        // The liveness witness: the one structural transaction is the only plan the render
+        // thread ever swapped in, so every periodic edit was applied live. An edit that silently
+        // rebuilt would swap in a plan of its own and fail the audit instead of auditing a path
+        // it never took. (Since #1273 a rebuild carries the unchanged source's ring, so source
+        // submission no longer tells the two apart.)
+        assert_eq!(
+            replacements, 1,
+            "plan replacements: exactly the structural transaction's (more: a live edit rebuilt)"
+        );
         assert_eq!(
             (carried, carry_mismatches),
             (1, 0),
-            "the audited calls include exactly one carrying swap block"
+            "the structural transaction's swap block carried the source's ring"
         );
         AuditEvidence {
             calls: CALLS,
