@@ -2,14 +2,20 @@
 
 #![allow(unsafe_code)]
 
-use core::{alloc::Layout, cell::Cell, mem::size_of, ptr};
+use core::{
+    alloc::Layout,
+    cell::Cell,
+    mem::size_of,
+    ptr,
+    sync::atomic::{AtomicBool, AtomicU64},
+};
 use std::alloc::{GlobalAlloc, System};
 
 use capi::*;
 use lane::Backend;
 use protocol::{
     CommandPayload, ExpectedRevision, ProtocolCodec, RequestId, SessionEdit, SessionRevision,
-    TypedCommandFrame,
+    StatusCode, TypedCommandFrame,
 };
 use session::StableId;
 
@@ -183,9 +189,25 @@ fn limits() -> CompileLimits {
     }
 }
 
-fn command(request_id: u64, revision: u64, session_id: &'static str) -> Vec<u8> {
-    let edit = SessionEdit::SetSessionId {
-        session_id: StableId::parse(session_id).expect("static session ID"),
+/// `SESSION`'s source content identity, `blake3:` and `tag` repeated as hex: the same length as
+/// the fixture's.
+fn content(tag: u8) -> String {
+    format!("blake3:{}", format!("{tag:02x}").repeat(32))
+}
+
+/// A structural transaction that renders identically (#1260 D3): it changes only `SESSION`'s
+/// source content identity to `content(tag)`. A session ID edit is model-only and commits without
+/// a rebuild, so it no longer triggers one. Successive rebuilds need distinct tags.
+fn command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let source = &model.sources[0];
+    assert_ne!(source.content, content(tag), "the edit changes the content");
+    let edit = SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content: content(tag),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
     };
     let mut bytes = vec![0_u8; 4_096];
     let len = ProtocolCodec::default()
@@ -234,8 +256,8 @@ unsafe fn submit(session: *mut Session, request: &[u8], response: &mut [u8; 4_09
 
 fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
     let capability = capability_command();
-    let first = command(2, 42, "lifecycle-first");
-    let second = command(3, 43, "lifecycle-second");
+    let first = command(2, 42, 0x01);
+    let second = command(3, 43, 0x02);
     let config = EngineConfig {
         struct_size: ENGINE_CONFIG_SIZE,
         abi_version: ABI_VERSION,
@@ -493,14 +515,23 @@ fn host_caps(limits: &CompileLimits) -> host_core::HostPrepareCaps {
 
 /// The host-core half of one `miso_engine_v1_compile_session`, replayed through the public API.
 ///
-/// capi parses the document into a `SessionStore` and prepares the plan, its source producers and
-/// its parameter catalog through `host-core` before it allocates anything of its own; it then
-/// moves all of them into its two handles without copying them. What the compile leaves live
-/// beyond this half is therefore exactly what capi itself allocated.
+/// capi parses the document into a `SessionStore` and prepares the plan, its source producers,
+/// its strip live-control producers and its parameter catalog through `host-core` before it
+/// allocates anything of its own; it then moves all of them into its two handles without copying
+/// them. What the compile leaves live beyond this half is therefore exactly what capi itself
+/// allocated.
 struct HostHalf {
     store: protocol::SessionStore,
     prepared: host_core::PreparedHost,
+    /// Each strip's fader/mute and matrix/pan producers, kept as capi keeps them (#1256 D2).
+    strips: Box<[host_core::TrackControlProducer]>,
+    /// One producer per prepared effect instance, with each EQ's owner, kept as capi keeps them
+    /// (#1263 D2).
+    effects: Box<[host_core::EffectControlProducer]>,
 }
+
+/// capi's live-lane depth, `LIVE_QUEUE_DEPTH` (#1053 D4), which is crate-private.
+const LIVE_QUEUE_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::new(16).unwrap();
 
 fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
     let caps = host_caps(compile_limits);
@@ -511,9 +542,36 @@ fn host_half(document: &str, compile_limits: &CompileLimits) -> HostHalf {
         .unwrap_or_else(|_| panic!("the reference session's compile caps"));
     let store = protocol::SessionStore::new(model, compile_caps)
         .unwrap_or_else(|_| panic!("the reference session compiles"));
-    let prepared = host_core::prepare_host_runtime(store.compiled(), &caps)
-        .unwrap_or_else(|_| panic!("the reference session prepares"));
-    HostHalf { store, prepared }
+    // The same request capi makes (#1256 D1, #1263 D1: fader/mute, matrix/pan and effect lanes,
+    // no input or route lane), spelled here independently, and inside the caller's observed
+    // window the same disposal (D2): the strip ID list and the vectors this selection leaves empty
+    // drop here, so only the producers survive, as two boxed slices. Keeping the ID list would
+    // count bytes capi does not keep.
+    let (prepared, handles) = host_core::prepare_host_runtime_with_live_lanes(
+        store.compiled(),
+        &caps,
+        &host_core::HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..host_core::HostLiveControlRequest::default()
+        },
+        host_core::HostLiveLanes {
+            strip_input: false,
+            effects: true,
+            routes: false,
+        },
+    )
+    .unwrap_or_else(|_| panic!("the reference session prepares"));
+    let host_core::HostLiveControlHandles {
+        strip_controls,
+        effect_controls,
+        ..
+    } = handles;
+    HostHalf {
+        store,
+        prepared,
+        strips: strip_controls.into_boxed_slice(),
+        effects: effect_controls.into_boxed_slice(),
+    }
 }
 
 impl HostHalf {
@@ -538,6 +596,52 @@ impl HostHalf {
     }
 }
 
+impl HostHalf {
+    /// The two capi terms an epoch adds to a replacement's or a live edit's peak, each from its
+    /// owning crate's report: `epoch_retained` and `prepared_protocol_retained`.
+    ///
+    /// The session's canonical JSON is charged once, with its model in the graph row. The epoch
+    /// term is the source producers' control table and ID arena, the strip producers' table
+    /// and track IDs (#1256), measured from the kept slice, and the effect producers' table and
+    /// owned payload (#1263), from host-core's walk over them, and the plan state inventory the
+    /// epoch keeps for its successor (#1273 D5). The prepared-protocol term is the
+    /// response buffer, the affine token, the replay cache and the parameter catalog.
+    fn capi_epoch_terms(&self, compile_limits: &CompileLimits) -> (u64, u64) {
+        let replay =
+            protocol::ReplayCache::resource_report_for_config(protocol::ReplayCacheConfig {
+                entries: core::num::NonZeroUsize::new(
+                    compile_limits.maximum_replay_entries as usize,
+                )
+                .expect("replay entries"),
+                bytes: core::num::NonZeroUsize::new(compile_limits.maximum_replay_bytes as usize)
+                    .expect("replay bytes"),
+                max_response_bytes: compile_limits.maximum_control_frame_bytes as usize,
+            })
+            .unwrap_or_else(|_| panic!("replay resource report"));
+        let strips = size_of_val(&*self.strips) as u64
+            + self
+                .strips
+                .iter()
+                .map(|producer| producer.track_id.len() as u64)
+                .sum::<u64>();
+        let effects = self
+            .prepared
+            .report
+            .effect_control_resources
+            .total_bytes()
+            .expect("the effect producers' charge");
+        let epoch = self.prepared.report.control_retained_bytes
+            + strips
+            + effects
+            + self.prepared.report.inventory_retained_bytes;
+        let prepared_protocol = compile_limits.maximum_control_frame_bytes
+            + size_of::<protocol::PreparedStructuralCommand>() as u64
+            + replay.retained_payload_bytes
+            + self.catalog_charge();
+        (epoch, prepared_protocol)
+    }
+}
+
 fn live_bytes(window: Snapshot) -> u64 {
     window
         .allocated_bytes
@@ -556,10 +660,12 @@ fn freed_by_drop<T>(value: T) -> u64 {
 
 /// What each owner the host-core half hands capi retains, observed by dropping it.
 ///
-/// The drop order is the attribution: the source producers go first, so a ring the producers
-/// share with the plan is freed -- and counted -- with the plan that renders from it, and the
-/// producers' own bytes are their control table and ID arena alone.
+/// The drop order is the attribution: the effect, strip and source producers go first, so a ring
+/// the producers share with the plan is freed -- and counted -- with the plan that renders from
+/// it, and the producers' own bytes are their tables, IDs and (an EQ's) owners alone.
 struct HostOwners {
+    effects: u64,
+    strips: u64,
     sources: u64,
     catalog: u64,
     plan: u64,
@@ -579,6 +685,8 @@ struct CompileObservation {
     /// Bytes the replayed host-core half left live, and the same bytes owner by owner.
     host_live: u64,
     owners: HostOwners,
+    /// `strip_control_table_bytes` at the compiled session's strip count and strip ID bytes.
+    strip_table_charge: u64,
 }
 
 fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObservation {
@@ -597,7 +705,21 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
     let host = host_half(document, compile_limits);
     let host_live = live_bytes(finish());
     let model = host.model_estimate();
-    let HostHalf { store, prepared } = host;
+    let HostHalf {
+        store,
+        prepared,
+        strips,
+        effects,
+    } = host;
+    let (strip_count, strip_id_bytes) = store
+        .compiled()
+        .normalized_model()
+        .strips()
+        .fold((0, 0), |(count, bytes), strip| {
+            (count + 1, bytes + strip.id.as_str().len())
+        });
+    let strip_table_charge = host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+        .expect("the strip table's charge");
     let host_core::PreparedHost {
         plan,
         sources,
@@ -606,6 +728,8 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         control_catalog,
     } = prepared;
     let owners = HostOwners {
+        effects: freed_by_drop(effects),
+        strips: freed_by_drop(strips),
         sources: freed_by_drop(sources),
         catalog: freed_by_drop(control_catalog),
         plan: freed_by_drop(plan),
@@ -613,9 +737,15 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         inventory: freed_by_drop(inventory),
     };
     assert_eq!(
-        owners.sources + owners.catalog + owners.plan + owners.store + owners.inventory,
+        owners.effects
+            + owners.strips
+            + owners.sources
+            + owners.catalog
+            + owners.plan
+            + owners.store
+            + owners.inventory,
         host_live,
-        "the five owners hold every byte the host-core half retains"
+        "the seven owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -624,6 +754,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         compile_live,
         host_live,
         owners,
+        strip_table_charge,
     }
 }
 
@@ -631,9 +762,10 @@ impl CompileObservation {
     /// The completeness claim for capi's own row, to the byte, from observations only.
     ///
     /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left live
-    /// beyond its host-core half -- plus the three host-allocated owners capi keeps: the source
-    /// control table and ID arena, the parameter catalog, and the plan state inventory (#1273 D5).
-    /// Each of the four terms on the left is observed. An owner row dropped from capi's accounting
+    /// beyond its host-core half -- plus the five host-allocated owners capi keeps: the effect and
+    /// strip live-control producers (#1263, #1256), the source control table and ID arena, the
+    /// parameter catalog, and the plan state inventory (#1273 D5). Each of the six terms on the
+    /// left is observed. An owner row dropped from capi's accounting
     /// (the verifier's `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi
     /// allocates but does not charge, or spare capacity in a charged one (the catalog's enum-choice
     /// vectors before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a
@@ -656,13 +788,16 @@ impl CompileObservation {
             compile_limits.maximum_control_frame_bytes % size_of::<u16>() as u64;
         assert_eq!(
             capi_allocated
+                + self.owners.effects
+                + self.owners.strips
                 + self.owners.sources
                 + self.owners.catalog
                 + self.owners.inventory
                 + decode_field_rounding,
             self.report.capi_retained_bytes,
-            "{label}: capi's own allocations + the source producers + the parameter catalog + the \
-             plan state inventory + the decode-field rounding, all observed (left), against \
+            "{label}: capi's own allocations + the effect producers + the strip producers + the \
+             source producers + the parameter catalog + the plan state inventory + the \
+             decode-field rounding, all observed (left), against \
              `capi_retained_bytes` (right)"
         );
     }
@@ -691,6 +826,18 @@ impl CompileObservation {
     ///   Builtins have their own allocator oracle (`builtins-compiler/tests/allocation_tracker.rs`).
     fn assert_host_owners_are_charged(&self, label: &str) {
         let owners = &self.owners;
+        assert_eq!(
+            owners.effects,
+            self.host_report
+                .effect_control_resources
+                .total_bytes()
+                .expect("the effect producers' charge"),
+            "{label}: effect producer table, its IDs and the EQ owners"
+        );
+        assert_eq!(
+            owners.strips, self.strip_table_charge,
+            "{label}: strip producer table and its track IDs"
+        );
         assert_eq!(
             owners.sources, self.host_report.control_retained_bytes,
             "{label}: source control table and ID arena"
@@ -740,6 +887,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
         ("parametric-eq-nine-track", SESSION.to_owned()),
         ("soft-clip nine-track", scratch_session()),
         ("browser identity", BROWSER_IDENTITY.to_owned()),
+        // #1256 MINOR-1, folded into #1258: submix strips and a route into a submix, so the strip
+        // table's submix entries and the C ABI's lane selection (no route lanes) are observed.
+        ("routed submix", two_track_routed_submix_session()),
     ] {
         let observed = observe_compile(&document, &limits());
         observed.assert_capi_retained_bytes_are_complete(label, &limits());
@@ -758,7 +908,9 @@ fn capi_retained_bytes_charge_every_byte_the_compile_retains() {
 fn prepared_parameter_catalog_charge_covers_its_allocations() {
     let host = host_half(SESSION, &limits());
     let charge = host.catalog_charge();
-    let HostHalf { store, prepared } = host;
+    let HostHalf {
+        store, prepared, ..
+    } = host;
     let host_core::PreparedHost {
         control_catalog, ..
     } = prepared;
@@ -835,24 +987,47 @@ impl Budget {
 /// eight-lane move less four mask bytes). The graph rows moved by the same amounts and stay inside
 /// their budgets (253,934 of 261,248 at eight lanes).
 /// | largest named allocation | 90,720 | the same |
+///
+/// #1256 raised the two builtin payload rows, a structural move: every C ABI plan now carries each
+/// strip's fader/mute and matrix/pan lanes, two 16-record rings per strip plus builtins' producer
+/// vector and control seal, 17,451 -> 28,521 (+11,070, 1,230 per strip on nine strips). The new
+/// ceiling is 28,521 plus 10 %, rounded up to 64, at both widths. capi retained moved 256,812 ->
+/// 258,135 (+1,323) inside its budget: the strip table, nine 136-byte producers and their 27 ID
+/// bytes (1,251), and 24 bytes in each of the three provider-epoch slots (72).
+///
+/// #1263 raised the three graph rows, a structural move: every C ABI plan now carries one live
+/// lane per prepared effect instance, here the nine console-slot EQs. The graph estimate charges
+/// each lane's ring and target staging and the banked live-control owner the lanes make bind build
+/// (`effect_control_resource`): 2,104 bytes per member plus 55,024 per eight-lane bank, measured
+/// on x86-64 by track count. graph session+plan and incremental move 253,934 -> 382,918 and graph
+/// metadata 56,137 -> 185,121 (+128,984 each); the prepared plan's observed bytes move by exactly
+/// as much, so the slack above is unchanged. The eight-lane ceilings are the new values plus 10 %,
+/// rounded up to 64. The four-lane ceilings are derived, not measured: the four-lane baseline
+/// (230,845 + #1098's 16,453 for session+plan; 56,840 + 69 for metadata) plus the eight-lane
+/// move, plus 10 %. That move is an upper bound at four lanes, because three four-lane banks
+/// hold fewer lanes (12) than two eight-lane banks (16) and a bank's per-lane terms (the packed
+/// span window, the lane array, the shunt over the AoSoA block) outweigh its per-bank staging
+/// window. capi retained moved 258,231 -> 273,640 (+15,409) inside its budget: the effect
+/// producer table (nine 104-byte producers) and its owned payload, the EQ owners and the effect
+/// and strip IDs (14,425), and 16 bytes in each of the three provider-epoch slots (48).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",
         value: |report| report.graph_session_plus_plan_bytes,
-        eight_lanes: 261_248,
-        four_lanes: 253_952,
+        eight_lanes: 421_248,
+        four_lanes: 413_952,
     },
     Budget {
         row: "graph_incremental_plan_bytes",
         value: |report| report.graph_incremental_plan_bytes,
-        eight_lanes: 261_248,
-        four_lanes: 253_952,
+        eight_lanes: 421_248,
+        four_lanes: 413_952,
     },
     Budget {
         row: "graph_metadata_bytes",
         value: |report| report.graph_metadata_bytes,
-        eight_lanes: 61_696,
-        four_lanes: 62_528,
+        eight_lanes: 203_648,
+        four_lanes: 204_544,
     },
     Budget {
         row: "graph_delay_bytes",
@@ -923,8 +1098,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_processor_payload_bytes",
         value: |report| report.builtin_processor_payload_bytes,
-        eight_lanes: 19_200,
-        four_lanes: 19_200,
+        eight_lanes: 31_424,
+        four_lanes: 31_424,
     },
     Budget {
         row: "builtin_meter_payload_bytes",
@@ -935,8 +1110,8 @@ const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "builtin_retained_payload_bytes",
         value: |report| report.builtin_retained_payload_bytes,
-        eight_lanes: 19_200,
-        four_lanes: 19_200,
+        eight_lanes: 31_424,
+        four_lanes: 31_424,
     },
     Budget {
         row: "capi_retained_bytes",
@@ -1270,15 +1445,16 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 #[test]
 fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let session_document = scratch_session();
-    let prospective_document = session_document.replacen(
-        "\"session_id\": \"parametric-eq-nine-track\"",
-        "\"session_id\": \"double-live-cap\"",
-        1,
-    );
+    let prospective_document = {
+        let mut model = session::parse_session_json(&session_document).expect("oracle session");
+        model.sources[0].content = content(0x01);
+        session::canonical_session_json(&model).expect("prospective canonical session")
+    };
+    assert_ne!(prospective_document, session_document);
     assert_eq!(
-        prospective_document.len() + "parametric-eq-nine-track".len(),
-        session_document.len() + "double-live-cap".len(),
-        "the replacement renames the session and changes nothing else"
+        prospective_document.len(),
+        session_document.len(),
+        "the replacement changes the source's content identity and nothing else"
     );
 
     // The two live reports, read through the C ABI at roomy caps.
@@ -1286,7 +1462,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let (current, prospective) = unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
         let current = resources_c(plan);
-        let request = command(1, 42, "double-live-cap");
+        let request = command(1, 42, 0x01);
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
         let mut pcm = [f32::NAN; 256];
@@ -1308,17 +1484,17 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         miso_engine_v1_plan_destroy(plan);
         (current, prospective)
     };
-    // The two reports can be equal -- the replacement only renames the session, and the canonical
-    // JSON that the rename shortens is charged with the model, not in these rows -- so the swap is
-    // proved by admission instead: with one publication slot, a second replacement is admitted
-    // only once the render has swapped the first one in.
+    // The two reports can be equal -- the replacement only rewrites the source's content identity
+    // at the same length, and the canonical JSON is charged with the model, not in these rows -- so
+    // the swap is proved by admission instead: with one publication slot, a second replacement is
+    // admitted only once the render has swapped the first one in.
     // SAFETY: These handles are uniquely owned until their matching destroy calls.
     unsafe {
         let (session, plan) = compile_c(&session_document, &limits());
-        let request = command(1, 42, "double-live-cap");
+        let request = command(1, 42, 0x01);
         let mut response = [0xa5_u8; 4_096];
         assert_eq!(submit(session, &request, &mut response), RESULT_OK);
-        let again = command(2, 43, "parametric-eq-nine-track");
+        let again = command(2, 43, 0x02);
         assert_eq!(
             submit(session, &again, &mut response),
             RESULT_BACKPRESSURE,
@@ -1351,14 +1527,6 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
     let prospective_host = host_half(&prospective_document, &limits());
     let current_model = current_host.model_estimate();
     let prospective_model = prospective_host.model_estimate();
-    let replay = protocol::ReplayCache::resource_report_for_config(protocol::ReplayCacheConfig {
-        entries: core::num::NonZeroUsize::new(limits().maximum_replay_entries as usize)
-            .expect("replay entries"),
-        bytes: core::num::NonZeroUsize::new(limits().maximum_replay_bytes as usize)
-            .expect("replay bytes"),
-        max_response_bytes: limits().maximum_control_frame_bytes as usize,
-    })
-    .unwrap_or_else(|_| panic!("replay resource report"));
     // The replacement leaves the source unchanged, so the prospective plan is prepared to carry
     // the current plan's ring (#1273): its report counts that ring, which the current plan owns
     // until the swap, and the double-live peak counts once.
@@ -1397,14 +1565,9 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         successor.inventory_retained_bytes
     );
     // The prospective session's canonical JSON is charged once, with its model in the graph row;
-    // capi's epoch row is the prospective source producers' control table and ID arena, and the
-    // plan state inventory the epoch keeps (#1273 D5).
-    let prospective_epoch = prospective_host.prepared.report.control_retained_bytes
-        + successor.inventory_retained_bytes;
-    let prepared_protocol = limits().maximum_control_frame_bytes
-        + size_of::<protocol::PreparedStructuralCommand>() as u64
-        + replay.retained_payload_bytes
-        + prospective_host.catalog_charge();
+    // capi's epoch row is the prospective epoch's producers and the plan state inventory it keeps
+    // (#1273 D5), and the prepared-protocol term is unchanged (`capi_epoch_terms`).
+    let (prospective_epoch, prepared_protocol) = prospective_host.capi_epoch_terms(&limits());
 
     let rows: [(&str, u64); 8] = [
         (
@@ -1474,7 +1637,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         unsafe {
             let (session, plan) = compile_c(&session_document, &exact_limits);
             assert_eq!(resources_c(plan), current, "{row}: the cap moves no row");
-            let request = command(1, 42, "double-live-cap");
+            let request = command(1, 42, 0x01);
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
             let mut pcm = [f32::NAN; 256];
@@ -1509,7 +1672,7 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
         unsafe {
             let (session, plan) = compile_c(&session_document, &below_limits);
             let before = resources_c(plan);
-            let request = command(1, 42, "double-live-cap");
+            let request = command(1, 42, 0x01);
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(
                 submit(session, &request, &mut response),
@@ -1521,6 +1684,239 @@ fn double_live_oracle_drives_exact_and_one_below_c_caps() {
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
+    }
+}
+
+/// `SESSION` with the first track's left fader at `left_db` and, when given, the source's content
+/// string replaced (#1258 D2: a structural edit that renders identically).
+fn fader_variant(left_db: f32, content: Option<&str>) -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.tracks[0].fader.left_db = left_db;
+    if let Some(content) = content {
+        model.sources[0].content = content.to_owned();
+    }
+    session::canonical_session_json(&model).expect("canonical variant")
+}
+
+/// The first track's fader with `left_db` on the left lane, as the live cap edits set it.
+fn eq0_fader_edit(left_db: f32) -> SessionEdit {
+    SessionEdit::SetTrackFader {
+        track_id: StableId::parse("eq0").expect("eq0"),
+        fader: session::DualMonoFader {
+            left_db,
+            right_db: 0.0,
+            left_mute: false,
+            right_mute: false,
+        },
+    }
+}
+
+/// The structural edit of the pending-candidate case: a new content string on the source.
+const LIVE_CAP_CONTENT: &str =
+    "blake3:abababababababababababababababababababababababababababababababab";
+
+fn live_cap_structural_edit() -> SessionEdit {
+    let model = session::parse_session_json(SESSION).expect("fixture");
+    let source = &model.sources[0];
+    SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content: LIVE_CAP_CONTENT.to_owned(),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
+    }
+}
+
+/// Compiles the `-6.0` base at `compile_limits`, commits the structural edit when `pending`, and
+/// returns the handles and the committed revision.
+///
+/// # Safety
+///
+/// The returned handles are uniquely owned by the caller, who destroys them.
+unsafe fn live_cap_session(
+    compile_limits: &CompileLimits,
+    pending: bool,
+) -> (*mut Session, *mut Plan, u64) {
+    // SAFETY: The handles are returned to the caller, who owns them.
+    unsafe {
+        let (session, plan) = compile_c(&fader_variant(-6.0, None), compile_limits);
+        let mut revision = 42;
+        if pending {
+            let request = transaction(900, revision, &[live_cap_structural_edit()]);
+            let (code, header) = submit_header(session, &request);
+            assert_eq!(code, RESULT_OK, "the structural edit");
+            assert_eq!(header.expect("a header").status, StatusCode::Ok);
+            revision += 1;
+            drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        }
+        (session, plan, revision)
+    }
+}
+
+/// Renders four fed blocks and destroys both handles.
+///
+/// # Safety
+///
+/// Both handles are uniquely owned by the caller and destroyed here.
+unsafe fn render_and_destroy(session: *mut Session, plan: *mut Plan) -> Vec<Vec<f32>> {
+    let mut feed = ConstantFeed::new();
+    // SAFETY: As the caller guarantees.
+    unsafe {
+        let blocks = (0..4)
+            .map(|block| fed_render_c(session, plan, &mut feed, block))
+            .collect();
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        blocks
+    }
+}
+
+/// #1258 gate 3: the live arm holds the caller's graph and capi caps to the byte (#1053 D8).
+///
+/// The edit moves the first track's left fader from `-6.0` to `-6.0123`, which grows the canonical
+/// JSON, so the prospective compiled model is larger than the current one. Each peak is derived
+/// from observations, never from the arm under test: the C report of the current plan (and, with a
+/// candidate pending, of the candidate, read after the render that swaps it in), each compiled
+/// model's own estimate, and the capi epoch terms from their owning crates' reports.
+///
+/// At each peak the edit commits. One byte below it is `RESULT_COMPILE_REJECTED` with the row's
+/// diagnostic, the committed snapshot and its revision are unchanged, and the plan renders exactly
+/// what a plan that never saw the edit renders, so no record reached a lane.
+///
+/// Test value: red if the live arm admits an edit whose peak is over the caller's cap, or refuses
+/// one within it, on either row, or if a cap refusal leaves a record or a revision behind.
+#[test]
+fn live_edits_are_admitted_at_their_exact_graph_and_capi_peaks_and_refused_one_byte_below() {
+    let base = fader_variant(-6.0, None);
+    let grown = fader_variant(-6.0123, None);
+    let structural = fader_variant(-6.0, Some(LIVE_CAP_CONTENT));
+    let structural_grown = fader_variant(-6.0123, Some(LIVE_CAP_CONTENT));
+    let model = |document: &str| {
+        host_half(document, &limits())
+            .model_estimate()
+            .compiled_model_bytes
+    };
+    assert!(
+        model(&grown) > model(&base),
+        "the edit grows the compiled model"
+    );
+
+    // The current and the candidate plan's reports, read at roomy caps.
+    // SAFETY: These handles are uniquely owned until their destroy calls.
+    let (current, candidate) = unsafe {
+        let (session, plan, _) = live_cap_session(&limits(), true);
+        let current = resources_c(plan);
+        let mut feed = ConstantFeed::new();
+        fed_render_c(session, plan, &mut feed, 0);
+        drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        let candidate = resources_c(plan);
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        (current, candidate)
+    };
+    let (_, base_protocol) = host_half(&base, &limits()).capi_epoch_terms(&limits());
+    let rebuild_graph_peak = current.graph_session_plus_plan_bytes
+        + candidate.graph_session_plus_plan_bytes
+        + model(&base)
+        + model(&structural);
+
+    let cases: [(&str, bool, SetCap, u64, &str); 3] = [
+        (
+            "graph",
+            false,
+            |caps, value| caps.maximum_graph_session_plus_plan_bytes = value,
+            current.graph_session_plus_plan_bytes + model(&base) + model(&grown),
+            "graph.resource.limit",
+        ),
+        (
+            "capi",
+            false,
+            |caps, value| caps.maximum_capi_retained_bytes = value,
+            current.capi_retained_bytes + base_protocol,
+            "capi.resource.limit",
+        ),
+        (
+            "graph with a candidate pending",
+            true,
+            |caps, value| caps.maximum_graph_session_plus_plan_bytes = value,
+            current.graph_session_plus_plan_bytes
+                + candidate.graph_session_plus_plan_bytes
+                + model(&structural)
+                + model(&structural_grown),
+            "graph.resource.limit",
+        ),
+    ];
+    for (row, pending, set_cap, peak, code) in cases {
+        println!("{row}: live peak {peak}");
+        if pending {
+            assert!(
+                rebuild_graph_peak < peak,
+                "{row}: the structural edit itself is admitted one byte below the live peak"
+            );
+        }
+        // An unedited plan's PCM, the reference both runs below are held to.
+        // SAFETY: These handles are uniquely owned and destroyed by the helper.
+        let unedited = unsafe {
+            let (session, plan, _) = live_cap_session(&limits(), pending);
+            render_and_destroy(session, plan)
+        };
+
+        let mut at_peak = limits();
+        set_cap(&mut at_peak, peak);
+        // SAFETY: These handles are uniquely owned and destroyed by the helper.
+        let edited = unsafe {
+            let (session, plan, revision) = live_cap_session(&at_peak, pending);
+            let (code, header) = submit_header(
+                session,
+                &transaction(901, revision, &[eq0_fader_edit(-6.0123)]),
+            );
+            assert_eq!(code, RESULT_OK, "{row}: admitted at the peak");
+            let header = header.expect("a header");
+            assert_eq!(header.status, StatusCode::Ok, "{row}");
+            assert_eq!(header.revision, SessionRevision(revision + 1), "{row}");
+            drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+            render_and_destroy(session, plan)
+        };
+        assert_ne!(
+            edited.last().map(|pcm| bits(pcm)),
+            unedited.last().map(|pcm| bits(pcm)),
+            "{row}: the admitted edit is audible, so the comparison below would see a record"
+        );
+
+        let mut below = limits();
+        set_cap(&mut below, peak - 1);
+        // SAFETY: These handles are uniquely owned and destroyed by the helper.
+        let refused = unsafe {
+            let (session, plan, revision) = live_cap_session(&below, pending);
+            let mut request_id = 1_000;
+            let before = snapshot_c(session, &mut request_id);
+            assert_eq!(before.0, revision, "{row}");
+            // Request IDs increase across the session's commands.
+            request_id += 1;
+            let (result, _) = submit_header(
+                session,
+                &transaction(request_id, revision, &[eq0_fader_edit(-6.0123)]),
+            );
+            assert_eq!(result, RESULT_COMPILE_REJECTED, "{row}: one byte below");
+            assert_eq!(
+                last_error_c(session),
+                format!("{code}\t$\n").into_bytes(),
+                "{row}: the row's diagnostic"
+            );
+            assert_eq!(
+                snapshot_c(session, &mut request_id),
+                before,
+                "{row}: the committed snapshot and its revision"
+            );
+            render_and_destroy(session, plan)
+        };
+        assert!(
+            refused
+                .iter()
+                .zip(&unedited)
+                .all(|(refused, unedited)| bits(refused) == bits(unedited)),
+            "{row}: the refused edit reached a lane"
+        );
     }
 }
 
@@ -1549,6 +1945,908 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
     unsafe { compile_rejected_c(SESSION, &below) };
 }
 
+/// Stops the render thread of the #1258 live-edit race however the control thread leaves the
+/// scope, so a failed assertion cannot hang the join. The plan-swap race keeps its own copy in
+/// `plan_swap_race.rs` (#1273).
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+// --- #1258: live C ABI edits against a concurrently rendering plan -------------------------------
+//
+// The helpers below drive one session the way a phone app does: a control thread feeds the source,
+// commits edits and drains events while another thread renders. Every wait has a deadline.
+
+/// The constant source the race and the live-cap tests feed: never zero, and different on the two
+/// lanes (#1258 D1).
+const CONSTANT_PCM: [f32; 2] = [0.375, -0.218_75];
+
+/// The fixtures' render quantum.
+const QUANTUM: usize = 128;
+
+/// How long a control-thread wait for render progress may take before it fails.
+const PROGRESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One submitted command: the C result and, on `RESULT_OK`, the decoded response header.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn submit_header(
+    session: *mut Session,
+    request: &[u8],
+) -> (u32, Option<protocol::ResponseHeader>) {
+    let mut response = [0_u8; 4_096];
+    let mut output = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: response.as_mut_ptr(),
+        capacity_bytes: response.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: The caller guarantees a live session; both buffers are owned and complete.
+    let code = unsafe {
+        miso_engine_v1_submit_command(session, request.as_ptr(), request.len() as u64, &mut output)
+    };
+    if code != RESULT_OK {
+        return (code, None);
+    }
+    let mut fields = [0_u16; 64];
+    let header = match ProtocolCodec::default()
+        .decode_typed_response(
+            &response[..output.required_bytes as usize],
+            &mut protocol::DecodeScratch::new(&mut fields),
+        )
+        .expect("a decodable response")
+    {
+        protocol::DecodedTypedResponseFrame::Success { header, .. }
+        | protocol::DecodedTypedResponseFrame::NonOk { header, .. } => header,
+    };
+    (code, Some(header))
+}
+
+/// The session's last error bytes.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn last_error_c(session: *mut Session) -> Vec<u8> {
+    let mut storage = [0_u8; 4_096];
+    let mut output = BytesOut {
+        struct_size: BYTES_OUT_SIZE,
+        reserved0: 0,
+        data: storage.as_mut_ptr(),
+        capacity_bytes: storage.len() as u64,
+        required_bytes: 0,
+    };
+    // SAFETY: The caller guarantees a live session; the descriptor names complete owned storage.
+    let code = unsafe { miso_engine_v1_last_error(session.cast_const().cast(), &mut output) };
+    assert_eq!(code, RESULT_OK, "last error");
+    storage[..output.required_bytes as usize].to_vec()
+}
+
+/// Dequeues every frame waiting on both event lanes.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn drain_events_c(session: *mut Session) -> Result<(), String> {
+    let mut storage = [0_u8; 4_096];
+    for lane in [EVENT_LANE_RELIABLE, EVENT_LANE_LOSSY] {
+        // Bounded: each lane holds a handful of frames.
+        for _ in 0..1_024 {
+            let mut event = BytesOut {
+                struct_size: BYTES_OUT_SIZE,
+                reserved0: 0,
+                data: storage.as_mut_ptr(),
+                capacity_bytes: storage.len() as u64,
+                required_bytes: 0,
+            };
+            // SAFETY: As above.
+            let code = unsafe { miso_engine_v1_dequeue_event(session, lane, &mut event) };
+            if code != RESULT_OK {
+                return Err(format!("dequeue lane {lane}: {code}"));
+            }
+            if event.required_bytes == 0 {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The committed session, paged through `SessionSnapshotGet`, and the revision its header reports.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn snapshot_c(session: *mut Session, request_id: &mut u64) -> (u64, String) {
+    let mut json = Vec::new();
+    let mut fields = [0_u16; 64];
+    let mut response = [0_u8; 4_096];
+    loop {
+        *request_id += 1;
+        let mut bytes = vec![0_u8; 4_096];
+        let len = ProtocolCodec::default()
+            .encode_command_frame_into(
+                &TypedCommandFrame {
+                    request_id: RequestId::new(*request_id).expect("nonzero request"),
+                    expected_revision: ExpectedRevision::Any,
+                    payload: CommandPayload::SessionSnapshotGet(protocol::SessionSnapshotRequest {
+                        offset: json.len() as u64,
+                        maximum_bytes: 2_048,
+                    }),
+                },
+                &mut bytes,
+            )
+            .expect("snapshot command");
+        bytes.truncate(len);
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The caller guarantees a live session; the buffers are owned and complete.
+        let code = unsafe {
+            miso_engine_v1_submit_command(session, bytes.as_ptr(), bytes.len() as u64, &mut output)
+        };
+        assert_eq!(code, RESULT_OK, "snapshot");
+        let Ok(protocol::DecodedTypedResponseFrame::Success {
+            header,
+            payload: protocol::DecodedSuccessResponsePayload::SessionSnapshot(page),
+        }) = ProtocolCodec::default().decode_typed_response(
+            &response[..output.required_bytes as usize],
+            &mut protocol::DecodeScratch::new(&mut fields),
+        )
+        else {
+            panic!("expected a snapshot page")
+        };
+        json.extend_from_slice(page.canonical_json_chunk);
+        if page.eof {
+            return (
+                header.revision.0,
+                String::from_utf8(json).expect("UTF-8 snapshot"),
+            );
+        }
+    }
+}
+
+/// One constant quantum offered to the fixture source.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn submit_constant_c(session: *mut Session, generation: u64, start_frame: u64) -> u32 {
+    let left = [CONSTANT_PCM[0]; QUANTUM];
+    let right = [CONSTANT_PCM[1]; QUANTUM];
+    let planes = [left.as_ptr(), right.as_ptr()];
+    let chunk = SourceChunk {
+        struct_size: SOURCE_CHUNK_SIZE,
+        sample_rate_hz: 48_000,
+        generation,
+        start_frame,
+        planes: planes.as_ptr(),
+        plane_count: 2,
+        frames: QUANTUM as u32,
+        end_of_region: 0,
+        reserved0: 0,
+    };
+    let mut report = SubmitReport {
+        struct_size: SUBMIT_REPORT_SIZE,
+        reserved0: 0,
+        accepted_frames: 0,
+        cumulative_written_frames: 0,
+        active_generation: 0,
+    };
+    let id = b"fixture-source";
+    // SAFETY: The caller guarantees a live session; every borrowed buffer outlives the call.
+    unsafe {
+        miso_engine_v1_source_submit_planar_f32(
+            session,
+            id.as_ptr(),
+            id.len() as u64,
+            &chunk,
+            &mut report,
+        )
+    }
+}
+
+/// The control thread's source feed: constant quanta, contiguous from the last seek.
+struct ConstantFeed {
+    generation: u64,
+    fed: u64,
+    seeks: u64,
+}
+
+impl ConstantFeed {
+    const fn new() -> Self {
+        Self {
+            generation: 1,
+            fed: 0,
+            seeks: 0,
+        }
+    }
+
+    /// Submits constant quanta until the ring is full.
+    ///
+    /// A stale generation means a render swapped in a fresh plan, whose rings start at generation
+    /// 1 and wait for a seek: the feed seeks to frame 0 under its next generation, as a host does
+    /// after a swap, and keeps feeding. The feed seeks once before its first submission, so a
+    /// fresh plan's generation 1 is always stale to it.
+    ///
+    /// # Safety
+    ///
+    /// `session` must be live and used by this thread alone for the call.
+    unsafe fn fill(&mut self, session: *mut Session) -> Result<(), String> {
+        let id = b"fixture-source";
+        if self.generation == 1 {
+            self.generation = 2;
+            // SAFETY: As the caller guarantees.
+            let code =
+                unsafe { miso_engine_v1_source_seek(session, id.as_ptr(), id.len() as u64, 2, 0) };
+            if code != RESULT_OK {
+                return Err(format!("first seek: {code}"));
+            }
+        }
+        // Bounded: the ring holds a few quanta.
+        for _ in 0..64 {
+            // SAFETY: As the caller guarantees.
+            let code = unsafe { submit_constant_c(session, self.generation, self.fed) };
+            // SAFETY: As the caller guarantees.
+            let stale = code == RESULT_INVALID_ARGUMENT
+                && unsafe { last_error_c(session) } == b"source.generation.stale";
+            match code {
+                RESULT_OK => self.fed += QUANTUM as u64,
+                RESULT_BACKPRESSURE => return Ok(()),
+                RESULT_INVALID_ARGUMENT if stale => {
+                    self.generation += 1;
+                    // SAFETY: As the caller guarantees.
+                    let code = unsafe {
+                        miso_engine_v1_source_seek(
+                            session,
+                            id.as_ptr(),
+                            id.len() as u64,
+                            self.generation,
+                            0,
+                        )
+                    };
+                    match code {
+                        RESULT_OK => {
+                            self.fed = 0;
+                            self.seeks += 1;
+                        }
+                        RESULT_BACKPRESSURE => return Ok(()),
+                        code => return Err(format!("seek after a swap: {code}")),
+                    }
+                }
+                code => {
+                    // SAFETY: As the caller guarantees.
+                    let error = unsafe { last_error_c(session) };
+                    return Err(format!(
+                        "submit at frame {}: {code} {}",
+                        self.fed,
+                        String::from_utf8_lossy(&error)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Feeds the source and renders one block on this thread; returns the block's planar PCM.
+///
+/// # Safety
+///
+/// Both handles must be live and used by this thread alone for the call.
+unsafe fn fed_render_c(
+    session: *mut Session,
+    plan: *mut Plan,
+    feed: &mut ConstantFeed,
+    block: u64,
+) -> Vec<f32> {
+    // SAFETY: As the caller guarantees.
+    unsafe { feed.fill(session) }.unwrap_or_else(|failure| panic!("{failure}"));
+    let mut pcm = vec![f32::NAN; QUANTUM * 2];
+    let output = PlanarOutput {
+        struct_size: PLANAR_OUTPUT_SIZE,
+        channels: 2,
+        samples: pcm.as_mut_ptr(),
+        sample_capacity: pcm.len() as u64,
+        frames: QUANTUM as u32,
+        plane_stride_samples: QUANTUM as u32,
+        reserved: [0; 2],
+    };
+    // SAFETY: As the caller guarantees; `output` names owned storage.
+    let code = unsafe { miso_engine_v1_render_f32_planar(plan, block * QUANTUM as u64, &output) };
+    assert_eq!(code, RESULT_OK, "render block {block}");
+    pcm
+}
+
+fn bits(pcm: &[f32]) -> Vec<u32> {
+    pcm.iter().map(|sample| sample.to_bits()).collect()
+}
+
+/// One transaction's bytes.
+fn transaction(request_id: u64, revision: u64, edits: &[SessionEdit]) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 4_096];
+    let len = ProtocolCodec::default()
+        .encode_command_frame_into(
+            &TypedCommandFrame {
+                request_id: RequestId::new(request_id).expect("nonzero request"),
+                expected_revision: ExpectedRevision::Exact(SessionRevision(revision)),
+                payload: CommandPayload::SessionTransactionApply(edits),
+            },
+            &mut bytes,
+        )
+        .expect("transaction command");
+    bytes.truncate(len);
+    bytes
+}
+
+/// The race session (#1258 D1): the nine-track fixture with an empty console, no inserts and no
+/// input filter, every delay zero, and a source long enough for any run. Nothing on it keeps
+/// state that depends on history, so the final block depends only on the final values.
+fn race_session() -> String {
+    let mut model = session::parse_session_json(SESSION).expect("fixture");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    model.sources[0].frames = 48_000 * 3_600;
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 0.0;
+            lane.delay_samples = 0;
+        }
+    }
+    session::canonical_session_json(&model).expect("canonical race session")
+}
+
+/// The largest pan smoothing the race edits use: one quantum (D1).
+const RACE_MAX_SMOOTHING: u32 = QUANTUM as u32;
+
+/// The control thread's edit sequence: a live fader, pan or mute edit on each of the nine tracks
+/// in turn, and every eighth edit a structural one that renders identically (D2: a new content
+/// string on the source, which the race never reads by content).
+struct RaceEdits {
+    tracks: Vec<StableId>,
+    faders: Vec<session::DualMonoFader>,
+    source: session::Source,
+}
+
+impl RaceEdits {
+    fn new(document: &str) -> Self {
+        let model = session::parse_session_json(document).expect("race session");
+        Self {
+            tracks: model.tracks.iter().map(|track| track.id.clone()).collect(),
+            faders: model
+                .tracks
+                .iter()
+                .map(|track| track.fader.clone())
+                .collect(),
+            source: model.sources[0].clone(),
+        }
+    }
+
+    /// Edit `index`. A fader or pan edit takes a value no earlier edit of the same kind on the
+    /// same track used, and a mute edit mostly flips its track's left mute, so a lost edit leaves
+    /// its track's value wrong unless a later edit overwrites it.
+    fn edit(&mut self, index: u64) -> (bool, SessionEdit) {
+        if index % 8 == 7 {
+            let digits = if (index / 8).is_multiple_of(2) {
+                "ab"
+            } else {
+                "cd"
+            };
+            return (
+                false,
+                SessionEdit::SetSourceContent {
+                    source_id: self.source.id.clone(),
+                    content: format!("blake3:{}", digits.repeat(32)),
+                    channels: self.source.channels,
+                    bit_depth: self.source.bit_depth,
+                    frames: self.source.frames,
+                },
+            );
+        }
+        let track = (index % self.tracks.len() as u64) as usize;
+        let track_id = self.tracks[track].clone();
+        let step = index / self.tracks.len() as u64;
+        let edit = match step % 3 {
+            0 => {
+                let fader = &mut self.faders[track];
+                fader.left_db = -0.5 - 0.25 * (index % 37) as f32;
+                fader.right_db = fader.left_db - 1.5;
+                SessionEdit::SetTrackFader {
+                    track_id,
+                    fader: fader.clone(),
+                }
+            }
+            1 => SessionEdit::SetTrackMatrixOrPan {
+                track_id,
+                matrix_or_pan: session::MatrixOrPan::Pan {
+                    left: 0.25 + 0.0625 * ((index * 7) % 11) as f32,
+                    right: 1.0 - 0.0625 * ((index * 5) % 13) as f32,
+                    smoothing_samples: 16 * (1 + (index % 8) as u32),
+                },
+            },
+            _ => {
+                let fader = &mut self.faders[track];
+                // Mute edits flip the left lane of each track in turn (alternating with each
+                // third step, offset by track), and the right lane is never muted, so the final
+                // mix always carries every track.
+                let mute = (step / 3 + track as u64).is_multiple_of(2);
+                fader.left_mute = mute;
+                fader.right_mute = false;
+                SessionEdit::SetTrackFader {
+                    track_id,
+                    fader: fader.clone(),
+                }
+            }
+        };
+        (true, edit)
+    }
+}
+
+/// What one race run counted.
+#[derive(Debug, Default)]
+struct RaceCounts {
+    live: u64,
+    structural: u64,
+    live_backpressure: u64,
+    plan_backpressure: u64,
+    event_backpressure: u64,
+    retries: u64,
+    seeks: u64,
+    overlapped: u64,
+    blocks: u64,
+}
+
+/// Edits per run, and edits between two waits for render progress (several per render period).
+///
+/// The last structural edit is edit 151, so the run ends with four live edits that commit while
+/// its candidate is pending or just swapped in, and no later rebuild re-prepares their values
+/// from the committed model: a live edit lost to the retiring plan stays lost in the final block.
+/// They are a pan (152) and three mutes (153-155), of which 153 and 155 flip a value and push a
+/// record; 154 repeats its track's value and commits with no record.
+const RACE_EDITS: u64 = 156;
+const RACE_EDITS_PER_BLOCK: u64 = 3;
+/// Render blocks after an edit's first refusal beyond which another refusal fails the run, as
+/// `WEDGE_BLOCKS` bounds a structural replacement in `plan_swap_race.rs`'s `race_plan_swaps`.
+const RACE_WEDGE_BLOCKS: u64 = 256;
+
+/// One submission's outcome in the race.
+enum Submitted {
+    Committed,
+    /// `RESULT_BACKPRESSURE` with `control.live.backpressure`.
+    LiveBackpressure,
+    /// `RESULT_BACKPRESSURE` with `control.plan.backpressure`.
+    PlanBackpressure,
+    /// `RESULT_OK` with the protocol's own `Backpressure` status.
+    EventBackpressure,
+}
+
+/// The control thread's side of one race run.
+struct RaceControl<'a> {
+    session: *mut Session,
+    rendered: &'a AtomicU64,
+    in_render: &'a AtomicBool,
+    stop: &'a AtomicBool,
+    feed: ConstantFeed,
+    counts: RaceCounts,
+    revision: u64,
+    request_id: u64,
+}
+
+impl RaceControl<'_> {
+    /// Waits for one more rendered block, feeding the source and draining the events meanwhile.
+    fn await_block(&mut self) -> Result<(), String> {
+        use core::sync::atomic::Ordering;
+        let target = self.rendered.load(Ordering::Acquire) + 1;
+        let deadline = std::time::Instant::now() + PROGRESS_DEADLINE;
+        loop {
+            if self.stop.load(Ordering::Acquire) {
+                return Err("the render thread stopped".to_owned());
+            }
+            // SAFETY: This thread is the session's only control caller.
+            unsafe {
+                self.feed.fill(self.session)?;
+                drain_events_c(self.session)?;
+            }
+            if self.rendered.load(Ordering::Acquire) >= target {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(format!("no block rendered within {PROGRESS_DEADLINE:?}"));
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Submits `edit` once under a new request ID; any outcome but a commit or a typed
+    /// backpressure is an error.
+    fn submit_once(&mut self, edit: &SessionEdit, live: bool) -> Result<Submitted, String> {
+        use core::sync::atomic::Ordering;
+        self.request_id += 1;
+        let request = transaction(self.request_id, self.revision, core::slice::from_ref(edit));
+        let overlapping = self.in_render.load(Ordering::SeqCst);
+        // SAFETY: This thread is the session's only control caller.
+        let (code, header) = unsafe { submit_header(self.session, &request) };
+        self.counts.overlapped += u64::from(overlapping && self.in_render.load(Ordering::SeqCst));
+        let outcome = match (code, header) {
+            (RESULT_OK, Some(header)) if header.status == StatusCode::Ok => {
+                if header.revision != SessionRevision(self.revision + 1) {
+                    return Err(format!(
+                        "committed at revision {}, not {}",
+                        header.revision.0,
+                        self.revision + 1
+                    ));
+                }
+                self.revision += 1;
+                if live {
+                    self.counts.live += 1;
+                } else {
+                    self.counts.structural += 1;
+                }
+                Submitted::Committed
+            }
+            (RESULT_OK, Some(header)) if header.status == StatusCode::Backpressure => {
+                self.counts.event_backpressure += 1;
+                Submitted::EventBackpressure
+            }
+            (RESULT_BACKPRESSURE, _) => {
+                // SAFETY: This thread is the session's only control caller.
+                match unsafe { last_error_c(self.session) }.as_slice() {
+                    b"control.live.backpressure" => {
+                        self.counts.live_backpressure += 1;
+                        Submitted::LiveBackpressure
+                    }
+                    b"control.plan.backpressure" => {
+                        self.counts.plan_backpressure += 1;
+                        Submitted::PlanBackpressure
+                    }
+                    other => {
+                        return Err(format!(
+                            "RESULT_BACKPRESSURE with {}",
+                            String::from_utf8_lossy(other)
+                        ));
+                    }
+                }
+            }
+            (code, header) => {
+                // SAFETY: This thread is the session's only control caller.
+                let error = unsafe { last_error_c(self.session) };
+                return Err(format!(
+                    "{} edit: result {code}, header {header:?}, last error {}",
+                    if live { "live" } else { "structural" },
+                    String::from_utf8_lossy(&error)
+                ));
+            }
+        };
+        // SAFETY: This thread is the session's only control caller.
+        unsafe { drain_events_c(self.session) }?;
+        Ok(outcome)
+    }
+
+    /// Commits `edit`, retrying a refusal under a new request ID once a block has rendered, until
+    /// [`RACE_WEDGE_BLOCKS`] blocks after its first refusal.
+    fn commit(&mut self, edit: &SessionEdit, live: bool) -> Result<(), String> {
+        use core::sync::atomic::Ordering;
+        let mut first_refusal = None;
+        loop {
+            if let Submitted::Committed = self.submit_once(edit, live)? {
+                return Ok(());
+            }
+            let now = self.rendered.load(Ordering::Acquire);
+            let since = *first_refusal.get_or_insert(now);
+            if now - since > RACE_WEDGE_BLOCKS {
+                return Err(format!(
+                    "still refused {} blocks after its first refusal",
+                    now - since
+                ));
+            }
+            self.counts.retries += 1;
+            self.await_block()?;
+        }
+    }
+}
+
+/// #1258 gate 1, one run: live fader, mute and pan edits and a structural edit every eighth,
+/// committed on this thread through `miso_engine_v1_submit_command` while a scoped thread renders
+/// back-to-back blocks through `miso_engine_v1_render_f32_planar`; then the final block against a
+/// fresh plan of the final committed snapshot.
+///
+/// Halfway through, the render thread parks (as a paused audio session does) while this thread
+/// fills one track's fader lane to typed live backpressure and submits a second structural edit
+/// behind a pending candidate, which is typed plan backpressure; both are retried once the render
+/// thread resumes. Without the pause the render thread drains the lanes faster than this thread
+/// fills them, and no retry would ever run.
+///
+/// The render thread never asserts: it records a refused block and stops. Every wait on this
+/// thread has a deadline, and `StopOnDrop` stops the render thread however this thread leaves the
+/// scope, so a failure on either side ends the run instead of hanging the join (#1251, lesson d).
+/// `bench_support::producer::render_while_producing` cannot serve here: `bench_support` installs
+/// its own global allocator, and this file's counting allocator is the one the counts come from.
+fn race_live_edits(run: usize) -> RaceCounts {
+    use core::sync::atomic::Ordering;
+
+    let document = race_session();
+    // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
+    let (session, plan) = unsafe { compile_c(&document, &limits()) };
+    let mut feed = ConstantFeed::new();
+    // Warm-up on this thread: the first blocks, fed, before the race starts.
+    for block in 0..2 {
+        // SAFETY: No other thread uses either handle yet.
+        unsafe { fed_render_c(session, plan, &mut feed, block) };
+    }
+    let first_race_block = 2_u64;
+    let plan_address = plan as usize;
+    let stop = AtomicBool::new(false);
+    let paused = AtomicBool::new(false);
+    let parked = AtomicBool::new(false);
+    let in_render = AtomicBool::new(false);
+    let rendered = AtomicU64::new(first_race_block);
+    let mut edits = RaceEdits::new(&document);
+
+    let (control, (render_observed, render_failure)) = std::thread::scope(|scope| {
+        let render = scope.spawn(|| {
+            let plan = plan_address as *mut Plan;
+            let mut pcm = [f32::NAN; QUANTUM * 2];
+            let output = PlanarOutput {
+                struct_size: PLANAR_OUTPUT_SIZE,
+                channels: 2,
+                samples: pcm.as_mut_ptr(),
+                sample_capacity: pcm.len() as u64,
+                frames: QUANTUM as u32,
+                plane_stride_samples: QUANTUM as u32,
+                reserved: [0; 2],
+            };
+            let mut block = first_race_block;
+            let mut failure = None;
+            begin();
+            while !stop.load(Ordering::Acquire) {
+                if paused.load(Ordering::Acquire) {
+                    parked.store(true, Ordering::Release);
+                    std::thread::yield_now();
+                    continue;
+                }
+                parked.store(false, Ordering::Release);
+                in_render.store(true, Ordering::SeqCst);
+                // SAFETY: This thread is the plan's only renderer; `output` is owned storage.
+                let code = unsafe {
+                    miso_engine_v1_render_f32_planar(plan, block * QUANTUM as u64, &output)
+                };
+                in_render.store(false, Ordering::SeqCst);
+                if code != RESULT_OK {
+                    failure = Some((block, code));
+                    stop.store(true, Ordering::Release);
+                    break;
+                }
+                block += 1;
+                rendered.store(block, Ordering::Release);
+            }
+            (finish(), failure)
+        });
+
+        let _stop = StopOnDrop(&stop);
+        let mut control = RaceControl {
+            session,
+            rendered: &rendered,
+            in_render: &in_render,
+            stop: &stop,
+            feed,
+            counts: RaceCounts::default(),
+            revision: 42,
+            request_id: 1,
+        };
+        let mut run_edits = || -> Result<(), String> {
+            for index in 0..RACE_EDITS {
+                if index.is_multiple_of(RACE_EDITS_PER_BLOCK) {
+                    control.await_block()?;
+                }
+                if index == RACE_EDITS / 2 {
+                    paused_bursts(&mut control, &mut edits, &paused, &parked)?;
+                }
+                let (live, edit) = edits.edit(index);
+                control
+                    .commit(&edit, live)
+                    .map_err(|error| format!("edit {index}: {error}"))?;
+            }
+            Ok(())
+        };
+        let failure = run_edits().err();
+        stop.store(true, Ordering::Release);
+        let render_result = render.join().expect("the render thread does not panic");
+        let RaceControl {
+            feed,
+            counts,
+            revision,
+            request_id,
+            ..
+        } = control;
+        ((feed, counts, revision, request_id, failure), render_result)
+    });
+    let (mut feed, mut counts, revision, mut request_id, failure) = control;
+    assert_eq!(render_failure, None, "run {run}: render refused a block");
+    assert_eq!(failure, None, "run {run}: a control call failed");
+    assert_eq!(
+        render_observed,
+        Snapshot {
+            allocations: 0,
+            deallocations: 0,
+            allocated_bytes: 0,
+            deallocated_bytes: 0,
+        },
+        "run {run}: every render call allocated and freed nothing"
+    );
+
+    // Settle on this thread: a candidate still pending swaps in at the first block; then render
+    // the plan's latency plus one quantum (every pan ramp is at most one quantum), and the next
+    // block is the final one.
+    let mut block = rendered.load(Ordering::Acquire);
+    counts.blocks = block - first_race_block;
+    // SAFETY: The race is over; this thread alone uses both handles from here on.
+    let (committed_revision, final_document, latency, final_block) = unsafe {
+        fed_render_c(session, plan, &mut feed, block);
+        block += 1;
+        drain_events_c(session).unwrap_or_else(|failure| panic!("{failure}"));
+        let latency = resources_c(plan).latency_samples;
+        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        for _ in 0..settle {
+            fed_render_c(session, plan, &mut feed, block);
+            block += 1;
+        }
+        let final_block = fed_render_c(session, plan, &mut feed, block);
+        let (committed_revision, final_document) = snapshot_c(session, &mut request_id);
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        (committed_revision, final_document, latency, final_block)
+    };
+    counts.seeks = feed.seeks;
+    assert_eq!(
+        committed_revision, revision,
+        "run {run}: the snapshot's revision"
+    );
+
+    // A fresh plan of the final committed snapshot, fed the same constant source.
+    // SAFETY: These handles are uniquely owned until the matching destroy calls.
+    let reference = unsafe {
+        let (session, plan) = compile_c(&final_document, &limits());
+        assert_eq!(resources_c(plan).latency_samples, latency);
+        let mut feed = ConstantFeed::new();
+        let settle = (latency + u64::from(RACE_MAX_SMOOTHING)).div_ceil(QUANTUM as u64) + 1;
+        let mut last = Vec::new();
+        for block in 0..=settle {
+            last = fed_render_c(session, plan, &mut feed, block);
+        }
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        last
+    };
+    assert!(
+        reference.iter().all(|sample| *sample != 0.0),
+        "run {run}: the final mix carries signal on both lanes"
+    );
+    // The block is constant on each lane, so a mismatch reports each lane's first sample.
+    assert!(
+        bits(&final_block) == bits(&reference),
+        "run {run}: the raced plan's final block {:?} against a fresh plan of the final snapshot \
+         {:?} (first left and right samples)",
+        [final_block[0], final_block[QUANTUM]],
+        [reference[0], reference[QUANTUM]],
+    );
+    counts
+}
+
+/// The paused phase of [`race_live_edits`]: with the render thread parked, live edits on the
+/// first track until its fader lane refuses with `control.live.backpressure` (at most one lane's
+/// depth plus one), then a structural edit and a second one behind it, which
+/// `control.plan.backpressure` refuses. The render thread resumes and both refusals are retried
+/// through [`RaceControl::commit`].
+fn paused_bursts(
+    control: &mut RaceControl<'_>,
+    edits: &mut RaceEdits,
+    paused: &AtomicBool,
+    parked: &AtomicBool,
+) -> Result<(), String> {
+    use core::sync::atomic::Ordering;
+    // Two whole blocks first, so a candidate the previous structural edit left pending has swapped
+    // in and its epoch is published before the render thread parks.
+    control.await_block()?;
+    control.await_block()?;
+    paused.store(true, Ordering::Release);
+    let deadline = std::time::Instant::now() + PROGRESS_DEADLINE;
+    while !parked.load(Ordering::Acquire) {
+        if std::time::Instant::now() > deadline {
+            return Err("the render thread never parked".to_owned());
+        }
+        std::thread::yield_now();
+    }
+    let track_id = edits.tracks[0].clone();
+    let mut refused_live = None;
+    for step in 0..=16 {
+        edits.faders[0].left_db = -20.0 - 0.25 * step as f32;
+        let edit = SessionEdit::SetTrackFader {
+            track_id: track_id.clone(),
+            fader: edits.faders[0].clone(),
+        };
+        match control.submit_once(&edit, true)? {
+            Submitted::Committed => {}
+            Submitted::LiveBackpressure => {
+                refused_live = Some(edit);
+                break;
+            }
+            _ => return Err(format!("paused live edit {step}: an unexpected refusal")),
+        }
+    }
+    let refused_live = refused_live.ok_or("a parked render never filled a 16-record fader lane")?;
+    let structural = |digits: &str| SessionEdit::SetSourceContent {
+        source_id: edits.source.id.clone(),
+        content: format!("blake3:{}", digits.repeat(32)),
+        channels: edits.source.channels,
+        bit_depth: edits.source.bit_depth,
+        frames: edits.source.frames,
+    };
+    let (first, second) = (structural("ef"), structural("01"));
+    if !matches!(control.submit_once(&first, false)?, Submitted::Committed) {
+        return Err("the paused structural edit was refused".to_owned());
+    }
+    if !matches!(
+        control.submit_once(&second, false)?,
+        Submitted::PlanBackpressure
+    ) {
+        return Err("a structural edit behind a pending candidate was not refused".to_owned());
+    }
+    paused.store(false, Ordering::Release);
+    // The refused live edit goes to the candidate's fresh lanes if the swap has not happened yet,
+    // or to the swapped-in plan's; the second structural edit waits for the swap. `retries`
+    // counts only the resubmissions `commit` finds refused again.
+    control.commit(&refused_live, true)?;
+    control.commit(&second, false)
+}
+
+/// #1258 gate 1: live fader, mute and pan edits, several per render period, and a structural edit
+/// every eighth, against a plan rendering on another thread, twenty times.
+///
+/// Test value: red if a fader or matrix drain allocates or frees on the render thread, if a live
+/// edit that races a plan swap reaches the retiring plan or is lost (the final block differs from
+/// a fresh plan of the final snapshot), if epoch synchronization returns `RESULT_INTERNAL` under
+/// live traffic, or if a `RESULT_BACKPRESSURE` carries any other diagnostic or never clears.
+#[test]
+fn live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free() {
+    let mut total = RaceCounts::default();
+    for run in 0..20 {
+        let counts = race_live_edits(run);
+        assert_eq!(counts.structural, RACE_EDITS / 8 + 2, "run {run}");
+        assert!(counts.live >= RACE_EDITS - RACE_EDITS / 8, "run {run}");
+        assert!(counts.live_backpressure >= 1, "run {run}");
+        assert!(counts.plan_backpressure >= 1, "run {run}");
+        assert!(counts.seeks > 0, "vacuous: run {run} swapped no plan in");
+        total.live += counts.live;
+        total.structural += counts.structural;
+        total.live_backpressure += counts.live_backpressure;
+        total.plan_backpressure += counts.plan_backpressure;
+        total.event_backpressure += counts.event_backpressure;
+        total.retries += counts.retries;
+        total.seeks += counts.seeks;
+        total.overlapped += counts.overlapped;
+        total.blocks += counts.blocks;
+    }
+    println!("twenty race runs: {total:?}");
+    assert!(
+        total.overlapped > 0,
+        "vacuous: no control call overlapped a render call"
+    );
+}
+
 // Issue #1206 D2: a C ABI caller bounds submix strips through `maximum_submixes`, the word of the
 // compile limits that was `reserved[0]`. Zero means "use `maximum_tracks`" -- what every caller
 // written before the word was named passes -- and the two remaining reserved words (#1243 named
@@ -1574,6 +2872,33 @@ fn two_track_three_submix_session() -> String {
             .submixes
             .push(session::Submix::unity(id, &model.console));
     }
+    session::canonical_session_json(&model).expect("canonical session")
+}
+
+/// [`two_track_three_submix_session`] with the first track routed through `bus0` to the main
+/// output: three submix strips beside two tracks, and one route into a submix, the route kind that
+/// would get a live lane if the C ABI selected route lanes (`HostLiveLanes::routes`).
+fn two_track_routed_submix_session() -> String {
+    let mut model =
+        session::parse_session_json(&two_track_three_submix_session()).expect("submix session");
+    let bus = StableId::parse("bus0").expect("stable id");
+    let session::RouteSource::Track { track_id, .. } = &model.routes[0].source else {
+        panic!("the first route is a track's")
+    };
+    assert_eq!(
+        track_id, &model.tracks[0].id,
+        "the first route is the first track's"
+    );
+    let mut out = model.routes[0].clone();
+    out.id = StableId::parse("bus0-main").expect("stable id");
+    out.source = session::RouteSource::Submix {
+        submix_id: bus.clone(),
+        tap: session::SendTap::PostPan,
+    };
+    let send = &mut model.routes[0];
+    send.id = StableId::parse("track-bus0").expect("stable id");
+    send.destination = session::RouteDestination::SubmixInput { submix_id: bus };
+    model.routes.push(out);
     session::canonical_session_json(&model).expect("canonical session")
 }
 

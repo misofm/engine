@@ -2868,6 +2868,7 @@ mod tests {
             let controls = [TrackControlRequest {
                 track_id: model.tracks[0].id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                input_lane: true,
             }];
             let builtins = if controlled {
                 prepare_session_builtins_between_render_calls(
@@ -11331,6 +11332,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                input_lane: true,
             })
             .collect();
         let builtins = prepare_session_builtins_with_live_controls(
@@ -11615,6 +11617,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                input_lane: true,
             })
             .collect();
         let caps = BuiltinCompileCaps {
@@ -11772,6 +11775,7 @@ mod tests {
             .map(|track| TrackControlRequest {
                 track_id: track.id.as_str().to_owned(),
                 queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                input_lane: true,
             })
             .collect();
         let builtins = prepare_session_builtins_between_render_calls(

@@ -8,8 +8,23 @@ pub(crate) struct CompiledChildren {
     pub(crate) plan: PlanState,
 }
 
+/// Every live lane's depth: each strip's fader/mute and matrix/pan rings hold 16 records (#1053 D4).
+pub(crate) const LIVE_QUEUE_DEPTH: NonZeroUsize =
+    NonZeroUsize::new(16).expect("sixteen is nonzero");
+
+/// The C ABI's live-lane selection: each strip's fader/mute and matrix/pan lanes (#1256 D1) and
+/// one lane per prepared effect instance (#1263 D1). No input lane (#1261 waits on owner Q4) and
+/// no route lane (#1225). An effect lane's depth is `min(LIVE_QUEUE_DEPTH, automation capacity)`.
+pub(crate) const C_ABI_LIVE_LANES: HostLiveLanes = HostLiveLanes {
+    effects: true,
+    ..HostLiveLanes::FADER_AND_MATRIX
+};
+
 pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
+    pub(crate) strips: StripLanes,
+    /// One live-control producer per prepared effect instance (#1263 D2).
+    pub(crate) effects: Box<[host_core::EffectControlProducer]>,
     pub(crate) plan: PreparedRenderPlan,
     pub(crate) resources: PlanResourceReport,
     /// The part of `resources`' source rows the plan carries from its predecessor.
@@ -121,13 +136,16 @@ pub(crate) fn protocol_queue_config(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn capi_resources(
     limits: CompileLimits,
     source_count: usize,
     source_id_bytes: usize,
+    strip_table_bytes: u64,
     quantum_frames: usize,
     provider: host_core::SessionControlProviderResources,
     inventory_bytes: u64,
+    effect_controls: host_core::EffectControlResources,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -160,13 +178,37 @@ pub(crate) fn capi_resources(
     // The session's canonical JSON is not a capi row. The compiled session owns it, and its
     // `compiled_model_bytes` already charges it to the graph cap, current and prospective alike
     // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
+    //
+    // The strip producer table (#1256 D3) is the epoch's too, through host-core's mirror. Its
+    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
+    // accumulator also charges the producer vector itself (`add_vector_layout::<
+    // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
+    // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
+    // either side is a deliberate decision, not a cleanup.
+    //
+    // The effect producer table and its owned payload (#1263 D3) are the epoch's too: capi keeps
+    // the producers, and with them each parametric EQ's prepared-target owner. host-core walks
+    // them over the built producers (`HostPrepareReport::effect_control_resources`). Their rings
+    // and target staging are the graph estimate's rows (`effect_control_resource`), so they are
+    // not charged again here. The payload is admitted twice all the same: host-core's preparation
+    // admission also adds `effect_control_resources.total_bytes()` to the graph row and the
+    // compiled model against `maximum_graph_session_plus_plan_bytes`. That is a recorded,
+    // conservative double admission (#1263 verdict MINOR 1), like #1256 D4's above: the initial
+    // compile needs graph row + compiled model + this payload under the graph cap.
+    let effect_row = effect_controls
+        .total_bytes()
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let control_table_row = host_core::control_table_bytes(source_count)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    let source_id_row = host_core::source_id_arena_bytes(source_id_bytes)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let epoch_rows = [
-        host_core::control_table_bytes(source_count)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
-        host_core::source_id_arena_bytes(source_id_bytes)
-            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+        control_table_row,
+        source_id_row,
         // Issue #1273 D5: each epoch keeps its plan's state inventory for the successor.
         inventory_bytes,
+        strip_table_bytes,
+        effect_row,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure("capi.resource.platform"))?
@@ -211,8 +253,13 @@ pub(crate) fn capi_resources(
         .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .ok_or_else(|| failure("capi.resource.arithmetic"))?;
-    let largest = epoch_rows
+    // Conservative: the strip row is the producer slice plus every `track_id`, which are separate
+    // allocations, so feeding the whole row overstates the largest single allocation when that
+    // row is the maximum. The error only ever refuses earlier.
+    // The effect row is several allocations; its own largest one stands for it.
+    let largest = [control_table_row, source_id_row, strip_table_bytes]
         .into_iter()
+        .chain([effect_controls.largest_allocation_bytes()])
         .chain(fixed_allocation_rows)
         .chain(prepared_protocol_allocation_rows)
         .chain([
@@ -235,6 +282,7 @@ pub(crate) fn prepared_capi_resources(
     compiled: &CompiledSession,
     catalog: &PreparedSessionControlCatalog,
     inventory: &PlanStateInventory,
+    effect_controls: host_core::EffectControlResources,
     limits: CompileLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
@@ -247,6 +295,16 @@ pub(crate) fn prepared_capi_resources(
                     .checked_add(source.id.as_str().len())
                     .ok_or_else(|| failure("capi.resource.arithmetic"))
             })?;
+    // Every strip, tracks and submixes alike, carries one producer whose `track_id` is its ID.
+    let (strip_count, strip_id_bytes) = compiled.normalized_model().strips().try_fold(
+        (0_usize, 0_usize),
+        |(count, bytes), strip| {
+            bytes
+                .checked_add(strip.id.as_str().len())
+                .map(|bytes| (count + 1, bytes))
+                .ok_or_else(|| failure("capi.resource.arithmetic"))
+        },
+    )?;
     let provider = SessionControlProvider::resource_report(
         catalog,
         controller_retained_capacity(limits)?,
@@ -257,9 +315,12 @@ pub(crate) fn prepared_capi_resources(
         limits,
         compiled.source_count(),
         source_id_bytes,
+        host_core::strip_control_table_bytes(strip_count, strip_id_bytes)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         compiled.quantum().0 as usize,
         provider,
         inventory.retained_bytes(),
+        effect_controls,
     )
 }
 
@@ -347,6 +408,69 @@ pub(crate) fn validate_replacement_peak(
         .largest_named_allocation_bytes
         .max(prospective.largest_named_allocation_bytes)
         .max(prospective_capi.largest)
+        .max(compiled_models.largest_allocation_bytes)
+        > limits.maximum_named_allocation_bytes
+    {
+        return Err(failure("capi.resource.limit"));
+    }
+    Ok(())
+}
+
+/// One provider epoch's resources as the live admission reads them: its plan's report row and the
+/// capi resources it was prepared with (#1257 D4).
+#[derive(Clone, Copy)]
+pub(crate) struct LiveEpochResources {
+    pub(crate) report: PlanResourceReport,
+    pub(crate) capi: CapiResources,
+}
+
+/// The live arm's admission (#1053 D8, #1257 D5): may the prospective compiled model live beside
+/// the current one, next to the plans that exist, until the commit?
+///
+/// The live arm prepares no plan, so the plans are the current epoch's and, when a candidate is
+/// pending, that candidate's; the newest of them is the pending one if any, else the current one.
+/// The terms, each against its own cap:
+///
+/// - **graph:** both plans' `graph_session_plus_plan_bytes` plus both compiled models'
+///   `retained_bytes`;
+/// - **capi:** the newest plan's `capi_retained_bytes`, plus the current epoch's `epoch_retained`
+///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
+///   term includes a provider catalog (`catalog_retained_bytes`) that the live arm never builds,
+///   because it never replaces the catalog: a conservative overcount, kept so that the term is the
+///   same one a rebuild charges;
+/// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
+///   newest epoch's capi `largest` and the compiled models' largest allocation.
+pub(crate) fn validate_live_peak(
+    current: LiveEpochResources,
+    pending: Option<LiveEpochResources>,
+    compiled_models: CompiledModelAdmission,
+    limits: CompileLimits,
+) -> Result<(), CompileFailure> {
+    let arithmetic = || failure("capi.resource.arithmetic");
+    let newest = pending.unwrap_or(current);
+    let graph = current
+        .report
+        .graph_session_plus_plan_bytes
+        .checked_add(pending.map_or(0, |pending| pending.report.graph_session_plus_plan_bytes))
+        .and_then(|value| value.checked_add(compiled_models.retained_bytes))
+        .ok_or_else(arithmetic)?;
+    if graph > limits.maximum_graph_session_plus_plan_bytes {
+        return Err(failure("graph.resource.limit"));
+    }
+    let capi = newest
+        .report
+        .capi_retained_bytes
+        .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
+        .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
+        .ok_or_else(arithmetic)?;
+    if capi > limits.maximum_capi_retained_bytes {
+        return Err(failure("capi.resource.limit"));
+    }
+    if current
+        .report
+        .largest_named_allocation_bytes
+        .max(pending.map_or(0, |pending| pending.report.largest_named_allocation_bytes))
+        .max(newest.capi.largest)
         .max(compiled_models.largest_allocation_bytes)
         > limits.maximum_named_allocation_bytes
     {
@@ -455,15 +579,49 @@ pub(crate) fn prepare_runtime(
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    let prepared = match successor {
-        Some(base) => prepare_host_runtime_successor(compiled, &caps, base),
-        None => prepare_host_runtime(compiled, &caps),
+    // #1256 D1: every plan carries each strip's fader/mute and matrix/pan lanes, and #1263 D1 one
+    // lane per prepared effect instance; nothing else live: no input lane (its tail would turn
+    // infinite) and no route lane (#1225).
+    //
+    // With a `successor` base (issue #1273 D1) the same lanes attach, and every source the
+    // transaction left unchanged is prepared vacant to carry its predecessor's ring.
+    let live = HostLiveControlRequest {
+        control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+        ..HostLiveControlRequest::default()
+    };
+    let (prepared, handles) = match successor {
+        Some(base) => prepare_host_runtime_with_live_lanes_successor(
+            compiled,
+            &caps,
+            &live,
+            C_ABI_LIVE_LANES,
+            base,
+        ),
+        None => prepare_host_runtime_with_live_lanes(compiled, &caps, &live, C_ABI_LIVE_LANES),
     }
     .map_err(prepare_failure)?;
+    // #1256 D2: keep only the producers. The strip ID list and the vectors this selection leaves
+    // empty drop here, on the control thread; each producer keeps its own `track_id`. The
+    // producer vector is built at exactly one entry per strip, so the boxed slice does not
+    // reallocate.
+    let host_core::HostLiveControlHandles {
+        strip_controls,
+        track_count,
+        effect_controls,
+        ..
+    } = handles;
+    let strips = StripLanes {
+        controls: strip_controls.into_boxed_slice(),
+        track_count,
+    };
+    // #1263 D2: likewise one entry per effect instance, built at exactly that capacity, so the
+    // boxed slice is the allocation host-core walked for `effect_control_resources`.
+    let effects = effect_controls.into_boxed_slice();
     let capi = prepared_capi_resources(
         compiled,
         &prepared.control_catalog,
         &prepared.inventory,
+        prepared.report.effect_control_resources,
         limits,
     )?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
@@ -493,6 +651,8 @@ pub(crate) fn prepare_runtime(
     };
     Ok(PreparedRuntime {
         sources: prepared.sources,
+        strips,
+        effects,
         plan: prepared.plan,
         resources: PlanResourceReport {
             struct_size: crate::PLAN_RESOURCE_REPORT_SIZE,
@@ -583,12 +743,14 @@ pub(crate) fn compile_children(
     let retained_capacity = controller_retained_capacity(limits)?;
     let PreparedRuntime {
         sources,
+        strips,
+        effects,
         plan,
         resources,
         carried: _,
         inventory,
         control_catalog,
-        capi: _,
+        capi,
     } = runtime;
     let (publisher, owner, retirer) = plan_exchange(
         plan,
@@ -652,7 +814,7 @@ pub(crate) fn compile_children(
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources, inventory),
+            providers: ProviderEpoch::current(sources, inventory, strips, effects, capi),
             pending_providers,
             retired_providers,
             publisher,
@@ -670,4 +832,163 @@ pub(crate) fn compile_children(
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
         plan: PlanState::new(owner, shared),
     })
+}
+
+#[cfg(test)]
+mod live_peak_tests {
+    //! #1257 gate 5: `validate_live_peak` charges each term of #1053 D8 against the right plan.
+
+    use super::*;
+    use crate::runtime::tests::{SESSION, limits};
+
+    /// Every term gets its own bit, so a missing or swapped term moves every sum it is part of.
+    struct Terms {
+        graph: u64,
+        capi_retained: u64,
+        largest_named: u64,
+        epoch_retained: u64,
+        prepared_protocol: u64,
+        capi_largest: u64,
+    }
+
+    fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
+        LiveEpochResources {
+            report: PlanResourceReport {
+                graph_session_plus_plan_bytes: terms.graph,
+                capi_retained_bytes: terms.capi_retained,
+                largest_named_allocation_bytes: terms.largest_named,
+                ..base
+            },
+            capi: CapiResources {
+                active_retained: u64::MAX,
+                epoch_retained: terms.epoch_retained,
+                prepared_protocol_retained: terms.prepared_protocol,
+                largest: terms.capi_largest,
+            },
+        }
+    }
+
+    fn caps(graph: u64, capi: u64, largest: u64) -> CompileLimits {
+        CompileLimits {
+            maximum_graph_session_plus_plan_bytes: graph,
+            maximum_capi_retained_bytes: capi,
+            maximum_named_allocation_bytes: largest,
+            ..limits()
+        }
+    }
+
+    fn verdict(
+        current: LiveEpochResources,
+        pending: Option<LiveEpochResources>,
+        models: CompiledModelAdmission,
+        limits: CompileLimits,
+    ) -> Result<(), String> {
+        validate_live_peak(current, pending, models, limits)
+            .map_err(|failure| String::from_utf8(failure.diagnostics).expect("UTF-8"))
+    }
+
+    /// Accepts with `cap` at `peak` and refuses with it one byte below, with `code`.
+    fn assert_cap(label: &str, peak: u64, code: &str, check: impl Fn(u64) -> Result<(), String>) {
+        assert_eq!(check(peak), Ok(()), "{label}: accepted at the cap");
+        assert_eq!(
+            check(peak - 1),
+            Err(format!("{code}\t$\n")),
+            "{label}: refused one byte below"
+        );
+    }
+
+    #[test]
+    fn the_live_admission_accepts_each_cap_and_refuses_one_byte_below() {
+        let base = compile_children(SESSION, limits())
+            .unwrap_or_else(|_| panic!("fixture compiles"))
+            .plan
+            .resources();
+        let current_terms = Terms {
+            graph: 1 << 0,
+            capi_retained: 1 << 1,
+            largest_named: 3,
+            epoch_retained: 1 << 2,
+            prepared_protocol: 1 << 3,
+            capi_largest: 5,
+        };
+        let pending_terms = Terms {
+            graph: 1 << 4,
+            capi_retained: 1 << 5,
+            largest_named: 7,
+            epoch_retained: 1 << 6,
+            prepared_protocol: 1 << 7,
+            capi_largest: 9,
+        };
+        let models = CompiledModelAdmission {
+            retained_bytes: 1 << 8,
+            largest_allocation_bytes: 11,
+        };
+        let current = epoch(base, &current_terms);
+        let pending = epoch(base, &pending_terms);
+        let huge = u64::MAX;
+
+        // Graph: both plans plus both compiled models.
+        for (label, pending, peak) in [
+            ("graph alone", None, 1 + (1 << 8)),
+            ("graph pending", Some(pending), 1 + (1 << 4) + (1 << 8)),
+        ] {
+            assert_cap(label, peak, "graph.resource.limit", |cap| {
+                verdict(current, pending, models, caps(cap, huge, huge))
+            });
+        }
+        // capi: the newest row, the current epoch's own rows while a candidate waits, and the
+        // newest epoch's prepared-protocol rows.
+        for (label, pending, peak) in [
+            ("capi alone", None, (1 << 1) + (1 << 3)),
+            (
+                "capi pending",
+                Some(pending),
+                (1 << 5) + (1 << 2) + (1 << 7),
+            ),
+        ] {
+            assert_cap(label, peak, "capi.resource.limit", |cap| {
+                verdict(current, pending, models, caps(huge, cap, huge))
+            });
+        }
+
+        // Largest allocation: make each term in turn the strict maximum. The current epoch's capi
+        // `largest` is a decoy while a candidate is pending: only the newest epoch's counts.
+        let big = 1_000;
+        for term in 0..4 {
+            let mut current_terms = Terms { ..current_terms };
+            let mut pending_terms = Terms { ..pending_terms };
+            let mut models = models;
+            match term {
+                0 => current_terms.largest_named = big,
+                1 => pending_terms.largest_named = big,
+                2 => pending_terms.capi_largest = big,
+                _ => models.largest_allocation_bytes = big,
+            }
+            current_terms.capi_largest = big * 2;
+            let current = epoch(base, &current_terms);
+            let pending = epoch(base, &pending_terms);
+            assert_cap(
+                &format!("largest pending, term {term}"),
+                big,
+                "capi.resource.limit",
+                |cap| verdict(current, Some(pending), models, caps(huge, huge, cap)),
+            );
+        }
+        for term in 0..3 {
+            let mut current_terms = Terms { ..current_terms };
+            let mut models = models;
+            match term {
+                0 => current_terms.largest_named = big,
+                1 => current_terms.capi_largest = big,
+                _ => models.largest_allocation_bytes = big,
+            }
+            let current = epoch(base, &current_terms);
+            assert_cap(
+                &format!("largest alone, term {term}"),
+                big,
+                "capi.resource.limit",
+                |cap| verdict(current, None, models, caps(huge, huge, cap)),
+            );
+        }
+    }
 }

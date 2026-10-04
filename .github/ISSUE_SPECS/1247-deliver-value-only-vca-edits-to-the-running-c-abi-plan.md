@@ -1,10 +1,13 @@
 # Deliver value-only VCA edits to the running C ABI plan
 
-Slice V8 of *VCA groups* (#1239). **Blocked:** it starts only after #1053 (not landed at filing),
+Slice V8 of *VCA groups* (#1239). **Blocked:** it starts only after #1053's core (#1257 and #1258; not
+landed at filing),
 *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225) and *Let C ABI
 sends follow their source strip's mute live* (#1226) have closed, and the VCA batch (#1240-#1246) is on
 `main`. **Re-verify every anchor when it starts:** #1053, #1225 and #1226 add the classifier and the
-live commit path this slice extends, and none of them exists at `8c6268967`.
+live commit path this slice extends, and none of them exists at `8c6268967`. (Amended 2026-10-04,
+when #1053 became an umbrella of slices #1253-#1266; the references below follow its decision
+record and guards G1-G3.)
 
 The design record cited below (`DESIGN`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
 
@@ -19,22 +22,23 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
 ## Context (forward-looking; re-verify after the dependencies land)
 
 - **At filing (`8c6268967`)** the C ABI has no live path: every committed transaction replaces the
-  plan (`git grep -n live_builtin_delta` is empty). VCAs apply at preparation on the C ABI since
+  plan (`git grep -n classify_live_delta` is empty). VCAs apply at preparation on the C ABI since
   *Apply VCA offsets and mutes at preparation* (#1242), so a structural edit renders VCAs correctly.
-- **After #1053:** capi classifies a committed-model delta as live through host-core's
-  `live_builtin_delta` (behind the `control-provider` feature, `crates/host-core/Cargo.toml:15`),
-  domain-checks, room-checks every queue, pushes, then commits infallibly (#1053 A1.4); every live
-  record uses #1053's ruled ramp length (its A2 D3).
+- **After #1053's core (#1257):** capi classifies a committed-model delta as live through
+  host-core's `classify_live_delta` (#1053 D1, #1255; behind the `control-provider` feature,
+  `crates/host-core/Cargo.toml:15`), domain-checks, room-checks every queue, checks the protocol
+  token, pushes, then commits, which cannot fail after the check (#1053 D6); every live fader and
+  mute record uses #1053's ramp seam, `LiveRamps::for_session` (its D3; a step until #1054).
 - **After #1225 and #1226:** strip faders and pans (tracks and submixes) and the gain, mute and
   matrix of routes into submixes are live; a strip mute change also pushes its follow records
   through `LiveRouteMuteFollow::delta` with a capi-owned `LiveRouteState`. #1225's D3 builds a route
   record's `source_lane_muted` from the source strip's committed mutes, and #1226's D1 hands `delta`
   the post-commit model's mutes as `effective_mute`.
-- **The VCA guard (DESIGN P13, widened at filing; #1239):** `live_builtin_delta` classifies a delta
+- **The VCA guard (DESIGN P13, widened at filing; #1239; #1053's G3):** `classify_live_delta` classifies a delta
   as structural whenever the pre- or post-commit model declares a VCA. It exists because #1053
   would push a member's own fader and drop the offset, and #1225/#1226 would read raw mutes and
-  reopen a VCA-muted member's following send. Whichever of #1053 and #1242 landed second implemented
-  it. This slice removes it.
+  reopen a VCA-muted member's following send. #1242 landed first, so #1053's #1255 implements it.
+  This slice removes it.
 - **After #1242:** `session::vca_effective_db`, `SessionModel::vca_reach` and
   `SessionModel::effective_strip_faders` (per strip `db`, `mute = own || vca_mute`, `vca_mute`).
 - **After #1244:** `host_core::LiveVcaState` (`try_new` from a model, setters, `effective_db`,
@@ -64,7 +68,7 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
   the follow records are domain-checked and room-checked together, then pushed, then committed, in
   #1053's order. A full queue is typed `Backpressure` with model, revision, replay and every mirror
   unchanged.
-- **D4. Ramps.** Every record uses #1053's ruled ramp length; a VCA change's ramp applies to every
+- **D4. Ramps.** Every record uses #1053's ramp seam (`LiveRamps::for_session`); a VCA change's ramp applies to every
   member record it emits.
 - **D5. Resources.** `LiveVcaState::retained_bytes()` (its tables, mirrors and shadow) is charged in
   `capi_resources`, and the oracles change by exactly those rows (zero for a session without VCAs).
@@ -74,7 +78,7 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
 - D1-D5 in capi's live commit path and host-core's classifier.
 - `docs/C_ABI_V1_QUALIFICATION.md`: VCA fader edits and member fader edits are value-only;
   membership edits are structural.
-- #1053's spec note on the VCA guard marked superseded, if the spec is still in
+- #1053's guard G3 marked superseded in its spec, if the spec is still in
   `.github/ISSUE_SPECS/`.
 
 ## Authorized paths
@@ -84,7 +88,7 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
 - `crates/capi/tests/` (`resource_lifecycle.rs` and one new test file)
 - `crates/host-core/src/` (the classifier only; `LiveVcaState`, `LiveRouteState` and
   `LiveRouteMuteFollow` are reused, not changed) and its tests
-- `docs/C_ABI_V1_QUALIFICATION.md`, `.github/ISSUE_SPECS/1053-*.md` (the note only)
+- `docs/C_ABI_V1_QUALIFICATION.md`, `.github/ISSUE_SPECS/1053-*.md` (guard G3's bullet only)
 - this spec
 
 ## Non-goals
@@ -138,8 +142,8 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
 
    *Test value: it turns red if any record is pushed before every queue's room is checked, or if
    composition re-emits unchanged targets.*
-6. **Realtime.** The two-thread barrier test (in `crates/capi/tests/resource_lifecycle.rs`, #1053's
-   gate shape) races VCA edits against render and a structural swap over 20 runs: `allocations == 0`
+6. **Realtime.** The two-thread race (in `crates/capi/tests/resource_lifecycle.rs`, *Qualify live C
+   ABI edits against a concurrently rendering plan*, #1258) races VCA edits against render and a structural swap over 20 runs: `allocations == 0`
    and `frees == 0` around each render call after warm-up, zero `INTERNAL` results, and a final
    block bit-identical to a fresh plan of the final committed model.
    *Test value: it turns red if VCA composition allocates on the render thread, or a racing VCA edit
@@ -171,7 +175,9 @@ the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
 
 - *Enumerate VCA groups and drive them from the SDK* (#1246; the VCA batch on `main`), which
   includes *Edit VCA groups through session transactions* (#1241, the opcodes D1 classifies)
-- *Deliver value-only fader, mute and pan transactions to the running C ABI plan through the live
+- *Apply value-only track fader, mute and pan transactions to the running C ABI plan* (#1257) and
+  *Qualify live C ABI edits against a concurrently rendering plan* (#1258), the core of the umbrella
+  *Deliver value-only fader, mute and pan transactions to the running C ABI plan through the live
   console lanes* (#1053) -- **not landed at filing**
 - *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225)
 - *Let C ABI sends follow their source strip's mute live* (#1226)

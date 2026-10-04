@@ -94,6 +94,8 @@ pub mod control_preparation;
 #[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
+#[cfg(feature = "control-provider")]
+pub mod live_delta;
 pub mod live_route_state;
 pub use control_preparation::{
     EQ_EDIT_CAPACITY, EQ_TARGET_CAPACITY, EQ_VALUE_COUNT, EqTargetEdit, EqTargetPreparer,
@@ -129,20 +131,23 @@ pub use engine::realtime::{
     ResponseSnapshotAvailability, ResponseSnapshotCapture, ResponseSnapshotError,
     ResponseSnapshotOwnerInfo, ResponseSnapshotSection, ResponseSnapshotSink,
 };
+#[cfg(feature = "control-provider")]
+pub use live_delta::{LiveDelta, LiveRamps, LiveRebuild, LiveStripRecords, classify_live_delta};
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
-    HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
-    HostPrepareReport, HostShapePolicy, PlanStateInventory, PreparedHost,
+    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, PlanStateInventory, PreparedHost,
     SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, compile_host_model,
     compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
     prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
     prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
-    prepare_host_runtime_with_live_controls_successor,
+    prepare_host_runtime_with_live_controls_successor, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime_with_live_lanes_successor,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
-    prepare_host_session, prepare_host_session_with_live_controls,
+    prepare_host_session, prepare_host_session_with_live_controls, strip_control_table_bytes,
 };
 pub use render_session::StartedRenderSession;
 pub use response::{
@@ -220,6 +225,16 @@ pub use spectrum::{
 /// that gather their tracks' inputs; a plan nobody joins never collapses, which is the safe default
 /// and the reason the join is an explicit call rather than an inference.
 pub use builtins_compiler::{session_structural_symmetry, track_mono_source};
+
+/// The live fader/mute and matrix/pan records and their lane selector (issue #1255 D6), re-exported
+/// so a host that pushes `classify_live_delta`'s records names them without depending on
+/// `builtins-compiler` or `builtins`.
+pub use builtins::BuiltinLaneSelector;
+/// One strip's live-control producers (`HostLiveControlHandles::strip_controls`), re-exported so a
+/// host that keeps them, as the C ABI does per provider epoch (#1256 D3), names the type without
+/// depending on `builtins-compiler`.
+pub use builtins_compiler::TrackControlProducer;
+pub use builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 pub use effect_contract::{ChannelSymmetryWitness, LiveControlRecord, SeamSide, SymmetryEvent};
 
 #[doc(hidden)]

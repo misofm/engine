@@ -3100,7 +3100,7 @@ fn idle_render_skips_admission_counter_clear_without_losing_queue_credit() {
 /// first block at `applied_at_sample` is fully changed -- the matrix stage drains its queue at the
 /// top of the block, so the transition is on a block boundary and is exact, not approximate.
 ///
-/// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
+/// Red mutation: move the `drain_controls` call in
 /// `LiveControlMatrixProcessor::process` to *after* `self.matrix.process(block)` -> the reported
 /// sample is one block early and `at_applied` still renders the pre-command value.
 #[test]
@@ -4241,7 +4241,10 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
                     [
                         (owner.producer.success_count(), owner.producer.full_count()),
                         (owner.fader.success_count(), owner.fader.full_count()),
-                        (owner.input.success_count(), owner.input.full_count()),
+                        {
+                            let input = owner.input.as_ref().expect("browser input lane");
+                            (input.success_count(), input.full_count())
+                        },
                     ]
                 })
                 .collect::<Vec<_>>(),
@@ -4356,7 +4359,7 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
 /// fader move has exactly one observable consequence: the whole plane scales. With a zero window
 /// the transition is a block boundary and is exact, not approximate.
 ///
-/// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
+/// Red mutation: move the `drain_controls` call in
 /// `LiveControlFaderProcessor::process` to *after* `self.fader.process(block)` -> the reported
 /// sample is one block early and `at_applied` still renders the pre-command value.
 #[test]

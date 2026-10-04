@@ -27,9 +27,10 @@ pub(crate) use engine::realtime::{
 };
 pub(crate) use host_core::SourceSubmission;
 pub(crate) use host_core::{
-    HostPrepareCaps, HostShapePolicy, PlanStateInventory, PrepareDiagnostics,
-    PreparedSessionControlCatalog, SessionControlProvider, SourceControlError, SourceControlSet,
-    SuccessorBase, parse_host_session, prepare_host_runtime, prepare_host_runtime_successor,
+    HostLiveControlRequest, HostLiveLanes, HostPrepareCaps, HostShapePolicy, PlanStateInventory,
+    PrepareDiagnostics, PreparedSessionControlCatalog, SessionControlProvider, SourceControlError,
+    SourceControlSet, SuccessorBase, parse_host_session, prepare_host_runtime_with_live_lanes,
+    prepare_host_runtime_with_live_lanes_successor,
 };
 pub(crate) use protocol::{
     CommandFrameProcessError, ControllerRetainedCapacity, DecodeScratch, EncodeError,
@@ -47,6 +48,8 @@ pub(crate) use crate::{
 pub(crate) mod compile;
 pub(crate) mod control;
 pub(crate) mod error;
+#[cfg(test)]
+mod live_tests;
 pub(crate) mod plan;
 #[cfg(test)]
 mod tests;

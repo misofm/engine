@@ -1004,6 +1004,8 @@ impl LivePlan {
             .expect("strip");
         self.handles.strip_controls[index]
             .input
+            .as_mut()
+            .expect("input lane")
             .try_push(write.record)
             .unwrap_or_else(|_| panic!("queue room"));
     }

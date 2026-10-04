@@ -14,7 +14,8 @@ use std::sync::Mutex;
 use builtins::{BuiltinLaneSelector, Matrix2x2, MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, TEST_ONLY_PAIR_GRAPH_TRACKS, TestOnlyFaderMatrixPair,
-    TrackControlRecord, TrackFaderRecord, TrackInputRecord, prepare_session_builtins,
+    TrackControlRecord, TrackControlRequest, TrackFaderRecord, TrackInputRecord,
+    prepare_session_builtins, prepare_session_builtins_with_live_controls,
     test_only_begin_phase_two_allocation_observation, test_only_fader_matrix_witness,
     test_only_observed_scalar_declined_split_pair_binding, test_only_observed_scalar_pair_binding,
     test_only_observed_scalar_split_pair_binding, test_only_phase_two_allocation_snapshot,
@@ -512,6 +513,8 @@ fn actual_queued_input_trim_drain_allocates_and_frees_nothing() {
         for control in &mut ridden.track_controls {
             control
                 .input
+                .as_mut()
+                .expect("input lane requested")
                 .try_push(TrackInputRecord::TrimDb {
                     lanes: BuiltinLaneSelector::Both,
                     db,
@@ -1347,6 +1350,71 @@ fn assert_phase_two_allocator_layouts_match_the_checked_resource_report(track_co
     assert!(
         first_touch_delta_checked,
         "the first-touch delta check must have run against the first measured combination"
+    );
+}
+
+/// Issue #1254 gate 3: a fader-and-matrix request (`input_lane: false`) on every track charges
+/// exactly what preparation allocates -- two rings per track, not three -- and an all-lanes
+/// request still does. A ring that is allocated but not charged, or charged but not allocated,
+/// turns the layout comparison red.
+#[test]
+fn live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_input_lane() {
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let session = session(4);
+    let requests = requests(0);
+    let controls = |input_lane: bool| -> Vec<TrackControlRequest> {
+        (0..4)
+            .map(|index| TrackControlRequest {
+                track_id: format!("track-{index}"),
+                queue_capacity: NonZeroUsize::new(16).expect("constant"),
+                input_lane,
+            })
+            .collect()
+    };
+    let prepare = |controls: &[TrackControlRequest]| {
+        armed(|| prepare_session_builtins_with_live_controls(&session, &requests, controls, caps()))
+            .expect("prepare")
+    };
+    // Settles first-touch state for this measurement, as `settle_phase_two_first_touch` does.
+    test_only_reset_phase_two_allocation_tracker();
+    let _ = prepare(&controls(true));
+    let mut retained = Vec::new();
+    for input_lane in [false, true] {
+        let controls = controls(input_lane);
+        test_only_reset_phase_two_allocation_tracker();
+        let prepared = prepare(&controls);
+        let snapshot = test_only_phase_two_allocation_snapshot();
+        let report = prepared.resource_report();
+        assert!(!snapshot.overflowed);
+        assert_eq!(prepared.track_control_count(), 4);
+        assert!(
+            prepared.validate_for_session(&session).0.is_empty(),
+            "input_lane={input_lane}: the prepared artifact passes its own seal"
+        );
+        assert_eq!(
+            snapshot.layouts,
+            report.retained_layouts(),
+            "input_lane={input_lane}"
+        );
+        assert_eq!(
+            snapshot.total_bytes, report.engine_owned_retained_payload_bytes,
+            "input_lane={input_lane}"
+        );
+        assert_eq!(
+            snapshot.allocation_count, report.retained_allocation_count,
+            "input_lane={input_lane}"
+        );
+        assert_eq!(
+            snapshot.largest_allocation_bytes, report.maximum_single_allocation_bytes,
+            "input_lane={input_lane}"
+        );
+        retained.push(report.engine_owned_retained_payload_bytes);
+    }
+    assert!(
+        retained[0] < retained[1],
+        "dropping the input lane must drop its ring: {retained:?}"
     );
 }
 

@@ -695,6 +695,13 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                     .set(b"control.plan.backpressure");
                 RESULT_BACKPRESSURE
             }
+            Err(CommandError::LiveBackpressure) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.live.backpressure");
+                RESULT_BACKPRESSURE
+            }
             Err(CommandError::CompileRejected(failure)) => {
                 session.last_error.borrow_mut().set(&failure.diagnostics);
                 RESULT_COMPILE_REJECTED
@@ -1083,6 +1090,15 @@ pub(crate) fn test_session_state_summary(session: *mut Session) -> (u64, usize, 
     // SAFETY: Test callers retain the exclusively owned live session for this inspection.
     let state = unsafe { &(*session).state };
     state.test_state_summary()
+}
+
+#[cfg(test)]
+pub(crate) fn test_last_error(session: *mut Session) -> Vec<u8> {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).last_error }
+        .borrow()
+        .as_slice()
+        .to_vec()
 }
 
 #[cfg(test)]
@@ -1750,8 +1766,17 @@ mod tests {
         );
         assert_eq!(event_out.required_bytes, 0);
 
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse("capi-ffi-replaced").expect("stable ID"),
+        // A structural edit that renders identically (#1260 D3): a session ID edit is model-only
+        // and would commit without the replacement plan this test applies below.
+        let model = session::parse_session_json(core::str::from_utf8(JSON).expect("UTF-8"))
+            .expect("fixture session");
+        let source = &model.sources[0];
+        let edit = protocol::SessionEdit::SetSourceContent {
+            source_id: source.id.clone(),
+            content: format!("blake3:{}", "cd".repeat(32)),
+            channels: source.channels,
+            bit_depth: source.bit_depth,
+            frames: source.frames,
         };
         let mut structural_request = vec![0_u8; 4_096];
         let structural_len = codec
