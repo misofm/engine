@@ -90,10 +90,12 @@ Ruling:
   part. The planner also reads "submix inputs" as covering the strip's **input section**, which
   DESIGN 2.2b answers with the channel model as one question. The input-section half rests on that
   reading.
-  - **Subject to owner review:** (b) keeps trim and polarity, which the planner had told the owner
-    a bus would drop. The planner's second reply, before W5, said that a submix "drops the
-    source-specific parts of the input section, such as trim and polarity". The owner has not been
-    told of this reversal.
+  - **Decided by the owner on 2026-10-04 (Q5); first recorded here as subject to owner review:**
+    (b) keeps trim and polarity, which the planner had told the owner a bus would drop. The
+    planner's second reply, before W5, said that a submix "drops the source-specific parts of the
+    input section, such as trim and polarity". The owner had not been told of this reversal when
+    this record was first written. The planner then asked it as Q5, and the owner kept both (Q5
+    below).
   - (b)'s dual-mono strip is the verified opinion, and it reverses question 4's own lean toward "a
     true L/R stereo strip and not dual-mono". The owner deferred to the verified opinion, not to
     the lean.
@@ -106,7 +108,8 @@ Ruling:
   applies to buses and sends (DESIGN section 6) is the planner's, subject to owner review.
 - **Owner-delegated answers** (O3). VERIFY-1 upheld both opinions, and its amendments are folded
   in. The two answers below therefore carry the owner's delegated authority, (b) under the reading
-  of "submix inputs" recorded at O3, with (b)'s trim and polarity subject to owner review (O3).
+  of "submix inputs" recorded at O3. (b)'s trim and polarity are an owner decision since Q5
+  (2026-10-04).
   - **(a) VCA groups are in scope** (DESIGN 2.2a).
     - A VCA is a control-only group. It carries no audio. Its per-lane dB offset adds to each
       member's own fader, and its mute ORs into each member's effective mute.
@@ -175,9 +178,10 @@ Ruling:
   `submix_output` becomes an unknown token. Route fields 6 (`mute`) and 7 (`follows_mute`) are
   appended. The C ABI's `reserved[0]` of the compile limits becomes `maximum_submixes`. Nothing is
   renumbered, and a retired code is refused, never reallocated. There is no `ABI_VERSION` bump.
-- **Owner questions (DESIGN 8.2), all open on 2026-10-02; Q1-Q4 answered on 2026-10-03.** No
-  filed slice of #1196 depends on an answer. The owner's words are quoted verbatim, from the
-  owner's message of 2026-10-03. Each answer names its authority kind, as above.
+- **Owner questions (DESIGN 8.2), all open on 2026-10-02; Q1-Q4 answered on 2026-10-03; Q5
+  answered on 2026-10-04.** No filed slice of #1196 depends on an answer. The owner's words are
+  quoted verbatim, from the owner's message of 2026-10-03 for Q1-Q4 and of 2026-10-04 for Q5. Each
+  answer names its authority kind, as above.
   - **Q1, owner direction, read by the planner** (may a submix override a console slot's
     `link_mode`?): **answered.** The owner: "We should follow whatever modern day DAWs look like."
     That is the owner's direction. The concrete rule is the planner's reading of it, subject to
@@ -207,18 +211,21 @@ Ruling:
     submix may follow, and that a monitor-style send opts out with `followsMute: false`. The owner
     asked for the explanation and raised no objection, but did not decide: the default stays
     `true` as the planner's (P11), subject to owner review.
-  - **Q5** (asked on 2026-10-03: should a submix strip keep the input section's `trim_db` and
-    `polarity_invert`?): **open, pending the owner's reply.** The planner explained that DAWs
-    split on it (Logic and Pro Tools give an aux or bus no trim or polarity; Cubase and Studio One
-    do) and recommended keeping both, as shipped by K1 (DESIGN 2.2, "Input section: all five
-    keys"). Nothing changes until the owner answers.
+  - **Q5, owner decision** (asked on 2026-10-03: should a submix strip keep the input section's
+    `trim_db` and `polarity_invert`?): **answered on 2026-10-04, closed.** The planner explained
+    that DAWs split on it (Logic and Pro Tools give an aux or bus no trim or polarity; Cubase and
+    Studio One do) and recommended keeping both, as shipped by K1 (DESIGN 2.2, "Input section: all
+    five keys"). The owner: "Yes ok let's keep trim and polarity on buses." Buses keep all five
+    input-section keys (`polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz`, `delay_samples`), as
+    shipped: trim and polarity by this answer, the other three under (b)'s delegated answer.
+    Nothing changes and nothing is filed.
   - The question DESIGN 8.2 held back as its own "Q5" (a class-B change of bus-sum order, only if
     a measurement shows D9's route order blocks folding) is still not asked; it is unrelated to the
     owner's Q5 above.
 - **VCA batch questions (#1240-#1246), recorded on 2026-10-03 as planner decisions, subject to owner
   review.** They are the owner questions the VCA batch raised. No VCA slice waits on an answer:
-  each slice implements the decision as written until the owner rules otherwise. Q5 above stays
-  open and is not one of them.
+  each slice implements the decision as written until the owner rules otherwise. Q5 above
+  (answered on 2026-10-04) is not one of them.
   - **V-Q1, the widened C ABI interim guard.** Recorded at (a) above: until #1247, every C ABI
     delta while the pre- or post-commit model declares a VCA is structural (a replacement plan),
     not only a fader field of a VCA member. The narrow guard would let #1225's live route records

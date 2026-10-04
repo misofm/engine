@@ -185,7 +185,7 @@ the owner's words.
 - **Q4.** The SDK defaults `followsMute` to `true` on a route into a submix. **Answered: default
   kept.**
 - **Q5** (asked on 2026-10-03): should a submix keep the input section's `trim_db` and
-  `polarity_invert`? Open, pending the owner's reply; nothing changes until then.
+  `polarity_invert`? **Answered on 2026-10-04: keep both** (decision 13, Q5). Nothing changes.
 
 ## Gates every slice inherits
 
