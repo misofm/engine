@@ -253,8 +253,14 @@ is a no-op; the oracle's window includes it and is exact.
 - M5 a fader `Mute` record pushed onto strip 0 at preparation: red, "parity 1 tracks at 44100 Hz:
   block 0" (bits differ).
 - M3 `routes: true` and M4 `effects: true`: gate 1 stays green. Candid: on these sessions a live
-  route or effect lane moves no bit and no tail by construction, so gate 1 does not catch them;
-  they show only as larger resource rows, which the budget test bounds.
+  route or effect lane moves no bit and no tail by construction, so gate 1 does not catch them.
+  (Corrected after the verdict, MINOR 1: the earlier sentence said both "show only as larger
+  resource rows, which the budget test bounds", which is wrong both ways.) M4 is caught exactly by
+  `capi_retained_bytes_charge_every_byte_the_compile_retains` (left 387,119, right 258,135), by
+  `tiny_control_frame_still_accounts_three_provider_counters_exactly` and by the budget test,
+  because the oracle's `host_half` spells `FADER_AND_MATRIX` independently. M3 moves no row on any
+  capi fixture (none has a route into a submix), so no test bounds it; the submix-routed oracle
+  session is #1256 MINOR 1, folded into #1258.
 - O1 strip row charged as zero: `capi_retained_bytes_charge_every_byte_the_compile_retains` red
   (left 258,135 observed, right 256,884).
 - O2 strip row charged for one extra strip: red (left 258,135, right 258,271).
@@ -290,3 +296,17 @@ is a no-op; the oracle's window includes it and is exact.
   `check-web-audioworklet.sh --without-metadata-regeneration`,
   `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`: pass.
 - 4-lane NEON (`run-aarch64-tests.sh debug`): CI only, not run locally.
+
+### Follow-ups applied (after the attempt 1 PASS, verdict NIT 1 and NIT 4)
+
+- NIT 1: `largest` in `crates/capi/src/runtime/compile.rs` keeps the whole strip row and now says
+  it is conservative (the slice and the `track_id`s are separate allocations, so it can only refuse
+  earlier). Feeding `Layout::array::<TrackControlProducer>(n)` instead was declined: it would move
+  `largest_allocation_bytes` for no behavioural gain, and the safe-direction comment is the
+  verdict's second option.
+- NIT 4: the charge-site comment in `compile.rs` names D4's double charge (builtins' processor
+  accumulator also charges the producer vector, against the builtin cap).
+- The M3/M4 sentence in the mutation runs above is corrected.
+- MINOR 1 (a submix-routed session in the charge oracle) is folded into #1258; NIT 2 and NIT 3 are
+  not in this follow-up's scope.
+- Comment-only code changes: no new test, so no mutation run.

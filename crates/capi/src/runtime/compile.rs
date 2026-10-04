@@ -153,7 +153,11 @@ pub(crate) fn capi_resources(
     // (`validate_replacement_peak`); charging it here too counted one allocation twice (#1060).
     //
     // The strip producer table (#1256 D3) is the epoch's too, through host-core's mirror. Its
-    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`.
+    // rings are builtins' rows, charged in `builtin_retained_payload_bytes`. Builtins' processor
+    // accumulator also charges the producer vector itself (`add_vector_layout::<
+    // TrackControlProducer>`), so that vector is charged twice, here against the capi cap and
+    // there against the builtin cap: #1256 D4's recorded, conservative double charge. Removing
+    // either side is a deliberate decision, not a cleanup.
     let epoch_rows = [
         host_core::control_table_bytes(source_count)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
@@ -205,6 +209,9 @@ pub(crate) fn capi_resources(
         .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
         .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .ok_or_else(|| failure("capi.resource.arithmetic"))?;
+    // Conservative: the strip row is the producer slice plus every `track_id`, which are separate
+    // allocations, so feeding the whole row overstates the largest single allocation when that
+    // row is the maximum. The error only ever refuses earlier.
     let largest = epoch_rows
         .into_iter()
         .chain(fixed_allocation_rows)
