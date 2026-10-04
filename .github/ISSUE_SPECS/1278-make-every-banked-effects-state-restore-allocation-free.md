@@ -521,7 +521,8 @@ target that moves only a disabled band's parameters is stationary. Hence the dec
   forbidden-body predicate").
 
 **Test value.** `carry.rs` mid-ramp: a restore that re-derives the carried step, or refuses the
-effect's own path, which no other EQ test catches. `carry.rs` one-channel refusal: a restore that
+effect's own path, caught deterministically at every sample (the EQ's `tests/randomized.rs`
+differential catches them only on some seeds: M1 on 10 of 24, M2 on 3 of 24). `carry.rs` one-channel refusal: a restore that
 commits one channel before the other is validated. Compressor rows: a settled or target
 coefficient of `0.0`. The differential's prepared-target drive: by reach, it now applies accepted
 moving EQ targets at random boundaries, through scalar, bank, collapsed arm and restored twin.
@@ -541,3 +542,33 @@ re-pinned); `trace-effect-contract-audit.sh target/release/bench 1000000` and
 the EQ restore and the compressor bound are compiled into it. Not re-pinned (`docs/RELEASE.md`).
 
 **Open (successors).** As attempt 2, with the realtime floors now 79 regions / 24 files.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`c2808bb04` + amendment `46ef4f263`) | `1278-attempt1.md` | FAIL | MAJOR (test value): soft-clip's edge-probe test caught nothing existing tests miss; product work confirmed allocation-free and bit-exact mid-ramp; 5 MINOR (one a compressor hostile-payload regression), NITs. |
+| 2 (`a070cfa7d`) | `1278-attempt2.md` | FAIL | MAJOR: the conformance differential never started a parametric-EQ ramp and its in-flight counter over-reported; product code correct. |
+| 3 (`251113c8f`) | `1278-attempt3.md` | PASS | EQ ramps driven, honest in-flight count, `RAMP_PATH_NORM_TOLERANCE = 1 + 2^-12` sound and derivable; 3 NIT (state the tolerance derivation, inaccurate `carry.rs` test-value sentence, an overlong compressor comment). |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commits on `codex/seamless-swap`; comments and records only, so no
+new test):
+- NIT-1: `crates/parametric-eq/src/lib.rs`'s `RAMP_PATH_NORM_TOLERANCE` rustdoc states the
+  derivation (convexity, `L <= 4`, `u = 2^-25`, the induction to `2^-22 + 65 * 4 * 2^-25`, about
+  `8.0e-6`, at every rate and through any retarget chain), with the `3.7e-6` grid measurement kept
+  as a cross-check.
+- NIT-2: the attempt-2 test-value sentence above now says `carry.rs` catches M1 and M2
+  deterministically and the EQ's randomized differential only on some seeds.
+- NIT-3: `crates/compressor/src/state.rs`'s coefficient comment is reflowed to 100 columns.
+- The realtime-policy floors: `scripts/check-realtime-policy.sh` now requires 25 files and 87
+  regions, the merged tree's counts (`realtime policy: ok (87 marked regions in 25 files)`), and
+  `scripts/test-realtime-policy.sh` pads its fixture with thirteen files and forty-six regions so
+  it sits exactly on both floors; its file-floor and region-floor mutation rows still turn red
+  (`realtime policy mutation tests: ok`).
+
+Stays open (successors, listed in #1269's "Phase 1 status"): the delay refuses its own edge-ramp
+snapshots (feedback, mix, cross feedback); soft-clip's two open non-finite history cases;
+soft-clip validates an in-flight current by its line, not by `ramp_path_within`. The EQ's `Simd4`
+legs are verified only in CI aarch64.

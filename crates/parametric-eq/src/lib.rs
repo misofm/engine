@@ -818,10 +818,20 @@ const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 /// that line: its rounding, and a retarget that starts a new line from a rounded point, put it a
 /// few ulps off, which a design-exact limit refuses: the conformance differential found the EQ
 /// refusing its own mid-ramp snapshots, and a 10 kHz bell at Q 0.1 moving from -24 dB to +24 dB
-/// was refused at every sample (`tests/carry.rs`). The largest excess measured over a grid of
-/// every band kind and frequency, gain and Q moves at 48 kHz was `3.7e-6`, about `2^-18`, 64
-/// times below this bound, while a forged path held to it gains at most `(1 + 2^-12)^64 < 1.016`
-/// over the at most [`RAMP_SAMPLES`] samples it lasts before the target's exact words snap in.
+/// was refused at every sample (`tests/carry.rs`).
+///
+/// The bound is derived, at every rate and through any chain of retargets. The norm `f` of the
+/// transition matrix is convex in the words (the matrix is affine in them) and Lipschitz with
+/// `L <= 4` in the max-norm of `(c1, a2, a3)`; each `f32` add rounds by at most `u = 2^-25`, since
+/// the words stay below 1, and the scaled step lands within about `u` of the target. So a walk
+/// starting at excess `E` stays below `1 + E` whenever `E >= 2^-22 + 65 * 4 * 2^-25`, about
+/// `8.0e-6` (`2^-16.9`), and a fresh design starts within `2^-22`: every point the effect reaches
+/// is within `1 + 8.0e-6`, 30 times inside this bound, and the same induction keeps a retarget
+/// from an accepted forged start inside it. Cross-check: the largest excess measured over a grid
+/// of every band kind and frequency, gain and Q moves was `3.7e-6` (`2^-18`) at 48 kHz, and a
+/// four-rate simulation agrees. A forged path held to the bound gains at most
+/// `(1 + 2^-12)^64 < 1.016` over the at most [`RAMP_SAMPLES`] samples it lasts before the target's
+/// exact words snap in.
 const RAMP_PATH_NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_096.0;
 
 /// Conservative finite bound for the three output-mix words accepted at the prepared-target
