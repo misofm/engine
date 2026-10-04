@@ -325,14 +325,16 @@ function rebuildPreflight(wasmModule, documents) {
   }));
 }
 
-function rebuildRound(modulePath, roundName) {
+// One round's record. `rebuild-preflight` runs it with no timed observation, so everything a timed
+// round reads and assembles is exercised before any timed launch.
+function rebuildRound(modulePath, roundName, count) {
   const moduleBytes = readFileSync(modulePath);
   const wasmModule = new WebAssembly.Module(moduleBytes);
-  const documents = REBUILD_DOCUMENTS.map(loadDocument);
-  rebuildPreflight(wasmModule, documents);
+  const documents = REBUILD_DOCUMENTS.map(rebuildDocument);
+  const premise = rebuildPreflight(wasmModule, documents);
   const loadStart = readFileSync("/proc/loadavg", "utf8").trim();
   const observations = documents.map(() => []);
-  for (let observation = 0; observation < REBUILD_OBSERVATIONS; observation++) {
+  for (let observation = 0; observation < count; observation++) {
     documents.forEach((document, index) => observations[index].push(rebuildObserve(wasmModule, document)));
   }
   const loadEnd = readFileSync("/proc/loadavg", "utf8").trim();
@@ -352,7 +354,8 @@ function rebuildRound(modulePath, roundName) {
     quantum_budget_ns: REBUILD_BUDGET_NS,
     live_control_command_queue_records: COMMAND_QUEUE_RECORDS,
     source_ring_frames: SOURCE_RING_FRAMES,
-    observations_per_document: REBUILD_OBSERVATIONS,
+    observations_per_document: count,
+    preflight: premise,
     pairing: "four documents alternated per observation; a fresh instance per boot",
     units: "ns",
     percentile_method: "nearest_rank",
@@ -482,13 +485,13 @@ function rebuildRun(workdir, outdir, cpu, control) {
 
 function rebuildMain([command, ...rest]) {
   if (command === "rebuild-preflight" && rest.length === 1) {
-    const documents = REBUILD_DOCUMENTS.map(rebuildDocument);
-    const result = rebuildPreflight(new WebAssembly.Module(readFileSync(rest[0])), documents);
-    process.stdout.write(`${JSON.stringify({ mode: command, documents: result })}\n`);
+    const record = rebuildRound(rest[0], "warmup", 0);
+    JSON.parse(JSON.stringify(record));
+    process.stdout.write(`${JSON.stringify({ mode: command, documents: record.preflight })}\n`);
     return 0;
   }
   if (command === "rebuild-round" && rest.length === 2 && Object.hasOwn(REBUILD_ROUNDS, rest[1])) {
-    process.stdout.write(`${JSON.stringify(rebuildRound(rest[0], rest[1]))}\n`);
+    process.stdout.write(`${JSON.stringify(rebuildRound(rest[0], rest[1], REBUILD_OBSERVATIONS))}\n`);
     return 0;
   }
   if (command === "rebuild-run" && rest.length === 4) {
