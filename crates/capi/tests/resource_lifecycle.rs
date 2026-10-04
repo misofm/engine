@@ -1924,6 +1924,9 @@ unsafe fn dequeue_c(session: *mut Session, lane: u32, storage: &mut [u8; 4_096])
 ///
 /// Any result other than OK fails, and so does `RESULT_BACKPRESSURE` more than 256 blocks after an
 /// admission. The render thread counts its own allocations and frees: swapping plans adds none.
+/// A swap witness keeps the race from passing vacuously if the edits stop rebuilding: the first
+/// plan's source ring is seeked to generation 2 before the race, and a generation-1 chunk is
+/// accepted after it only by a fresh plan's ring.
 fn race_plan_swaps(swaps: u64, readers: usize) {
     use core::sync::atomic::Ordering;
 
@@ -1946,6 +1949,13 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
 
     // SAFETY: The returned handles are uniquely owned until the matching destroy calls below.
     let (session, plan) = unsafe { compile_c(SESSION, &limits()) };
+    // The swap witness, armed: the first plan's source ring moves to generation 2, so it refuses a
+    // generation-1 chunk from here on. A swapped-in plan's fresh ring starts at generation 1.
+    let source = b"fixture-source";
+    // SAFETY: The session is live and no other thread uses it yet.
+    let seek =
+        unsafe { miso_engine_v1_source_seek(session, source.as_ptr(), source.len() as u64, 2, 0) };
+    assert_eq!(seek, RESULT_OK, "the witness seek");
     let session_address = session as usize;
     let plan_address = plan as usize;
     let stop = AtomicBool::new(false);
@@ -2114,6 +2124,31 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
             )
         });
 
+    // The swap witness, read: two more blocks on this thread swap in a candidate the last
+    // admission may have left pending, and then a generation-1 chunk is accepted only if a fresh
+    // plan replaced the first one, whose ring the witness seek moved to generation 2.
+    let witness = if render_failure.is_none() && control.2.is_none() {
+        let mut pcm = [f32::NAN; 2 * QUANTUM];
+        let output = PlanarOutput {
+            struct_size: PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM as u32,
+            plane_stride_samples: QUANTUM as u32,
+            reserved: [0; 2],
+        };
+        for block in blocks..blocks + 2 {
+            // SAFETY: The render thread has joined; this thread is the plan's only renderer.
+            let code =
+                unsafe { miso_engine_v1_render_f32_planar(plan, block * QUANTUM as u64, &output) };
+            assert_eq!(code, RESULT_OK, "witness block {block}");
+        }
+        // SAFETY: Every other thread has joined; the session is live.
+        Some(unsafe { submit_constant_c(session, 1, 0) })
+    } else {
+        None
+    };
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
         miso_engine_v1_session_destroy(session);
@@ -2147,6 +2182,11 @@ fn race_plan_swaps(swaps: u64, readers: usize) {
             deallocated_bytes: 0,
         },
         "render stayed allocation-free across {swaps} plan swaps"
+    );
+    assert_eq!(
+        witness,
+        Some(RESULT_OK),
+        "vacuous: no fresh plan replaced the first one (a generation-1 chunk was refused)"
     );
 }
 
@@ -2548,8 +2588,9 @@ impl RaceEdits {
         }
     }
 
-    /// Edit `index`, with a value no earlier edit of the same kind on the same track used, so a
-    /// lost edit leaves its track's value wrong unless a later edit overwrites it.
+    /// Edit `index`. A fader or pan edit takes a value no earlier edit of the same kind on the
+    /// same track used, and a mute edit mostly flips its track's left mute, so a lost edit leaves
+    /// its track's value wrong unless a later edit overwrites it.
     fn edit(&mut self, index: u64) -> (bool, SessionEdit) {
         if index % 8 == 7 {
             let digits = if (index / 8).is_multiple_of(2) {
@@ -2591,9 +2632,10 @@ impl RaceEdits {
             },
             _ => {
                 let fader = &mut self.faders[track];
-                // Mute every third mute edit's track on the left lane only, and unmute both
-                // otherwise, so the final mix always carries most tracks.
-                let mute = (index / 3).is_multiple_of(3);
+                // Mute edits flip the left lane of each track in turn (alternating with each
+                // third step, offset by track), and the right lane is never muted, so the final
+                // mix always carries every track.
+                let mute = (step / 3 + track as u64).is_multiple_of(2);
                 fader.left_mute = mute;
                 fader.right_mute = false;
                 SessionEdit::SetTrackFader {
@@ -2625,6 +2667,8 @@ struct RaceCounts {
 /// The last structural edit is edit 151, so the run ends with four live edits that commit while
 /// its candidate is pending or just swapped in, and no later rebuild re-prepares their values
 /// from the committed model: a live edit lost to the retiring plan stays lost in the final block.
+/// They are a pan (152) and three mutes (153-155), of which 153 and 155 flip a value and push a
+/// record; 154 repeats its track's value and commits with no record.
 const RACE_EDITS: u64 = 156;
 const RACE_EDITS_PER_BLOCK: u64 = 3;
 /// Render blocks after an edit's first refusal beyond which another refusal fails the run, as
@@ -3015,10 +3059,9 @@ fn paused_bursts(
     }
     paused.store(false, Ordering::Release);
     // The refused live edit goes to the candidate's fresh lanes if the swap has not happened yet,
-    // or to the swapped-in plan's; the second structural edit waits for the swap.
-    control.counts.retries += 1;
+    // or to the swapped-in plan's; the second structural edit waits for the swap. `retries`
+    // counts only the resubmissions `commit` finds refused again.
     control.commit(&refused_live, true)?;
-    control.counts.retries += 1;
     control.commit(&second, false)
 }
 

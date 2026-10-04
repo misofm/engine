@@ -237,3 +237,19 @@ before (gate 3).
 - Worklet chain: not run. `host_core::live_delta` is `#[cfg(feature = "control-provider")]`, and
   only `capi` enables that feature, so no line compiled into the browser module changed.
 - 4-lane (NEON) `bash scripts/run-aarch64-tests.sh debug`: CI-only; not run locally.
+
+### Follow-ups applied (after the attempt 1 PASS; batch follow-ups worker)
+
+- **MINOR 1.** `crates/capi/include/miso_engine_v1.h` (comment only) and
+  `docs/CONTROL_PROTOCOL_SEMANTICS.md` now say that a transaction changing only the session ID, a
+  profile's id or the stored automation table commits with no replacement and no live value.
+  `scripts/check-capi-abi.sh` passes, so the ABI is unchanged.
+- **MINOR 2.** `race_plan_swaps` (the two #1042 race tests) now carries a swap witness: before the
+  race the first plan's source ring is seeked to generation 2; after the race two more blocks render
+  on the test thread and a generation-1 chunk must be accepted, which only a fresh plan's ring does.
+  Mutation: `command()` made model-only (a `SetSessionId`): both
+  `control_calls_racing_plan_swapping_renders_never_wedge_replacement` and
+  `resource_queries_racing_plan_swaps_always_find_the_published_row` went **red** on the witness
+  ("a generation-1 chunk was refused"); they were green under this mutation before. Reverted.
+- Gates: as recorded in #1258's follow-ups note (capi tests, race x5, fmt, clippy, ABI, realtime and
+  workspace policies).

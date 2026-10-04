@@ -195,8 +195,9 @@ defect was introduced, the test went red, and the defect was reverted.
 - `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` (gate 1, 20
   runs). The race session follows D1: the nine-track fixture with an empty console, no inserts,
   HPF/LPF off, zero delay, and a constant source of `[0.375, -0.21875]`. Each run makes 156 edits:
-  live fader, pan (smoothing 16-128) and mute edits cycling over the nine tracks, with distinct
-  values, and a `SetSourceContent` structural edit every eighth (D2). The control thread waits for
+  live fader, pan (smoothing 16-128) and mute edits cycling over the nine tracks (fader and pan
+  values distinct; each mute edit flips its track's left mute, 36 of 43 changing a value; see
+  Follow-ups applied), and a `SetSourceContent` structural edit every eighth (D2). The control thread waits for
   render progress every third edit, so several edits land in each render period. It feeds the
   source, seeks under a new generation after every swap (it detects a swap by
   `source.generation.stale`), and drains both event lanes after every call. Halfway through each
@@ -217,13 +218,14 @@ defect was introduced, the test went red, and the defect was reverted.
   must also be non-zero on both lanes.
 
   The last structural edit is edit 151, so the run ends with four live edits that no later rebuild
-  re-prepares. In the first draft the run ended with a structural edit, and mutation M1-a survived:
+  re-prepares: a pan (152) and three mutes (153-155), of which 153 and 155 push a record. In the first draft the run ended with a structural edit, and mutation M1-a survived:
   the final rebuild prepares from the committed model and so healed every lost live edit.
 
   Counts over 20 runs, on each of three base runs: 3,080 live and 420 structural commits; 20 live
-  and 20-21 plan `RESULT_BACKPRESSURE`; 40-41 retries; 0 protocol event backpressure; 380-381 seeks
+  and 20-21 plan `RESULT_BACKPRESSURE`; 40-41 retries (40 of them the forced paused-phase
+  resubmissions, which follow-ups removed from the counter); 0 protocol event backpressure; 380-381 seeks
   after swaps; 3,160-3,161 control calls that overlapped a render call; about 10,400 race blocks.
-  Each run takes about 7 s in debug.
+  The 20-run test takes about 7 s in debug.
 
   *Test value:* red if a fader or matrix drain allocates or frees on the render thread, if a live
   edit that races a swap reaches the retiring plan or is lost, if epoch synchronization returns
@@ -337,3 +339,23 @@ temporary output failed with ENOSPC. 12.9 GB of older duplicate test executables
 `target/debug/deps` were deleted (the newest build of each test binary was kept), all in this
 worktree's own target directory and while no cargo process was using it. Cargo relinks a deleted
 binary on demand.
+
+### Follow-ups applied (after the attempt 1 PASS; batch follow-ups worker)
+
+- **MINOR 1.** A race mute edit is now `let mute = (step / 3 + track as u64).is_multiple_of(2);`,
+  so 36 of 43 mute edits per run flip their track's left mute (it was 3 of 43). Edits 153 and 155
+  among the final four live edits push records, the right lanes are never muted, and 4 of 9 tracks
+  end left-muted, so the final mix stays non-zero (asserted). The `RaceEdits::edit` and `RACE_EDITS`
+  docs and this record now say so. Mutations, each reverted afterwards:
+  - mute-drop (the live arm skips every `TrackFaderRecord::Mute` push in `control.rs`): race
+    **red** in run 0 on 3 of 3 invocations (final block `[-0.16999753, -0.25600186]` against
+    `[-0.1212493, 0.039765462]`); it was green before this fix;
+  - M1-a (the live arm pushes to `self.providers`): race red in run 0 on 3 of 3 invocations.
+- **NIT 1.** The timing sentence now reads "the 20-run test takes about 7 s".
+- **NIT 2.** `paused_bursts` no longer adds the two forced resubmissions to `retries`; the counter
+  now counts only resubmissions `RaceControl::commit` found refused again: 0-6 per 20 runs over
+  five invocations.
+- Gates: `cargo test --locked -p capi` pass (50 lib, 13 `resource_lifecycle`); the three race tests
+  passed in 5 more invocations (7.8-9.2 s each); `cargo fmt --all -- --check`, `cargo clippy --locked
+  -p capi --all-targets --all-features -- -D warnings`, `scripts/check-capi-abi.sh`,
+  `scripts/check-realtime-policy.sh` and `scripts/check-workspace-policy.sh` pass.
