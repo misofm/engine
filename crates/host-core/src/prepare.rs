@@ -298,9 +298,10 @@ pub struct HostLiveControlRequest {
     /// Issue #140 turns this into the depth of *every* live channel a strip owns (a submix too,
     /// issue #1211 D1): the matrix/pan queue #137 shipped, the fader/mute queue, and one queue
     /// per prepared effect instance. Which of them are attached is the caller's [`HostLiveLanes`]
-    /// (issue #1254 D2): the matrix/pan and fader/mute queues always; the input queue, the effect
-    /// queues and the route queues only under [`HostLiveLanes::ALL`], which every entry except
-    /// [`prepare_host_runtime_with_live_lanes`] uses. Each
+    /// (issue #1254 D2): the matrix/pan and fader/mute queues always; the input queue when
+    /// [`HostLiveLanes::strip_input`] is set, the effect queues when [`HostLiveLanes::effects`] is
+    /// set, and the route queues when [`HostLiveLanes::routes`] is set. Every entry except
+    /// [`prepare_host_runtime_with_live_lanes`] passes [`HostLiveLanes::ALL`]. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
@@ -416,10 +417,11 @@ pub struct HostLiveControlHandles {
     /// `input` is `None`. A submix's producer carries the submix ID in `track_id`.
     pub strip_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared strip effect instance (#140 A); empty when no channel was
-    /// requested. A submix strip's effects get one exactly as a track's do (issue #1207 D5), and
-    /// `track_id` then carries the submix ID. Addressed by `(track_id, address)` in the session's
-    /// own terms (decision 12, issue #1096): a console slot by its index in the session's slot
-    /// order (`pre_insert`, then `post_insert`), an insert by its index in the strip's `inserts`
+    /// requested or [`HostLiveLanes::effects`] was not set (issue #1254). A submix strip's effects
+    /// get one exactly as a track's do (issue #1207 D5), and `track_id` then carries the submix
+    /// ID. Addressed by `(track_id, address)` in the session's own terms (decision 12, issue
+    /// #1096): a console slot by its index in the session's slot order (`pre_insert`, then
+    /// `post_insert`), an insert by its index in the strip's `inserts`
     /// ([`Self::effect_control_mut`]).
     pub effect_controls: Vec<EffectControlProducer>,
     /// The meter consumers. With the default set, one per track, in `strips[..track_count]` order;
@@ -435,11 +437,12 @@ pub struct HostLiveControlHandles {
     pub effect_observations: Vec<EffectObservationHandle>,
     /// One live send producer per route into a submix, in canonical route-ID order -- the order
     /// the render plane's lanes were attached in (issue #1221 D3). Empty when no channel was
-    /// requested, and routes into the output have none: they keep their prepared constants and
-    /// their fold.
+    /// requested or [`HostLiveLanes::routes`] was not set (issue #1254), and routes into the
+    /// output have none: they keep their prepared constants and their fold.
     ///
-    /// Every host that prepares through host-core with live controls gets these: the browser now,
-    /// and C ABI plans too once #1053 attaches live controls there. A settled record's bits are a
+    /// The browser prepares with [`HostLiveLanes::ALL`] and gets these. C ABI plans prepare with
+    /// [`HostLiveLanes::FADER_AND_MATRIX`] (#1053 D5, #1256) and get none; their route lanes
+    /// arrive with the slice that pushes to them (#1225). A settled record's bits are a
     /// static route's by construction, because [`RouteControlProducer::record`] takes its target
     /// from `graph_compiler::route_coefficients`, the function the compiler lowers a prepared
     /// route's constants with.

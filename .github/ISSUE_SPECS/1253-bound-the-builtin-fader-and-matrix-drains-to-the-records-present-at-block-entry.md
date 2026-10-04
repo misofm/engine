@@ -199,3 +199,11 @@ None.
    `run-aarch64-tests.sh debug`: not run locally (x86-64 host; CI `aarch64-debug` job).
 
 **Outside authorized paths.** None.
+
+### Follow-ups applied (after the attempt 1 PASS)
+
+- NIT 2: the host-web mutation prose (`hosts/host-web/src/tests.rs`, the two `Red mutation` docs,
+  and `hosts/host-web/MUTATIONS.md`) now names "the `drain_controls` call" instead of the old
+  `while let ... try_pop()` drain. Prose only; no test behaviour changed.
+- NIT 1 (the realtime-policy `try_pop` rule is a single-line regex) is not implemented here; it
+  stays a recorded follow-up.

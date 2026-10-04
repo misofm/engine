@@ -308,3 +308,21 @@ Land them one at a time and rebase.
   0 violations.
 - Lesson (a): no session, request or wire field changed, so no browser qualification stub needs
   one. Lesson (c): no new CI command or test-file pattern.
+
+### Follow-ups applied (after the attempt 1 PASS, verdict MINOR 1-3 and NIT 1-2)
+
+- MINOR 1: gate 1(a) (`fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits`)
+  now asserts `Concurrent` delivery. For each fixture it prepares the same request through
+  `prepare_host_runtime_between_render_calls` and asserts the fader-matrix witness saw at least one
+  fused-bank factory call (non-vacuity), then prepares through `prepare_host_runtime_with_live_lanes`
+  and asserts `factory_calls == 0`. Test value: red if the live-lanes entry prepares with
+  `BetweenRenderCalls` delivery, which renders the same bits and so passed every earlier test.
+  Mutation: `between_render_calls` `false` -> `true` in `prepare_host_runtime_with_live_lanes`:
+  red (`left: 2, right: 0`, "Concurrent delivery forms no fused fader-matrix bank"); reverted, green.
+- MINOR 2: `HostLiveControlRequest::control_queue_depth`'s doc names each lane's own flag.
+- MINOR 3: the `effect_controls` and `route_controls` docs state the `HostLiveLanes` condition, and
+  `route_controls` states #1053 D5 (C ABI plans prepare with `FADER_AND_MATRIX`; their route lanes
+  arrive with #1225).
+- NIT 1: both builtins-compiler comments now say "two or three" rings.
+- NIT 2: the precondition (`only_the_plain_session_has_a_finite_lanes_free_tail`) is folded into
+  the top of gate 1(a); the separate test is deleted.

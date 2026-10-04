@@ -3673,7 +3673,7 @@ fn resource_plan(
         // sections now live *inline* in the strip vector charged above rather than behind a `Box`,
         // so they are charged by that vector's layout and not per track. `controlled` therefore
         // changes no byte of the *section* storage, and the only live-control-dependent rows left
-        // are the three bounded rings charged below.
+        // are the two or three bounded rings charged below.
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
     add_vector_layout::<MeterConsumer>(&mut meter, request_count)?;
@@ -3687,9 +3687,9 @@ fn resource_plan(
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
     add_vector_layout::<(Box<str>, usize, bool)>(&mut processor, controls.len())?;
     for control in controls {
-        // Three bounded rings per controlled track at the same depth: #137 D1's matrix channel,
-        // #140 B's fader/mute channel and #210 phase 3's input trim/polarity channel. All three
-        // are charged here, in the same accumulator, for the same reason -- they are per-track
+        // Two or three bounded rings per controlled track at the same depth: #137 D1's matrix
+        // channel, #140 B's fader/mute channel and, when requested, #210 phase 3's input
+        // trim/polarity channel. All of them are charged here, in the same accumulator, for the same reason -- they are per-track
         // processor storage, not meter storage.
         let matrix_queue = bounded_spsc_retained_payload::<TrackControlRecord>(
             control.queue_capacity,
