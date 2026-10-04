@@ -19,9 +19,9 @@
 //!   to subnormals, signed zeros, non-finite and extreme values, and payloads the effect's own
 //!   crafting hook writes, restored into a scalar instance and into its bank lanes at once: they
 //!   must accept or refuse together, with the same code, and render the same words afterwards.
-//! * **restored against continued.** At block boundaries -- preferentially while a ramp the lane's
-//!   automation started may be in flight (within 64 samples of the span), and at every drawn
-//!   quantum, 32 included -- a lane's snapshot is restored into a freshly prepared instance,
+//! * **restored against continued.** At block boundaries -- always at the first one where a ramp
+//!   the lane's automation started may be in flight (within 64 samples of the span) and
+//!   preferentially after it, at every quantum, 32 included -- a lane's snapshot is restored into a freshly prepared instance,
 //!   which then renders beside the lane: it must render and report exactly what the lane renders
 //!   by continuing. A payload carries every word a continuation reads (#1278).
 //! * **bind eligibility.** A cohort that differs in one program-key field declines, a malformed
@@ -60,12 +60,12 @@ const IN_FLIGHT_SAMPLES: u64 = 64;
 
 /// The render quanta a scenario runs at (128 twice, as the common host quantum).
 ///
-/// A differential that banks natively indexes them by its seed rather than drawing one, so every
-/// five consecutive seeds visit every quantum (`32` at seed 3) at every bank width the build has,
-/// and [`assert_reached`]'s quantum-32 clause holds by construction rather than by a draw. A
-/// 4-lane (NEON/simd128) build binds one width per seed where an AVX2 build may bind two, and
-/// drawn, twelve multiband seeds left the 4-lane build no automated quantum-32 scenario (#1278
-/// follow-up). The scalar-only differential, which no quantum clause reaches, still draws one.
+/// A scenario indexes them by its seed rather than drawing one, so every five consecutive seeds
+/// visit every quantum (`32` at seed 3) at every bank width the build has, and
+/// [`assert_reached`]'s quantum-32 clause needs only a ramp in flight in that scenario rather than
+/// a lucky draw. A 4-lane (NEON/simd128) build binds one width per seed where an AVX2 build may
+/// bind two, and drawn, twelve multiband seeds left the 4-lane build no automated quantum-32
+/// scenario (#1278 follow-up).
 const QUANTA: [u32; 5] = [128, 128, 64, 32, 256];
 
 /// One state payload's three sections, as `snapshot_state_payload` writes them.
@@ -368,11 +368,7 @@ fn scenario(
     let mono = draw.chance(1, 3);
     let shape = Shape {
         quality: draw.pick(descriptor.qualities),
-        quantum: if spec.banks_natively {
-            QUANTA[(seed % QUANTA.len() as u64) as usize]
-        } else {
-            draw.pick(&QUANTA)
-        },
+        quantum: QUANTA[(seed % QUANTA.len() as u64) as usize],
         link: draw.pick(&links),
         bypass: draw.chance(1, 8),
         ports: draw_ports(&mut draw, descriptor),
@@ -899,8 +895,8 @@ fn run_width(
     // Per lane, the sample before which a ramp its automation started may still be in flight.
     let mut in_flight_until = vec![0_u64; lanes];
     // Whether a continuation has been taken while a ramp may be in flight: the first boundary
-    // that offers one always takes it, so a scenario whose automation starts a ramp reaches a
-    // mid-ramp continuation by construction rather than by a draw.
+    // that offers one always takes it, so a scenario whose automation leaves a ramp in flight at
+    // a boundary reaches a mid-ramp continuation without a further draw.
     let mut taken_in_flight = false;
     // Prepared targets (#1278 attempt 3): an effect that refuses raw spans and takes its
     // automation as prepared targets (the EQ) gets ramps only this way. Per lane, the candidate
