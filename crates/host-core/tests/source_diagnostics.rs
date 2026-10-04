@@ -148,6 +148,12 @@ const TABLE: &[(SourceControlError, &str, bool, bool)] = &[
         true,
         false,
     ),
+    (
+        SourceControlError::Vacated,
+        "source.ring.vacated",
+        false,
+        false,
+    ),
 ];
 
 /// The two codes a host must see from more than one variant, and why. Anything else sharing a
@@ -180,6 +186,7 @@ const fn variant_index(error: SourceControlError) -> usize {
         SourceControlError::Chunk(HostChunkError::Full { .. }) => 14,
         SourceControlError::Chunk(HostChunkError::InternalInvariant) => 15,
         SourceControlError::Seek(SourceSeekError::Backpressure { .. }) => 16,
+        SourceControlError::Vacated => 17,
     }
 }
 

@@ -570,6 +570,9 @@ struct HostOwners {
     catalog: u64,
     plan: u64,
     store: u64,
+    /// The plan's state inventory (#1272 D1). capi does not keep it yet (slice 4 of #1269 does),
+    /// so the compile drops it and it is no part of what capi retains.
+    inventory: u64,
 }
 
 /// One C ABI compile and its replayed host-core half, each observed by this file's allocator.
@@ -605,6 +608,7 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         plan,
         sources,
         report: host_report,
+        inventory,
         control_catalog,
     } = prepared;
     let owners = HostOwners {
@@ -612,11 +616,12 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
         catalog: freed_by_drop(control_catalog),
         plan: freed_by_drop(plan),
         store: freed_by_drop(store),
+        inventory: freed_by_drop(inventory),
     };
     assert_eq!(
-        owners.sources + owners.catalog + owners.plan + owners.store,
+        owners.sources + owners.catalog + owners.plan + owners.store + owners.inventory,
         host_live,
-        "the four owners hold every byte the host-core half retains"
+        "the five owners hold every byte the host-core half retains"
     );
     CompileObservation {
         report,
@@ -644,9 +649,10 @@ impl CompileObservation {
     /// control frame's byte length but allocates whole `u16` fields, so an odd frame length is
     /// charged one byte it does not allocate. That is the safe direction.
     fn assert_capi_retained_bytes_are_complete(&self, label: &str, compile_limits: &CompileLimits) {
+        // capi drops the inventory the host-core half returns, so it is no part of the compile.
         let capi_allocated = self
             .compile_live
-            .checked_sub(self.host_live)
+            .checked_sub(self.host_live - self.owners.inventory)
             .unwrap_or_else(|| {
                 panic!(
                     "{label}: the compile left {} bytes live, fewer than its host-core half's {}",
@@ -690,6 +696,10 @@ impl CompileObservation {
         assert_eq!(
             owners.sources, self.host_report.control_retained_bytes,
             "{label}: source control table and ID arena"
+        );
+        assert_eq!(
+            owners.inventory, self.host_report.inventory_retained_bytes,
+            "{label}: the plan state inventory"
         );
         assert!(
             owners.store <= self.model.compiled_model_bytes,

@@ -31,6 +31,7 @@ use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, prepare_graph_source_set,
 };
+use std::collections::BTreeMap;
 
 use crate::diagnostics::{PrepareDiagnostics, PrepareRejection, diagnostic_lines};
 use crate::route_controls::{RouteControlProducer, RouteControlResources};
@@ -247,6 +248,19 @@ pub struct HostPrepareReport {
     pub source_overhead_bytes: u64,
     /// Total engine-owned source bytes.
     pub source_total_bytes: u64,
+    /// Engine-owned bytes of the source rings this plan carries from its predecessor (issue #1272
+    /// D4): allocated by the predecessor, moved in at the swap block, and absent from the three
+    /// rows above. The single-plan source caps count them with those rows. Zero for a plan
+    /// prepared without a successor base.
+    pub carried_source_total_bytes: u64,
+    /// The overhead part of [`Self::carried_source_total_bytes`].
+    pub carried_source_overhead_bytes: u64,
+    /// Bytes the installed swap-block carry program retains in the plan
+    /// (`graph::carry_program_retained_bytes`), charged against
+    /// `maximum_graph_session_plus_plan_bytes`. Zero without a successor base or a carried owner.
+    pub carry_program_retained_bytes: u64,
+    /// Bytes [`PreparedHost::inventory`] retains ([`PlanStateInventory::retained_bytes`]).
+    pub inventory_retained_bytes: u64,
     /// Summed effect state bytes.
     pub effect_scalar_state_bytes: u64,
     /// Summed effect scratch bytes.
@@ -457,9 +471,84 @@ pub struct PreparedHost {
     pub sources: SourceControlSet,
     /// Address-free resource facts about this preparation.
     pub report: HostPrepareReport,
+    /// What this plan holds, for preparing its successor ([`SuccessorBase`]). Control-side plain
+    /// data; never read on the render thread.
+    pub inventory: PlanStateInventory,
     /// Exact protocol catalog projected from the accepted prepared-effect authority.
     #[cfg(feature = "control-provider")]
     pub control_catalog: crate::PreparedSessionControlCatalog,
+}
+
+/// One source of a prepared plan, as its successor's preparation sees it (issue #1272 D1).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceInventoryRow {
+    /// The session source ID.
+    pub id: Box<str>,
+    /// The configuration of the ring this plan renders the source from, whether it allocated
+    /// the ring or carries it.
+    pub ring: PcmSourceRingConfig,
+    /// The source's index in the plan's graph source set.
+    pub index: u32,
+}
+
+/// The state a prepared plan holds, recorded at the end of its preparation (issue #1272 D1).
+///
+/// A successor's preparation joins it with the committed and the new session models to decide
+/// what carries ([`SuccessorBase`]). Plain data, `Send`, built and read on control threads only.
+/// This slice records sources; later slices add one row list per state family.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanStateInventory {
+    plan_identity: u64,
+    /// Sorted by ID.
+    sources: Box<[SourceInventoryRow]>,
+}
+
+impl PlanStateInventory {
+    /// The plan's process-unique graph identity (`graph::plan_identity`), which the successor's
+    /// carry program names.
+    #[must_use]
+    pub const fn plan_identity(&self) -> u64 {
+        self.plan_identity
+    }
+
+    /// One row per session source, sorted by source ID.
+    #[must_use]
+    pub fn sources(&self) -> &[SourceInventoryRow] {
+        &self.sources
+    }
+
+    /// The row of source `id`, if the plan has that source.
+    #[must_use]
+    pub fn source(&self, id: &str) -> Option<&SourceInventoryRow> {
+        self.sources
+            .binary_search_by(|row| (*row.id).cmp(id))
+            .ok()
+            .map(|index| &self.sources[index])
+    }
+
+    /// Heap bytes this inventory retains: its row table and its source ID text.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        let ids: usize = self.sources.iter().map(|row| row.id.len()).sum();
+        u64::try_from(core::mem::size_of_val::<[SourceInventoryRow]>(&self.sources) + ids)
+            .unwrap_or(u64::MAX)
+    }
+}
+
+/// The plan a successor is prepared to displace (issue #1272 D2, umbrella #1269 P1).
+///
+/// `committed` is the predecessor's committed session model at the moment the successor is
+/// prepared. An owner carries only when the transaction left its values equal between
+/// `committed` and the model the successor is compiled from, and its prepared layout equal to
+/// the predecessor's `inventory` row. A source carries when its ID is in both models, its
+/// declaration (content, channels, bit depth, frames) is equal, and its ring configuration is
+/// the inventory row's; which tracks read it does not matter.
+#[derive(Clone, Copy, Debug)]
+pub struct SuccessorBase<'a> {
+    /// The predecessor's [`PreparedHost::inventory`].
+    pub inventory: &'a PlanStateInventory,
+    /// The predecessor's committed session model.
+    pub committed: &'a SessionModel,
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -592,6 +681,7 @@ pub fn prepare_host_runtime_with_live_controls(
         None,
         false,
         Backend::current(),
+        None,
     )
 }
 
@@ -613,6 +703,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(spectrum)),
+        None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Single(capture) => capture,
@@ -645,12 +736,99 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Collection(spectrum)),
+        None,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Collection(capture) => capture,
         PreparedSpectrumCapture::Single(_) => return Err(resource("host.spectrum.capture")),
     };
     Ok((prepared, handles, capture))
+}
+
+/// Prepare a successor of a running plan (issue #1272 D2).
+///
+/// Exactly [`prepare_host_runtime`], except that every source the transaction left unchanged
+/// ([`SuccessorBase`]) is prepared vacant: the successor allocates no ring for it, and the plan's
+/// installed carry program moves the predecessor's ring in at the swap block, with its queued
+/// PCM, its generation and its read position. Its producer moves with
+/// [`SourceControlSet::adopt_persisting`], which the host calls after its last fallible step.
+/// The successor must displace exactly the plan `base.inventory` describes.
+pub fn prepare_host_runtime_successor(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    base: SuccessorBase<'_>,
+) -> Result<PreparedHost, PrepareDiagnostics> {
+    let (prepared, handles) = prepare_host_runtime_with_live_controls_successor(
+        compiled,
+        caps,
+        &HostLiveControlRequest::default(),
+        base,
+    )?;
+    debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
+    Ok(prepared)
+}
+
+/// [`prepare_host_runtime_with_live_controls`] for a successor of a running plan: see
+/// [`prepare_host_runtime_successor`].
+pub fn prepare_host_runtime_with_live_controls_successor(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    base: SuccessorBase<'_>,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        false,
+        Backend::current(),
+        Some(base),
+    )
+}
+
+/// Test-support width seam (issue #1272 D2): [`prepare_host_runtime_with_live_controls`] on an
+/// explicit bank width, so width tests can live in `tests/`. Production uses
+/// [`Backend::current`].
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_with_live_controls_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        false,
+        backend,
+        None,
+    )
+}
+
+/// Test-support width seam (issue #1272 D2): [`prepare_host_runtime_with_live_controls_successor`]
+/// on an explicit bank width.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn test_only_prepare_host_runtime_with_live_controls_successor_on(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    base: SuccessorBase<'_>,
+    backend: Backend,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    prepare_host_runtime_with_live_controls_policy(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        false,
+        backend,
+        Some(base),
+    )
 }
 
 /// Test-only preparation seam for exercising the scalar lowering against the native bank.
@@ -669,6 +847,7 @@ pub(crate) fn prepare_host_runtime_with_live_controls_backend(
         None,
         false,
         backend,
+        None,
     )
 }
 
@@ -710,6 +889,7 @@ pub(crate) fn prepare_host_runtime_between_render_calls_with_backend(
         None,
         true,
         backend,
+        None,
     )
 }
 
@@ -728,6 +908,7 @@ pub fn prepare_host_runtime_with_selected_meters_between_render_calls(
         Some(meters),
         true,
         Backend::current(),
+        None,
     )
 }
 
@@ -739,6 +920,7 @@ fn prepare_host_runtime_with_live_controls_policy(
     selected_meters: Option<&[HostMeterRequest]>,
     between_render_calls: bool,
     backend: Backend,
+    successor: Option<SuccessorBase<'_>>,
 ) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
     let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
         compiled,
@@ -748,6 +930,7 @@ fn prepare_host_runtime_with_live_controls_policy(
         between_render_calls,
         backend,
         None,
+        successor,
     )?;
     Ok((prepared, handles))
 }
@@ -766,6 +949,7 @@ pub fn prepare_host_runtime_with_spectrum(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(request)),
+        None,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -802,6 +986,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     between_render_calls: bool,
     backend: Backend,
     spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+    successor: Option<SuccessorBase<'_>>,
 ) -> Result<
     (
         PreparedHost,
@@ -840,33 +1025,95 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         .map_err(|_| resource("host.resource.allocation"))?;
     let mut builder = ControlSourceBuilder::with_capacity(source_id_bytes, compiled.source_count())
         .map_err(|()| resource("host.resource.allocation"))?;
-    for source in &model.sources {
+    // Issue #1272 D3: the predecessor's committed source declarations, by ID.
+    let committed_sources: BTreeMap<&str, &session::Source> = successor
+        .map(|base| {
+            base.committed
+                .sources
+                .iter()
+                .map(|source| (source.id.as_str(), source))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut inventory_sources = Vec::with_capacity(model.sources.len());
+    let mut carried_sources: Vec<(u32, u32)> = Vec::new();
+    let mut carried_total_bytes = 0_u64;
+    let mut carried_overhead_bytes = 0_u64;
+    let mut carried_largest_bytes = 0_u64;
+    for (index, source) in model.sources.iter().enumerate() {
         if caps
             .maximum_source_channels
             .is_some_and(|maximum| u32::from(source.channels) > maximum)
         {
             return Err(shape("host.source.channels"));
         }
-        let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
-            PcmSourceRingConfig {
-                channel_count: u32::from(source.channels),
-                quantum_frames: compiled.quantum(),
-                frame_capacity: u64::from(caps.source_ring_frames),
-                initial_generation: SourceGeneration(1),
-            },
-            SourceFrame(0),
-        )
-        .map_err(|_| resource("host.source.prepare"))?;
-        builder.push(
-            source.id.as_str(),
-            compiled.sample_rate().0,
-            u32::from(source.channels),
-            0,
-            source.frames,
-            producer.into_host_chunk_provider(compiled.sample_rate()),
-        );
-        graph_sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
+        let index = u32::try_from(index).map_err(|_| platform("host.count"))?;
+        let ring = PcmSourceRingConfig {
+            channel_count: u32::from(source.channels),
+            quantum_frames: compiled.quantum(),
+            frame_capacity: u64::from(caps.source_ring_frames),
+            initial_generation: SourceGeneration(1),
+        };
+        // Issue #1272 D3: carry when the ID is in both models, the declaration is unchanged and
+        // the ring the successor would allocate is the one the predecessor renders from.
+        let carried_from = successor.and_then(|base| {
+            let row = base.inventory.source(source.id.as_str())?;
+            let committed = committed_sources.get(source.id.as_str())?;
+            (**committed == *source && row.ring == ring).then_some(row.index)
+        });
+        if let Some(predecessor_index) = carried_from {
+            // D4: no ring here; the single-plan caps below count the carried one.
+            let carried = PcmSourceRing::resource_report(ring)
+                .map_err(|_| resource("host.source.prepare"))?;
+            carried_total_bytes = carried_total_bytes
+                .checked_add(carried.total_engine_owned_bytes)
+                .ok_or_else(|| resource("host.resource.arithmetic"))?;
+            carried_overhead_bytes = carried_overhead_bytes
+                .checked_add(carried.overhead_bytes)
+                .ok_or_else(|| resource("host.resource.arithmetic"))?;
+            carried_largest_bytes = carried_largest_bytes.max(carried.largest_allocation_bytes);
+            builder.push(
+                source.id.as_str(),
+                compiled.sample_rate().0,
+                u32::from(source.channels),
+                0,
+                source.frames,
+                None,
+            );
+            graph_sources.push(SourceGraphSource::vacant(u32::from(source.channels)));
+            carried_sources.push((index, predecessor_index));
+        } else {
+            let (producer, consumer, resources) =
+                PcmSourceRing::prepare_host_region(ring, SourceFrame(0))
+                    .map_err(|_| resource("host.source.prepare"))?;
+            builder.push(
+                source.id.as_str(),
+                compiled.sample_rate().0,
+                u32::from(source.channels),
+                0,
+                source.frames,
+                Some(producer.into_host_chunk_provider(compiled.sample_rate())),
+            );
+            graph_sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
+        }
+        inventory_sources.push(SourceInventoryRow {
+            id: source.id.as_str().into(),
+            ring,
+            index,
+        });
     }
+    // The hand-over the successor runs at its swap block, built here so the plan charge below
+    // counts it; installed after bind.
+    let carry_program = match successor {
+        Some(base) if !carried_sources.is_empty() => Some(graph::GraphCarryProgram {
+            predecessor: base.inventory.plan_identity(),
+            sources: carried_sources.into_boxed_slice(),
+        }),
+        _ => None,
+    };
+    let carry_program_bytes = carry_program
+        .as_ref()
+        .map_or(0, graph::GraphCarryProgram::retained_bytes);
     let sources = builder.finish();
 
     // Source semantics: tracks only.
@@ -1169,6 +1416,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
                 .ok_or_else(|| resource("host.effect.resource.arithmetic"))?,
         )
         .and_then(|bytes| bytes.checked_add(route_control_resources.total_bytes))
+        .and_then(|bytes| bytes.checked_add(carry_program_bytes))
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
     if admitted_graph_and_model > caps.maximum_graph_session_plus_plan_bytes {
         return Err(resource("host.graph.resource.limit"));
@@ -1183,14 +1431,25 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let source_set = prepare_graph_source_set(artifact.envelope(), graph_sources, mappings)
         .map_err(|_| graph_failure("host.source.graph.prepare"))?;
     let source_resources = source_set.resource_report();
-    if source_resources.total_engine_owned_bytes > caps.maximum_source_total_bytes
-        || source_resources.overhead_bytes > caps.maximum_source_overhead_bytes
+    // Issue #1272 D4: a plan's source caps count the rings it allocated plus the rings it will
+    // carry, so the active plan never exceeds them after the swap.
+    let source_total_with_carried = source_resources
+        .total_engine_owned_bytes
+        .checked_add(carried_total_bytes)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let source_overhead_with_carried = source_resources
+        .overhead_bytes
+        .checked_add(carried_overhead_bytes)
+        .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    if source_total_with_carried > caps.maximum_source_total_bytes
+        || source_overhead_with_carried > caps.maximum_source_overhead_bytes
     {
         return Err(resource("host.source.resource.limit"));
     }
     let largest_engine_allocation_bytes = graph_resources
         .largest_allocation_bytes
         .max(source_resources.largest_allocation_bytes)
+        .max(carried_largest_bytes)
         .max(builtin_resources.maximum_single_allocation_bytes)
         .max(spectrum_resources.map_or(0, |resources| resources.largest_allocation_bytes));
     if largest_engine_allocation_bytes.max(session_resources.single_allocation_bytes)
@@ -1323,6 +1582,20 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     let control_retained_bytes = sources
         .retained_bytes()
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
+    let mut plan = bound.plan;
+    // Issue #1272 D4: the join's program goes in before the plan leaves preparation.
+    if let Some(program) = carry_program {
+        graph::install_carry_program(&mut plan, program)
+            .map_err(|_| graph_failure("host.carry.install"))?;
+    }
+    let carry_program_retained_bytes = graph::carry_program_retained_bytes(&mut plan);
+    debug_assert_eq!(carry_program_retained_bytes, carry_program_bytes);
+    inventory_sources.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let inventory = PlanStateInventory {
+        plan_identity: graph::plan_identity(&mut plan)
+            .ok_or_else(|| graph_failure("host.inventory.identity"))?,
+        sources: inventory_sources.into_boxed_slice(),
+    };
     let report = HostPrepareReport {
         sample_rate_hz: compiled.sample_rate().0,
         quantum_frames: compiled.quantum().0,
@@ -1346,6 +1619,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
         source_pcm_payload_bytes: source_resources.pcm_payload_already_charged_bytes,
         source_overhead_bytes: source_resources.overhead_bytes,
         source_total_bytes: source_resources.total_engine_owned_bytes,
+        carried_source_total_bytes: carried_total_bytes,
+        carried_source_overhead_bytes: carried_overhead_bytes,
+        carry_program_retained_bytes,
+        inventory_retained_bytes: inventory.retained_bytes(),
         effect_scalar_state_bytes: effect_state_bytes,
         effect_scalar_scratch_bytes: effect_scratch_bytes,
         builtin_processor_payload_bytes: builtin_resources.engine_owned_processor_payload_bytes,
@@ -1373,7 +1650,6 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // missed optimisation rather than wrong audio, and it is why the default is that way round.
     // On a session whose tracks read two source channels, which is every stereo session there is,
     // this arms nothing.
-    let mut plan = bound.plan;
     // Source semantics: tracks only.
     let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
         .into_iter()
@@ -1387,6 +1663,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             plan,
             sources,
             report,
+            inventory,
             #[cfg(feature = "control-provider")]
             control_catalog,
         },

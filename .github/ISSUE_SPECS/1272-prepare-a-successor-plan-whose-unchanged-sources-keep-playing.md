@@ -126,3 +126,122 @@ this: the C ABI in slice 4, the browser in B2.
 ## Dependencies
 
 - *Move a source consumer into a successor graph plan* (#1271).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-04)
+
+**What changed.**
+
+- `crates/host-core/src/prepare.rs`:
+  - D1: `PlanStateInventory` holds the plan identity and `SourceInventoryRow { id, ring, index }`
+    rows sorted by ID. It is a new field, `PreparedHost::inventory`, and exposes
+    `retained_bytes()`.
+  - D2: `SuccessorBase { inventory, committed }`. The private policy functions take
+    `Option<SuccessorBase>` as their last argument, and every existing entry passes `None`. The
+    public entries are `prepare_host_runtime_successor` and
+    `prepare_host_runtime_with_live_controls_successor`. Under `test-support` there are two
+    `#[doc(hidden)]` width seams: `test_only_prepare_host_runtime_with_live_controls_on` and
+    `test_only_prepare_host_runtime_with_live_controls_successor_on`.
+  - D3: the source rule is the one the spec freezes: `committed` source == new source (the whole
+    `session::Source`) and inventory `ring` == the successor's `PcmSourceRingConfig`.
+  - D4: a carried source is `SourceGraphSource::vacant` and its `ControlSource` holds no provider.
+    The `GraphCarryProgram` is built before the graph charge, and its `retained_bytes()` is added
+    to the `maximum_graph_session_plus_plan_bytes` admission. It is installed after bind with
+    `graph::install_carry_program`; an install refusal is `host.carry.install`. A program is
+    installed only when at least one source carries. The source caps count allocated plus carried
+    (`PcmSourceRing::resource_report(ring)`).
+  - New report rows: `carried_source_total_bytes`, `carried_source_overhead_bytes`,
+    `carry_program_retained_bytes` (walked with `graph::carry_program_retained_bytes(plan)` after
+    install) and `inventory_retained_bytes`.
+- `crates/host-core/src/source.rs`:
+  - D5: `ControlSource::provider` is now `Option`. `SourceControlSet::adopt_persisting` moves
+    producers by ID (binary search) and allocates nothing.
+  - `SourceControlError::Vacated` (`"source.ring.vacated"`) is neither backpressure nor internal.
+  - D6 is documented on `adopt_persisting`.
+- `lib.rs` has the exports and an entry-point table row. `render_session.rs` has the destructure.
+- Tests:
+  - `crates/host-core/tests/successor_swap.rs` holds the gates.
+  - `crates/host-core/tests/support/successor.rs` is the swapped-run and reference-run harness. It
+    is included by `#[path]` so the shared `support/mod.rs` is untouched.
+- `crates/capi/tests/resource_lifecycle.rs`: the oracle has a fifth owner, `inventory`, observed
+  by drop. Its row is asserted exact against `inventory_retained_bytes`. Because capi drops the
+  inventory until slice 4 keeps it, capi's own allocations are `compile_live - (host_live -
+  inventory)`.
+- **Outside the authorized paths:** `crates/host-core/tests/source_diagnostics.rs` gained the
+  `Vacated` row. Its `variant_index` match is exhaustive by design, so D5 cannot compile without
+  it. The edit is one table row and one match arm; no existing assertion changed.
+
+**#1271 review MINORs carried into this slice.**
+
+- MINOR 5: gate 5 carries a real `PcmSourceRing` consumer through the real
+  `SourceGraphSourceSetDriver::adopt_sources`. It prepares both plans through host-core, not a
+  stub driver.
+- MINOR 6: `carry_program_retained_bytes` is charged against
+  `maximum_graph_session_plus_plan_bytes` and reported as `HostPrepareReport::carry_program_retained_bytes`.
+  Gate 1 asserts 8 bytes for one move; gate 3 asserts 0.
+
+**Gates (all at `Backend::Simd8` and `Backend::Simd4` where they render).**
+
+1. `an_added_muted_track_keeps_the_source_playing_at_{eight,four}_lanes` covers gate 1:
+   - All 12 blocks are bit-identical to fresh B fed from frame 0.
+   - Block 7 (index 6) reports `Applied` and `Carried`, and `adopt_persisting` returns 1.
+   - The predecessor set refuses submit and seek with `Vacated`.
+   - Allocated plus carried source bytes equal a fresh B's exactly, and the carry program is 8
+     bytes.
+   - The same run with a fresh successor first differs at block 7: the oracle can fail.
+2. `a_removed_source_leaves_the_kept_source_playing` covers gate 2. The removed source
+   (`aux-source`) sorts first, so the kept source moves from index 1 to 0. A's aux track is
+   muted, so every block equals fresh B. A submit for the removed source returns `UnknownSource`.
+3. `a_changed_source_gets_its_own_ring` covers gate 3 (`frames - 1`): carried bytes 0, program 0,
+   `source_total_bytes` equal to a fresh B's, `adopt_persisting` returns 0, and a frame-0 submit
+   is accepted.
+4. `a_successor_charges_allocated_and_carried_rings_to_the_source_cap` covers gate 4: a cap of
+   exactly allocated plus carried admits, and one byte less refuses with
+   `host.source.resource.limit`.
+5. `the_swap_block_allocates_and_frees_nothing` covers gate 5. Every block after warm-up block 0,
+   the swap block included, reads `(0, 0, 0)` on `bench_support::alloc`'s thread counters and
+   `(0, 0)` on the engine render audit. The test runs under `Mode::Count` so a violation reads
+   as an assertion.
+
+**Mutations.** Each was applied, run red, reverted and run green.
+
+- M1, the successor ignores the base (every source gets a fresh ring): gates 1, 2, 4 and 5 red.
+  The fresh ring refuses the playing frame (`NonContiguous`), and gate 4's carried row is 0.
+- M2, `adopt_persisting` keyed by index: gate 2 red at Simd8 (bits differ).
+- M3, carry program pairs `(index, index)`: gate 2 red.
+- M4, the D3 rule ignores the declaration (ring config only): gate 3 red.
+- M5, the source cap counts only allocated rings: gate 4 red (one byte below is admitted).
+- M6, a `Box` allocated in `SourceGraphSourceSetDriver::adopt_sources`: gate 5 red at block 6
+  with `(1, 0, 1)` when run alone. Run in parallel, the other swapped-run tests abort the binary
+  under the default `Mode::Abort`.
+- M7, a vacant submit returns `UnknownSource`: gate 1 red at both widths.
+- capi oracle: `inventory_retained_bytes` under-reported by 1 makes
+  `capi_retained_bytes_charge_every_byte_the_compile_retains` red (62 against 61).
+
+**Commands.**
+
+- `cargo test --locked -p host-core --features host-core/test-support,graph/test-support`: green
+  (27 result lines, 0 failed).
+- `cargo test --locked -p host-web --features host-web/test-support`: green.
+- `cargo test --locked -p capi`: green (lib 35, resource_lifecycle 11).
+- `cargo test --locked -p console-workload`: green, digests kept.
+- `check-host-core-policy.sh` and `test-host-core-policy.sh`: green.
+- `cargo fmt --all -- --check`,
+  `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` and
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: green.
+- `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh`,
+  `test-realtime-policy.sh` and `check-capi-abi.sh`: green.
+- `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`: 0
+  allocations, 0 deallocations, 0 syscalls, 0 violations.
+- `bash scripts/check-cross-targets.sh`: PASS. The only failures are the known #1018 iOS
+  `memset_pattern16` expected failures (host-core 4 calls).
+- The worklet chain into fresh directories was green:
+  - `build-web-audioworklet.sh --named-twin`
+  - `check-web-audioworklet.sh --without-metadata-regeneration`
+  - `check-browser-expected-resources.py --artifacts`, with `sourceTotalBytes` 3294 of 3648 and
+    `graphSessionPlusPlanBytes` 29794 of 35648
+  - `test-web-audioworklet.sh`
+- **ARTIFACT CHANGED**: the shipped module is
+  `feeb20c3da85e7eef1199edff06f979f5ff0c00914bf981f1e7b0911765a1d47` (2869086 B). Following
+  `docs/RELEASE.md` ("Between releases"), the pin is not re-pinned.

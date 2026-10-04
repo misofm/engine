@@ -31,6 +31,7 @@
 //! | [`compile_host_session`] | a host that wants the [`CompiledSession`] before preparing |
 //! | [`parse_host_session`] + [`HostPrepareCaps::compile_caps`] | a host that builds its own `SessionStore` (the C ABI host does, for the control protocol) and then calls [`prepare_host_runtime`] |
 //! | [`prepare_host_runtime`] | prepare from an already compiled session; also the plan-replacement path |
+//! | [`prepare_host_runtime_successor`] | prepare a replacement plan whose unchanged sources keep their rings ([`SuccessorBase`], [`SourceControlSet::adopt_persisting`]) |
 //! | [`HostPrepareCaps::validate_shape`] | check rate/quantum/ring before an expensive host-side pre-flight |
 //!
 //! # Threading
@@ -131,11 +132,14 @@ pub use engine::realtime::{
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
     HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
-    HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
-    compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
-    parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
-    prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
+    HostPrepareReport, HostShapePolicy, PlanStateInventory, PreparedHost,
+    SOURCE_STALL_TOLERANCE_MS, SourceInventoryRow, SuccessorBase, compile_host_model,
+    compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
+    prepare_host_runtime, prepare_host_runtime_between_render_calls,
+    prepare_host_runtime_successor, prepare_host_runtime_with_live_controls,
+    prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
+    prepare_host_runtime_with_live_controls_successor,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_live_controls,
@@ -184,6 +188,11 @@ pub use effect_compiler::{
 #[cfg(feature = "test-support")]
 pub use effect_compiler::{
     test_only_parametric_eq_design_call_count, test_only_reset_parametric_eq_design_calls,
+};
+#[cfg(feature = "test-support")]
+pub use prepare::{
+    test_only_prepare_host_runtime_with_live_controls_on,
+    test_only_prepare_host_runtime_with_live_controls_successor_on,
 };
 #[cfg(feature = "test-support")]
 pub use spectrum::{

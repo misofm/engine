@@ -181,6 +181,7 @@ impl PreparedHost {
             plan,
             sources,
             report,
+            inventory,
             #[cfg(feature = "control-provider")]
             control_catalog,
         } = self;
@@ -191,6 +192,7 @@ impl PreparedHost {
                     plan,
                     sources,
                     report,
+                    inventory,
                     #[cfg(feature = "control-provider")]
                     control_catalog,
                 },
