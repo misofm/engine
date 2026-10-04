@@ -278,3 +278,28 @@ The attempt-1 verdict's three MINORs, closed in the #1275 slice:
    `docs/C_ABI_V1_QUALIFICATION.md` and `docs/CONTROL_PROTOCOL_SEMANTICS.md` each gained one
    sentence: a source whose declaration the transaction changed restarts in a new ring at
    generation 1, frame 0, its accepted PCM discarded with its plan, and the host restarts its feed.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`448baae85`, `1338b063c`) | `1273-attempt1.md` | PASS | Sources keep playing across a C ABI structural transaction, gates re-run green; 3 MINOR (D1 committed model and D3 seek routing undefended, changed-source host contract missing; closed in the #1275 slice above), 5 NIT. |
+
+### Phase-1 follow-ups
+
+Closed (batch follow-ups commit on `codex/seamless-swap`):
+- NIT-5: the two overlong doc-comment lines in `crates/capi/tests/resource_lifecycle.rs` and the
+  overlong line in `docs/C_ABI_V1_QUALIFICATION.md` that this slice introduced are rewrapped to
+  100 columns.
+
+Stays open:
+- NIT-3: `ProtocolCommit` is not in
+  `every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits`'s `PHASES`. A
+  commit fault returns `RESULT_INTERNAL` (255), not backpressure, so it needs its own expectation
+  arm rather than a seventh matrix entry; left for a capi-owned follow-up (tried here: the
+  matrix as written goes red at `AfterProtocolPrepare/ProtocolCommit` on the result code).
+- NIT-4: the double-live oracle still uses the `SetSessionId` trigger; whichever of #1260 and this
+  lands second switches it to the muted-`UpsertTrack` trigger (#1053 coordination).
+- NIT-1 and NIT-2 were accepted by the verdict.
+- The `audit capi` `pcm_digest` moved `ff6cdcb96cdcdad5` to `7281b6c931e05dcc` here, and later to
+  `c60671f6593fa603` with #1276's carried input filters (see #1276).

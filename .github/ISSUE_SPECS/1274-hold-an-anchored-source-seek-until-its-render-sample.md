@@ -280,6 +280,7 @@ noted; each mutation applied alone, `cargo test -p source --lib`, restored):
 - NIT-4: the #917 ownership paragraph is reflowed to 100 columns, and
   `crates/host-core/src/source.rs`'s `seek_at` rustdoc is reflowed.
 
-Stays open: nothing from these verdicts. The observation that a plain-seek block arriving after
-the source underran past its frame is acked and then counted as a stale discard is the documented
+Stays open: attempt 1's NIT-2 (harness duplication in `tests/support/successor.rs`) belongs to
+the next slice that owns that file. The observation that a plain-seek block arriving after the
+source underran past its frame is acked and then counted as a stale discard is the documented
 just-in-time rule, not a finding.

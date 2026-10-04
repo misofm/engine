@@ -630,14 +630,14 @@ fn observe_compile(document: &str, compile_limits: &CompileLimits) -> CompileObs
 impl CompileObservation {
     /// The completeness claim for capi's own row, to the byte, from observations only.
     ///
-    /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left
-    /// live beyond its host-core half -- plus the three host-allocated owners capi keeps: the source
+    /// `capi_retained_bytes` charges what capi allocates itself -- everything the compile left live
+    /// beyond its host-core half -- plus the three host-allocated owners capi keeps: the source
     /// control table and ID arena, the parameter catalog, and the plan state inventory (#1273 D5).
-    /// Each of the four terms on the left is observed. An owner row dropped from capi's accounting (the verifier's
-    /// `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi allocates but
-    /// does not charge, or spare capacity in a charged one (the catalog's enum-choice vectors
-    /// before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a byte
-    /// literal, so a charged layout change moves both sides together and needs no edit.
+    /// Each of the four terms on the left is observed. An owner row dropped from capi's accounting
+    /// (the verifier's `checked_layout::<Plan>(1)`) lowers the right side alone; a new owner capi
+    /// allocates but does not charge, or spare capacity in a charged one (the catalog's enum-choice
+    /// vectors before #1060 attempt 2), raises the left side alone. Either is red. Nothing is a
+    /// byte literal, so a charged layout change moves both sides together and needs no edit.
     ///
     /// The one difference is derived, not pinned: capi charges its decode-field scratch at the
     /// control frame's byte length but allocates whole `u16` fields, so an odd frame length is

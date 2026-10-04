@@ -217,3 +217,19 @@ soft-clip` suite run, the file restored and compared byte for byte):
 | MZ | `is_negative_zero(current) ||` dropped from the in-flight guard | rejection test, row "an in-flight mix current of -0.0" |
 
 Every other test stayed green under each mutation, and the suite is green after each restore.
+
+### Verdicts
+
+| Attempt | Verdict file | Result | Summary |
+|---|---|---|---|
+| 1 (`1199b53f9`) | `1071-attempt1.md` | FAIL | MAJOR-1: a ramp the effect runs itself writes a mid-ramp `current` (a negative subnormal mix among them) that its own restore refuses, so gate 1 failed. |
+| 2 (`983ac85bd`) | `1071-attempt2.md` | PASS | Every self-produced state restores (1,339,910 snapshots in a chained-retarget probe); 2 MINOR (the line's `remaining * step` term and two hostile exclusions untested), 2 NIT. |
+| Review follow-ups (`d6217a79d`) | `1278-attempt1.md`, section "Separate: `d6217a79d`" | no findings | The overshoot test has a unique catch; the rejection rows close MINOR-2; the "not closed under render" doc is accurate. |
+
+### Phase-1 follow-ups
+
+Nothing further was open from these verdicts after `d6217a79d`; this batch changes no #1071 code.
+Attempt-1 MINOR-2 (an `inf` in the `X` history) and attempt-2 NIT-2 were handed to #1278. Stays
+open as #1278 successors, listed in #1269's "Phase 1 status": soft-clip's two open non-finite
+history cases, and soft-clip validating an in-flight current by its line rather than by
+`ramp_path_within`.
