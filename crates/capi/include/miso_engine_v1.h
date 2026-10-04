@@ -51,6 +51,14 @@ extern "C" {
  * built for (issue 083, master plan D4 -- the engine dispatches nothing at runtime, so the check
  * happens once at boot instead of inside a render callback). No other entry point returns it. An
  * embedder that receives it must not retry; the library and the CPU do not match.
+ *
+ * Sources across a structural transaction (issue 1273). A SESSION_TRANSACTION_APPLY that replaces
+ * the plan keeps every source it leaves unchanged playing: the source keeps its ring, its
+ * generation and its read position, so the host neither seeks nor refills it, and must not reseek
+ * it. From the moment the command returns OK, source submissions and seeks address the newest
+ * committed session, whether or not its plan has been swapped in yet. A source the transaction
+ * removed is refused as "source.id.unknown"; PCM already accepted for it is discarded with its
+ * plan. A source the transaction added starts at generation 1, frame 0, until the host seeks it.
  */
 
 #define MISO_ENGINE_V1_ABI_VERSION UINT32_C(0x00010000)

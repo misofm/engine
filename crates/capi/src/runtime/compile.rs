@@ -12,6 +12,10 @@ pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
     pub(crate) plan: PreparedRenderPlan,
     pub(crate) resources: PlanResourceReport,
+    /// The part of `resources`' source rows the plan carries from its predecessor.
+    pub(crate) carried: CarriedSourceBytes,
+    /// What the plan holds, for preparing its successor (issue #1273 D1).
+    pub(crate) inventory: PlanStateInventory,
     pub(crate) control_catalog: PreparedSessionControlCatalog,
     pub(crate) capi: CapiResources,
 }
@@ -35,6 +39,17 @@ pub(crate) struct CapiResources {
     pub(crate) epoch_retained: u64,
     pub(crate) prepared_protocol_retained: u64,
     pub(crate) largest: u64,
+}
+
+/// Source-ring bytes a successor plan carries from the plan it displaces (issue #1273 D5).
+///
+/// The successor's [`PlanResourceReport`] counts them in its source rows, because it owns those
+/// rings once active; until the swap the running plan owns them, so the double-live admission
+/// subtracts them from the successor's rows and counts each carried ring once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CarriedSourceBytes {
+    pub(crate) total: u64,
+    pub(crate) overhead: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +127,7 @@ pub(crate) fn capi_resources(
     source_id_bytes: usize,
     quantum_frames: usize,
     provider: host_core::SessionControlProviderResources,
+    inventory_bytes: u64,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -149,6 +165,8 @@ pub(crate) fn capi_resources(
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
         host_core::source_id_arena_bytes(source_id_bytes)
             .ok_or_else(|| failure("capi.resource.arithmetic"))?,
+        // Issue #1273 D5: each epoch keeps its plan's state inventory for the successor.
+        inventory_bytes,
     ];
     let maximum_configuration_items = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure("capi.resource.platform"))?
@@ -216,6 +234,7 @@ pub(crate) fn capi_resources(
 pub(crate) fn prepared_capi_resources(
     compiled: &CompiledSession,
     catalog: &PreparedSessionControlCatalog,
+    inventory: &PlanStateInventory,
     limits: CompileLimits,
 ) -> Result<CapiResources, CompileFailure> {
     let source_id_bytes =
@@ -240,6 +259,7 @@ pub(crate) fn prepared_capi_resources(
         source_id_bytes,
         compiled.quantum().0 as usize,
         provider,
+        inventory.retained_bytes(),
     )
 }
 
@@ -258,6 +278,7 @@ pub(crate) fn controller_retained_capacity(
 pub(crate) fn validate_replacement_peak(
     current: PlanResourceReport,
     prospective: PlanResourceReport,
+    prospective_carried: CarriedSourceBytes,
     prospective_capi: CapiResources,
     compiled_models: CompiledModelAdmission,
     limits: CompileLimits,
@@ -276,11 +297,22 @@ pub(crate) fn validate_replacement_peak(
     {
         return Err(failure("graph.resource.limit"));
     }
-    if combined(current.source_total_bytes, prospective.source_total_bytes)?
-        > limits.maximum_source_total_bytes
+    // Issue #1273 D5: a carried ring is the current plan's until the swap, so the double-live
+    // peak counts it once, there.
+    let allocated = |row: u64, carried: u64| {
+        row.checked_sub(carried)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))
+    };
+    if combined(
+        current.source_total_bytes,
+        allocated(prospective.source_total_bytes, prospective_carried.total)?,
+    )? > limits.maximum_source_total_bytes
         || combined(
             current.source_overhead_bytes,
-            prospective.source_overhead_bytes,
+            allocated(
+                prospective.source_overhead_bytes,
+                prospective_carried.overhead,
+            )?,
         )? > limits.maximum_source_overhead_bytes
     {
         return Err(failure("source.resource.limit"));
@@ -409,17 +441,31 @@ pub(crate) fn prepare_failure(diagnostics: PrepareDiagnostics) -> CompileFailure
 ///
 /// The shared pipeline is `host-core`; capi adds only what is capi's: its own retained
 /// rows (protocol queues, replay storage, handle structs), and the ABI report shape.
+///
+/// With a `successor` base (a structural transaction, issue #1273 D1) every source the
+/// transaction leaves unchanged is prepared vacant, to carry the displaced plan's ring; the
+/// report's source rows count those rings too (D5). `compile_session` passes `None`.
 pub(crate) fn prepare_runtime(
     compiled: &CompiledSession,
     limits: CompileLimits,
+    successor: Option<SuccessorBase<'_>>,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
     // Shape still runs before host/runtime allocation. The exact provider catalog exists only
     // after shared host preparation, so CAPI retained-resource admission necessarily follows the
     // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
-    let capi = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
+    let prepared = match successor {
+        Some(base) => prepare_host_runtime_successor(compiled, &caps, base),
+        None => prepare_host_runtime(compiled, &caps),
+    }
+    .map_err(prepare_failure)?;
+    let capi = prepared_capi_resources(
+        compiled,
+        &prepared.control_catalog,
+        &prepared.inventory,
+        limits,
+    )?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
@@ -427,6 +473,20 @@ pub(crate) fn prepare_runtime(
     }
     let host = prepared.report;
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
+    let carried = CarriedSourceBytes {
+        total: host.carried_source_total_bytes,
+        overhead: host.carried_source_overhead_bytes,
+    };
+    // Issue #1273 D5: the rows count what the plan owns once active, carried rings included,
+    // and the carry program it retains with its graph.
+    let with_carried = |row: u64, carried: u64| {
+        row.checked_add(carried)
+            .ok_or_else(|| failure("capi.resource.arithmetic"))
+    };
+    let carried_payload = carried
+        .total
+        .checked_sub(carried.overhead)
+        .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let (tail_kind, tail_samples) = match host.output_tail {
         TailSamples::Finite(samples) => (TAIL_FINITE, samples),
         TailSamples::Infinite => (TAIL_INFINITE, 0),
@@ -444,7 +504,10 @@ pub(crate) fn prepare_runtime(
             latency_samples: host.latency_samples,
             tail_kind,
             tail_samples,
-            graph_session_plus_plan_bytes: host.graph_session_plus_plan_bytes,
+            graph_session_plus_plan_bytes: with_carried(
+                host.graph_session_plus_plan_bytes,
+                host.carry_program_retained_bytes,
+            )?,
             graph_incremental_plan_bytes: host.graph_incremental_plan_bytes,
             graph_metadata_bytes: host.graph_metadata_bytes,
             graph_delay_bytes: host.graph_delay_bytes,
@@ -453,9 +516,9 @@ pub(crate) fn prepare_runtime(
             effect_bank_metadata_bytes: host.effect_bank_metadata_bytes,
             builtin_bank_bytes: host.builtin_bank_bytes,
             builtin_bank_scratch_bytes: host.builtin_bank_scratch_bytes,
-            source_pcm_payload_bytes: host.source_pcm_payload_bytes,
-            source_overhead_bytes: host.source_overhead_bytes,
-            source_total_bytes: host.source_total_bytes,
+            source_pcm_payload_bytes: with_carried(host.source_pcm_payload_bytes, carried_payload)?,
+            source_overhead_bytes: with_carried(host.source_overhead_bytes, carried.overhead)?,
+            source_total_bytes: with_carried(host.source_total_bytes, carried.total)?,
             effect_scalar_state_bytes: host.effect_scalar_state_bytes,
             effect_scalar_scratch_bytes: host.effect_scalar_scratch_bytes,
             builtin_processor_payload_bytes: host.builtin_processor_payload_bytes,
@@ -465,6 +528,8 @@ pub(crate) fn prepare_runtime(
             largest_named_allocation_bytes: largest_named,
             reserved: [0; 4],
         },
+        carried,
+        inventory: prepared.inventory,
         control_catalog: prepared.control_catalog,
         capi,
     })
@@ -489,7 +554,7 @@ pub(crate) fn compile_children(
         .map_err(prepare_failure)?;
     let store =
         SessionStore::new(model, compile_caps).map_err(|value| session_diagnostics(&value))?;
-    let runtime = prepare_runtime(store.compiled(), limits)?;
+    let runtime = prepare_runtime(store.compiled(), limits, None)?;
 
     let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
         .map_err(|_| failure("capi.resource.platform"))?;
@@ -520,6 +585,8 @@ pub(crate) fn compile_children(
         sources,
         plan,
         resources,
+        carried: _,
+        inventory,
         control_catalog,
         capi: _,
     } = runtime;
@@ -585,7 +652,7 @@ pub(crate) fn compile_children(
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources),
+            providers: ProviderEpoch::current(sources, inventory),
             pending_providers,
             retired_providers,
             publisher,

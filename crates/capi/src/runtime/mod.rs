@@ -27,9 +27,9 @@ pub(crate) use engine::realtime::{
 };
 pub(crate) use host_core::SourceSubmission;
 pub(crate) use host_core::{
-    HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PreparedSessionControlCatalog,
-    SessionControlProvider, SourceControlError, SourceControlSet, parse_host_session,
-    prepare_host_runtime,
+    HostPrepareCaps, HostShapePolicy, PlanStateInventory, PrepareDiagnostics,
+    PreparedSessionControlCatalog, SessionControlProvider, SourceControlError, SourceControlSet,
+    SuccessorBase, parse_host_session, prepare_host_runtime, prepare_host_runtime_successor,
 };
 pub(crate) use protocol::{
     CommandFrameProcessError, ControllerRetainedCapacity, DecodeScratch, EncodeError,

@@ -11,7 +11,7 @@ use capi::{
     SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk, SubmitReport,
     miso_engine_v1_compile_session, miso_engine_v1_engine_create, miso_engine_v1_engine_destroy,
     miso_engine_v1_plan_destroy, miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
-    miso_engine_v1_source_submit_planar_f32,
+    miso_engine_v1_source_submit_planar_f32, miso_engine_v1_submit_command, plan_carry_counts,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 
@@ -20,6 +20,93 @@ const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: usize = 128;
 const SESSION_JSON: &[u8] =
     include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+/// Render calls before the structural transaction (issue #1273 deliverable 3): the next call is
+/// the carrying swap block.
+const CALLS_BEFORE_TRANSACTION: u64 = 1;
+
+/// Submits one quantum of the audit's source signal at `start_frame`.
+///
+/// # Safety
+///
+/// `session` must be live and used by this thread alone for the call.
+unsafe fn submit_block(session: *mut Session, start_frame: u64) -> u32 {
+    let left = [0.25_f32; QUANTUM_FRAMES];
+    let right = [-0.5_f32; QUANTUM_FRAMES];
+    let planes = [left.as_ptr(), right.as_ptr()];
+    let chunk = SourceChunk {
+        struct_size: SOURCE_CHUNK_SIZE,
+        sample_rate_hz: SAMPLE_RATE_HZ,
+        generation: 1,
+        start_frame,
+        planes: planes.as_ptr(),
+        plane_count: 2,
+        frames: QUANTUM_FRAMES as u32,
+        end_of_region: 0,
+        reserved0: 0,
+    };
+    let mut report = SubmitReport {
+        struct_size: SUBMIT_REPORT_SIZE,
+        reserved0: 0,
+        accepted_frames: 0,
+        cumulative_written_frames: 0,
+        active_generation: 0,
+    };
+    // SAFETY: The caller guarantees a live session; all borrowed source bytes/planes and report
+    // storage remain valid until the synchronous copy completes.
+    let submitted = unsafe {
+        miso_engine_v1_source_submit_planar_f32(
+            session,
+            b"fixture-source".as_ptr(),
+            14,
+            &chunk,
+            &mut report,
+        )
+    };
+    if submitted != RESULT_OK {
+        submitted
+    } else if report.accepted_frames != QUANTUM_FRAMES as u64 {
+        RESULT_INTERNAL
+    } else {
+        RESULT_OK
+    }
+}
+
+/// One structural transaction: `UpsertTrack` of a muted copy of the first track, and its route.
+/// The source is unchanged, so the successor carries its ring.
+fn structural_transaction() -> Vec<u8> {
+    let model = session::parse_session_json(
+        core::str::from_utf8(SESSION_JSON).expect("the audit session is UTF-8"),
+    )
+    .expect("the audit session parses");
+    let mut track = model.tracks[0].clone();
+    track.id = session::StableId::parse("a-muted").expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse("a-muted-main").expect("route ID");
+    if let session::RouteSource::Track { track_id, .. } = &mut route.source {
+        *track_id = track.id.clone();
+    }
+    let edits = [
+        protocol::SessionEdit::UpsertTrack { track },
+        protocol::SessionEdit::UpsertRoute { route },
+    ];
+    let mut bytes = vec![0_u8; 4_096];
+    let len = protocol::ProtocolCodec::default()
+        .encode_command_frame_into(
+            &protocol::TypedCommandFrame {
+                request_id: protocol::RequestId::new(1).expect("nonzero request"),
+                expected_revision: protocol::ExpectedRevision::Exact(protocol::SessionRevision(
+                    model.revision,
+                )),
+                payload: protocol::CommandPayload::SessionTransactionApply(&edits),
+            },
+            &mut bytes,
+        )
+        .expect("the structural transaction encodes");
+    bytes.truncate(len);
+    bytes
+}
 
 struct AuditHandles {
     engine: *mut Engine,
@@ -75,46 +162,45 @@ impl AuditHandles {
             return Err(compiled);
         }
 
-        let left = [0.25_f32; QUANTUM_FRAMES];
-        let right = [-0.5_f32; QUANTUM_FRAMES];
-        let planes = [left.as_ptr(), right.as_ptr()];
-        let chunk = SourceChunk {
-            struct_size: SOURCE_CHUNK_SIZE,
-            sample_rate_hz: SAMPLE_RATE_HZ,
-            generation: 1,
-            start_frame: 0,
-            planes: planes.as_ptr(),
-            plane_count: 2,
-            frames: QUANTUM_FRAMES as u32,
-            end_of_region: 0,
-            reserved0: 0,
-        };
-        let mut report = SubmitReport {
-            struct_size: SUBMIT_REPORT_SIZE,
-            reserved0: 0,
-            accepted_frames: 0,
-            cumulative_written_frames: 0,
-            active_generation: 0,
-        };
-        // SAFETY: The session is live and all borrowed source bytes/planes and report storage
-        // remain valid until the synchronous copy completes.
-        let submitted = unsafe {
-            miso_engine_v1_source_submit_planar_f32(
-                handles.session,
-                b"fixture-source".as_ptr(),
-                14,
-                &chunk,
-                &mut report,
-            )
-        };
-        if submitted != RESULT_OK || report.accepted_frames != QUANTUM_FRAMES as u64 {
-            return Err(if submitted != RESULT_OK {
-                submitted
-            } else {
-                RESULT_INTERNAL
-            });
+        // SAFETY: The session is live and used by this thread alone.
+        let submitted = unsafe { submit_block(handles.session, 0) };
+        if submitted != RESULT_OK {
+            return Err(submitted);
         }
         Ok(handles)
+    }
+
+    /// Commits [`structural_transaction`] and feeds the source's next block through the producer
+    /// it moved, so the swap block renders PCM from the carried ring. Control work, run outside
+    /// every render scope.
+    fn apply_structural_transaction(&mut self) -> Result<(), u32> {
+        let request = structural_transaction();
+        let mut response = [0_u8; 4_096];
+        let mut output = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: response.as_mut_ptr(),
+            capacity_bytes: response.len() as u64,
+            required_bytes: 0,
+        };
+        // SAFETY: The session is live and used by this thread alone; the request and response
+        // storage outlive the synchronous call.
+        let committed = unsafe {
+            miso_engine_v1_submit_command(
+                self.session,
+                request.as_ptr(),
+                request.len() as u64,
+                &mut output,
+            )
+        };
+        if committed != RESULT_OK {
+            return Err(committed);
+        }
+        // SAFETY: As above.
+        match unsafe { submit_block(self.session, QUANTUM_FRAMES as u64) } {
+            RESULT_OK => Ok(()),
+            refused => Err(refused),
+        }
     }
 }
 
@@ -161,10 +247,8 @@ impl PreparedAudit {
         let mut render_errors = 0_u64;
         let mut output_address_changes = 0_u64;
         let mut pcm_digest = 0xcbf2_9ce4_8422_2325_u64;
-        audit::warm_up();
-        audit::reset();
-        audit::in_render_scope(|| {
-            for call in 0..CALLS {
+        let mut render_calls = |calls: core::ops::Range<u64>| {
+            for call in calls {
                 // SAFETY: The plan is live and exclusive, the descriptor points to the same
                 // complete writable output for every synchronous call, and exact time is bounded.
                 let result = unsafe {
@@ -181,11 +265,27 @@ impl PreparedAudit {
                     pcm_digest = pcm_digest.wrapping_mul(0x0000_0100_0000_01b3);
                 }
             }
-        });
+        };
+        audit::warm_up();
+        audit::reset();
+        audit::in_render_scope(|| render_calls(0..CALLS_BEFORE_TRANSACTION));
+        // Issue #1273: one structural transaction between two render calls, outside the render
+        // scope, so the next audited call is a carrying swap block.
+        self.handles
+            .apply_structural_transaction()
+            .expect("apply the audit's structural transaction");
+        audit::in_render_scope(|| render_calls(CALLS_BEFORE_TRANSACTION..CALLS));
         let snapshot = audit::snapshot();
+        // SAFETY: The plan is live and no render call runs concurrently.
+        let (carried, carry_mismatches) = unsafe { plan_carry_counts(plan) };
         assert_eq!(render_errors, 0);
         assert_eq!(output_address_changes, 0);
         assert_eq!(snapshot.total(), 0);
+        assert_eq!(
+            (carried, carry_mismatches),
+            (1, 0),
+            "the audited calls include exactly one carrying swap block"
+        );
         AuditEvidence {
             calls: CALLS,
             stable_output_address: output_address_changes == 0,

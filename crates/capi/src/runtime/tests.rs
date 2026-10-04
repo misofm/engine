@@ -669,7 +669,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
                 end_of_region: false,
             },
         )
-        .expect("submission remains routed to old committed provider before boundary");
+        .expect("a submission after the commit feeds the newest committed session");
 
     let required = match children.session.dequeue_event(EventLane::Reliable, 0) {
         Err(EventError::BufferTooSmall { required }) => required,
@@ -723,11 +723,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     );
     assert_eq!(children.session.controller.replay().len(), 1);
 
-    pcm.fill(f32::NAN);
-    assert_eq!(
-        STRUCTURAL_SOURCE_STATE_POLICY,
-        StructuralSourceStatePolicy::ResetAtReplacementBoundary
-    );
+    // The swap block's continuity is `a_c_abi_structural_transaction_keeps_the_source_playing`'s.
     children
         .plan
         .render(
@@ -735,10 +731,6 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("replacement boundary");
-    assert!(
-        pcm.iter().all(|sample| *sample == 0.0),
-        "new provider follows the frozen structural source-state policy"
-    );
     assert_eq!(children.plan.owner.active_epoch().0, 1);
     assert_eq!(children.session.providers.epoch, 0);
     children
@@ -827,6 +819,432 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     assert!(children.session.pending_providers.is_empty());
 }
 
+/// A test signal with no exact-zero sample (issue #1269's acceptance shape): every frame and
+/// channel differs, so a block rendered from the wrong source position cannot match.
+fn continuity_signal(frame: u64, channel: usize, salt: u64) -> f32 {
+    let step = ((frame + salt * 131) % 997) as f32 * 1.0e-4;
+    if channel == 0 {
+        0.125 + step
+    } else {
+        -0.25 - step
+    }
+}
+
+/// One block of [`continuity_signal`] at source frame `block * 128`.
+fn continuity_block(block: u64, salt: u64) -> (Vec<f32>, Vec<f32>) {
+    let start = block * 128;
+    (
+        (start..start + 128)
+            .map(|frame| continuity_signal(frame, 0, salt))
+            .collect(),
+        (start..start + 128)
+            .map(|frame| continuity_signal(frame, 1, salt))
+            .collect(),
+    )
+}
+
+/// The gap-free acceptance session: tracks `eq0`-`eq2` on the fixture source, empty console
+/// sections, no inserts, and the input filters off, so no unchanged path holds DSP state.
+fn stateless_session(sample_rate_hz: u32) -> session::SessionModel {
+    let mut model = parse_session_json(SESSION).expect("fixture");
+    model.sample_rate_hz = sample_rate_hz;
+    model.tracks.truncate(3);
+    model.routes.truncate(3);
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for builtins in [&mut track.builtins.left, &mut track.builtins.right] {
+            builtins.hpf_hz = 0.0;
+            builtins.lpf_hz = 0.0;
+        }
+    }
+    model
+}
+
+/// `UpsertTrack` of a muted copy of the first track, whose ID sorts before every other, and
+/// `UpsertRoute` of its route: the added strip contributes exact zeros.
+fn add_muted_track(model: &session::SessionModel, id: &str) -> [protocol::SessionEdit; 2] {
+    let mut track = model.tracks[0].clone();
+    track.id = session::StableId::parse(id).expect("track ID");
+    track.fader.left_mute = true;
+    track.fader.right_mute = true;
+    let mut route = model.routes[0].clone();
+    route.id = session::StableId::parse(&format!("{id}-main")).expect("route ID");
+    let session::RouteSource::Track { track_id, .. } = &mut route.source else {
+        panic!("track route")
+    };
+    *track_id = track.id.clone();
+    [
+        protocol::SessionEdit::UpsertTrack { track },
+        protocol::SessionEdit::UpsertRoute { route },
+    ]
+}
+
+/// `RemoveRoute` and `RemoveTrack` of a track [`add_muted_track`] added.
+fn remove_track(id: &str) -> [protocol::SessionEdit; 2] {
+    [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: session::StableId::parse(&format!("{id}-main")).expect("route ID"),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: session::StableId::parse(id).expect("track ID"),
+        },
+    ]
+}
+
+/// The committed session's canonical JSON, read through `SESSION_SNAPSHOT_GET` in chunks.
+fn snapshot_c(session: *mut crate::Session) -> String {
+    let mut json = Vec::new();
+    for request_id in 1_000_u64.. {
+        let request = command_bytes(
+            request_id,
+            protocol::CommandPayload::SessionSnapshotGet(protocol::SessionSnapshotRequest {
+                offset: json.len() as u64,
+                maximum_bytes: 2_048,
+            }),
+        );
+        let (result, response) = command_c(session, &request);
+        assert_eq!(result, crate::RESULT_OK);
+        let mut fields = [0_u16; 64];
+        let protocol::DecodedTypedResponseFrame::Success {
+            payload: protocol::DecodedSuccessResponsePayload::SessionSnapshot(chunk),
+            ..
+        } = ProtocolCodec::default()
+            .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+            .expect("snapshot response")
+        else {
+            panic!("expected a snapshot chunk")
+        };
+        json.extend_from_slice(chunk.canonical_json_chunk);
+        if chunk.eof {
+            break;
+        }
+    }
+    String::from_utf8(json).expect("canonical JSON")
+}
+
+/// Renders one 128-frame block through the exported entry point.
+fn render_c(plan: *mut crate::Plan, block: u64) -> Vec<f32> {
+    let mut pcm = vec![f32::NAN; 256];
+    let output = crate::PlanarOutput {
+        struct_size: crate::PLANAR_OUTPUT_SIZE,
+        channels: 2,
+        samples: pcm.as_mut_ptr(),
+        sample_capacity: pcm.len() as u64,
+        frames: 128,
+        plane_stride_samples: 128,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        crate::ffi::test_render(plan, block * 128, &output),
+        crate::RESULT_OK
+    );
+    pcm
+}
+
+/// Feeds `fixture-source` one block ahead and renders `blocks` blocks from `first`.
+fn feed_and_render_c(
+    session: *mut crate::Session,
+    plan: *mut crate::Plan,
+    sample_rate_hz: u32,
+    first: u64,
+    blocks: u64,
+) -> Vec<Vec<f32>> {
+    (first..first + blocks)
+        .map(|block| {
+            let (left, right) = continuity_block(block + 1, 0);
+            submit_c(
+                session,
+                1,
+                (block + 1) * 128,
+                sample_rate_hz,
+                &left,
+                &right,
+                false,
+            );
+            render_c(plan, block)
+        })
+        .collect()
+}
+
+/// Issue #1273 gate 1: across a C ABI structural transaction (`UpsertTrack` of a muted track and
+/// its route), every block is bit-identical to the committed post-edit session compiled fresh and
+/// fed the same PCM from frame 0. The source keeps its ring, generation and position: no seek, no
+/// refill.
+///
+/// Test value: red if the successor allocates a fresh ring for the unchanged source, if the
+/// producer stays in the old set, or if a submit after the commit is routed to the old set
+/// (`structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic` pinned the
+/// opposite, a silent swap block, before this issue).
+fn structural_transaction_keeps_the_source_playing_at(sample_rate_hz: u32) {
+    let model = stateless_session(sample_rate_hz);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let (c_session, c_plan) = boxed_c_children(&document);
+    let (left, right) = continuity_block(0, 0);
+    submit_c(c_session, 1, 0, sample_rate_hz, &left, &right, false);
+    let mut swapped = feed_and_render_c(c_session, c_plan, sample_rate_hz, 0, 6);
+    let edits = add_muted_track(&model, "a-muted");
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    assert_eq!(command_c(c_session, &transaction).0, crate::RESULT_OK);
+    swapped.extend(feed_and_render_c(c_session, c_plan, sample_rate_hz, 6, 6));
+    let carried = crate::ffi::test_plan_carry_counts(c_plan);
+    assert_eq!(carried, (1, 0), "one swap, and it carried");
+    let committed = snapshot_c(c_session);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+
+    let (r_session, r_plan) = boxed_c_children(&committed);
+    let (left, right) = continuity_block(0, 0);
+    submit_c(r_session, 1, 0, sample_rate_hz, &left, &right, false);
+    let reference = feed_and_render_c(r_session, r_plan, sample_rate_hz, 0, 12);
+    crate::ffi::test_plan_destroy(r_plan);
+    crate::ffi::test_session_destroy(r_session);
+
+    for (block, (swapped, reference)) in swapped.iter().zip(&reference).enumerate() {
+        assert!(
+            reference.iter().all(|sample| *sample != 0.0),
+            "{sample_rate_hz} Hz block {block}: the reference plays"
+        );
+        let swapped_bits = swapped
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>();
+        let reference_bits = reference
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            swapped_bits, reference_bits,
+            "{sample_rate_hz} Hz block {block}: bit-identical to the fresh post-edit session"
+        );
+    }
+}
+
+#[test]
+fn a_c_abi_structural_transaction_keeps_the_source_playing() {
+    structural_transaction_keeps_the_source_playing_at(48_000);
+    structural_transaction_keeps_the_source_playing_at(96_000);
+}
+
+/// Submits block `block` of each of `ids`' signals (salted by position) through the session state.
+fn submit_direct(children: &mut CompiledChildren, ids: &[&[u8]], block: u64) {
+    for (salt, id) in ids.iter().enumerate() {
+        let (left, right) = continuity_block(block, salt as u64);
+        let report = children
+            .session
+            .submit(
+                id,
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: block * 128,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .unwrap_or_else(|error| panic!("block {block}: {:?}", error.report()));
+        assert_eq!(report.accepted_frames, 128);
+    }
+}
+
+/// Renders block `block` through the plan state.
+fn render_direct(children: &mut CompiledChildren, block: u64) -> Vec<f32> {
+    let mut pcm = vec![f32::NAN; 256];
+    children
+        .plan
+        .render(
+            block * 128,
+            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+        )
+        .expect("block");
+    pcm
+}
+
+/// Feeds `ids` one block ahead and renders `blocks` blocks from `first`.
+fn feed_and_render_direct(
+    children: &mut CompiledChildren,
+    ids: &[&[u8]],
+    first: u64,
+    blocks: u64,
+) -> Vec<Vec<f32>> {
+    (first..first + blocks)
+        .map(|block| {
+            submit_direct(children, ids, block + 1);
+            render_direct(children, block)
+        })
+        .collect()
+}
+
+fn assert_bit_identical(label: &str, first: u64, actual: &[Vec<f32>], expected: &[Vec<f32>]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        let block = first + index as u64;
+        assert!(
+            expected.iter().all(|sample| *sample != 0.0),
+            "{label} block {block}: the reference plays"
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "{label} block {block}: bit-identical to the reference"
+        );
+    }
+}
+
+/// Issue #1273 gate 2: a transaction that removes a track and its source leaves the remaining
+/// source playing from its carried ring, bit-identical to the fresh post-edit session, and a
+/// submit for the removed source is refused as unknown.
+///
+/// Test value: red if the carry joins sources by graph index instead of ID (the remaining
+/// source's index moves when the first is removed), or if a removed source's producer stays
+/// reachable after the commit.
+#[test]
+fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
+    const AUX: &[u8] = b"aux-source";
+    let mut model = stateless_session(48_000);
+    model.tracks.truncate(2);
+    model.routes.truncate(2);
+    // The removed source sorts first, so the remaining one changes graph index.
+    let mut aux = model.sources[0].clone();
+    aux.id = session::StableId::parse("aux-source").expect("source ID");
+    model.sources.insert(0, aux);
+    model.tracks[0].source_id = session::StableId::parse("aux-source").expect("source ID");
+    let both: [&[u8]; 2] = [b"fixture-source", AUX];
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let mut children = compile_children(&document, limits()).expect("children");
+    submit_direct(&mut children, &both, 0);
+    feed_and_render_direct(&mut children, &both, 0, 6);
+    let edits = [
+        protocol::SessionEdit::RemoveRoute {
+            route_id: model.routes[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveTrack {
+            track_id: model.tracks[0].id.clone(),
+        },
+        protocol::SessionEdit::RemoveSource {
+            source_id: session::StableId::parse("aux-source").expect("source ID"),
+        },
+    ];
+    children
+        .session
+        .command(
+            &command_bytes_at_revision(
+                1,
+                ExpectedRevision::Exact(SessionRevision(42)),
+                protocol::CommandPayload::SessionTransactionApply(&edits),
+            ),
+            4_096,
+        )
+        .expect("removal transaction");
+    let (left, right) = continuity_block(7, 1);
+    let refused = children.session.submit(
+        AUX,
+        SourceSubmission {
+            generation: 1,
+            start_frame: 7 * 128,
+            sample_rate_hz: 48_000,
+            planes: &[&left, &right],
+            frames: 128,
+            end_of_region: false,
+        },
+    );
+    let Err(refusal) = refused else {
+        panic!("a submit for the removed source is refused")
+    };
+    assert_eq!(
+        refusal.report(),
+        (crate::RESULT_INVALID_ARGUMENT, &b"source.id.unknown"[..])
+    );
+    let swapped = feed_and_render_direct(&mut children, &both[..1], 6, 6);
+    assert_eq!(children.plan.owner.carried_count(), 1);
+
+    let committed = session::canonical_session_json(
+        children
+            .session
+            .controller
+            .session()
+            .compiled()
+            .normalized_model(),
+    )
+    .expect("committed");
+    let mut reference = compile_children(&committed, limits()).expect("reference");
+    submit_direct(&mut reference, &both[..1], 0);
+    let expected = feed_and_render_direct(&mut reference, &both[..1], 0, 12);
+    assert_bit_identical("removal", 6, &swapped, &expected[6..]);
+}
+
+/// Issue #1273 gate 3: a structural transaction refused at any phase, including a protocol
+/// commit that returns `Err`, moves no producer. The source still accepts PCM and the running
+/// plan renders it, bit-identical to a session that never saw the transaction.
+///
+/// Test value: red if the producer hand-over runs before any fallible step: the refused
+/// candidate takes the producer with it, and the next submit returns `source.ring.vacated`.
+#[test]
+fn a_refused_structural_transaction_moves_no_producer() {
+    use TestStructuralFaultPhase::{
+        AfterAdmission, AfterPlanReservation, AfterProtocolPrepare, AfterRuntimePrepare,
+        BeforeProtocolCommit, BeforeRuntimePrepare, ProtocolCommit,
+    };
+    let source: [&[u8]; 1] = [b"fixture-source"];
+    let model = stateless_session(48_000);
+    let document = session::canonical_session_json(&model).expect("canonical");
+    let mut reference = compile_children(&document, limits()).expect("reference");
+    submit_direct(&mut reference, &source, 0);
+    let expected = feed_and_render_direct(&mut reference, &source, 0, 4);
+    let edits = add_muted_track(&model, "a-muted");
+    let transaction = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
+    );
+    for phase in [
+        AfterProtocolPrepare,
+        BeforeRuntimePrepare,
+        AfterRuntimePrepare,
+        AfterAdmission,
+        AfterPlanReservation,
+        BeforeProtocolCommit,
+        ProtocolCommit,
+    ] {
+        let mut children = compile_children(&document, limits()).expect("children");
+        submit_direct(&mut children, &source, 0);
+        let mut rendered = feed_and_render_direct(&mut children, &source, 0, 2);
+        children
+            .session
+            .test_set_structural_faults([Some(phase), None]);
+        let refused = children.session.command(&transaction, 4_096);
+        assert!(
+            matches!(
+                refused,
+                Err(CommandError::Backpressure | CommandError::Internal)
+            ),
+            "{phase:?}: {refused:?}"
+        );
+        assert_eq!(
+            children.session.controller.session().revision(),
+            SessionRevision(42),
+            "{phase:?}"
+        );
+        assert!(children.session.pending_providers.is_empty(), "{phase:?}");
+        rendered.extend(feed_and_render_direct(&mut children, &source, 2, 2));
+        assert_eq!(children.plan.owner.carried_count(), 0, "{phase:?}");
+        assert_bit_identical(&format!("{phase:?}"), 0, &rendered, &expected);
+    }
+}
+
 /// The outcome of one control call, reduced to what issue #1042 distinguishes.
 fn control_outcome<T, E: core::fmt::Debug>(result: &Result<T, E>) -> String {
     match result {
@@ -847,10 +1265,40 @@ fn control_outcome<T, E: core::fmt::Debug>(result: &Result<T, E>) -> String {
 /// synchronization parked the old provider in `retired_providers` for good; and the old epoch's
 /// report row, skipped because it matched the lagging atomic, kept the table full, so every later
 /// structural command returned `Backpressure`.
+///
+/// Issue #1273 gate 4: the trigger adds and removes a muted track (`UpsertTrack`), so every swap
+/// carries the source's ring, and the source is fed twice a round: after the commit, while the
+/// candidate is pending, and inside the window. Both submits must land in the carried ring. Test
+/// value: red if a submit in either place is routed to the current epoch, whose producer has
+/// moved (`source.ring.vacated`), or if the carried ring loses its write position
+/// (`source.frame.noncontiguous`).
 #[test]
 fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
+    let model = parse_session_json(SESSION).expect("fixture");
     let mut children = compile_children(SESSION, limits()).expect("children");
+    let left = [0.25_f32; 128];
+    let right = [-0.5_f32; 128];
+    let mut next_frame = 0_u64;
+    let mut feed = |children: &mut CompiledChildren, label: &str| {
+        let report = children
+            .session
+            .submit(
+                b"fixture-source",
+                SourceSubmission {
+                    generation: 1,
+                    start_frame: next_frame,
+                    sample_rate_hz: 48_000,
+                    planes: &[&left, &right],
+                    frames: 128,
+                    end_of_region: false,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{label}: {:?}", error.report()));
+        assert_eq!(report.accepted_frames, 128, "{label}");
+        next_frame += 128;
+    };
     let mut pcm = [0.0_f32; 256];
+    feed(&mut children, "first block");
     children
         .plan
         .render(
@@ -858,19 +1306,22 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("first block");
-    let structural = |request_id: u64, revision: u64, session_id: &str| {
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse(session_id).expect("stable ID"),
+    // Even rounds add the muted track, odd rounds remove it.
+    let structural = |request_id: u64, revision: u64, round: u64| {
+        let edits = if round.is_multiple_of(2) {
+            add_muted_track(&model, "a-race").to_vec()
+        } else {
+            remove_track("a-race").to_vec()
         };
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
-            protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+            protocol::CommandPayload::SessionTransactionApply(&edits),
         )
     };
     let mut request_id = 1;
     let mut revision = 42;
-    let mut pending = structural(request_id, revision, "split-0");
+    let mut pending = structural(request_id, revision, 0);
     children
         .session
         .command(&pending, 4_096)
@@ -879,6 +1330,8 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
 
     for round in 1..=4_u64 {
         let sample = round * 128;
+        // The candidate is pending: the source's producer has moved to it.
+        feed(&mut children, "pending candidate");
         // Drain the round's `SESSION_COMMITTED`, so the reliable lane never backpressures.
         assert!(
             children
@@ -904,19 +1357,26 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             .expect("swapping block");
         assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
         assert_eq!(report.active_epoch.0, new_epoch);
+        assert_eq!(children.plan.owner.carried_count(), round);
+        assert!(
+            pcm.iter().all(|sample| *sample != 0.0),
+            "round {round}: the swap block plays the carried ring"
+        );
         assert_eq!(
             children.plan.shared.active_epoch.load(Ordering::Acquire),
             old_epoch,
             "the window is open: the atomic still names the retired plan"
         );
 
-        // Inside the window: an immediate command, a lossy dequeue, and a structural command.
+        // Inside the window: a source submit, an immediate command, a lossy dequeue, and a
+        // structural command.
+        feed(&mut children, "swap window");
         request_id += 1;
         let capabilities = command_bytes(request_id, protocol::CommandPayload::CapabilitiesGet);
         let window_immediate = children.session.command(&capabilities, 4_096);
         let window_lossy = children.session.dequeue_event(EventLane::Lossy, 4_096);
         request_id += 1;
-        pending = structural(request_id, revision, &format!("split-{round}"));
+        pending = structural(request_id, revision, round);
         let window_structural = children.session.command(&pending, 4_096);
         let window_revision = children.session.controller.session().revision().0;
         // The any-thread query reads the lagging atomic's row, which must still be there.

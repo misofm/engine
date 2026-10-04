@@ -157,3 +157,68 @@ paths hold no DSP state, the output is bit-identical to a plan that had the edit
 ## Dependencies
 
 - *Prepare a successor plan whose unchanged sources keep playing* (#1272).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `2a6f2c10c`)
+
+**Change.** D1-D6 as frozen. `ProviderEpoch` keeps its plan's `PlanStateInventory`;
+`prepare_runtime` takes an `Option<SuccessorBase>` (the `Structural` arm passes the newest epoch's
+inventory and the pre-transaction committed model; `compile_children` passes `None`) and calls
+`prepare_host_runtime_successor` when given one. `adopt_persisting` runs immediately after
+`prepared.commit(..)` returns `Ok`, before `replace_session_catalog`. `submit` and `seek` use the
+newest epoch (`SessionState::newest_providers_mut`). `StructuralSourceStatePolicy`, its constant and
+the swap-block-all-zeros assertions in
+`structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic` are deleted. A new
+`#[cfg(test)]` fault phase `ProtocolCommit` makes `ObservedPreparedToken::commit` return `Err`.
+`crate::ffi::plan_carry_counts` (`#[doc(hidden)] pub unsafe fn`, no exported symbol) reads the
+owner's carry counters; a `#[cfg(test)]` wrapper `test_plan_carry_counts` serves the unit tests.
+
+**Resources (D5).** The candidate's report counts carried rings in `source_total_bytes`,
+`source_overhead_bytes` and `source_pcm_payload_bytes`, and the carry program in
+`graph_session_plus_plan_bytes`; `validate_replacement_peak` subtracts the candidate's carried
+total/overhead, so each carried ring counts once; capi's epoch row charges each epoch's inventory
+(`inventory_retained_bytes`). Oracle moves: `capi_retained_bytes_charge_every_byte_the_compile_retains`
+adds the observed inventory owner to capi's side (and no longer subtracts it from the host half);
+`double_live_oracle_drives_exact_and_one_below_c_caps` (soft-clip nine-track, SetSessionId trigger,
+which carries the source) subtracts the carried ring from both source rows and adds the successor's
+inventory to the capi epoch row. Numbers at x86-64-v3 (eight lanes): carried ring 10,608 bytes
+(2,416 overhead), carry program 8 bytes, inventory 62 bytes; double-live requirements: graph
+549,774, source-total 13,660, source-overhead 5,468, capi 167,770 (all exact-admitted and refused one
+below).
+
+**Gates.**
+
+| Gate | Evidence | Result |
+|---|---|---|
+| 1 | `runtime::tests::a_c_abi_structural_transaction_keeps_the_source_playing` (exported entries: `submit_c`, `command_c`, `test_render`, `SESSION_SNAPSHOT_GET`), 48 kHz and 96 kHz, 12 blocks bit-identical, carry counts `(1, 0)` | pass |
+| 2 | `removing_a_track_and_its_source_keeps_the_other_source_playing` (removed source sorts first, so the remaining one changes graph index); post-swap blocks bit-identical; removed-source submit `(MISO_ENGINE_V1_INVALID_ARGUMENT, "source.id.unknown")` | pass |
+| 3 | `a_refused_structural_transaction_moves_no_producer`: all six phases of the fault matrix plus `ProtocolCommit`; after each refusal the source accepts PCM and renders bit-identical to an unedited session | pass |
+| 4 | `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live` (UpsertTrack/RemoveTrack trigger, a submit while the candidate is pending and one inside the window, swap block non-silent) and `race_plan_swaps` (UpsertTrack/RemoveTrack, PCM submitted between every control call; only OK or ring-full backpressure accepted; every applied swap carried) | pass |
+| 5 | both `resource_lifecycle` oracles with the rows above | pass |
+| 6 | `audit capi`: transaction after call 0, outside both render scopes; allocations, deallocations, locks, syscalls and every other counter 0; carry counts `(1, 0)`; `pcm_digest` moves `ff6cdcb96cdcdad5` -> `7281b6c931e05dcc` (format-only check in CI; keys unchanged) | pass |
+| 7 | `cargo test --locked -p capi` (38 + 11), `cargo test --locked -p audit capi::`, `check-capi-abi.sh` and `--self-test`, fmt, clippy (workspace, all targets, all features), doc, workspace and realtime policies and their mutation tests, `check-cross-targets.sh` | pass |
+
+No browser Wasm code changed (capi and tools/audit are native only): no worklet rebuild, artifact
+unchanged.
+
+**Mutations** (each applied alone, test red, reverted, green):
+
+| Mutation | Red |
+|---|---|
+| M1 `Structural` arm passes no successor base (fresh rings) | gates 1, 2, 4 (window), structural-epochs test (`source.frame.noncontiguous` on the post-commit submit) |
+| M2 `adopt_persisting` removed (producer left in the old set) | gates 1, 2, 4 (window) (`source.ring.vacated`) |
+| M3 `submit` routed to `self.providers` | gates 1, 2, 4 (window and both `race_plan_swaps` tests) |
+| M4 producer moved before `prepared.commit` | gate 3, `ProtocolCommit` phase only (the other six phases return before the move) |
+| M5 host-core carry joined by successor index, not the inventory row's (temporary, reverted) | gate 2 (bit-identity) |
+| M6 an unknown source falls back to the current set | gate 2 (refusal) |
+| M7 inventory not charged in capi's epoch row | both capi oracles and the tiny-frame oracle |
+| M8 carried ring counted twice in the double-live peak | double-live oracle (exact cap refused) |
+| M9 carry program not charged in the graph row | double-live oracle |
+| A1 audit applies no transaction | `audit capi` exits nonzero (carry counts `(0, 0)`) |
+| A2 (with M1) | `audit capi` exits nonzero (post-commit submit refused) |
+
+**Deviation.** The race tests keep their own `std::thread::scope` driver rather than
+`bench_support::producer::render_while_producing`: capi has no `bench-support` dev-dependency and
+`crates/capi/Cargo.toml` is outside the authorized paths. The render thread now holds its own
+`StopOnDrop`, so a panic on either side stops the other and the scope cannot hang.

@@ -1040,6 +1040,34 @@ pub(crate) fn test_telemetry_counters(session: *mut Session) -> protocol::Teleme
     unsafe { &(*session).state }.test_telemetry_counters()
 }
 
+/// How many applied plan swaps carried state from their predecessor, and how many found a
+/// predecessor whose shape could not supply it (`RealtimePlanOwner::carried_count` and
+/// `carry_mismatch_count`). Not part of the C ABI: no symbol is exported, and the header does not
+/// declare it. `audit capi` reads it to prove its audited render calls include a carrying swap
+/// (issue #1273 deliverable 3).
+///
+/// # Safety
+///
+/// `plan` must be a live plan handle returned by `miso_engine_v1_compile_session`, and no render
+/// call or destroy may run on it concurrently: the counters are the render thread's own.
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
+    // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
+    // the render-thread state aliases no exclusive borrow.
+    let state = unsafe { &(*plan).state };
+    (
+        state.owner.carried_count(),
+        state.owner.carry_mismatch_count(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_plan_carry_counts(plan: *mut Plan) -> (u64, u64) {
+    // SAFETY: Test callers retain the exclusively owned live plan, with no render in flight.
+    unsafe { plan_carry_counts(plan) }
+}
+
 #[cfg(test)]
 pub(crate) fn test_set_structural_faults(
     session: *mut Session,

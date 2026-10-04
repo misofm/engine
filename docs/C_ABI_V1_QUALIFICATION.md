@@ -56,6 +56,23 @@ The accepted Rust exported-C regressions supply the complete 11-command, six-eve
 replacement, retirement/reclaim, source-preserving/source-changing, failure, replay, and lifecycle
 matrix without copying protocol semantics into the qualification consumer.
 
+A structural transaction keeps every unchanged source playing (#1273, slice 4 of #1269). The
+replacement plan is prepared from the newest plan's state inventory and committed session model,
+with no ring for a source whose declaration and ring configuration are unchanged; at its swap block
+it takes that source's ring from the plan it displaces, with the queued PCM, the generation and the
+read position. The source's producer moves to the replacement's source set right after the protocol
+commit succeeds, which is the last fallible step, so a refused transaction moves nothing. From the
+commit on, `miso_engine_v1_source_submit_planar_f32` and `miso_engine_v1_source_seek` address the
+newest committed session: a host keeps feeding an unchanged source contiguously and must not reseek
+it. A removed source is refused as `source.id.unknown`, and PCM already accepted for it is discarded
+with its plan. An added source starts at generation 1, frame 0, until the host seeks it. For a
+session whose unchanged paths hold no DSP state, the output across the swap is bit-identical to the
+post-edit session compiled fresh and fed the same PCM from frame 0 (`runtime::tests`'
+`a_c_abi_structural_transaction_keeps_the_source_playing`). The replacement's resource report counts
+the rings it carries and its carry program, as the plan will own them once active; the double-live
+admission counts a carried ring once, with the plan it displaces; and capi's epoch row charges the
+state inventory each epoch keeps.
+
 Submix strips are editable through the same `SESSION_TRANSACTION_APPLY` transactions as track
 strips: opcodes `0203`-`0211` take a submix ID as their strip ID (#1204). Every such transaction is
 structural, compiling and swapping a replacement plan, until *Deliver value-only send and
@@ -102,7 +119,10 @@ and no-clobber behavior. The runner, its fixtures, and its exclusive-output-dire
 not modified, retried, or described as a new Issue-116 seal.
 
 The exported C render audit completed 100,000 calls with stable caller storage and zero allocation,
-deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors. A
+deallocation, lock, feature-detection, log, file/network I/O, syscall, unwind, or render errors.
+Since #1273 the audit applies one structural transaction (a muted track and its route) after its
+first call, outside the render scopes, so its second audited call is a swap block that carries the
+source's ring; the tool fails unless exactly that one swap carried. A
 separate functional one-million-block render/swap audit observed two accepted swaps, one retirement
 deferral, zero forbidden-operation counters, and zero syscalls between the explicit realtime trace
 markers. Neither audit selected a benchmark mode or recorded durations.
@@ -139,8 +159,8 @@ admission. Host-core's default feature graph remains protocol-free; only capi en
 
 `resource_lifecycle` checks these charges against the allocator (#1060). Its counting allocator
 observes a C ABI compile and a replay of its host-core half owner by owner, and nothing is taken
-from the accounting it checks. What capi allocates itself, plus the observed source producers and
-parameter catalog, must equal `capi_retained_bytes` to the byte. The session store must fit its
+from the accounting it checks. What capi allocates itself, plus the observed source producers,
+parameter catalog and plan state inventory (#1273), must equal `capi_retained_bytes` to the byte. The session store must fit its
 compiled-model estimate, and the prepared plan its engine rows (a bound; see the test). The
 canonical JSON is charged once, with the compiled model in the graph cap: capi's epoch row no
 longer charges it a second time. The double-live admission is derived from the two live reports
