@@ -319,7 +319,9 @@ the defect was introduced, the test went red, and the defect was reverted).
 - `a_replayed_live_edit_pushes_nothing` (gate 3c): red if a replayed live edit reaches the live arm
   and pushes again. No capi-side mutation reaches it: the protocol answers a replay before a token
   exists, by two independent checks (stale exact revision, then the replay preflight). It is kept
-  as the spec's invariant guard; its mutation was not run.
+  as the spec's invariant guard; its mutation was not run. (Corrected after the verdict, NIT 2:
+  a capi-side mutation does reach it -- a live response that diverges from the committed frame;
+  see the follow-ups below.)
 - `a_live_edit_while_a_candidate_is_pending_reaches_the_candidate` (gate 3d): red if a pending
   candidate misses an acked edit. M2, push to the current provider: red (candidate room
   `(16, 16)`).
@@ -363,3 +365,57 @@ the defect was introduced, the test went red, and the defect was reverted).
   is linear when the delta and the table share canonical order and still correct when they do not.
 - No block-atomicity is claimed anywhere; the docs state #1053 D2's one-quantum skew.
 - The skipped epoch-lag check during a lag, and every producer/render race, are #1258's.
+  (Corrected after the verdict, MINOR 2: the skipped lag check is this slice's own first hazard,
+  and #1258's race gate retries every `control.plan.backpressure`, so it would not catch a lag
+  check moved above the live arm. A deterministic in-window test now covers it; see the
+  follow-ups below. Producer/render races remain #1258's.)
+
+### Follow-ups applied (after the attempt 1 PASS, verdict MINOR 1-4 and NIT 2-4, NIT 6)
+
+All tests are in `crates/capi/src/runtime/live_tests.rs`; each mutation was applied, run with
+`cargo test --locked -p capi --lib`, and reverted from a saved copy.
+
+- MINOR 1 (room-check terms). `a_full_live_lane_refuses_before_anything_changes` now also fills
+  eq3's matrix lane with 16 distinct pan edits (room `(16, 0)`); the 17th returns `BACKPRESSURE` /
+  `control.live.backpressure` with the refusal state and every current room unchanged and no plan
+  prepared. It then leaves eq4's fader lane room 1 and sends one edit whose left and right dB
+  differ (two `FaderDb` records): `BACKPRESSURE`, refusal state and rooms unchanged, room still 1.
+  Test value: red if the room check drops its matrix term or counts edits instead of fader records.
+  Mutations: matrix term `|| false`: red (the push hits `unreachable!`, live_tests.rs:618);
+  fader term `count().min(1)`: red (live_tests.rs:647). Both were green on every capi test before.
+- MINOR 2 (epoch lag). New `a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate`,
+  modelled on `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`: a
+  structural edit prepares a candidate, `owner.render_contiguous` swaps it in while
+  `active_epoch` still names the retired plan, and a value-only `SetTrackFader` inside that window
+  returns `Ok`, commits one revision, prepares no candidate (no pending epoch) and takes exactly one
+  record from the promoted provider's eq0 fader lane, with the atomic still lagging. Test value:
+  red if the epoch-lag check runs before the live arm. Mutation: the lag check copied above
+  `commit_live`: red (`Err("Backpressure")`, revision unchanged), unique in the capi suite. The
+  attempt-record sentence above is corrected.
+- MINOR 3: `docs/C_ABI_V1_QUALIFICATION.md`'s #1257 section states the +96 B
+  `capi_retained_bytes` per session (`ProviderEpoch`'s 32-byte `CapiResources`, inline current
+  epoch plus two reserved slots; 258,135 -> 258,231 on the nine-track reference, the verifier's
+  measurement) and that exact-cap callers must raise `maximum_capi_retained_bytes`.
+- MINOR 4 / NIT 6: gate 1(a)'s mute window now asserts that the unmuted reference carries signal
+  in every compared block. Test value: red if the mute window's input goes silent, which would make
+  the exact-`+0.0` check vacuous. Mutation: `source_sample` returns 0.0 for frames below 6 * 128
+  (silencing the warm-up and the mute window): red at the new assertion ("1 tracks at 44100 Hz:
+  block 5: the reference carries signal in the mute window"); the same mutation on the
+  pre-change test is green.
+- NIT 2 (gate 3c's test value). `a_replayed_live_edit_pushes_nothing` is red if the live arm's
+  response diverges from the committed frame the replay cache serves, the plausible defect behind
+  owner question Q3 (a live/rebuild flag in the response). Mutation: flip the last response byte
+  after `committed.write_into` in `commit_live`: red at live_tests.rs:715 (`replay == first`),
+  and no other capi test. This replaces the "its mutation was not run" note above.
+- NIT 3 (events). New `a_live_edit_emits_the_commit_events_of_a_rebuild`: a live edit emits
+  exactly one `SESSION_COMMITTED`; with one automation batch queued (handle 5, accepted), the next
+  live edit emits `SESSION_COMMITTED` then `AUTOMATION_CANCELED`. Test value: red if a live edit
+  commits through a path that loses or skips the protocol commit's events. Mutations: (i) the
+  live arm dequeues one reliable event after its commit: red here (and in #1258's
+  `a_live_edit_without_reliable_event_room_...`, incidentally); (ii) the protocol commit skips
+  `cancel_queued_automation_reserved`: red here and in
+  `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`, no protocol test red. Not a
+  unique catch for the protocol-level defect; it pins #1053 D10 for the live arm, as the verdict
+  asks.
+- NIT 4: the header's live-edit paragraph says "takes the replacement path exactly as before"
+  (comment only).

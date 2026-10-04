@@ -5,7 +5,7 @@
 //! rebuilds the plan on purpose.
 
 use super::tests::{
-    boxed_c_children, command_bytes, command_bytes_at_revision, command_c, event_c,
+    SESSION, boxed_c_children, command_bytes, command_bytes_at_revision, command_c, event_c,
     generated_parity_session, limits, submit_c,
 };
 use super::*;
@@ -399,14 +399,24 @@ fn live_pcm_shape(track_count: usize, sample_rate_hz: u32) {
     );
     assert_eq!(pending, 0, "{label}");
     let k = window(latency, 0, quantum);
-    for (block, pcm) in settle(&mut rig, k, 3) {
+    let muted = settle(&mut rig, k, 3);
+    for (block, pcm) in &muted {
         assert!(
             pcm.iter().all(|sample| sample.to_bits() == 0),
             "{label}: block {block} after the mute is exactly +0.0"
         );
     }
+    // The compared window is not vacuous: the unmuted reference carries signal in every block of
+    // it.
     while original.block < rig.block {
-        original.step();
+        let block = original.block;
+        let reference = original.step();
+        if muted.iter().any(|(muted_block, _)| *muted_block == block) {
+            assert!(
+                reference.iter().any(|sample| *sample != 0.0),
+                "{label}: block {block}: the reference carries signal in the mute window"
+            );
+        }
     }
 
     // (b) Unmute: bit-identical to the original session's lanes-free plan.
@@ -570,7 +580,8 @@ fn refusal_state(rig: &Rig) -> (u64, Vec<u8>, usize, protocol::QueueReport) {
 }
 
 /// Gate 3 (a): a full lane is typed backpressure before anything changes, and a retry after one
-/// render succeeds.
+/// render succeeds. The room check's matrix term and its fader record count are each exercised
+/// too: a full matrix lane, and a two-record fader edit against room for one.
 #[test]
 fn a_full_live_lane_refuses_before_anything_changes() {
     let mut rig = Rig::new(&long_session(10, 48_000));
@@ -599,6 +610,58 @@ fn a_full_live_lane_refuses_before_anything_changes() {
     assert_eq!(rig.room(Epoch::Current, "eq0"), (depth, depth));
     assert_eq!(rig.apply(&[left_db_edit("eq0", -20.0)]), crate::RESULT_OK);
     assert_eq!(rig.room(Epoch::Current, "eq0"), (depth - 1, depth));
+
+    // The matrix term: sixteen pan edits fill eq3's matrix lane, and the seventeenth refuses.
+    let pan = |edit: usize| SessionEdit::SetTrackMatrixOrPan {
+        track_id: StableId::parse("eq3").expect("eq3"),
+        matrix_or_pan: MatrixOrPan::Pan {
+            left: -0.5 + edit as f32 / 64.0,
+            right: 0.5,
+            smoothing_samples: 0,
+        },
+    };
+    for edit in 0..depth {
+        assert_eq!(rig.apply(&[pan(edit)]), crate::RESULT_OK, "pan {edit}");
+    }
+    assert_eq!(rig.room(Epoch::Current, "eq3"), (depth, 0));
+    let before = (refusal_state(&rig), rig.current_rooms());
+    assert_eq!(rig.apply(&[pan(depth)]), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure");
+    assert_eq!(
+        (refusal_state(&rig), rig.current_rooms()),
+        before,
+        "a full matrix lane refuses before anything changes"
+    );
+    assert_eq!(rig.summary().3, 0, "the refusal prepared no plan");
+
+    // The fader term counts records, not edits: with room for one record, an edit whose two lanes
+    // move to different dB values (two records) refuses.
+    for edit in 0..depth - 1 {
+        assert_eq!(
+            rig.apply(&[left_db_edit("eq4", -1.0 - edit as f32)]),
+            crate::RESULT_OK,
+            "edit {edit}"
+        );
+    }
+    assert_eq!(rig.room(Epoch::Current, "eq4"), (1, depth));
+    let before = (refusal_state(&rig), rig.current_rooms());
+    let two_records = fader_edit(
+        "eq4",
+        DualMonoFader {
+            left_db: -40.0,
+            right_db: -30.0,
+            left_mute: false,
+            right_mute: false,
+        },
+    );
+    assert_eq!(rig.apply(&[two_records]), crate::RESULT_BACKPRESSURE);
+    assert_eq!(rig.last_error(), b"control.live.backpressure");
+    assert_eq!(
+        (refusal_state(&rig), rig.current_rooms()),
+        before,
+        "two records against room for one refuse before anything changes"
+    );
+    assert_eq!(rig.room(Epoch::Current, "eq4"), (1, depth));
 }
 
 /// Gate 3 (b): a transaction is all or nothing across tracks.
@@ -1022,4 +1085,182 @@ fn a_live_edit_without_reliable_event_room_is_protocol_backpressure_and_pushes_n
     assert_eq!(rig.summary().0, revision + 1);
     assert_eq!(rig.room(Epoch::Current, "eq1"), (depth - 1, depth));
     assert_eq!(rig.room(Epoch::Current, "eq2"), (depth, depth - 1));
+}
+
+/// #1257 hazard 1 (#1053 D7): the live arm adds no report row, so it skips the epoch-lag check
+/// that refuses a rebuild inside a plan-swapping render call.
+///
+/// Modelled on `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live`: the test
+/// runs the two halves of `PlanState::render` separately and makes a value-only fader edit between
+/// them, while the atomic still names the retired plan.
+///
+/// Test value: red if the lag check runs before (or inside) the live arm, which turns every live
+/// edit inside the window into retryable backpressure; #1258's race gate retries that refusal and
+/// so cannot see it.
+#[test]
+fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() {
+    let mut children = compile_children(SESSION, limits()).expect("children");
+    let mut pcm = [0.0_f32; 256];
+    children
+        .plan
+        .render(
+            0,
+            PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+        )
+        .expect("first block");
+    let revision = children.session.controller.session().revision().0;
+    let edit = protocol::SessionEdit::SetSessionId {
+        session_id: StableId::parse("swap-window").expect("stable ID"),
+    };
+    let structural = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+    );
+    children
+        .session
+        .command(&structural, 4_096)
+        .expect("structural command");
+    assert!(
+        children
+            .session
+            .dequeue_event(EventLane::Reliable, 4_096)
+            .expect("reliable event")
+            .is_some()
+    );
+    let old_epoch = children.session.providers.epoch;
+    let new_epoch = children.session.pending_providers[0].epoch;
+
+    // First half of `PlanState::render`: the owner swaps in the candidate.
+    let report = children
+        .plan
+        .owner
+        .render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
+            },
+            128,
+        )
+        .expect("swapping block");
+    assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
+    assert_eq!(report.active_epoch.0, new_epoch);
+    assert_eq!(
+        children.plan.shared.active_epoch.load(Ordering::Acquire),
+        old_epoch,
+        "the window is open: the atomic still names the retired plan"
+    );
+
+    // Inside the window: a value-only fader edit on eq0.
+    let live = command_bytes_at_revision(
+        2,
+        ExpectedRevision::Exact(SessionRevision(revision + 1)),
+        protocol::CommandPayload::SessionTransactionApply(&[left_db_edit("eq0", -7.5)]),
+    );
+    let result = children.session.command(&live, 4_096);
+    let snapshot = children.session.test_transaction_snapshot();
+    let depth = LIVE_QUEUE_DEPTH.get();
+    let rooms: Vec<_> = snapshot
+        .live_rooms
+        .iter()
+        .filter(|(_, id, ..)| &**id == "eq0")
+        .map(|&(epoch, _, fader, matrix)| (epoch, fader, matrix))
+        .collect();
+    assert_eq!(
+        (
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}")),
+            snapshot.revision,
+            snapshot.active_plan_epoch,
+            snapshot.provider_epoch,
+            snapshot.pending_provider_epochs,
+            rooms,
+        ),
+        (
+            Ok(()),
+            revision + 2,
+            old_epoch,
+            new_epoch,
+            Vec::new(),
+            vec![(new_epoch, depth - 1, depth)],
+        ),
+        "the live edit commits inside the window, prepares no candidate, and takes one record \
+         from the promoted provider's fader lane"
+    );
+}
+
+/// The reliable lane's events, drained, by kind.
+fn reliable_event_kinds(rig: &Rig) -> Vec<&'static str> {
+    let mut kinds = Vec::new();
+    loop {
+        let (result, frame) = event_c(rig.session, crate::EVENT_LANE_RELIABLE);
+        assert_eq!(result, crate::RESULT_OK);
+        if frame.is_empty() {
+            return kinds;
+        }
+        let mut fields = [0_u16; 64];
+        let event = ProtocolCodec::default()
+            .decode_typed_event(&frame, &mut DecodeScratch::new(&mut fields))
+            .expect("reliable event");
+        kinds.push(match event.payload {
+            protocol::DecodedEventPayload::SessionCommitted(_) => "SESSION_COMMITTED",
+            protocol::DecodedEventPayload::AutomationCanceled(_) => "AUTOMATION_CANCELED",
+            _ => "other",
+        });
+    }
+}
+
+/// #1053 D10: a live edit emits exactly the events a rebuild's commit does -- one
+/// `SESSION_COMMITTED`, and an `AUTOMATION_CANCELED` when an automation batch is queued.
+///
+/// Test value: red if a live edit commits through a path that skips the protocol commit's events,
+/// for example a live-only commit that emits no `SESSION_COMMITTED` or leaves the queued
+/// automation of the superseded revision uncanceled.
+#[test]
+fn a_live_edit_emits_the_commit_events_of_a_rebuild() {
+    let mut rig = Rig::new(&long_session(10, 48_000));
+    rig.step();
+    let bytes = rig.transaction(&[left_db_edit("eq0", -1.0)]);
+    assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the edit is live");
+    assert_eq!(reliable_event_kinds(&rig), ["SESSION_COMMITTED"]);
+
+    // Queue one automation batch at the committed revision, then edit live again.
+    let record = protocol::AutomationRecord {
+        kind: protocol::AutomationKind::Point,
+        handle: protocol::ParameterHandle(5),
+        start: protocol::SampleTime(1 << 20),
+        end: protocol::SampleTime(1 << 20),
+        start_value: 100.0,
+        end_value: 100.0,
+    };
+    let request = rig.next_request();
+    let automation = command_bytes_at_revision(
+        request,
+        ExpectedRevision::Exact(SessionRevision(rig.summary().0)),
+        protocol::CommandPayload::AutomationEnqueue(protocol::AutomationEnqueue {
+            records: core::slice::from_ref(&record),
+        }),
+    );
+    let (result, response) = command_c(rig.session, &automation);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    assert!(
+        matches!(
+            ProtocolCodec::default()
+                .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+                .expect("automation response"),
+            protocol::DecodedTypedResponseFrame::Success { .. }
+        ),
+        "the automation batch is queued"
+    );
+    assert_eq!(reliable_event_kinds(&rig), Vec::<&str>::new());
+    let bytes = rig.transaction(&[left_db_edit("eq0", -2.0)]);
+    assert_eq!(command_c(rig.session, &bytes).0, crate::RESULT_OK);
+    assert_eq!(rig.summary().3, 0, "the edit is live");
+    assert_eq!(
+        reliable_event_kinds(&rig),
+        ["SESSION_COMMITTED", "AUTOMATION_CANCELED"]
+    );
 }

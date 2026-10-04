@@ -34,8 +34,8 @@ extern "C" {
  * Live edits. A committed SESSION_TRANSACTION_APPLY that changes nothing but track fader levels,
  * track mutes, and track pan or matrix values is applied to the running plan: no plan is
  * prepared, and the source rings, the effect state and the render position continue, so the host
- * goes on submitting with no seek. Any other change replaces the plan exactly as before: a submix
- * strip's values, any edit while the session declares a VCA, the mute of a track that a
+ * goes on submitting with no seek. Any other change takes the replacement path exactly as
+ * before: a submix strip's values, any edit while the session declares a VCA, the mute of a track that a
  * follows_mute send reads, a fader outside its domain (refused as MISO_ENGINE_V1_COMPILE_REJECTED
  * with the same diagnostic as before), and every other field. A live edit applies no later than
  * the first render call that begins after miso_engine_v1_submit_command returns, and may apply one

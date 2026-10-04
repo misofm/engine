@@ -253,3 +253,8 @@ model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes
   current epoch's rows while a candidate is pending, plus the prepared-protocol rows, fit
   `maximum_capi_retained_bytes` (the last term counts a catalog the live arm never builds: a
   documented overcount); and the largest allocation fits `maximum_named_allocation_bytes`.
+- **Resource movement.** Each provider epoch now keeps its own capi resource figures (32 bytes)
+  for the live admission, so every session's `capi_retained_bytes` grows by 96 bytes: the inline
+  current epoch in the session plus its two reserved epoch slots. On the nine-track EQ reference
+  session the row moves 258,135 -> 258,231 bytes. A caller whose `maximum_capi_retained_bytes` was
+  exact must raise it.
