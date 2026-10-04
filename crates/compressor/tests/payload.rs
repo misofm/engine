@@ -417,10 +417,11 @@ fn a_step_that_leaves_the_domain_before_the_snap_is_refused() {
         .expect("nine steps of 0.05 stay inside [0, 1]");
 }
 
-/// A smoother coefficient is held to `[0, 1]` where it is a designed value (a target, a settled
-/// current) and its moving path to `[0, 1 + 64 ulps]` (#1278 attempt 2): the smoother
-/// `y += c (x - y)` diverges for every `c < 0`, so no rounding budget may reach below zero. A
-/// settled release coefficient of `-1e-6` once made the gain reduction run away over seconds.
+/// A smoother coefficient is held to `(0, 1]` where it is a designed value (a target, a settled
+/// current) and its moving path to `[0, 1 + 64 ulps]` (#1278 attempts 2 and 3): the smoother
+/// `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which no legal time designs,
+/// so no rounding budget may reach below zero. A settled release coefficient of `-1e-6` once made
+/// the gain reduction run away over seconds, and one of `0.0` held it for as long.
 #[test]
 fn a_coefficient_below_zero_or_above_its_design_is_refused() {
     // The release coefficient ramp follows the seven parameter ramps.
@@ -440,6 +441,9 @@ fn a_coefficient_below_zero_or_above_its_design_is_refused() {
     let above_one = f32::from_bits(1.0_f32.to_bits() + 8);
     for (case, section) in [
         ("a settled negative current", ramp(-1e-6, 0.5, 0.0, 0)),
+        // A zero coefficient freezes the smoother; no legal time designs one.
+        ("a settled zero current", ramp(0.0, 0.5, 0.0, 0)),
+        ("a zero target", ramp(0.5, 0.0, -1e-3, 10)),
         ("a settled current above one", ramp(above_one, 0.5, 0.0, 0)),
         ("a target above one", ramp(0.5, above_one, 1e-3, 10)),
         // Nineteen steps of -1e-7 from 1e-6 reach -9e-7 before the snap to 0.5.

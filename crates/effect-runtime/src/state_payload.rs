@@ -182,6 +182,8 @@ pub const fn expected_sizes(layout: &StateLayout) -> StatePayloadSizes {
     }
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the word and ramp codec the effects' payload calls run in the
+// plan-swap block.
 /// Writes `value` to word `word` of `bytes`, little-endian.
 ///
 /// # Panics
@@ -314,6 +316,7 @@ pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining
     }
     true
 }
+// REALTIME_POLICY_END
 
 /// Checks the three sections against the layout.
 ///

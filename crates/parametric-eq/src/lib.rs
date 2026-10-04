@@ -809,6 +809,21 @@ pub fn word_spectral_norm(words: EqSvfWords) -> f64 {
 /// Largest spectral norm accepted from a rounded word set: one `f32` rounding above contractive.
 const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 
+/// Largest spectral norm accepted on the remaining path of a restored in-flight ramp (#1278
+/// attempt 3).
+///
+/// The path is the `f32` walk the render takes, `current + step` once per sample, between two
+/// designs that each pass [`NORM_TOLERANCE`]. The transition matrix is affine in the words, so the
+/// exact straight line between them is no less contractive than its worse end, but the walk is not
+/// that line: its rounding, and a retarget that starts a new line from a rounded point, put it a
+/// few ulps off, which a design-exact limit refuses: the conformance differential found the EQ
+/// refusing its own mid-ramp snapshots, and a 10 kHz bell at Q 0.1 moving from -24 dB to +24 dB
+/// was refused at every sample (`tests/carry.rs`). The largest excess measured over a grid of
+/// every band kind and frequency, gain and Q moves at 48 kHz was `3.7e-6`, about `2^-18`, 64
+/// times below this bound, while a forged path held to it gains at most `(1 + 2^-12)^64 < 1.016`
+/// over the at most [`RAMP_SAMPLES`] samples it lasts before the target's exact words snap in.
+const RAMP_PATH_NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_096.0;
+
 /// Conservative finite bound for the three output-mix words accepted at the prepared-target
 /// boundary. It is derived from the descriptor's legal gain, Q and shelf-slope domains: with
 /// `A = 10^(gain/40)`, `A < 4` and `1/A < 4`; with `Q >= 0.1` and `S >= 0.1`, the shelf damping
@@ -871,6 +886,11 @@ pub fn design_svf(
 /// spectral-norm limit. It cannot prove that arbitrary stable coefficient words implement the
 /// semantic cutoff or Q in a target header; the Rust preparer remains the coefficient authority.
 fn validate_rounded_svf(words: EqSvfWords) -> Result<(), EqDesignError> {
+    validate_svf_within(words, NORM_TOLERANCE)
+}
+
+/// [`validate_rounded_svf`] with the spectral-norm limit `norm_bound`.
+fn validate_svf_within(words: EqSvfWords, norm_bound: f64) -> Result<(), EqDesignError> {
     let values = words.to_array();
     if !values.iter().all(|value| value.is_finite())
         || values
@@ -882,7 +902,7 @@ fn validate_rounded_svf(words: EqSvfWords) -> Result<(), EqDesignError> {
         || words.m0.abs() > OUTPUT_MIX_BOUND
         || words.m1.abs() > OUTPUT_MIX_BOUND
         || words.m2.abs() > OUTPUT_MIX_BOUND
-        || word_spectral_norm(words) > NORM_TOLERANCE
+        || word_spectral_norm(words) > norm_bound
     {
         return Err(EqDesignError::Coefficients);
     }
@@ -2580,6 +2600,8 @@ struct RestoredBand {
     step: [f32; 6],
     remaining: u32,
     target: BandTarget,
+    /// `target`'s designed words, designed once while validating and committed as they are.
+    words: EqSvfWords,
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
@@ -2631,7 +2653,9 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// `configuration` supplies the two parameters that are not automatable and therefore not in
     /// the payload — the band's enable and family. The ramp target words are **recomputed** from
     /// the stored parameters rather than stored, so a payload cannot carry words that disagree with
-    /// the parameters it also carries.
+    /// the parameters it also carries. (The effect itself decodes both channels before committing
+    /// either; this one-channel form serves the crate's unit tests.)
+    #[cfg(test)]
     fn restore_track(
         &mut self,
         track: usize,
@@ -2639,6 +2663,18 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         configuration: &[BandTarget; EQ_SECTION_COUNT],
         sample_rate: SampleRateHz,
     ) -> Result<(), StatePayloadError> {
+        let decoded = Self::decode_track(words, configuration, sample_rate)?;
+        self.commit_track(track, &decoded);
+        Ok(())
+    }
+
+    /// Validates one lane's state words, designing each band's target once, and returns them
+    /// decoded for [`commit_track`](Self::commit_track). Writes nothing.
+    fn decode_track(
+        words: &[u32; STATE_LANE_WORDS],
+        configuration: &[BandTarget; EQ_SECTION_COUNT],
+        sample_rate: SampleRateHz,
+    ) -> Result<[RestoredBand; EQ_SECTION_COUNT], StatePayloadError> {
         let invalid = StatePayloadError {
             code: "effect.state.payload",
         };
@@ -2648,11 +2684,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             step: [0.0; 6],
             remaining: 0,
             target: configuration[0],
+            words: EqSvfWords::IDENTITY,
         }; EQ_SECTION_COUNT];
         for section in 0..EQ_SECTION_COUNT {
             let base = section * STATE_WORDS_PER_BAND;
             let read = |offset: usize| f32::from_bits(words[base + offset]);
-            let band = RestoredBand {
+            let mut band = RestoredBand {
                 integrators: [read(0), read(1)],
                 coefficients: core::array::from_fn(|index| read(2 + index)),
                 step: core::array::from_fn(|index| read(8 + index)),
@@ -2664,6 +2701,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                     }
                     target
                 },
+                words: EqSvfWords::IDENTITY,
             };
             let numeric = band.target.numeric();
             if !band.integrators.into_iter().all(f32::is_finite)
@@ -2691,7 +2729,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 let mut cursor = current_words;
                 for _ in 0..band.remaining {
                     if !words_are_identity(cursor) {
-                        validate_rounded_svf(cursor).map_err(|_| invalid)?;
+                        validate_svf_within(cursor, RAMP_PATH_NORM_TOLERANCE)
+                            .map_err(|_| invalid)?;
                     }
                     cursor = EqSvfWords::from_array(core::array::from_fn(|index| {
                         cursor.to_array()[index] + step_words.to_array()[index]
@@ -2711,13 +2750,16 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             {
                 return Err(invalid);
             }
+            band.words = target_words;
             decoded[section] = band;
         }
-        for (section, band) in decoded.into_iter().enumerate() {
-            let target_words = band
-                .target
-                .words(sample_rate)
-                .unwrap_or(EqSvfWords::IDENTITY);
+        Ok(decoded)
+    }
+
+    /// Commits lane `track`'s bands as [`decode_track`](Self::decode_track) validated them.
+    fn commit_track(&mut self, track: usize, decoded: &[RestoredBand; EQ_SECTION_COUNT]) {
+        for (section, band) in decoded.iter().enumerate() {
+            let target_words = band.words;
             let slot = &mut self.sections[section];
             lane_set(&mut slot.state.ic1, track, band.integrators[0]);
             lane_set(&mut slot.state.ic2, track, band.integrators[1]);
@@ -2744,7 +2786,6 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         for section in 0..EQ_SECTION_COUNT {
             self.refresh_identity(section);
         }
-        Ok(())
     }
 }
 // REALTIME_POLICY_END
@@ -3360,26 +3401,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         right_configuration[HPF_SECTION].enabled = right_enables[0];
         right_configuration[LPF_SECTION].enabled = right_enables[1];
         let sample_rate = self.sample_rate();
-        let mut candidate_left = Channel::<L, W>::new(
-            core::array::from_fn(|index| self.left.targets[index]),
-            sample_rate,
-        )
-        .map_err(|_| StatePayloadError {
-            code: "effect.state.payload",
-        })?;
-        candidate_left.restore_track(track, &left, &left_configuration, sample_rate)?;
-        let mut candidate_right = Channel::<L, W>::new(
-            core::array::from_fn(|index| self.right.targets[index]),
-            sample_rate,
-        )
-        .map_err(|_| StatePayloadError {
-            code: "effect.state.payload",
-        })?;
-        candidate_right.restore_track(track, &right, &right_configuration, sample_rate)?;
-        self.left
-            .restore_track(track, &left, &left_configuration, sample_rate)?;
-        self.right
-            .restore_track(track, &right, &right_configuration, sample_rate)?;
+        // Both channels validate before either commits: all or none. Each band's target is
+        // designed once, here, and committed as designed.
+        let decoded_left = Channel::<L, W>::decode_track(&left, &left_configuration, sample_rate)?;
+        let decoded_right =
+            Channel::<L, W>::decode_track(&right, &right_configuration, sample_rate)?;
+        self.left.commit_track(track, &decoded_left);
+        self.right.commit_track(track, &decoded_right);
         Ok(())
     }
 }

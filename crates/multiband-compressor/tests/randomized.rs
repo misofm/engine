@@ -55,6 +55,7 @@ fn the_bank_renders_its_scalar_instances_including_the_known_defect() {
         known: &[],
         banks_natively: true,
         witness: false,
+        in_flight: None,
     });
     conformance::assert_reached(&coverage);
 }

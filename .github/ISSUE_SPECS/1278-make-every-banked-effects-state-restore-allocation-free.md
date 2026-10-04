@@ -358,9 +358,9 @@ in-flight current.
   (replacing a running one), else as before. Coverage counts `continuations_in_flight` and
   `continuations_in_flight_at_32`, replacing `continuations_after_automation`, and
   `assert_reached` requires both when a bank was compared. Measured in the default runs
-  (continuations / in flight / in flight at quantum 32): EQ 226/206/55, compressor 291/210/49,
-  gate 234/179/33, limiter 174/157/21, soft-clip 84/79/7, transient shaper 242/211/50, multiband
-  120/57/9. The multiband's **actual** mid-ramp continuations, decoded once with temporary prints of
+  (continuations / in flight / in flight at quantum 32): EQ 226/206/55 (wrong: no EQ ramp ever
+  started; see attempt 3), compressor 291/210/49, gate 234/179/33, limiter 174/157/21, soft-clip
+  84/79/7, transient shaper 242/211/50, multiband 120/57/9. The multiband's **actual** mid-ramp continuations, decoded once with temporary prints of
   its staged ramps' `remaining`: 44 of 119 (7 at quantum 32), against 3 (0 at quantum 32) at attempt
   1; no continuation the proxy called settled had a ramp moving.
 - MINOR-5: `crates/compressor/tests/ramps.rs` header (words `1 + 4i`..`4 + 4i`, step carried),
@@ -437,3 +437,107 @@ cross feedback; slice 12 moves rather than restores it). Soft-clip's two open no
 cases (attempt 1 amendment). Soft-clip validates an in-flight current by its line, not by
 `ramp_path_within` (verdict NIT-2, #1071's design). Raise `check-realtime-policy.sh`'s floors to
 78 regions / 23 files.
+
+### Attempt 3 (implementer, 2026-10-04)
+
+**Attempt-2 verdict: FAIL** (`submix-verdicts/1278-attempt2.md`). Every attempt-1 finding was
+confirmed fixed and every gate green, but MAJOR-1: the conformance differential never started a
+parametric-EQ ramp (the EQ refuses raw spans, #807, and the harness never applied a prepared
+target), while the in-flight counter credited it with 206 continuations (55 at quantum 32); an EQ
+restore that re-derives a moving step as `(target - current) / remaining` stayed green in every
+test. NITs: the compressor accepted a coefficient of exactly `0.0`; the shared ramp walks sat
+outside a realtime region; the EQ restore designed each band's coefficients twice.
+
+**Changes.**
+
+- MAJOR-1, fix (a): `run_width` now drives prepared targets for an effect with
+  `target_preparation()` (the EQ). At a third of the boundaries (after the continuation take) it
+  draws a candidate that moves one to three continuous values of one lane (both channels on a
+  mono scenario), prepares it off the audited scope, and applies every target inside render
+  scopes to the scalar instance, the bank lane, the disengaged mono arm's lane and the lane's
+  continued twin; they must accept or refuse together. New coverage `prepared_targets`,
+  `applied_targets`, `moving_targets`; `assert_reached` requires a moving target where a bank
+  was compared.
+- The in-flight counter no longer over-reports. A raw span credits a lane only when that block's
+  report counts no invalid span (the EQ counts every raw span invalid, so it is never credited);
+  a prepared target credits only when accepted and its words differ from the lane's known
+  heading; any reset clears every lane (a discontinuity snaps ramps), and a restore of anything
+  but the lane's own untouched snapshot clears that lane. New `EffectDifferential::in_flight`:
+  an effect's own snapshot reading; given, the counters count decoded mid-ramp snapshots
+  exactly. The EQ's `tests/randomized.rs` gives it (`remaining`, word 14 of each band). The
+  macro takes an optional trailing `in_flight:`; the two direct constructors (EQ and multiband
+  ignored tests) say `None` / the decoder.
+- **Product defect found by the new harness, fixed.** With ramps driven, the EQ refused its own
+  mid-ramp snapshots: `Channel::restore_track` walked the remaining path under the design's norm
+  limit (`NORM_TOLERANCE`, one `f32` rounding above contractive), but the render's `f32` walk sits
+  a few ulps above it near the contractive edge. Seed 0 refused lane 1's snapshot at section 3;
+  a grid of every band kind with frequency, gain and Q moves at 48 kHz found 649 refused ramps,
+  a 10 kHz bell at Q 0.1 from -24 dB to +24 dB at every sample. The walk is now held to
+  `RAMP_PATH_NORM_TOLERANCE = 1 + 2^-12` (worst excess measured on that grid: `3.7e-6`, about
+  `2^-18`; a forged path gains at most `(1 + 2^-12)^64 < 1.016` before the target snaps in).
+  Designs and settled words keep the exact limit. This defect would have refused the carry of
+  any EQ lane caught mid-ramp near the contractive edge.
+- Option (b) as well, as the EQ's own gate: `crates/parametric-eq/tests/carry.rs`
+  `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` restores at every sample 0..=64 of
+  three prepared-target ramps (a bell moving in frequency, gain and Q; the 10 kHz swing above;
+  the first ramp retargeted 17 samples in) into a fresh scalar instance and a fresh bank lane (the
+  last lane) at every width this build binds, and compares 100 following frames bitwise.
+- NIT-3, fixed: `Channel::decode_track` validates a lane and designs each band once (carried in
+  `RestoredBand::words`), `Channel::commit_track` commits; `PreparedParametricEq::restore_track`
+  decodes both channels, then commits both. The two candidate `Channel::new` builds (a design for
+  every band of every lane) and the second validation pass are gone: a lane restore now designs
+  six bands per channel, not four passes plus `2 W * 6` candidate designs.
+  `Channel::restore_track` remains for the unit tests (`#[cfg(test)]`). New
+  `a_restore_refused_on_one_channel_moves_neither` (scalar and bank lane) defends the all-or-none
+  order the refactor now owns.
+- NIT-1, fixed: the compressor holds a target and a settled coefficient to `(0, 1]` (no legal
+  time designs `0.0`; the smallest is about 2.1e-6). Rows "a settled zero current", "a zero
+  target". The moving path keeps the closed `[0, 1 + 64 ulps]`.
+- NIT-2, fixed: `effect_runtime::state_payload`'s word and ramp codec (`write_u32` through
+  `ramp_path_inside`) is one `REALTIME_POLICY` region. `check-realtime-policy.sh` now reports
+  **79 regions in 24 files**; its floors are unchanged (follow-up: raise to 79/24).
+
+**Coverage, default runs** (continuations / in flight / in flight at quantum 32): EQ 141/58/26
+(decoded exactly; 320 targets applied, 295 moving), compressor 294/213/48, gate 214/157/29,
+multiband 111/50/7, soft-clip 69/61/6, transient shaper 209/173/37, limiter 169/148/20.
+Measured once with the verifier's snapshot decoder as a temporary print (actual mid-ramp /
+proxy): compressor 209/213, gate 155/157, multiband 50/50, soft-clip 55/61, transient shaper
+168/173, limiter 144/148. Before the decoder the EQ's proxy read 94 with 57 actual: an accepted
+target that moves only a disabled band's parameters is stationary. Hence the decoder.
+
+**Mutation evidence** (each applied, observed red, reverted, observed green):
+
+- EQ `commit_track` storing a moving step as `(target - current) / remaining`: `carry.rs` red
+  (342 of 390 scalar and bank comparisons, all three ramps); the differential red ("the instance
+  restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered
+  0xbeb91440", quantum 64, 88.2 kHz); `contract.rs` and `bank.rs` stay green.
+- EQ path walk back to `NORM_TOLERANCE`: `carry.rs` red (the 10 kHz swing refused at samples
+  0-63); the differential red ("lane 1's snapshot refused by a fresh instance").
+- EQ commit of the left channel before decoding the right: `a_restore_refused_on_one_channel_
+  moves_neither` red ("the scalar instance moved"); no other EQ test is red.
+- Compressor bound back to `[0, 1]`: `a_coefficient_below_zero_or_above_its_design_is_refused`
+  red ("a settled zero current"); every other compressor test green.
+- `vec![0_u8; 4]` in `ramp_path_inside`: `check-realtime-policy.sh` red ("marked realtime
+  forbidden-body predicate").
+
+**Test value.** `carry.rs` mid-ramp: a restore that re-derives the carried step, or refuses the
+effect's own path, which no other EQ test catches. `carry.rs` one-channel refusal: a restore that
+commits one channel before the other is validated. Compressor rows: a settled or target
+coefficient of `0.0`. The differential's prepared-target drive: by reach, it now applies accepted
+moving EQ targets at random boundaries, through scalar, bank, collapsed arm and restored twin.
+
+**Gates (on the committed tree).** fmt; clippy `--workspace --all-targets --all-features -D
+warnings`; rustdoc `-D warnings`; workspace policy check/test; realtime policy check/test (79
+regions, 24 files); `check-capi-abi.sh`; `audit capi` (0 allocations, 0 deallocations, 0 locks,
+0 syscalls, 100k calls); `check-cross-targets.sh` (PASS; only the #1018 iOS `memset_pattern16`
+expected failures); `cargo test --locked` for parametric-eq, compressor, gate-expander,
+true-peak-limiter, soft-clip, transient-shaper, multiband-compressor, conformance,
+effect-compiler, effect-runtime, effect-contract; `cargo test --locked --release -p
+console-workload` (console digests unchanged); `conformance_fixtures -- --check` (nothing
+re-pinned); `trace-effect-contract-audit.sh target/release/bench 1000000` and
+`check-effect-contract.sh`: all pass. Worklet chain (build `--named-twin`,
+`check-web-audioworklet.sh --without-metadata-regeneration`, expected resources, test): pass.
+**ARTIFACT CHANGED**: the shipped module is now `477f3f1c6c53c828...` (attempt 2: `1928ba47...`):
+the EQ restore and the compressor bound are compiled into it. Not re-pinned (`docs/RELEASE.md`).
+
+**Open (successors).** As attempt 2, with the realtime floors now 79 regions / 24 files.

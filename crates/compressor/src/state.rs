@@ -132,8 +132,11 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
             return Err(state_error("effect.state.parameter"));
         }
     }
-    // `design::rate_coefficient` designs every coefficient in `[0, 1]`, and a target or a settled
-    // coefficient is a designed value, held there exactly. A moving coefficient is an iterated
+    // `design::rate_coefficient` designs every coefficient of a legal time in `(0, 1]`: it gives
+    // exactly `0.0` only for an infinite time, which the domains exclude, and its smallest legal
+    // coefficient (5 s at 96 kHz) is about 2.1e-6. A target or a settled coefficient is a designed
+    // value, held there exactly; a settled `0.0` would freeze the smoother until the next retarget.
+    // A moving path keeps the closed lower bound below: it lands on its target's exact word. A moving coefficient is an iterated
     // `current + step` between two designed values, so it may round a few ulps past either one:
     // its path is held to `[0, 1 + 64 ulps]`. The budget is one-sided: the smoother
     // `y += c (x - y)` has its pole at `1 - c`, so it diverges for every `c < 0` (and for
@@ -141,7 +144,7 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
     // coefficient, 5 s at 96 kHz, is about 2.1e-6, far above the walk's rounding).
     for index in 0..RATE_RAMPS {
         let ramp = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
-        let designed = |value: f32| (0.0..=1.0).contains(&value);
+        let designed = |value: f32| value > 0.0 && value <= 1.0;
         if !designed(ramp.target)
             || (ramp.remaining == 0 && !designed(ramp.current))
             || !ramp_path_inside(ramp, (0.0, 1.0 + 64.0 * f32::EPSILON), SMOOTHING_SAMPLES)
