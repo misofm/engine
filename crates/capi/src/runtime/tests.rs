@@ -671,11 +671,12 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         )
         .expect("old plan block");
     assert!(pcm.iter().any(|sample| *sample != 0.0), "old provider PCM");
-    let edit = rebuild_edit(SESSION, 0x01);
+    // A rebuild that leaves the source's declaration alone, so its ring carries (#1273 D1).
+    let edits = add_muted_track(&parse_session_json(SESSION).expect("model"), "a-muted");
     let first_request = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
-        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+        protocol::CommandPayload::SessionTransactionApply(&edits),
     );
     assert!(matches!(
         children.session.command(&first_request, 0),
@@ -907,7 +908,7 @@ fn continuity_block(block: u64, salt: u64) -> (Vec<f32>, Vec<f32>) {
 
 /// The gap-free acceptance session: tracks `eq0`-`eq2` on the fixture source, empty console
 /// sections, no inserts, and the input filters off, so no unchanged path holds DSP state.
-fn stateless_session(sample_rate_hz: u32) -> session::SessionModel {
+pub(super) fn stateless_session(sample_rate_hz: u32) -> session::SessionModel {
     let mut model = parse_session_json(SESSION).expect("fixture");
     model.sample_rate_hz = sample_rate_hz;
     model.tracks.truncate(3);
@@ -927,7 +928,10 @@ fn stateless_session(sample_rate_hz: u32) -> session::SessionModel {
 
 /// `UpsertTrack` of a muted copy of the first track, whose ID sorts before every other, and
 /// `UpsertRoute` of its route: the added strip contributes exact zeros.
-fn add_muted_track(model: &session::SessionModel, id: &str) -> [protocol::SessionEdit; 2] {
+pub(super) fn add_muted_track(
+    model: &session::SessionModel,
+    id: &str,
+) -> [protocol::SessionEdit; 2] {
     let mut track = model.tracks[0].clone();
     track.id = session::StableId::parse(id).expect("track ID");
     track.fader.left_mute = true;
