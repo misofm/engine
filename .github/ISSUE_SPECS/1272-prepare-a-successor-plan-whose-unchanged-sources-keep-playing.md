@@ -286,3 +286,18 @@ Stays open (no action): NIT 1 (path list; later briefs that add a `SourceControl
 list `tests/source_diagnostics.rs`), NIT 2 (a wrong predecessor goes unrecorded when nothing
 carries; becomes "any owner carries" in the slice-7+ briefs), NIT 5 and NIT 6 (accepted by the
 verdict).
+
+Batch gate blocker (verdict `1269-phase1-verdict.md`, BLOCKED by qualification's `release-shape`
+job): `tests/successor_swap.rs` and its `#[path]` module `tests/support/successor.rs` call
+`host_core::test_only_prepare_host_runtime_with_live_controls_on` and `..._successor_on`, which
+exist only under `host-core/test-support`, so
+`CARGO_PROFILE_RELEASE_PANIC=unwind cargo check --locked --release --workspace --all-targets`
+(no features) failed to compile the test. Fixed by `#![cfg(feature = "test-support")]` at the top
+of `successor_swap.rs`, as `crates/builtins-compiler/tests/allocation_tracker.rs` does; it is the
+support module's only user. Gates: `cargo fmt --all -- --check` ok; the release-shape command and
+`cargo check --locked --workspace --all-targets` (no features) both finish clean, so no other
+integration test has the same gap; `cargo clippy --locked --workspace --all-targets --all-features
+-- -D warnings` ok; test-debug-a's exact command passes (118 test binaries ok, `successor_swap`
+runs 32 tests, all pass, because the step names `host-core/test-support`);
+`python3 scripts/check-test-support-ci.py` ok (host-core/test-support covered by test-debug-a);
+`bash scripts/check-workspace-policy.sh` ok.

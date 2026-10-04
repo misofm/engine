@@ -19,6 +19,8 @@
 //! * **Gate 5, realtime.** Every block after the warm-up, the swap block (carry included) among
 //!   them, allocates and frees nothing.
 
+#![cfg(feature = "test-support")]
+
 #[path = "support/successor.rs"]
 mod successor;
 

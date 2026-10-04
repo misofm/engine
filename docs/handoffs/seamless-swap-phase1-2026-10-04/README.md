@@ -11,7 +11,7 @@ and decision record is its spec's Attempt record. Commits are listed from
 |---|---|---|---|---|---|
 | #1270 | Hand the outgoing plan to its successor at the swap block | `22c9bd5a1`; follow-ups `46bc191af` | 1 | PASS with minors | `1270-attempt1.md` |
 | #1271 | Move a source consumer into a successor graph plan | `5488fb2f5`, `1a911e31f`; follow-ups `bbf4d8626` | 1 | PASS with minors | `1271-attempt1.md` |
-| #1272 | Prepare a successor plan whose unchanged sources keep playing | `2a6f2c10c`; follow-ups `bf2b788e8`, `1d40c488d` | 1 | PASS with minors | `1272-attempt1.md` |
+| #1272 | Prepare a successor plan whose unchanged sources keep playing | `2a6f2c10c`; follow-ups `bf2b788e8`, `1d40c488d`, the release-shape cfg follow-up | 1 | PASS with minors | `1272-attempt1.md` |
 | #1273 | Keep sources playing across a C ABI structural transaction | `448baae85`, `1338b063c`; follow-ups `41ed93566` | 1 | PASS with minors | `1273-attempt1.md` |
 | #1274 | Hold an anchored source seek until its render sample | `0297efa8c`; follow-ups `c14fde0ce`, `2330610e6`, `41ed93566` | 1 | PASS with minors; follow-ups PASS with minors | `1274-attempt1.md`, `1274-followups.md` |
 | #1275 | Start a newly added C ABI source at an exact render sample | `55690373d`; follow-ups `86ac2f359` | 1 | PASS with minors | `1275-attempt1.md` |
