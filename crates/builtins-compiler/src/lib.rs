@@ -12391,11 +12391,13 @@ mod tests {
     /// -> lane 0's later trim and lane 1's trim stay queued and the trims never move.
     #[test]
     fn the_carry_drain_applies_every_record_past_a_refused_one() {
-        for backend in [
+        // A `Vec`, so a target without AVX2 iterates one width without a single-element loop.
+        let backends = vec![
             #[cfg(target_feature = "avx2")]
             Backend::Simd8,
             Backend::Simd4,
-        ] {
+        ];
+        for backend in backends {
             carry_drain_applies_every_record_past_a_refused_one(backend);
         }
     }
