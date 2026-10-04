@@ -207,5 +207,49 @@ its strip ID bytes) is charged in `capi_retained_bytes`. On the nine-track EQ re
 two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
 `maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
 must raise both. No input, effect or route lane is attached, so rendering, `latency_samples`,
-`tail_kind` and `tail_samples` do not change. Nothing pushes to the lanes yet; #1257 delivers
-fader, mute and pan edits through them.
+`tail_kind` and `tail_samples` do not change. #1257 delivers fader, mute and pan edits through
+them (next section).
+
+## Value-only track edits on the running plan (#1257)
+
+`miso_engine_v1_submit_command` classifies each `SESSION_TRANSACTION_APPLY` by the committed
+model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes.
+
+- **Live.** The committed models before and after differ only in track `fader` (`left_db`,
+  `right_db`, `left_mute`, `right_mute`) and `pan`/`matrix` values. The engine pushes the records
+  that change a rendered value to the newest plan -- the pending replacement if there is one, else
+  the current plan -- and commits. No plan is prepared; source rings, effect state and the render
+  position continue, and the host keeps submitting with no seek. Fader and mute changes are steps
+  until #1054 gives them ramps; a pan or matrix change carries the session's own
+  `smoothing_samples`.
+- **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
+  edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
+  reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
+  `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
+- **Timing (#1053 D2).** A live edit applies no later than the first render call that begins after
+  the submit returns, and a stage that has not drained yet may apply it one block earlier, so one
+  transaction's records can land up to one quantum apart. It is heard up to `latency_samples`
+  later. There is no block-atomicity claim.
+- **Backpressure.** Each strip's fader/mute and matrix/pan lanes hold 16 records each. A
+  transaction that does not fit every lane it touches returns `BACKPRESSURE` with last error
+  `control.live.backpressure` (a full plan queue stays `control.plan.backpressure`). The model,
+  the revision, the replay cache, the events and every lane are unchanged; the host retries with a
+  new request ID after a render call. A host that is not rendering takes 16 single-value edits
+  per lane before the first refusal.
+- **No ack before a drop (#1053 D6).** Classification, the live admission (#1053 D8), the
+  producer lookup, the room check on every lane and the protocol's commit predicate all run before
+  the first push; nothing changes until the last of them passes. The push and the commit then
+  cannot fail, and render applies every record it pops, because the classifier refuses every value
+  the setters would refuse.
+- **Same response and events.** A live edit returns `TransactionApplied` and emits one
+  `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
+  The reliable event lane holds two events, so a host drains it after each edit either way.
+- **Detecting a rebuild.** As before: after a replacement the next source submission is refused
+  until the host seeks. After a live edit, submission simply continues. No new symbol, opcode,
+  field, result code or event is added.
+- **Live admission.** The prospective compiled model lives beside the current one until the
+  commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
+  `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the
+  current epoch's rows while a candidate is pending, plus the prepared-protocol rows, fit
+  `maximum_capi_retained_bytes` (the last term counts a catalog the live arm never builds: a
+  documented overcount); and the largest allocation fits `maximum_named_allocation_bytes`.

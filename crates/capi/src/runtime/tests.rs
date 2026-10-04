@@ -12,9 +12,10 @@ fn source_region_end(sources: &SourceControlSet) -> u64 {
         .end
 }
 
-const SESSION: &str = include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.json");
+pub(super) const SESSION: &str =
+    include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
-fn limits() -> CompileLimits {
+pub(super) fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: crate::COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
@@ -46,11 +47,11 @@ fn limits() -> CompileLimits {
     }
 }
 
-fn command_bytes(request_id: u64, payload: protocol::CommandPayload<'_>) -> Vec<u8> {
+pub(super) fn command_bytes(request_id: u64, payload: protocol::CommandPayload<'_>) -> Vec<u8> {
     command_bytes_at_revision(request_id, ExpectedRevision::Any, payload)
 }
 
-fn command_bytes_at_revision(
+pub(super) fn command_bytes_at_revision(
     request_id: u64,
     expected_revision: ExpectedRevision,
     payload: protocol::CommandPayload<'_>,
@@ -107,7 +108,7 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020003000000100000000b000000000000002b00000000000000010000000000000001000301040000000100000000000000",
 ];
 
-fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
+pub(super) fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     let mut model = parse_session_json(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
     model.sources[0].frames = 192;
@@ -141,7 +142,7 @@ fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     session::canonical_session_json(&model).expect("canonical parity session")
 }
 
-fn submit_c(
+pub(super) fn submit_c(
     session: *mut crate::Session,
     generation: u64,
     start_frame: u64,
@@ -177,11 +178,11 @@ fn submit_c(
     assert_eq!(report.accepted_frames, left.len() as u64);
 }
 
-fn boxed_c_children(session: &str) -> (*mut crate::Session, *mut crate::Plan) {
+pub(super) fn boxed_c_children(session: &str) -> (*mut crate::Session, *mut crate::Plan) {
     boxed_c_children_with_limits(session, limits())
 }
 
-fn boxed_c_children_with_limits(
+pub(super) fn boxed_c_children_with_limits(
     session: &str,
     limits: CompileLimits,
 ) -> (*mut crate::Session, *mut crate::Plan) {
@@ -195,12 +196,12 @@ fn boxed_c_children_with_limits(
     )
 }
 
-fn command_c(session: *mut crate::Session, request: &[u8]) -> (u32, Vec<u8>) {
+pub(super) fn command_c(session: *mut crate::Session, request: &[u8]) -> (u32, Vec<u8>) {
     let (result, _, storage) = command_c_capacity(session, request, 4_096);
     (result, storage)
 }
 
-fn command_c_capacity(
+pub(super) fn command_c_capacity(
     session: *mut crate::Session,
     request: &[u8],
     capacity: usize,
@@ -347,12 +348,12 @@ fn c_commands_observe_the_rendered_plan_sample() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
+pub(super) fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
     let (result, _, storage) = event_c_capacity(session, lane, 4_096);
     (result, storage)
 }
 
-fn event_c_capacity(
+pub(super) fn event_c_capacity(
     session: *mut crate::Session,
     lane: u32,
     capacity: usize,

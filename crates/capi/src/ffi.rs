@@ -629,6 +629,13 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                     .set(b"control.plan.backpressure");
                 RESULT_BACKPRESSURE
             }
+            Err(CommandError::LiveBackpressure) => {
+                session
+                    .last_error
+                    .borrow_mut()
+                    .set(b"control.live.backpressure");
+                RESULT_BACKPRESSURE
+            }
             Err(CommandError::CompileRejected(failure)) => {
                 session.last_error.borrow_mut().set(&failure.diagnostics);
                 RESULT_COMPILE_REJECTED
@@ -1017,6 +1024,15 @@ pub(crate) fn test_session_state_summary(session: *mut Session) -> (u64, usize, 
     // SAFETY: Test callers retain the exclusively owned live session for this inspection.
     let state = unsafe { &(*session).state };
     state.test_state_summary()
+}
+
+#[cfg(test)]
+pub(crate) fn test_last_error(session: *mut Session) -> Vec<u8> {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &(*session).last_error }
+        .borrow()
+        .as_slice()
+        .to_vec()
 }
 
 #[cfg(test)]

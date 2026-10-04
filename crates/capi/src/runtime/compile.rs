@@ -347,6 +347,69 @@ pub(crate) fn validate_replacement_peak(
     Ok(())
 }
 
+/// One provider epoch's resources as the live admission reads them: its plan's report row and the
+/// capi resources it was prepared with (#1257 D4).
+#[derive(Clone, Copy)]
+pub(crate) struct LiveEpochResources {
+    pub(crate) report: PlanResourceReport,
+    pub(crate) capi: CapiResources,
+}
+
+/// The live arm's admission (#1053 D8, #1257 D5): may the prospective compiled model live beside
+/// the current one, next to the plans that exist, until the commit?
+///
+/// The live arm prepares no plan, so the plans are the current epoch's and, when a candidate is
+/// pending, that candidate's; the newest of them is the pending one if any, else the current one.
+/// The terms, each against its own cap:
+///
+/// - **graph:** both plans' `graph_session_plus_plan_bytes` plus both compiled models'
+///   `retained_bytes`;
+/// - **capi:** the newest plan's `capi_retained_bytes`, plus the current epoch's `epoch_retained`
+///   while a candidate is pending, plus the newest epoch's `prepared_protocol_retained`. That last
+///   term includes a provider catalog (`catalog_retained_bytes`) that the live arm never builds,
+///   because it never replaces the catalog: a conservative overcount, kept so that the term is the
+///   same one a rebuild charges;
+/// - **largest allocation:** the largest of both plans' `largest_named_allocation_bytes`, the
+///   newest epoch's capi `largest` and the compiled models' largest allocation.
+pub(crate) fn validate_live_peak(
+    current: LiveEpochResources,
+    pending: Option<LiveEpochResources>,
+    compiled_models: CompiledModelAdmission,
+    limits: CompileLimits,
+) -> Result<(), CompileFailure> {
+    let arithmetic = || failure("capi.resource.arithmetic");
+    let newest = pending.unwrap_or(current);
+    let graph = current
+        .report
+        .graph_session_plus_plan_bytes
+        .checked_add(pending.map_or(0, |pending| pending.report.graph_session_plus_plan_bytes))
+        .and_then(|value| value.checked_add(compiled_models.retained_bytes))
+        .ok_or_else(arithmetic)?;
+    if graph > limits.maximum_graph_session_plus_plan_bytes {
+        return Err(failure("graph.resource.limit"));
+    }
+    let capi = newest
+        .report
+        .capi_retained_bytes
+        .checked_add(pending.map_or(0, |_| current.capi.epoch_retained))
+        .and_then(|value| value.checked_add(newest.capi.prepared_protocol_retained))
+        .ok_or_else(arithmetic)?;
+    if capi > limits.maximum_capi_retained_bytes {
+        return Err(failure("capi.resource.limit"));
+    }
+    if current
+        .report
+        .largest_named_allocation_bytes
+        .max(pending.map_or(0, |pending| pending.report.largest_named_allocation_bytes))
+        .max(newest.capi.largest)
+        .max(compiled_models.largest_allocation_bytes)
+        > limits.maximum_named_allocation_bytes
+    {
+        return Err(failure("capi.resource.limit"));
+    }
+    Ok(())
+}
+
 pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
     limits.maximum_automation_spans_per_block != 0
         && [
@@ -571,7 +634,7 @@ pub(crate) fn compile_children(
         plan,
         resources,
         control_catalog,
-        capi: _,
+        capi,
     } = runtime;
     let (publisher, owner, retirer) = plan_exchange(
         plan,
@@ -635,7 +698,7 @@ pub(crate) fn compile_children(
     Ok(CompiledChildren {
         session: SessionState {
             controller: ObservedController::new(controller),
-            providers: ProviderEpoch::current(sources, strips),
+            providers: ProviderEpoch::current(sources, strips, capi),
             pending_providers,
             retired_providers,
             publisher,
@@ -653,4 +716,163 @@ pub(crate) fn compile_children(
         session_error: FixedBytes::try_new(limits.maximum_diagnostic_bytes)?,
         plan: PlanState::new(owner, shared),
     })
+}
+
+#[cfg(test)]
+mod live_peak_tests {
+    //! #1257 gate 5: `validate_live_peak` charges each term of #1053 D8 against the right plan.
+
+    use super::*;
+    use crate::runtime::tests::{SESSION, limits};
+
+    /// Every term gets its own bit, so a missing or swapped term moves every sum it is part of.
+    struct Terms {
+        graph: u64,
+        capi_retained: u64,
+        largest_named: u64,
+        epoch_retained: u64,
+        prepared_protocol: u64,
+        capi_largest: u64,
+    }
+
+    fn epoch(base: PlanResourceReport, terms: &Terms) -> LiveEpochResources {
+        LiveEpochResources {
+            report: PlanResourceReport {
+                graph_session_plus_plan_bytes: terms.graph,
+                capi_retained_bytes: terms.capi_retained,
+                largest_named_allocation_bytes: terms.largest_named,
+                ..base
+            },
+            capi: CapiResources {
+                active_retained: u64::MAX,
+                epoch_retained: terms.epoch_retained,
+                prepared_protocol_retained: terms.prepared_protocol,
+                largest: terms.capi_largest,
+            },
+        }
+    }
+
+    fn caps(graph: u64, capi: u64, largest: u64) -> CompileLimits {
+        CompileLimits {
+            maximum_graph_session_plus_plan_bytes: graph,
+            maximum_capi_retained_bytes: capi,
+            maximum_named_allocation_bytes: largest,
+            ..limits()
+        }
+    }
+
+    fn verdict(
+        current: LiveEpochResources,
+        pending: Option<LiveEpochResources>,
+        models: CompiledModelAdmission,
+        limits: CompileLimits,
+    ) -> Result<(), String> {
+        validate_live_peak(current, pending, models, limits)
+            .map_err(|failure| String::from_utf8(failure.diagnostics).expect("UTF-8"))
+    }
+
+    /// Accepts with `cap` at `peak` and refuses with it one byte below, with `code`.
+    fn assert_cap(label: &str, peak: u64, code: &str, check: impl Fn(u64) -> Result<(), String>) {
+        assert_eq!(check(peak), Ok(()), "{label}: accepted at the cap");
+        assert_eq!(
+            check(peak - 1),
+            Err(format!("{code}\t$\n")),
+            "{label}: refused one byte below"
+        );
+    }
+
+    #[test]
+    fn the_live_admission_accepts_each_cap_and_refuses_one_byte_below() {
+        let base = compile_children(SESSION, limits())
+            .unwrap_or_else(|_| panic!("fixture compiles"))
+            .plan
+            .resources();
+        let current_terms = Terms {
+            graph: 1 << 0,
+            capi_retained: 1 << 1,
+            largest_named: 3,
+            epoch_retained: 1 << 2,
+            prepared_protocol: 1 << 3,
+            capi_largest: 5,
+        };
+        let pending_terms = Terms {
+            graph: 1 << 4,
+            capi_retained: 1 << 5,
+            largest_named: 7,
+            epoch_retained: 1 << 6,
+            prepared_protocol: 1 << 7,
+            capi_largest: 9,
+        };
+        let models = CompiledModelAdmission {
+            retained_bytes: 1 << 8,
+            largest_allocation_bytes: 11,
+        };
+        let current = epoch(base, &current_terms);
+        let pending = epoch(base, &pending_terms);
+        let huge = u64::MAX;
+
+        // Graph: both plans plus both compiled models.
+        for (label, pending, peak) in [
+            ("graph alone", None, 1 + (1 << 8)),
+            ("graph pending", Some(pending), 1 + (1 << 4) + (1 << 8)),
+        ] {
+            assert_cap(label, peak, "graph.resource.limit", |cap| {
+                verdict(current, pending, models, caps(cap, huge, huge))
+            });
+        }
+        // capi: the newest row, the current epoch's own rows while a candidate waits, and the
+        // newest epoch's prepared-protocol rows.
+        for (label, pending, peak) in [
+            ("capi alone", None, (1 << 1) + (1 << 3)),
+            (
+                "capi pending",
+                Some(pending),
+                (1 << 5) + (1 << 2) + (1 << 7),
+            ),
+        ] {
+            assert_cap(label, peak, "capi.resource.limit", |cap| {
+                verdict(current, pending, models, caps(huge, cap, huge))
+            });
+        }
+
+        // Largest allocation: make each term in turn the strict maximum. The current epoch's capi
+        // `largest` is a decoy while a candidate is pending: only the newest epoch's counts.
+        let big = 1_000;
+        for term in 0..4 {
+            let mut current_terms = Terms { ..current_terms };
+            let mut pending_terms = Terms { ..pending_terms };
+            let mut models = models;
+            match term {
+                0 => current_terms.largest_named = big,
+                1 => pending_terms.largest_named = big,
+                2 => pending_terms.capi_largest = big,
+                _ => models.largest_allocation_bytes = big,
+            }
+            current_terms.capi_largest = big * 2;
+            let current = epoch(base, &current_terms);
+            let pending = epoch(base, &pending_terms);
+            assert_cap(
+                &format!("largest pending, term {term}"),
+                big,
+                "capi.resource.limit",
+                |cap| verdict(current, Some(pending), models, caps(huge, huge, cap)),
+            );
+        }
+        for term in 0..3 {
+            let mut current_terms = Terms { ..current_terms };
+            let mut models = models;
+            match term {
+                0 => current_terms.largest_named = big,
+                1 => current_terms.capi_largest = big,
+                _ => models.largest_allocation_bytes = big,
+            }
+            let current = epoch(base, &current_terms);
+            assert_cap(
+                &format!("largest alone, term {term}"),
+                big,
+                "capi.resource.limit",
+                |cap| verdict(current, None, models, caps(huge, huge, cap)),
+            );
+        }
+    }
 }

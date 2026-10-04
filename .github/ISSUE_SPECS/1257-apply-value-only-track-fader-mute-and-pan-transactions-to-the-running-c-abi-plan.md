@@ -256,3 +256,110 @@ Run every command from the repository root.
 - "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `f02d09b24`)
+
+**What changed.**
+- `protocol::ProtocolController::check_prepared_structural` (D3): the commit predicate, factored
+  out; `commit_prepared_structural` calls it first, so there is one definition.
+- capi `control.rs`: `SessionState::commit_live` (D1, D2) is called from one branch point in the
+  structural arm, after `plan_alive` and the response-size check. It classifies, and a rebuild gets
+  the token back untouched (`LiveCommit::Rebuild`); the epoch-lag check now sits below that branch
+  and guards the rebuild path only. The live steps run in #1053 D6's order: admission
+  (`live_admission` -> `validate_live_peak`, `COMPILE_REJECTED`), resolution by strip ID in the
+  newest epoch (`INTERNAL` on a miss), room on every touched queue (`LiveBackpressure`), the
+  protocol predicate (`INTERNAL`), then the pushes (`unreachable!` on a full queue), the commit
+  (`expect`) and the response. Nothing is mutated before the last check; no plan is reserved, no
+  report row added and the catalog is not replaced. `ProviderEpoch` gains `capi: CapiResources`
+  (D4), set at compile and at every replacement; #1256's `#[allow(dead_code)]` on `StripLanes` and
+  `ProviderEpoch::strips` are gone and the ownership wording is corrected. Test-only:
+  `TestStructuralFaultPhase::BeforeLivePush` (D7) and a `live_rooms` field on
+  `TestTransactionSnapshot`.
+- capi `compile.rs`: `LiveEpochResources` and `validate_live_peak` (D5), term for term from #1053
+  D8, with the catalog overcount documented.
+- capi `ffi.rs`: the `LiveBackpressure` arm (D8: `RESULT_BACKPRESSURE`,
+  `control.live.backpressure`). **Outside the authorized paths, minimum change:** a
+  `#[cfg(test)] fn test_last_error` beside the other `test_*` hooks. Gate 3 must read the last
+  error, `miso_engine_v1_last_error` needs `unsafe`, and the realtime policy confines `unsafe` to
+  `ffi.rs`, so the only safe reader is a hook there.
+- Docs (D6): a "Live edits" paragraph in `miso_engine_v1.h` after the thread-ownership block; a
+  "Value-only track edits on the running plan (#1257)" section in `C_ABI_V1_QUALIFICATION.md`; the
+  delivery-status paragraph of `CONTROL_PROTOCOL_SEMANTICS.md` now says #1053 delivers it and that
+  every other transaction still replaces the plan.
+- `tests.rs`: the shared helpers became `pub(super)`.
+
+**New tests and their test value** (each answer was proven by the mutation run listed under it:
+the defect was introduced, the test went red, and the defect was reverted).
+- `live_fader_mute_and_pan_edits_change_the_running_plan_bit_exactly` (gate 1; 1 and 10 tracks
+  at 44.1/48/88.2/96 kHz; continuous, never-zero source with distinct lanes; no seek): red if a
+  value-only edit still rebuilds, a record lands on the wrong track or lane, or the live value
+  differs from what preparation bakes. M1, the live arm always rebuilds: red (`(43, 1, 0, 1)`,
+  a candidate was prepared). M3, records pushed to the next track: red (10 tracks, edited block
+  25).
+- `a_live_track_edit_beside_a_submix_strip_reaches_its_track` (gate 1 on a session with a submix
+  strip, added at the #1256 verifier's request): red if strip resolution confuses the
+  tracks-then-submixes table. M3b, index + 1 (eq9 resolves to `bus`): red. The bus is stateless
+  (filters off, console EQ bypassed): with a stateful bus, the live run's bus filter memory
+  holds pre-edit input forever, so no window makes it bit-equal to a plan started with the edit.
+  This was diagnosed during the attempt (the live pan was applied, the record consumed, and the
+  difference persisted 30 blocks only through the bus EQ) and is a property of the comparison,
+  not a defect.
+- `a_live_mute_survives_a_later_rebuild` (gate 2): red if a live edit is acked without reaching
+  the committed model. M9b, acknowledge without committing the token: red ("SessionSnapshotGet
+  returns the live mute"). The control run without the mute renders non-zero and matches its own
+  fresh plan, which also proves the seek/resubmission alignment.
+- `a_full_live_lane_refuses_before_anything_changes` (gate 3a): red if the room check is missing
+  or off by one, or the diagnostic is the plan's. M5, no room check: red. M6, `<=` for `<`: red
+  on edit 15. M7, `control.plan.backpressure`: red.
+- `a_live_transaction_with_one_full_lane_pushes_to_no_lane` (gate 3b; the full track is second in
+  delta order): red if a strip is pushed as soon as its own room checks. M4, push-as-you-check:
+  red.
+- `a_replayed_live_edit_pushes_nothing` (gate 3c): red if a replayed live edit reaches the live arm
+  and pushes again. No capi-side mutation reaches it: the protocol answers a replay before a token
+  exists, by two independent checks (stale exact revision, then the replay preflight). It is kept
+  as the spec's invariant guard; its mutation was not run.
+- `a_live_edit_while_a_candidate_is_pending_reaches_the_candidate` (gate 3d): red if a pending
+  candidate misses an acked edit. M2, push to the current provider: red (candidate room
+  `(16, 16)`).
+- `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing` (gate 4; VCA, followed
+  mute, submix fader, source content; 30 dB fader is `COMPILE_REJECTED` with exactly the
+  diagnostic `compile_children` gives that session, no push): red if capi feeds the classifier the
+  wrong models. M9, `classify(next, next)`: red (followed mute did not rebuild).
+- `a_fault_before_the_live_push_leaves_every_queue_and_the_model_alone` (D7): red if any push moves
+  above the last fallible check. M8, the pushes moved above the fault point: red (room `(15, 16)`).
+- `the_live_admission_accepts_each_cap_and_refuses_one_byte_below` (gate 5, in `compile.rs`; every
+  term its own bit, each cap at the peak and one byte below, with and without a pending epoch;
+  for the largest allocation each term in turn is the strict maximum, and the current epoch's capi
+  `largest` is a decoy while a candidate waits). M10, pending graph term dropped: red. M11, capi
+  row of the current plan instead of the newest: red. M12, current epoch's capi `largest`: red.
+  M13, compiled-model largest dropped: red. M14, current `epoch_retained` dropped: red.
+
+**Gates** (on the implementation tree; logs in the implementer's scratch directory).
+- `cargo test --locked -p capi`: 46 + 11 passed (re-run after the submix test).
+- `cargo test --locked -p protocol --features test-support`: 146 passed.
+- The workspace test command: 1,324 passed, 0 failed.
+- `cargo build --locked --release -p audit -p bench -p capi -p session-validator`: pass.
+  `./target/release/audit capi`: 100,000 calls, allocations 0, deallocations 0, locks 0,
+  syscalls 0, total_violations 0.
+- `check-capi-abi.sh` and `--self-test`: pass. `check-scalar-oracle-absent.py --native
+  target/release/libcapi.so`: pass.
+- `resource_lifecycle`: 11 passed; no oracle needed an edit for `ProviderEpoch`'s new field.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features --
+  -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: pass.
+- host-core, realtime, workspace and protocol-control policy check + self-test: pass.
+  `check-cross-targets.sh`: pass. `check-ci-path-routing.py`: pass.
+- Worklet chain: not run. `protocol` and capi are not in the browser module (`host-web` does not
+  enable `host-core/control-provider`, and `cargo tree -p host-web --target wasm32-unknown-unknown`
+  lists no `protocol`).
+- 4-lane NEON (`run-aarch64-tests.sh debug`): CI only, not run locally.
+
+**Notes for the verifier.**
+- The epoch-lag check now follows the response-size check, so a structural edit that is both too
+  large for the caller's buffer and inside the lag now reports `BUFFER_TOO_SMALL` before
+  `BACKPRESSURE`. D1 orders it so.
+- Resolution scans the track producers from where the previous strip was found, wrapping, so it
+  is linear when the delta and the table share canonical order and still correct when they do not.
+- No block-atomicity is claimed anywhere; the docs state #1053 D2's one-quantum skew.
+- The skipped epoch-lag check during a lag, and every producer/render race, are #1258's.

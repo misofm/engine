@@ -47,6 +47,8 @@ pub(crate) use crate::{
 pub(crate) mod compile;
 pub(crate) mod control;
 pub(crate) mod error;
+#[cfg(test)]
+mod live_tests;
 pub(crate) mod plan;
 #[cfg(test)]
 mod tests;

@@ -31,6 +31,23 @@ extern "C" {
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
  *
+ * Live edits. A committed SESSION_TRANSACTION_APPLY that changes nothing but track fader levels,
+ * track mutes, and track pan or matrix values is applied to the running plan: no plan is
+ * prepared, and the source rings, the effect state and the render position continue, so the host
+ * goes on submitting with no seek. Any other change replaces the plan exactly as before: a submix
+ * strip's values, any edit while the session declares a VCA, the mute of a track that a
+ * follows_mute send reads, a fader outside its domain (refused as MISO_ENGINE_V1_COMPILE_REJECTED
+ * with the same diagnostic as before), and every other field. A live edit applies no later than
+ * the first render call that begins after miso_engine_v1_submit_command returns, and may apply one
+ * block earlier, so the values of one transaction can take effect up to one quantum apart; it is
+ * heard up to latency_samples later. Each track lane holds 16 pending live values: past that the
+ * edit returns MISO_ENGINE_V1_BACKPRESSURE with the diagnostic "control.live.backpressure", the
+ * session and its revision are unchanged, and the host retries after a render call. An
+ * acknowledged live edit is never dropped. A live edit commits the same response and the same
+ * reliable events as a replacement, so the host drains the reliable event lane after each edit
+ * either way. A host still detects a replacement as before: its next source submission is refused
+ * until it seeks; after a live edit, submission simply continues.
+ *
  * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.
  * Every float plane pointer (chunk planes and output samples) must be 4-byte aligned, and the chunk
