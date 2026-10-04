@@ -218,7 +218,7 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
     fn fill(bound: &mut PreparedBuiltinsGraphBound, arm: &str, last: f32) -> Vec<usize> {
         let mut capacities = Vec::new();
         for control in &mut bound.track_controls {
-            let capacity = control.input.capacity();
+            let capacity = control.input.as_ref().expect("input lane").capacity();
             assert!(
                 capacity > 2,
                 "{arm}: a queue of {capacity} cannot tell a cap of two apart"
@@ -226,6 +226,8 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
             for index in 1..capacity {
                 control
                     .input
+                    .as_mut()
+                    .expect("input lane")
                     .try_push(trim(-(index as f32)))
                     .unwrap_or_else(|_| {
                         panic!(
@@ -234,14 +236,24 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
                         )
                     });
             }
-            control.input.try_push(trim(last)).unwrap_or_else(|_| {
-                panic!(
-                    "{arm} {}: a record from before the block is still pending",
-                    control.track_id
-                )
-            });
+            control
+                .input
+                .as_mut()
+                .expect("input lane")
+                .try_push(trim(last))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{arm} {}: a record from before the block is still pending",
+                        control.track_id
+                    )
+                });
             assert!(
-                control.input.try_push(trim(-6.0)).is_err(),
+                control
+                    .input
+                    .as_mut()
+                    .expect("input lane")
+                    .try_push(trim(-6.0))
+                    .is_err(),
                 "{arm}: the queue is full before the block"
             );
             capacities.push(capacity);
@@ -263,7 +275,12 @@ fn a_block_drains_every_input_record_queued_at_its_entry() {
         for (block, last) in [(0_u64, -40.0_f32), (1, -20.0)] {
             fill(&mut filled, arm, last);
             for control in &mut last_only.track_controls {
-                control.input.try_push(trim(last)).expect("queue room");
+                control
+                    .input
+                    .as_mut()
+                    .expect("input lane")
+                    .try_push(trim(last))
+                    .expect("queue room");
             }
             let filled_bits = render(&mut filled, block);
             let last_only_bits = render(&mut last_only, block);

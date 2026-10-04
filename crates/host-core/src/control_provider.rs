@@ -206,6 +206,47 @@ impl SessionControlProvider {
         self.parameter_state = catalog.parameter_state;
     }
 
+    /// The catalog handle of one effect parameter row (issue #1264 D4), or `None` when the
+    /// catalog has no such row.
+    ///
+    /// `effect_id` is the instance's ID in its strip: the slot ID for a console slot, the effect's
+    /// own ID for an insert. A `Shared` parameter has one `Both` row; a `PerLane` one has a `Left`
+    /// and a `Right` row. A linear search over the catalog: control thread only, no allocation.
+    #[must_use]
+    pub fn parameter_handle(
+        &self,
+        track_id: &str,
+        rack: ParameterRack,
+        effect_id: &str,
+        parameter_id: u32,
+        channel: ParameterChannel,
+    ) -> Option<u32> {
+        self.parameter_metadata
+            .iter()
+            .find(|row| {
+                row.parameter_id == parameter_id
+                    && row.channel == channel
+                    && row.rack == rack
+                    && row.track_id == track_id
+                    && row.effect_id == effect_id
+            })
+            .map(|row| row.handle)
+    }
+
+    /// Set the readback value of one catalog row in place (issue #1264 D4): a live parameter
+    /// edit's value, exactly as a rebuild's catalog would hold it.
+    ///
+    /// Allocation-free. A handle the catalog does not hold changes nothing; the caller looks every
+    /// handle up with [`Self::parameter_handle`] before it commits, so that cannot happen.
+    pub fn set_parameter_value(&mut self, handle: u32, value: f32) {
+        if let Ok(index) = self
+            .parameter_state
+            .binary_search_by_key(&handle, |record| record.handle)
+        {
+            self.parameter_state[index].value = value;
+        }
+    }
+
     /// Record the two queue-owned telemetry counters exposed by the provider boundary.
     pub fn set_telemetry_counters(&mut self, counters: TelemetryCounters) {
         set_counter(

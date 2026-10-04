@@ -12,9 +12,10 @@ fn source_region_end(sources: &SourceControlSet) -> u64 {
         .end
 }
 
-const SESSION: &str = include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.json");
+pub(super) const SESSION: &str =
+    include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
-fn limits() -> CompileLimits {
+pub(super) fn limits() -> CompileLimits {
     CompileLimits {
         struct_size: crate::COMPILE_LIMITS_SIZE,
         source_ring_frames: 1_024,
@@ -46,11 +47,11 @@ fn limits() -> CompileLimits {
     }
 }
 
-fn command_bytes(request_id: u64, payload: protocol::CommandPayload<'_>) -> Vec<u8> {
+pub(super) fn command_bytes(request_id: u64, payload: protocol::CommandPayload<'_>) -> Vec<u8> {
     command_bytes_at_revision(request_id, ExpectedRevision::Any, payload)
 }
 
-fn command_bytes_at_revision(
+pub(super) fn command_bytes_at_revision(
     request_id: u64,
     expected_revision: ExpectedRevision,
     payload: protocol::CommandPayload<'_>,
@@ -107,7 +108,30 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020003000000100000000b000000000000002b00000000000000010000000000000001000301040000000100000000000000",
 ];
 
-fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
+/// A structural edit that renders identically, for a test that needs a plan rebuild (#1260 D3).
+///
+/// It changes only the first source's `content` identity, to `blake3:` and `tag` repeated as hex,
+/// keeping its length. A session ID edit is model-only and commits without a rebuild, so it can no
+/// longer trigger one. Successive rebuilds of one session need distinct tags: rewriting the
+/// committed content is a live, record-free delta.
+pub(super) fn rebuild_edit(document: &str, tag: u8) -> protocol::SessionEdit {
+    let model = parse_session_json(document).expect("rebuild edit session");
+    let source = &model.sources[0];
+    let content = format!("blake3:{}", format!("{tag:02x}").repeat(32));
+    assert_ne!(
+        content, source.content,
+        "the rebuild edit changes the content"
+    );
+    protocol::SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content,
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
+    }
+}
+
+pub(super) fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     let mut model = parse_session_json(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
     model.sources[0].frames = 192;
@@ -141,7 +165,7 @@ fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     session::canonical_session_json(&model).expect("canonical parity session")
 }
 
-fn submit_c(
+pub(super) fn submit_c(
     session: *mut crate::Session,
     generation: u64,
     start_frame: u64,
@@ -177,11 +201,11 @@ fn submit_c(
     assert_eq!(report.accepted_frames, left.len() as u64);
 }
 
-fn boxed_c_children(session: &str) -> (*mut crate::Session, *mut crate::Plan) {
+pub(super) fn boxed_c_children(session: &str) -> (*mut crate::Session, *mut crate::Plan) {
     boxed_c_children_with_limits(session, limits())
 }
 
-fn boxed_c_children_with_limits(
+pub(super) fn boxed_c_children_with_limits(
     session: &str,
     limits: CompileLimits,
 ) -> (*mut crate::Session, *mut crate::Plan) {
@@ -195,12 +219,12 @@ fn boxed_c_children_with_limits(
     )
 }
 
-fn command_c(session: *mut crate::Session, request: &[u8]) -> (u32, Vec<u8>) {
+pub(super) fn command_c(session: *mut crate::Session, request: &[u8]) -> (u32, Vec<u8>) {
     let (result, _, storage) = command_c_capacity(session, request, 4_096);
     (result, storage)
 }
 
-fn command_c_capacity(
+pub(super) fn command_c_capacity(
     session: *mut crate::Session,
     request: &[u8],
     capacity: usize,
@@ -347,12 +371,12 @@ fn c_commands_observe_the_rendered_plan_sample() {
     crate::ffi::test_session_destroy(c_session);
 }
 
-fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
+pub(super) fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
     let (result, _, storage) = event_c_capacity(session, lane, 4_096);
     (result, storage)
 }
 
-fn event_c_capacity(
+pub(super) fn event_c_capacity(
     session: *mut crate::Session,
     lane: u32,
     capacity: usize,
@@ -624,9 +648,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         )
         .expect("old plan block");
     assert!(pcm.iter().any(|sample| *sample != 0.0), "old provider PCM");
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("capi-replaced").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let first_request = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
@@ -858,10 +880,8 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("first block");
-    let structural = |request_id: u64, revision: u64, session_id: &str| {
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse(session_id).expect("stable ID"),
-        };
+    let structural = |request_id: u64, revision: u64, tag: u8| {
+        let edit = rebuild_edit(SESSION, tag);
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
@@ -870,7 +890,7 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
     };
     let mut request_id = 1;
     let mut revision = 42;
-    let mut pending = structural(request_id, revision, "split-0");
+    let mut pending = structural(request_id, revision, 0x10);
     children
         .session
         .command(&pending, 4_096)
@@ -916,7 +936,11 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         let window_immediate = children.session.command(&capabilities, 4_096);
         let window_lossy = children.session.dequeue_event(EventLane::Lossy, 4_096);
         request_id += 1;
-        pending = structural(request_id, revision, &format!("split-{round}"));
+        pending = structural(
+            request_id,
+            revision,
+            0x10 + u8::try_from(round).expect("round"),
+        );
         let window_structural = children.session.command(&pending, 4_096);
         let window_revision = children.session.controller.session().revision().0;
         // The any-thread query reads the lagging atomic's row, which must still be there.
@@ -1122,10 +1146,7 @@ fn a_rejected_render_call_that_swaps_plans_leaves_the_c_session_live() {
         crate::RESULT_OK
     );
     let structural = |request_id: u64, revision: u64| {
-        let edit = protocol::SessionEdit::SetSessionId {
-            session_id: session::StableId::parse(&format!("rejected-{request_id}"))
-                .expect("stable ID"),
-        };
+        let edit = rebuild_edit(SESSION, u8::try_from(request_id).expect("small request ID"));
         command_bytes_at_revision(
             request_id,
             ExpectedRevision::Exact(SessionRevision(revision)),
@@ -1394,9 +1415,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
 fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
     crate::ffi::test_plan_destroy(c_plan);
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("destroyed-plan").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let request = command_bytes_at_revision(
         1,
         ExpectedRevision::Exact(SessionRevision(42)),
@@ -1472,9 +1491,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             crate::ffi::test_reset_lifecycle_observer();
             let (c_session, c_plan) = boxed_c_children(SESSION);
             crate::ffi::test_set_structural_faults(c_session, [Some(first), Some(second)]);
-            let edit = protocol::SessionEdit::SetSessionId {
-                session_id: session::StableId::parse("fault-matrix").expect("stable ID"),
-            };
+            let edit = rebuild_edit(SESSION, 0x01);
             let request = command_bytes_at_revision(
                 1,
                 ExpectedRevision::Exact(SessionRevision(42)),
@@ -1542,9 +1559,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             expected.current_plan_disposed += 1;
             assert_eq!(crate::ffi::test_owner_counters(c_session), expected);
 
-            let retry_edit = protocol::SessionEdit::SetSessionId {
-                session_id: session::StableId::parse("fault-matrix-retry").expect("stable ID"),
-            };
+            let retry_edit = rebuild_edit(SESSION, 0x02);
             let retry = command_bytes_at_revision(
                 2,
                 ExpectedRevision::Exact(SessionRevision(43)),
@@ -1789,9 +1804,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         ),
         protocol::MessageId::DiagnosticsGet
     );
-    let structural = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("all-command-families").expect("stable ID"),
-    };
+    let structural = rebuild_edit(SESSION, 0x01);
     assert_eq!(
         dispatch!(
             ExpectedRevision::Exact(SessionRevision(42)),
@@ -1873,9 +1886,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     }
     dispatch!(first, StatusCode::ReplayExpired, pinned_hex(EXPIRED));
 
-    let edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("pressure-one").expect("stable ID"),
-    };
+    let edit = rebuild_edit(SESSION, 0x01);
     let stale = command_bytes_at_revision(
         19,
         ExpectedRevision::Exact(SessionRevision(41)),
@@ -1922,9 +1933,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     assert_eq!(commit_event.0, crate::RESULT_OK);
     assert_eq!(commit_event.1, pinned_hex(COMMIT_EVENT));
 
-    let second_edit = protocol::SessionEdit::SetSessionId {
-        session_id: session::StableId::parse("pressure-two").expect("stable ID"),
-    };
+    let second_edit = rebuild_edit(SESSION, 0x02);
     let publication_full = command_bytes_at_revision(
         24,
         ExpectedRevision::Exact(SessionRevision(43)),
@@ -1987,6 +1996,293 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
 
     crate::ffi::test_plan_destroy(c_plan);
     crate::ffi::test_session_destroy(c_session);
+}
+
+/// The parity session stripped to a chain whose builtin tail is finite: no console slot, no
+/// insert, and both input filters off. Only such a session tells a live input lane apart, because
+/// the input lane makes a strip's builtin tail infinite (#1256 gate 1).
+fn bare_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&generated_parity_session(track_count, sample_rate_hz))
+        .expect("accepted parity session");
+    model.console.pre_insert.clear();
+    model.console.post_insert.clear();
+    for track in &mut model.tracks {
+        track.console.clear();
+        track.inserts.effects.clear();
+        for lane in [&mut track.builtins.left, &mut track.builtins.right] {
+            lane.hpf_hz = 0.0;
+            lane.lpf_hz = 0.0;
+        }
+    }
+    session::canonical_session_json(&model).expect("canonical bare session")
+}
+
+/// The ten-track parity session with mixed effect cohorts (#1263 verdict NIT 3): an enabled
+/// compressor insert on the first and sixth tracks, and a bypassed delay and a bypassed multiband
+/// compressor insert on the second. Only an enabled non-EQ effect tells a non-target lane seeded
+/// bypassed apart, and the delay and the multiband keep their prepared bypass.
+fn mixed_effect_parity_session(sample_rate_hz: u32) -> String {
+    let mut model = parse_session_json(&generated_parity_session(10, sample_rate_hz))
+        .expect("accepted parity session");
+    let template = model.lower_track(&model.tracks[0]).pre_insert[0].clone();
+    let native = |instance: &str, effect: &str, bypass: bool| {
+        let mut native = template.clone();
+        native.id = session::StableId::parse(instance).expect("instance ID");
+        native.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse(effect).expect("effect ID"),
+        };
+        native.params.clear();
+        native.bypass = bypass;
+        native
+    };
+    for track in [0, 5] {
+        model.tracks[track]
+            .inserts
+            .effects
+            .push(native("comp", "miso.compressor", false));
+    }
+    model.tracks[1].inserts.effects.extend([
+        native("dly", "miso.delay", true),
+        native("mb", "miso.multiband-compressor", true),
+    ]);
+    session::canonical_session_json(&model).expect("canonical mixed-effect session")
+}
+
+/// One C ABI plan against a lanes-free `host_core::prepare_host_runtime` plan of the same session
+/// (#1256 gate 1), and against the C ABI's lane selection without its effect lanes (#1263 gate 1).
+fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_finite: bool) {
+    let mut c = compile_children(document, limits()).unwrap_or_else(|failure| {
+        panic!(
+            "{label}: compile: {}",
+            String::from_utf8_lossy(&failure.diagnostics)
+        )
+    });
+    let caps = prepare_caps(limits());
+    let compiled = host_core::compile_host_session(document, &caps)
+        .unwrap_or_else(|_| panic!("{label}: host compile"));
+    let host_core::PreparedHost {
+        mut plan,
+        mut sources,
+        report: host,
+        ..
+    } = host_core::prepare_host_runtime(&compiled, &caps)
+        .unwrap_or_else(|_| panic!("{label}: lanes-free host prepare"));
+
+    // Same latency and tail as the lanes-free plan.
+    let resources = c.plan.resources();
+    let (tail_kind, tail_samples) = match host.output_tail {
+        TailSamples::Finite(samples) => (TAIL_FINITE, samples),
+        TailSamples::Infinite => (TAIL_INFINITE, 0),
+    };
+    if expect_finite {
+        assert_eq!(
+            tail_kind, TAIL_FINITE,
+            "{label}: the lanes-free tail is finite"
+        );
+    }
+    assert_eq!(resources.latency_samples, host.latency_samples, "{label}");
+    assert_eq!(resources.tail_kind, tail_kind, "{label}: tail kind");
+    assert_eq!(
+        resources.tail_samples, tail_samples,
+        "{label}: tail samples"
+    );
+
+    // #1263 gate 1: attaching the effect lanes moves neither latency nor tail. The reference is
+    // the C ABI's selection less its effect lanes, prepared at the same depth.
+    let (without_effects, _) = host_core::prepare_host_runtime_with_live_lanes(
+        &compiled,
+        &caps,
+        &HostLiveControlRequest {
+            control_queue_depth: Some(LIVE_QUEUE_DEPTH),
+            ..HostLiveControlRequest::default()
+        },
+        HostLiveLanes {
+            effects: false,
+            ..C_ABI_LIVE_LANES
+        },
+    )
+    .unwrap_or_else(|_| panic!("{label}: host prepare without effect lanes"));
+    let without_effects = without_effects.report;
+    assert_eq!(
+        resources.latency_samples, without_effects.latency_samples,
+        "{label}: latency without effect lanes"
+    );
+    assert_eq!(
+        (resources.tail_kind, resources.tail_samples),
+        match without_effects.output_tail {
+            TailSamples::Finite(samples) => (TAIL_FINITE, samples),
+            TailSamples::Infinite => (TAIL_INFINITE, 0),
+        },
+        "{label}: tail without effect lanes"
+    );
+
+    // #1263 gate 1: one effect producer per prepared effect instance -- every strip's console
+    // slots and inserts -- and an owner exactly on the parametric EQs.
+    let normalized = compiled.normalized_model();
+    let mut expected = normalized
+        .strips()
+        .flat_map(|strip| {
+            let racks = normalized.lower_strip(&strip);
+            let id = strip.id.as_str().to_owned();
+            racks
+                .in_chain_order()
+                .into_iter()
+                .flatten()
+                .map(|effect| {
+                    let native = match &effect.identity {
+                        session::EffectIdentity::Native { effect_id } => effect_id.as_str(),
+                        _ => panic!("{label}: a native effect"),
+                    };
+                    (
+                        id.clone(),
+                        effect.id.as_str().to_owned(),
+                        native == "miso.parametric-eq",
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut kept = c
+        .session
+        .providers
+        .effects
+        .iter()
+        .map(|producer| {
+            (
+                producer.track_id.to_string(),
+                producer.effect_id.to_string(),
+                producer.has_owner(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    kept.sort();
+    assert_eq!(
+        kept, expected,
+        "{label}: one producer per effect instance, owners on the EQs"
+    );
+
+    // One producer per strip, in canonical strip order, with no input lane.
+    let model = compiled.normalized_model();
+    let strips = &c.session.providers.strips;
+    assert_eq!(strips.track_count, model.tracks.len(), "{label}");
+    assert_eq!(
+        strips
+            .controls
+            .iter()
+            .map(|producer| &*producer.track_id)
+            .collect::<Vec<_>>(),
+        model
+            .strips()
+            .map(|strip| strip.id.as_str())
+            .collect::<Vec<_>>(),
+        "{label}: one producer per strip, in canonical order"
+    );
+    assert!(
+        strips
+            .controls
+            .iter()
+            .all(|producer| producer.input.is_none()),
+        "{label}: no strip carries an input lane"
+    );
+
+    // Eight blocks fed the same source chunks are bit-identical.
+    let rate = compiled.sample_rate().0;
+    let quantum = 128_usize;
+    let mut first_left = vec![0.0_f32; quantum];
+    let mut first_right = vec![0.0_f32; quantum];
+    first_left[1] = 0.25;
+    first_right[1] = -0.5;
+    first_left[7] = -1.0;
+    first_right[9] = 0.75;
+    let final_left = vec![0.125_f32; 64];
+    let final_right = vec![-0.25_f32; 64];
+    let mut audible = false;
+    for block in 0..8_u64 {
+        let chunk = match block {
+            0 => Some((0, &first_left, &first_right, false)),
+            1 => Some((128, &final_left, &final_right, true)),
+            _ => None,
+        };
+        if let Some((start_frame, left, right, end_of_region)) = chunk {
+            let planes = [left.as_slice(), right.as_slice()];
+            let submission = || SourceSubmission {
+                generation: 1,
+                start_frame,
+                sample_rate_hz: rate,
+                planes: &planes,
+                frames: left.len() as u32,
+                end_of_region,
+            };
+            c.session
+                .submit(b"fixture-source", submission())
+                .unwrap_or_else(|_| panic!("{label}: C submit"));
+            sources
+                .submit(b"fixture-source", submission())
+                .unwrap_or_else(|_| panic!("{label}: host submit"));
+        }
+        let mut c_pcm = vec![f32::NAN; quantum * 2];
+        c.plan
+            .render(
+                block * quantum as u64,
+                PlanarBufferMut::try_new(&mut c_pcm, 2, quantum, quantum).expect("C output"),
+            )
+            .unwrap_or_else(|code| panic!("{label}: C render {code}"));
+        let mut host_pcm = vec![f32::NAN; quantum * 2];
+        plan.render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut host_pcm, 2, quantum, quantum)
+                    .expect("host output"),
+            },
+            block * quantum as u64,
+        )
+        .unwrap_or_else(|_| panic!("{label}: host render"));
+        assert_eq!(
+            c_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            host_pcm
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            "{label}: block {block}"
+        );
+        audible |= c_pcm.iter().any(|sample| *sample != 0.0);
+    }
+    assert!(audible, "{label}: the compared blocks carry signal");
+}
+
+#[test]
+fn c_abi_plans_with_live_lanes_render_like_lanes_free_plans() {
+    for sample_rate_hz in [44_100, 48_000, 88_200, 96_000] {
+        // #1263 gate 1: the nine-track EQ fixture itself, at the helper's 192-frame source.
+        let mut nine = parse_session_json(SESSION).expect("accepted nine-track fixture");
+        nine.sample_rate_hz = sample_rate_hz;
+        nine.sources[0].frames = 192;
+        assert_live_lanes_render_like_lanes_free(
+            &session::canonical_session_json(&nine).expect("canonical nine-track session"),
+            &format!("nine-track EQ fixture at {sample_rate_hz} Hz"),
+            false,
+        );
+        for track_count in [1, 10] {
+            assert_live_lanes_render_like_lanes_free(
+                &generated_parity_session(track_count, sample_rate_hz),
+                &format!("parity {track_count} tracks at {sample_rate_hz} Hz"),
+                false,
+            );
+            assert_live_lanes_render_like_lanes_free(
+                &bare_parity_session(track_count, sample_rate_hz),
+                &format!("bare {track_count} tracks at {sample_rate_hz} Hz"),
+                true,
+            );
+        }
+        assert_live_lanes_render_like_lanes_free(
+            &mixed_effect_parity_session(sample_rate_hz),
+            &format!("mixed effects 10 tracks at {sample_rate_hz} Hz"),
+            false,
+        );
+    }
 }
 
 #[test]

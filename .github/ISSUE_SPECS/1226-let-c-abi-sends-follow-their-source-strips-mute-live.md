@@ -2,7 +2,9 @@
 
 Slice 28 of *Submix strips and live aux sends* (#1196). Batch C1, after *Deliver value-only send and
 submix-strip edits to the running C ABI plan* (#1225); the root pushes C1 once after this slice's verdict.
-**Re-verify every anchor after #1053 and slice 27 land.**
+**Re-verify every anchor after #1053's core (#1257, #1258) and slice 27 land.** (Amended
+2026-10-04, when #1053 became an umbrella of slices #1253-#1266; the references below follow its
+decision record and guards G1-G3.)
 
 The design record cited below (`DESIGN`, `VERIFY-1` to `VERIFY-3`, `REVISION-1`, `REVISION-2` and
 `APPLIED-3`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
@@ -18,16 +20,19 @@ source-ring reset and a re-seek, because #1053's live path would otherwise push 
 leave the follow-muted send's prepared coefficients behind, rendering something other than the
 committed model.
 
-## Context (re-verify after #1053 and slice 27 land)
+## Context (re-verify after #1257 and slice 27 land)
 
 - **After *Deliver value-only send and submix-strip edits to the running C ABI plan*:**
   - capi classifies a committed-model delta that touches only strip faders and pans (tracks and
     submixes) and the gain, mute and matrix of routes into submixes as live, through host-core's
-    `live_builtin_delta` (#1053, behind the `control-provider` feature, `crates/host-core/Cargo.toml:15`);
-  - it checks every domain, then room in every queue, then pushes, then commits infallibly (#1053
-    A1.4, `.github/ISSUE_SPECS/1053-*.md:131-134`);
-  - every live record uses the ramp length #1053 ruled (its A2 D3, `:155-161`);
-  - the **P13 follow guard** is still in `live_builtin_delta`: a delta that changes `left_mute` or
+    `classify_live_delta` (#1053 D1, #1255, behind the `control-provider` feature,
+    `crates/host-core/Cargo.toml:15`);
+  - it checks every domain, then room in every queue, then the protocol token, then pushes, then
+    commits, which cannot fail after the check (#1053 D6, #1257's `commit_live`);
+  - every live record uses the ramp length #1053 gives (its D3, `LiveRamps::for_session`; a step
+    until #1054);
+  - the **P13 follow guard** (#1053's G2) is still in `classify_live_delta`: a delta that changes
+    `left_mute` or
     `right_mute` of a strip that, in the post-commit model, is the source of a route with
     `follows_mute: true` is structural.
 - **The follow composition already exists in host-core** (*Let a send follow its source strip's mute
@@ -52,10 +57,10 @@ committed model.
 - **Follow mute is a send's property.** A route into the output never follows: `follows_mute: true`
   on it is refused at validation (*Let a route into a submix follow its source strip's mute in the
   session*, #1218), so every follow record targets a live route.
-- **The "never a redundant record" rule** (`crates/host-core/src/solo.rs:32-45`): re-entering the ramp
+- **The "never a redundant record" rule** (`crates/host-core/src/solo.rs:58-70`): re-entering the ramp
   kernel on a settled lane can turn an exact `+0.0` into `-0.0`; it is digest-visible.
-- **#1053's spec carries the P13 note** that slice 00 appended to its A2 D1 "Add:" bullet
-  (`.github/ISSUE_SPECS/1053-*.md:145-147`), if the spec is still in `.github/ISSUE_SPECS/`.
+- **#1053's spec carries the P13 note** as its "Guards (DESIGN P13)" section, bullets G1-G3, if the
+  spec is still in `.github/ISSUE_SPECS/`.
 
 ## Decisions frozen for this slice
 
@@ -65,19 +70,20 @@ committed model.
   `mute` of every live route, and calls `LiveRouteMuteFollow::delta` with
   `effective_mute(strip, lane) = ` the post-commit model's mute of that strip lane. For each yielded
   `(route, source_lane_muted)` it builds the record with `RouteControlProducer::record` (the route's
-  current `gain_db`, `matrix` and `mute`, the new `source_lane_muted`, the ruled ramp length).
+  current `gain_db`, `matrix` and `mute`, the new `source_lane_muted`, the mute ramp length of `LiveRamps::for_session`).
 - **D2. One commit.** Strip mute records, route value records and follow records are domain-checked
   together, room-checked together across every queue, pushed, then committed infallibly, in #1053's
   order. A full queue is typed `Backpressure`: model, revision, replay, queues and the route mirror
   unchanged.
-- **D3. Ramps.** A follow record uses the same ruled ramp length as the strip mute record it follows.
-- **D4. The guard goes.** Remove the P13 follow guard from `live_builtin_delta`: a mute on a follow
+- **D3. Ramps.** A follow record uses the same ramp length as the strip mute record it follows
+  (`LiveRamps::for_session(next).mute_samples`).
+- **D4. The guard goes.** Remove the P13 follow guard (G2) from `classify_live_delta`: a mute on a follow
   source is now live. The submix-strip and VCA parts of P13 are not this slice's (slice 27 lifted the
   first; the VCA umbrella owns the second).
-- **D5. #1053's spec note.** Mark the follow-source bullet of the P13 note in #1053's spec as
-  superseded by this slice, if the spec is still in `.github/ISSUE_SPECS/`. The VCA bullet stays
-  until *Deliver value-only VCA edits to the running C ABI plan* (#1247), and this slice keeps the
-  VCA guard in `live_builtin_delta` (amended at filing of *VCA groups*, #1239).
+- **D5. #1053's spec note.** Mark G2 in #1053's spec as superseded by this slice, if the spec is
+  still in `.github/ISSUE_SPECS/`. G3, the VCA guard, stays until *Deliver value-only VCA edits to
+  the running C ABI plan* (#1247), and this slice keeps it in `classify_live_delta` (amended at
+  filing of *VCA groups*, #1239).
 - **D6. Resources.** The `LiveRouteState` mirror and its shadow are charged in `capi_resources`
   (`crates/capi/src/runtime/compile.rs:109-213`), and the `resource_lifecycle` oracles change by
   exactly those rows.
@@ -85,7 +91,7 @@ committed model.
 ## Deliverables
 
 - D1-D3 in capi's live commit path.
-- D4 in host-core's `live_builtin_delta`.
+- D4 in host-core's `classify_live_delta`.
 - D5 and D6.
 - `docs/C_ABI_V1_QUALIFICATION.md`: a mute on a strip that sends follow is value-only, and its sends
   follow in the same commit.
@@ -95,10 +101,10 @@ committed model.
 - `crates/capi/src/runtime/{control.rs,compile.rs}`, and any capi runtime module #1053 or slice 27
   added for the live commit path
 - `crates/capi/tests/resource_lifecycle.rs` and the capi test file slice 27 added
-- `crates/host-core/src/` (`live_builtin_delta` only; `LiveRouteMuteFollow` and `LiveRouteState` are
+- `crates/host-core/src/` (`classify_live_delta` only; `LiveRouteMuteFollow` and `LiveRouteState` are
   reused, not changed) and `crates/host-core/tests/`
 - `docs/C_ABI_V1_QUALIFICATION.md`
-- `.github/ISSUE_SPECS/1053-*.md` (the P13 note only), if the spec is still in the directory
+- `.github/ISSUE_SPECS/1053-*.md` (guard G2's bullet only), if the spec is still in the directory
 - this spec
 
 ## Non-goals
@@ -128,7 +134,7 @@ committed model.
    `pre_fader` with `follows_mute: true` into bus `b`, and `b` routes to the output. Through the
    exported entry points, `020f` mutes `t`'s left lane, then both lanes, then unmutes it.
    - Each edit changes the **same** plan: no new epoch, no re-seek, no silent block.
-   - After `latency_samples` plus the ruled ramp (plus the send's compensation delay where it has
+   - After `latency_samples` plus the mute ramp (plus the send's compensation delay where it has
      one), the output is bit-identical to a plan compiled from the committed model and fed the same
      sources from sample 0.
    - `t` and a second track feed distinct, non-constant signals on each lane, and the send's matrix
@@ -150,8 +156,8 @@ committed model.
    and route mirror are unchanged.
    *Test value: it turns red if the strip mute is pushed or committed while its follow record is
    refused.*
-4. **Realtime.** The two-thread barrier test in `crates/capi/tests/resource_lifecycle.rs` (#1053's
-   gate 4 shape) races follow-source mutes against render and a structural swap over 20 runs:
+4. **Realtime.** The two-thread race in `crates/capi/tests/resource_lifecycle.rs` (*Qualify live C
+   ABI edits against a concurrently rendering plan*, #1258) races follow-source mutes against render and a structural swap over 20 runs:
    `allocations == 0` and `frees == 0` around every render call after warm-up; zero `INTERNAL`
    results; the final block bit-identical to a fresh plan of the final committed model.
    *Test value: it turns red if the follow composition allocates on the render thread or a racing
@@ -185,7 +191,7 @@ committed model.
 
 ## Standing rules for the implementer
 
-- Work from this body and the merged code of #1053 and slice 27. Extend their paths; do not fork
+- Work from this body and the merged code of #1053's slices and slice 27. Extend their paths; do not fork
   them.
 - The commit after the first push is infallible by construction. No ack precedes a drop.
 - Never emit a redundant record.

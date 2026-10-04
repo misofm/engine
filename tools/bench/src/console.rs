@@ -165,7 +165,8 @@
 //! (`fixtures/session/v1/console-sixty-four-track-sends.json`, derived by
 //! `scripts/derive-sends-console-fixture.py`). It is emitted after the metered row and is timed
 //! like every other session row, at [`PlanConfig::BASELINE`] with its sources bound: the
-//! plan the C ABI prepares for fan playback, with no live controls, so every route is static. It
+//! plan the C ABI prepares for fan playback, less the fader and matrix lanes the C ABI now
+//! attaches (#1256); routes stay static there too. It
 //! states no floor (`floor::floor_row` says why). Its digest is asserted in-run to differ from
 //! `sixty_four_track_console`'s (`SENDS_PAIR`), because a sends row that rendered the standing
 //! console's bits would not have compiled its own fixture.

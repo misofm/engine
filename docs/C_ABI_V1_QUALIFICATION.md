@@ -196,3 +196,227 @@ expectations include one additional eight-byte graph owner on Wasm; PCM digests 
 builder invocation refused a missing output directory before compilation (exit 2);
 the corrected invocation with an existing empty directory completed successfully.
 Historical artifact and qualification records above retain their original identities.
+
+## Live fader and matrix lanes on every plan (#1256)
+
+Every C ABI plan, at compile and at every structural replacement, carries two live lanes per
+strip, tracks and submixes alike: a 16-record fader/mute ring and a 16-record matrix/pan ring
+(#1053 D4). The rings are charged in `builtin_retained_payload_bytes`. capi keeps the strips'
+producers with the plan's provider epoch, and that producer table (one producer per strip plus
+its strip ID bytes) is charged in `capi_retained_bytes`. On the nine-track EQ reference session the
+two rows move 17,451 -> 28,521 and 256,812 -> 258,135 bytes. A caller whose
+`maximum_builtin_retained_bytes` and `maximum_capi_retained_bytes` were exact before this change
+must raise both. No input, effect or route lane is attached, so rendering, `latency_samples`,
+`tail_kind` and `tail_samples` do not change. #1257 delivers fader, mute and pan edits through
+them (next section).
+
+## Value-only track edits on the running plan (#1257)
+
+`miso_engine_v1_submit_command` classifies each `SESSION_TRANSACTION_APPLY` by the committed
+model's delta (`host_core::classify_live_delta`, #1053 D1), never by its opcodes.
+
+- **Live.** The committed models before and after differ only in track `fader` (`left_db`,
+  `right_db`, `left_mute`, `right_mute`) and `pan`/`matrix` values. The engine pushes the records
+  that change a rendered value to the newest plan -- the pending replacement if there is one, else
+  the current plan -- and commits. No plan is prepared; source rings, effect state and the render
+  position continue, and the host keeps submitting with no seek. Fader and mute changes are steps
+  until #1054 gives them ramps; a pan or matrix change carries the session's own
+  `smoothing_samples`.
+- **Model-only (#1260).** A delta that changes only fields no prepared plan reads -- the session
+  ID, the render profile's `id`, the output profile's `id` and the stored `automation` table --
+  is live with no records: it commits through the same admission and protocol predicates, emits
+  the same response and `SESSION_COMMITTED`, and the running plan, its source rings and its effect
+  state continue untouched. It may ride with fader, mute and pan edits. The automation term holds
+  only while no host renders stored automation (#1058); every other profile field stays
+  structural.
+- **Live effect parameters (#1264, #1265).** A track's console-slot entry or insert whose
+  `params` change only in live parameters, parametric EQ values included, is live too; see
+  "Value-only effect parameter edits" and "Value-only parametric EQ edits" below. So is a
+  bypass change on one, except the delay's and the multiband compressor's; see "Value-only effect
+  bypass edits" below.
+- **Rebuild.** Everything else replaces the plan exactly as before: any submix strip value, any
+  edit while either model declares a VCA, a mute change on a track that a `follows_mute` route
+  reads, a fader dB outside `[-144, 24]` or a pan/matrix the setter refuses (reported as
+  `COMPILE_REJECTED` with the preparation diagnostic a rebuild gives), and every other field.
+- **Timing (#1053 D2).** A live edit applies no later than the first render call that begins after
+  the submit returns, and a stage that has not drained yet may apply it one block earlier, so one
+  transaction's records can land up to one quantum apart. It is heard up to `latency_samples`
+  later. There is no block-atomicity claim.
+- **Backpressure.** Each strip's fader/mute and matrix/pan lanes hold 16 records each. A
+  transaction that does not fit every lane it touches returns `BACKPRESSURE` with last error
+  `control.live.backpressure` (a full plan queue stays `control.plan.backpressure`). The model,
+  the revision, the replay cache, the events and every lane are unchanged; the host retries with a
+  new request ID after a render call. A host that is not rendering takes 16 single-value edits
+  per lane before the first refusal.
+- **No ack before a drop (#1053 D6).** Classification, the live admission (#1053 D8), the
+  producer lookup, the room check on every lane and the protocol's commit predicate all run before
+  the first push; nothing changes until the last of them passes. The push and the commit then
+  cannot fail, and render applies every record it pops, because the classifier refuses every value
+  the setters would refuse.
+- **Same response and events.** A live edit returns `TransactionApplied` and emits one
+  `SESSION_COMMITTED` (plus `AUTOMATION_CANCELED` per queued batch), exactly as a replacement does.
+  The reliable event lane holds two events, so a host drains it after each edit either way.
+- **Detecting a rebuild.** As before: after a replacement the next source submission is refused
+  until the host seeks. After a live edit, submission simply continues. No new symbol, opcode,
+  field, result code or event is added.
+- **Live admission.** The prospective compiled model lives beside the current one until the
+  commit, so a live edit is admitted only if both plans' graph bytes plus both compiled models fit
+  `maximum_graph_session_plus_plan_bytes`; the newest plan's `capi_retained_bytes`, plus the
+  current epoch's rows while a candidate is pending, plus the prepared-protocol rows, fit
+  `maximum_capi_retained_bytes` (the last term counts a catalog the live arm never builds: a
+  documented overcount); and the largest allocation fits `maximum_named_allocation_bytes`.
+- **Resource movement.** Each provider epoch now keeps its own capi resource figures (32 bytes)
+  for the live admission, so every session's `capi_retained_bytes` grows by 96 bytes: the inline
+  current epoch in the session plus its two reserved epoch slots. On the nine-track EQ reference
+  session the row moves 258,135 -> 258,231 bytes. A caller whose `maximum_capi_retained_bytes` was
+  exact must raise it.
+
+## Live effect lanes on every plan (#1263)
+
+Every C ABI plan, at compile and at every structural replacement, also carries one live control
+lane per prepared effect instance, console slots and inserts alike, on tracks and submixes. Each
+lane's ring holds `min(16, the effect's automation capacity)` records, and a parametric EQ's lane
+also carries its prepared-target staging. capi keeps the producers with the plan's provider epoch;
+each EQ's producer owns its prepared-target owner. #1264 pushes live effect parameter edits
+through them, and #1265 publishes live EQ targets through the owners (below). No input or route
+lane is attached.
+
+- **Rendering, latency and tail do not change.** A lane is seeded from the session's bypass, so
+  the plan renders bit-identically to a lanes-free plan, and `latency_samples`, `tail_kind` and
+  `tail_samples` equal those of the same plan without effect lanes. Both are checked on the
+  nine-track EQ reference session and on the one- and ten-track parity sessions (the ten-track
+  one has a bypassed limiter insert) at the four launch rates.
+- **Charges.** The rings, the target staging and the banked live-control owner the lanes make the
+  plan build are graph rows, charged in `graph_session_plus_plan_bytes`,
+  `graph_incremental_plan_bytes` and `graph_metadata_bytes`. The producer table, its strip and
+  effect IDs and the EQ owners are reported once, in `capi_retained_bytes`. Both enter the
+  replacement and live admissions through those rows. The producer payload is admitted twice, a
+  conservative double admission: at preparation host-core also admits it against
+  `maximum_graph_session_plus_plan_bytes`, so the initial compile needs the graph row plus the
+  compiled model plus the payload `capi_retained_bytes` charges for the producers (15,361 bytes on
+  the reference session below). A replacement's two-plan peak and the live admission dominate it.
+- **Resource movement on the nine-track EQ reference session** at the reference `limits()`
+  (`maximum_automation_spans_per_block` S = 128, a 128-frame quantum; x86-64, eight lanes). These
+  are that session's figures, not general ones:
+
+  | row | before | after |
+  |---|---|---|
+  | `graph_session_plus_plan_bytes`, `graph_incremental_plan_bytes` | 253,934 | 382,918 |
+  | `graph_metadata_bytes` | 56,137 | 185,121 |
+  | `capi_retained_bytes` | 258,231 | 273,640 |
+  | `largest_named_allocation_bytes` | 90,720 | 90,720 |
+
+- **The general formula.** The graph rows grow by a per-member term plus a per-bank term:
+
+  - each parametric EQ member 2,104 bytes, each other effect member 1,208 (no 896-byte target
+    staging);
+  - at a 128-frame quantum, each eight-lane effect bank 8,944 + 360 * S bytes, plus 64 * L for a
+    prepared latency of L samples, and each four-lane bank 4,560 + 200 * S. S is the caller's
+    `maximum_automation_spans_per_block`, because each lane's packed window equals the automation
+    capacity, so the bank term scales with it: at S = 4,096 a four-lane bank is about 824 KB.
+
+  On the reference session that is nine EQ members and two eight-lane banks at S = 128 and L = 0:
+  9 * 2,104 + 2 * 55,024 = +128,984. `capi_retained_bytes` grows by the producer table and its
+  payload (15,361 bytes there: nine 104-byte producers, their IDs and the nine EQ owners) and 16
+  bytes in each of the three provider-epoch slots. Every other row is unchanged. A session without
+  effects moves only `capi_retained_bytes`, by 48 bytes. A caller whose
+  `maximum_graph_session_plus_plan_bytes` or `maximum_capi_retained_bytes` was exact before this
+  change must raise it; a structural replacement charges both plans' graph rows, so its peak grows
+  by twice the graph move.
+
+## Value-only effect parameter edits on the running plan (#1264)
+
+A transaction that changes, adds or removes `params` of a track's native effect -- a console
+slot's entry or an insert -- is live when every value it changes is live. The classifier resolves
+the pre- and post-commit `params` through `effect_compiler::resolve_initial_values`, the one
+function preparation uses (unit, channel policy, defaults, `-0.0` to `+0.0`, domain, unknown IDs),
+and compares the resolved values bit by bit.
+
+- **Live.** A changed value of a parameter whose descriptor is automatable with
+  `automation_rate` `Block`. The engine pushes one parameter record per changed
+  `(parameter, lane)` -- `Both` for a shared parameter, `Left` and `Right` apart for a per-lane one
+  -- to that instance's lane in the newest plan, and the effect ramps it with the descriptor's own
+  smoothing. A removed entry returns to the default. Rewriting a value in another representation
+  (a `both` value as equal `left` and `right` values) pushes nothing. It may ride with fader, mute,
+  pan and model-only edits in one transaction.
+- **Prepared, so a rebuild.** A changed value of a parameter that is not automatable or whose
+  `automation_rate` is `None` (for example the gate/expander's attack, hold and release, and a
+  parametric EQ band's `enabled` and `kind`). The parametric EQ's live parameters ride prepared
+  targets; see "Value-only parametric EQ edits" below.
+- **Rebuild for everything else about an effect**: identity, quality, link mode, a prepared bypass
+  (#1266, below), sidechain, the insert order and the console slot set, any effect on a submix
+  strip, and `params` that preparation refuses (reported as `COMPILE_REJECTED` with the
+  preparation diagnostic).
+- **A transaction too large for a lane.** An effect lane holds `min(16, automation capacity)`
+  records. A transaction whose records for one instance outnumber that capacity could never fit,
+  so it takes the rebuild path instead of an endless `BACKPRESSURE`. A transaction that fits the
+  capacity but not the lane's current room returns `BACKPRESSURE` with
+  `control.live.backpressure`, exactly as a full fader lane does, and changes nothing.
+- **No ack before a drop.** Every record passes its producer's preflight, and every readback row
+  is looked up, before the first push, beside the room check of #1257.
+- **The readback follows.** After the commit, the protocol's parameter state
+  (`PARAMETER_STATE_GET`) reports each live value, exactly as a rebuild's catalog would. The
+  catalog's handles and metadata do not change.
+- **Effects keep their state.** A live parameter edit is not bit-identical to a fresh plan of the
+  edited session, because the effect's history differs; it is bit-identical to the browser's live
+  lane given the same records at the same block, at the four launch rates on one and ten tracks.
+- **No resource movement.** No row moves: the records ride the lanes #1263 attached.
+
+## Value-only parametric EQ edits on the running plan (#1265)
+
+A parametric EQ instance (a console slot's entry or an insert of a track) takes its live values as
+prepared targets through its owner, never as bare parameter records.
+
+- **Live.** Each band's frequency, gain, Q and shelf slope, and the HPF's and the LPF's `enabled`,
+  frequency and Q (every EQ parameter whose `automation_rate` is `Block`).
+- **Prepared, so a rebuild.** A band's `enabled` and `kind` (decision 14, F2), and any EQ value
+  preparation refuses (`COMPILE_REJECTED`, as for any effect).
+- **Targets are designed on the control thread.** The classifier seeds host-core's
+  `EqTargetPreparer` with the instance's pre-commit values, resolved by the one function
+  preparation uses, passes the changed `(parameter, lane)` values as edits, and designs the
+  targets at the session's sample rate. Render only applies them, through the EQ's prepared-target
+  staging.
+- **All or nothing.** For each EQ instance, in the newest plan: `begin_owner` at the owner's
+  committed revision, `edit_owner` for each edit, and `preflight_candidate_targets` (revision,
+  validation and the whole target prefix's queue room), before the room checks and preflights of
+  #1264 and the protocol predicate. A lack of room is `BACKPRESSURE` with
+  `control.live.backpressure`; any other refusal is `INTERNAL`. A refusal at any of these steps
+  discards every owner begun and changes nothing. Then the records are pushed, each owner's targets
+  published, the protocol committed and each owner committed; none of them can fail.
+- **A transaction too large for a lane.** An EQ instance whose designed targets outnumber its
+  lane's whole capacity (at most 12 targets against `min(16, automation capacity)`) takes the
+  rebuild path, as #1264 does for records.
+- **The readback follows** every changed EQ value, as for #1264.
+- **Effects keep their state.** A live EQ edit renders bit-identically to the browser's lane given
+  targets that `EqTargetPreparer` designs from the owner's own committed values, published through
+  the owner at the same block, on the nine-track EQ fixture at the four launch rates.
+- **No resource movement.** The targets ride the EQ lanes and owners #1263 attached.
+
+## Value-only effect bypass edits on the running plan (#1266)
+
+A transaction that switches the bypass of a track's console-slot entry or insert is live through
+the rack's latency-preserving bypass shunt (decision 14).
+
+- **Live.** One bypass record carrying the new bypass goes to the instance's lane in the newest
+  plan. It rides with the instance's parameter records or, for a parametric EQ, its targets, under
+  the one-quantum allowance of #1053 D2; no order between them is promised.
+  The shunt selects the latency-matched dry signal for the lane while the wet path keeps running,
+  so the effect's state continues either way and prepared latency does not change. The switch is a
+  step: there is no bypass crossfade (decision 14, F7). It may ride with every other live edit.
+- **Prepared, so a rebuild.** A bypass change, in either direction, on the delay or the multiband
+  compressor: their session bypass is prepared into the effect, not lowered to the lane
+  (`effect_compiler::lowers_session_bypass`), so a live record would be acked and never heard
+  (decision 14, F4). A submix strip's bypass stays a rebuild too, as every submix value does.
+- **No ack before a drop.** The bypass record passes its producer's preflight and the room check
+  of #1264 before the first push; for an EQ the room must hold the record and the whole target
+  prefix together, or the transaction is `BACKPRESSURE` with `control.live.backpressure` and
+  changes nothing.
+- **Equal to a rebuild, on the gate fixture.** The wet path keeps running, so the switched
+  instance's own state is the same either way. An effect downstream of it keeps the live history,
+  as after any live edit, so the from-sample-0 oracle holds only while that downstream memory fits
+  the window. On the gate fixture (a compressor insert, then a soft-clip console slot), from
+  E + ceil(latency / quantum) + 1 on, a live bypass or lift renders bit-identically to a plan
+  compiled from the committed snapshot and fed the same source from sample 0, on one and ten
+  tracks at the four launch rates. A second stateful effect after the switched one (a compressor
+  after a compressor) does not converge within that window; its difference decays.
+- **No resource movement.** The record rides the lanes #1263 attached; no readback row reads it.

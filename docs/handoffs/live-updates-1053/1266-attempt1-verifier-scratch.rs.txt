@@ -1,0 +1,36 @@
+/// Verifier scratch (#1266 attempt 1): an EQ bypass beside an edit whose targets exactly fill the
+/// queue could never fit, so it must rebuild, never an endless BACKPRESSURE.
+#[test]
+fn v1266_eq_bypass_plus_full_capacity_targets_rebuilds() {
+    use session::{ParameterChannel, ParameterUnit, RackName};
+    let document = eq_session(48_000);
+    let small = CompileLimits {
+        maximum_automation_spans_per_block: 4,
+        ..limits()
+    };
+    let mut edits: Vec<SessionEdit> = [4, 20, 36]
+        .iter()
+        .flat_map(|&parameter_id| {
+            [ParameterChannel::Left, ParameterChannel::Right].map(|channel| {
+                upsert(
+                    "eq0",
+                    RackName::Console,
+                    "eq",
+                    parameter_id,
+                    channel,
+                    ParameterUnit::Db,
+                    -5.0,
+                )
+            })
+        })
+        .collect();
+    edits.insert(0, bypass_edit("eq0", RackName::Console, "eq", true));
+    let mut rig = Rig::with_limits(&document, small);
+    rig.step();
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
+    let (revision, ..) = rig.summary();
+    assert_eq!(rig.apply(&edits), crate::RESULT_OK, "admitted, not backpressure");
+    let (after, _, _, pending) = rig.summary();
+    assert_eq!((after, pending), (revision + 1, 1), "bypass + four targets rebuild");
+    assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
+}

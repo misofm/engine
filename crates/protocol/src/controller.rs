@@ -1939,12 +1939,22 @@ impl<P: ControlProvider> ProtocolController<P> {
         ))
     }
 
-    /// Validate token affinity/currentness, then apply every prepared controller mutation without
-    /// another fallible semantic or capacity decision.
-    pub fn commit_prepared_structural(
-        &mut self,
-        mut prepared: PreparedStructuralCommand,
-    ) -> Result<CommittedCommandFrame, PreparedCommandCommitError> {
+    /// The predicate [`Self::commit_prepared_structural`] decides with, without consuming the
+    /// token or changing anything (#1257 D3).
+    ///
+    /// A host that must act on the token's outcome before committing it -- the C ABI pushes live
+    /// records to a running plan and only then commits (#1053 D6) -- calls this first: while it
+    /// holds the controller by `&mut`, an `Ok` here means the commit cannot fail.
+    ///
+    /// # Errors
+    ///
+    /// [`PreparedCommandCommitError::WrongController`] for a token another controller prepared;
+    /// [`PreparedCommandCommitError::StaleGeneration`] when the generation, the revision or the
+    /// automation-queue occupancy changed since the token was prepared.
+    pub fn check_prepared_structural(
+        &self,
+        prepared: &PreparedStructuralCommand,
+    ) -> Result<(), PreparedCommandCommitError> {
         if !Arc::ptr_eq(&self.structural_generation, &prepared.owner) {
             return Err(PreparedCommandCommitError::WrongController);
         }
@@ -1956,6 +1966,16 @@ impl<P: ControlProvider> ProtocolController<P> {
         {
             return Err(PreparedCommandCommitError::StaleGeneration);
         }
+        Ok(())
+    }
+
+    /// Validate token affinity/currentness, then apply every prepared controller mutation without
+    /// another fallible semantic or capacity decision.
+    pub fn commit_prepared_structural(
+        &mut self,
+        mut prepared: PreparedStructuralCommand,
+    ) -> Result<CommittedCommandFrame, PreparedCommandCommitError> {
+        self.check_prepared_structural(&prepared)?;
         let mut event_reservations = prepared
             .event_reservations
             .take()

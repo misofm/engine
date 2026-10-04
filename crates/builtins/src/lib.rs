@@ -4105,7 +4105,17 @@ impl FaderMuteRampBuiltins {
 ///
 /// The domain is `fader_db`'s own, so a live move is admitted on exactly the terms a declared one
 /// is; sharing this with preparation is what keeps the two from drifting.
-fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
+///
+/// Issue #1255 D3: preparation's `fader_lanes`, the render-side setter
+/// ([`BuiltinFaderBank::set_fader_db`]) and host-core's live-delta classifier share this one
+/// function, so those three cannot disagree on the domain. Two other checks still spell the
+/// `[-144, 24]` dB range themselves (`prepare_sections` here and builtins-compiler's `gain_path`);
+/// they agree with it today.
+///
+/// # Errors
+///
+/// [`BuiltinParameterError::GainDomain`] when `db` is not finite or is outside `[-144, 24]`.
+pub fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
     if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
         return Err(BuiltinParameterError::GainDomain);
     }

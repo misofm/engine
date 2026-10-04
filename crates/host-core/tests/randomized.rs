@@ -706,7 +706,12 @@ fn live_records(draw: &mut Draw, handles: &HostLiveControlHandles) -> Vec<Live> 
 /// arm, because every arm has seen the same records.
 fn push(handles: &mut HostLiveControlHandles, record: Live) -> bool {
     match record {
-        Live::Input(track, record) => handles.strip_controls[track].input.try_push(record).is_ok(),
+        Live::Input(track, record) => handles.strip_controls[track]
+            .input
+            .as_mut()
+            .expect("input lane")
+            .try_push(record)
+            .is_ok(),
         Live::Fader(track, record) => handles.strip_controls[track].fader.try_push(record).is_ok(),
         Live::Matrix(track, record) => handles.strip_controls[track]
             .producer
