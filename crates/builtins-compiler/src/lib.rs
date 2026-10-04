@@ -236,6 +236,13 @@ pub struct TrackControlRequest {
     pub track_id: String,
     /// Exact bounded depth of this track's control queue. A full queue is typed backpressure.
     pub queue_capacity: NonZeroUsize,
+    /// Whether the strip also gets the live input trim/polarity/filter lane (#1254 D1).
+    ///
+    /// `true` attaches all three lanes, as every request did before #1254. `false` attaches only
+    /// the matrix and fader lanes: no input ring is created or charged, the producer's
+    /// [`TrackControlProducer::input`] is `None`, and the strip keeps its chain's own builtin
+    /// tail, because only a live input target can enable a filter the session left off.
+    pub input_lane: bool,
 }
 
 /// The control-side producer half of one prepared live-control channel.
@@ -257,8 +264,9 @@ pub struct TrackControlProducer {
     /// consumers.
     pub fader: Producer<TrackFaderRecord>,
     /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
-    /// depth, for the reason the field above states.
-    pub input: Producer<TrackInputRecord>,
+    /// depth, for the reason the field above states. `None` when the request set
+    /// [`TrackControlRequest::input_lane`] to `false` (#1254 D1).
+    pub input: Option<Producer<TrackInputRecord>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -295,7 +303,9 @@ pub struct MeterConsumer {
 struct StripControlConsumers {
     /// `None` once a strip bank has claimed this side. The three sides are claimed together --
     /// `planned_strip_banks` plans all three stages over one track list -- so a partly claimed
-    /// strip is unreachable, and `strip_bindings` says so rather than papering over it.
+    /// strip is unreachable, and `strip_bindings` says so rather than papering over it. The input
+    /// side is also `None` from the start when the request had `input_lane: false` (#1254 D1);
+    /// that strip's input section is then the plain one, banked or per node.
     input: Option<Consumer<TrackInputRecord>>,
     fader: Option<Consumer<TrackFaderRecord>>,
     matrix: Option<Consumer<TrackControlRecord>>,
@@ -1473,8 +1483,9 @@ struct BuiltinSessionSeal {
     requests: Vec<MeterRequestSeal>,
     observers: Vec<(Box<str>, TrackStage, u64)>,
     consumers: Vec<(u64, Box<str>, MeterTap)>,
-    /// Issue #137 D1: `(track_id, queue_capacity)` per live-control channel, sorted.
-    controls: Vec<(Box<str>, usize)>,
+    /// Issue #137 D1: `(track_id, queue_capacity, input_lane)` per live-control channel, sorted
+    /// (#1254 D1 added the input-lane flag).
+    controls: Vec<(Box<str>, usize, bool)>,
     resources: BuiltinResourceEstimate,
 }
 
@@ -2097,10 +2108,16 @@ impl PreparedBuiltinsSession {
                 "$.builtins.processors",
             ));
         }
-        let mut actual_controls: Vec<(&str, usize)> = self
+        let mut actual_controls: Vec<(&str, usize, bool)> = self
             .track_controls
             .iter()
-            .map(|control| (control.track_id.as_ref(), control.producer.capacity()))
+            .map(|control| {
+                (
+                    control.track_id.as_ref(),
+                    control.producer.capacity(),
+                    control.input.is_some(),
+                )
+            })
             .collect();
         actual_controls.sort_unstable();
         let expected_tails = match expected_tails(session, &actual_controls) {
@@ -2139,7 +2156,7 @@ impl PreparedBuiltinsSession {
             .seal
             .controls
             .iter()
-            .map(|(track, capacity)| (track.as_ref(), *capacity))
+            .map(|(track, capacity, input_lane)| (track.as_ref(), *capacity, *input_lane))
             .eq(actual_controls)
         {
             diagnostics.push(diag(
@@ -2231,14 +2248,18 @@ impl PreparedBuiltinsSession {
                     // prepared parameters, and preparation already proved the domain.
                     let ramped = FaderMuteRampBuiltins::new(parameters)
                         .expect("preparation validated the ramped fader's gain domain");
-                    (
-                        Box::new(LiveControlInputProcessor {
+                    // #1254 D1: a fader-and-matrix channel has no input consumer, so its strip
+                    // binds the plain input section a strip without controls gets.
+                    let input_processor: Box<dyn GraphRuntimeProcessor> = match control.input {
+                        Some(input_control) => Box::new(LiveControlInputProcessor {
                             input,
-                            control: control
-                                .input
-                                .expect("a strip is banked on all three stages or on none"),
+                            control: input_control,
                             live: ChannelSymmetryWitness::SYMMETRIC,
                         }),
+                        None => Box::new(InputProcessor(input)),
+                    };
+                    (
+                        input_processor,
                         Box::new(LiveControlFaderProcessor {
                             fader: ramped,
                             control: control
@@ -3144,7 +3165,7 @@ fn processors_match(
 
 fn expected_tails(
     session: &CompiledSession,
-    sorted_controls: &[(&str, usize)],
+    sorted_controls: &[(&str, usize, bool)],
 ) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
     let model = session.normalized_model();
     let mut values: Vec<(Box<str>, BuiltinTail)> = Vec::with_capacity(model.strips().count());
@@ -3152,9 +3173,11 @@ fn expected_tails(
         let parameters =
             strip_parameters(&strip, (fader.db, fader.mute), u32::MAX).map_err(|_| ())?;
         let chain = BuiltinChain::new(session.sample_rate().0, parameters).map_err(|_| ())?;
+        // #1254 D1: only a live input lane makes the tail infinite (a live filter target can
+        // enable a filter); a fader-and-matrix channel keeps the chain's own tail.
         let tail = if sorted_controls
-            .binary_search_by(|(control, _)| control.cmp(&strip.id.as_str()))
-            .is_ok()
+            .binary_search_by(|(control, _, _)| control.cmp(&strip.id.as_str()))
+            .is_ok_and(|index| sorted_controls[index].2)
         {
             BuiltinTail::Infinite
         } else {
@@ -3413,6 +3436,15 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     // #1242 D2: lowering bakes each strip's VCA-effective fader, computed once, here, before the
     // phase-two allocation observation (strip `i` is entry `i`).
     let effective_faders = session.normalized_model().effective_strip_faders();
+    // The request index is a transient lookup, not retained storage, so it is built before the
+    // phase-two observation that compares retained allocations with the report (#1254 gate 3).
+    let mut control_capacity: BTreeMap<&str, (NonZeroUsize, bool)> = BTreeMap::new();
+    for control in controls {
+        control_capacity.insert(
+            control.track_id.as_str(),
+            (control.queue_capacity, control.input_lane),
+        );
+    }
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().strips().count();
@@ -3425,12 +3457,8 @@ fn prepare_session_builtins_with_live_controls_and_policy(
     let mut strips = Vec::with_capacity(track_count);
     let mut bank_inputs = Vec::with_capacity(track_count);
     let mut tails = Vec::with_capacity(track_count);
-    let mut control_capacity: BTreeMap<&str, NonZeroUsize> = BTreeMap::new();
-    for control in controls {
-        control_capacity.insert(control.track_id.as_str(), control.queue_capacity);
-    }
     let mut track_controls = Vec::with_capacity(controls.len());
-    let mut control_seal: Vec<(Box<str>, usize)> = Vec::with_capacity(controls.len());
+    let mut control_seal: Vec<(Box<str>, usize, bool)> = Vec::with_capacity(controls.len());
     for (strip, fader) in session.normalized_model().strips().zip(&effective_faders) {
         let parameters = strip_parameters(
             &strip,
@@ -3448,7 +3476,10 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         let bank_input = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted bank coefficients")
             .into_input_builtins();
-        let tail = if control_capacity.contains_key(strip.id.as_str()) {
+        let tail = if control_capacity
+            .get(strip.id.as_str())
+            .is_some_and(|(_, input_lane)| *input_lane)
+        {
             BuiltinTail::Infinite
         } else {
             tail
@@ -3464,16 +3495,21 @@ fn prepare_session_builtins_with_live_controls_and_policy(
         };
         let control = match control_capacity.get(strip.id.as_str()) {
             None => None,
-            Some(capacity) => {
+            Some(&(capacity, input_lane)) => {
                 let (producer, control) =
-                    bounded_spsc::<TrackControlRecord>(*capacity, QueueGeneration(0))
+                    bounded_spsc::<TrackControlRecord>(capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
                 let (fader_producer, fader_control) =
-                    bounded_spsc::<TrackFaderRecord>(*capacity, QueueGeneration(0))
+                    bounded_spsc::<TrackFaderRecord>(capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
-                let (input_producer, input_control) =
-                    bounded_spsc::<TrackInputRecord>(*capacity, QueueGeneration(0))
-                        .map_err(|_| control_failure())?;
+                let (input_producer, input_control) = if input_lane {
+                    let (producer, consumer) =
+                        bounded_spsc::<TrackInputRecord>(capacity, QueueGeneration(0))
+                            .map_err(|_| control_failure())?;
+                    (Some(producer), Some(consumer))
+                } else {
+                    (None, None)
+                };
                 // The ramped fader is validated here rather than at binding, so a declared
                 // `fader_db` outside the live domain is a preparation diagnostic on the track that
                 // carries it -- the same failure, at the same place, as before the strip banked.
@@ -3490,9 +3526,13 @@ fn prepare_session_builtins_with_live_controls_and_policy(
                     fader: fader_producer,
                     input: input_producer,
                 });
-                control_seal.push((Box::<str>::from(strip.id.as_str()), capacity.get()));
+                control_seal.push((
+                    Box::<str>::from(strip.id.as_str()),
+                    capacity.get(),
+                    input_lane,
+                ));
                 Some(StripControlConsumers {
-                    input: Some(input_control),
+                    input: input_control,
                     fader: Some(fader_control),
                     matrix: Some(control),
                 })
@@ -3645,7 +3685,7 @@ fn resource_plan(
     // because they are per-track processor storage rather than meter storage: the producer vector,
     // its seal, and one bounded ring per requested track.
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
-    add_vector_layout::<(Box<str>, usize)>(&mut processor, controls.len())?;
+    add_vector_layout::<(Box<str>, usize, bool)>(&mut processor, controls.len())?;
     for control in controls {
         // Three bounded rings per controlled track at the same depth: #137 D1's matrix channel,
         // #140 B's fader/mute channel and #210 phase 3's input trim/polarity channel. All three
@@ -3667,14 +3707,25 @@ fn resource_plan(
                     &control_path(control),
                 )
             })?;
-        let input_queue = bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity)
-            .map_err(|_| {
-                diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &control_path(control),
-                )
-            })?;
-        for queue in [matrix_queue, fader_queue, input_queue] {
+        // #1254 D1: the input ring exists, and is charged, only when the request asked for it.
+        let input_queue = if control.input_lane {
+            Some(
+                bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity).map_err(
+                    |_| {
+                        diag(
+                            "builtin.resource.arithmetic_overflow",
+                            &control_path(control),
+                        )
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        for queue in [Some(matrix_queue), Some(fader_queue), input_queue]
+            .into_iter()
+            .flatten()
+        {
             processor
                 .add_layout(
                     core::alloc::Layout::from_size_align(
@@ -6338,6 +6389,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                input_lane: true,
             })
             .collect::<Vec<_>>();
         let meter_requests = post_fader_barrier.then(|| MeterRequest {
@@ -6743,6 +6795,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(8).expect("queue"),
+                input_lane: true,
             })
             .collect::<Vec<_>>();
         let meter = post_fader_observed.then(|| MeterRequest {
@@ -7255,6 +7308,124 @@ mod tests {
                 "matrix owner {owner}"
             );
         }
+    }
+
+    /// A two-track graph whose strips carry fader-and-matrix channels only (`input_lane: false`,
+    /// #1254 D1), prepared, lowered and bound at `backend`.
+    fn input_free_pair_graph(backend: Backend) -> PreparedBuiltinsGraphBound {
+        let n = 2;
+        let compiled = n_track_session_with_symmetry(n, false);
+        let controls = (0..n)
+            .map(|index| TrackControlRequest {
+                track_id: track_name(index),
+                queue_capacity: NonZeroUsize::new(8).expect("queue"),
+                input_lane: false,
+            })
+            .collect::<Vec<_>>();
+        let builtins =
+            prepare_session_builtins_with_live_controls(&compiled, &[], &controls, caps())
+                .expect("prepared builtins");
+        assert!(builtins.validate_for_session(&compiled).0.is_empty());
+        let (mut graph, levels) = track_graph(n);
+        let classes = SessionPoolClasses::from_session(&compiled);
+        let scalar_resource = builtins
+            .graph_scalar_owner_resource(backend, &levels, &classes)
+            .expect("checked scalar owner resource");
+        graph
+            .estimate
+            .checked_add_scalar_owners(scalar_resource)
+            .expect("fixture scalar owner estimate");
+        let emitted_op_count = levels.iter().map(|level| level.nodes.len() as u64).sum();
+        graph
+            .estimate
+            .checked_add_runtime_metadata(
+                graph::GraphRuntimeMetadataResourceEstimate::checked_for(emitted_op_count)
+                    .expect("fixture runtime metadata estimate"),
+            )
+            .expect("fixture runtime metadata estimate fold");
+        let artifact =
+            builtins.into_graph_artifact_with_banks(graph, (), backend, &levels, &classes);
+        let envelope = artifact.graph.envelope;
+        let mut nodes = (0..n)
+            .map(|index| {
+                GraphNodeBinding::new(
+                    GraphNodeId::TrackStage {
+                        track_id: StableGraphId::parse(&track_name(index)).expect("track"),
+                        stage: TrackStage::Input,
+                    },
+                    Box::new(SeededInput {
+                        seed: 0x1254_0000 ^ index as u64,
+                        symmetric: false,
+                        nonfinite: false,
+                    }) as Box<dyn GraphRuntimeProcessor>,
+                )
+            })
+            .collect::<Vec<_>>();
+        nodes.push(GraphNodeBinding::new(
+            GraphNodeId::Output {
+                output_id: StableGraphId::parse("main-out").expect("output"),
+            },
+            Box::new(HarnessSink) as Box<dyn GraphRuntimeProcessor>,
+        ));
+        artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code))
+    }
+
+    /// Issue #1254 gate 1(d): a fader-and-matrix strip prepares under the scalar oracle (which
+    /// binds the plain input section) and under the native banks, and the two render the same
+    /// live mute and matrix bit for bit.
+    #[test]
+    fn input_free_live_strips_match_between_the_scalar_oracle_and_the_banks() {
+        let mut outputs = Vec::new();
+        for backend in [Backend::Scalar, PAIR_GRAPH_BACKEND] {
+            let mut bound = input_free_pair_graph(backend);
+            assert_eq!(bound.track_controls.len(), 2);
+            assert!(
+                bound
+                    .track_controls
+                    .iter()
+                    .all(|control| control.input.is_none())
+            );
+            bound.track_controls[0]
+                .fader
+                .try_push(TrackFaderRecord::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: true,
+                    smoothing_samples: 0,
+                })
+                .expect("fader queue room");
+            bound.track_controls[1]
+                .producer
+                .try_push(TrackControlRecord {
+                    matrix: Matrix2x2 {
+                        ll: 0.5,
+                        lr: 0.25,
+                        rl: -0.5,
+                        rr: 0.75,
+                    },
+                    smoothing_samples: 0,
+                })
+                .expect("matrix queue room");
+            let mut bits = Vec::new();
+            for block in 0..4_u64 {
+                bits.extend(render_bound(&mut bound, block * HARNESS_QUANTUM as u64));
+            }
+            outputs.push(bits);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        let mut quiet = input_free_pair_graph(PAIR_GRAPH_BACKEND);
+        let quiet_bits: Vec<u32> = (0..4_u64)
+            .flat_map(|block| render_bound(&mut quiet, block * HARNESS_QUANTUM as u64))
+            .collect();
+        assert_ne!(
+            outputs[1], quiet_bits,
+            "the records reached the rendered output"
+        );
     }
 
     /// #443's compact product fixture reaches the genuine scalar graph selection seam. The
@@ -9269,6 +9440,8 @@ mod tests {
                 .find(|control| control.track_id.as_ref() == pair_graph_tail_id())
                 .expect("selected tail controls")
                 .input
+                .as_mut()
+                .expect("input lane requested")
                 .try_push(command)
                 .unwrap();
         }
@@ -10986,6 +11159,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("nonzero queue"),
+                input_lane: true,
             })
             .collect::<Vec<_>>();
         let collect = |prepared: PreparedBuiltinsSession| {
@@ -11053,6 +11227,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("control queue"),
+                input_lane: true,
             })
             .collect::<Vec<_>>();
         let collect_delivery = |prepared: PreparedBuiltinsSession| {
@@ -11105,6 +11280,7 @@ mod tests {
             .map(|index| TrackControlRequest {
                 track_id: track_name(index),
                 queue_capacity: NonZeroUsize::new(4).expect("queue"),
+                input_lane: true,
             })
             .collect::<Vec<_>>();
         let (_, levels) = track_graph(3);
@@ -11644,6 +11820,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: "vocal".to_owned(),
                 queue_capacity: NonZeroUsize::new(1).expect("queue"),
+                input_lane: true,
             }],
             caps(),
         )
@@ -12516,6 +12693,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: track.clone(),
                 queue_capacity: depth,
+                input_lane: true,
             }],
             caps(),
         )
@@ -12548,10 +12726,12 @@ mod tests {
                 TrackControlRequest {
                     track_id: track.clone(),
                     queue_capacity: depth,
+                    input_lane: true,
                 },
                 TrackControlRequest {
                     track_id: track.clone(),
                     queue_capacity: depth,
+                    input_lane: true,
                 },
             ],
             caps(),
@@ -12572,6 +12752,7 @@ mod tests {
             &[TrackControlRequest {
                 track_id: "no-such-track".to_owned(),
                 queue_capacity: depth,
+                input_lane: true,
             }],
             caps(),
         )

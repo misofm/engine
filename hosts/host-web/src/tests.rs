@@ -4234,7 +4234,10 @@ fn late_mixed_effect_refusal_preserves_observation_queue_solo_and_wire_index() {
                     [
                         (owner.producer.success_count(), owner.producer.full_count()),
                         (owner.fader.success_count(), owner.fader.full_count()),
-                        (owner.input.success_count(), owner.input.full_count()),
+                        {
+                            let input = owner.input.as_ref().expect("browser input lane");
+                            (input.success_count(), input.full_count())
+                        },
                     ]
                 })
                 .collect::<Vec<_>>(),

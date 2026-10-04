@@ -130,12 +130,13 @@ pub use engine::realtime::{
 };
 pub use live_route_state::{LiveRoute, LiveRouteMuteFollow, LiveRouteState, LiveRouteStateError};
 pub use prepare::{
-    HostLiveControlHandles, HostLiveControlRequest, HostMeterRequest, HostPrepareCaps,
-    HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
+    HostLiveControlHandles, HostLiveControlRequest, HostLiveLanes, HostMeterRequest,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, PreparedHost, SOURCE_STALL_TOLERANCE_MS,
     compile_host_model, compile_host_session, count_effects, default_source_ring_frames,
     parse_host_session, prepare_host_runtime, prepare_host_runtime_between_render_calls,
     prepare_host_runtime_with_live_controls, prepare_host_runtime_with_live_controls_and_spectrum,
     prepare_host_runtime_with_live_controls_and_spectrum_collection,
+    prepare_host_runtime_with_live_lanes,
     prepare_host_runtime_with_selected_meters_between_render_calls,
     prepare_host_runtime_with_spectrum, prepare_host_runtime_with_spectrum_collection,
     prepare_host_session, prepare_host_session_with_live_controls,

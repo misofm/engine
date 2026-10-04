@@ -298,6 +298,8 @@ fn render(document: &str, tap: MeterTap, live: Option<&LiveWrite>, forced_off: b
         if let Some(write) = live.filter(|write| write.block == block) {
             handles.strip_controls[write.track]
                 .input
+                .as_mut()
+                .expect("input lane")
                 .try_push(write.record)
                 .expect("bounded queue room");
         }

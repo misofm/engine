@@ -297,7 +297,10 @@ pub struct HostLiveControlRequest {
     ///
     /// Issue #140 turns this into the depth of *every* live channel a strip owns (a submix too,
     /// issue #1211 D1): the matrix/pan queue #137 shipped, the fader/mute queue, and one queue
-    /// per prepared effect instance. Each
+    /// per prepared effect instance. Which of them are attached is the caller's [`HostLiveLanes`]
+    /// (issue #1254 D2): the matrix/pan and fader/mute queues always; the input queue, the effect
+    /// queues and the route queues only under [`HostLiveLanes::ALL`], which every entry except
+    /// [`prepare_host_runtime_with_live_lanes`] uses. Each
     /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
     /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
@@ -344,6 +347,37 @@ impl Default for HostLiveControlRequest {
     }
 }
 
+/// Which live lanes, beyond every strip's fader/mute and matrix/pan lanes, a live-control
+/// preparation attaches (issue #1254 D2).
+///
+/// It matters only when [`HostLiveControlRequest::control_queue_depth`] is `Some`; with `None`
+/// nothing is attached whatever it says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostLiveLanes {
+    /// Each strip's input trim/polarity/filter lane. It makes the strip's builtin tail infinite,
+    /// because a live filter target can enable a filter the session left off.
+    pub strip_input: bool,
+    /// One lane per prepared strip effect instance; observation taps ride these.
+    pub effects: bool,
+    /// One lane per route into a submix; a live route loses the route fold.
+    pub routes: bool,
+}
+
+impl HostLiveLanes {
+    /// Every lane: what every entry other than [`prepare_host_runtime_with_live_lanes`] attaches.
+    pub const ALL: Self = Self {
+        strip_input: true,
+        effects: true,
+        routes: true,
+    };
+    /// Only each strip's fader/mute and matrix/pan lanes (the C ABI's selection, #1256).
+    pub const FADER_AND_MATRIX: Self = Self {
+        strip_input: false,
+        effects: false,
+        routes: false,
+    };
+}
+
 /// One caller-selected engine meter observer. Ordering is retained in returned meter handles.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostMeterRequest {
@@ -375,9 +409,11 @@ pub struct HostLiveControlHandles {
     /// (issue #1211 D1); empty when no channel was requested. A host's track lanes are
     /// `strip_controls[..track_count]`.
     ///
-    /// Each carries all three of a strip's builtin channels: the matrix/pan queue (#137 D1), the
-    /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3). A submix's
-    /// producer carries the submix ID in `track_id`.
+    /// Each carries a strip's builtin channels: always the matrix/pan queue (#137 D1) and the
+    /// fader/mute queue (#140 B), and the input trim/polarity queue (#210 phase 3) only when
+    /// [`HostLiveLanes::strip_input`] was set -- under [`HostLiveLanes::ALL`], every entry but
+    /// [`prepare_host_runtime_with_live_lanes`]. With [`HostLiveLanes::FADER_AND_MATRIX`] its
+    /// `input` is `None`. A submix's producer carries the submix ID in `track_id`.
     pub strip_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared strip effect instance (#140 A); empty when no channel was
     /// requested. A submix strip's effects get one exactly as a track's do (issue #1207 D5), and
@@ -595,6 +631,36 @@ pub fn prepare_host_runtime_with_live_controls(
     )
 }
 
+/// Prepare a host whose live controls attach only the selected lanes (issue #1254 D2), with
+/// `Concurrent` delivery like [`prepare_host_runtime_with_live_controls`].
+///
+/// With `live_controls.control_queue_depth` set, every strip always gets its fader/mute and
+/// matrix/pan lanes; `lanes` decides whether it also gets the input lane, whether each effect
+/// instance gets one, and whether each route into a submix gets one. [`HostLiveLanes::ALL`] is
+/// exactly [`prepare_host_runtime_with_live_controls`]. [`HostLiveLanes::FADER_AND_MATRIX`] leaves
+/// every strip's builtin tail at its chain's own value (only a live input lane can enable a
+/// filter), allocates no effect or route ring, and keeps every route's fold. Observation taps ride
+/// the effect lanes, so `observation_taps > 0` with `effects: false` is refused with
+/// `host.observation.live_controls`.
+pub fn prepare_host_runtime_with_live_lanes(
+    compiled: &CompiledSession,
+    caps: &HostPrepareCaps,
+    live_controls: &HostLiveControlRequest,
+    lanes: HostLiveLanes,
+) -> Result<(PreparedHost, HostLiveControlHandles), PrepareDiagnostics> {
+    let (prepared, handles, _) = prepare_host_runtime_with_live_controls_policy_and_spectrum(
+        compiled,
+        caps,
+        live_controls,
+        None,
+        false,
+        Backend::current(),
+        None,
+        lanes,
+    )?;
+    Ok((prepared, handles))
+}
+
 /// Prepare a host with live-control handles and one selected, fixed-size spectrum observer.
 ///
 /// Meter configuration remains part of [`HostLiveControlRequest`], so this entry keeps the
@@ -613,6 +679,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(spectrum)),
+        HostLiveLanes::ALL,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Single(capture) => capture,
@@ -645,6 +712,7 @@ pub fn prepare_host_runtime_with_live_controls_and_spectrum_collection(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Collection(spectrum)),
+        HostLiveLanes::ALL,
     )?;
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
         PreparedSpectrumCapture::Collection(capture) => capture,
@@ -748,6 +816,7 @@ fn prepare_host_runtime_with_live_controls_policy(
         between_render_calls,
         backend,
         None,
+        HostLiveLanes::ALL,
     )?;
     Ok((prepared, handles))
 }
@@ -766,6 +835,7 @@ pub fn prepare_host_runtime_with_spectrum(
         false,
         Backend::current(),
         Some(SpectrumPreparationRequest::Single(request)),
+        HostLiveLanes::ALL,
     )?;
     debug_assert!(handles.strip_controls.is_empty() && handles.meters.is_empty());
     let capture = match capture.ok_or_else(|| resource("host.spectrum.capture"))? {
@@ -802,6 +872,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     between_render_calls: bool,
     backend: Backend,
     spectrum_request: Option<SpectrumPreparationRequest<'_>>,
+    lanes: HostLiveLanes,
 ) -> Result<
     (
         PreparedHost,
@@ -940,10 +1011,10 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // host that asks for no live controls attaches nothing and the plan renders the byte-identical
     // live-control-free path.
     let effect_controls: Vec<EffectControlProducer> = match live_controls.control_queue_depth {
-        None => Vec::new(),
-        Some(depth) => {
+        Some(depth) if lanes.effects => {
             attach_effect_live_controls(&mut effects, depth).map_err(effect_diagnostics)?
         }
+        _ => Vec::new(),
     };
     // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
     // only alongside a control channel: a subscription rides the effect's own command queue, so
@@ -956,7 +1027,8 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     };
     let effect_observations: Vec<EffectObservationHandle> = match live_controls.observation_taps {
         0 => Vec::new(),
-        taps if live_controls.control_queue_depth.is_none() => {
+        // Issue #1254 D2: without effect lanes there is no queue for a subscription to ride.
+        taps if live_controls.control_queue_depth.is_none() || !lanes.effects => {
             let _ = taps;
             return Err(shape("host.observation.live_controls"));
         }
@@ -989,6 +1061,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
             .map(|strip| TrackControlRequest {
                 track_id: strip.to_string(),
                 queue_capacity: depth,
+                input_lane: lanes.strip_input,
             })
             .collect(),
     };
@@ -1126,6 +1199,7 @@ fn prepare_host_runtime_with_live_controls_policy_and_spectrum(
     // control channel nothing is attached and the plan binds exactly what it bound before.
     let graph_route_controls = match live_controls.control_queue_depth {
         None => Vec::new(),
+        Some(_) if !lanes.routes => Vec::new(),
         Some(depth) => artifact
             .attach_route_live_controls(depth)
             .map_err(|error| match error {

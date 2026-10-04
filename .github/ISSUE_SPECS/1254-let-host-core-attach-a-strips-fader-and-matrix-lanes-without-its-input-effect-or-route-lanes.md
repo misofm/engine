@@ -216,3 +216,95 @@ Land them one at a time and rebase.
 - "Bit-identical" gates are hard stops.
 - A test that greps source or prose is refused. A superseded test is deleted in the same PR.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, base `b5489f00d`)
+
+**Implementation.**
+
+- builtins-compiler: `TrackControlRequest::input_lane`; `TrackControlProducer::input` is
+  `Option`. With `false` no input ring is created or charged, the strip's input consumer is
+  `None` (the bank lane already took `Option`), the tail is `chain.tail()` in both the prepared
+  tails and `expected_tails`, and the control seal is `(track, capacity, input_lane)`, compared
+  against the producers' `input.is_some()`. The scalar oracle's `strip_bindings` binds the plain
+  `InputProcessor` for a strip with no input consumer. Every existing literal passes `true`.
+- One change the gate forced: the request index (`control_capacity`, a `BTreeMap`) is built
+  before `TestPhaseTwoAllocationGuard::begin` instead of after it. It is a transient lookup, not
+  retained storage; with any control request its node was observed as an uncharged phase-two
+  allocation, which the new exact-charge case (gate 3) caught. No existing case prepared controls
+  under that observation. Production builds are unaffected (the guard is test-support only).
+- host-core: `HostLiveLanes { strip_input, effects, routes }` with `ALL` and `FADER_AND_MATRIX`,
+  re-exported at the crate root; `prepare_host_runtime_with_live_lanes` (Concurrent delivery).
+  The private core function takes the selection; every other entry passes `ALL`. Effect lanes,
+  the strip input lane and the route lanes are gated; `observation_taps > 0` with
+  `effects: false` is refused with `host.observation.live_controls`. Docs of
+  `control_queue_depth` and `strip_controls` say which lanes each selection attaches.
+- host-web: the two `.input` sites treat `None` as an unaddressable slot (`queue_available`
+  returns `None` -> `COMMAND_REASON_UNSUPPORTED_KIND`; `push` returns `Err`), never a panic.
+- **Outside the authorized paths (minimum, forced by compilation):**
+  `hosts/host-web/src/tests.rs` (one queue-counter closure reads `owner.input` through
+  `as_ref().expect(..)`). `crates/graph-compiler/src/lib.rs` is covered by "any other
+  `TrackControlRequest` literal" (4 literals get `input_lane: true`).
+
+**New tests and their test value.**
+
+- `crates/host-core/tests/live_lanes.rs` (the plain session is the EQ fixture with an empty
+  console, no inserts, filters off, and its last track routed through a unity submix `bus`, so it
+  has one route into a submix):
+  - `only_the_plain_session_has_a_finite_lanes_free_tail` -- the precondition: plain is
+    `Finite`, EQ is `Infinite`.
+  - `fader_and_matrix_lanes_attach_nothing_else_and_render_the_lanes_free_bits` (1a) -- red if
+    a fader-and-matrix request still attaches the input lane (tail becomes infinite), attaches
+    effect or route lanes, or changes a rendered bit. It also checks `ALL` on the plain session
+    gives `input: Some`, one route lane and an infinite tail.
+  - `fader_and_matrix_lanes_render_as_the_session_with_their_values_baked` (1b) -- red if the
+    lanes are attached but no longer drained by the banks. Mute on strip 2, matrix
+    `[0.5 0.25; -0.5 0.75]` on strip 5, both smoothing 0, versus the baked session; it also
+    asserts the baked edits change the output.
+  - `observation_without_effect_lanes_is_refused` (1c) -- red if an observation tap is attached
+    without the effect queue it rides.
+- `builtins-compiler` unit test
+  `input_free_live_strips_match_between_the_scalar_oracle_and_the_banks` (1d) -- red if the
+  scalar oracle still expects an input consumer (it panics) or binds the strip differently from
+  the bank. It also asserts the records moved the output.
+- `crates/builtins-compiler/tests/allocation_tracker.rs`
+  `live_control_rings_are_charged_exactly_as_allocated_with_and_without_the_input_lane` (gate 3)
+  -- red if an unrequested input ring is still allocated, or is still charged; it also checks
+  `input_lane: true` and that each prepared artifact passes its own seal.
+
+**Mutation runs** (each applied, test run, reverted):
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | host-core passes `input_lane: true` regardless of `lanes.strip_input` | red: 1a (`input.is_none()`) |
+| M1b | builtins tail rule ignores `input_lane` (`.is_some()` / `.is_ok()` in both prepared tails and `expected_tails`) | red: 1a, `left: Infinite right: Finite(0)` |
+| M2 | effect lanes attached regardless of `lanes.effects` | red: 1a (`effect_controls.is_empty()`) |
+| M3 | route lanes attached regardless of `lanes.routes` | red: 1a (`route_controls.is_empty()`) |
+| M4 | the fader bank stops taking its consumer (`.and_then(\|_\| None)`) | red: 1b |
+| M5 | observation refusal drops `\|\| !lanes.effects` | red: 1c |
+| M6 | scalar oracle panics on a missing input consumer (the pre-change `expect`) | red: 1d |
+| M7 | input ring charged unconditionally | red: gate 3 (layouts differ) |
+| M8 | input ring created unconditionally (`input_lane = true` at creation) | red: gate 3 (layouts differ) |
+
+**Gates (all from the head of this attempt, x86-64-v3 host).**
+
+- Gate 1: `cargo test -p host-core --features test-support --test live_lanes` 4 passed;
+  1(d) and gate 3 pass.
+- Gate 2: the workspace test command: exit 0, 116 result lines, 1300 passed, 0 failed.
+  `cargo test --locked -p builtins-compiler --no-run`: ok.
+  `cargo test --locked --release -p audit -p bench -p console-workload`: ok.
+- Gate 4: AudioWorklet module SHA-256, base `b5489f00d`:
+  `6eb292980c2f31a7a2b86ef8388a17b1f0b5efa1b70544ec1a955d1bd207188f`; this attempt:
+  `04ce0d44483b5ebce30619c3abcf7991e9dd0d4d69719c3df30def529b3e6f52` -- changed, as expected.
+  `check-web-audioworklet.sh --without-metadata-regeneration`: passed.
+  `check-browser-expected-resources.py --artifacts`: digests and rows agree, within budget.
+  `test-web-audioworklet.sh`: passed.
+- Gate 5: `cargo fmt --all -- --check` ok; clippy `-D warnings` ok; `cargo doc` with
+  `-D warnings` ok; host-core, realtime and workspace check/test policy scripts ok;
+  `check-cross-targets.sh` PASS (iOS `memset_pattern16` expected failures unchanged, #1018).
+  AArch64 (`run-aarch64-tests.sh debug`): not run locally, CI-only.
+- Batch rules: `check-capi-abi.sh` ok; `audit capi`: 100,000 calls, 0 allocations, 0 syscalls,
+  0 violations.
+- Lesson (a): no session, request or wire field changed, so no browser qualification stub needs
+  one. Lesson (c): no new CI command or test-file pattern.

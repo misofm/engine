@@ -215,6 +215,8 @@ fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
         .get_mut(track)
         .expect("a control channel for the addressed track")
         .input
+        .as_mut()
+        .expect("input lane")
         .try_push(record)
         .expect("bounded queue room");
 }

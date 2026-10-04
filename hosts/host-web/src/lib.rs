@@ -1770,9 +1770,12 @@ impl ReadyOwnership {
         }
         if slot < tracks * 3 {
             return u32::try_from(
+                // #1254 D4: a strip prepared without its input lane is unaddressable here, like an
+                // absent effect lane; the browser always prepares with it, so this never fires.
                 self.controls
                     .get(slot - tracks * 2)?
                     .input
+                    .as_ref()?
                     .available_capacity(),
             )
             .ok();
@@ -1812,7 +1815,8 @@ impl ReadyOwnership {
             }
             AdmittedCommand::Input(record) => {
                 let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
-                producer.input.try_push(record).map_err(|_| ())
+                let input = producer.input.as_mut().ok_or(())?;
+                input.try_push(record).map_err(|_| ())
             }
             AdmittedCommand::Route(record) => {
                 let route = (slot - tracks * 3)
