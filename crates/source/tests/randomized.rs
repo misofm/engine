@@ -434,6 +434,9 @@ fn schedule(seed: u64, reach: &mut Reach) {
                         Seek::NotIncreasing
                     }
                     Err(SourceSeekError::Backpressure { .. }) => Seek::Backpressure,
+                    Err(SourceSeekError::AnchorUnaligned) => {
+                        unreachable!("{context}: a plain seek has no anchor")
+                    }
                 };
                 let expected = model.seek(target, frame);
                 assert_eq!(

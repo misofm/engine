@@ -24,7 +24,7 @@ mod successor;
 
 use engine::realtime::{CarryOutcome, SwapOutcome};
 use graph_compiler::Backend;
-use host_core::{PrepareRejection, SourceControlError, SourceSubmission};
+use host_core::{PrepareRejection, SourceControlError, SourceControlSet, SourceSubmission};
 use session::{RouteSource, SessionModel, Source, StableId, parse_session_json};
 use successor::{
     BLOCKS, Feed, QUANTUM, SWAP_BLOCK, Session, Successor, caps, first_difference, reference_run,
@@ -357,4 +357,352 @@ fn the_swap_block_allocates_and_frees_nothing() {
         assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
         assert_eq!(block.audit, (0, 0), "block {index}: render audit");
     }
+}
+
+// Issue #1274 (slice 5 of #1269): an anchored seek, `SourceControlSet::seek_at`, holds a source's
+// new generation until the block that starts at its anchor sample on the plan's absolute render
+// clock, which the swap continues.
+
+/// The source a structural edit adds in the anchored-seek cases.
+const ADDED_SOURCE: &str = "added-source";
+/// The audible track on [`ADDED_SOURCE`].
+const ADDED_TRACK: &str = "added";
+
+/// Session A with one track, `eq0`, on [`SOURCE`].
+fn one_track_session() -> SessionModel {
+    let mut model = session_a();
+    remove_track(&mut model, "eq1");
+    model
+}
+
+/// [`one_track_session`] plus [`ADDED_SOURCE`], an audible track on it and its route.
+fn added_source_session() -> SessionModel {
+    let mut model = one_track_session();
+    add_source(&mut model, ADDED_SOURCE);
+    add_track(&mut model, "eq0", ADDED_TRACK, ADDED_SOURCE, false);
+    model
+}
+
+/// Submit `feed`'s PCM for blocks `blocks` to `id` at `generation`, from source frame
+/// `blocks.start * QUANTUM` on.
+fn submit_blocks(
+    sources: &mut SourceControlSet,
+    id: &str,
+    feed: &Feed,
+    generation: u64,
+    blocks: core::ops::Range<usize>,
+) {
+    for block in blocks {
+        let range = block * QUANTUM..(block + 1) * QUANTUM;
+        sources
+            .submit(
+                id.as_bytes(),
+                SourceSubmission {
+                    generation,
+                    start_frame: range.start as u64,
+                    sample_rate_hz: 48_000,
+                    planes: &[&feed.planes[0][range.clone()], &feed.planes[1][range]],
+                    frames: QUANTUM as u32,
+                    end_of_region: false,
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("{id} generation {generation} block {block}: {error:?}")
+            });
+    }
+}
+
+/// A reference feed for `id` whose block `b` carries `feed`'s block `source_block(b)`, or exact
+/// zeros where that is `None`. [`reference_run`] submits it at generation 1 from frame 0.
+fn spliced(id: &'static str, feed: &Feed, source_block: impl Fn(usize) -> Option<usize>) -> Feed {
+    let plane = |channel: usize| {
+        (0..BLOCKS)
+            .flat_map(|block| match source_block(block) {
+                Some(from) => feed.planes[channel][from * QUANTUM..(from + 1) * QUANTUM].to_vec(),
+                None => vec![0.0; QUANTUM],
+            })
+            .collect::<Vec<f32>>()
+    };
+    Feed {
+        id,
+        planes: [plane(0), plane(1)],
+    }
+}
+
+fn render_block(owner: &mut engine::realtime::RealtimePlanOwner) -> successor::Block {
+    use bench_support::alloc as bench_alloc;
+    use engine::realtime::{PlanarBufferMut, RenderIo, audit};
+    let mut output = [f32::NAN; QUANTUM * 2];
+    let sample = owner.next_absolute_sample();
+    audit::reset();
+    let mark = bench_alloc::current_thread_counters();
+    let report = owner
+        .render_contiguous(
+            RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 2, QUANTUM, QUANTUM).expect("output"),
+            },
+            sample,
+        )
+        .unwrap_or_else(|error| panic!("render: {error:?}"));
+    let delta = bench_alloc::current_thread_delta_since(mark);
+    let snapshot = audit::snapshot();
+    successor::Block {
+        bits: output.iter().map(|sample| sample.to_bits()).collect(),
+        swap: report.swap,
+        carry: report.carry,
+        allocator: (delta.allocations, delta.reallocations, delta.deallocations),
+        audit: (snapshot.allocations, snapshot.deallocations),
+    }
+}
+
+type Exchange = (
+    engine::realtime::PlanPublisher,
+    engine::realtime::RealtimePlanOwner,
+    engine::realtime::PlanRetirer,
+);
+
+fn exchange(plan: engine::realtime::PreparedRenderPlan) -> Exchange {
+    use core::num::NonZeroUsize;
+    engine::realtime::plan_exchange(
+        plan,
+        engine::realtime::PlanExchangeConfig {
+            publication_capacity: NonZeroUsize::MIN,
+            retirement_capacity: NonZeroUsize::MIN,
+        },
+    )
+    .unwrap_or_else(|_| panic!("plan exchange"))
+}
+
+/// Render [`one_track_session`] fed `kept` for [`SWAP_BLOCK`] blocks, swap in
+/// [`added_source_session`] as its successor, and render to [`BLOCKS`]. Before block
+/// `seek_before` (at or after the swap block) renders, `seek_at(ADDED_SOURCE, 2, A, A)` with
+/// `A = anchor_block * QUANTUM`, then submit `added` at generation 2 from frame `A` to the end.
+fn anchored_swap_run(
+    kept: &Feed,
+    added: &Feed,
+    anchor_block: usize,
+    seek_before: usize,
+    backend: Backend,
+) -> Vec<successor::Block> {
+    assert!(seek_before >= SWAP_BLOCK);
+    let a = Session::compile(one_track_session());
+    let b = Session::compile(added_source_session());
+    let predecessor = a.prepare(backend);
+    let mut a_sources = predecessor.sources;
+    let inventory = predecessor.inventory;
+    let (mut publisher, mut owner, _retirer) = exchange(predecessor.plan);
+    let mut blocks = Vec::with_capacity(BLOCKS);
+    submit_blocks(&mut a_sources, SOURCE, kept, 1, 0..1);
+    for block in 0..SWAP_BLOCK {
+        submit_blocks(&mut a_sources, SOURCE, kept, 1, block + 1..block + 2);
+        blocks.push(render_block(&mut owner));
+    }
+    let mut prepared = b
+        .prepare_successor(&inventory, &a.model, &caps(), backend)
+        .unwrap_or_else(|failure| panic!("successor: {failure:?}"));
+    assert_eq!(prepared.sources.adopt_persisting(&mut a_sources), 1);
+    let mut b_sources = prepared.sources;
+    publisher
+        .reserve_replacement(prepared.plan)
+        .unwrap_or_else(|_| panic!("reserve the successor"))
+        .commit();
+    let anchor = (anchor_block * QUANTUM) as u64;
+    for block in SWAP_BLOCK..BLOCKS {
+        if block + 1 < BLOCKS {
+            submit_blocks(&mut b_sources, SOURCE, kept, 1, block + 1..block + 2);
+        }
+        if block == seek_before {
+            b_sources
+                .seek_at(ADDED_SOURCE.as_bytes(), 2, anchor, anchor)
+                .expect("anchored seek");
+            submit_blocks(&mut b_sources, ADDED_SOURCE, added, 2, anchor_block..BLOCKS);
+        }
+        blocks.push(render_block(&mut owner));
+    }
+    assert_eq!(blocks[SWAP_BLOCK].carry, CarryOutcome::Carried);
+    blocks
+}
+
+/// Gate 1 of #1274, at one width: the anchor is three blocks past the next render and the ring is
+/// primed from it at once.
+fn future_anchor_starts_the_added_stem_on_its_block(backend: Backend) {
+    const ANCHOR_BLOCK: usize = SWAP_BLOCK + 4;
+    let kept = Feed::new(SOURCE, 1);
+    let added = Feed::new(ADDED_SOURCE, 2);
+    let b = Session::compile(added_source_session());
+    let reference_added = spliced(ADDED_SOURCE, &added, |block| {
+        (block >= ANCHOR_BLOCK).then_some(block)
+    });
+    let reference = reference_run(&b, &[&kept, &reference_added], backend);
+    let run = anchored_swap_run(&kept, &added, ANCHOR_BLOCK, SWAP_BLOCK + 1, backend);
+    assert_eq!(
+        first_difference(&run, &reference),
+        None,
+        "{backend:?}: the added stem starts exactly at its anchor block"
+    );
+    // The oracle sees the stem: without it the anchor block differs.
+    let silent = reference_run(
+        &b,
+        &[&kept, &spliced(ADDED_SOURCE, &added, |_| None)],
+        backend,
+    );
+    assert_eq!(first_difference(&silent, &reference), Some(ANCHOR_BLOCK));
+}
+
+/// Gate 1 of #1274 at eight lanes. Red if a held seek discards the primed generation (the stem is
+/// silent at the anchor) or applies when observed (the stem starts early).
+#[cfg(target_feature = "avx2")]
+#[test]
+fn a_future_anchor_starts_the_added_stem_on_its_block_at_eight_lanes() {
+    future_anchor_starts_the_added_stem_on_its_block(Backend::Simd8);
+}
+
+/// Gate 1 of #1274 at four lanes.
+#[test]
+fn a_future_anchor_starts_the_added_stem_on_its_block_at_four_lanes() {
+    future_anchor_starts_the_added_stem_on_its_block(Backend::Simd4);
+}
+
+/// Gate 2 of #1274: the anchor is two blocks before the swap block, so the render observes the
+/// seek late and starts the stem at the swap block's own frame. Red if the lateness is measured
+/// on any clock but the plan's absolute render sample, or not added at all.
+#[test]
+fn a_past_anchor_starts_the_added_stem_in_time() {
+    const ANCHOR_BLOCK: usize = SWAP_BLOCK - 2;
+    let kept = Feed::new(SOURCE, 1);
+    let added = Feed::new(ADDED_SOURCE, 2);
+    let b = Session::compile(added_source_session());
+    let reference_added = spliced(ADDED_SOURCE, &added, |block| {
+        (block >= SWAP_BLOCK).then_some(block)
+    });
+    for backend in backends() {
+        let reference = reference_run(&b, &[&kept, &reference_added], backend);
+        let run = anchored_swap_run(&kept, &added, ANCHOR_BLOCK, SWAP_BLOCK, backend);
+        assert_eq!(
+            first_difference(&run, &reference),
+            None,
+            "{backend:?}: the stem is in time from the swap block on"
+        );
+        assert!(reference[SWAP_BLOCK].bits.iter().any(|bits| *bits != 0));
+    }
+}
+
+/// Gate 3 of #1274: two playing sources, each given `seek_at` to one anchor before a different
+/// render, both jump in the anchor block. Each keeps playing its queued old generation until then.
+/// Red if a seek applies when observed, if a held seek drops the old generation's queued PCM, or
+/// if it discards the new generation's primed block.
+#[test]
+fn two_playing_sources_move_to_one_block() {
+    const SECOND_SOURCE: &str = "second-source";
+    const ANCHOR_BLOCK: usize = 8;
+    /// Both sources jump to this source block.
+    const TARGET_BLOCK: usize = 2;
+    let mut model = session_a();
+    add_source(&mut model, SECOND_SOURCE);
+    model
+        .tracks
+        .iter_mut()
+        .find(|track| track.id.as_str() == "eq1")
+        .expect("eq1")
+        .source_id = id(SECOND_SOURCE);
+    let session = Session::compile(model);
+    let first = Feed::new(SOURCE, 1);
+    let second = Feed::new(SECOND_SOURCE, 3);
+    let jump = |block: usize| {
+        Some(if block < ANCHOR_BLOCK {
+            block
+        } else {
+            TARGET_BLOCK + block - ANCHOR_BLOCK
+        })
+    };
+    let anchor = (ANCHOR_BLOCK * QUANTUM) as u64;
+    for backend in backends() {
+        let reference = reference_run(
+            &session,
+            &[
+                &spliced(SOURCE, &first, jump),
+                &spliced(SECOND_SOURCE, &second, jump),
+            ],
+            backend,
+        );
+        let prepared = session.prepare(backend);
+        let mut sources = prepared.sources;
+        let (_publisher, mut owner, _retirer) = exchange(prepared.plan);
+        // The old generation is queued up to the anchor before anything renders.
+        submit_blocks(&mut sources, SOURCE, &first, 1, 0..ANCHOR_BLOCK);
+        submit_blocks(&mut sources, SECOND_SOURCE, &second, 1, 0..ANCHOR_BLOCK);
+        let tail = TARGET_BLOCK..TARGET_BLOCK + BLOCKS - ANCHOR_BLOCK;
+        let mut blocks = Vec::with_capacity(BLOCKS);
+        for block in 0..BLOCKS {
+            for (moment, id, feed) in [(3, SOURCE, &first), (6, SECOND_SOURCE, &second)] {
+                if block == moment {
+                    let target = (TARGET_BLOCK * QUANTUM) as u64;
+                    sources
+                        .seek_at(id.as_bytes(), 2, target, anchor)
+                        .expect("anchored seek");
+                    submit_blocks(&mut sources, id, feed, 2, tail.clone());
+                }
+            }
+            blocks.push(render_block(&mut owner));
+        }
+        assert_eq!(
+            first_difference(&blocks, &reference),
+            None,
+            "{backend:?}: both sources jump in the anchor block"
+        );
+    }
+}
+
+/// Gate 5 of #1274: the blocks that hold, then apply, an anchored seek -- observed early and
+/// observed late -- make no allocator call. Red if holding or applying the seek, or keeping the
+/// pending block, allocates or frees on the render thread.
+#[test]
+fn holding_and_applying_an_anchored_seek_allocates_nothing() {
+    use bench_support::alloc::{Mode, assert_installed, mode, set_mode};
+    struct RestoreMode(Mode);
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            set_mode(self.0);
+        }
+    }
+    assert_installed();
+    let _restore = RestoreMode(mode());
+    set_mode(Mode::Count);
+    engine::realtime::audit::warm_up();
+    let kept = Feed::new(SOURCE, 1);
+    let added = Feed::new(ADDED_SOURCE, 2);
+    for (anchor_block, seek_before) in [
+        (SWAP_BLOCK + 4, SWAP_BLOCK + 1),
+        (SWAP_BLOCK - 2, SWAP_BLOCK),
+    ] {
+        let run = anchored_swap_run(&kept, &added, anchor_block, seek_before, Backend::current());
+        for (index, block) in run.iter().enumerate().skip(1) {
+            assert_eq!(block.allocator, (0, 0, 0), "block {index}: allocator calls");
+            assert_eq!(block.audit, (0, 0), "block {index}: render audit");
+        }
+    }
+}
+
+/// D5 of #1274: `seek_at` keeps `seek`'s region and generation rules and refuses an anchor no
+/// block starts at.
+#[test]
+fn seek_at_refuses_an_unaligned_anchor() {
+    let session = Session::compile(one_track_session());
+    let mut sources = session.prepare(Backend::current()).sources;
+    let refused = sources
+        .seek_at(SOURCE.as_bytes(), 2, 0, QUANTUM as u64 + 1)
+        .expect_err("unaligned anchor");
+    assert_eq!(refused.diagnostic(), "source.seek.anchor_unaligned");
+    assert_eq!(
+        sources.seek_at(SOURCE.as_bytes(), 2, 48_001, 0),
+        Err(SourceControlError::OutsideRegion)
+    );
+    assert_eq!(
+        sources.seek_at(SOURCE.as_bytes(), 0, 0, 0),
+        Err(SourceControlError::GenerationZero)
+    );
+    // The refusals left generation 1 active: the same seek, aligned, is accepted.
+    sources
+        .seek_at(SOURCE.as_bytes(), 2, 0, QUANTUM as u64)
+        .expect("aligned anchor");
 }

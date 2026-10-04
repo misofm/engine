@@ -98,6 +98,7 @@ impl SourceControlError {
             Self::Chunk(HostChunkError::InternalInvariant) => "source.internal",
             Self::Seek(SourceSeekError::Backpressure { .. }) => "source.seek.backpressure",
             Self::Vacated => "source.ring.vacated",
+            Self::Seek(SourceSeekError::AnchorUnaligned) => "source.seek.anchor_unaligned",
         }
     }
 
@@ -202,6 +203,40 @@ impl SourceControlSet {
         generation: u64,
         frame: u64,
     ) -> Result<(), SourceControlError> {
+        self.queue_seek(id, generation, frame, None)
+    }
+
+    /// Queue one strictly increasing, generation-tagged seek whose source `frame` enters the graph
+    /// in the block that starts at absolute render sample `anchor_sample` (issue #1274).
+    ///
+    /// `anchor_sample` is on the plan's absolute render clock, the one a host renders with and
+    /// every plan swap continues; it names when `frame` enters the graph, and the output hears it
+    /// the plan's latency later. It must be a multiple of the quantum, or the seek is refused with
+    /// `source.seek.anchor_unaligned`. The region and generation rules are [`Self::seek`]'s.
+    ///
+    /// On success the source accepts the new generation's PCM from `frame` at once; submit it
+    /// before the anchor block renders and the source plays it from exactly that block. Should the
+    /// render reach the seek only after the anchor block has passed, it starts at `frame` plus the
+    /// lateness, so it stays in time. Until the anchor block, PCM already queued for the playing
+    /// generation keeps playing; when that runs out, the source renders silence and reports an
+    /// underrun.
+    pub fn seek_at(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        frame: u64,
+        anchor_sample: u64,
+    ) -> Result<(), SourceControlError> {
+        self.queue_seek(id, generation, frame, Some(anchor_sample))
+    }
+
+    fn queue_seek(
+        &mut self,
+        id: &[u8],
+        generation: u64,
+        frame: u64,
+        anchor_sample: Option<u64>,
+    ) -> Result<(), SourceControlError> {
         let index = self.index_of(id).ok_or(SourceControlError::UnknownSource)?;
         let source = &mut self.sources[index];
         let provider = source
@@ -213,12 +248,16 @@ impl SourceControlSet {
         }
         let generation =
             SourceGeneration::new(generation).ok_or(SourceControlError::GenerationZero)?;
-        provider
-            .try_seek(SourceCommand::Seek {
+        let frame = SourceFrame(frame);
+        let command = match anchor_sample {
+            None => SourceCommand::Seek { generation, frame },
+            Some(anchor_sample) => SourceCommand::SeekAt {
                 generation,
-                frame: SourceFrame(frame),
-            })
-            .map_err(SourceControlError::Seek)
+                frame,
+                anchor_sample,
+            },
+        };
+        provider.try_seek(command).map_err(SourceControlError::Seek)
     }
 
     /// The mapped source region of the named source, as `start..end` in source frames.
