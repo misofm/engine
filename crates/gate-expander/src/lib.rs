@@ -471,6 +471,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Some(())
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, a restore commit re-derives the timing coefficients.
     /// Recomputes one lane's hold count and one-pole coefficients from its timing.
     fn rederive_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
         let timing = self.timing[lane][channel];
@@ -489,6 +490,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         );
         Some(())
     }
+    // REALTIME_POLICY_END
 
     /// Clears one lane of one channel back to its prepared defaults: gain, phase, hold and resting
     /// ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7 recovery
@@ -697,6 +699,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
     /// Writes one lane's channel section of the state payload.
     fn write_lane(&self, channel: usize, lane: usize, bytes: &mut [u8]) {
         let state = &self.state[channel];
@@ -858,6 +861,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         self.commit_lane(0, lane, &left)?;
         self.commit_lane(1, lane, &right)
     }
+    // REALTIME_POLICY_END
 }
 
 /// Word index of the first ramp quadruple in a channel section.

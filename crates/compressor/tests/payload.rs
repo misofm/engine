@@ -417,6 +417,56 @@ fn a_step_that_leaves_the_domain_before_the_snap_is_refused() {
         .expect("nine steps of 0.05 stay inside [0, 1]");
 }
 
+/// A smoother coefficient is held to `[0, 1]` where it is a designed value (a target, a settled
+/// current) and its moving path to `[0, 1 + 64 ulps]` (#1278 attempt 2): the smoother
+/// `y += c (x - y)` diverges for every `c < 0`, so no rounding budget may reach below zero. A
+/// settled release coefficient of `-1e-6` once made the gain reduction run away over seconds.
+#[test]
+fn a_coefficient_below_zero_or_above_its_design_is_refused() {
+    // The release coefficient ramp follows the seven parameter ramps.
+    const RELEASE: usize = 8;
+    let values = initial_values();
+    let mut effect = prepare(request(&values));
+    let (left, right) = snapshot(effect.as_ref());
+    assert_eq!(read_u32(&left, ramp_word(RELEASE, REMAINING)), 0);
+    let ramp = |current: f32, target: f32, step: f32, remaining: u32| {
+        let mut section = left.clone();
+        write_f32(&mut section, ramp_word(RELEASE, CURRENT), current);
+        write_f32(&mut section, ramp_word(RELEASE, TARGET), target);
+        write_f32(&mut section, ramp_word(RELEASE, STEP), step);
+        write_u32(&mut section, ramp_word(RELEASE, REMAINING), remaining);
+        section
+    };
+    let above_one = f32::from_bits(1.0_f32.to_bits() + 8);
+    for (case, section) in [
+        ("a settled negative current", ramp(-1e-6, 0.5, 0.0, 0)),
+        ("a settled current above one", ramp(above_one, 0.5, 0.0, 0)),
+        ("a target above one", ramp(0.5, above_one, 1e-3, 10)),
+        // Nineteen steps of -1e-7 from 1e-6 reach -9e-7 before the snap to 0.5.
+        ("a moving path below zero", ramp(1e-6, 0.5, -1e-7, 20)),
+    ] {
+        assert_eq!(
+            restore(effect.as_mut(), STATE_VERSION, &section, &right)
+                .expect_err(case)
+                .code,
+            "effect.state.parameter",
+            "{case}"
+        );
+        assert_eq!(
+            snapshot(effect.as_ref()),
+            (left.clone(), right.clone()),
+            "{case}"
+        );
+    }
+    restore(
+        effect.as_mut(),
+        STATE_VERSION,
+        &ramp(1e-6, 0.5, 1e-7, 20),
+        &right,
+    )
+    .expect("a moving path that stays inside [0, 1] restores");
+}
+
 /// Every preparation-legal parameter value survives a round trip, including a subnormal.
 #[test]
 fn preparation_legal_parameter_states_round_trip() {

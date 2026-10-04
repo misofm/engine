@@ -2571,6 +2571,7 @@ fn step_word<L: Lane>(step: &SvfCoefStep<L>, index: usize) -> L {
     }
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// One band's decoded payload words, held until every band of the lane has validated.
 #[derive(Clone, Copy)]
 struct RestoredBand {
@@ -2746,6 +2747,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 /// Stateless native factory for prepared parametric EQs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -3271,6 +3273,7 @@ fn bind_bank(
     )))
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// Maps the shared codec's error onto the contract's.
 fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
@@ -3380,6 +3383,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the EQ's own kernel read surface.
 ///

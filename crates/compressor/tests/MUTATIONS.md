@@ -46,7 +46,7 @@ cargo test --locked -p compressor --test <test binary>
 | 10 | the ballistic coefficient is the retention, not the rate: `exp` for `1 - exp` | `src/design.rs` | `oracle` | RED |
 | 11 | the ballistic coefficient designed in `f32`: `0.001 * ms * fs` as an `f32` product | `src/design.rs` | `cross_target` | RED |
 | 12 | the per-lane coefficient scatter writes lane 0 for every lane | `src/design.rs` | `lane_identity` | RED |
-| 13 | the restored ramp step ignores `remaining` and divides by 64 | `src/state.rs` | `payload` | RED |
+| 13 | the restore re-derives a moving ramp's step from its other words instead of reading the carried step (#1278 D2a; the row's original mutation, a step dividing by 64, targeted the retired 22-word layout) | `src/state.rs` | `payload` | RED |
 | 14 | the left channel is committed before the right section is validated | `src/lib.rs` | `payload` | RED |
 | 15 | the backend-availability fallback moved above the per-request validation | `src/lib.rs` | `contract` | RED |
 | 16 | a Point ramps over 63 samples instead of the descriptor's 64 | `src/lib.rs` | `ramps` | RED |
@@ -80,7 +80,7 @@ to `origin/main` on this branch.
 | `cross_target` | E4's corpus is finite, busy and has four distinct cases. Its pinned SHA-256 at all three widths is compared by gate G5 alone since issue #1048 (`tools/wasm-gates/tests/g5_native_corpus.rs`, and the wasm guests of `scripts/run-wasm-gates.sh`); the rows above that name `cross_target` for a digest predate that move |
 | `identity` | E8: bypass, `mix == 0`, `mix == 1`, `G == 0 && makeup == +0`, the `Average` link's exact level, and that every identity keeps the state warm |
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |
-| `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
+| `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the exact mid-ramp restore (every ramp's step and both coefficient ramps carried, #1278), a carried path held inside its domain and a coefficient held to `[0, 1 + 64 ulps]`, subnormal round trip, both resets |
 | `nonfinite` | E9, D7: the boundary check trips once per block and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
 
 ### E14 (retired, measured once)

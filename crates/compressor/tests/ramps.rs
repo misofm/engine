@@ -2,10 +2,9 @@
 // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E6 — D11: one division at the event, iterated additions, an exact snap on the last sample.
 //!
-//! The ramp state is visible through the payload: word `1 + 3i` is parameter `i`'s `current`,
-//! `2 + 3i` its `target` and `3 + 3i` its `remaining`. `step` is deliberately **not** serialised —
-//! the layout is a frozen contract fixture — which is what makes a mid-ramp restore class B
-//! (`tests/payload.rs`).
+//! The ramp state is visible through the payload: words `1 + 4i` to `4 + 4i` are parameter `i`'s
+//! `current`, `target`, `step` and `remaining` (`support::ramp_word`). The step is carried
+//! (#1278 D2a), so a mid-ramp restore continues bit for bit (`tests/payload.rs`).
 
 mod support;
 

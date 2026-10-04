@@ -285,7 +285,16 @@ pub fn ramp_path_within(
     slack: f32,
     max_remaining: u32,
 ) -> bool {
-    let inside = |value: f32| (low - slack..=high + slack).contains(&value);
+    ramp_path_inside(ramp, (low - slack, high + slack), max_remaining)
+}
+
+/// Whether every value a restored ramp can take lies in the closed interval `[low, high]`, with
+/// the same `remaining`, step and walk rules as [`ramp_path_within`]. For an effect whose
+/// rounding budget is one-sided: a smoother coefficient, for example, may round a few ulps above
+/// its top but never below zero, where the recurrence diverges.
+#[must_use]
+pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining: u32) -> bool {
+    let inside = |value: f32| (low..=high).contains(&value);
     if ramp.remaining > max_remaining
         || !ramp.step.is_finite()
         || !inside(ramp.current)

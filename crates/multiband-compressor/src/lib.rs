@@ -1291,6 +1291,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 /// Word offset of the first filter word.
 const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// One lane of a lane-wide value.
 #[inline]
 fn lane_value<L: Lane>(value: L, track: usize) -> f32 {
@@ -1481,6 +1482,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
         Ok(())
     }
 }
+// REALTIME_POLICY_END
 
 // ---------------------------------------------------------------------------------------------
 // Contract surface

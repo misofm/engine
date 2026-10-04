@@ -22,7 +22,7 @@
 use effect_contract::{StatePayloadError, StatePayloadOutput, StatePayloadSizes};
 use effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use effect_runtime::state_payload::{
-    RAMP_WORDS, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
+    RAMP_WORDS, ramp_path_inside, ramp_path_within, read_f32, read_ramp, write_f32, write_ramp,
 };
 use lane::Lane;
 
@@ -132,12 +132,20 @@ pub(crate) fn validate_channel(bytes: &[u8]) -> Result<(), StatePayloadError> {
             return Err(state_error("effect.state.parameter"));
         }
     }
-    // `design::rate_coefficient` holds a designed coefficient in `[0, 1]`; an interpolated one
-    // may round a few ulps past it, as a parameter ramp may. The one-pole smoother
-    // `y += c (x - y)` is stable for every `c` in `(0, 2)`, so that rounding budget is safe.
+    // `design::rate_coefficient` designs every coefficient in `[0, 1]`, and a target or a settled
+    // coefficient is a designed value, held there exactly. A moving coefficient is an iterated
+    // `current + step` between two designed values, so it may round a few ulps past either one:
+    // its path is held to `[0, 1 + 64 ulps]`. The budget is one-sided: the smoother
+    // `y += c (x - y)` has its pole at `1 - c`, so it diverges for every `c < 0` (and for
+    // `c > 2`), and no rounding of the effect's own walk reaches below zero (its smallest
+    // coefficient, 5 s at 96 kHz, is about 2.1e-6, far above the walk's rounding).
     for index in 0..RATE_RAMPS {
         let ramp = read_ramp(bytes, RATE_RAMP_WORD + index * RAMP_WORDS);
-        if !ramp_path_within(ramp, (0.0, 1.0), 64.0 * f32::EPSILON, SMOOTHING_SAMPLES) {
+        let designed = |value: f32| (0.0..=1.0).contains(&value);
+        if !designed(ramp.target)
+            || (ramp.remaining == 0 && !designed(ramp.current))
+            || !ramp_path_inside(ramp, (0.0, 1.0 + 64.0 * f32::EPSILON), SMOOTHING_SAMPLES)
+        {
             return Err(state_error("effect.state.parameter"));
         }
     }

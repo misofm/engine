@@ -19,10 +19,11 @@
 //!   to subnormals, signed zeros, non-finite and extreme values, and payloads the effect's own
 //!   crafting hook writes, restored into a scalar instance and into its bank lanes at once: they
 //!   must accept or refuse together, with the same code, and render the same words afterwards.
-//! * **restored against continued.** At random block boundaries -- after automation, so mid-ramp,
-//!   and at every drawn quantum, 32 included -- a lane's snapshot is restored into a freshly
-//!   prepared instance, which then renders beside the lane: it must render and report exactly what
-//!   the lane renders by continuing. A payload carries every word a continuation reads (#1278).
+//! * **restored against continued.** At block boundaries -- preferentially while a ramp the lane's
+//!   automation started may be in flight (within 64 samples of the span), and at every drawn
+//!   quantum, 32 included -- a lane's snapshot is restored into a freshly prepared instance,
+//!   which then renders beside the lane: it must render and report exactly what the lane renders
+//!   by continuing. A payload carries every word a continuation reads (#1278).
 //! * **bind eligibility.** A cohort that differs in one program-key field declines, a malformed
 //!   shape refuses with `effect.bank.requests`, and an invalid member refuses with the code
 //!   `prepare` gives it (the three-outcome rule on `bind_homogeneous_bank`).
@@ -50,6 +51,11 @@ use effect_contract::{
 };
 use engine::realtime::audit;
 use lane::Backend;
+
+/// How long after a span's last sample a ramp it started may still be in flight: every banked
+/// launch effect smooths a parameter change over 64 samples (or 64 per-sample updates). The
+/// harness cannot read an effect's ramps, so this is what "mid-ramp" means to its coverage.
+const IN_FLIGHT_SAMPLES: u64 = 64;
 
 /// One state payload's three sections, as `snapshot_state_payload` writes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,9 +173,12 @@ pub struct DifferentialCoverage {
     /// Lane snapshots restored into a fresh instance, which then rendered beside the lane it was
     /// taken from (restored against continued).
     pub continuations: u64,
-    /// Of those, the ones taken right after a block that delivered automation to the lane, so a
-    /// ramp may be in flight.
-    pub continuations_after_automation: u64,
+    /// Of those, the ones taken while a ramp the lane's automation started may be in flight: at
+    /// a boundary less than 64 samples after the last sample a span delivered to the lane
+    /// touched (every banked launch effect smooths a change over 64 samples).
+    pub continuations_in_flight: u64,
+    /// Of those, the ones taken in a scenario whose quantum is 32, under the 64-sample ramps.
+    pub continuations_in_flight_at_32: u64,
     /// Blocks a restored instance rendered beside its continued lane, compared word for word.
     pub continued_blocks: u64,
     /// Witness answers checked against a crafting hook's claim.
@@ -212,7 +221,8 @@ impl DifferentialCoverage {
         self.refused_restores += other.refused_restores;
         self.crafted_restores += other.crafted_restores;
         self.continuations += other.continuations;
-        self.continuations_after_automation += other.continuations_after_automation;
+        self.continuations_in_flight += other.continuations_in_flight;
+        self.continuations_in_flight_at_32 += other.continuations_in_flight_at_32;
         self.continued_blocks += other.continued_blocks;
         self.witness_checks += other.witness_checks;
         self.witness_holds += other.witness_holds;
@@ -839,8 +849,8 @@ fn run_width(
     // Restored against continued: a lane's snapshot restored into a fresh instance, rendered
     // beside the lane from then on. The plan-swap carry (#1269) is exactly this move.
     let mut continuation: Option<Continuation> = None;
-    // Which lanes the previous block delivered automation to.
-    let mut automated_before = vec![false; lanes];
+    // Per lane, the sample before which a ramp its automation started may still be in flight.
+    let mut in_flight_until = vec![0_u64; lanes];
     for block in 0..spec.blocks {
         let context = format!("{width:?} block {block} at sample {first} ({shape:?})");
         // --- Block-boundary operations -------------------------------------------------------
@@ -893,8 +903,20 @@ fn run_width(
         if continuation.is_some() && draw.chance(1, 8) {
             continuation = None;
         }
-        if continuation.is_none() && draw.chance(1, 3) {
-            let lane = draw.below(lanes);
+        // Preferentially while a ramp may be in flight (#1278 attempt 2): a restore that
+        // re-derives a word the continuation reads diverges only mid-ramp, and a uniform draw
+        // reached that rarely on an effect whose automation the scenario narrows to one lane.
+        let flying: Vec<usize> = (0..lanes)
+            .filter(|&lane| first < in_flight_until[lane])
+            .collect();
+        let take = if !flying.is_empty() && draw.chance(1, 2) {
+            Some(draw.pick(&flying))
+        } else if continuation.is_none() && draw.chance(1, 3) {
+            Some(draw.below(lanes))
+        } else {
+            None
+        };
+        if let Some(lane) = take {
             continuation = Some(Continuation::take(
                 factory,
                 requests[lane],
@@ -906,8 +928,11 @@ fn run_width(
                 &context,
             ));
             coverage.continuations += 1;
-            if automated_before[lane] {
-                coverage.continuations_after_automation += 1;
+            if first < in_flight_until[lane] {
+                coverage.continuations_in_flight += 1;
+                if shape.quantum == 32 {
+                    coverage.continuations_in_flight_at_32 += 1;
+                }
             }
         }
 
@@ -1000,8 +1025,10 @@ fn run_width(
             offsets[lane + 1] = spans.len() as u32;
             lane_spans.push(drawn);
         }
-        for (lane, automated) in automated_before.iter_mut().enumerate() {
-            *automated = !lane_spans[lane].is_empty();
+        for (lane, until) in in_flight_until.iter_mut().enumerate() {
+            for span in &lane_spans[lane] {
+                *until = (*until).max(span.end_sample.saturating_add(IN_FLIGHT_SAMPLES));
+            }
         }
         coverage.spans += spans.len() as u64;
 
@@ -2033,8 +2060,11 @@ pub fn assert_reached(coverage: &DifferentialCoverage) {
     assert!(
         coverage.continuations > 0
             && (coverage.banks.iter().sum::<u64>() == 0
-                || (coverage.continued_blocks > 0 && coverage.continuations_after_automation > 0)),
-        "no restored instance rendered beside its continued lane after automation: {coverage:?}"
+                || (coverage.continued_blocks > 0
+                    && coverage.continuations_in_flight > 0
+                    && coverage.continuations_in_flight_at_32 > 0)),
+        "no restored instance rendered beside its continued lane with a ramp in flight, at \
+         quantum 32 included: {coverage:?}"
     );
     assert!(
         coverage.malformed_refusals > 0 && coverage.heterogeneous_declines > 0,

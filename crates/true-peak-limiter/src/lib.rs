@@ -67,8 +67,8 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    HEADER_WORDS, StateLayout, read_f32, read_header, read_u32, validate_lengths, write_f32,
-    write_header, write_u32,
+    HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_u32, validate_lengths,
+    write_f32, write_header, write_u32,
 };
 use lane::{Backend, Lane, flush};
 
@@ -3949,14 +3949,15 @@ const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
 
-/// The `[minimum, maximum]` a stored coefficient may occupy, with a 64-ulp relaxation.
+/// The `[minimum, maximum]` a **moving** coefficient's path may occupy, with a 64-ulp relaxation.
 ///
 /// A ramped `current` lies mathematically between two in-domain coefficients, but the iterated
 /// `current + step` of D11 rounds at each of up to 63 additions before the snap, and a ramp only a
 /// few hundred ulps long ends past an endpoint by more than four ulps: #1278 found a ceiling ramp
-/// to -24 dB whose own snapshot a four-ulp budget refused. The relaxation is that rounding budget;
-/// it is not a domain widening, and a value outside a coefficient's real range by more than a few
-/// dozen ulps is still rejected.
+/// to -24 dB whose own snapshot a four-ulp budget refused. The relaxation is that rounding budget
+/// and applies only to the values a moving ramp visits (`ramp_path_inside`): a target and a
+/// settled coefficient are designed values and are held to the unrelaxed range, so no payload can
+/// set a ceiling above the effect's own.
 fn coefficient_bounds(low: f32, high: f32) -> (f32, f32) {
     let slack = 64.0 * f32::EPSILON;
     (low - low.abs() * slack, high + high.abs() * slack)
@@ -4051,8 +4052,8 @@ fn read_lane(
         return Err(state_error("effect.state.gain"));
     }
 
-    let limit_bounds = coefficient_bounds(limit_coefficient(-24.0), limit_coefficient(0.0));
-    let release_bounds = coefficient_bounds(
+    let limit_bounds = (limit_coefficient(-24.0), limit_coefficient(0.0));
+    let release_bounds = (
         release_coefficient(2000.0, sample_rate),
         release_coefficient(10.0, sample_rate),
     );
@@ -4068,24 +4069,23 @@ fn read_lane(
         } else {
             release_bounds
         };
-        let current = read_f32(bytes, word);
-        let target = read_f32(bytes, word + 1);
-        let step = read_f32(bytes, word + 2);
-        let remaining = read_u32(bytes, word + 3);
-        if !(low..=high).contains(&current)
-            || !(low..=high).contains(&target)
-            || !step.is_finite()
-            || remaining > RAMP_UPDATES
-            || (remaining == 0 && current.to_bits() != target.to_bits())
+        let read = LinearRamp {
+            current: read_f32(bytes, word),
+            target: read_f32(bytes, word + 1),
+            step: read_f32(bytes, word + 2),
+            remaining: read_u32(bytes, word + 3),
+        };
+        // The target and a settled current are designed values, inside the range exactly; a
+        // moving ramp's every value up to the snap stays inside the relaxed path bounds, which
+        // also bounds its step. `ramp_path_inside` checks `remaining` first, so the walk is
+        // bounded by `RAMP_UPDATES`, and a settled ramp's step must be `+0.0`.
+        if !(low..=high).contains(&read.target)
+            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
+            || !ramp_path_inside(read, coefficient_bounds(low, high), RAMP_UPDATES)
         {
             return Err(state_error("effect.state.parameter"));
         }
-        *ramp = LinearRamp {
-            current,
-            target,
-            step,
-            remaining,
-        };
+        *ramp = read;
     }
 
     for tap in 0..HISTORY_WORDS {
@@ -7598,7 +7598,35 @@ mod tests {
         let sizes = peer.metadata().state_sizes;
         let reference = snapshot(peer.as_ref());
         type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
-        let corruptions: [Corruption; 6] = [
+        // #1278 attempt 2: a target and a settled coefficient are held to the designed range
+        // exactly, and a moving ramp's whole path to its relaxed bounds.
+        let above_ceiling = f32::from_bits(limit_coefficient(0.0).to_bits() + 1);
+        let limit_ramp = |current: f32, target: f32, step: f32, remaining: u32| {
+            move |bytes: &mut Vec<u8>| {
+                write_f32(bytes, words::LIMIT_RAMP, current);
+                write_f32(bytes, words::LIMIT_RAMP + 1, target);
+                write_f32(bytes, words::LIMIT_RAMP + 2, step);
+                write_u32(bytes, words::LIMIT_RAMP + 3, remaining);
+            }
+        };
+        let ceiling = limit_coefficient(0.0);
+        let corruptions: [Corruption; 10] = [
+            (
+                "settled limit one ulp above the ceiling",
+                Box::new(limit_ramp(above_ceiling, ceiling, 0.0, 0)),
+            ),
+            (
+                "limit target one ulp above the ceiling",
+                Box::new(limit_ramp(ceiling, above_ceiling, 0.0, 8)),
+            ),
+            (
+                "moving limit walked past its bounds by its step",
+                Box::new(limit_ramp(ceiling, ceiling, -1e30, 8)),
+            ),
+            (
+                "settled limit with a nonzero step",
+                Box::new(limit_ramp(ceiling, ceiling, 1e-3, 0)),
+            ),
             (
                 "version",
                 Box::new(|bytes: &mut Vec<u8>| write_u32(bytes, 0, 0)),
@@ -9277,10 +9305,14 @@ mod tests {
                     }
                     if draw.chance(1, 5) {
                         // An in-flight limit ramp that `read_lane` accepts and that no retarget
-                        // produces: it walks the limit to zero, below it, or to infinity.
+                        // produces: it walks toward an edge of the ceiling range, then snaps back
+                        // to where it started. (A walk out of the range, to zero or to infinity,
+                        // is refused since #1278 attempt 2.)
                         let current = read_f32(&payload.1, words::LIMIT_RAMP);
-                        let step = draw.pick(&[-current, -2.0 * current, f32::MAX, -0.5 * current]);
                         let remaining = 2 + draw.below(63) as u32;
+                        let edge = draw.pick(&[limit_coefficient(-24.0), limit_coefficient(0.0)]);
+                        let step =
+                            (edge - current) / (remaining - 1) as f32 * draw.pick(&[0.5_f32, 0.9]);
                         let sections = if draw.chance(1, 2) { 2 } else { 1 };
                         for section in [&mut payload.1, &mut payload.2].into_iter().take(sections) {
                             write_f32(section, words::LIMIT_RAMP, current);
@@ -9346,7 +9378,7 @@ mod tests {
     /// Issue #990. Random banks (every launch rate, both links, bypass, ragged and asymmetric
     /// cohorts), random block lengths and signals (including `-0.0`, subnormals, the exact
     /// threshold and non-finite words), one- and two-channel retargets, same-value retargets,
-    /// rejected `Both` spans, both resets, restores of current, cross-track and hostile-ramp
+    /// rejected `Both` spans, both resets, restores of current, cross-track and in-flight-ramp
     /// payloads, and collapse runs with and without `desymmetrize`. Every block is compared as in
     /// the matrix. The linked body must actually have run.
     #[test]

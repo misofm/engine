@@ -583,6 +583,8 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         self.left_env = el;
         self.right_env = er;
     }
+
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
     fn snapshot(
         &self,
         lane: usize,
@@ -698,6 +700,7 @@ fn valid_envelope(value: f32) -> bool {
 const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
+// REALTIME_POLICY_END
 
 /// The runtime parameter domain of one contract parameter row.
 fn domain(parameter: &ParameterDescriptor) -> Option<ParameterSpec> {

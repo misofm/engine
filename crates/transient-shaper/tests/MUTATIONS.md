@@ -27,7 +27,7 @@ cargo test --locked -p transient-shaper --test <test binary>
 | 1 | `DB_PER_OCTAVE = 20.0` — the `log10`/`log2` confusion in the contrast scale | `src/lib.rs` | `oracle` | RED (both tests) |
 | 2 | `OCTAVES_PER_DB = 0.05` — the `exp2`/`pow10` confusion in the gain law | `src/lib.rs` | `oracle` | RED (both tests) |
 | 3 | identity mask drops its `shape == 0` term | `src/lib.rs` | `contract` | RED |
-| 4 | the restored ramp derives `step` from `RAMP_SAMPLES` instead of `remaining` | `src/lib.rs` | `contract` | RED |
+| 4 | the restore replaces the carried `step` with `(target - current) / RAMP_SAMPLES` (#1278 attempt 2 re-run; the row's original mutation targeted the retired eleven-word layout) | `src/lib.rs` | `contract` | RED |
 | 5 | `LinkMode::Maximum` dispatched to the `LINK_AVERAGE` instantiation | `src/lib.rs` | `contract` | RED |
 | 6 | `finish_block` skipped after the frame loop (D7 boundary check gone) | `src/lib.rs` | `boundary` | RED (both tests) |
 | 7 | `replace_lane` writes lane `0` instead of `lane` | `src/lib.rs` | `bank` | RED |
@@ -72,13 +72,15 @@ what preserves the sign bit, and the `-0.0` rows of the defaults case are what c
 
 ```
 thread 'automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly'
-    panicked at tests/contract.rs:242
+    panicked at tests/contract.rs:239
 ```
 
-The persisted layout is eleven words and does not carry the D11 `step`, so a restore derives
-`(target - current) / remaining`. The representable contract row resumes exactly; replacing its
-denominator with `RAMP_SAMPLES` restarts the ramp and breaks that continuation. Iteratively
-rounded currents need not reconstruct the original increment in general.
+Since #1278 (D2a) the layout is fourteen words per channel and carries each ramp's D11 `step`
+beside its `current`, `target` and `remaining`, so a restore reads the increment the
+uninterrupted ramp is carrying instead of re-deriving it (an iteratively rounded `current` need
+not reconstruct the original increment). Replacing the carried step with
+`(target - current) / RAMP_SAMPLES` restarts the ramp and breaks the continuation. The eleven-word
+layout this row was first recorded against derived `(target - current) / remaining`.
 
 ### 5 — link-mode dispatch
 

@@ -51,8 +51,11 @@ these calls in the swap block.
   value.
 - **D2a. Exact mid-ramp.** A payload carries every word a lane's continuation reads, including a
   ramp's `step`, so restore never re-derives a value it could read. The payload is not persisted
-  (R6b), so its layout may change for this; bump the effect's `state_layout_version` and update its
-  fixtures in the same commit.
+  (R6b), so its layout may change for this; update the effect's fixtures in the same commit.
+  *Amended at attempt 2:* `state_layout_version` stays `1`. AGENTS.md gives a genuine version its
+  sole prelaunch identity, V1 (`effect-compiler`'s `launch_native_state_layouts_are_v1` pins it),
+  and the exact section lengths refuse a payload of the old layout. The attempt-1 verdict accepted
+  this deviation; `docs/EFFECT_CONTRACT_V1.md` says the same since attempt 2.
 - **D3. Realtime regions.** The four payload methods of every banked effect sit inside
   `REALTIME_POLICY` regions, so `scripts/check-realtime-policy.sh` scans them.
 - **D4. Docs.** The trait docs say the payload calls are render-safe and that the plan-swap carry
@@ -302,3 +305,135 @@ attempt 1.
   **ARTIFACT CHANGED**: the shipped module is now `0f508f8ca5b3849d...` (attempt 1 built
   `5aae9805...`), because soft-clip's restore decode, which is compiled into it, changed. Not
   re-pinned (`docs/RELEASE.md`).
+
+### Attempt 2 (implementer, 2026-10-04)
+
+**Attempt-1 verdict: FAIL** (`submix-verdicts/1278-attempt1.md`). The product work was confirmed:
+every banked effect's payload calls are allocation-free on the render thread and a lane restored
+mid-ramp continues bit for bit, quantum 32 included; the limiter's allocation-free restore and the
+`state_layout_version = 1` deviation were accepted. Findings: MAJOR-1, soft-clip's call of the
+shared edge probe had no unique catch (the seeded `a_restored_near_edge_ramp_continues_bit_for_bit`
+dominates it); MINOR-1, the compressor's coefficient-ramp bound admitted negative coefficients,
+which make the smoother diverge; MINOR-2, the limiter widened its 4-ulp bound to 64 ulps for
+targets and settled ramps too and had no path check; MINOR-3, the gate, multiband, transient
+shaper and EQ marked only their trait wrappers, not their codec bodies; MINOR-4, the coverage
+clause counted continuations after automation, not in flight, and the multiband reached 3
+mid-ramp continuations and none at quantum 32; MINOR-5, stale docs; NIT-1 floors; NIT-2 soft-clip
+in-flight current.
+
+**Changes.**
+
+- MAJOR-1: `crates/soft-clip/tests/randomized.rs`'s `the_effects_own_edge_ramp_snapshots_restore`
+  is deleted. `EffectDifferential::assert_edge_ramps_restore` keeps its five other callers.
+- MINOR-1: `effect_runtime::state_payload::ramp_path_inside(ramp, (low, high), max_remaining)` is
+  the walk over an explicit closed interval (`ramp_path_within` now delegates to it with the
+  symmetric slack). The compressor holds a coefficient ramp's target and a settled current to
+  `[0, 1]` exactly and a moving path to `[0, 1 + 64 ulps]`: the budget is one-sided, because the
+  smoother's pole is `1 - c` and every `c < 0` diverges. Comment corrected. New test
+  `payload::a_coefficient_below_zero_or_above_its_design_is_refused` (settled `-1e-6` current, a
+  settled current and a target 8 ulps above one, a moving path to `-9e-7`; refused with
+  `effect.state.parameter` and nothing moved; a moving path inside `[0, 1]` restores).
+- MINOR-2: the limiter's `read_lane` holds a coefficient ramp's target to the unrelaxed designed
+  range, a settled current to its target's bits, and a moving ramp to `ramp_path_inside` over the
+  64-ulp relaxed bounds (`coefficient_bounds` now only shapes the path), which also bounds its
+  step. Four rejection rows in `state_round_trips_and_rejects_corruption`: settled limit one ulp
+  above the ceiling, target one ulp above, a moving limit walked out by a `-1e30` step, a settled
+  limit with a nonzero step. The linked randomized scenario's crafted in-flight limit ramp walked
+  to zero or infinity, which is now refused; it now walks toward a range edge (factor 0.5 or 0.9)
+  and snaps back, and is still accepted (19 of 20 moving crafted restores accepted in the debug
+  run, measured once with a temporary print).
+- MINOR-3: `REALTIME_POLICY` regions now cover the codec bodies: gate `write_lane` through
+  `restore_lane` and `rederive_lane` (the commit calls it); multiband `lane_value` through
+  `Instance::restore` (`write_side`, `stage_side`, `commit_side`); transient shaper `snapshot`
+  through `state_error` (`restore`, `write_lane`, `read_lane`); EQ `RestoredBand` and
+  `Channel::{snapshot_track, snapshot_cut_enables, restore_track}`, and `runtime_state_error`
+  through `PreparedParametricEq::restore_track` (`read_payload`, `write_payload`). Pure
+  helpers they call (design functions, `Channel::new`, value validators) stay unmarked, as in the
+  other effects. `check-realtime-policy.sh` now reports **78 regions in 23 files** (attempt 1: 72
+  in 23); its floors (41, 12) are unchanged, the script being outside this slice's paths
+  (follow-up: raise them to 78/23).
+- MINOR-4: `run_width` tracks, per lane, the sample before which a ramp its automation started may
+  be in flight (last span sample + 64, `IN_FLIGHT_SAMPLES`; every banked launch effect smooths over
+  64 samples or updates), and takes a continuation on such a lane with chance 1/2 at each boundary
+  (replacing a running one), else as before. Coverage counts `continuations_in_flight` and
+  `continuations_in_flight_at_32`, replacing `continuations_after_automation`, and
+  `assert_reached` requires both when a bank was compared. Measured in the default runs
+  (continuations / in flight / in flight at quantum 32): EQ 226/206/55, compressor 291/210/49,
+  gate 234/179/33, limiter 174/157/21, soft-clip 84/79/7, transient shaper 242/211/50, multiband
+  120/57/9. The multiband's **actual** mid-ramp continuations, decoded once with temporary prints of
+  its staged ramps' `remaining`: 44 of 119 (7 at quantum 32), against 3 (0 at quantum 32) at attempt
+  1; no continuation the proxy called settled had a ramp moving.
+- MINOR-5: `crates/compressor/tests/ramps.rs` header (words `1 + 4i`..`4 + 4i`, step carried),
+  `crates/transient-shaper/tests/contract.rs` doc of the 63/64 test (step carried; the mutation
+  re-run below), `crates/transient-shaper/tests/MUTATIONS.md` row 4 and its section,
+  `crates/compressor/tests/MUTATIONS.md` row 13 and the `payload` row. D2a amended above.
+  `docs/EFFECT_CONTRACT_V1.md` (authorized for this attempt): the state section now says nothing
+  persists a payload and the payload calls are render-safe for the plan-swap carry; the W2-D2 bump
+  sentence now says a prelaunch layout change keeps version `1`.
+
+**Width.** On this AVX2 host the compressor, transient shaper, gate, soft-clip and EQ decline
+`Four` by design; their payload calls run at `Eight` here and their four-lane (`Simd4`) path runs
+only in CI's `aarch64-debug`/`aarch64-release` legs (and is compiled into the simd128 worklet). The
+limiter and the multiband bind both widths here.
+
+**Mutation evidence** (each applied, observed red, reverted, observed green):
+
+- Compressor coefficient bound back to attempt 1's symmetric `ramp_path_within((0, 1), 64 ulps)`:
+  `a_coefficient_below_zero_or_above_its_design_is_refused` red ("a settled negative current").
+  Target check removed: red ("a target above one"). Settled-current check removed: red ("a settled
+  current above one"). Path lower bound `-64 ulps`: red ("a moving path below zero"). The path walk
+  reduced to its endpoints (in `ramp_path_inside`): red.
+- Limiter: target check removed: `state_round_trips_and_rejects_corruption` red ("limit target one
+  ulp above the ceiling was accepted"); settled bits check removed: red ("settled limit one ulp
+  above the ceiling"); path walk reduced to endpoints: red ("moving limit walked past its bounds
+  by its step"); settled `+0.0` step rule removed: red ("settled limit with a nonzero step");
+  attempt 1's check restored whole: red. Path slack back to 4 ulps: the limiter's
+  `the_effects_own_edge_ramp_snapshots_restore` red (its own ceiling ramp to -24 dB refused at
+  every rate), so the 64-ulp path budget is still needed.
+- Realtime regions: `let _probe = vec![0_u8; 4];` in the transient shaper's `read_lane`, the
+  gate's `parse_lane` and `rederive_lane`, the multiband's `stage_side` and the EQ's
+  `Channel::restore_track`: `check-realtime-policy.sh` red ("marked realtime forbidden-body
+  predicate") for each.
+- In-flight coverage: the preferential take disabled (`if false && ...`): the multiband's
+  differential red ("no restored instance rendered beside its continued lane with a ramp in
+  flight, at quantum 32 included"); the other six stay green. A multiband restore that re-derives
+  a moving step: red in the new harness (the continuation oracle, "the instance restored from its
+  snapshot rendered 0xbe960b42 where the lane, continuing, rendered 0xbe960b45"), and also red in
+  attempt 1's harness through the restore round trip; the multiband carries no other ramp word a
+  restore could re-derive (its `BandCache` is a memo keyed by the ramp values), so no mutation was
+  found that only the in-flight preference catches beyond the coverage clause itself.
+- Transient shaper `read_lane` replacing the carried step with `(target - current) /
+  RAMP_SAMPLES`: `automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly`
+  red (`tests/contract.rs:239`).
+
+**Test value (new or rewritten tests).**
+
+- `compressor payload::a_coefficient_below_zero_or_above_its_design_is_refused`: a coefficient
+  bound that lets a payload hold a negative (divergent) or above-design coefficient; attempt 1's
+  bound is such a defect, and no other test is red on it.
+- limiter `state_round_trips_and_rejects_corruption`'s four new rows: a target or settled
+  coefficient held only to the relaxed bounds (a ceiling above the effect's own), a path checked
+  at its endpoints only, a settled ramp with a stale step.
+- `assert_reached`'s in-flight clauses: a harness that stops taking continuations mid-ramp, or never
+  at quantum 32 (red on the multiband with the preference removed).
+
+**Gates (this attempt, on the committed tree).** fmt; clippy `--workspace --all-targets
+--all-features -D warnings`; rustdoc `-D warnings`; workspace policy check/test; realtime policy
+check/test (78 regions, 23 files); `check-capi-abi.sh`; `audit capi` (0 allocations, 0
+deallocations, 0 locks, 0 syscalls, 100k calls); `check-cross-targets.sh` (PASS; only the #1018
+iOS `memset_pattern16` expected failures); `cargo test --locked -p parametric-eq -p compressor -p
+gate-expander -p true-peak-limiter -p soft-clip -p transient-shaper -p multiband-compressor -p
+conformance -p effect-compiler -p effect-runtime -p effect-contract`; `cargo test --locked --release
+-p console-workload` (console digests unchanged); `conformance_fixtures -- --check` (nothing
+re-pinned); `cargo build --release -p bench`, `trace-effect-contract-audit.sh target/release/bench
+1000000` (ok) and `check-effect-contract.sh` (8 factories): all pass. Worklet chain (build
+`--named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, expected resources,
+test): pass. **ARTIFACT CHANGED**: the shipped module is now `1928ba471a57c016...` (attempt 1
+amendment: `0f508f8c...`), because restore decode compiled into it changed (compressor and limiter
+bounds). Not re-pinned (`docs/RELEASE.md`).
+
+**Open (successors, unchanged).** The delay refuses its own edge-ramp snapshots (feedback, mix,
+cross feedback; slice 12 moves rather than restores it). Soft-clip's two open non-finite history
+cases (attempt 1 amendment). Soft-clip validates an in-flight current by its line, not by
+`ramp_path_within` (verdict NIT-2, #1071's design). Raise `check-realtime-policy.sh`'s floors to
+78 regions / 23 files.

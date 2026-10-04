@@ -171,10 +171,12 @@ transitions use cached words and do not invoke the coefficient designer.
 
 State is three exact caller buffers: common, left, and right. Snapshot is deterministic and
 all-or-none. Restore accepts only the current nonzero `state_layout_version` and exact prepared
-sizes. Since #1037 (R6b) no engine path snapshots or restores a payload: the compiler's
-unpublished-temporary restore and its persisted envelope went with `effect-package`, and the
-per-effect `snapshot_state_payload`/`restore_state_payload` hooks keep only test and evidence-tool
-callers (`conformance`, `tools/bench`) until a follow-up removes them with their own digest evidence.
+sizes. Nothing persists a payload (R6b; the compiler's persisted envelope went with
+`effect-package` in #1037). The payload calls -- `snapshot_state_payload`/`restore_state_payload`
+and a bank's per-track pair -- are render-safe: they allocate, free, lock and log nothing and run
+in time bounded by the prepared state, because the plan-swap carry (#1269) is to call them in the
+swap block to move a lane's state into a rebuilt plan, and a restored lane continues bit for bit like
+the lane it was taken from, mid-ramp included (#1278).
 
 **A version or length word inside the payload outranks the caller's claim.** The
 `state_layout_version` argument of `restore_state_payload` arrives out of band, from the
@@ -185,10 +187,12 @@ the bytes. Where a payload carries none, the argument is checked against the des
 `state_layout_version` and the prepared sizes. The header is two little-endian words at the front
 of the common section — layout version, then the effect's data word count — implemented once in
 `effect_runtime::state_payload`. Adopting it moves `maximum_state.common_bytes` from 0
-to 8, which is a descriptor identity change, so adoption travels with a
-`state_layout_version` bump (decision W2-D2): the crates that had to bump anyway carry a header
-today, the rest adopt one in a coordinated identity change. The **rule** above is frozen now for
-all of them.
+to 8, which is a descriptor identity change: the crates that carry a header today adopted it with
+their layouts, the rest adopt one in a coordinated identity change. Before launch a layout change
+does not bump `state_layout_version`: a genuine version's prelaunch identity is `1` (AGENTS.md,
+the version-suffix rule). No payload is persisted, so only a payload of the same build can arrive,
+and the exact prepared section lengths refuse one whose layout has another length (#1278 grew two
+effects' layouts at version `1`). The **rule** above is frozen now for all of them.
 
 `scratch_fixed_bytes` is an **admission ceiling an effect reserves, not a measurement of what it
 uses**. A host admits a preparation by proving it can supply
