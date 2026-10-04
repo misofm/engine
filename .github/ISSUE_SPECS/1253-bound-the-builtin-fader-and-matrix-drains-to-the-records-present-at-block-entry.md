@@ -139,3 +139,63 @@ None.
 - A test that greps source or prose is refused. The policy script is a gate, not a test, and its
   mutation case is the test.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `11b7c92e4`)
+
+**Change.**
+- `crates/builtins-compiler/src/lib.rs`: `drain_fader_controls`, `drain_matrix_controls` and the
+  two test-only oracle drains (`LiveControlMatrixProcessor::drain_controls`,
+  `LiveControlFaderProcessor::drain_controls`) read `available_at_entry()` once and pop at most
+  that many records (`for _ in 0..available { let Ok(record) = ..try_pop() else { break }; .. }`),
+  the shape of `BuiltinBankProcessor::begin_block` (D1). The fused processor's fader-then-matrix
+  order is untouched. The two production drains are now marked realtime regions (D2); their
+  bodies pass the forbidden-body predicate as written (no edits needed for it).
+- `scripts/check-realtime-policy.sh`: floors 12/41 -> 13/43 ("thirteen", "forty-three"), comment
+  updated (D2). New rule over the marked bodies (D3): `gate_scan_forbidden 'marked realtime
+  unbounded try_pop drain (bound it with available_at_entry)'` with pattern
+  `while[[:space:]]+let[[:space:]]+Ok[[:space:]]*\(.*=.*\.try_pop[[:space:]]*\(`.
+- `scripts/test-realtime-policy.sh`: `create_fixture` gains
+  `crates/builtins-compiler/src/lib.rs` with two marked regions (fixture now 13 files, 43
+  regions; also added to the `empty_bodies` list), the three floor cases expect the new messages,
+  and one new mutation case, `marked-unbounded-try-pop-drain`.
+
+**Marker counts.** Tree: 56 regions in 16 files (was 54 in 15). Floors: 13 files, 43 regions.
+
+**Test value (`marked-unbounded-try-pop-drain`).** It turns red if an unbounded
+`while let Ok(..) = ..try_pop()` drain enters a marked realtime region.
+
+**Mutation runs.**
+- A. Reverted the production `drain_matrix_controls` to `while let Ok(record) = control.try_pop()`:
+  `check-realtime-policy.sh` red with `realtime policy failure: marked realtime unbounded try_pop
+  drain (bound it with available_at_entry)` at `lib.rs:1025`. Reverted; gate green.
+- B. Removed the new rule from `check-realtime-policy.sh`: `test-realtime-policy.sh` red with
+  `realtime policy mutation unexpectedly passed: marked-unbounded-try-pop-drain`. Reverted; green.
+- C. Left the file floor at 12: `test-realtime-policy.sh` red (`marked-file-count-floor` no longer
+  fails with the file-floor class). Reverted; green.
+
+**Gates (all from the worktree root, on the attempt's tree).**
+1. `cargo test --locked -p builtins-compiler --features test-support` PASS (52 + 10 + 3 passed,
+   1 ignored); workspace test command PASS (115 `test result: ok` lines, no failure);
+   `cargo test --locked -p builtins-compiler --no-run` PASS.
+2. `bash scripts/check-realtime-policy.sh && bash scripts/test-realtime-policy.sh` PASS
+   (`realtime policy: ok (56 marked regions in 16 files)`, `realtime policy mutation tests: ok`).
+3. `cargo test --locked --release -p audit -p bench -p console-workload` PASS.
+4. `cargo build --locked --release -p audit -p bench -p capi -p session-validator` PASS;
+   `trace-builtins-audit.sh` PASS; `trace-builtins-graph-audit.sh` PASS;
+   `./target/release/audit capi`: allocations 0, deallocations 0, locks 0, syscalls 0,
+   total_violations 0.
+5. AudioWorklet module: `54b0a1bf8` `30d075d3ce6382f21235675996184c675753acf6d451e11d7d676a3d50aaeff4`
+   (2849915 B); this branch `6eb292980c2f31a7a2b86ef8388a17b1f0b5efa1b70544ec1a955d1bd207188f`
+   (2850019 B, +104 B) -- changed, as expected. `check-web-audioworklet.sh
+   --without-metadata-regeneration` PASS; `check-browser-expected-resources.py --artifacts` PASS;
+   `test-web-audioworklet.sh` PASS.
+6. `cargo fmt --all -- --check` PASS; `cargo clippy --locked --workspace --all-targets
+   --all-features -- -D warnings` PASS; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace
+   --no-deps` PASS; host-core/realtime/workspace check+test policy PASS;
+   `scripts/check-cross-targets.sh` PASS (iOS `memset_pattern16` expected failures unchanged:
+   transient-shaper 268, true-peak-limiter 104); `scripts/check-capi-abi.sh` PASS.
+   `run-aarch64-tests.sh debug`: not run locally (x86-64 host; CI `aarch64-debug` job).
+
+**Outside authorized paths.** None.

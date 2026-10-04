@@ -64,16 +64,24 @@ while IFS= read -r source; do
 done <<<"$marked_files"
 fi
 
-# The floors are the tree's own counts after #664's complete LocalRing removal: twelve files
-# and forty-one regions. The removed wrapper was one marked region with no live caller, so the
-# region floor follows that deliberate deletion. Deleting any other marker to silence the gate
-# still fails here -- the file leaves the discovered set or a region leaves the marked set --
-# instead of passing with less coverage. Raising a floor is part of the change that adds a marker.
-[[ "$marked_file_count" -ge 12 ]] || fail "expected at least twelve marked realtime files"
-[[ "$marker_count" -ge 41 ]] || fail "expected at least forty-one marked realtime regions"
+# The floors were the tree's counts after #664's complete LocalRing removal (twelve files and
+# forty-one regions); #1253 raises them by exactly what it adds, builtins-compiler's fader and
+# matrix drains: one file and two regions, to thirteen files and forty-three regions. Deleting a
+# marker to silence the gate still fails here -- the file leaves the discovered set or a region
+# leaves the marked set -- instead of passing with less coverage. Raising a floor is part of the
+# change that adds a marker.
+[[ "$marked_file_count" -ge 13 ]] || fail "expected at least thirteen marked realtime files"
+[[ "$marker_count" -ge 43 ]] || fail "expected at least forty-three marked realtime regions"
 
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?
+
+# #1253: a render-thread drain pops at most the records present at block entry. A
+# `while let Ok(..) = ..try_pop()` loop keeps popping whatever a concurrent producer publishes
+# while it runs -- data-dependent, unbounded render work. The bounded form reads
+# `available_at_entry()` once and pops at most that many records.
+gate_scan_forbidden 'marked realtime unbounded try_pop drain (bound it with available_at_entry)' \
+    'while[[:space:]]+let[[:space:]]+Ok[[:space:]]*\(.*=.*\.try_pop[[:space:]]*\(' '' "$scratch_file" || exit $?
 
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
 # {crates,hosts,tools} tree, of which the realtime module is a part, rather than one of five copies

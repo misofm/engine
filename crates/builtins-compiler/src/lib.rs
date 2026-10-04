@@ -967,6 +967,7 @@ fn scalar_owner_id(track_id: &StableGraphId) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
+// REALTIME_POLICY_BEGIN
 fn drain_fader_controls(
     bank: &mut BuiltinFaderBank,
     controls: &mut [Option<Consumer<TrackFaderRecord>>],
@@ -975,7 +976,13 @@ fn drain_fader_controls(
         let Some(control) = control.as_mut() else {
             continue;
         };
-        while let Ok(record) = control.try_pop() {
+        // Pop only what was published at block entry: a record pushed while this drain runs
+        // waits for the next block, so the work stays bounded under a concurrent producer.
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -1002,7 +1009,9 @@ fn drain_fader_controls(
     }
     Ok(())
 }
+// REALTIME_POLICY_END
 
+// REALTIME_POLICY_BEGIN
 fn drain_matrix_controls(
     bank: &mut BuiltinMatrixBank,
     controls: &mut [Option<Consumer<TrackControlRecord>>],
@@ -1011,7 +1020,13 @@ fn drain_matrix_controls(
         let Some(control) = control.as_mut() else {
             continue;
         };
-        while let Ok(record) = control.try_pop() {
+        // Pop only what was published at block entry: a record pushed while this drain runs
+        // waits for the next block, so the work stays bounded under a concurrent producer.
+        let available = control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = control.try_pop() else {
+                break;
+            };
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -1024,6 +1039,7 @@ fn drain_matrix_controls(
     }
     Ok(())
 }
+// REALTIME_POLICY_END
 
 fn make_fader_matrix(
     fader: BuiltinProcessor,
@@ -4198,7 +4214,11 @@ impl GraphRuntimeProcessor for LiveControlMatrixProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl LiveControlMatrixProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
-        while let Ok(record) = self.control.try_pop() {
+        let available = self.control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = self.control.try_pop() else {
+                break;
+            };
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();
@@ -4264,7 +4284,11 @@ impl GraphRuntimeProcessor for LiveControlFaderProcessor {
 #[cfg(any(test, feature = "test-support"))]
 impl LiveControlFaderProcessor {
     fn drain_controls(&mut self) -> Result<(), RenderError> {
-        while let Ok(record) = self.control.try_pop() {
+        let available = self.control.available_at_entry();
+        for _ in 0..available {
+            let Ok(record) = self.control.try_pop() else {
+                break;
+            };
             #[cfg(any(test, feature = "test-support"))]
             FADER_MATRIX_LIVE_WITNESS.with(|value| {
                 let mut counters = value.get();

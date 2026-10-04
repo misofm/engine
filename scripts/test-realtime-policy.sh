@@ -17,14 +17,16 @@ create_fixture() {
         "$root/crates/graph/src" \
         "$root/crates/rack/src" \
         "$root/crates/builtins/src" \
+        "$root/crates/builtins-compiler/src" \
         "$root/crates/session/tests" \
         "$root/hosts/host-web/src" \
         "$root/hosts/host-web/tests" \
         "$root/tools/bench-support/src" \
         "$root/tools/audit/src" \
         "$root/tools/bench/src"
-    # The marked file set mirrors the real tree after #371 (RT-16/IO-14) and #664's complete
-    # LocalRing removal: twelve files and forty-one regions across crates/ and hosts/, so the floors in the gate and the discovery
+    # The marked file set mirrors the real tree after #371 (RT-16/IO-14), #664's complete
+    # LocalRing removal and #1253's builtins-compiler drains: thirteen files and forty-three
+    # regions across crates/ and hosts/, so the floors in the gate and the discovery
     # walk are exercised against the same shape the gate sees on main. Column-zero markers and
     # indented markers (as in the real `impl`-block regions) both appear.
     printf '%s\n' \
@@ -267,6 +269,17 @@ create_fixture() {
     printf '%s\n' \
         'fn measure() {}' \
         >"$root/tools/bench/src/console.rs"
+    # Two regions, mirroring the real crates/builtins-compiler/src/lib.rs after #1253: the
+    # bounded fader and matrix drains.
+    printf '%s\n' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn drain_fader_controls() {}' \
+        '// REALTIME_POLICY_END' \
+        '' \
+        '// REALTIME_POLICY_BEGIN' \
+        'fn drain_matrix_controls() {}' \
+        '// REALTIME_POLICY_END' \
+        >"$root/crates/builtins-compiler/src/lib.rs"
 }
 
 expect_failure() {
@@ -319,6 +332,7 @@ sed -i -E '/^[[:space:]]*fn [a-z_]+\(\) \{\}[[:space:]]*$/d' \
     "$empty_bodies/crates/effect-contract/src/live.rs" \
     "$empty_bodies/crates/rack/src/lib.rs" \
     "$empty_bodies/crates/builtins/src/lib.rs" \
+    "$empty_bodies/crates/builtins-compiler/src/lib.rs" \
     "$empty_bodies/hosts/host-web/src/lib.rs"
 bash "$policy_script" "$empty_bodies" >/dev/null
 
@@ -391,15 +405,19 @@ expect_failure marked-effect-control-lane-stage "$alloc_class" \
 # with a violation is found and red.
 expect_failure marked-tools-root-scanned "$alloc_class" \
     'printf "%s\n" "// REALTIME_POLICY_BEGIN" "fn tool() { let _ = vec![0u8; 1]; }" "// REALTIME_POLICY_END" >"$root/tools/audit/src/marker_probe.rs"'
+# #1253: an unbounded `while let Ok(..) = ..try_pop()` drain inside a marked region is refused
+# with a message naming the bounded form.
+expect_failure marked-unbounded-try-pop-drain 'bound it with available_at_entry' \
+    'sed -i "s/fn drain_fader_controls() {}/fn drain_fader_controls() { while let Ok(record) = control.try_pop() { apply(record); } }/" "$root/crates/builtins-compiler/src/lib.rs"'
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
 # trips the file floor instead of passing with less coverage.
-expect_failure marked-file-count-floor 'expected at least twelve marked realtime files' \
+expect_failure marked-file-count-floor 'expected at least thirteen marked realtime files' \
     'sed -i "/REALTIME_POLICY/d" "$root/crates/builtins/src/lib.rs"'
-expect_failure no-marked-files-uses-floor 'expected at least twelve marked realtime files' \
+expect_failure no-marked-files-uses-floor 'expected at least thirteen marked realtime files' \
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least forty-one marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least forty-three marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.
