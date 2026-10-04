@@ -249,15 +249,88 @@ fn converted_domain(index: usize) -> Option<(f32, f32)> {
     }
 }
 
-/// `true` if a converted value is finite, not `-0.0`, not subnormal, and inside its range.
+/// `true` if a converted value is finite, not `-0.0`, and inside its range.
+///
+/// A subnormal is accepted wherever the range holds one: only the mix's `[0, 1]` does (the two
+/// gains' converted ranges start at `-24 dB`, a normal gain), and a subnormal mix is a legal value
+/// the effect holds and renders with, so its own snapshot must restore it (#1071).
+///
+/// This is the rule for every value at rest and for every ramp target. An in-flight ramp's
+/// `current` may leave the range by a rounding margin; [`ramp_current_valid`] owns that case.
 ///
 /// This is control-plane validation of a restored or prepared coefficient, not a render-path
 /// check: the render path has none (D7).
 fn converted_value_valid(index: usize, value: f32) -> bool {
-    if is_negative_zero(value) || !value.is_finite() || value.is_subnormal() {
+    if is_negative_zero(value) || !value.is_finite() {
         return false;
     }
     converted_domain(index).is_some_and(|(low, high)| value >= low && value <= high)
+}
+
+/// The spacing of the `f32` grid just above a positive finite `value`.
+fn ulp_at(value: f32) -> f32 {
+    f32::from_bits(value.to_bits() + 1) - value
+}
+
+/// `true` if `current` is a value parameter `index`'s ramp can hold with `target`, `step` and
+/// `remaining` (#1071 attempt 2).
+///
+/// Every current inside the converted range is accepted, as it always was. Outside it, only an
+/// in-flight ramp's rounding overshoot is: D11 rounds the step once and then adds it, so a ramp
+/// toward a range edge can cross that edge before its final sample assigns the target. A mix
+/// ramped from 40 subnormal units to `0.0` steps by `-1` unit (`-40/64` rounded up in magnitude)
+/// and holds negative subnormals for its last 24 samples; a gain ramped to `+36 dB` from a few
+/// dozen ulps below it ends a few ulps above it. Those are the effect's own words, so the restore
+/// must accept them.
+///
+/// The bound. Let the ramp start at `s` (any value the effect held, itself possibly an
+/// overshoot) toward a target `t` in the range `[low, high]`, with `step = fl(fl(t - s) / 64)`,
+/// and let it have added `step` `k = 64 - remaining` times (the snap leaves `remaining >= 1`
+/// while a ramp is in flight). Then
+/// `current = t - remaining * step + a + 64 * b + c`, where `a` is the rounding of `t - s` (at
+/// most half an ulp of `2 * high`, since `|t - s| < 2 * high`), `b` the rounding of the division
+/// (zero unless the quotient is subnormal, and then at most `2^-150`), and `c` the `k <= 63`
+/// rounded additions (each at most half an ulp of `2 * high`, since every running value is below
+/// `2 * high`). So the current lies within `32 * ulp(2 * high) + 2^-144` of the ramp's line
+/// `t - remaining * step`, and the check accepts `64 * ulp(2 * high)`. It runs in `f64`, whose
+/// rounding of these operands (below `2^-50` of an `f32` ulp of `2 * high` here) is far inside the
+/// spare `32` ulps.
+///
+/// Hostile words are refused as before but for that rounding margin: `-0.0`, non-finite values,
+/// a ramp at rest outside its range, and an in-flight current outside its range and off its own
+/// ramp's line.
+///
+/// The accepted set is not closed under render once a crafted word is in. A crafted in-flight
+/// ramp may hold a current near the tolerance's edge, far further off its line than any ramp of
+/// the effect's own drifts, and its later rounded additions can carry it past the tolerance, so
+/// the effect's own snapshot of it, some samples on, is refused. Only a crafted restore reaches this;
+/// every state the effect produces from its own automation stays restorable, and the plan-swap
+/// carry (#1278) moves only such states. Do not assume that a lane accepted from an arbitrary
+/// payload snapshots into one this check accepts.
+fn ramp_current_valid(index: usize, current: f32, target: f32, step: f32, remaining: u32) -> bool {
+    if converted_value_valid(index, current) {
+        return true;
+    }
+    if remaining == 0 || is_negative_zero(current) || !current.is_finite() || !step.is_finite() {
+        return false;
+    }
+    converted_domain(index).is_some_and(|(_, high)| {
+        let tolerance = f64::from(RAMP_SAMPLES) * f64::from(ulp_at(2.0 * high));
+        let line = f64::from(target) - f64::from(remaining) * f64::from(step);
+        (f64::from(current) - line).abs() <= tolerance
+    })
+}
+
+/// `true` if `step` is an increment parameter `index`'s ramp can hold.
+///
+/// Only the mix can step by a subnormal: a ramp toward or from a subnormal mix divides a subnormal
+/// difference. A gain step is `|Δ| / 64` with `|Δ|` at least an ulp of the `-24 dB` gain (about
+/// `7.5e-9`), so it is zero or normal, and a subnormal gain step is never self-produced.
+fn ramp_step_valid(index: usize, step: f32) -> bool {
+    match index {
+        2 => step.is_finite(),
+        _ => normal_or_zero(step),
+    }
 }
 
 /// Converts the six validated initial values into the two per-channel coefficient sets.
@@ -580,6 +653,7 @@ fn apply_automation<L: Lane>(
 // State payload, layout version 1
 // ---------------------------------------------------------------------------------------------
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
 /// Reads one lane of one channel into the 104 payload words of layout 1.
 fn write_lane_words<L: Lane>(channel: &Channel<L>, lane: usize, words: &mut [u32]) {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
@@ -630,10 +704,32 @@ struct LaneRestore {
 
 /// Validates the 104 payload words of layout 1.
 ///
-/// Ramp currents and targets must be inside the *converted* domain (a linear gain, not decibels),
-/// must not be `-0.0` and must not be subnormal; `step` must be finite and normal-or-zero;
-/// `remaining` must not exceed the smoothing window; every history word must be finite and either
-/// zero or normal. The cursor belongs to the bank and is not carried in the payload.
+/// The rule is "accept every word the effect itself can hold, refuse the rest" (#1071), so a
+/// snapshot of a lane that only ever held its own words always survives its own restore and a
+/// restored lane continues bit for bit (a lane restored from a crafted payload need not; see
+/// [`ramp_current_valid`]):
+///
+/// * ramp targets, and the currents of ramps at rest, must be inside the *converted* domain (a
+///   linear gain, not decibels) and must not be `-0.0`; a subnormal is in domain only for the mix;
+/// * an in-flight ramp's current may leave that domain only by the rounding overshoot the ramp
+///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
+/// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
+/// * `remaining` must not exceed the smoothing window;
+/// * the interpolation and decimation histories (`X`, `e`) must be zero or normal. The kernel
+///   flushes both before they enter a history (D7), and `lane::flush` zeroes every magnitude
+///   below `FLUSH_EPS` (`1e-20`), so the kernel writes only zeros and magnitudes of at least
+///   `1e-20`; the check is the looser zero-or-normal, which refuses every subnormal;
+/// * except that `X` may also hold an infinity ([`x_history_word_valid`]): `X` is
+///   `2 * drive * x`, which overflows for a finite input above about `2.7e36` at `+36 dB`. The
+///   cubic clamps the infinity to `±2/3`, so the output stays finite and D7 never clears it, and
+///   the effect holds it for 31 samples (#1278, #1071 attempt 1 MINOR-2). A NaN is never
+///   accepted, in any history;
+/// * the dry history must be finite: it holds the input unflushed by design, so the identity
+///   path can reproduce any input sample, subnormals included.
+///
+/// Flushing on snapshot instead would change rendered bits (a subnormal dry sample is the output
+/// at `mix == 0`) and break the exact continuation the plan-swap carry relies on (#1278 D2a).
+/// The cursor belongs to the bank and is not carried in the payload.
 fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
     let mut ramps = [LinearRamp::fixed(0.0); PARAMETER_COUNT];
@@ -643,10 +739,10 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         let target = f32::from_bits(words[base + 1]);
         let step = f32::from_bits(words[base + 2]);
         let remaining = words[base + 3];
-        if !converted_value_valid(parameter, current)
+        if remaining > RAMP_SAMPLES
             || !converted_value_valid(parameter, target)
-            || !normal_or_zero(step)
-            || remaining > RAMP_SAMPLES
+            || !ramp_step_valid(parameter, step)
+            || !ramp_current_valid(parameter, current, target, step, remaining)
         {
             return Err(StatePayloadError {
                 code: STATE_PARAMETER_CODE,
@@ -665,14 +761,18 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         e: [0.0; E_HISTORY_AGES],
         dry: [0.0; DRY_HISTORY_AGES],
     };
-    for (slot, offset) in [
+    let rules: [fn(f32) -> bool; 3] = [x_history_word_valid, normal_or_zero, f32::is_finite];
+    for ((slot, offset), valid) in [
         (&mut restore.x[..], X_HISTORY_WORD),
         (&mut restore.e[..], E_HISTORY_WORD),
         (&mut restore.dry[..], DRY_HISTORY_WORD),
-    ] {
+    ]
+    .into_iter()
+    .zip(rules)
+    {
         for (age, value) in slot.iter_mut().enumerate() {
             let word = f32::from_bits(words[offset + age]);
-            if !normal_or_zero(word) {
+            if !valid(word) {
                 return Err(StatePayloadError {
                     code: STATE_HISTORY_CODE,
                 });
@@ -681,6 +781,12 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         }
     }
     Ok(restore)
+}
+
+/// `true` if `value` is a word the interpolator input history `X` can hold: a zero, a normal, or
+/// the infinity a finite input overflows `2 * drive * x` to.
+fn x_history_word_valid(value: f32) -> bool {
+    normal_or_zero(value) || value.is_infinite()
 }
 
 /// `true` if `value` is finite and either a zero or a normal. Signed zeros are accepted.
@@ -783,6 +889,7 @@ fn restore_sections<L: Lane>(
 fn runtime_state_error(error: payload::StatePayloadError) -> StatePayloadError {
     StatePayloadError { code: error.code }
 }
+// REALTIME_POLICY_END
 
 // ---------------------------------------------------------------------------------------------
 // Prepared instances
@@ -1057,6 +1164,7 @@ impl PreparedNativeEffect for PreparedSoftClip {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -1077,6 +1185,7 @@ impl PreparedNativeEffect for PreparedSoftClip {
             input,
         )
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
@@ -1132,6 +1241,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1156,6 +1266,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedSoftClipBank<L> {
             input,
         )
     }
+    // REALTIME_POLICY_END
 }
 
 fn bank_track_index<L: Lane>(track_index: u32) -> Result<usize, StatePayloadError> {

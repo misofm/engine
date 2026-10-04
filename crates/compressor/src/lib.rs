@@ -296,8 +296,8 @@ const fn quality(sample_rate: u32) -> effect_contract::QualityDescriptor {
         tail: TailSamples::Infinite,
         maximum_state: StatePayloadSizes {
             common_bytes: 0,
-            left_bytes: 22 * 4,
-            right_bytes: 22 * 4,
+            left_bytes: (state::STATE_HEADER_WORDS * 4) as u32,
+            right_bytes: (state::STATE_HEADER_WORDS * 4) as u32,
         },
         scratch_fixed_bytes: 64,
         scratch_bytes_per_frame: 0,
@@ -341,7 +341,10 @@ pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     // `32 + len("Gain Reduction") + len("dB")` = 48 bytes. `state_layout_version` does not move:
     // no state byte changed, the tap is a read of state that was already there.
     contract_minor: 1,
-    state_layout_version: 1,
+    // #1278 D2a: the 37-word layout carries every ramp's step and the coefficient ramps, so a
+    // mid-ramp restore continues bit for bit. It stays V1, the sole prelaunch identity
+    // (`state::STATE_LAYOUT_VERSION`); the payload is not persisted (R6b).
+    state_layout_version: state::STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &COMPRESSOR_PARAMETERS,
     ports: &PORTS,
@@ -671,6 +674,7 @@ impl<L: Lane> Instance<L> {
         self.right.copy_state_from(&self.left);
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     /// Writes one lane's payload.
     fn snapshot(
         &self,
@@ -716,6 +720,7 @@ impl<L: Lane> Instance<L> {
         state::commit_channel(input.right, &mut self.right, lane, rate);
         Ok(())
     }
+    // REALTIME_POLICY_END
 }
 
 /// The `DESIGNED` term of the channel-symmetry witness, over the compressor's own kernel read
@@ -1091,6 +1096,7 @@ impl PreparedNativeEffect for PreparedCompressor {
         true
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -1105,6 +1111,7 @@ impl PreparedNativeEffect for PreparedCompressor {
     ) -> Result<(), StatePayloadError> {
         self.instance.restore(state_layout_version, input, 0)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
@@ -1159,6 +1166,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         self.process_bank_inner::<false>(block)
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1177,6 +1185,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         let track = checked_track(track_index, L::WIDTH, self.active)?;
         self.instance.restore(state_layout_version, input, track)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedCompressorBank<L> {
@@ -1420,7 +1429,7 @@ mod witness_tests {
             },
             initial_values: &values,
             limits: PrepareEffectLimits {
-                maximum_total_state_bytes: 176,
+                maximum_total_state_bytes: 296,
                 maximum_scratch_bytes: 64,
                 maximum_automation_spans_per_block: 16,
             },

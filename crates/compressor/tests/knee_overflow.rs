@@ -218,8 +218,13 @@ fn a_restored_overflowing_knee_does_not_duck() {
         let (left_payload, right_payload) = snapshot(donor.as_ref());
         let receiver_values = values(6.0, ratio);
         let mut receiver = prepare(request(&receiver_values));
-        restore(receiver.as_mut(), 1, &left_payload, &right_payload)
-            .expect("a valid payload restores");
+        restore(
+            receiver.as_mut(),
+            support::STATE_VERSION,
+            &left_payload,
+            &right_payload,
+        )
+        .expect("a valid payload restores");
         let mut left = vec![1.0_f32; FRAMES];
         let mut right = vec![1.0_f32; FRAMES];
         let report = render_scalar(receiver.as_mut(), &mut left, &mut right, 128, 128, &[]);

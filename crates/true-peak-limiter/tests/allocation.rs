@@ -1,10 +1,12 @@
 //! A1: the render path allocates nothing.
 //!
-//! The audited allocator's current-thread counters watch `process` and
-//! `process_bank` over a hundred blocks that include automation, a boundary-check failure and both
-//! resets, and a padded bank whose failures recover one lane (#1091). The limiter allocates at preparation and at restore — both control plane — and never
-//! again; before #90 the render path was allocation-free too, and this gate is what keeps it so
-//! now that the arena, the ramps and the payload codec all changed hands.
+//! The audited allocator's current-thread counters watch `process` and `process_bank` over a
+//! hundred blocks that include automation, a boundary-check failure and both resets, and a padded
+//! bank whose failures recover one lane (#1091). The limiter allocates at preparation -- control
+//! plane -- and never again: since #1278 a restore validates and commits in place, and the
+//! randomized differential (`tests/randomized.rs`) audits every payload call. Before #90 the
+//! render path was allocation-free too, and this gate is what keeps it so now that the arena, the
+//! ramps and the payload codec all changed hands.
 
 use bench_support::alloc;
 use lane::Backend;

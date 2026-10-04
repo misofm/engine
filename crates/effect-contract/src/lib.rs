@@ -1910,12 +1910,32 @@ pub trait PreparedNativeEffect: Send {
         Err(ResponseAnalysisError::UnsupportedCapability)
     }
 
+    /// Writes this instance's state payload into the caller's buffers.
+    ///
+    /// # Render-safe (#1278)
+    ///
+    /// The four payload calls -- this one, [`restore_state_payload`](Self::restore_state_payload)
+    /// and the bank's [`snapshot_track_state_payload`](PreparedNativeEffectBank::snapshot_track_state_payload)
+    /// and [`restore_track_state_payload`](PreparedNativeEffectBank::restore_track_state_payload)
+    /// -- are render-thread calls: the plan-swap carry (#1269) moves effect lanes through them in
+    /// the swap block, between two rendered blocks. Each allocates nothing, frees nothing, takes
+    /// no lock, makes no syscall and runs in time bounded by the prepared state size. A snapshot
+    /// writes straight into the caller's buffers; a restore validates the whole payload in place,
+    /// reading the input bytes, then commits by reading them again into the instance's existing
+    /// storage, so a refused restore changes nothing.
+    ///
+    /// A payload carries every word a continuation reads, a ramp's step included, so an instance
+    /// that restores it renders, from then on, exactly the words the instance it was taken from
+    /// renders by continuing -- mid-ramp too. A restore never re-derives a value it could read.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError>;
 
     /// Restores a snapshot into this prepared instance.
+    ///
+    /// Render-safe, and exact against the continued instance: see
+    /// [`snapshot_state_payload`](Self::snapshot_state_payload).
     ///
     /// # The payload-header rule (issue #95; the uniform rule for every effect)
     ///
@@ -2033,21 +2053,29 @@ pub trait PreparedNativeEffectBank: Send {
 
     /// Write one track's state payload.
     ///
+    /// Render-safe, like the scalar payload calls
+    /// ([`PreparedNativeEffect::snapshot_state_payload`]): the plan-swap carry (#1269) snapshots
+    /// and restores bank lanes in the swap block, and a lane restored from this payload continues
+    /// exactly as this lane does.
+    ///
     /// # Snapshotting a collapsed bank
     ///
     /// A bank whose chain is currently collapsed holds a right channel frozen at the moment the
     /// collapse engaged, so a payload taken from it would carry a right section no dual run ever
-    /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation
-    /// and why nothing in this tree owes it yet -- no engine path snapshots a bank at all since
-    /// #1037 removed the persisted state envelope, whose only entry point snapshotted unpublished
-    /// banks, and a bank bound into a chain is not unpublished. The note is repeated from here
-    /// because this is the method a caller reaches for, and a caller that finds a way to a bound
-    /// bank must call `desymmetrize_channels` first.
+    /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation.
+    /// No engine path snapshots a bound bank yet -- #1037 removed the persisted state envelope,
+    /// whose only entry point snapshotted unpublished banks -- but the plan-swap carry will, so
+    /// the note is repeated from here because this is the method a caller reaches for: a caller
+    /// that snapshots a bound bank must call `desymmetrize_channels` first.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
         output: StatePayloadOutput<'_>,
     ) -> Result<(), StatePayloadError>;
+    /// Restore one track's state payload into its lane.
+    ///
+    /// Render-safe and exact against the continued lane, like
+    /// [`PreparedNativeEffect::restore_state_payload`]; a refused restore changes nothing.
     fn restore_track_state_payload(
         &mut self,
         track_index: u32,
@@ -2147,10 +2175,10 @@ pub trait PreparedNativeEffectBank: Send {
     /// A state payload taken while a bank is collapsed would carry a right section that is whatever
     /// the right channel held when the collapse engaged. Calling this first makes the payload the
     /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
-    /// state, not an approximation of it. Nothing in this tree needs to: no engine path snapshots a
-    /// bank since #1037 removed the persisted state envelope, whose snapshot took only unpublished
-    /// banks. The obligation is written here so that the first caller that *does* reach a bound
-    /// bank finds it stated rather than has to derive it.
+    /// state, not an approximation of it. No engine path snapshots a bound bank yet: #1037 removed
+    /// the persisted state envelope, whose snapshot took only unpublished banks. The plan-swap
+    /// carry (#1269) will be the first caller that does, and the obligation is written here so it
+    /// finds it stated rather than has to derive it.
     fn desymmetrize_channels(&mut self) {}
 
     /// Whether this bank can **prove**, right now, that its two channels' state is bit-equal.

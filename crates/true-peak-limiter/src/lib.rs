@@ -67,8 +67,8 @@ use effect_runtime::params::{
 };
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    HEADER_WORDS, StateLayout, read_f32, read_header, read_u32, validate_lengths, write_f32,
-    write_header, write_u32,
+    HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_u32, validate_lengths,
+    write_f32, write_header, write_u32,
 };
 use lane::{Backend, Lane, flush};
 
@@ -3927,8 +3927,11 @@ mod words {
     pub(super) const HISTORY: usize = 15;
 }
 
-/// A parsed, not yet committed channel section.
-#[derive(Debug)]
+/// The scalar words of a validated, not yet committed channel section.
+///
+/// The rings and the history are not here: a restore validates them in place in the payload bytes
+/// and commits them by reading the bytes again (#1278 D1), so a restore holds no heap value.
+#[derive(Clone, Copy, Debug)]
 struct LaneRestore {
     main_cursor: u32,
     ring_cursor: u32,
@@ -3940,27 +3943,27 @@ struct LaneRestore {
     box_sum: f32,
     limit: LinearRamp,
     release: LinearRamp,
-    history: Box<[f32]>,
-    main_ring: Box<[f32]>,
-    required_ring: Box<[f32]>,
-    box_ring: Box<[f32]>,
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
 
-/// The `[minimum, maximum]` a stored coefficient may occupy, with a four-ulp relaxation.
+/// The `[minimum, maximum]` a **moving** coefficient's path may occupy, with a 64-ulp relaxation.
 ///
 /// A ramped `current` lies mathematically between two in-domain coefficients, but the iterated
-/// `current + step` of D11 can round a hair past an endpoint on its last step before the snap. The
-/// relaxation is exactly that rounding budget; it is not a domain widening, and a value outside a
-/// coefficient's real range by more than a few ulps is still rejected.
+/// `current + step` of D11 rounds at each of up to 63 additions before the snap, and a ramp only a
+/// few hundred ulps long ends past an endpoint by more than four ulps: #1278 found a ceiling ramp
+/// to -24 dB whose own snapshot a four-ulp budget refused. The relaxation is that rounding budget
+/// and applies only to the values a moving ramp visits (`ramp_path_inside`): a target and a
+/// settled coefficient are designed values and are held to the unrelaxed range, so no payload can
+/// set a ceiling above the effect's own.
 fn coefficient_bounds(low: f32, high: f32) -> (f32, f32) {
-    let slack = 4.0 * f32::EPSILON;
+    let slack = 64.0 * f32::EPSILON;
     (low - low.abs() * slack, high + high.abs() * slack)
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// Writes one channel of one track into `bytes`, physical ring order.
 fn snapshot_lane(
     bytes: &mut [u8],
@@ -4014,7 +4017,7 @@ fn snapshot_lane(
     debug_assert_eq!(word, shape.lane_words());
 }
 
-/// Parses and validates one channel section without touching any live state.
+/// Validates one channel section in place, without touching any live state or the heap.
 fn read_lane(
     bytes: &[u8],
     shape: &Shape,
@@ -4049,8 +4052,8 @@ fn read_lane(
         return Err(state_error("effect.state.gain"));
     }
 
-    let limit_bounds = coefficient_bounds(limit_coefficient(-24.0), limit_coefficient(0.0));
-    let release_bounds = coefficient_bounds(
+    let limit_bounds = (limit_coefficient(-24.0), limit_coefficient(0.0));
+    let release_bounds = (
         release_coefficient(2000.0, sample_rate),
         release_coefficient(10.0, sample_rate),
     );
@@ -4066,60 +4069,51 @@ fn read_lane(
         } else {
             release_bounds
         };
-        let current = read_f32(bytes, word);
-        let target = read_f32(bytes, word + 1);
-        let step = read_f32(bytes, word + 2);
-        let remaining = read_u32(bytes, word + 3);
-        if !(low..=high).contains(&current)
-            || !(low..=high).contains(&target)
-            || !step.is_finite()
-            || remaining > RAMP_UPDATES
-            || (remaining == 0 && current.to_bits() != target.to_bits())
+        let read = LinearRamp {
+            current: read_f32(bytes, word),
+            target: read_f32(bytes, word + 1),
+            step: read_f32(bytes, word + 2),
+            remaining: read_u32(bytes, word + 3),
+        };
+        // The target and a settled current are designed values, inside the range exactly; a
+        // moving ramp's every value up to the snap stays inside the relaxed path bounds, which
+        // also bounds its step. `ramp_path_inside` checks `remaining` first, so the walk is
+        // bounded by `RAMP_UPDATES`, and a settled ramp's step must be `+0.0`.
+        if !(low..=high).contains(&read.target)
+            || (read.remaining == 0 && read.current.to_bits() != read.target.to_bits())
+            || !ramp_path_inside(read, coefficient_bounds(low, high), RAMP_UPDATES)
         {
             return Err(state_error("effect.state.parameter"));
         }
-        *ramp = LinearRamp {
-            current,
-            target,
-            step,
-            remaining,
-        };
+        *ramp = read;
     }
 
-    let mut history = vec![0.0_f32; HISTORY_WORDS].into_boxed_slice();
-    for (tap, value) in history.iter_mut().enumerate() {
-        *value = read_f32(bytes, words::HISTORY + tap);
-        if !value.is_finite() {
+    for tap in 0..HISTORY_WORDS {
+        if !read_f32(bytes, words::HISTORY + tap).is_finite() {
             return Err(state_error("effect.state.history"));
         }
     }
 
-    let mut word = LANE_HEADER_WORDS;
-    let mut main_ring = vec![0.0_f32; shape.main].into_boxed_slice();
-    for value in main_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !value.is_finite() {
+    let main_base = LANE_HEADER_WORDS;
+    let required_base = main_base + shape.main;
+    let box_base = required_base + shape.ring;
+    debug_assert_eq!(box_base + shape.ring, shape.lane_words());
+    for slot in 0..shape.main {
+        if !read_f32(bytes, main_base + slot).is_finite() {
             return Err(state_error("effect.state.ring"));
         }
     }
-    let mut required_ring = vec![0.0_f32; shape.ring].into_boxed_slice();
-    for value in required_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !(0.0..=1.0).contains(value) {
+    for slot in 0..shape.ring {
+        if !(0.0..=1.0).contains(&read_f32(bytes, required_base + slot)) {
             return Err(state_error("effect.state.gain"));
         }
     }
-    let mut box_ring = vec![0.0_f32; shape.ring].into_boxed_slice();
-    for value in box_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !(0.0..=1.0).contains(value) || (*value * BOX_GRID).floor() != *value * BOX_GRID {
+    for slot in 0..shape.ring {
+        let value = read_f32(bytes, box_base + slot);
+        if !(0.0..=1.0).contains(&value) || (value * BOX_GRID).floor() != value * BOX_GRID {
             return Err(state_error("effect.state.gain"));
         }
     }
-    debug_assert_eq!(word, shape.lane_words());
 
     // The box sum is recomputed from the ring rather than trusted: the two together are the state
     // of one running window, and a payload whose sum does not match its own terms would make the
@@ -4127,7 +4121,7 @@ fn read_lane(
     let mut recomputed = 0.0_f32;
     for age in 1..=window {
         let slot = (ring_cursor as usize + shape.ring - age) % shape.ring;
-        recomputed += box_ring[slot];
+        recomputed += read_f32(bytes, box_base + slot);
     }
     if recomputed.to_bits() != box_sum.to_bits() {
         return Err(state_error("effect.state.gain"));
@@ -4144,10 +4138,6 @@ fn read_lane(
         box_sum,
         limit: ramps[0],
         release: ramps[1],
-        history,
-        main_ring,
-        required_ring,
-        box_ring,
     })
 }
 
@@ -4164,6 +4154,7 @@ fn commit_lane(
     state: &mut ChannelState,
     lane: usize,
     parsed: &LaneRestore,
+    bytes: &[u8],
     cursors: Cursors,
     shape: &Shape,
 ) {
@@ -4176,19 +4167,22 @@ fn commit_lane(
     state.box_sum[lane] = parsed.box_sum;
     state.limit[lane] = parsed.limit;
     state.release[lane] = parsed.release;
-    for (tap, value) in parsed.history.iter().enumerate() {
-        state.history[tap * width + lane] = *value;
+    for tap in 0..HISTORY_WORDS {
+        state.history[tap * width + lane] = read_f32(bytes, words::HISTORY + tap);
     }
+    let main_base = LANE_HEADER_WORDS;
+    let required_base = main_base + shape.main;
+    let box_base = required_base + shape.ring;
     for age in 0..shape.main {
         let source = (parsed.main_cursor as usize + age) % shape.main;
         let destination = (cursors.main as usize + age) % shape.main;
-        state.main_ring[destination * width + lane] = parsed.main_ring[source];
+        state.main_ring[destination * width + lane] = read_f32(bytes, main_base + source);
     }
     for age in 0..shape.ring {
         let source = (parsed.ring_cursor as usize + age) % shape.ring;
         let destination = (cursors.ring as usize + age) % shape.ring;
-        state.required_ring[destination * width + lane] = parsed.required_ring[source];
-        state.box_ring[destination * width + lane] = parsed.box_ring[source];
+        state.required_ring[destination * width + lane] = read_f32(bytes, required_base + source);
+        state.box_ring[destination * width + lane] = read_f32(bytes, box_base + source);
     }
 }
 
@@ -4236,15 +4230,32 @@ impl<L: Lane> LimiterCore<L> {
         let rate = self.metadata.sample_rate;
         let left = read_lane(input.left, &self.shape, rate)?;
         let right = read_lane(input.right, &self.shape, rate)?;
-        commit_lane(&mut self.left, track, &left, self.cursors, &self.shape);
-        commit_lane(&mut self.right, track, &right, self.cursors, &self.shape);
+        commit_lane(
+            &mut self.left,
+            track,
+            &left,
+            input.left,
+            self.cursors,
+            &self.shape,
+        );
+        commit_lane(
+            &mut self.right,
+            track,
+            &right,
+            input.right,
+            self.cursors,
+            &self.shape,
+        );
         // #990: a payload's two sections are arbitrary, so the record is re-derived from the words
-        // themselves, every lane of the bank, on this control-path call. A rejected restore returns
+        // themselves, every lane of the bank, on this payload call (bounded by the prepared
+        // state, and allocation-free: the plan-swap carry makes it in the swap block, #1278). A rejected restore returns
         // above without writing anything and leaves the record as true as it was.
         self.gain_linked = gain_state_agrees(&self.left, &self.right);
         Ok(())
     }
 }
+
+// REALTIME_POLICY_END
 
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
@@ -4448,6 +4459,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         mut output: StatePayloadOutput<'_>,
@@ -4462,6 +4474,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
     ) -> Result<(), StatePayloadError> {
         self.core.restore_track(0, state_layout_version, &input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
@@ -4516,6 +4529,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         self.process_bank_inner::<false>(block)
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -4534,6 +4548,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedTruePeakLimiterBank<L> {
@@ -7583,7 +7598,35 @@ mod tests {
         let sizes = peer.metadata().state_sizes;
         let reference = snapshot(peer.as_ref());
         type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
-        let corruptions: [Corruption; 6] = [
+        // #1278 attempt 2: a target and a settled coefficient are held to the designed range
+        // exactly, and a moving ramp's whole path to its relaxed bounds.
+        let above_ceiling = f32::from_bits(limit_coefficient(0.0).to_bits() + 1);
+        let limit_ramp = |current: f32, target: f32, step: f32, remaining: u32| {
+            move |bytes: &mut Vec<u8>| {
+                write_f32(bytes, words::LIMIT_RAMP, current);
+                write_f32(bytes, words::LIMIT_RAMP + 1, target);
+                write_f32(bytes, words::LIMIT_RAMP + 2, step);
+                write_u32(bytes, words::LIMIT_RAMP + 3, remaining);
+            }
+        };
+        let ceiling = limit_coefficient(0.0);
+        let corruptions: [Corruption; 10] = [
+            (
+                "settled limit one ulp above the ceiling",
+                Box::new(limit_ramp(above_ceiling, ceiling, 0.0, 0)),
+            ),
+            (
+                "limit target one ulp above the ceiling",
+                Box::new(limit_ramp(ceiling, above_ceiling, 0.0, 8)),
+            ),
+            (
+                "moving limit walked past its bounds by its step",
+                Box::new(limit_ramp(ceiling, ceiling, -1e30, 8)),
+            ),
+            (
+                "settled limit with a nonzero step",
+                Box::new(limit_ramp(ceiling, ceiling, 1e-3, 0)),
+            ),
             (
                 "version",
                 Box::new(|bytes: &mut Vec<u8>| write_u32(bytes, 0, 0)),
@@ -9262,10 +9305,14 @@ mod tests {
                     }
                     if draw.chance(1, 5) {
                         // An in-flight limit ramp that `read_lane` accepts and that no retarget
-                        // produces: it walks the limit to zero, below it, or to infinity.
+                        // produces: it walks toward an edge of the ceiling range, then snaps back
+                        // to where it started. (A walk out of the range, to zero or to infinity,
+                        // is refused since #1278 attempt 2.)
                         let current = read_f32(&payload.1, words::LIMIT_RAMP);
-                        let step = draw.pick(&[-current, -2.0 * current, f32::MAX, -0.5 * current]);
                         let remaining = 2 + draw.below(63) as u32;
+                        let edge = draw.pick(&[limit_coefficient(-24.0), limit_coefficient(0.0)]);
+                        let step =
+                            (edge - current) / (remaining - 1) as f32 * draw.pick(&[0.5_f32, 0.9]);
                         let sections = if draw.chance(1, 2) { 2 } else { 1 };
                         for section in [&mut payload.1, &mut payload.2].into_iter().take(sections) {
                             write_f32(section, words::LIMIT_RAMP, current);
@@ -9331,7 +9378,7 @@ mod tests {
     /// Issue #990. Random banks (every launch rate, both links, bypass, ragged and asymmetric
     /// cohorts), random block lengths and signals (including `-0.0`, subnormals, the exact
     /// threshold and non-finite words), one- and two-channel retargets, same-value retargets,
-    /// rejected `Both` spans, both resets, restores of current, cross-track and hostile-ramp
+    /// rejected `Both` spans, both resets, restores of current, cross-track and in-flight-ramp
     /// payloads, and collapse runs with and without `desymmetrize`. Every block is compared as in
     /// the matrix. The linked body must actually have run.
     #[test]

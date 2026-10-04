@@ -471,6 +471,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         Some(())
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, a restore commit re-derives the timing coefficients.
     /// Recomputes one lane's hold count and one-pole coefficients from its timing.
     fn rederive_lane(&mut self, channel: usize, lane: usize) -> Option<()> {
         let timing = self.timing[lane][channel];
@@ -489,6 +490,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         );
         Some(())
     }
+    // REALTIME_POLICY_END
 
     /// Clears one lane of one channel back to its prepared defaults: gain, phase, hold and resting
     /// ramps. This is `ResetKind::FullToDefaults` for one lane, and it is also the D7 recovery
@@ -697,6 +699,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         }
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
     /// Writes one lane's channel section of the state payload.
     fn write_lane(&self, channel: usize, lane: usize, bytes: &mut [u8]) {
         let state = &self.state[channel];
@@ -774,13 +777,30 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
             let step = payload::read_f32(bytes, word + 2);
             let remaining = payload::read_f32(bytes, word + 3);
             let resting = remaining == 0.0;
+            // #1278: the effect's own mid-ramp snapshot must restore. A ramping `current` is an
+            // iterated `current + step` that may round a few ulps past a domain edge, and its step
+            // is `(target - current) / 64`, which is subnormal for a ramp a few ulps long near
+            // zero. So the target and a resting current are held to the domain, and a moving ramp
+            // to its whole remaining path within a 64-ulp rounding budget.
+            let spec = &GATE_SPECS[index];
+            let slack = 64.0 * f32::EPSILON * spec.minimum.abs().max(spec.maximum.abs());
+            let path = integral_within(remaining, RAMP_SAMPLES as f32)
+                && payload::ramp_path_within(
+                    LinearRamp {
+                        current,
+                        target,
+                        step,
+                        remaining: remaining as u32,
+                    },
+                    (spec.minimum, spec.maximum),
+                    slack,
+                    RAMP_SAMPLES,
+                );
             if is_negative_zero(current)
                 || is_negative_zero(target)
-                || !parameter_value_valid(&GATE_SPECS[index], current)
-                || !parameter_value_valid(&GATE_SPECS[index], target)
-                || !integral_within(remaining, RAMP_SAMPLES as f32)
-                || !normal_or_zero(step)
-                || (resting && step.to_bits() != 0)
+                || (resting && !parameter_value_valid(spec, current))
+                || !parameter_value_valid(spec, target)
+                || !path
             {
                 return Err(state_error("effect.state.parameter"));
             }
@@ -841,6 +861,7 @@ impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {
         self.commit_lane(0, lane, &left)?;
         self.commit_lane(1, lane, &right)
     }
+    // REALTIME_POLICY_END
 }
 
 /// Word index of the first ramp quadruple in a channel section.
@@ -883,6 +904,7 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
         true
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         mut output: StatePayloadOutput<'_>,
@@ -897,6 +919,7 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     ) -> Result<(), StatePayloadError> {
         self.restore_lane(0, state_layout_version, &input)
     }
+    // REALTIME_POLICY_END
 }
 
 /// Whether this artifact executes banks of `lanes` lanes: a compile-time constant (D4).
@@ -988,6 +1011,7 @@ macro_rules! bank_impl {
                 report
             }
 
+            // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
             fn snapshot_track_state_payload(
                 &self,
                 track_index: u32,
@@ -1006,6 +1030,7 @@ macro_rules! bank_impl {
                 let track = checked_track(track_index, <$lane>::WIDTH)?;
                 self.restore_lane(track, state_layout_version, &input)
             }
+            // REALTIME_POLICY_END
         }
     };
 }

@@ -136,38 +136,9 @@ impl<L: Lane> Channel<L> {
         core::array::from_fn(|parameter| self.ramps[parameter][lane].current)
     }
 
-    pub(crate) fn redesign(&mut self, lane: usize, sample_rate: u32) {
-        let values = self.current_values(lane);
-        design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
-        self.seed_rate_ramps(lane);
-    }
-
     fn seed_rate_ramps(&mut self, lane: usize) {
         self.rate_ramps[0][lane] = LinearRamp::fixed(self.words[COEF_ATTACK][lane]);
         self.rate_ramps[1][lane] = LinearRamp::fixed(self.words[COEF_RELEASE][lane]);
-    }
-
-    /// Reconstructs the active coefficient trajectories after a version-1 payload restore.
-    ///
-    /// The payload intentionally keeps its frozen 22-word shape and does not serialize auxiliary
-    /// coefficient state. As with the parameter ramp step, which is also reconstructed from the
-    /// payload's current/target/remaining triple, the resumed coefficient path starts from the
-    /// exact design of the serialized current time and reaches the exact target design after the
-    /// serialized number of samples.
-    pub(crate) fn restore_rate_ramps(&mut self, lane: usize, sample_rate: u32) {
-        for (slot, (parameter, coefficient)) in [(3, COEF_ATTACK), (4, COEF_RELEASE)]
-            .into_iter()
-            .enumerate()
-        {
-            let parameter_ramp = self.ramps[parameter][lane];
-            let start = self.words[coefficient][lane];
-            let target = rate_coefficient(parameter_ramp.target, sample_rate);
-            let mut ramp = LinearRamp::fixed(start);
-            if parameter_ramp.remaining != 0 {
-                ramp.set_target(target, parameter_ramp.remaining);
-            }
-            self.rate_ramps[slot][lane] = ramp;
-        }
     }
 
     /// Retargets a smoothed parameter and, for attack/release, its coefficient ramp.
@@ -1675,8 +1646,10 @@ mod coefficient_ramp_tests {
         assert_eq!(channel.ramps[3][0].remaining, 0);
     }
 
+    /// #1278 D2a: a lane restored mid-ramp resumes both ramps -- the release time and its
+    /// coefficient -- word for word as the lane it was taken from continues them.
     #[test]
-    fn payload_restore_reconstructs_an_active_coefficient_ramp_from_remaining() {
+    fn payload_restore_resumes_an_active_coefficient_ramp_exactly() {
         let mut source = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
         source.set_parameter_target(4, 0, 2_800.0, SAMPLE_RATE);
         for _ in 0..23 {
@@ -1688,30 +1661,22 @@ mod coefficient_ramp_tests {
 
         let mut restored = Channel::<f32>::new(&defaults(), SAMPLE_RATE);
         commit_channel(&bytes, &mut restored, 0, SAMPLE_RATE);
-        let parameter = restored.ramps[4][0];
-        let expected_start = rate_coefficient(parameter.current, SAMPLE_RATE);
-        let expected_target = rate_coefficient(parameter.target, SAMPLE_RATE);
-        let mut expected = LinearRamp::fixed(expected_start);
-        expected.set_target(expected_target, parameter.remaining);
-        assert_eq!(
-            restored.words[COEF_RELEASE][0].to_bits(),
-            expected_start.to_bits()
-        );
-        assert_eq!(restored.rate_ramps[1][0].remaining, parameter.remaining);
-
-        for update in 0..parameter.remaining {
-            let expected_word = expected.next_value();
-            restored.advance_ramps(SAMPLE_RATE);
+        let remaining = source.ramps[4][0].remaining;
+        assert!(remaining > 0, "the fixture restores mid-ramp");
+        for update in 0..=remaining {
             assert_eq!(
                 restored.words[COEF_RELEASE][0].to_bits(),
-                expected_word.to_bits(),
+                source.words[COEF_RELEASE][0].to_bits(),
                 "restored coefficient update {update}"
             );
+            assert_eq!(restored.ramps[4][0], source.ramps[4][0], "update {update}");
+            assert_eq!(
+                restored.rate_ramps[1][0], source.rate_ramps[1][0],
+                "update {update}"
+            );
+            source.advance_ramps(SAMPLE_RATE);
+            restored.advance_ramps(SAMPLE_RATE);
         }
-        assert_eq!(
-            restored.words[COEF_RELEASE][0].to_bits(),
-            expected_target.to_bits()
-        );
         assert_eq!(restored.ramps[4][0].remaining, 0);
     }
 
@@ -2287,7 +2252,8 @@ mod settled_body_tests {
     }
 
     /// Restores one lane of `channel` through the payload codec (`validate_channel`, then
-    /// `commit_channel`), with the ramp of `parameter` replaced by `(current, target, remaining)`.
+    /// `commit_channel`), with the ramp of `parameter` replaced by `(current, target, remaining)`
+    /// and the step `set_target` would give it.
     fn restore_ramp<L: Lane>(
         channel: &mut Channel<L>,
         lane: usize,
@@ -2297,10 +2263,16 @@ mod settled_body_tests {
     ) {
         let mut bytes = [0_u8; STATE_HEADER_WORDS * 4];
         write_channel(&mut bytes, channel, lane);
-        let word = (1 + parameter * 3) * 4;
+        let word = (1 + parameter * 4) * 4;
+        let step = if remaining == 0 {
+            0.0_f32
+        } else {
+            (target - current) / remaining as f32
+        };
         bytes[word..word + 4].copy_from_slice(&current.to_le_bytes());
         bytes[word + 4..word + 8].copy_from_slice(&target.to_le_bytes());
-        bytes[word + 8..word + 12].copy_from_slice(&remaining.to_le_bytes());
+        bytes[word + 8..word + 12].copy_from_slice(&step.to_le_bytes());
+        bytes[word + 12..word + 16].copy_from_slice(&remaining.to_le_bytes());
         validate_channel(&bytes).expect("a legal payload");
         commit_channel(&bytes, channel, lane, sample_rate);
     }

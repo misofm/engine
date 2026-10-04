@@ -19,7 +19,7 @@ use transient_shaper::{TRANSIENT_SHAPER_PARAMETERS, TransientShaperFactory};
 pub(crate) const PARAMETER_COUNT: usize = 3;
 
 /// Words in one lane's state section, and its byte length.
-pub(crate) const STATE_WORDS: usize = 11;
+pub(crate) const STATE_WORDS: usize = 14;
 
 /// Byte length of one lane's state section.
 pub(crate) const LANE_STATE_BYTES: usize = STATE_WORDS * 4;
@@ -87,7 +87,7 @@ pub(crate) fn request_full<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 88,
+            maximum_total_state_bytes: 112,
             maximum_scratch_bytes: 24,
             maximum_automation_spans_per_block: 16,
         },
@@ -162,7 +162,9 @@ pub(crate) fn state_u32(bytes: &[u8], word: usize) -> u32 {
     read_u32(bytes, word)
 }
 
-/// The eleven bytes-worth of words one lane's state section must hold.
+/// The fourteen words one lane's state section must hold (#1278): the two
+/// envelopes, then each ramp's current, target, step and remaining, with the step `set_target`
+/// gives a ramp of `remaining` samples (`+0.0` when settled).
 pub(crate) fn expected_lane_bytes(
     envelopes: [f32; 2],
     ramps: [(f32, f32, u32); PARAMETER_COUNT],
@@ -171,10 +173,16 @@ pub(crate) fn expected_lane_bytes(
     write_f32(&mut bytes, 0, envelopes[0]);
     write_f32(&mut bytes, 1, envelopes[1]);
     for (index, ramp) in ramps.into_iter().enumerate() {
-        let word = 2 + index * 3;
+        let word = 2 + index * 4;
+        let step = if ramp.2 == 0 {
+            0.0
+        } else {
+            (ramp.1 - ramp.0) / ramp.2 as f32
+        };
         write_f32(&mut bytes, word, ramp.0);
         write_f32(&mut bytes, word + 1, ramp.1);
-        write_u32(&mut bytes, word + 2, ramp.2);
+        write_f32(&mut bytes, word + 2, step);
+        write_u32(&mut bytes, word + 3, ramp.2);
     }
     bytes
 }

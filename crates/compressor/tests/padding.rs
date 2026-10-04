@@ -481,7 +481,7 @@ fn a_padded_lane_is_not_a_track() {
             let restore = |bank: &mut dyn PreparedNativeEffectBank, lane: usize| {
                 bank.restore_track_state_payload(
                     lane as u32,
-                    1,
+                    support::STATE_VERSION,
                     StatePayloadInput {
                         common: &[],
                         left: &left,
@@ -512,7 +512,7 @@ fn a_padded_lane_is_not_a_track() {
                 assert_eq!(
                     bank.restore_track_state_payload(
                         lane as u32,
-                        1,
+                        support::STATE_VERSION,
                         StatePayloadInput {
                             common: &[],
                             left: &member_left,

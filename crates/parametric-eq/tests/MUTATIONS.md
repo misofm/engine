@@ -426,3 +426,15 @@ cascade rendering `80000000` where the full one renders `00000000`.
 | 1015-B1 | follow-up: `>` instead of `>=` on `FLUSH_EPS` in `lane_is_flush_shaped` (the range starts one word above the floor) | `leg_c_refuses_below_flush_eps_admits_it_and_re_engages` (`live integrator 0 holding 1e-20 …: block 0 must elide`), dev and release | RED |
 | 1015-B2 | follow-up: the old leg (c) in both stationary lists | the boundary test (`holding 1e-30 …: block 0 must refuse`) and both reproduction tests, dev and release | RED |
 | 1015-B3 | follow-up: refuse subnormals only (the range starts at the smallest normal) | the boundary test (`holding 1e-30 …: block 0 must refuse`), dev and release | RED |
+
+## #1278 attempt 3: mid-ramp restores and the plan-swap carry
+
+The carry (#1269) restores a lane's snapshot into a freshly prepared plan, mid-ramp included. The
+gates are `tests/carry.rs` and the conformance differential (`tests/randomized.rs`), which now
+drives EQ ramps through prepared targets. Debug profile, AVX2 host (the EQ binds `Eight` only here).
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1278-M1 | `Channel::commit_track` stores a moving band's step as `(target - current) / remaining` instead of the carried step | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (342 of 390 scalar and bank comparisons diverge, on all three ramps); the differential (`the instance restored from its snapshot rendered 0xbeb91443 where the lane, continuing, rendered 0xbeb91440`) | RED |
+| 1278-M2 | the remaining-path walk held to the design's `NORM_TOLERANCE` instead of `RAMP_PATH_NORM_TOLERANCE` | `a_mid_ramp_restore_continues_bit_for_bit_at_every_sample` (the 10 kHz bell refused at samples 0-63); the differential (`lane 1's snapshot refused by a fresh instance (effect.state.payload)`) | RED |
+| 1278-M3 | `PreparedParametricEq::restore_track` commits the left channel before decoding the right | `a_restore_refused_on_one_channel_moves_neither` (`the scalar instance moved`) | RED |
