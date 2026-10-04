@@ -14,7 +14,10 @@ use effect_contract::{
 };
 use effect_runtime::state_payload::{read_f32, read_u32};
 
-use support::{initial_values, prepare, render_scalar, request_with_quantum};
+use support::{
+    CURRENT, REMAINING, TARGET, initial_values, prepare, ramp_word, render_scalar,
+    request_with_quantum,
+};
 
 const THRESHOLD_DEFAULT: f32 = -18.0;
 const THRESHOLD_TARGET: f32 = -80.0;
@@ -76,11 +79,14 @@ fn block_point_steps_by_a_precomputed_increment_and_snaps_exactly() {
         }
         let payload = state(effect.as_ref());
         assert_eq!(
-            read_f32(&payload, 1).to_bits(),
+            read_f32(&payload, ramp_word(0, CURRENT)).to_bits(),
             expected.to_bits(),
             "after {updates} updates"
         );
-        assert_eq!(read_u32(&payload, 3), SMOOTHING - updates as u32);
+        assert_eq!(
+            read_u32(&payload, ramp_word(0, REMAINING)),
+            SMOOTHING - updates as u32
+        );
     }
 
     // The 64th update assigns the target exactly, whatever the accumulated sum was.
@@ -99,11 +105,11 @@ fn block_point_steps_by_a_precomputed_increment_and_snaps_exactly() {
     );
     let payload = state(effect.as_ref());
     assert_eq!(
-        read_f32(&payload, 1).to_bits(),
+        read_f32(&payload, ramp_word(0, CURRENT)).to_bits(),
         THRESHOLD_TARGET.to_bits(),
         "the last update is an assignment, not an addition"
     );
-    assert_eq!(read_u32(&payload, 3), 0);
+    assert_eq!(read_u32(&payload, ramp_word(0, REMAINING)), 0);
 
     // And it did not arrive early: 63 additions do not reach the target.
     let mut sum = THRESHOLD_DEFAULT;
@@ -129,7 +135,7 @@ fn a_restarting_point_ramps_from_the_current_value() {
         128,
         &[(0, point(0, ParameterChannel::Left, THRESHOLD_TARGET))],
     );
-    let mid = read_f32(&state(effect.as_ref()), 1);
+    let mid = read_f32(&state(effect.as_ref()), ramp_word(0, CURRENT));
 
     let mut left = vec![0.0_f32; 1];
     let mut right = vec![0.0_f32; 1];
@@ -144,11 +150,14 @@ fn a_restarting_point_ramps_from_the_current_value() {
     let payload = state(effect.as_ref());
     let restarted_step = (-30.0_f32 - mid) / SMOOTHING as f32;
     assert_eq!(
-        read_f32(&payload, 1).to_bits(),
+        read_f32(&payload, ramp_word(0, CURRENT)).to_bits(),
         (mid + restarted_step).to_bits()
     );
-    assert_eq!(read_u32(&payload, 2), (-30.0_f32).to_bits());
-    assert_eq!(read_u32(&payload, 3), SMOOTHING - 1);
+    assert_eq!(
+        read_u32(&payload, ramp_word(0, TARGET)),
+        (-30.0_f32).to_bits()
+    );
+    assert_eq!(read_u32(&payload, ramp_word(0, REMAINING)), SMOOTHING - 1);
 }
 
 /// A time Point that returns to the current milliseconds still completes an in-flight
@@ -170,7 +179,7 @@ fn an_attack_cancel_to_current_keeps_the_64_sample_coefficient_return_live() {
         &[(0, first)],
     );
     let before = state(effect.as_ref());
-    let current_word = 1 + 3 * 3;
+    let current_word = ramp_word(3, CURRENT);
     let current = read_f32(&before, current_word);
 
     let cancel = PreparedAutomationSpan {
@@ -190,10 +199,10 @@ fn an_attack_cancel_to_current_keeps_the_64_sample_coefficient_return_live() {
         current.to_bits()
     );
     assert_eq!(
-        read_f32(&after_event, current_word + 1).to_bits(),
+        read_f32(&after_event, ramp_word(3, TARGET)).to_bits(),
         current.to_bits()
     );
-    assert_eq!(read_u32(&after_event, current_word + 2), 63);
+    assert_eq!(read_u32(&after_event, ramp_word(3, REMAINING)), 63);
 
     let mut left = vec![0.0_f32; 63];
     let mut right = vec![0.0_f32; 63];
@@ -207,10 +216,10 @@ fn an_attack_cancel_to_current_keeps_the_64_sample_coefficient_return_live() {
         current.to_bits()
     );
     assert_eq!(
-        read_f32(&settled, current_word + 1).to_bits(),
+        read_f32(&settled, ramp_word(3, TARGET)).to_bits(),
         current.to_bits()
     );
-    assert_eq!(read_u32(&settled, current_word + 2), 0);
+    assert_eq!(read_u32(&settled, ramp_word(3, REMAINING)), 0);
 }
 
 /// Automation is per channel and per parameter, and an out-of-order or duplicate span is counted
@@ -234,8 +243,8 @@ fn automation_validation_is_unchanged() {
     assert_eq!(report.invalid_spans, 1, "the out-of-order span is rejected");
     let payload = state(effect.as_ref());
     // Parameter 2 was applied, parameter 0 was not.
-    assert_eq!(read_u32(&payload, 3 + 3 * 2), SMOOTHING - 1);
-    assert_eq!(read_u32(&payload, 3), 0);
+    assert_eq!(read_u32(&payload, ramp_word(2, REMAINING)), SMOOTHING - 1);
+    assert_eq!(read_u32(&payload, ramp_word(0, REMAINING)), 0);
 
     // `Both` is not a channel this effect accepts.
     let mut effect = prepare(request_with_quantum(&values, 128));
@@ -251,7 +260,10 @@ fn automation_validation_is_unchanged() {
         .expect("block"),
     );
     assert_eq!(report.invalid_spans, 1);
-    assert_eq!(read_u32(&state(effect.as_ref()), 3), 0);
+    assert_eq!(
+        read_u32(&state(effect.as_ref()), ramp_word(0, REMAINING)),
+        0
+    );
 }
 
 /// A finished ramp leaves exactly the coefficients a fresh preparation at that value would.
@@ -733,12 +745,12 @@ fn assert_bank_ramp(
         let (left, right) = support::snapshot_track(bank, track, sizes_from);
         for (name, channel) in [("left", &left), ("right", &right)] {
             assert_eq!(
-                read_f32(channel, 2 + parameter * 3).to_bits(),
+                read_f32(channel, ramp_word(parameter, TARGET)).to_bits(),
                 target.to_bits(),
                 "lane {track} {name}: parameter {parameter}'s target"
             );
             assert_eq!(
-                read_u32(channel, 3 + parameter * 3),
+                read_u32(channel, ramp_word(parameter, REMAINING)),
                 remaining,
                 "lane {track} {name}: parameter {parameter}'s remaining samples"
             );

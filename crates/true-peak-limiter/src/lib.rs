@@ -3927,8 +3927,11 @@ mod words {
     pub(super) const HISTORY: usize = 15;
 }
 
-/// A parsed, not yet committed channel section.
-#[derive(Debug)]
+/// The scalar words of a validated, not yet committed channel section.
+///
+/// The rings and the history are not here: a restore validates them in place in the payload bytes
+/// and commits them by reading the bytes again (#1278 D1), so a restore holds no heap value.
+#[derive(Clone, Copy, Debug)]
 struct LaneRestore {
     main_cursor: u32,
     ring_cursor: u32,
@@ -3940,27 +3943,26 @@ struct LaneRestore {
     box_sum: f32,
     limit: LinearRamp,
     release: LinearRamp,
-    history: Box<[f32]>,
-    main_ring: Box<[f32]>,
-    required_ring: Box<[f32]>,
-    box_ring: Box<[f32]>,
 }
 
 const fn state_error(code: &'static str) -> StatePayloadError {
     StatePayloadError { code }
 }
 
-/// The `[minimum, maximum]` a stored coefficient may occupy, with a four-ulp relaxation.
+/// The `[minimum, maximum]` a stored coefficient may occupy, with a 64-ulp relaxation.
 ///
 /// A ramped `current` lies mathematically between two in-domain coefficients, but the iterated
-/// `current + step` of D11 can round a hair past an endpoint on its last step before the snap. The
-/// relaxation is exactly that rounding budget; it is not a domain widening, and a value outside a
-/// coefficient's real range by more than a few ulps is still rejected.
+/// `current + step` of D11 rounds at each of up to 63 additions before the snap, and a ramp only a
+/// few hundred ulps long ends past an endpoint by more than four ulps: #1278 found a ceiling ramp
+/// to -24 dB whose own snapshot a four-ulp budget refused. The relaxation is that rounding budget;
+/// it is not a domain widening, and a value outside a coefficient's real range by more than a few
+/// dozen ulps is still rejected.
 fn coefficient_bounds(low: f32, high: f32) -> (f32, f32) {
-    let slack = 4.0 * f32::EPSILON;
+    let slack = 64.0 * f32::EPSILON;
     (low - low.abs() * slack, high + high.abs() * slack)
 }
 
+// REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// Writes one channel of one track into `bytes`, physical ring order.
 fn snapshot_lane(
     bytes: &mut [u8],
@@ -4014,7 +4016,7 @@ fn snapshot_lane(
     debug_assert_eq!(word, shape.lane_words());
 }
 
-/// Parses and validates one channel section without touching any live state.
+/// Validates one channel section in place, without touching any live state or the heap.
 fn read_lane(
     bytes: &[u8],
     shape: &Shape,
@@ -4086,40 +4088,32 @@ fn read_lane(
         };
     }
 
-    let mut history = vec![0.0_f32; HISTORY_WORDS].into_boxed_slice();
-    for (tap, value) in history.iter_mut().enumerate() {
-        *value = read_f32(bytes, words::HISTORY + tap);
-        if !value.is_finite() {
+    for tap in 0..HISTORY_WORDS {
+        if !read_f32(bytes, words::HISTORY + tap).is_finite() {
             return Err(state_error("effect.state.history"));
         }
     }
 
-    let mut word = LANE_HEADER_WORDS;
-    let mut main_ring = vec![0.0_f32; shape.main].into_boxed_slice();
-    for value in main_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !value.is_finite() {
+    let main_base = LANE_HEADER_WORDS;
+    let required_base = main_base + shape.main;
+    let box_base = required_base + shape.ring;
+    debug_assert_eq!(box_base + shape.ring, shape.lane_words());
+    for slot in 0..shape.main {
+        if !read_f32(bytes, main_base + slot).is_finite() {
             return Err(state_error("effect.state.ring"));
         }
     }
-    let mut required_ring = vec![0.0_f32; shape.ring].into_boxed_slice();
-    for value in required_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !(0.0..=1.0).contains(value) {
+    for slot in 0..shape.ring {
+        if !(0.0..=1.0).contains(&read_f32(bytes, required_base + slot)) {
             return Err(state_error("effect.state.gain"));
         }
     }
-    let mut box_ring = vec![0.0_f32; shape.ring].into_boxed_slice();
-    for value in box_ring.iter_mut() {
-        *value = read_f32(bytes, word);
-        word += 1;
-        if !(0.0..=1.0).contains(value) || (*value * BOX_GRID).floor() != *value * BOX_GRID {
+    for slot in 0..shape.ring {
+        let value = read_f32(bytes, box_base + slot);
+        if !(0.0..=1.0).contains(&value) || (value * BOX_GRID).floor() != value * BOX_GRID {
             return Err(state_error("effect.state.gain"));
         }
     }
-    debug_assert_eq!(word, shape.lane_words());
 
     // The box sum is recomputed from the ring rather than trusted: the two together are the state
     // of one running window, and a payload whose sum does not match its own terms would make the
@@ -4127,7 +4121,7 @@ fn read_lane(
     let mut recomputed = 0.0_f32;
     for age in 1..=window {
         let slot = (ring_cursor as usize + shape.ring - age) % shape.ring;
-        recomputed += box_ring[slot];
+        recomputed += read_f32(bytes, box_base + slot);
     }
     if recomputed.to_bits() != box_sum.to_bits() {
         return Err(state_error("effect.state.gain"));
@@ -4144,10 +4138,6 @@ fn read_lane(
         box_sum,
         limit: ramps[0],
         release: ramps[1],
-        history,
-        main_ring,
-        required_ring,
-        box_ring,
     })
 }
 
@@ -4164,6 +4154,7 @@ fn commit_lane(
     state: &mut ChannelState,
     lane: usize,
     parsed: &LaneRestore,
+    bytes: &[u8],
     cursors: Cursors,
     shape: &Shape,
 ) {
@@ -4176,19 +4167,22 @@ fn commit_lane(
     state.box_sum[lane] = parsed.box_sum;
     state.limit[lane] = parsed.limit;
     state.release[lane] = parsed.release;
-    for (tap, value) in parsed.history.iter().enumerate() {
-        state.history[tap * width + lane] = *value;
+    for tap in 0..HISTORY_WORDS {
+        state.history[tap * width + lane] = read_f32(bytes, words::HISTORY + tap);
     }
+    let main_base = LANE_HEADER_WORDS;
+    let required_base = main_base + shape.main;
+    let box_base = required_base + shape.ring;
     for age in 0..shape.main {
         let source = (parsed.main_cursor as usize + age) % shape.main;
         let destination = (cursors.main as usize + age) % shape.main;
-        state.main_ring[destination * width + lane] = parsed.main_ring[source];
+        state.main_ring[destination * width + lane] = read_f32(bytes, main_base + source);
     }
     for age in 0..shape.ring {
         let source = (parsed.ring_cursor as usize + age) % shape.ring;
         let destination = (cursors.ring as usize + age) % shape.ring;
-        state.required_ring[destination * width + lane] = parsed.required_ring[source];
-        state.box_ring[destination * width + lane] = parsed.box_ring[source];
+        state.required_ring[destination * width + lane] = read_f32(bytes, required_base + source);
+        state.box_ring[destination * width + lane] = read_f32(bytes, box_base + source);
     }
 }
 
@@ -4236,15 +4230,32 @@ impl<L: Lane> LimiterCore<L> {
         let rate = self.metadata.sample_rate;
         let left = read_lane(input.left, &self.shape, rate)?;
         let right = read_lane(input.right, &self.shape, rate)?;
-        commit_lane(&mut self.left, track, &left, self.cursors, &self.shape);
-        commit_lane(&mut self.right, track, &right, self.cursors, &self.shape);
+        commit_lane(
+            &mut self.left,
+            track,
+            &left,
+            input.left,
+            self.cursors,
+            &self.shape,
+        );
+        commit_lane(
+            &mut self.right,
+            track,
+            &right,
+            input.right,
+            self.cursors,
+            &self.shape,
+        );
         // #990: a payload's two sections are arbitrary, so the record is re-derived from the words
-        // themselves, every lane of the bank, on this control-path call. A rejected restore returns
+        // themselves, every lane of the bank, on this payload call (bounded by the prepared
+        // state, and allocation-free: the plan-swap carry makes it in the swap block, #1278). A rejected restore returns
         // above without writing anything and leaves the record as true as it was.
         self.gain_linked = gain_state_agrees(&self.left, &self.right);
         Ok(())
     }
 }
+
+// REALTIME_POLICY_END
 
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
     let track = usize::try_from(track_index).map_err(|_| state_error("effect.state.track"))?;
@@ -4448,6 +4459,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         mut output: StatePayloadOutput<'_>,
@@ -4462,6 +4474,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
     ) -> Result<(), StatePayloadError> {
         self.core.restore_track(0, state_layout_version, &input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
@@ -4516,6 +4529,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         self.process_bank_inner::<false>(block)
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -4534,6 +4548,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         let track = self.checked_member(track_index)?;
         self.core.restore_track(track, state_layout_version, &input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane> PreparedTruePeakLimiterBank<L> {

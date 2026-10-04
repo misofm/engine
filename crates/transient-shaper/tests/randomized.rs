@@ -23,3 +23,14 @@ conformance::randomized_effect_test!(
 fn the_d7_recovery_reports_one_block_on_the_failing_lane() {
     conformance::assert_d7_reports(&transient_shaper::TransientShaperFactory);
 }
+
+/// #1278: the plan-swap carry restores every lane it carries, so a restore must accept every state
+/// the effect itself reaches -- including a smoothed ramp to a domain edge whose iterated
+/// `current + step` has rounded past the edge, at every launch rate. Red on a restore that holds a
+/// moving ramp's `current` (or a subnormal step) to the strict domain.
+#[test]
+fn the_effects_own_edge_ramp_snapshots_restore() {
+    conformance::EffectDifferential::assert_edge_ramps_restore(
+        &transient_shaper::TransientShaperFactory,
+    );
+}

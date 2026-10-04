@@ -3487,6 +3487,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -3506,6 +3507,7 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         }
         result
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
@@ -3553,6 +3555,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         self.process_bank_inner::<false>(block)
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -3583,6 +3586,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         }
         result
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {

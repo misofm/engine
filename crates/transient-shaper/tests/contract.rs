@@ -33,7 +33,7 @@ fn descriptor_resources_and_transactional_caps_are_frozen() {
     for quality in TRANSIENT_SHAPER_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(quality.tail, TailSamples::Finite(0));
-        assert_eq!(quality.maximum_state.total(), Some(88));
+        assert_eq!(quality.maximum_state.total(), Some(112));
         assert_eq!(quality.maximum_state.common_bytes, 0);
         assert_eq!(quality.maximum_state.left_bytes, LANE_STATE_BYTES as u32);
         assert_eq!(quality.maximum_state.right_bytes, LANE_STATE_BYTES as u32);
@@ -169,7 +169,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         (1.0_f32 / 64.0).to_bits()
     );
     assert_eq!(state_f32(&after_one.0, 3).to_bits(), 1.0_f32.to_bits());
-    assert_eq!(state_u32(&after_one.0, 4), 63);
+    assert_eq!(state_u32(&after_one.0, 5), 63);
     assert_eq!(after_one.1, initial_right);
 
     render(&mut effect, 62, 1, &[]);
@@ -178,7 +178,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         state_f32(&after_sixty_three.0, 2).to_bits(),
         (63.0_f32 / 64.0).to_bits()
     );
-    assert_eq!(state_u32(&after_sixty_three.0, 4), 1);
+    assert_eq!(state_u32(&after_sixty_three.0, 5), 1);
     assert_eq!(after_sixty_three.1, initial_right);
 
     render(&mut effect, 1, 63, &[]);
@@ -187,7 +187,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
         state_f32(&after_sixty_four.0, 2).to_bits(),
         1.0_f32.to_bits()
     );
-    assert_eq!(state_u32(&after_sixty_four.0, 4), 0);
+    assert_eq!(state_u32(&after_sixty_four.0, 5), 0);
     assert_eq!(after_sixty_four.1, initial_right);
 
     render(
@@ -199,7 +199,7 @@ fn automation_updates_one_sixty_three_sixty_four_retargets_and_restores_exactly(
     let active = snapshot(effect.as_ref());
     assert_eq!(state_f32(&active.0, 2).to_bits(), 0.96875_f32.to_bits());
     assert_eq!(state_f32(&active.0, 3).to_bits(), (-1.0_f32).to_bits());
-    assert_eq!(state_u32(&active.0, 4), 63);
+    assert_eq!(state_u32(&active.0, 5), 63);
     assert_eq!(active.1, initial_right);
 
     let mut restored = prepare(&values);
@@ -395,21 +395,25 @@ fn state_restore_validates_version_length_envelope_and_parameters() {
     let sizes = effect.metadata().state_sizes;
     let good = snapshot(effect.as_ref());
 
-    assert_eq!(
-        effect.restore_state_payload(
-            2,
-            StatePayloadInput::new(&[], &good.0, &good.1, sizes).expect("input"),
-        ),
-        Err(StatePayloadError {
-            code: "effect.state.version"
-        })
-    );
+    for version in [0, 2] {
+        assert_eq!(
+            effect.restore_state_payload(
+                version,
+                StatePayloadInput::new(&[], &good.0, &good.1, sizes).expect("input"),
+            ),
+            Err(StatePayloadError {
+                code: "effect.state.version"
+            }),
+            "version {version}"
+        );
+    }
 
     for (word, bits, code) in [
         (0_usize, f32::NAN.to_bits(), "effect.state.envelope"),
         (1, (-1.0_f32).to_bits(), "effect.state.envelope"),
         (2, 2.0_f32.to_bits(), "effect.state.parameter"),
-        (4, 65_u32, "effect.state.parameter"),
+        (4, f32::INFINITY.to_bits(), "effect.state.parameter"),
+        (5, 65_u32, "effect.state.parameter"),
     ] {
         let mut bad = good.0.clone();
         bad[word * 4..word * 4 + 4].copy_from_slice(&bits.to_le_bytes());

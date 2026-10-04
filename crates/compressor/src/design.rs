@@ -12,9 +12,8 @@
 //! [`rate_coefficient`] is the only ballistic coefficient law. [`design_lane`] uses it for a full
 //! design, and the event path uses it to design a new target. The coefficient ramp's last sample
 //! snaps to that exact target, so a finished ramp matches a fresh preparation at the same value.
-//! Restore re-derives the start and end words from the v1 payload's current/target/remaining triple
-//! because the 22-word layout does not serialize its auxiliary coefficient ramp; block partition
-//! invariance is preserved.
+//! The state payload (#1278) carries the coefficient ramps word for word, so a
+//! restore resumes them exactly rather than re-deriving them.
 //!
 //! # Why the exponential is `f64`
 //!

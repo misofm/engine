@@ -65,8 +65,15 @@ fn read_u32(payload: &[u8], word: usize) -> u32 {
     u32::from_le_bytes(payload[word * 4..word * 4 + 4].try_into().unwrap())
 }
 
+/// The payload word of `field` (current, target, step, remaining) of `parameter`'s ramp
+/// (#1278).
 fn ramp_word(parameter: usize, field: usize) -> usize {
-    1 + parameter * 3 + field
+    1 + parameter * 4 + field
+}
+
+/// The payload word of `field` of the attack (`slot` 0) or release (`slot` 1) coefficient ramp.
+fn rate_ramp_word(slot: usize, field: usize) -> usize {
+    ramp_word(support::PARAMETER_COUNT, 0) + slot * 4 + field
 }
 
 fn assert_state_bits(actual: PreparedParameterState, current: f32, target: f32) {
@@ -317,18 +324,22 @@ fn native_parameter_access_is_typed_and_transactional() {
                 prior.current_value,
                 value,
             );
-            assert_only_words_may_change(
-                &before,
-                &after,
-                channel,
-                &[ramp_word(parameter, 1), ramp_word(parameter, 2)],
-            );
+            // Attack and release retarget their coefficient ramps too.
+            let mut words = vec![
+                ramp_word(parameter, 1),
+                ramp_word(parameter, 2),
+                ramp_word(parameter, 3),
+            ];
+            if let Some(slot) = parameter.checked_sub(3).filter(|slot| *slot < 2) {
+                words.extend((1..4).map(|field| rate_ramp_word(slot, field)));
+            }
+            assert_only_words_may_change(&before, &after, channel, &words);
             let section = if channel == ParameterChannel::Left {
                 &after.0
             } else {
                 &after.1
             };
-            assert_eq!(read_u32(section, ramp_word(parameter, 2)), RAMP_SAMPLES);
+            assert_eq!(read_u32(section, ramp_word(parameter, 3)), RAMP_SAMPLES);
         }
     }
 
@@ -424,7 +435,7 @@ fn native_point_changes_target_without_advancing_samples() {
         &before,
         &after_first,
         ParameterChannel::Left,
-        &[ramp_word(5, 1), ramp_word(5, 2)],
+        &[ramp_word(5, 1), ramp_word(5, 2), ramp_word(5, 3)],
     );
     for _ in 0..2 {
         assert_state_bits(
@@ -436,7 +447,7 @@ fn native_point_changes_target_without_advancing_samples() {
         );
     }
     assert_observation_bits(observation_before, observe(&*via_point));
-    assert_eq!(read_u32(&after_first.0, ramp_word(5, 2)), RAMP_SAMPLES);
+    assert_eq!(read_u32(&after_first.0, ramp_word(5, 3)), RAMP_SAMPLES);
 
     via_point
         .apply_parameter_point(5, ParameterChannel::Left, -7.0)
@@ -446,7 +457,7 @@ fn native_point_changes_target_without_advancing_samples() {
         &after_first,
         &after_second,
         ParameterChannel::Left,
-        &[ramp_word(5, 1), ramp_word(5, 2)],
+        &[ramp_word(5, 1), ramp_word(5, 2), ramp_word(5, 3)],
     );
     assert_state_bits(
         via_point
@@ -544,7 +555,7 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
         assert_eq!(state.target_value.to_bits(), 16.0_f32.to_bits());
         let payload = snapshot(&*effect);
         assert_eq!(
-            read_u32(&payload.0, ramp_word(5, 2)),
+            read_u32(&payload.0, ramp_word(5, 3)),
             RAMP_SAMPLES - checkpoint as u32
         );
         assert_state_bits(
@@ -556,7 +567,7 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
             read_f32(&payload.1, ramp_word(5, 0)).to_bits(),
             right_initial.current_value.to_bits()
         );
-        assert_eq!(read_u32(&payload.1, ramp_word(5, 2)), 0);
+        assert_eq!(read_u32(&payload.1, ramp_word(5, 3)), 0);
     }
 
     let mut restart = prepare(request(&values));
@@ -572,7 +583,7 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
     restart
         .apply_parameter_point(5, ParameterChannel::Left, 12.0)
         .unwrap();
-    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 2)), 64);
+    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 3)), 64);
     advance(&mut *restart, &mut restart_sample, 1);
     assert_eq!(
         restart
@@ -591,7 +602,7 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
     restart
         .apply_parameter_point(5, ParameterChannel::Left, -11.0)
         .unwrap();
-    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 2)), 64);
+    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 3)), 64);
     advance(&mut *restart, &mut restart_sample, 1);
     assert_eq!(
         restart
@@ -614,7 +625,7 @@ fn native_point_retarget_obeys_current_and_sample_count_laws() {
         cancel_current,
         cancel_current,
     );
-    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 2)), 0);
+    assert_eq!(read_u32(&snapshot(&*restart).0, ramp_word(5, 3)), 0);
     advance(&mut *restart, &mut restart_sample, 17);
     assert_state_bits(
         restart.parameter_state(5, ParameterChannel::Left).unwrap(),
@@ -772,7 +783,7 @@ fn native_point_invalidates_silent_fixed_point_without_advancing_it() {
         &moving_before,
         &moving_after,
         ParameterChannel::Left,
-        &[ramp_word(5, 1), ramp_word(5, 2)],
+        &[ramp_word(5, 1), ramp_word(5, 2), ramp_word(5, 3)],
     );
     let moving_point = process_silence(&mut *via_point, 256, &[]);
     let moving_spans = [point_at(256, 5, ParameterChannel::Left, 1.0)];

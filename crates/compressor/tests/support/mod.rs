@@ -21,6 +21,23 @@ pub const PARAMETER_COUNT: usize = 7;
 /// Fixed scalar words in one causal channel section.
 pub const STATE_HEADER_WORDS: usize = compressor::STATE_HEADER_WORDS;
 
+/// The payload layout version every restore names.
+pub const STATE_VERSION: u32 = compressor::COMPRESSOR_DESCRIPTOR.state_layout_version;
+
+/// A ramp's fields inside its four payload words (#1278).
+pub const CURRENT: usize = 0;
+/// The ramp's target.
+pub const TARGET: usize = 1;
+/// The ramp's per-sample step.
+pub const STEP: usize = 2;
+/// The samples the ramp has still to produce.
+pub const REMAINING: usize = 3;
+
+/// The payload word of `field` of smoothed parameter `parameter`'s ramp.
+pub const fn ramp_word(parameter: usize, field: usize) -> usize {
+    1 + parameter * 4 + field
+}
+
 /// The sidechain port identifier.
 pub fn sidechain_port() -> PortId {
     PortId::new("sidechain-in").expect("port id")
@@ -68,7 +85,7 @@ pub fn request_with_quantum<'a>(
         },
         initial_values: values,
         limits: PrepareEffectLimits {
-            maximum_total_state_bytes: 176,
+            maximum_total_state_bytes: 296,
             maximum_scratch_bytes: 64,
             maximum_automation_spans_per_block: 16,
         },

@@ -13,8 +13,9 @@ use effect_contract::{
 use effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 
 use support::{
-    bind_bank, initial_values, native_bank_width, noise, prepare, render_scalar, request, restore,
-    restore_track, snapshot, snapshot_track, values_with,
+    CURRENT, REMAINING, STATE_HEADER_WORDS, STATE_VERSION, STEP, TARGET, bind_bank, initial_values,
+    native_bank_width, noise, prepare, ramp_word, render_scalar, request, restore, restore_track,
+    snapshot, snapshot_track, values_with,
 };
 
 fn point(parameter: u32, channel: ParameterChannel, value: f32) -> PreparedAutomationSpan {
@@ -62,7 +63,7 @@ fn an_idle_restore_is_bit_exact() {
 
     // A fresh instance takes the payload and continues the render.
     let mut continued = prepare(request(&values));
-    restore(continued.as_mut(), 1, &saved_left, &saved_right).expect("restore");
+    restore(continued.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("restore");
     let mut second_left = input_left[2_048..].to_vec();
     let mut second_right = input_right[2_048..].to_vec();
     render_scalar(
@@ -112,13 +113,26 @@ fn a_restore_is_transactional_across_both_channels() {
 
     for (word, value, code) in [
         (0_usize, 1.0_f32.to_bits(), "effect.state.gain"),
-        (1, f32::NAN.to_bits(), "effect.state.parameter"),
-        (2, 1.0_f32.to_bits(), "effect.state.parameter"),
-        (3, 65_u32, "effect.state.parameter"),
+        (
+            ramp_word(0, CURRENT),
+            f32::NAN.to_bits(),
+            "effect.state.parameter",
+        ),
+        (
+            ramp_word(0, TARGET),
+            1.0_f32.to_bits(),
+            "effect.state.parameter",
+        ),
+        (
+            ramp_word(0, STEP),
+            f32::NAN.to_bits(),
+            "effect.state.parameter",
+        ),
+        (ramp_word(0, REMAINING), 65_u32, "effect.state.parameter"),
     ] {
         let mut corrupt = saved_right.clone();
         write_u32(&mut corrupt, word, value);
-        let error = restore(effect.as_mut(), 1, &modified_left, &corrupt)
+        let error = restore(effect.as_mut(), STATE_VERSION, &modified_left, &corrupt)
             .err()
             .unwrap_or_else(|| panic!("word {word} must be rejected"));
         assert_eq!(error.code, code, "word {word}");
@@ -141,9 +155,14 @@ fn a_restore_is_transactional_across_both_channels() {
 
     // A version other than the descriptor's is rejected.
     assert_eq!(
-        restore(effect.as_mut(), 2, &saved_left, &saved_right)
-            .expect_err("version")
-            .code,
+        restore(
+            effect.as_mut(),
+            STATE_VERSION + 1,
+            &saved_left,
+            &saved_right
+        )
+        .expect_err("version")
+        .code,
         "effect.state.version"
     );
 }
@@ -163,7 +182,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     let mut scalar_short = scalar_saved.1.clone();
     scalar_short.pop();
     assert_eq!(
-        restore(scalar.as_mut(), 1, &scalar_left, &scalar_short)
+        restore(scalar.as_mut(), STATE_VERSION, &scalar_left, &scalar_short)
             .expect_err("short raw scalar payload must reach validation")
             .code,
         "effect.state.length"
@@ -172,7 +191,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
 
     let old_raw = vec![0_u8; OLD_CHANNEL_BYTES];
     assert_eq!(
-        restore(scalar.as_mut(), 1, &old_raw, &old_raw)
+        restore(scalar.as_mut(), STATE_VERSION, &old_raw, &old_raw)
             .expect_err("old raw scalar payload must be rejected")
             .code,
         "effect.state.length"
@@ -191,12 +210,12 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     let mut bank_left = bank_saved.0.clone();
     write_f32(&mut bank_left, 1, -17.5);
     let mut corrupt_right = bank_saved.1.clone();
-    write_u32(&mut corrupt_right, 21, 65);
+    write_u32(&mut corrupt_right, STATE_HEADER_WORDS - 1, 65);
     assert_eq!(
         restore_track(
             bank.as_mut(),
             0,
-            1,
+            STATE_VERSION,
             &bank_left,
             &corrupt_right,
             bank_scalar.as_ref(),
@@ -217,7 +236,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         restore_track(
             bank.as_mut(),
             0,
-            1,
+            STATE_VERSION,
             &bank_saved.0,
             &bank_short,
             bank_scalar.as_ref(),
@@ -230,7 +249,7 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
         restore_track(
             bank.as_mut(),
             0,
-            1,
+            STATE_VERSION,
             &old_raw,
             &old_raw,
             bank_scalar.as_ref(),
@@ -245,19 +264,14 @@ fn malformed_raw_payloads_reject_transactionally_in_scalar_and_bank_hooks() {
     );
 }
 
-/// A mid-ramp restore lands on the target on the same sample, and tracks within 8 ulp afterwards.
+/// A mid-ramp restore continues exactly as the lane it was taken from (#1278 D2a).
 ///
-/// `step` is not serialised — the payload layout is a frozen contract fixture — so a restore
-/// re-derives it as `(target - current) / remaining`. That is **class B**: the pre-audit law
-/// recomputed exactly that quotient every sample and D11's law computes it once at the event, so a
-/// ramp resumed at `remaining = 37` follows a slightly different path to the same place. The two
-/// things that must still hold are asserted here: the arrival sample and the arrival value.
-///
-/// Red mutation (MUTATIONS.md row 13): `step = (target - current) / 64.0` on restore, ignoring
-/// `remaining`. The *arrival sample* is driven by `remaining` and survives it, so what this test
-/// pins is the value the ramp holds on the way there.
+/// The payload carries each ramp's step, so the restored ramp walks the continued ramp's words,
+/// sample for sample, and lands on the target on the same sample. Layout version 1 re-derived
+/// the step as `(target - current) / remaining`, which reaches the same place by another path:
+/// the mutation that restores that derivation turns this test red.
 #[test]
-fn a_mid_ramp_restore_arrives_on_the_same_sample() {
+fn a_mid_ramp_restore_continues_the_ramp_exactly() {
     let values = initial_values();
     let mut effect = prepare(request(&values));
     let mut left = vec![0.0_f32; 27];
@@ -268,47 +282,42 @@ fn a_mid_ramp_restore_arrives_on_the_same_sample() {
         &mut right,
         27,
         128,
-        &[(0, point(0, ParameterChannel::Left, -80.0))],
+        &[(0, point(0, ParameterChannel::Left, -71.3))],
     );
     let (saved_left, saved_right) = snapshot(effect.as_ref());
-    assert_eq!(read_u32(&saved_left, 3), 37, "37 samples still to produce");
-
-    let mut restored = prepare(request(&values));
-    restore(restored.as_mut(), 1, &saved_left, &saved_right).expect("restore");
-
-    // 36 more samples: still short of the target, and on the re-derived step exactly.
-    let resumed_from = read_f32(&saved_left, 1);
-    let resumed_step = ((-80.0_f32) - resumed_from) / 37.0;
-    let mut expected = resumed_from;
-    for _ in 0..36 {
-        expected += resumed_step;
-    }
-    let mut left = vec![0.0_f32; 36];
-    let mut right = vec![0.0_f32; 36];
-    render_scalar(restored.as_mut(), &mut left, &mut right, 36, 128, &[]);
-    let (state, _) = snapshot(restored.as_ref());
-    assert_eq!(read_u32(&state, 3), 1);
-    assert_ne!(read_f32(&state, 1).to_bits(), (-80.0_f32).to_bits());
     assert_eq!(
-        read_f32(&state, 1).to_bits(),
-        expected.to_bits(),
-        "the step is re-derived from the remaining distance and the remaining count"
+        read_u32(&saved_left, ramp_word(0, REMAINING)),
+        37,
+        "37 samples still to produce"
     );
 
-    // The 37th lands exactly on the target.
-    let mut left = vec![0.0_f32; 1];
-    let mut right = vec![0.0_f32; 1];
-    render_scalar(restored.as_mut(), &mut left, &mut right, 1, 128, &[]);
+    let mut restored = prepare(request(&values));
+    restore(restored.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("restore");
+    for sample in 0..=37 {
+        assert_eq!(
+            snapshot(restored.as_ref()),
+            snapshot(effect.as_ref()),
+            "sample {sample}: the restored state is the continued state"
+        );
+        for instance in [&mut restored, &mut effect] {
+            let mut left = vec![0.0_f32; 1];
+            let mut right = vec![0.0_f32; 1];
+            render_scalar(instance.as_mut(), &mut left, &mut right, 1, 128, &[]);
+        }
+    }
     let (state, _) = snapshot(restored.as_ref());
-    assert_eq!(read_u32(&state, 3), 0);
-    assert_eq!(read_f32(&state, 1).to_bits(), (-80.0_f32).to_bits());
+    assert_eq!(read_u32(&state, ramp_word(0, REMAINING)), 0);
+    assert_eq!(
+        read_f32(&state, ramp_word(0, CURRENT)).to_bits(),
+        (-71.3_f32).to_bits()
+    );
 }
 
-/// An active attack restore rebuilds its coefficient ramp from current/target/remaining and keeps
-/// the final snap and block partition invariant. The v1 payload stores the parameter triple, not
-/// the auxiliary coefficient ramp; it therefore defines a deterministic reconstructed continuation.
+/// An active attack restore resumes its parameter and coefficient ramps word for word: the
+/// restored instance renders what the source renders by continuing, whole or in blocks, and both
+/// snap to the target on the same sample.
 #[test]
-fn an_active_attack_restore_reconstructs_one_partition_invariant_coefficient_path() {
+fn an_active_attack_restore_continues_one_partition_invariant_coefficient_path() {
     let values = initial_values();
     let mut source = prepare(request(&values));
     let mut left = noise(21, 0x88_00_01, 0.8);
@@ -322,18 +331,31 @@ fn an_active_attack_restore_reconstructs_one_partition_invariant_coefficient_pat
         &[(0, point(3, ParameterChannel::Left, 180.0))],
     );
     let (saved_left, saved_right) = snapshot(source.as_ref());
-    assert_eq!(read_u32(&saved_left, 3 + 3 * 3), 43);
+    assert_eq!(read_u32(&saved_left, ramp_word(3, REMAINING)), 43);
 
     let mut whole = prepare(request(&values));
     let mut split = prepare(request(&values));
-    restore(whole.as_mut(), 1, &saved_left, &saved_right).expect("whole restore");
-    restore(split.as_mut(), 1, &saved_left, &saved_right).expect("split restore");
+    restore(whole.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("whole restore");
+    restore(split.as_mut(), STATE_VERSION, &saved_left, &saved_right).expect("split restore");
     let input_left = noise(43, 0x88_00_03, 0.8);
     let input_right = noise(43, 0x88_00_04, 0.8);
-    let mut whole_left = input_left.clone();
-    let mut whole_right = input_right.clone();
-    let mut split_left = input_left;
-    let mut split_right = input_right;
+    let bits = |plane: &[f32]| {
+        plane
+            .iter()
+            .map(|sample| sample.to_bits())
+            .collect::<Vec<_>>()
+    };
+    let (mut source_left, mut source_right) = (input_left.clone(), input_right.clone());
+    let (mut whole_left, mut whole_right) = (input_left.clone(), input_right.clone());
+    let (mut split_left, mut split_right) = (input_left, input_right);
+    render_scalar(
+        source.as_mut(),
+        &mut source_left,
+        &mut source_right,
+        43,
+        128,
+        &[],
+    );
     render_scalar(
         whole.as_mut(),
         &mut whole_left,
@@ -350,30 +372,49 @@ fn an_active_attack_restore_reconstructs_one_partition_invariant_coefficient_pat
         128,
         &[],
     );
-    assert_eq!(
-        whole_left
-            .iter()
-            .map(|sample| sample.to_bits())
-            .collect::<Vec<_>>(),
-        split_left
-            .iter()
-            .map(|sample| sample.to_bits())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        whole_right
-            .iter()
-            .map(|sample| sample.to_bits())
-            .collect::<Vec<_>>(),
-        split_right
-            .iter()
-            .map(|sample| sample.to_bits())
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(snapshot(whole.as_ref()), snapshot(split.as_ref()));
+    for (who, left, right) in [
+        ("whole", &whole_left, &whole_right),
+        ("split", &split_left, &split_right),
+    ] {
+        assert_eq!(bits(left), bits(&source_left), "{who} left");
+        assert_eq!(bits(right), bits(&source_right), "{who} right");
+    }
+    assert_eq!(snapshot(whole.as_ref()), snapshot(source.as_ref()));
+    assert_eq!(snapshot(split.as_ref()), snapshot(source.as_ref()));
     let settled = snapshot(whole.as_ref()).0;
-    assert_eq!(read_u32(&settled, 3 + 3 * 3), 0);
-    assert_eq!(read_f32(&settled, 1 + 3 * 3).to_bits(), 180.0_f32.to_bits());
+    assert_eq!(read_u32(&settled, ramp_word(3, REMAINING)), 0);
+    assert_eq!(
+        read_f32(&settled, ramp_word(3, CURRENT)).to_bits(),
+        180.0_f32.to_bits()
+    );
+}
+
+/// A carried step is validated over the ramp's whole remaining path (#1278 D2a): a finite step
+/// that walks the mix ramp out of `[0, 1]` before its snap is refused, and leaves the state where
+/// it was, while one that stays inside restores.
+#[test]
+fn a_step_that_leaves_the_domain_before_the_snap_is_refused() {
+    let values = initial_values();
+    let mut effect = prepare(request(&values));
+    let (left, right) = snapshot(effect.as_ref());
+    let ramp = |step: f32| {
+        let mut section = left.clone();
+        write_f32(&mut section, ramp_word(6, CURRENT), 0.5);
+        write_f32(&mut section, ramp_word(6, TARGET), 0.5);
+        write_f32(&mut section, ramp_word(6, STEP), step);
+        write_u32(&mut section, ramp_word(6, REMAINING), 10);
+        section
+    };
+    // Nine steps of 0.06 from 0.5 reach 1.04 before the tenth snaps back to 0.5.
+    assert_eq!(
+        restore(effect.as_mut(), STATE_VERSION, &ramp(0.06), &right)
+            .expect_err("the path leaves [0, 1]")
+            .code,
+        "effect.state.parameter"
+    );
+    assert_eq!(snapshot(effect.as_ref()), (left.clone(), right.clone()));
+    restore(effect.as_mut(), STATE_VERSION, &ramp(0.05), &right)
+        .expect("nine steps of 0.05 stay inside [0, 1]");
 }
 
 /// Every preparation-legal parameter value survives a round trip, including a subnormal.
@@ -384,12 +425,17 @@ fn preparation_legal_parameter_states_round_trip() {
     let (mut left, right) = snapshot(effect.as_ref());
     let subnormal = f32::from_bits(1);
     // Makeup and mix admit positive subnormals in their continuous domains.
-    for word in [16_usize, 19, 20] {
+    let words = [
+        ramp_word(5, CURRENT),
+        ramp_word(6, CURRENT),
+        ramp_word(6, TARGET),
+    ];
+    for word in words {
         write_f32(&mut left, word, subnormal);
     }
-    restore(effect.as_mut(), 1, &left, &right).expect("a legal subnormal restores");
+    restore(effect.as_mut(), STATE_VERSION, &left, &right).expect("a legal subnormal restores");
     let (restored_left, _) = snapshot(effect.as_ref());
-    for word in [16_usize, 19, 20] {
+    for word in words {
         assert_eq!(
             read_f32(&restored_left, word).to_bits(),
             subnormal.to_bits()

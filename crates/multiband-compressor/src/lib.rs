@@ -55,7 +55,8 @@ use effect_runtime::envelope::retention_coefficient;
 use effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
-    STATE_LENGTH_CODE, STATE_VERSION_CODE, read_f32, read_u32, write_f32, write_u32,
+    STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_within, read_f32, read_u32, write_f32,
+    write_u32,
 };
 use lane::kernels::{SvfState, svf_step};
 use lane::{Lane, flush};
@@ -1364,11 +1365,23 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
         // `LinearRamp`'s invariant, enforced rather than assumed: a ramp at rest is at its target
         // and has no increment. A payload that says otherwise would have the segment driver add a
         // stale step to a resting parameter for ever.
-        if !parameter_state_valid(index + 1, current)
+        //
+        // #1278: the effect's own mid-ramp snapshot must restore. A moving `current` is an
+        // iterated `current + step` that may round a few ulps past a domain edge, and the step of
+        // a ramp a few ulps long near zero is subnormal, so a moving ramp is held to its whole
+        // remaining path within a 64-ulp rounding budget rather than to the strict domain.
+        let spec = &SPECS[index + 1];
+        let slack = 64.0 * f32::EPSILON * spec.minimum.abs().max(spec.maximum.abs());
+        let read = LinearRamp {
+            current,
+            target,
+            step,
+            remaining,
+        };
+        if (remaining == 0 && !parameter_state_valid(index + 1, current))
             || !parameter_state_valid(index + 1, target)
-            || !normal_or_zero(step)
-            || remaining > SMOOTHING_SAMPLES
-            || (remaining == 0 && (step != 0.0 || current.to_bits() != target.to_bits()))
+            || !ramp_path_within(read, (spec.minimum, spec.maximum), slack, SMOOTHING_SAMPLES)
+            || (remaining == 0 && current.to_bits() != target.to_bits())
         {
             return Err(state_error("effect.state.parameter"));
         }
@@ -1651,6 +1664,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
         reports[0]
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,
@@ -1665,6 +1679,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
     ) -> Result<(), StatePayloadError> {
         self.instance.restore(0, state_layout_version, input)
     }
+    // REALTIME_POLICY_END
 }
 
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
@@ -1716,6 +1731,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         report
     }
 
+    // REALTIME_POLICY_BEGIN: #1278 D3, the payload calls run in the plan-swap block.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1735,6 +1751,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         let track = checked_track(track_index, W)?;
         self.instance.restore(track, state_layout_version, input)
     }
+    // REALTIME_POLICY_END
 }
 
 fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadError> {
