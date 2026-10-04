@@ -1356,8 +1356,12 @@ const fn map_spsc_error(error: SpscError) -> PcmSourceRingError {
 
 /// One render-owned source endpoint moved into the graph fan-out wrapper.
 pub struct SourceGraphSource {
-    consumer: PcmSourceConsumer,
-    resources: SourceResourceReport,
+    /// `None` for a vacant source ([`Self::vacant`]).
+    consumer: Option<PcmSourceConsumer>,
+    /// Exact channel count, of the consumer or the vacancy.
+    channel_count: u32,
+    /// `None` for a vacant source: it charges no PCM payload and no ring overhead.
+    resources: Option<SourceResourceReport>,
     /// Fixed caller-owned bytes not represented by the ring report (every host passes zero).
     additional_overhead_bytes: u64,
     /// Largest such fixed allocation, if larger than the ring allocation (zero from every host).
@@ -1374,10 +1378,25 @@ impl SourceGraphSource {
         additional_largest_allocation_bytes: u64,
     ) -> Self {
         Self {
-            consumer,
-            resources,
+            channel_count: consumer.channel_count(),
+            consumer: Some(consumer),
+            resources: Some(resources),
             additional_overhead_bytes,
             additional_largest_allocation_bytes,
+        }
+    }
+
+    /// Construct a vacant source of `channel_count` channels: no ring, until a successor plan's
+    /// carry program moves a predecessor's consumer into it at the swap block. Until then every
+    /// claim on it renders `+0.0` and each block reports a source underrun.
+    #[must_use]
+    pub const fn vacant(channel_count: u32) -> Self {
+        Self {
+            consumer: None,
+            channel_count,
+            resources: None,
+            additional_overhead_bytes: 0,
+            additional_largest_allocation_bytes: 0,
         }
     }
 }
@@ -1401,7 +1420,10 @@ pub enum SourceGraphSourceSetError {
 }
 
 struct GraphSourceEntry {
-    consumer: PcmSourceConsumer,
+    /// `None` while vacant: the entry renders `+0.0` and reports an underrun every block.
+    consumer: Option<PcmSourceConsumer>,
+    /// The channel count the mappings were validated against, kept for a vacant entry.
+    channel_count: u32,
 }
 
 struct SourceGraphSourceSetDriver {
@@ -1470,7 +1492,9 @@ fn source_set_retained_resources(
 
 impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
-        source_index < self.sources.len()
+        self.sources
+            .get(source_index)
+            .is_some_and(|source| source.consumer.is_some())
     }
 
     fn prepare_source_seek(&mut self, source_index: usize, generation: u64, frame: u64) -> bool {
@@ -1480,7 +1504,8 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         let prepared = self
             .sources
             .get_mut(source_index)
-            .is_some_and(|source| source.consumer.prepare_seek(generation, SourceFrame(frame)));
+            .and_then(|source| source.consumer.as_mut())
+            .is_some_and(|consumer| consumer.prepare_seek(generation, SourceFrame(frame)));
         if prepared {
             self.pending_generation_change = true;
         }
@@ -1505,14 +1530,23 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         };
         self.pending_generation_change = false;
         for source in &mut self.sources {
-            let report = source.consumer.begin_block();
+            // A vacant entry has nothing to play: its block is an underrun.
+            let Some(consumer) = source.consumer.as_mut() else {
+                self.block_validity.source_underrun = true;
+                continue;
+            };
+            let report = consumer.begin_block();
             self.block_validity.source_underrun |= report.underrun_event;
             self.block_validity.source_generation_changed |= report.generation_changed;
         }
         // No claim will read this quantum, so nothing needs the played blocks past this point.
         if self.mappings.is_empty() {
-            for source in &mut self.sources {
-                source.consumer.end_block();
+            for consumer in self
+                .sources
+                .iter_mut()
+                .filter_map(|source| source.consumer.as_mut())
+            {
+                consumer.end_block();
             }
         }
         Ok(())
@@ -1543,14 +1577,18 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
             .sources
             .get(source_index)
             .ok_or(engine::realtime::RenderError::InvalidEnvelope)?;
-        source
-            .consumer
+        let Some(consumer) = source.consumer.as_ref() else {
+            // Vacant: the claim is silence, as an underrun is.
+            left.fill(0.0);
+            right.fill(0.0);
+            return Ok(());
+        };
+        consumer
             .copy_channel(left_channel, left)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)?;
         // The played block is not released here: it stays readable in place until the next
         // `begin_block` or seek preparation, whichever claim copied last (#917).
-        source
-            .consumer
+        consumer
             .copy_channel(right_channel, right)
             .map_err(|_| engine::realtime::RenderError::InvalidEnvelope)
     }
@@ -1571,7 +1609,7 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     /// reads them in place of the copy.
     fn played_planes(&self, claim_index: usize) -> Option<(&[f32], &[f32])> {
         let mapping = self.mappings.get(claim_index)?;
-        let consumer = &self.sources.get(mapping.source_index)?.consumer;
+        let consumer = self.sources.get(mapping.source_index)?.consumer.as_ref()?;
         Some((
             consumer.played_plane(mapping.left_channel)?,
             consumer.played_plane(mapping.right_channel)?,
@@ -1582,14 +1620,18 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
     fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
         let mut written = 0;
         for source in &self.sources {
-            let telemetry = source.consumer.telemetry();
-            for value in [
-                telemetry.cumulative_read_frames,
-                telemetry.stale_generation_discard_count,
-                telemetry.underrun_frames,
-                telemetry.underrun_events,
-                telemetry.native_decoder_sanitized_samples,
-            ] {
+            // A vacant entry reports zeros, so every source keeps its five telemetry slots.
+            let values = source.consumer.as_ref().map_or([0; 5], |consumer| {
+                let telemetry = consumer.telemetry();
+                [
+                    telemetry.cumulative_read_frames,
+                    telemetry.stale_generation_discard_count,
+                    telemetry.underrun_frames,
+                    telemetry.underrun_events,
+                    telemetry.native_decoder_sanitized_samples,
+                ]
+            });
+            for value in values {
                 let Some(slot) = output.get_mut(written) else {
                     return written;
                 };
@@ -1599,6 +1641,68 @@ impl GraphPreparedSourceSetDriver for SourceGraphSourceSetDriver {
         }
         written
     }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn source_vacancy(&self, source_index: usize) -> Option<bool> {
+        self.sources
+            .get(source_index)
+            .map(|source| source.consumer.is_none())
+    }
+
+    fn vacant_source_count(&self) -> usize {
+        self.sources
+            .iter()
+            .filter(|source| source.consumer.is_none())
+            .count()
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Move each named predecessor consumer into this set's vacant entry with a swap, so the
+    /// predecessor's entry becomes vacant and nothing is allocated, freed or dropped. Every move
+    /// is checked first -- both indices in range, this entry vacant, the predecessor's occupied,
+    /// the channel counts and quanta equal -- and any failure moves nothing. The predecessor's
+    /// pending generation change (a seek prepared since its last block) is carried too.
+    fn adopt_sources(
+        &mut self,
+        predecessor: &mut dyn GraphPreparedSourceSetDriver,
+        moves: &[(u32, u32)],
+    ) -> bool {
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return false;
+        };
+        let movable = predecessor.quantum_frames == self.quantum_frames
+            && moves.iter().all(|&(successor, source)| {
+                match (
+                    self.sources.get(successor as usize),
+                    predecessor.sources.get(source as usize),
+                ) {
+                    (Some(successor), Some(source)) => {
+                        successor.consumer.is_none()
+                            && source.consumer.is_some()
+                            && successor.channel_count == source.channel_count
+                    }
+                    _ => false,
+                }
+            });
+        if !movable {
+            return false;
+        }
+        for &(successor, source) in moves {
+            core::mem::swap(
+                &mut self.sources[successor as usize].consumer,
+                &mut predecessor.sources[source as usize].consumer,
+            );
+        }
+        self.pending_generation_change |= predecessor.pending_generation_change;
+        true
+    }
+    // REALTIME_POLICY_END
 }
 
 /// Seal one or more prepared source consumers into a graph-owned fan-out source set.
@@ -1620,18 +1724,23 @@ pub fn prepare_graph_source_set(
     let mut largest = 0_u64;
     let mut entries = Vec::with_capacity(sources.len());
     for source in sources {
-        pcm_payload = pcm_payload
-            .checked_add(source.resources.pcm_payload_already_charged_bytes)
-            .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+        // A vacant source owns no ring: it charges no PCM payload and no ring overhead.
+        if let Some(resources) = source.resources {
+            pcm_payload = pcm_payload
+                .checked_add(resources.pcm_payload_already_charged_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            overhead = overhead
+                .checked_add(resources.overhead_bytes)
+                .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
+            largest = largest.max(resources.largest_allocation_bytes);
+        }
         overhead = overhead
-            .checked_add(source.resources.overhead_bytes)
-            .and_then(|value| value.checked_add(source.additional_overhead_bytes))
+            .checked_add(source.additional_overhead_bytes)
             .ok_or(SourceGraphSourceSetError::ArithmeticOverflow)?;
-        largest = largest
-            .max(source.resources.largest_allocation_bytes)
-            .max(source.additional_largest_allocation_bytes);
+        largest = largest.max(source.additional_largest_allocation_bytes);
         entries.push(GraphSourceEntry {
             consumer: source.consumer,
+            channel_count: source.channel_count,
         });
     }
     overhead = overhead
@@ -1646,8 +1755,8 @@ pub fn prepare_graph_source_set(
         let source = entries
             .get(mapping.source_index)
             .ok_or(SourceGraphSourceSetError::SourceIndex)?;
-        if mapping.left_channel >= source.consumer.channel_count()
-            || mapping.right_channel >= source.consumer.channel_count()
+        if mapping.left_channel >= source.channel_count
+            || mapping.right_channel >= source.channel_count
         {
             return Err(SourceGraphSourceSetError::ChannelIndex);
         }
@@ -2077,7 +2186,11 @@ mod tests {
         mappings: Vec<SourceGraphTrackMapping>,
     ) -> SourceGraphSourceSetDriver {
         SourceGraphSourceSetDriver {
-            sources: vec![GraphSourceEntry { consumer }].into_boxed_slice(),
+            sources: vec![GraphSourceEntry {
+                channel_count: consumer.channel_count(),
+                consumer: Some(consumer),
+            }]
+            .into_boxed_slice(),
             mappings: mappings.into_boxed_slice(),
             quantum_frames: 4,
             block_validity: GraphObservationValidity::CLEAR,
@@ -2846,6 +2959,556 @@ mod tests {
             .expect("first block");
         let mut driver = test_driver(consumer, Vec::new());
         driver.begin_block(0, 4).expect("zero-claim begin");
-        assert!(driver.sources[0].consumer.played_plane(0).is_none());
+        assert!(
+            driver.sources[0]
+                .consumer
+                .as_ref()
+                .expect("occupied")
+                .played_plane(0)
+                .is_none()
+        );
+    }
+
+    /// Slice #1271: a successor graph plan takes the predecessor's source consumer at the swap
+    /// block, through a vacant entry and an installed carry program.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod carry {
+        use super::*;
+        use core::num::NonZeroUsize;
+        use effect_contract::{LatencySamples, TailSamples};
+        use engine::{
+            QuantumFrames,
+            realtime::{
+                CarryOutcome, PlanExchangeConfig, PlanarBufferMut, PreparedRenderPlan,
+                RenderEnvelope, RenderIo, SwapOutcome, plan_exchange,
+            },
+        };
+        use graph::{
+            DependencyLevel, GraphCarryInstallError, GraphCarryProgram, GraphEdge, GraphEdgeId,
+            GraphNode, GraphNodeId, GraphNodeObserverBinding, GraphObservationBlock,
+            GraphObservationValidity, GraphPortId, GraphPortKind, GraphResourceEstimate,
+            GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor, GraphSpec,
+            PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        const FRAMES: u32 = 4;
+        const BLOCKS: usize = 8;
+        const SWAP_BLOCK: usize = 4;
+
+        type Block = [u32; 2 * FRAMES as usize];
+
+        struct Noop;
+        impl GraphRuntimeProcessor for Noop {
+            fn process(
+                &mut self,
+                _block: graph::GraphBindingBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                Ok(())
+            }
+        }
+
+        /// The last block's source facts: bit 0 underrun, bit 1 generation change, bit 2 seen.
+        struct Validity(Arc<AtomicU8>);
+        impl GraphRuntimeObserver for Validity {
+            fn observe(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+            ) -> Result<(), engine::realtime::RenderError> {
+                Ok(())
+            }
+
+            fn observe_with_validity(
+                &mut self,
+                _block: GraphObservationBlock<'_>,
+                validity: GraphObservationValidity,
+            ) -> Result<(), engine::realtime::RenderError> {
+                let bits = u8::from(validity.source_underrun)
+                    | u8::from(validity.source_generation_changed) << 1
+                    | 4;
+                self.0.store(bits, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        /// `(source_underrun, source_generation_changed)` of the last observed block.
+        fn take_validity(cell: &AtomicU8) -> (bool, bool) {
+            let bits = cell.swap(0, Ordering::Relaxed);
+            assert_ne!(bits & 4, 0, "the observer saw no block");
+            (bits & 1 != 0, bits & 2 != 0)
+        }
+
+        fn envelope() -> RenderEnvelope {
+            RenderEnvelope {
+                sample_rate: RATE,
+                quantum: QuantumFrames(FRAMES),
+                output_channels: NonZeroUsize::new(2).expect("two"),
+            }
+        }
+
+        fn track(id: &str) -> GraphNodeId {
+            GraphNodeId::TrackStage {
+                track_id: StableGraphId::parse(id).expect("track ID"),
+                stage: TrackStage::Input,
+            }
+        }
+
+        fn output() -> GraphNodeId {
+            GraphNodeId::Output {
+                output_id: StableGraphId::parse("main").expect("output ID"),
+            }
+        }
+
+        fn inputs() -> [GraphNodeId; 2] {
+            [track("a"), track("b")]
+        }
+
+        /// Two track inputs summed into the output: the fan-out test's shape with two claims.
+        fn graph_plan() -> PreparedGraphPlan {
+            let edge = |source: GraphNodeId, route: &str| GraphEdge {
+                id: GraphEdgeId::RouteSource {
+                    route_id: StableGraphId::parse(route).expect("route ID"),
+                },
+                source: GraphPortId {
+                    node: source,
+                    kind: GraphPortKind::MainOutput,
+                    effect_port: None,
+                },
+                destination: GraphPortId {
+                    node: output(),
+                    kind: GraphPortKind::MainInput,
+                    effect_port: None,
+                },
+                path: format!("$.{route}"),
+            };
+            let [a, b] = inputs();
+            let schedule = vec![a.clone(), b.clone(), output()];
+            PreparedGraphPlan::new(PreparedGraphPlanParts {
+                plan_id: 1,
+                spec: GraphSpec {
+                    nodes: schedule
+                        .iter()
+                        .cloned()
+                        .map(|id| GraphNode {
+                            id,
+                            latency: LatencySamples(0),
+                            tail: TailSamples::Finite(0),
+                        })
+                        .collect(),
+                    ports: Vec::new(),
+                    edges: vec![edge(a.clone(), "a"), edge(b.clone(), "b")],
+                },
+                sequential_schedule: schedule.clone(),
+                dependency_levels: vec![
+                    DependencyLevel {
+                        level: 0,
+                        nodes: vec![a, b],
+                    },
+                    DependencyLevel {
+                        level: 1,
+                        nodes: vec![output()],
+                    },
+                ],
+                route_timings: Vec::new(),
+                inserted_delays: Vec::new(),
+                buffer_assignments: Vec::new(),
+                estimate: GraphResourceEstimate {
+                    logical_nodes: 0,
+                    materialized_nodes: 0,
+                    edges: 0,
+                    schedule_items: 0,
+                    dependency_levels: 0,
+                    reductions: 0,
+                    routes: 0,
+                    effects: 0,
+                    audio_buffer_samples: 0,
+                    total_delay_samples: 0,
+                    delay_bytes: 0,
+                    graph_metadata_bytes: 0,
+                    declared_effect_bytes: 0,
+                    effect_bank_count: 0,
+                    effect_bank_scratch_bytes: 0,
+                    effect_bank_runtime_buffer_bytes: 0,
+                    effect_bank_metadata_bytes: 0,
+                    builtin_bank_bytes: 0,
+                    builtin_bank_scratch_bytes: 0,
+                    builtin_bank_count: 0,
+                    largest_allocation_bytes: 0,
+                    incremental_plan_bytes: 0,
+                    session_plus_plan_bytes: 0,
+                },
+                envelope: envelope(),
+                required_bindings: schedule,
+                routes: Vec::new(),
+                track_delays: Vec::new(),
+                effects: Vec::new(),
+                effect_controls: Vec::new(),
+                banks: Vec::new(),
+                builtin_banks: Vec::new(),
+                observers: Vec::new(),
+                effect_observations: Vec::new(),
+            })
+        }
+
+        /// Claim `a` reads channels `(0, 1)` and claim `b` reads `(1, 0)`, both of source 0.
+        fn mappings() -> Vec<SourceGraphTrackMapping> {
+            let [a, b] = inputs();
+            vec![
+                SourceGraphTrackMapping {
+                    node: a,
+                    source_index: 0,
+                    left_channel: 0,
+                    right_channel: 1,
+                },
+                SourceGraphTrackMapping {
+                    node: b,
+                    source_index: 0,
+                    left_channel: 1,
+                    right_channel: 0,
+                },
+            ]
+        }
+
+        /// Bind a graph plan over `source`, observing the output's source facts into `validity`.
+        fn bind(source: SourceGraphSource, validity: &Arc<AtomicU8>) -> PreparedRenderPlan {
+            let set =
+                prepare_graph_source_set(envelope(), vec![source], mappings()).expect("source set");
+            let bindings = GraphRuntimeBindings {
+                envelope: envelope(),
+                nodes: vec![graph::GraphNodeBinding::new(output(), Box::new(Noop))],
+                observers: vec![GraphNodeObserverBinding::new(
+                    output(),
+                    1,
+                    Box::new(Validity(Arc::clone(validity))),
+                )],
+            };
+            match graph_plan().bind_with_source_set(bindings, set) {
+                Ok(plan) => plan,
+                Err(failure) => panic!("bind failed: {}", failure.code),
+            }
+        }
+
+        /// Channel 0 is `1 + frame` and channel 1 is `0.25 * (1 + frame)`: no exact-zero sample,
+        /// and every frame distinct.
+        fn frame_samples(start: u64) -> [[f32; FRAMES as usize]; 2] {
+            let first = core::array::from_fn(|frame| (start as f32) + frame as f32 + 1.0);
+            [first, first.map(|value: f32| 0.25 * value)]
+        }
+
+        /// A two-channel ring holding all `BLOCKS` blocks of generation 1, from frame 0.
+        fn filled_source() -> (HostChunkProvider, SourceGraphSource) {
+            let config = PcmSourceRingConfig {
+                channel_count: 2,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: BLOCKS as u64 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            for block in 0..BLOCKS as u64 {
+                let planes = frame_samples(block * u64::from(FRAMES));
+                host.submit(chunk(
+                    1,
+                    block * u64::from(FRAMES),
+                    &[&planes[0], &planes[1]],
+                    FRAMES,
+                    false,
+                ))
+                .expect("source PCM");
+            }
+            (host, SourceGraphSource::new(consumer, resources, 0, 0))
+        }
+
+        fn io(output: &mut [f32; 2 * FRAMES as usize]) -> RenderIo<'_> {
+            RenderIo {
+                output: PlanarBufferMut::try_new(output, 2, FRAMES as usize, FRAMES as usize)
+                    .expect("output"),
+            }
+        }
+
+        fn bits(output: &[f32; 2 * FRAMES as usize]) -> Block {
+            output.map(f32::to_bits)
+        }
+
+        fn plan_block(plan: &mut PreparedRenderPlan) -> Block {
+            let mut output = [f32::NAN; 2 * FRAMES as usize];
+            let sample = plan.next_absolute_sample();
+            plan.render_contiguous(io(&mut output), sample)
+                .expect("render");
+            bits(&output)
+        }
+
+        /// One unswapped plan over the filled ring, for `BLOCKS` blocks.
+        fn reference() -> Vec<Block> {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_host, source) = filled_source();
+            let mut plan = bind(source, &validity);
+            let blocks: Vec<Block> = (0..BLOCKS).map(|_| plan_block(&mut plan)).collect();
+            assert!(
+                blocks
+                    .iter()
+                    .flatten()
+                    .all(|word| f32::from_bits(*word) != 0.0)
+            );
+            blocks
+        }
+
+        fn exchange_config() -> PlanExchangeConfig {
+            PlanExchangeConfig {
+                publication_capacity: NonZeroUsize::new(1).expect("one"),
+                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+            }
+        }
+
+        /// Plan A over the filled ring for `SWAP_BLOCK` blocks through a plan exchange, then the
+        /// vacant plan B, given the program `program(identity of A)`, for the rest. Returns every
+        /// block, the swap block's carry outcome, and each block's `(underrun, generation)` facts.
+        fn swap(
+            program: impl FnOnce(u64) -> Option<GraphCarryProgram>,
+        ) -> (Vec<Block>, CarryOutcome, Vec<(bool, bool)>) {
+            let validity = Arc::new(AtomicU8::new(0));
+            let (_host, source) = filled_source();
+            let mut predecessor = bind(source, &validity);
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let (mut publisher, mut owner, _retirer) =
+                plan_exchange(predecessor, exchange_config()).expect("exchange");
+            let mut blocks = Vec::new();
+            let mut facts = Vec::new();
+            let mut carry = CarryOutcome::NotRequested;
+            let mut successor = Some(bind(SourceGraphSource::vacant(2), &validity));
+            let mut program = Some(program);
+            for block in 0..BLOCKS {
+                if block == SWAP_BLOCK {
+                    let mut plan = successor.take().expect("successor");
+                    if let Some(program) = (program.take().expect("program"))(identity) {
+                        graph::install_carry_program(&mut plan, program).expect("install");
+                    }
+                    assert!(publisher.publish(plan).is_ok());
+                }
+                let mut output = [f32::NAN; 2 * FRAMES as usize];
+                let sample = owner.next_absolute_sample();
+                let report = owner
+                    .render_contiguous(io(&mut output), sample)
+                    .expect("render");
+                let expected_swap = if block == SWAP_BLOCK {
+                    carry = report.carry;
+                    SwapOutcome::Applied
+                } else {
+                    assert_eq!(report.carry, CarryOutcome::NotRequested);
+                    SwapOutcome::None
+                };
+                assert_eq!(report.swap, expected_swap, "block {block}");
+                blocks.push(bits(&output));
+                facts.push(take_validity(&validity));
+            }
+            (blocks, carry, facts)
+        }
+
+        fn carry_source_zero(predecessor: u64) -> GraphCarryProgram {
+            GraphCarryProgram {
+                predecessor,
+                sources: vec![(0, 0)].into_boxed_slice(),
+            }
+        }
+
+        /// Gate 1. Red if the consumer is not moved into the vacant entry at the swap block (the
+        /// successor would render silence there) or the move lands a block late.
+        #[test]
+        fn a_carried_consumer_continues_the_predecessor_audio_gap_free() {
+            let reference = reference();
+            let (blocks, carry, facts) = swap(|identity| Some(carry_source_zero(identity)));
+            assert_eq!(blocks, reference);
+            assert_eq!(carry, CarryOutcome::Carried);
+            assert!(
+                facts.iter().all(|&fact| fact == (false, false)),
+                "{facts:?}"
+            );
+        }
+
+        /// Gate 2. Red if a mismatched predecessor still hands its ring over (the successor
+        /// would play the predecessor's audio) or a vacant entry renders anything but `+0.0`
+        /// without flagging an underrun.
+        #[test]
+        fn a_vacant_source_without_a_matching_carry_renders_silence_and_an_underrun() {
+            let reference = reference();
+            let silence: Block = [0.0_f32.to_bits(); 2 * FRAMES as usize];
+            let outcomes = [
+                (CarryOutcome::NotRequested, None),
+                (CarryOutcome::PredecessorMismatch, Some(1_u64)),
+            ];
+            for (expected, offset) in outcomes {
+                let (blocks, carry, facts) = swap(|identity| {
+                    offset.map(|offset| carry_source_zero(identity.wrapping_add(offset)))
+                });
+                assert_eq!(carry, expected);
+                assert_eq!(blocks[..SWAP_BLOCK], reference[..SWAP_BLOCK]);
+                assert!(blocks[SWAP_BLOCK..].iter().all(|block| *block == silence));
+                assert!(
+                    facts[..SWAP_BLOCK]
+                        .iter()
+                        .all(|&fact| fact == (false, false))
+                );
+                assert!(
+                    facts[SWAP_BLOCK..]
+                        .iter()
+                        .all(|&fact| fact == (true, false))
+                );
+            }
+            // A predecessor index the predecessor does not have refuses the whole move.
+            let (blocks, carry, _) = swap(|identity| {
+                Some(GraphCarryProgram {
+                    predecessor: identity,
+                    sources: vec![(0, 1)].into_boxed_slice(),
+                })
+            });
+            assert_eq!(carry, CarryOutcome::PredecessorMismatch);
+            assert!(blocks[SWAP_BLOCK..].iter().all(|block| *block == silence));
+        }
+
+        /// Gate 3. Red if the carry drops the predecessor's pending generation change: the
+        /// successor's first block would claim continuity across a seek.
+        #[test]
+        fn a_seek_prepared_before_the_swap_is_reported_in_the_successors_first_block() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let config = PcmSourceRingConfig {
+                channel_count: 2,
+                quantum_frames: QuantumFrames(FRAMES),
+                frame_capacity: 4 * u64::from(FRAMES),
+                initial_generation: SourceGeneration(1),
+            };
+            let (producer, consumer, resources) = PcmSourceRing::prepare(config).expect("ring");
+            let mut host = producer.into_host_chunk_provider(RATE);
+            let first = frame_samples(0);
+            host.submit(chunk(1, 0, &[&first[0], &first[1]], FRAMES, false))
+                .expect("first block");
+            let mut predecessor =
+                bind(SourceGraphSource::new(consumer, resources, 0, 0), &validity);
+            plan_block(&mut predecessor);
+            assert_eq!(take_validity(&validity), (false, false));
+
+            const SEEK: u64 = 1_000;
+            host.try_seek(SourceCommand::Seek {
+                generation: SourceGeneration(2),
+                frame: SourceFrame(SEEK),
+            })
+            .expect("seek");
+            let sought = [frame_samples(SEEK), frame_samples(SEEK + u64::from(FRAMES))];
+            for (index, planes) in sought.iter().enumerate() {
+                let start = SEEK + index as u64 * u64::from(FRAMES);
+                host.submit(chunk(2, start, &[&planes[0], &planes[1]], FRAMES, false))
+                    .expect("sought block");
+            }
+            assert!(predecessor.prepare_source_seek(0, 2, SEEK));
+
+            let identity = graph::plan_identity(&mut predecessor).expect("graph plan");
+            let mut successor = bind(SourceGraphSource::vacant(2), &validity);
+            graph::install_carry_program(&mut successor, carry_source_zero(identity))
+                .expect("install");
+            assert_eq!(
+                successor.adopt_predecessor_plan(&mut predecessor),
+                CarryOutcome::Carried
+            );
+            for (index, planes) in sought.iter().enumerate() {
+                let block = plan_block(&mut successor);
+                let sum: Vec<u32> = (0..FRAMES as usize)
+                    .map(|frame| (planes[0][frame] + planes[1][frame]).to_bits())
+                    .collect();
+                assert_eq!(block[..FRAMES as usize], sum[..], "left, block {index}");
+                assert_eq!(block[FRAMES as usize..], sum[..], "right, block {index}");
+                assert_eq!(
+                    take_validity(&validity),
+                    (false, index == 0),
+                    "block {index}"
+                );
+            }
+        }
+
+        /// Gate 4. Red if install accepts a program that names a source index the successor does
+        /// not have, a source that already owns a ring, or one index twice.
+        #[test]
+        fn install_refuses_out_of_range_occupied_and_repeated_sources() {
+            let validity = Arc::new(AtomicU8::new(0));
+            let mut vacant = bind(SourceGraphSource::vacant(2), &validity);
+            let (_host, source) = filled_source();
+            let mut occupied = bind(source, &validity);
+            let program = |sources: &[(u32, u32)]| GraphCarryProgram {
+                predecessor: 1,
+                sources: sources.into(),
+            };
+            assert_eq!(
+                graph::install_carry_program(&mut vacant, program(&[(1, 0)])),
+                Err(GraphCarryInstallError::SourceIndexOutOfRange)
+            );
+            assert_eq!(
+                graph::install_carry_program(&mut occupied, program(&[(0, 0)])),
+                Err(GraphCarryInstallError::SourceNotVacant)
+            );
+            assert_eq!(
+                graph::install_carry_program(&mut vacant, program(&[(0, 0), (0, 1)])),
+                Err(GraphCarryInstallError::DuplicateSourceIndex)
+            );
+            let mut plain = PreparedRenderPlan::prepare(engine::realtime::PrepareRenderPlan {
+                plan_id: 1,
+                envelope: envelope(),
+                scratch: &[],
+            })
+            .expect("plain plan");
+            assert_eq!(
+                graph::install_carry_program(&mut plain, program(&[(0, 0)])),
+                Err(GraphCarryInstallError::NotAGraphPlan)
+            );
+            assert_eq!(graph::plan_identity(&mut plain), None);
+            // A refused install charges nothing; an accepted one charges its move table.
+            assert_eq!(graph::carry_program_retained_bytes(&mut vacant), 0);
+            graph::install_carry_program(&mut vacant, program(&[(0, 0)])).expect("install");
+            assert_eq!(
+                graph::carry_program_retained_bytes(&mut vacant),
+                core::mem::size_of::<(u32, u32)>() as u64
+            );
+            let vacant_identity = graph::plan_identity(&mut vacant).expect("identity");
+            let occupied_identity = graph::plan_identity(&mut occupied).expect("identity");
+            assert_ne!(vacant_identity, occupied_identity);
+            assert!(vacant_identity != 0 && occupied_identity != 0);
+        }
+
+        /// D1. Red if a vacant source charges ring bytes or is not counted apart.
+        #[test]
+        fn a_vacant_source_charges_no_ring_and_is_counted_apart() {
+            let (_host, occupied_source) = filled_source();
+            let ring = occupied_source.resources.expect("ring report");
+            let occupied = prepare_graph_source_set(envelope(), vec![occupied_source], mappings())
+                .expect("occupied set");
+            let vacant = prepare_graph_source_set(
+                envelope(),
+                vec![SourceGraphSource::vacant(2)],
+                mappings(),
+            )
+            .expect("vacant set");
+            let (occupied_report, vacant_report) =
+                (occupied.resource_report(), vacant.resource_report());
+            assert_eq!(vacant_report.pcm_payload_already_charged_bytes, 0);
+            assert_eq!(
+                occupied_report.overhead_bytes - vacant_report.overhead_bytes,
+                ring.overhead_bytes
+            );
+            assert_eq!(
+                vacant_report.total_engine_owned_bytes,
+                vacant_report.overhead_bytes
+            );
+            assert_eq!(
+                (occupied.vacant_source_count(), vacant.vacant_source_count()),
+                (0, 1)
+            );
+            // Mappings are still checked against a vacant source's channel count.
+            assert!(matches!(
+                prepare_graph_source_set(
+                    envelope(),
+                    vec![SourceGraphSource::vacant(1)],
+                    mappings()
+                ),
+                Err(SourceGraphSourceSetError::ChannelIndex)
+            ));
+        }
     }
 }

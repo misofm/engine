@@ -103,3 +103,77 @@ successor plan whose unchanged sources keep playing* (slice 3) builds the host-c
 ## Dependencies
 
 - *Hand the outgoing plan to its successor at the swap block* (#1270).
+
+## Attempt record
+
+### Attempt 1 (implementer, on `22c9bd5a1`)
+
+**Implementation.**
+
+- D1 (`crates/source/src/lib.rs`): `GraphSourceEntry` holds `Option<PcmSourceConsumer>` plus the
+  channel count the mappings were validated against. `SourceGraphSource::vacant(channel_count)`
+  carries no ring and no `SourceResourceReport`, so the set charges it no PCM payload and no ring
+  overhead. A vacant entry sets `source_underrun` in `begin_block`, writes `+0.0` in
+  `copy_track_input`, lends no planes, refuses seek preparation and reports zero telemetry. The
+  set counts vacant sources apart through a new `GraphPreparedSourceSet::vacant_source_count`.
+- D2 (`crates/graph/src/lib.rs`, `crates/engine/src/realtime/plan.rs`): `GraphExecutor` takes a
+  nonzero identity from a global `AtomicU64` at bind. `graph::plan_identity` reads it through the
+  new hidden `PreparedRenderPlan::executor_any_mut`.
+- D3: `GraphCarryProgram`, `GraphCarryInstallError` and `graph::install_carry_program`. Install
+  refuses a non-graph plan, a plan without a source set, an out-of-range successor index, an
+  occupied successor index, and a repeated successor or predecessor index. The program is stored in
+  the executor. `graph::carry_program_retained_bytes` (zero without a program) reports its move-table
+  bytes; this attempt reads "charged to the plan's report" as that accessor, because the program is
+  installed after bind, when the graph estimate has already been admitted. Slice 3 adds it to the
+  host's plan charge.
+- D4: `GraphExecutor::adopt_predecessor` follows D4 steps 1-4. On the driver trait it adds
+  `as_any_mut`, `source_vacancy`, `vacant_source_count` and `adopt_sources`, each with a default.
+  `SourceGraphSourceSetDriver::adopt_sources` checks every move first, all or nothing: both indices
+  in range, successor vacant, predecessor occupied, equal channel counts and quanta. It then
+  `mem::swap`s each pair and ORs in the predecessor's `pending_generation_change`. When a move
+  fails it moves nothing, and the executor reports `PredecessorMismatch`. So a predecessor index
+  that is out of range, which install cannot check, is refused at the swap block.
+
+**Gates.**
+
+| Gate | Test | Result |
+| --- | --- | --- |
+| 1 gap-free | `source` `tests::carry::a_carried_consumer_continues_the_predecessor_audio_gap_free` | green: 8 blocks bit-identical to the unswapped plan, block 5 `Carried`, no underrun or generation flag on any block |
+| 2 vacant | `...::a_vacant_source_without_a_matching_carry_renders_silence_and_an_underrun` | green: no program gives `NotRequested`, a wrong identity gives `PredecessorMismatch`, both render `+0.0` with the underrun flag; an out-of-range predecessor index also gives `PredecessorMismatch` |
+| 3 generation | `...::a_seek_prepared_before_the_swap_is_reported_in_the_successors_first_block` | green: B's first block plays the sought PCM and flags the generation change; its second block does not |
+| 4 install | `...::install_refuses_out_of_range_occupied_and_repeated_sources` | green; also identities are distinct and nonzero, and the retained bytes are 0, then 8 |
+| D1 report | `...::a_vacant_source_charges_no_ring_and_is_counted_apart` | green |
+
+**Mutations** (each applied, run red, reverted, run green):
+
+- M1, skip the swap in `adopt_sources` (it returns `true` with nothing moved): gates 1 and 3 red.
+- M2, drop the identity comparison in `GraphExecutor::adopt_predecessor`: gate 2 red.
+- M3, drop the `pending_generation_change` OR: gate 3 red.
+- M4, accept an occupied successor index at install: gate 4 red.
+- M5, drop the duplicate-index check at install: gate 4 red.
+- M6, a vacant entry that does not flag the underrun: gate 2 red.
+
+**Allocation proof: not committed (path blocker).** The test
+`the_swap_block_carry_allocates_and_frees_nothing` ran in `crates/graph/src/lib.rs` tests. It uses
+a heap-owning carried slot through `plan_exchange` and reads `bench_support::alloc`'s thread-scoped
+counters around the swap block, after four warm blocks. Run alone, it measured
+`(allocations, deallocations) == (0, 0)` with `Carried`. Two mutations turned it red: a cloned
+instead of swapped slot gave `(1, 0)`, and a `Box` in `adopt_predecessor` gave `(1, 1)`. It could
+not stay in the lib tests, because linking the audited allocator aborts existing graph lib tests
+that allocate inside a render scope
+(`runtime::tests::a_folded_metered_plan_is_the_unfolded_plans_master_and_meters_bit_for_bit`
+aborted first). It belongs in a new `crates/graph/tests/rt11_*.rs` integration binary, the pattern
+of `rt10_source_in_place_alloc.rs`. That path is outside this slice's authorized paths, so it waits
+on the coordinator.
+
+**Commands.**
+
+- `cargo test --locked -p source -p graph --features graph/test-support`: green (graph lib 90, source lib 24, all integration binaries).
+- `cargo test --locked -p engine -p host-core`: green (29 result lines, 0 failed).
+- `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: green.
+- `check-workspace-policy.sh`, `test-workspace-policy.sh`, `check-realtime-policy.sh`, `test-realtime-policy.sh` and `check-capi-abi.sh`: green.
+- `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`: 0 allocations, 0 deallocations, 0 syscalls.
+- `bash scripts/trace-graph-audit.sh target/release/audit`: PASS (1000000 blocks).
+- `bash scripts/check-cross-targets.sh`: exit 0, with only the known #1018 iOS `memset_pattern16` expected failures.
+- Worklet chain into fresh directories: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts` and `test-web-audioworklet.sh` all green. `sourceTotalBytes` is 3294 of 3648, which is +8 B per source entry for the vacancy-aware entry.
+- **ARTIFACT CHANGED**: the shipped module is `92415199cfb8bf6e7a08926acce85bf1737d1e4619eb658bb3fda47fb6b5d335`. Per `docs/RELEASE.md` ("Between releases"), nothing re-pins between releases, so the pin file is untouched.

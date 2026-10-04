@@ -895,6 +895,15 @@ impl PreparedRenderPlan {
         super::audit::in_render_scope(|| self.carry_from(predecessor))
     }
 
+    /// This plan's executor as `Any` ([`PreparedPlanExecutor::as_any_mut`]), so the crate that
+    /// built it can reach its own executor type off the render thread -- to read its identity or
+    /// install a hand-over program before publication. `None` without an executor or when the
+    /// executor offers none.
+    #[doc(hidden)]
+    pub fn executor_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        self.executor.as_deref_mut()?.as_any_mut()
+    }
+
     /// Run the executor hand-over from `predecessor`, if both plans have executors.
     pub(crate) fn carry_from(&mut self, predecessor: &mut Self) -> CarryOutcome {
         match (

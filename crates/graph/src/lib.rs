@@ -217,8 +217,9 @@ use effect_contract::{
     ResponseSnapshotSummary, SeamSide, TailSamples,
 };
 use engine::realtime::{
-    BufferArena, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan, PreparedPlanExecutor,
-    PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError, ResponseSnapshotSink,
+    BufferArena, CarryOutcome, PlanUnitEligibility, PlanarBufferMut, PrepareRenderPlan,
+    PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError, ResponseSnapshotError,
+    ResponseSnapshotSink,
 };
 use lane::Backend;
 use rack::AoSoaScratch;
@@ -2148,6 +2149,35 @@ pub trait GraphPreparedSourceSetDriver: Send {
     fn played_planes(&self, _claim_index: usize) -> Option<(&[f32], &[f32])> {
         None
     }
+    /// This driver as `Any`, so a successor's [`Self::adopt_sources`] can downcast its
+    /// predecessor to the concrete type it knows how to take sources from. `None` (the default)
+    /// offers nothing.
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
+    }
+    /// Whether source `source_index` is vacant (bound with no ring, waiting for a carried one),
+    /// or `None` when the index is out of range or the driver has no vacancy concept (the
+    /// default). Read off the render thread, by [`install_carry_program`].
+    fn source_vacancy(&self, _source_index: usize) -> Option<bool> {
+        None
+    }
+    /// Sources bound vacant, counted apart from the resource report (they charge no PCM payload
+    /// and no ring overhead).
+    fn vacant_source_count(&self) -> usize {
+        0
+    }
+    /// Take sources from the predecessor's driver at the swap block: for each `(successor
+    /// index, predecessor index)` move the predecessor's source into this driver's vacant entry,
+    /// leaving the predecessor's entry vacant. All or nothing: `false` (the default) moves
+    /// nothing. Render-thread code: no allocation, free, lock or syscall, bounded by
+    /// `moves.len()`.
+    fn adopt_sources(
+        &mut self,
+        _predecessor: &mut dyn GraphPreparedSourceSetDriver,
+        _moves: &[(u32, u32)],
+    ) -> bool {
+        false
+    }
 }
 
 /// The source set as a bank's gather sees it during the unit loop (issue #918): a shared view of
@@ -2240,6 +2270,14 @@ impl GraphPreparedSourceSet {
     /// Copy bounded render-owner telemetry only after the prepared plan is disarmed.
     pub fn copy_after_disarm_telemetry(&self, output: &mut [u64]) -> usize {
         self.driver.copy_after_disarm_telemetry(output)
+    }
+
+    /// Sources bound vacant: no ring until a [`GraphCarryProgram`] moves one in at the swap
+    /// block. They are counted here, apart from [`Self::resource_report`], which charges them
+    /// no PCM payload and no ring overhead.
+    #[must_use]
+    pub fn vacant_source_count(&self) -> usize {
+        self.driver.vacant_source_count()
     }
 }
 
@@ -2639,6 +2677,109 @@ struct GraphExecutor {
     /// at bind; the inert units stay in `runtime.units`, so the census, `unit_eligibility` and
     /// every walk over the units still see them.
     active_units: Box<[u32]>,
+    /// Process-unique, nonzero identity taken at bind ([`plan_identity`]): what a successor's
+    /// [`GraphCarryProgram::predecessor`] names. Every host passes the same `plan_id`, so the
+    /// plan id cannot tell two plans apart.
+    identity: u64,
+    /// The hand-over a successor runs at its swap block, installed before publication.
+    carry: Option<GraphCarryProgram>,
+}
+
+/// Next graph executor identity; identities start at 1, so zero never names a plan.
+static NEXT_GRAPH_IDENTITY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Take a fresh process-unique identity, at bind (off the render thread).
+fn next_graph_identity() -> u64 {
+    NEXT_GRAPH_IDENTITY.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+/// What a successor graph plan takes from the plan it displaces, at the swap block.
+///
+/// `sources` lists `(successor source index, predecessor source index)` pairs: each moves the
+/// predecessor's source consumer (ring, queued blocks, generation, read position and pending
+/// generation change) into the successor's vacant entry. The move happens only when the
+/// displaced plan is the graph plan whose identity is `predecessor`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphCarryProgram {
+    /// [`plan_identity`] of the plan this successor is built to displace.
+    pub predecessor: u64,
+    /// `(successor source index, predecessor source index)` pairs.
+    pub sources: Box<[(u32, u32)]>,
+}
+
+impl GraphCarryProgram {
+    /// Heap bytes the installed program retains in its plan (its move table), charged to the
+    /// plan by [`carry_program_retained_bytes`].
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        u64::try_from(core::mem::size_of_val::<[(u32, u32)]>(&self.sources)).unwrap_or(u64::MAX)
+    }
+}
+
+/// Refusal to install a [`GraphCarryProgram`], off the render thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphCarryInstallError {
+    /// The plan was not bound by this crate.
+    NotAGraphPlan,
+    /// The plan has no source set to carry sources into.
+    NoSourceSet,
+    /// A successor source index is beyond the plan's source set.
+    SourceIndexOutOfRange,
+    /// A successor source index already owns a ring.
+    SourceNotVacant,
+    /// A successor or predecessor source index appears twice.
+    DuplicateSourceIndex,
+}
+
+/// The process-unique identity of a graph plan, taken at bind; `None` for any other plan.
+pub fn plan_identity(plan: &mut PreparedRenderPlan) -> Option<u64> {
+    plan.executor_any_mut()?
+        .downcast_mut::<GraphExecutor>()
+        .map(|executor| executor.identity)
+}
+
+/// Install the hand-over this graph plan runs when it displaces its predecessor.
+///
+/// Call it before publication. Refused, leaving any earlier program in place, when the plan is
+/// not a graph plan, has no source set, or a successor index is out of range, not vacant or
+/// repeated, or a predecessor index is repeated. Predecessor indices are checked against the
+/// predecessor at the swap block, where an out-of-range index refuses the whole move.
+pub fn install_carry_program(
+    plan: &mut PreparedRenderPlan,
+    program: GraphCarryProgram,
+) -> Result<(), GraphCarryInstallError> {
+    let executor = plan
+        .executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .ok_or(GraphCarryInstallError::NotAGraphPlan)?;
+    let set = executor
+        .source_set
+        .as_ref()
+        .ok_or(GraphCarryInstallError::NoSourceSet)?;
+    for (index, &(successor, predecessor)) in program.sources.iter().enumerate() {
+        match set.driver.source_vacancy(successor as usize) {
+            None => return Err(GraphCarryInstallError::SourceIndexOutOfRange),
+            Some(false) => return Err(GraphCarryInstallError::SourceNotVacant),
+            Some(true) => {}
+        }
+        if program.sources[..index]
+            .iter()
+            .any(|&(s, p)| s == successor || p == predecessor)
+        {
+            return Err(GraphCarryInstallError::DuplicateSourceIndex);
+        }
+    }
+    executor.carry = Some(program);
+    Ok(())
+}
+
+/// Bytes the plan's installed [`GraphCarryProgram`] retains; zero for a plan without one or for
+/// any other plan.
+pub fn carry_program_retained_bytes(plan: &mut PreparedRenderPlan) -> u64 {
+    plan.executor_any_mut()
+        .and_then(|any| any.downcast_mut::<GraphExecutor>())
+        .and_then(|executor| executor.carry.as_ref())
+        .map_or(0, GraphCarryProgram::retained_bytes)
 }
 
 /// Bytes of one entry of each executor table sized at bind (issue #936): `(active_units,
@@ -2719,6 +2860,8 @@ struct GraphExecutorWithoutSplitPairTable {
     source_set: Option<GraphPreparedSourceSet>,
     source_input_buffers: Box<[(usize, u32)]>,
     active_units: Box<[u32]>,
+    identity: u64,
+    carry: Option<GraphCarryProgram>,
 }
 
 fn scalar_split_runtime_owner_layout() -> (u64, u64) {
@@ -2826,11 +2969,53 @@ impl GraphExecutor {
             source_set,
             source_input_buffers,
             active_units,
+            identity: next_graph_identity(),
+            carry: None,
         }
     }
 }
 
 impl PreparedPlanExecutor for GraphExecutor {
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        Some(self)
+    }
+
+    // REALTIME_POLICY_BEGIN
+    /// Move the sources the installed [`GraphCarryProgram`] names out of the predecessor graph
+    /// plan, at the swap block: a bounded series of swaps, nothing allocated or freed.
+    ///
+    /// No program, or a predecessor that is not a graph plan, takes nothing (`NotRequested`). A
+    /// predecessor of another identity, a source set missing on either side, or a driver that
+    /// refuses the moves takes nothing and reports `PredecessorMismatch`.
+    fn adopt_predecessor(&mut self, predecessor: &mut dyn PreparedPlanExecutor) -> CarryOutcome {
+        let Some(program) = self.carry.as_ref() else {
+            return CarryOutcome::NotRequested;
+        };
+        let Some(predecessor) = predecessor
+            .as_any_mut()
+            .and_then(|any| any.downcast_mut::<Self>())
+        else {
+            return CarryOutcome::NotRequested;
+        };
+        if predecessor.identity != program.predecessor {
+            return CarryOutcome::PredecessorMismatch;
+        }
+        let (Some(successor_set), Some(predecessor_set)) =
+            (self.source_set.as_mut(), predecessor.source_set.as_mut())
+        else {
+            return CarryOutcome::PredecessorMismatch;
+        };
+        if successor_set
+            .driver
+            .adopt_sources(&mut *predecessor_set.driver, &program.sources)
+        {
+            CarryOutcome::Carried
+        } else {
+            CarryOutcome::PredecessorMismatch
+        }
+    }
+    // REALTIME_POLICY_END
+
     fn can_prepare_source_seek(&self, source_index: usize) -> bool {
         self.source_set
             .as_ref()
@@ -2891,6 +3076,8 @@ impl PreparedPlanExecutor for GraphExecutor {
             source_set,
             source_input_buffers,
             active_units,
+            identity: _,
+            carry: _,
         } = self;
         #[cfg(any(test, feature = "test-support"))]
         let mut probe = test_only_phase_profile::Probe::start();
