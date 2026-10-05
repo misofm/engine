@@ -194,11 +194,13 @@ when a dependency forces the order, and then sequence the correct solution.
   6. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
 - **Fallback, counted and reported:** the transition only, the D15-9 duck-swap of every strip whose
   content timing moves (#1397 D2's `grown_strips`: a strip with a node whose arrival grows, or with
-  an outgoing edge whose compensation line changes length, unedited strips included, plus the
-  consumer of every sidechain edge whose line changes length unless it leaves a ducked strip's
-  `post_fader` or `post_pan` tap), joined with #1324's restarted strips, with `S` counted with
-  #1324 D4's `C` (each sidechain line from a ducked strip's `post_fader` or `post_pan` tap
-  included), counted `TRANSITION_FALLBACK`. It applies when preparation returns
+  an outgoing route, send or output path whose compensation line changes length, unedited strips
+  included), closed under #1324 D1's sidechain rule over the joined strips. That set is computed
+  from the ordinary compile before the carry join and passed to preparation as
+  `SuccessorBase::forced_restart`, so each of its strips is restarted before the fader and armed
+  (#1324 D2-D3) and joins #1324's restarted strips. `S` is counted with #1324 D4's `C` (each
+  sidechain line from a ducked strip's `post_fader` or `post_pan` tap included), and the edit is
+  counted `TRANSITION_FALLBACK`. It applies when preparation returns
   `WarmUnavailable`, or when readiness is still unmet `prime_deadline_samples` of render after
   `not_before` (counted in render samples: one stall tolerance plus `P_MAX` plus one quantum,
   #1358 D1). There is no render-thread pre-roll. While render waits for readiness, the
@@ -577,6 +579,13 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
   mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
   each section's dry mask is kept in state); D6 (class B) is restated by change size.
+- **#1328 A4 corrected:** the SVF joint flush has a defined rest threshold. While every input
+  sample satisfies `|x| < L* = REST_EPS / (2 · max(a2, a3))`, a section stays at rest and outputs
+  only its direct term; the worst output change is about 5.0e-10 (−186 dBFS; `L*` ≤ −210.3 dBFS,
+  EQ low shelf 10 Hz +24 dB at 96 kHz). Accepted under D15-4(a) by root under the owner's
+  delegation of math decisions: it is below the f32 rounding error of any signal above about
+  −30 dBFS through the same section. Gating the flush on `x == 0` was rejected (spill risk, no
+  measurable gain). Details: #1328 Amendment 1 A7 and `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its
@@ -647,6 +656,9 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
 - **Round 8: PASS-WITH-FIXES**, no blocker. One major: the transition's grown strips fell outside
   #1324 D4's `C` and #1397 D2's duck set for sidechain lines (M1). It was folded in, with the
   minors.
+- **Round 9: PASS-WITH-FIXES**, no blocker. One major: the transition computed its grown strips
+  after preparation, so a grown strip that preparation carried was never restarted or armed (M1;
+  now `SuccessorBase::forced_restart`, #1397 D2 step 1). It was folded in, with the minors.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
 passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its

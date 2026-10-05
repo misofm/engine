@@ -56,6 +56,11 @@ never leaves it muted.
   tap or destination does not put the source strip in this set (D15-9: a re-pointed route is
   ramped at route level and never ducks its source strip; #1283 and #1284 leave it out; #1363
   ramps the route itself).
+  - **A forced restart.** A strip in `SuccessorBase::forced_restart` (the transition's duck set,
+    *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+    successor cannot adopt*, #1397 D2 step 1) is in `restarted_strips()` like a strip the carry
+    join restarts, and D1-D3 apply to it the same way: it is restarted (D2), armed (D3), and
+    the sidechain rule below runs over it. The field is empty for every other successor.
   - **Sidechain consumers join the set.** A sidechain edge (`GraphEdgeId::EffectSidechain`) has no
     gain lane: the compiler wires the routed sidechain's source tap straight into the effect's
     `SidechainInput` port (`crates/graph-compiler/src/compile.rs:390-416`; the tap's stage,
@@ -85,11 +90,11 @@ never leaves it muted.
     from the end of the duck until the fire (the fader is ducked to a settled `+0.0`, then armed
     muted), so it adds nothing either.
 - **D2. Whole pre-fader restart.** For a duck-swapped strip, preparation marks not carried, after
-  the join: every owner before the fader, the fader stage, and every route out of the strip whose
-  tap precedes the fader. A partial carry upstream of a restarted latent owner would emit its
-  carried tail, then the restarted owner's at-rest zeros: a hole with a step at each edge. Owners
-  after the fader (matrix/pan, post-fader and post-pan sends, their compensation lines) carry as the
-  join says; they carry the ducked tail.
+  the join: every owner before the fader (the compensation lines on its chain included), the fader
+  stage, and every route out of the strip whose tap precedes the fader. A partial carry upstream of
+  a restarted latent owner would emit its carried tail, then the restarted owner's at-rest zeros: a
+  hole with a step at each edge. Owners after the fader (matrix/pan, post-fader and post-pan sends,
+  their compensation lines) carry as the join says; they carry the ducked tail.
   - A source-claim line (*Grow latency during playback by adopting a primed warm successor*, #1287
     D1) is not an owner of the strip: it holds raw source frames and no processing state, so it
     carries for a duck-swapped strip too (*Carry source-claim lines across a plan swap and fill a
@@ -103,22 +108,23 @@ never leaves it muted.
     hold exact `+0.0` (D4's duck, with `S` counted with D4's `C`, which includes each
     `EffectSidechain` line from its `post_fader` or `post_pan` tap into a carried node, which its
     grown arrival can shorten), and its armed fader keeps them at `+0.0` until the fire.
-- **D3. Arm.** Each duck-swapped strip is armed through #1288's arm entry point (its D1 strip-set
-  argument; channels the model leaves unmuted), with `D` per #1288 D4 (its pre-fader latency; for a
-  submix plus the longest compensation delay of an input route whose line starts at rest). Its
+- **D3. Arm.** Each duck-swapped strip, a forced-restart strip (D1) included, is armed through
+  #1288's arm entry point (its D1 strip-set argument; channels the model leaves unmuted), with `D`
+  per #1288 D4 (its pre-fader latency, the compensation lines on its chain included; for a submix
+  plus the longest compensation delay of an input route whose line starts at rest). Its
   routes from taps before the fader are armed with it by #1363 D1 (c). The fire comes no earlier
   than adoption (#1288 D3), so for a playing source the fade starts at the first block at or after
   `S + D`.
 - **D4. Duck.** This issue extends #1325 D7's `plan_strip_transition`: the duck set is the removed
-  strips plus `successor.restarted_strips()` (the transition also adds *Duck-swap the strips a
-  latency growth restarts, and fall back to the transition when a warm successor cannot adopt*,
-  #1397 D2's grown strips), and the duck routes are every route from those strips
-  whose tap precedes the fader, minus every strip and route already in the running plan's duck
-  overlay (#1325 D6: a second ramped mute would reset the running ramp to `N` from its part-ducked
-  level and end it after the scheduled `S`). The control plane writes their ramped mutes and
-  schedules `S` exactly as #1325 D2-D3, in the same transaction, with one `S`; #1325 D3's `C`
-  covers every route out of a duck-swapped strip as well as out of a removed one, since a restarted
-  pre-fader route's line must empty before `S`.
+  strips plus `successor.restarted_strips()` (for the transition, *Duck-swap the strips a latency
+  growth restarts, and fall back to the transition when a warm successor cannot adopt*, that set
+  holds #1397 D2's grown strips through `SuccessorBase::forced_restart`, D1), and the duck routes
+  are every route from those strips whose tap precedes the fader, minus every strip and route
+  already in the running plan's duck overlay (#1325 D6: a second ramped mute would reset the running
+  ramp to `N` from its part-ducked level and end it after the scheduled `S`). The control plane
+  writes their ramped mutes and schedules `S` exactly as #1325 D2-D3, in the same transaction, with
+  one `S`; #1325 D3's `C` covers every route out of a duck-swapped strip as well as out of a removed
+  one, since a restarted pre-fader route's line must empty before `S`.
   - **`C` for every duck-swap.** On every duck-swap, warm or not (a rebuild that `warm_lead`
     calls `Ordinary`, a lead-0 or `Primed` warm edit, every rebuild of a session without a
     `WarmConfig`, and the transition, #1397 D2), `plan_strip_transition` computes `C` as the
@@ -239,15 +245,16 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    with no transaction. Bit-identical, at `Backend::Simd8` and `Backend::Simd4` in
    `successor_swap.rs` and through the C entries.
 8. **Realtime.** As #1325's realtime gate, over the fade blocks too.
-9. **A shortened sidechain line from a restarted submix's `input` tap drops no fade sample.** In
-   A, track T2 routes from its `post_fader` tap to submix Bu; Bu holds a true-peak limiter insert
-   and routes to the output; track T3 holds a true-peak limiter insert, then a compressor insert
-   whose routed sidechain reads Bu's `input` tap, and routes to the output. All are audible. One
+9. **A shortened sidechain line from a restarted submix's `input` tap drops no fade sample.** In A,
+   track T2 routes from its `post_fader` tap to submix Bu; Bu holds a true-peak limiter insert and
+   routes to the output; track T3 holds a true-peak limiter insert, then a compressor insert whose
+   routed sidechain reads Bu's `input` tap, and routes to the output. All are audible. One
    transaction removes T2, adds track T1 with a true-peak limiter insert routed from its
-   `post_fader` tap to Bu, and removes Bu's limiter. No carried node's arrival grows (restarted
-   Bu's `Input` stage grows from 0 to `L`), so it is a plain duck-swap (with a `WarmConfig`, #1354 D2 step 4 returns `Ordinary`). Bu is restarted, T3 stays
-   carried under D1's exemption (the only line into Bu's `Input` stage comes from added T1), and
-   T3's sidechain line shrinks from the limiter's latency `L` to 0.
+   `post_fader` tap to Bu, and removes Bu's limiter. No carried node's arrival grows (restarted Bu's
+   `Input` stage grows from 0 to `L`), so it is a plain duck-swap (with a `WarmConfig`, #1354 D2
+   step 4 returns `Ordinary`). Bu is restarted, T3 stays carried under D1's exemption (the only line
+   into Bu's `Input` stage comes from added T1), and T3's sidechain line shrinks from the limiter's
+   latency `L` to 0.
    (a) `plan_strip_transition` returns `C = L` (T3's sidechain line in A, plus T2's line into
    Bu's `Input` stage, which is 0), and the watermark's first sample is `S = ceil_q(p + q + N +
    L)`.

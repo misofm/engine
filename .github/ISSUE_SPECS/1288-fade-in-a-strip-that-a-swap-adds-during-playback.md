@@ -85,9 +85,14 @@ start at rest at the adopted block.
   a no-op default: `GraphPreparedBuiltinBankProcessor::fire_fade_in(&mut self, lane, ramp)` and
   `GraphRuntimeProcessor::fire_fade_in(&mut self, ramp)`, implemented by the three owners above.
 - **D4. Delay `D` (host-core).** For a track: the sum of the latencies of the strip's nodes from its
-  input to its fader in the successor (a latent insert at rest emits zeros for its latency). For a
-  submix: that sum plus the largest `compensation_delay` of a route into it whose line starts at
-  rest. Computed on the control thread from the compiled successor.
+  input to its fader in the successor (a latent insert at rest emits zeros for its latency), plus
+  the compensation delay of every edge on that chain. A routed sidechain key that arrives later
+  than the strip's main path puts a `CompensationDelay` on the chain edge into the keyed effect
+  (PDC takes each node's input arrival as the maximum over its incoming edges, the sidechain edge
+  included, and delays every earlier edge to it, `crates/graph-compiler/src/pdc.rs:59-95`). That
+  line starts at rest and emits zeros for its length, as a latent insert does. For a submix: that
+  sum plus the largest `compensation_delay` of a route into it whose line starts at rest. Computed
+  on the control thread from the compiled successor.
 - **D5. Length.** `ramp_samples` = `LiveRamps::for_session(successor model).mute_samples`, the
   session mute ramp. After the ramp the stage is settled and the output equals the reference bit
   for bit (the ramp's exact end assignment).
@@ -151,9 +156,14 @@ start at rest at the adopted block.
    run with no add.
 4. **Fade shape.** With every other strip muted: (a) an added track on a playing source; (b) an
    added source started by `seek_at` at `A`, three blocks after the swap; (c) case (b) with a
-   true-peak limiter insert (`D > 0`). Each output equals a fresh plan of the successor session, fed
-   the same source frames at the same blocks, with the strip muted and given a live unmute of `N`
-   samples at the D3 fire block: bit-identical for every block.
+   true-peak limiter insert (`D > 0`); (d) case (a) at 48 kHz with the added track holding a
+   compressor insert whose routed sidechain reads the `pre_fader` tap of a carried track that holds
+   a true-peak limiter insert (486 samples, `crates/true-peak-limiter/src/lib.rs:242`; the model
+   mutes that track like every other, and its `pre_fader` tap precedes the mute). The compressor
+   adds no latency (`crates/compressor/src/lib.rs:295`), so no node of the added strip is latent,
+   but its main path gets a 486-sample compensation line and `D` is 486. Each output equals a fresh
+   plan of the successor session, fed the same source frames at the same blocks, with the strip
+   muted and given a live unmute of `N` samples at the D3 fire block: bit-identical for every block.
 5. **Browser form.** Gate 4(a) with both runs prepared between render calls
    (`FaderMatrixBankProcessor`).
 6. **Realtime.** Extend `the_swap_block_allocates_and_frees_nothing` (`successor_swap.rs:476`) over
@@ -178,6 +188,9 @@ start at rest at the adopted block.
 - Gate 3: a fade applied to every strip at the swap (a global dip) turns it red.
 - Gate 4(b): a fade that starts at the swap block for an anchored stem (finished before the stem
   plays, so the click remains) turns it red.
+- Gate 4(d): a `D` that counts node latencies only (0 here) fires the ramp at the first played
+  block while the compensation line still emits its at-rest zeros, so part of the ramp is spent
+  on zeros and the output differs from the reference's fade; it turns red.
 - Gate 5: arming only the split banks leaves the browser's fused form unfaded; it turns red.
 
 ## Dependencies

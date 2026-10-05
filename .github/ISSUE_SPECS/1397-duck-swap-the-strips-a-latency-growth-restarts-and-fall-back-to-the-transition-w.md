@@ -90,8 +90,14 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
     render adopted it exactly, and the caller never calls this function.
 
   Steps:
-  1. The committed model is prepared again as an ordinary successor: #1285 floors, no lead, and
-     the predecessor's source-read offset (#1396 D2).
+  1. The committed model is compiled as an ordinary successor (#1285 floors, no lead, the compile
+     #1354 D2 step 3 makes), and step 4's duck set is computed from that compile's arrivals,
+     before any carry join. It is then prepared from that compile as an ordinary successor, with
+     the predecessor's source-read offset (#1396 D2) and with the duck set as
+     `SuccessorBase::forced_restart`, a new field (`&[String]`, strip IDs, sorted; empty for every
+     other successor). Preparation applies #1324 D2-D3 to every strip in it, the same as to a
+     strip the carry join restarts: a whole pre-fader restart, armed. It adds those strips to
+     `restarted_strips()`, after which #1324 D1's sidechain rule runs again over the whole set.
      - With a donor, the donor's added rings are donated (*Prepare a successor across a withdrawn
        candidate plan*, #1344 D3). They pass #1344 D5's unconsumed check, because render never
        begins a candidate's consumers before it claims it (#1355 D2).
@@ -108,19 +114,22 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      fires. The function returns the donor to its caller, the deadline step, which republishes it
      and sets its record again (#1358 D3), so it is never held outside the mailbox. The next
      deadline step retries. The revision stays pending and never completes as nothing.
-  4. The duck set is `grown_strips(predecessor, successor)`, a new function in
-     `crates/host-core/src/transition.rs`, sorted by ID, joined with #1324's restarted strips. It
-     returns every strip whose content timing moves: a strip with a node whose arrival grows over
-     the predecessor, or a strip with an outgoing edge (route, send, `EffectSidechain` edge, or
-     its path into the output) whose compensation line changes length. A line that changes
-     length restarts with a gap, so its strip must be ducked. When the output's arrival grows,
-     every strip that reaches the output is in the set. It also adds the consuming strip of every
-     `EffectSidechain` edge whose line changes length, except an edge from a ducked strip's
-     `post_fader` or `post_pan` tap (#1324 D4's `C` empties that line by `S`). Every other tap
-     (an `input` tap, track or submix, and every tap before the fader: `post_input`,
-     `insert_send`, `insert_return`, `pre_fader`) stays live through the duck, so the consumer's
-     key would jump at `S`. These rules repeat, with #1324 D1's sidechain rule over the joined
-     strips, until no strip is added, as #1324 D1 iterates.
+  4. The duck set is `grown_strips(predecessor, compiled)`, a new function in
+     `crates/host-core/src/transition.rs`, sorted by ID. It reads step 1's compile and returns
+     every strip whose content timing moves: a strip with a node whose arrival grows over the
+     predecessor, or a strip with an outgoing edge (route, send, or its path into the output)
+     whose compensation line changes length. A line that changes length restarts with a gap, so
+     its strip must be ducked. When the output's arrival grows, every strip that reaches the
+     output is in the set. It then runs #1324 D1's sidechain rule over these strips, repeats
+     until no strip is added (as #1324 D1 iterates), and returns that closed set. Preparation
+     runs D1 again after the carry join over the whole `restarted_strips()` (step 1), so the
+     strips the join restarts add their consumers too. So a carried effect keyed from a
+     `post_input`, `insert_send`, `insert_return` or `pre_fader` tap of a ducked strip joins the
+     set. A `post_fader` or
+     `post_pan` tap needs no rule: #1324 D4's `C` empties that line by `S`, and the armed fader
+     keeps it at `+0.0` until the fire. A track's `input` tap and a submix's `input` tap keep the
+     consumer carried exactly as #1324 D1 states. The prepared successor's `restarted_strips()`
+     is the duck set the transition ducks.
   5. It is published as #1324 D4 publishes, with one `S` and #1324 D4's `C`, which counts every
      `EffectSidechain` line from a ducked strip's `post_fader` or `post_pan` tap into a carried
      node. Before publication it writes
@@ -144,7 +153,8 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 1. D1 in the control plane's growth path (the arms of #1403 D2's match) and
    `crates/host-core/src/prepare.rs`.
 2. D2 in `crates/host-core/src/warm.rs`, `grown_strips` in `crates/host-core/src/transition.rs`,
-   and the submit-time branch in the control plane. D5's write in the transition's publication.
+   `SuccessorBase::forced_restart` in `crates/host-core/src/prepare.rs`, and the submit-time
+   branch in the control plane. D5's write in the transition's publication.
 3. A `test-support` hook that makes the next re-preparation refuse. It marks the refusal as
    injected, so D2's debug assertion does not fire for it.
 4. Gates in `crates/host-core/tests/warm_successor.rs` and the control-plane unit tests.
@@ -194,8 +204,10 @@ warm edit would be `LeadBound`.
    sidechain reads track 1's `post_fader` tap: `S` counts that line, adoption waits for it, and it
    holds only `+0.0` at the adoption block.
 3. **Transition at submit.** With the warm configuration's `P_MAX` one quantum below `ΣP + P`,
-   the edit returns OK with path `rebuild`. Every strip `grown_strips` names is ducked, and it
-   names track 2 too, since the output's arrival grows. Up to the transition's `S`, every block
+   the edit returns OK with path `rebuild`. Track 2 holds a compressor insert in A and in the
+   edit (no latency, `crates/compressor/src/lib.rs:295`). Every strip `grown_strips` names is
+   ducked, and it names track 2 too, since the output's arrival grows; the prepared successor's
+   `restarted_strips()` holds both tracks. Up to the transition's `S`, every block
    equals a reference that makes no structural edit and live-mutes tracks 1 and 2 with the same
    ramped mute at the same block. From `S`, every block equals a fresh plan of the successor
    session (no lead, the predecessor's source-read offset) with tracks 1 and 2 muted and
@@ -231,14 +243,15 @@ warm edit would be `LeadBound`.
    `P_MAX` set as in gate 3, so `warm_lead` returns `Unavailable(LeadBound)` and D2 runs at
    submit. The G-to-K key line shrinks from 486 to 455 samples and the G-to-H route line from 62
    to 31.
-   - (a) `grown_strips` returns `[G, T1]`. `C` is 486 (the G-to-K key line in A; no route line
-     out of T1 or G is longer than 62), and the watermark's first sample is
-     `S = ceil_q(p + q + N + 486)`. Every output block before the first fire block equals a
-     reference that makes no structural edit and live-mutes T1 and G with the same ramped mute
-     at the same block.
-   - (b) The same edit with K's key read from G's `pre_fader` tap: `grown_strips` returns
-     `[G, K, T1]`, and every output block before the first fire block equals a reference that
-     live-mutes T1, G and K the same way.
+   - (a) `grown_strips` returns `[G, T1]`, and so does the prepared successor's
+     `restarted_strips()`. `C` is 486 (the G-to-K key line in A; no route line out of T1 or G is
+     longer than 62), and the watermark's first sample is `S = ceil_q(p + q + N + 486)`. Every
+     output block before T1's fire block (the first block at or after `S + 31`; G's `D` is 0, so
+     G fires at `S` on silent input) equals a reference that makes no structural edit and
+     live-mutes T1 and G with the same ramped mute at the same block.
+   - (b) The same edit with K's key read from G's `pre_fader` tap: `grown_strips` and
+     `restarted_strips()` return `[G, K, T1]`, and every output block before T1's fire block
+     equals a reference that live-mutes T1, G and K the same way.
    - Bit-identical, at both bank widths.
 7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
@@ -255,7 +268,10 @@ warm edit would be `LeadBound`.
 - Gate 2: a `not_before` without the in-flight quantum, the route lines' `C` or the sidechain
   line's adopts early, and the shortened line drops nonzero samples. Red.
 - Gate 3: a bound that refuses the edit, a transition that reports `EXACT`, or a duck set without
-  track 2 breaks the references. Red.
+  track 2 breaks the references. So does a successor that carries a grown strip unarmed
+  (round-9 M1: `grown_strips` computed after preparation, so track 2 keeps its carried chain and
+  fader): track 2's compressor keeps its envelope from before the duck, or its fader stays at
+  the ducked `+0.0`, and the blocks from `S` differ from the fresh plan. Red.
 - Gate 4: a refused re-preparation that drops the revision completes it as nothing; a refusal
   that holds the donor outside the mailbox leaves no record, so no step retries; a fallback that
   drops the donor before preparing loses `c`'s acked chunks; a republish that resets the word
@@ -264,11 +280,14 @@ warm edit would be `LeadBound`.
   cuts track 1 dead at the adoption block; a `publish_primed` that leaves the withdrawn
   candidate's flags alone keeps `s` flagged, so W2 waits for frames the host never sends and is
   not adopted at the first block at or after `S`. Red.
-- Gate 6(a): a `C` that counts sidechain lines only from restarted strips (round-8 M1) misses
-  ducked, not restarted G, so `S` counts 62 instead of 486; W's shorter key line drops 31
-  samples of G's fade tail from K's detector, and K's gain differs from the reference after
-  `S`. Gate 6(b): a `grown_strips` without the consumer rule leaves K audible
-  through the duck, and its key jumps 31 samples at `S`. Red.
+- Gate 6(a): a `C` that counts sidechain lines only from strips the carry join restarts
+  (round-8 M1) misses G, so `S` counts 62 instead of 486: the `S` assertion is red, and W's
+  shorter key line drops 31 samples of G's fade tail from K's detector, so K's gain differs from
+  the reference from `S` on, before T1's fire block. A successor that does not restart and arm
+  the grown strips (round-9 M1) fails the `restarted_strips()` assertion. Gate 6(b): #1324 D1's
+  rule run over the carry join's `restarted_strips()` only (the round-8 text) leaves K carried
+  and audible through the duck, and its key line, shortened from 486 to 455 samples, drops 31
+  samples of G's pre-fader signal at `S`. Red.
 
 ## Dependencies
 

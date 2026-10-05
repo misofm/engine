@@ -26,7 +26,8 @@ and #1288 merge to `main` in the same batch (#1288 Hazards).
     of `Waiting`, `FireAt(u64)`, `Done` (#1288 D3). The graph executor's `adopt_predecessor`, which
     this slice extends, is on `main` at `crates/graph/src/lib.rs:3139`.
   - Arming happens inside successor preparation through one entry point that takes a strip set
-    (#1288 D1); the delay `D` is the strip's pre-fader latency (#1288 D4).
+    (#1288 D1); the delay `D` is the strip's pre-fader latency, its chain's compensation lines included
+    (#1288 D4).
   - #1288 D6 leaves an arm still waiting when its plan is succeeded to this issue.
 - Route arms: *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363)
   gives an added route (its D3) and a send from a tap before an armed fader (its D1 (c)) an entry
