@@ -115,8 +115,12 @@ bounded tail of decision 15 D15-4. Today such an edit rebuilds the plan.
 
 - The classifier: `crates/host-core/src/live_delta.rs` and `crates/host-core/tests/live_delta.rs`.
 - `crates/builtins/src/lib.rs`: `checked_trim_gain`'s visibility and documentation only.
-- The control plane: `crates/control-plane/src/compile.rs` (`C_ABI_LIVE_LANES`) and
-  `crates/control-plane/src/control.rs` (`commit_live`).
+- The control plane: `crates/control-plane/src/control.rs` (`commit_live`).
+- `C_ABI_LIVE_LANES`, where it lives when this slice merges (*Prepare through an adapter-supplied
+  preparer in the control plane crate*, #1400 D3): in `crates/control-plane/src/compile.rs` if
+  this slice merges before #1400 (which then moves the edited constant to capi unchanged); beside
+  `CapiPreparer` in `crates/capi/src/` if it merges after. Root rebases whichever lands second;
+  neither order changes a value.
 - capi's tests: `crates/capi/src/runtime/live_tests.rs` and
   `crates/capi/tests/resource_lifecycle.rs`.
 - `docs/C_ABI_V1_QUALIFICATION.md`.

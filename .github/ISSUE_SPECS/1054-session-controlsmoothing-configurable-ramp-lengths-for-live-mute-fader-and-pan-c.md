@@ -81,8 +81,8 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
     them. The tag keeps both explicit without an optional field.
 - **D1a. Migration.** A one-off rewrite adds `"control_smoothing": { "kind": "default" }` at its
   canonical place in every checked-in session document, fixture and embedded test session. Nothing
-  else in any document moves. `default` resolves to the same lengths an absent setting would, so
-  every render digest stays; a digest of session-document bytes moves by this one key only.
+  else in any document moves. `default` resolves to the same lengths today's sessions, which carry no
+  such key, prepare with, so every render digest stays; a digest of session-document bytes moves by this one key only.
 - **D2. Default table and rounding**, in `crates/session`. `CONTROL_SMOOTHING_DEFAULT` holds
   #1055's section 9 values. `SessionModel::control_smoothing_samples(&self) ->
   ControlSmoothingSamples { mute, fader, pan }` applies
@@ -184,14 +184,14 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
    regenerates with the new document, and the SDK writer reproduces it (`builder-evals.mjs`
    corpus loop, run by `check-sdk-headless.sh`).
 2. **Rounding** (`crates/session` unit test). 441/480/882/960 for 10 ms and 882/960/1764/1920 for
-   20 ms at the four launch rates; 221 for 5 ms at 44.1 kHz (a tie); 0 for `-0.0`; an omitted
-   `default` gives the default table.
+   20 ms at the four launch rates; 221 for 5 ms at 44.1 kHz (a tie); 0 for `-0.0`;
+   `{ "kind": "default" }` gives the default table.
 3. **Classifier** (`crates/host-core/tests/live_delta.rs`, rewritten test). At 48 kHz with the
    default table: a fader, a mute and a pan change give `FaderDb` 960, `Mute` 480, matrix 960 (96
    when the model says 96). With `mute_ms` 5, `fader_ms` 15 and `pan_ms` 25: 720, 240, 1200.
    With all session keys at 0: 0, 0, 0. `for_row` returns the D3 key's field for every `LiveRampRow`.
 4. **C ABI, the ramp is heard** (`crates/capi/src/runtime/live_tests.rs`, new). A playing session
-   with no `control_smoothing` takes a mute transaction. The first block after the commit equals
+   with `"control_smoothing": { "kind": "default" }` takes a mute transaction. The first block after the commit equals
    neither the unmuted nor the muted control; from the first block after the ramp, the output is
    bit-identical to a control booted muted. The commit and the ramp blocks allocate nothing
    (`bench_support::alloc` thread counters, process statics warmed).
@@ -211,7 +211,7 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
      `cargo fmt --all -- --check`
 7. **Migration and digests.** `git diff` of the D1a commit adds only the one key; every migrated
    document passes `cargo run --locked -p session-validator -- validate <file>`. No render digest
-   moves: preparation is unchanged and `default` gives the lengths of today's absent setting. A
+   moves: preparation is unchanged and `default` gives the lengths today's key-less sessions prepare with. A
    digest of session-document bytes moves by the key; each is listed with its file and the reason
    "D1a adds the required `control_smoothing` key" and re-pinned on its own, never in bulk
    (decision 15, risk 4). Any other digest that moves is a defect.

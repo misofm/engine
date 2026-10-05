@@ -124,8 +124,9 @@ ordinary session transaction" holds.
 5. **Classifier** (`crates/host-core/tests/live_delta.rs`, new). A delta that changes only
    `control_smoothing` is `Ok` with no records. One that also moves a fader carries the new
    length on its `FaderDb` record.
-6. **Corpus.** `cargo run --locked -p conformance --example conformance_fixtures -- --check` and
-   `bash scripts/check-protocol-wasm-parity.sh` pass with the one re-pin (D6), and the controller
+6. **Corpus.** `cargo test --locked -p conformance --test conformance_corpus` (which checks
+   `COMPLETE_SCHEMA_HASH`) and `bash scripts/check-protocol-wasm-parity.sh` (every other spelling
+   of the hash agrees) pass with the one re-pin (D6), and the controller
    test's boundary row (`controller/tests.rs:327-328`) passes at 47 and 46.
 7. **Commands:**
    - `cargo test --locked -p protocol --features test-support`, `cargo test --locked -p capi`,

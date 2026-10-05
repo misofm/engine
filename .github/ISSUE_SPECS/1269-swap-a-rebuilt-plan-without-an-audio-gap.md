@@ -359,7 +359,7 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1355 | *Catch up a returned successor and adopt it exactly at a scheduled sample* | C | #1277, #1310, #1312, #1314, #1320, #1321, #1327, #1344, #1345, #1346, #1347, #1354, #1396, #1398 |
 | #1356 | *Hold live edits during a catch-up and apply them at the adoption sample* | C | #1277, #1309, #1311, #1312, #1314, #1345, #1346, #1347, #1355 |
 | #1357 | *Supersede a running catch-up by a structural edit* | C | #1310, #1314, #1320, #1344, #1348, #1354, #1355, #1356 |
-| #1358 | *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition* | C | #1286, #1311, #1314, #1331, #1355, #1356, #1396, #1397 |
+| #1358 | *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition* | C | #1286, #1311, #1314, #1331, #1343, #1344, #1355, #1356, #1396, #1397 |
 | #1359 | *Turn a pending catch-up into a plain rebuild at a host-declared stop* | C | #1310, #1323, #1344, #1355, #1357, #1396 |
 | #1360 | *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1313, #1314, #1348, #1358, #1359, #1397 |
 | #1361 | *Run the browser catch-up in the Worker's service loop* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1360, #1381 |
@@ -381,7 +381,7 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1382 | *Admit browser live edits in the Worker through the committed model* | H | #1054, #1057, #1225, #1226, #1247, #1261, #1262, #1267, #1312, #1313, #1332, #1345, #1346, #1347, #1364, #1381, #1390, #1394 |
 | #1290 | *Replace the running browser session in the Rust host* | H | #1277, #1309, #1310, #1313, #1314, #1326, #1327, #1332, #1348, #1349, #1381, #1382, #1387, #1395, #1400, #1401 |
 | #1293 | *Export transaction apply and anchored seek from the browser engine module* | H | #1290, #1309, #1313, #1316, #1319, #1332, #1381, #1387 |
-| #1294 | *Send a session transaction to the browser control plane* | H | #1293, #1332, #1348, #1349, #1381, #1382, #1386, #1387 |
+| #1294 | *Send a session transaction to the browser control plane* | H | #1293, #1310, #1332, #1348, #1349, #1381, #1382, #1386, #1387 |
 | #1295 | *Qualify a structural browser edit in real browsers* | H | #1290, #1294, #1332, #1333, #1386 |
 | #1383 | *Build and encode session transactions in the SDK* | H | #1394 |
 | #1385 | *Encode the session, submix, output, route, automation and VCA edits in the SDK* | H | #1335, #1383, #1394 |

@@ -168,8 +168,9 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
    and a hand-built `EditRamps`: entries 37 on `(Strip, Fader)` and `(Strip, Matrix)` give
    `FaderDb` 37, `Mute` 480, matrix 37 (37 also when the model says 96); an entry 0 on
    `(Strip, Mute)` gives 960, 0, 960; an entry on another strip changes nothing.
-5. **Corpus.** `cargo run --locked -p conformance --example conformance_fixtures -- --check` and
-   `bash scripts/check-protocol-wasm-parity.sh` pass with one re-pin, its history line reading
+5. **Corpus.** `cargo test --locked -p conformance --test conformance_corpus` (which checks
+   `COMPLETE_SCHEMA_HASH`) and `bash scripts/check-protocol-wasm-parity.sh` (every other spelling
+   of the hash agrees) pass with one re-pin, its history line reading
    "#1394 appends optional `ramp_samples` to the live-value edits".
 6. **C ABI** (`crates/capi/src/runtime/live_tests.rs`, new). On a playing session with the default
    table, a mute transaction with `ramp_samples = 0` is bit-identical to a control booted muted from

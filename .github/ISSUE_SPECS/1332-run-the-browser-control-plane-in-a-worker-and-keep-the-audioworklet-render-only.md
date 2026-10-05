@@ -96,18 +96,23 @@ mode, how many control allocations ran in the worklet.
   4. A new export, `miso_engine_web_v1_host_release(handle) -> u64`, moves the booted host out of
      the Worker's handle table into a transfer token (a raw pointer to a heap box). This is a move:
      nothing is dropped. Move semantics, exactly:
-     - `LIVE_HOST` (`hosts/host-web/src/ffi.rs:504`, today `RefCell<Option<LiveHost>>`) becomes
-       `RefCell<Option<Box<LiveHost>>>`. Boot boxes the host once, in the Worker.
-     - `host_release` takes the box out with `Option::take()` and returns `Box::into_raw`. No
-       allocation, no free: the token is the same box.
+     - `LIVE_HOST` (`hosts/host-web/src/ffi.rs:504`, today `RefCell<Option<LiveHost>>`; #1333 D5
+       makes it `RefCell<ManuallyDrop<Option<LiveHost>>>`) becomes
+       `RefCell<ManuallyDrop<Option<Box<LiveHost>>>>`, const-initialised. It keeps #1333 D5's
+       `const _: () = assert!(!core::mem::needs_drop::<_>())` for its new type, so the thread
+       local still registers no destructor. Boot boxes the host once, in the Worker.
+     - `host_release` takes the box out through the `ManuallyDrop` with `Option::take()` and
+       returns `Box::into_raw`. No allocation, no free: the token is the same box.
      - `host_adopt` rebuilds the box with `Box::from_raw` and stores it only into a slot that
        holds `None`, by matching on the `borrow_mut()` slot. A slot that already holds a host
        refuses with `RESULT_WRONG_STATE` and leaves the token unconsumed. It never assigns or
        `replace`s over a `Some`, which would run the old host's drop glue.
      - The staging references are `Copy` and go into `Cell<Option<&'static _>>` slots, so
        setting them drops nothing.
-     - One box travels Worker, worklet, Worker. Only the Worker's dispose frees it. The token also carries the three staging references that boot allocated
-     (#1333 D5: `&'static` references, `Copy`), so the worklet never allocates a staging.
+     - One box travels Worker, worklet, Worker. Only the Worker's dispose frees it: it takes the
+       box out with `take()` and drops it explicitly, as #1333 D5's dispose does.
+     - The token also carries the three staging references that boot allocated (#1333 D5:
+       `&'static` references, `Copy`), so the worklet never allocates a staging.
   5. The Worker also reserves the worklet instance's stack and TLS block through
      `miso_engine_web_v1_instance_reserve() -> u32`, which follows the recipe that #1331 recorded.
   6. The main realm passes the memory, the module, the stack/TLS address and the token to the
@@ -303,14 +308,14 @@ mode, how many control allocations ran in the worklet.
 ## Dependencies
 
 - *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331).
-  Its verdict, including the real iOS device and the memory maximum, gates this slice.
-- *Gate AudioWorklet render against allocation statically and at runtime* (#1333): the runtime
-  counter, and const, destructor-free thread-locals.
+- *Gate AudioWorklet render against allocation statically and at runtime* (#1333).
 - *Build the browser artifact on a pinned nightly toolchain* (#1334).
-- *Ship the browser module with one imported shared memory at every instantiation site*
-  (#1380).
-- *Design: one edit API on every host over the core's committed session model* (#1057). The ports
-  of D7 carry that API's messages, so its design note fixes what they serve.
+- *Ship the browser module with one imported shared memory at every instantiation site* (#1380).
+- *Design: one edit API on every host over the core's committed session model* (#1057).
+
+#1331's verdict, including the real iOS device and the memory maximum, gates this slice. #1333
+supplies the runtime counter and the const, destructor-free thread locals. The ports of D7 carry
+#1057's edit API messages, so its design note fixes what they serve.
 
 ## Successor slices
 

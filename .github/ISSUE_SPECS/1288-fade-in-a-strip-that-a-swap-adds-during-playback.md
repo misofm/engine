@@ -81,8 +81,10 @@ the strip off the render thread before adoption.
   The graph executor's `adopt_predecessor` sets `adopted = true` on entry, before any of its early
   returns (`crates/graph/src/lib.rs:3139-3142` returns early without a carry program). So the fade
   starts at the first block at or after `max(S, first played block + D)`, where `S` is the adopted
-  block. For a warm successor whose catch-up already played the source through its latent nodes,
-  that is `S` itself; no special case and no `D = 0` override exists. The frames before the fire
+  block. A warm successor keeps an added source's entry closed until adoption (*Catch up a
+  returned successor and adopt it exactly at a scheduled sample*, #1355 D2), so its first played
+  block is `S` and the fade fires at the first block at or after `S + D`, by the same rule; no
+  special case and no `D = 0` override exists. The frames before the fire
   stay muted (zeros, never a step). New trait methods with
   a no-op default: `GraphPreparedBuiltinBankProcessor::fire_fade_in(&mut self, lane, ramp)` and
   `GraphRuntimeProcessor::fire_fade_in(&mut self, ramp)`, implemented by the three owners above.

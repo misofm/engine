@@ -54,8 +54,13 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
 - **D3. Determinism.** The case requires path `rebuild`, outcome `exact`, and zero source
   underruns over the capture. A run that reports another outcome fails with that outcome named.
 - **D4. Both legs.** The case runs on #1332's isolated leg (`instanceMode === "worker"`,
-  `blockingRebuilds` 0) and on its non-isolated leg (`instanceMode === "single"`,
-  `blockingRebuilds` exactly 1).
+  `blockingRebuilds` 0, `singleModeControlAllocations` 0) and on its non-isolated leg
+  (`instanceMode === "single"`, `blockingRebuilds` exactly 1). On the non-isolated leg the case
+  reads #1332 D1's `singleModeControlAllocations` from the host status just before it sends the
+  replacement and again once the watermark covers R; the second reading is greater than the first
+  (the apply runs in the worklet's message handler, outside `process()`, and allocates there).
+  *Replace the running browser session in the Rust host* (#1290) gate 9 leaves this browser leg to
+  this slice.
 - **D5. Allocation.** After the case, #1333's render-locked allocation counter reads exactly 0 on
   both pages.
 - **D6. Matrix.** Re-record the matrix for every browser in one run and state it in the PR.
@@ -81,10 +86,14 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
 ## Objective gates
 
 1. The case passes in Chromium, Firefox and WebKit on both pages: capture equals the run-time
-   reference, path `rebuild`, outcome `exact`, zero underruns, allocation counter 0.
-2. Three new mutations in `MUTATIONS` turn the run red: `structural-edit-skipped` (the replacement
+   reference, path `rebuild`, outcome `exact`, zero underruns, render-locked allocation counter
+   0. On the non-isolated page `singleModeControlAllocations` grows across the apply (D4); on the
+   isolated page it reads 0.
+2. New mutations in `MUTATIONS` turn the run red: `structural-edit-skipped` (the replacement
    is never sent), `structural-edit-adoption-shifted` (the reference applies one block late), and
-   `structural-edit-blocking-uncounted` (the `single` leg's `blockingRebuilds` reads 0).
+   `structural-edit-blocking-uncounted` (the `single` leg's `blockingRebuilds` reads 0). A fourth,
+   `structural-edit-control-allocations-uncounted` (the `single` leg reports the same
+   `singleModeControlAllocations` before and after the apply), turns it red too.
 3. Commands, per browser, from `hosts/host-web/qualification` after `npm ci`, with the artifact
    built as in `qualification.yml`'s `artifact` job:
    - `npm run qualify -- --artifacts <dir> --sdk-root ../../../sdk --browser chromium --check-matrix --self-test-mutations`
@@ -98,7 +107,9 @@ instance, whose structural edit is the blocking rebuild, reported and counted, D
   view too late, or misroutes a source after the swap diverges from the reference; it turns red.
   No hermetic test sees real rendered bits, and no native test runs a browser engine's Wasm.
 - Gate 1 (non-isolated): a single-instance page whose structural edit silently fails or is not
-  counted turns it red.
+  counted turns it red, and so does one whose apply allocates in the worklet without counting it
+  in `singleModeControlAllocations` (the audio-thread allocation decision 15 requires to be
+  reported would go unreported).
 - Gate 1 (allocation): a swap path that allocates in the worklet after boot turns the counter
   non-zero.
 - Gate 2: each mutation proves the comparison can fail for the defect it names.

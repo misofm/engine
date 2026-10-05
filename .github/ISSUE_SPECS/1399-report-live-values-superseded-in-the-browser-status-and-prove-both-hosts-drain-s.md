@@ -17,9 +17,11 @@ hosts, so the two admissions and drains cannot drift apart.
   `:2186-2197` (`reserved: [0; 4]`). Layout asserts: `hosts/host-web/src/tests.rs:286`
   (`size_of::<WebStatus>() == 80`) and `:413` (`offset_of!(WebStatus, reserved) == 48`).
 - Mirrors of the layout:
-  - `status_fields` in `tools/parameter-metadata/src/abi_layout.rs:330-345` (`"reserved"`,
-    `"u64[4]"`), which generates `sdk/src/generated/abi.ts`
-    (`bash scripts/check-sdk-generated.sh` compares it);
+  - `status_fields` in `tools/parameter-metadata/src/abi_layout.rs:318-343` (`"reserved"`,
+    `"u64[4]"` at `:342`), which generates the layout asset
+    `sdk/assets/miso-engine-v1-abi-layout.json` (its `structures.status` entry, `:147-161`) and
+    from it `sdk/src/generated/abi.ts` (`bash scripts/check-sdk-generated.sh` compares both
+    arrows byte for byte);
   - the worklet's status reader, `readStatus()`
     (`hosts/host-web/web/miso-engine-v1-audio-worklet.js:944-960`), which throws unless offsets
     48, 56, 64 and 72 are zero (`:946-949`); its result is spread into the `miso.status.v1` reply
@@ -50,7 +52,8 @@ hosts, so the two admissions and drains cannot drift apart.
 
 ## Deliverables
 
-1. D1-D2 in `hosts/host-web/src/lib.rs` and the mirrors; regenerated SDK files.
+1. D1-D2 in `hosts/host-web/src/lib.rs` and the mirrors; the regenerated layout asset and
+   `abi.ts`.
 2. Gate 1 in `hosts/host-web/src/tests.rs`; gate 3 in `scripts/test-web-audioworklet.mjs`; gate 2
    in a new `hosts/host-web/tests/strip_cells_cross_host.rs`.
 
@@ -60,7 +63,8 @@ hosts, so the two admissions and drains cannot drift apart.
   `hosts/host-web/tests/strip_cells_cross_host.rs` (new), `hosts/host-web/Cargo.toml`
   (`control-plane` as a dev-dependency).
 - `tools/parameter-metadata/src/abi_layout.rs` (`status_fields` only),
-  `sdk/src/generated/abi.ts` (regenerated), `hosts/host-web/web/miso-engine-v1-audio-worklet.js`
+  `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts` (both regenerated
+  only), `hosts/host-web/web/miso-engine-v1-audio-worklet.js`
   (the status reader only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` (the status
   reply's field list and validation only), `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts`
   and `sdk/src/browser/shipped-host.d.ts` (`MisoStatus` only).

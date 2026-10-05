@@ -24,7 +24,7 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
   every record available at block entry, each ramping from the coefficients the route is at.
 - **Browser admission.** The route band (`queue_available`, `hosts/host-web/src/lib.rs:1783-1786`;
   `push`, `:1821-1827`). `free()` is `#[inline(always)]` for the worklet call-graph gate
-  (`lib.rs:1003-1011`).
+  (`crates/graph/src/lib.rs:1005-1013`).
 - **C ABI.** No route lane today (`crates/capi/src/runtime/compile.rs:15-21`); #1225 attaches
   them, written to these cells.
 
@@ -69,8 +69,8 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 - Two records in one drain used to ramp to the first target and then from wherever that ramp
   stood; now one ramp goes to the last target. Re-pin only fixtures that send two route edits in
   one block, each with that reason.
-- The callgraph gate reads function names (`lib.rs:1003-1011`): keep the write path free of a
-  function named like an allocator.
+- The callgraph gate reads function names (`crates/graph/src/lib.rs:1005-1013`): keep the
+  write path free of a function named like an allocator.
 
 ## Objective gates
 

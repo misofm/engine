@@ -97,12 +97,24 @@ fade in with it. Every other path stays bit-identical. D15-9 covers added, edite
     endpoints are unchanged. At later swaps the fading route's edges exist under its own ID in
     both plans and carry by #1283 D1 without an alias.
   - So the signal continues: the predecessor's pending line content plays out under the fading
-    route. It is prepared at its predecessor coefficients, and its fire, at the adoption block
-    (delay 0), retargets to `[+0.0; 4]`, `mute = true` over `N`.
+    route, which is prepared at its predecessor coefficients. Its fire retargets to `[+0.0; 4]`,
+    `mute = true` over `N`.
+  - **Fire block.** A fading route of case (a) has no replacement: its fire is at the adoption
+    block (delay 0). A fading route of case (b) has one, the added route under the original ID
+    (D3), whose line starts at rest and whose fire waits its `compensation_delay` `C`. The fading
+    copy fires at its replacement's fire block (the same delay, so the same block), never at
+    adoption. Until then it passes the source at its predecessor values, so the destination hears
+    no dip: the two ramps run over the same `N` samples. Firing the copy at adoption would fade it
+    out before the replacement fades in: with a true-peak limiter upstream, `C = rate / 100 + 6`
+    (`crates/true-peak-limiter/src/lib.rs:236-242`, 486 samples at 48 kHz), which exceeds the
+    default mute ramp of 480 samples (10 ms), so every prepared gain edit on such a route would
+    drop out for about 20 ms.
 - **D5. Retiring a fading route.** The inventory lists each fading route with the revision that
-  removed it. A later successor omits it when the watermark (#1314) shows that revision in effect
-  at `S_r` and `render_sample >= S_r + N`; otherwise it keeps it, with its ramp state carried as a
-  live send ramp (#1284). Omitting it removes a silent, muted edge; a latency drop it causes is held
+  removed it and its fire delay `d` (D4: 0 in case (a), its replacement's delay in case (b)). A
+  later successor omits it when the watermark (#1314) shows that revision in effect at `S_r` and
+  `render_sample >= S_r + f + N`, where `f = ceil(d / quantum) * quantum` is the offset of its fire
+  block (adoption is at a block boundary, so the fire block is `S_r + f`); otherwise it keeps it,
+  with its ramp state carried as a live send ramp (#1284), and a copy that has not fired yet keeps its pending fire (#1288's table carries it). Omitting it removes a silent, muted edge; a latency drop it causes is held
   by the floors (#1285).
 - **D6. Length.** `N = LiveRamps::for_session(next model).mute_samples` (a route add or removal is a
   send switched on or off). After the ramp an added route mixes the reference's bits.
@@ -149,28 +161,36 @@ between render calls.
    route (same ID) to submix C. B's input equals gate 2's fade-out, C's input equals gate 1's
    fade-in, and A's own output to the master equals a run with no transaction, bit for bit (A is
    not ducked). The same with the tap changed from `post_fader` to `pre_fader` instead. Both cases
-   are run a second time with a track through a true-peak limiter into B and into C, so A's old
-   edge into B and its new edge into C each carry a compensation delay (`C_B`, `C_C` > 0): from `S`
-   B's input from A first plays the predecessor's `C_B` pending samples of A (not zeros) under the
-   fading ramp, and C's input from A is exact zeros until the block at or after `S + C_C`, then
-   gate 1's fade-in.
+   are run a second time, at 48 kHz, with a track through a true-peak limiter into B and into C, so
+   A's old edge into B and its new edge into C each carry a compensation delay (`C_B`, `C_C` > 0).
+   Let `F` be the first block boundary at or after `S + C_C`. Before `F`, B's input from A equals a
+   run without the transaction (the predecessor's `C_B` pending samples play out, not zeros) and
+   C's input from A is exact zeros. From `F`, B's input is gate 2's fade-out and C's is gate 1's
+   fade-in, both fired at `F`.
 5. **Prepared send value change (D1 (b) (2)).** Prepared without route lanes (as the C ABI
    prepares before #1225): track A sends `post_fader` into submix B at `gain_db = -12`; a
-   structural transaction adds a muted track and also sets that send to `gain_db = 0`. B's input
-   from A equals a reference plan compiled through D4's fading-route path with both routes, the old
-   one (-12 dB) live-muted with `N` at `S` and the new one (0 dB) muted at start and live-unmuted
-   with `N` at `S`: bit-identical in every block. The same with the send's `follows_mute` changed
-   from `false` to `true` while A is muted. The gain case is run again with a track through a
-   true-peak limiter into B, so the send's edge carries a compensation delay `C > 0`: from `S` the
-   old copy's output first plays the predecessor's `C` pending samples of A at -12 dB under its
-   fade-out, and the new route contributes exact zeros until the block at or after `S + C`. With
-   route lanes and #1225's classifier the gain edit
-   instead carries and retargets: no fading copy is prepared.
+   structural transaction adds a muted track and also sets that send to `gain_db = 0`. The
+   reference is a plan compiled through D4's fading-route path with both routes, the old one
+   (-12 dB) live-muted with `N` and the new one (0 dB) muted at start and live-unmuted with `N`,
+   both fired at the same block `F`, the first block boundary at or after `S + C`. B's input from
+   A equals it bit for bit in every block. The same with the send's `follows_mute` changed from
+   `false` to `true` while A is muted.
+   - Without compensation (`C = 0`), `F = S`.
+   - At 48 kHz with a true-peak limiter on A's path into B, `C = 486`. Run it with `N = 2000` and
+     with `N = 480` (the default mute ramp, shorter than `C`). From `S` to `F`, B's input from A
+     equals the predecessor's output (the old copy at -12 dB, the pending samples included, no
+     fade yet); from `F` both ramps run together, so with A fed a constant nonzero signal B's
+     input from A is never zero.
+   - With route lanes and #1225's classifier the gain edit instead carries and retargets: no
+     fading copy is prepared.
 6. **Pre-fader send of an added strip.** A transaction adds track T with a `pre_fader` send into
    submix R. R's input from T equals a fresh plan of the successor session with that route muted at
    start and unmuted with `N` at T's fader fire block (#1288 D3); before it, exact zeros.
-7. **Fading route retires.** A second structural transaction prepared after `S + N` drops the fading
-   route with no change in output; one prepared before it keeps the ramp going: gate 2's blocks hold.
+7. **Fading route retires.** A second structural transaction prepared after `S + N` drops gate
+   2's fading route with no change in output; one prepared before it keeps the ramp going: gate 2's
+   blocks hold. With gate 5's compensated copy (`f = F - S`), a second transaction prepared after
+   `S + N` but before `F + N` keeps it and gate 5's blocks hold; one after `F + N` drops it with
+   no change in output.
 8. **Realtime.** Zero allocations and frees over the swap and ramp blocks
    (`the_swap_block_allocates_and_frees_nothing`, `successor_swap.rs:476`).
 9. Commands:
@@ -189,8 +209,10 @@ between render calls.
 - Gate 2: a removal that drops the route at `S`, or a fading route whose line does not carry, turns
   it red.
 - Gates 4 and 5 with compensation: a fading copy whose line starts at rest (no alias: a
-  `C`-sample hole at `S`), or a same-endpoint new route that keeps the warm line (the pending
-  audio played twice, once at each value) turns them red.
+  `C`-sample hole at `S`), a same-endpoint new route that keeps the warm line (the pending
+  audio played twice, once at each value), or a fading copy fired at adoption instead of at its
+  replacement's fire block (a dip, and with `N = 480 < C` a full dropout, between the two fades)
+  turns them red.
 - Gate 3: a transition that touches other routes or folds a ramp into a neighbour turns it red.
 - Gate 4: a re-point treated as a value change (a step at both destinations) or one that ducks
   the source strip turns it red.
@@ -198,14 +220,14 @@ between render calls.
   one that still takes a fading copy (a needless double route), turns it red.
 - Gate 6: a pre-fader send left unarmed beside an armed fader (it enters at full level at
   adoption, a step at R) turns it red.
-- Gate 7: a fading route dropped mid-ramp, or never dropped, turns it red.
+- Gate 7: a fading route dropped mid-ramp (retired at `S_r + N` though it fired at `S_r + f`),
+  or never dropped, turns it red.
 
 ## Dependencies
 
 - *Fade in a strip that a swap adds during playback* (#1288).
-- *Supersede an unadopted candidate plan by compare-and-swap* (#1310) (base model of case (c)
-  restores).
-- *Carry compensation lines across a plan swap* (#1283) (the line lookup D4's alias extends).
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
+- *Carry compensation lines across a plan swap* (#1283).
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284).
 - *Keep every node's latency from dropping during playback* (#1285).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

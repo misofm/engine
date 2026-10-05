@@ -142,9 +142,9 @@ still binds one bank (#1368).
    unknown token.
 7. Commands:
    - `cargo test --locked -p session -p protocol -p effect-compiler -p graph-compiler --features protocol/test-support,effect-compiler/test-support,graph/test-support`
-   - `cargo test --locked -p conformance --test conformance_corpus` and
-     `cargo run --locked -p conformance --example conformance_fixtures -- --check` (the re-pinned
-     corpus hash); `bash scripts/check-protocol-wasm-parity.sh` (every spelling of the hash agrees)
+   - `cargo test --locked -p conformance --test conformance_corpus` (checks the re-pinned
+     `COMPLETE_SCHEMA_HASH`); `bash scripts/check-protocol-wasm-parity.sh` (every other spelling of
+     the hash agrees)
    - `cargo test --locked -p host-core -p capi -p host-web -p audit -p console-workload --features host-core/test-support,host-core/control-provider,host-web/test-support`
      (every `ConsoleEntry` literal still builds and passes)
    - `cargo run --locked -p session-validator -- validate <file>` on each migrated document

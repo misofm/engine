@@ -70,14 +70,20 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   has emptied its last nonzero frame by `p + q + N + C <= S`. Between then and `S` the strip and
   its routes contribute exact `+0.0`. A paused host keeps `S` valid: render resumes at `p`.
 - **D4. The source retires with phase 2, unless restored.** Until the successor is adopted,
-  `submit`, `seek` and `seek_at` for a source absent from the newest committed session but present in the plan that
-  still renders go to that plan's producer. From the adoption on they are refused with
+  `submit`, `seek` and `seek_at` for a source absent from the newest committed session but present
+  in the plan that still renders go to that plan's producer. From the adoption on they are refused with
   `source.id.unknown`, as today. Its ring and producer retire with the displaced plan through the
   existing retirement path; PCM queued past `S` is discarded with it (documented, as today). The host
   learns the adoption from the watermark (#1314) and stops feeding then. The producer stays in the
   running plan's source control set, which the control plane keeps in that plan's epoch; the duck
   overlay (D6) lists the source. A transaction that restores the source in phase 1 takes over its
   producer and ring instead (D6).
+  - **Under supersession the producer may sit in the withdrawn candidate.** When the removing
+    transaction supersedes a candidate that kept the source, that candidate's commit already moved
+    the running plan's producer into its own set (`adopt_persisting`,
+    `crates/capi/src/runtime/control.rs:1019`; #1310 D2). #1310 D5 step 5,
+    `P0.sources.adopt_persisting(&mut A.sources)`, returns it to the running plan's set before the
+    withdrawn candidate is dropped (step 6), so D4's routing finds it there.
 - **D5. Reporting.** The response path is `rebuild` (#1313). The revision completes when render
   adopts at `S`: the watermark (#1314) reports first sample `S` with `EXACT` (or `SUPERSEDED` when
   #1310 displaces it) and counts it in `exact_count`. A planned D15-9 transition is the designed
@@ -114,12 +120,13 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
     in at adoption (`adopt_sources`, `crates/source/src/lib.rs:1851`). Before the commit the
     control plane checks that the overlay's producer is present in the epoch's set; after the
     commit it moves it into the candidate's set (`SourceControlSet::adopt_persisting`,
-    `crates/host-core/src/source.rs:286`) before publication, beside #1310 D5's producer moves.
+    `crates/host-core/src/source.rs:286`) before publication, beside #1310 D5 step 2's producer
+    moves.
     Every submit acked for it in phase 1 is in that ring, so no ack precedes a drop. A restored
     source with a different declaration or ring configuration is a new source with a fresh ring;
     the old one retires at adoption as D4 says. If a later transaction in the same phase 1 removes
-    the source again, the control plane moves its producer from the withdrawn candidate's set back
-    to the epoch's set (it never left the overlay), so D4's routing holds.
+    the source again, #1310 D5 step 5 moves its producer from the withdrawn candidate's set back to
+    the epoch's set (it never left the overlay), so D4's routing holds.
   - In the taken case (render already adopted the older candidate) the base is that plan, the
     overlay is gone with the retired epoch, and a restored strip is an added strip (#1288).
 - **D7. Shared step.** The order in the control plane is: validate and classify; prepare the
@@ -198,9 +205,15 @@ two render calls, so the ramp starts at `p`).
    (b) The same with B's source fed one block ahead only, as in gate 2. Every submit for it before
    and after the restore returns OK, none is refused, and from `S` on B plays the frames submitted
    for those blocks (the bit-identity above holds with the same source frames).
-5. **Realtime.** On the render thread, every block from `k + 1` through the adoption block makes
+5. **A source removed across a supersession keeps feeding phase 1.** P0 runs gate 1's session.
+   Without rendering, T1 adds a muted track C (its candidate keeps B's source, so B's producer
+   moves into T1's set), then T2 removes B. T2 returns OK and supersedes T1. Feed B's source one
+   block ahead only, as in gate 2. Every submit for it before the adoption returns OK, and every
+   block up to `S` equals gate 1's reference bit for bit (C is muted). The first submit after the
+   adoption returns `MISO_ENGINE_V1_INVALID_ARGUMENT` with `source.id.unknown`.
+6. **Realtime.** On the render thread, every block from `k + 1` through the adoption block makes
    zero allocations and frees (`bench_support::alloc` thread-scoped counters, statics warmed).
-6. Commands:
+7. Commands:
    - `cargo test --locked -p capi --test strip_transitions`
    - `cargo test --locked -p host-core -p capi --features host-core/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` (as in
@@ -224,7 +237,10 @@ two render calls, so the ramp starts at `p`).
   that does not arm B (it enters at full gain) turns it red. Gate 4(b): a restored source given a
   fresh ring (its acked phase-1 PCM dropped, B plays underrun zeros from `S`) or a producer left in
   the retiring plan's set (submits refused or lost) turns it red.
-- Gate 5: a schedule check or cell drain that allocates on the render thread turns it red.
+- Gate 5: a supersession that drops the withdrawn candidate with the removed source's producer
+  (#1310 D5 step 5 missing) leaves the running plan's entry vacant: the phase-1 submits are
+  refused and the ramp plays underrun zeros. Gate 2 does not supersede, so it cannot see it.
+- Gate 6: a schedule check or cell drain that allocates on the render thread turns it red.
 
 ## Dependencies
 
@@ -236,8 +252,7 @@ two render calls, so the ramp starts at `p`).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054).
-- *Fade in a strip that a swap adds during playback* (#1288) (the arm, D6).
-- *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363) (D1 (c), D6).
-- *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391) (D2's
-  route writes).
+- *Fade in a strip that a swap adds during playback* (#1288).
+- *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363).
+- *Give every route whose tap precedes its strip's fader a live lane on every plan* (#1391).
 - *Hold route-lane values in latest-target cells* (#1347).

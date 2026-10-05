@@ -82,10 +82,12 @@ changed or added owners start fresh.
     `pair_carried_observations` (same shape, over the observation handles). For each record of
     its kind, it swaps `successor[s]` with `predecessor[p]`. It is allocation-free, drops nothing,
     and may run on the render thread.
-  - A host whose readers live inside the plan calls them in the swap block, from the plan's host
+  - A host whose readers live inside the plan pairs them in the swap block, from the plan's host
     attachment hook. The browser is that host: *Swap and retire browser plans through the
-    Worker's service loop* (#1381) D3. After the call the successor's reader vectors hold the
-    carried consumers, and the retiring predecessor holds the fresh ones.
+    Worker's service loop* (#1381) D3 calls `pair_carried_meters` (its meter vector is in host-core
+    order) and pairs observation handles through its own host-core-index-to-slot map, because the
+    browser keeps observations in gapped per-slot storage. After the swap block the successor holds
+    the carried readers, and the retiring predecessor holds the fresh ones.
 - **D4. Copy mode belongs to #1287.** In a warm successor the observers render `[B, S + P)` during
   the catch-up, which overlaps windows the predecessor publishes. How they continue depends on the
   clock *Pre-roll a successor whose latency grows* (#1287) gives the successor at adoption. So #1287
@@ -108,7 +110,7 @@ changed or added owners start fresh.
   needs every meter's windows to match: the browser requires equal `window_sequence`,
   `start_sample`, `end_sample` and `frames` across the group (`hosts/host-web/src/lib.rs:3485-3500`).
   A fresh `MeterAccumulator` opens its first window at its first observation (`start: None`,
-  `crates/builtins/src/lib.rs:4558`), so an added strip's meter would sit off the grid forever.
+  `crates/builtins/src/lib.rs:4683`), so an added strip's meter would sit off the grid forever.
   So, in the swap block, a fresh meter (no carry record) whose `MeterConfig` equals a carried
   meter's takes the open window position of the first such carried meter (lowest successor entry
   index): its `start`, `frames` and `sequence`, with its lanes and cumulative counters at zero.

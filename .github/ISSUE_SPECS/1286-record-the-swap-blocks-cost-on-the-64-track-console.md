@@ -77,13 +77,18 @@ Deferred) earns a brief.
   (untimed). The record reports every distribution (p50, p90, p99, max), the bytes per copy
   (`carry_program_copy_bytes`), the count of silent successor blocks, and the host and build facts
   the console records already carry.
-- **D3. The derivation (the only one).** Notation: `q = 128`, `D = q / fs` at 96 kHz,
-  `ceil_q(x)` rounds `x` samples up to whole quanta. Per measured row:
-  - `c` = the larger of the render thread's ordinary-block p99 in phase 3 and the second thread's
-    successor-block p99 (native), or `D / h` for the slowest engine's #1331 D7 headroom `h`
-    (browser);
+- **D3. The derivation (the only one).** Notation: `q = 128`, `fs = 96 kHz` (session A's rate),
+  `D = q / fs`, `ceil_q(x)` rounds `x` samples up to whole quanta. #1331 D7's headroom `h` is
+  measured on the browser's 64-track app session at its own rate `fs_h` (48 kHz, as every
+  browser qualification session runs, e.g. `hosts/host-web/qualification/live-control-session.json:5`);
+  the record states `fs_h` beside `h`. Every row is stated at one rate, `fs`. Per measured row:
+  - `c` = seconds per rendered block: the larger of the render thread's ordinary-block p99 in
+    phase 3 and the second thread's successor-block p99 (native), or `(q / fs_h) / h` for the
+    slowest engine's `h` (browser: one block of `q` samples takes `1 / h` of its audio duration at
+    `fs_h`);
   - `r` = successor render samples per render-clock sample under contention: the second thread's
-    blocks per second times `q / fs` (native), or `h` (browser). `r_min` is the smaller row.
+    blocks per second times `q / fs` (native), or `h · fs_h / fs` (browser: `h · fs_h` samples per
+    wall second against `fs` render-clock samples). `r_min` is the smaller row.
 
   The constants, each the tighter over the native and browser rows:
   1. `K_MAX_BLOCKS = max(0, floor(D / c) − 1)`: the largest `k` whose `k` pre-rolled successor

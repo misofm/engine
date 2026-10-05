@@ -24,7 +24,9 @@ is never interrupted.
   - control-owned: taken back and rendering forward (#1355);
   - published `ExactlyAt(S)` and unclaimed: withdrawable (#1311 D2);
   - adopted.
-- Its predecessor's rings are armed (#1320 D4). Its held edits are in the committed model (#1356 D4).
+- Its predecessor's rings are armed (#1320 D4). Its held edits are in its own cells and in the
+  committed model (#1356 D1, D4). The rings of sources it added are unconsumed: their entries stay
+  closed until adoption (#1355 D2).
 - `SUPERSEDED` and `superseded_count` are #1314 D5's.
 - Today a structural transaction is refused while a candidate is pending
   (`crates/capi/src/runtime/control.rs:959-961`). After #1309 this lives in `crates/control-plane`.
@@ -47,8 +49,10 @@ is never interrupted.
     every submission and seek for a source the displaced successor added lands in the ring the
     newer candidate will own (#1344 D3). It records the in-flight successor as superseded, and
     holds the newer candidate control-side, unpublished: the mailbox has no free cell while the
-    in-flight one is `Returned`. The steps of D3 that need the displaced successor in hand (2, the
-    consumer half of 4, and 5) wait for it, as D1a says.
+    in-flight one is `Returned`. Live edits committed from then on are written into the held
+    candidate's cells (#1356 D1); a warm one's retargets are written at its first publication and
+    skip those cells (#1356 D3). The steps of D3 that need the displaced successor in hand (2, the
+    consumer half of 3, 4 and 5) wait for it, as D1a says.
   - If it is published and unclaimed, the control plane withdraws it (#1310 D1).
   - If render took it, it is the base, as in #1310's *taken* case. The newer edit is then an
     ordinary rebuild, or a new catch-up if it grows latency again. The control call services
@@ -61,11 +65,10 @@ is never interrupted.
   CopyRefused }`). A copy lasts at most the rest of one render callback (#1354 D1), so the first
   service call after that callback finds it ended; an earlier call gets `InFlight` again and leaves
   everything as it is. The service step then runs D3 step 2, `donate_consumers` (the consumer
-  half of step 4, checked before the commit), the added-source peek hand-over of #1355 D2, and
-  writes the newer candidate's revision word: the highest revision committed since the commit,
-  which #1314 D2 routed to this control-held candidate. All are infallible moves and stores. It
-  drops the displaced plan and publishes the newer candidate (step 5). It never prepares or
-  checks anything again.
+  half of step 3, checked before the commit), and writes the newer candidate's revision word: the
+  highest revision committed since the commit, which #1314 D2 routed to this control-held
+  candidate. All are infallible moves and stores. It publishes the newer candidate (step 4), and
+  only then drops the displaced plan (step 5). It never prepares or checks anything again.
   - A further structural edit before that service call supersedes the held newer candidate, which
     is control-owned (the first case above); the in-flight successor stays recorded as superseded.
     The pending consumer half follows the producers: the newest candidate's donation from the held
@@ -82,25 +85,26 @@ is never interrupted.
   - **Peeks pass by donation.** A warm newer candidate does not call `take_peek`: the displaced
     successor still owns the rings' peeks (#1320 D3). Preparation borrows them from the donor,
     untouched and still armed. On success they move to the newer candidate in D3. On refusal they
-    stay with the displaced successor. The peeks of sources the displaced successor added are
-    held control-side by its `CatchUp` (#1355 D2) and pass the same way. In the in-flight case
-    nothing in the displaced plan is borrowed at preparation: its consumers and carried peeks stay
-    where they are until D1a's service step moves them, which is a move, never a check.
-- **D3. Infallible order.** Only after every fallible check (#1310 D4):
+    stay with the displaced successor. A source the displaced successor added has no peek (#1355
+    D2); its ring passes by donation alone (D3 step 3). In the in-flight case nothing in the
+    displaced plan is borrowed at preparation: its consumers and carried peeks stay where they are
+    until D1a's service step moves them, which is a move, never a check.
+- **D3. Infallible order.** Only after every fallible check (#1310 D4), following #1310 D5's order:
   1. the protocol commit;
   2. `abandon` each borrowed peek (#1320 D8). A warm newer candidate keeps them: its claim's
      `arm_peek` completes the abandon and arms again at the new B (#1320 D4). An ordinary or
      transition candidate drops them, which ends them (#1320 D3);
-  3. drop the hold (#1356 D4) and the displaced plan on the control thread;
-  4. donate the displaced successor's new rings (#1310 D2, #1344 D3). They pass #1344 D5's
-     unconsumed check although the displaced catch-up rendered blocks, because it read them only
-     through peeks (#1355 D2);
-  5. publish the newer candidate, `CopyAndReturn` when it is warm.
+  3. donate the displaced successor's new rings (#1310 D2, #1344 D3). They pass #1344 D5's
+     unconsumed check although the displaced catch-up rendered blocks, because it never opened an
+     added entry (#1355 D2);
+  4. write the newer candidate's `superseded` and revision words (#1310 D5-D6), then publish it,
+     `CopyAndReturn` when it is warm;
+  5. last, drop the displaced plan on the control thread, with the edits held in its cells (#1356
+     D4). It is the donor of step 3, so it is never dropped before the donation and publication.
 
   On a refusal the displaced catch-up continues untouched, with its peeks still armed. In the
-  in-flight case steps 1, 3 (except the displaced plan, not yet in hand) and the producer half of
-  4 run in the submit; D1a's service step drops the plan and runs step 2, the consumer half of 4,
-  and 5.
+  in-flight case steps 1 and the producer half of 3 run in the submit; D1a's service step runs
+  step 2, the consumer half of 3, step 4 and then step 5, in that order.
 - **D4. Completion.** The displaced revision completes with the newer one's adoption, flagged
   `SUPERSEDED` (#1314 D5).
 - **D5. Acked-batch question.** The displaced revision's content is in the newer committed model,
@@ -109,7 +113,8 @@ is never interrupted.
   dropped while it waits. A source the displaced successor added is fed, from the commit on, into
   the ring the newer candidate keeps (the producer half of the donation), so a chunk acked in that
   window is never in the ring the displaced plan drops. Revisions committed in that window are in
-  the held candidate's word, never the running plan's. An ack can never precede a drop.
+  the held candidate's word, never the running plan's, and live values in its cells (#1356 D1).
+  The displaced plan, the donor, is dropped last (D3 step 5). An ack can never precede a drop.
 
 ## Deliverables
 
@@ -153,8 +158,9 @@ is never interrupted.
    source `c` and the newer edit keeping it. While the hook holds render, submit two chunks of `c`
    and commit a live fader edit. After the service step publishes the newer candidate, `c` plays
    every chunk submitted before and after the newer commit, from frame 0, as in gate 1's
-   reference fed the same PCM, and before the newer adoption the watermark never reports the
-   fader edit's revision.
+   reference fed the same PCM. Before the newer adoption the watermark never reports the fader
+   edit's revision; from it, with the newer edit also changing that strip's fader in the model,
+   the fader is the live edit's value, not the newer candidate's retarget.
 9. Commands: those of #1356.
 
 ## Test value
@@ -174,7 +180,9 @@ is never interrupted.
 - Gate 8: a submit that checks no donation before the commit, or leaves `c`'s producer pointing
   at the newer candidate's fresh ring, loses the chunks submitted while the copy was in flight
   (that ring goes to the displaced plan and is dropped); a revision stamped on the running plan in
-  that window is reported early. Red.
+  that window is reported early; a newer candidate whose retargets are written over the cells after
+  the live edit plays the older value; a service step that drops the displaced plan before
+  `donate_consumers` loses `c`'s ring. Red.
 
 ## Dependencies
 

@@ -20,6 +20,11 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
   and #1381. The verifier still flagged #1280, #1316, #1332 and #1363 as tight; their stream
   coordinator splits any that does not fit half a day before implementation (AGENTS.md).
+- **Stream C design gate.** Three adversarial rounds each found new defects in the warm successor
+  (decision 15, "Verification"); the last round's findings were folded in without a fourth check.
+  Before its first implementation slice, stream C's coordinator runs one fresh opus-xhigh design
+  verification of #1287, #1320, #1321, #1353-#1361, #1396 and #1397 together, and folds every
+  BLOCKER and MAJOR into the specs (and GitHub) first.
 - Critical path: S0, then B #1309, then B #1312 (cells) and #1343, then A's carry slices (#1277 onward)
   and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
   slices that write into them (#1312 before #1277, #1345 before #1280).
@@ -146,7 +151,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 9 | #1357 | Supersede a running catch-up by a structural edit | #1320, #1354, #1355, #1356 | #1310, #1314, #1344, #1348 |
 | 10 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish | #1354, #1355, #1356, #1396 | #1288, #1311, #1314, #1324, #1344 |
 | 11 | #1359 | Turn a pending catch-up into a plain rebuild at a host-declared stop | #1355, #1357, #1396 | #1310, #1323, #1344 |
-| 12 | #1358 | Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition | #1355, #1356, #1396, #1397 | #1286, #1311, #1314, #1331 |
+| 12 | #1358 | Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition | #1355, #1356, #1396, #1397 | #1286, #1311, #1314, #1331, #1343, #1344 |
 | 13 | #1360 | Run the C ABI catch-up from miso_engine_v1_service and report its outcome | #1358, #1359, #1397 | #1286, #1309, #1313, #1314, #1348 |
 | 14 | #1361 | Run the browser catch-up in the Worker's service loop | #1360 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
 
@@ -261,7 +266,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 14 | #1293 | Export transaction apply and anchored seek from the browser engine module | #1290, #1332, #1381, #1387 | #1309, #1313, #1316, #1319 |
 | 15 | #1342 | Make a send's follows_mute live in the browser | #1290, #1382 | #1226, #1313, #1347 |
 | 16 | #1386 | Diff a replacement document against the committed model and export replace from the browser engine module | #1290, #1293 | — |
-| 17 | #1294 | Send a session transaction to the browser control plane | #1293, #1332, #1381, #1382, #1386, #1387 | #1348, #1349 |
+| 17 | #1294 | Send a session transaction to the browser control plane | #1293, #1332, #1381, #1382, #1386, #1387 | #1310, #1348, #1349 |
 | 18 | #1295 | Qualify a structural browser edit in real browsers | #1290, #1294, #1332, #1333, #1386 | — |
 | 19 | #1296 | Apply session transactions from the browser SDK | #1294, #1295, #1382, #1383, #1385, #1386 | #1312, #1313, #1314, #1325, #1326, #1349 |
 | 20 | #1297 | Feed and retire the sources a browser edit adds or removes | #1293, #1296, #1332, #1381, #1387 | #1316, #1325 |

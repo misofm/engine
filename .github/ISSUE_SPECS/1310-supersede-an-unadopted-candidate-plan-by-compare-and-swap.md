@@ -79,9 +79,17 @@ successor is adopted.
   2. `apply_donation` with D4's checked plan (it cannot fail, #1344 D3) and the producer moves;
   3. B's `superseded` word (D6) and revision (#1314 D2);
   4. publish B;
-  5. drop A's plan, provider epoch and credit on the control thread; remove A's report row.
+  5. return to P0's epoch every producer A still holds that P0 holds vacant:
+     `P0.sources.adopt_persisting(&mut A.sources)` (`crates/host-core/src/source.rs:286`). A's
+     commit moved P0's persisting producers into A's set (`crates/capi/src/runtime/control.rs:1019`);
+     step 2 moved into B the ones B keeps, so what remains for P0 are the producers of sources P0
+     still renders and B removed. Infallible and allocation-free; keyed by source ID;
+  6. drop A's plan, provider epoch and credit on the control thread; remove A's report row.
 
-  B is published only after it owns the donated rings, because render may adopt it at once.
+  B is published only after it owns the donated rings, because render may adopt it at once. Step 5
+  runs before step 6 because P0's consumers keep rendering until B is adopted: a producer dropped
+  with A would leave a source P0 still plays with no producer, and *Remove a strip in two phases:
+  ramp out, then a scheduled swap* (#1325) D4 routes phase-1 submits for a removed source to it.
 - **D6. This slice owns `SUPERSEDED`.** Let `r_P0` be the revision last written to P0's cell (the
   control plane keeps it per provider epoch) and `r_B` B's own revision. Every revision after `r_P0`
   and before `r_B` was committed onto A or onto a candidate A had superseded, and its content is in
@@ -93,7 +101,8 @@ successor is adopted.
 - **D8. The acked-batch question: can an ack ever precede a drop? No.** A's revision was acked
   and stays committed: its edits are in the model B is compiled from, and its host-fed sources move
   into B (D2). Every way the donation could fail is checked before the commit (D4), so the
-  post-commit apply cannot lose a ring. If B is refused, A is republished untouched (D4). B is acked
+  post-commit apply cannot lose a ring, and a producer of a source P0 still renders returns to P0's
+epoch before A drops (D5 step 5). If B is refused, A is republished untouched (D4). B is acked
   only after every fallible step. A's revisions complete when B is adopted, reported as
   `superseded` (D6).
 
@@ -154,11 +163,17 @@ successor is adopted.
    harness's tolerance of a transient structural `RESULT_BACKPRESSURE` (`plan_swap_race.rs:391`)
    is removed: any structural `RESULT_BACKPRESSURE` now fails it. The source-submit tolerance at
    `:294` is a full ring and stays.
-6. **Superseded tests.** Delete the assertions that a second structural edit is
+6. **A removed source's producer returns to the running epoch (new capi test).** P0 has sources
+   `s` and `u`. Without rendering, T1 changes `u`'s track's insert (A persists `s`, so `s`'s
+   producer moves into A's set), then T2 removes `s`'s track. Through the `test-support` owner
+   counters and a `test-support` accessor on the epoch's source set: after T2 the running epoch's
+   set holds `s`'s producer (not vacant), B's set has no `s`, and no producer was dropped on the
+   control thread. After B's adoption `s`'s producer retires with P0's epoch as today.
+7. **Superseded tests.** Delete the assertions that a second structural edit is
    `RESULT_BACKPRESSURE` while one is pending (find them under `crates/capi/`); gate 1 replaces them.
-7. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`:
+8. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`:
    allocations, deallocations, locks, syscalls and `total_violations` 0.
-8. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features
+9. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features
    test-support`; `cargo test --locked -p protocol --features test-support`;
    `bash scripts/check-capi-abi.sh`; `bash scripts/check-protocol-control-policy.sh`;
    `bash scripts/check-realtime-policy.sh`; `bash scripts/check-workspace-policy.sh`;
@@ -176,13 +191,14 @@ successor is adopted.
   after the commit (the fault between check and commit must leave both plans whole).
 - Gate 4: a three-plan peak admitted beyond a cap, or a refusal that loses the withdrawn candidate.
 - Gate 5: a race between withdrawal and render's claim; judged by reaching both outcomes.
+- Gate 6: a supersession that drops A with the producers B did not take (step 5 missing or
+  after step 6) leaves the running epoch's entry for `s` vacant, so a source P0 still renders has
+  no producer. Gates 1-5 do not see it: none removes a source that A persisted.
 
 ## Dependencies
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Let the control thread withdraw an unadopted candidate plan* (#1343).
 - *Prepare a successor across a withdrawn candidate plan* (#1344).
-- *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the
-  `superseded` word D6 writes.
-- *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398):
-  the capacities and the three-plan admission this path runs.
+- *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
+- *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398).

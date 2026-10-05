@@ -24,7 +24,7 @@ calls the same engine-side step.
   `command` then refreshes the provider's telemetry counters from the controller's queues
   (`set_telemetry_counters`, `control.rs:850-853`); no other call does.
 - Two specs rely on that refresh running on every control call: *Hold live values in
-  latest-target cells on both hosts* (#1312, D7: `live_values_superseded`) and *Report each
+  latest-target cells on both hosts* (#1312, D8: `live_values_superseded`) and *Report each
   configured counter's own value in the C ABI counter snapshot* (#1351, D3: the snapshot reads
   the refreshed values).
 - *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311) adds a
@@ -82,7 +82,7 @@ calls the same engine-side step.
 - **D8. Counter refresh.** The refresh moves `command`'s `set_telemetry_counters` call
   (`control.rs:850-853`) into service, so every control call runs it. It sets every counter the
   provider serves from a source outside the provider: the controller's telemetry counters today,
-  and `live_values_superseded` once #1312 lands (#1312 D7 and #1351 D3 call this the control
+  and `live_values_superseded` once #1312 lands (#1312 D8 and #1351 D3 call this the control
   plane's refresh). A counter added later joins this refresh, not a single call.
 
 ## Deliverables

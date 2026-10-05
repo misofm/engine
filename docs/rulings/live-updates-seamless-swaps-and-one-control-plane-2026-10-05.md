@@ -452,5 +452,22 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
 
 ### Verification
 
-Pending: a fresh Opus 5.5 adversarial verifier checks this record, the `AGENTS.md` amendment and
-every spec filed from it.
+Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it three times:
+
+- **Round 1 (whole record, about 900 anchors): FAIL**, five blockers (an ack lost on the pre-roll
+  fallback, a watermark that aliased under supersession, BACKPRESSURE for a live link value, an
+  unmeetable exact-rest definition, no browser service export) and about forty majors. All were
+  folded in; fourteen over-size slices were split (#1388-#1401).
+- **Round 2 (the fixes, about 400 anchors): FAIL**, two new blockers on the warm-successor path (a
+  revision reported in effect while its candidate was held by the control thread; donation from a
+  successor the catch-up had rendered) and ten majors. All were folded in.
+- **Round 3 (focused on the round-2 fixes, about 270 anchors): FAIL**, every round-2 finding
+  resolved, one new blocker (the render pre-roll could not read an added source) and ten majors,
+  nine of them on the warm successor and the browser carry. All were folded in without a fourth
+  verification.
+
+The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
+passed every round. Each round found new defects only in stream C (the warm successor) and its
+seams with streams B, D and H. Stream C's coordinator therefore runs a fresh design verification of
+#1287, #1320, #1321, #1353-#1361, #1396 and #1397 before the first implementation slice
+(`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).

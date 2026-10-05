@@ -50,21 +50,32 @@ A latency-growing edit always completes, and the host always learns how.
 - **D3. Deadline.** At each service call, if `render_clock() - B > CATCH_UP_DEADLINE_SAMPLES(fs)`, the
   catch-up stops and falls back (D4). A render clock that does not move never passes it.
 - **D4. Pre-roll fallback.**
-  1. Before publication, the control plane writes the #1277 D5 retarget records, then the held
-     live edits (#1356 D3), then the epoch's outcome word `PREROLL_FALLBACK` (#1355 D8). Only then
-     does it publish the successor with a new `PlanAdoption::PreRoll { max_blocks: K_MAX_BLOCKS }`.
-     The hold is not dropped: it now lives in the successor.
-  2. Render claims it at the next block, `h`. If the successor's clock is behind `h` by `d`, with
-     `d / quantum <= max_blocks`, and every peek holds the frames for those blocks, render renders
-     those blocks into the successor's preallocated discard planes, inside the render scope,
-     reading the peeks on the render thread (#1320 D3). The live lanes stay closed (#1355 D4).
-  3. It then adopts at `h` exactly as #1355 D6 does, which opens the live lanes before block `h`,
-     so the held edits apply at `h`.
-  4. Otherwise render marks the cell `Returned` with `ReturnReason::PreRollBound` (#1311
+  1. The catch-up first takes its successor back if it is published. An unclaimed `ExactlyAt`
+     candidate is taken with `withdraw()` (#1311 D6, *Let the control thread withdraw an
+     unadopted candidate plan*, #1343 D5): `Withdrawn` or `Returned { .. }` gives it back whole;
+     `Taken` means render adopted it exactly, so there is no fallback and the epoch's word stays
+     `EXACT`. Only a candidate the control thread holds is published as a pre-roll; the mailbox
+     never holds two publications of one successor.
+  2. Before publication, the control plane runs #1356 D3's publication writes: the kept retargets
+     only if no adopting publication preceded this one, each skipping a cell a live edit wrote,
+     then the revision word. Then it writes the epoch's outcome word `PREROLL_FALLBACK` (#1355 D8).
+     Only then does it publish the successor with a new
+     `PlanAdoption::PreRoll { max_blocks: K_MAX_BLOCKS }`. Live edits committed before this point
+     are already in the successor's cells (#1356 D1), and none is overwritten.
+  3. Render claims it at the next block, `h`. If the successor's clock is behind `h` by `d`, with
+     `d / quantum <= max_blocks`, and every carried peek holds the frames for those blocks, render
+     renders those blocks into the successor's preallocated discard planes, inside the render
+     scope, reading the carried peeks on the render thread (#1320 D3). An added source's entry
+     stays closed and reads `+0.0` (#1355 D2): render never reads or begins its consumer here. The
+     live lanes stay closed (#1355 D4).
+  4. It then adopts at `h` exactly as #1355 D6 does, which opens the added entries and the live
+     lanes before block `h`, so the held edits apply at `h` and each added source begins at `h`.
+  5. Otherwise render marks the cell `Returned` with `ReturnReason::PreRollBound` (#1311
      D3 defines it), and the candidate stays there whole. The next service call takes it
      with `withdraw()` (`Withdrawal::Returned`, #1311 D6) and takes the transition (#1397 D2,
      `CatchUp::fall_back_to_transition`): only that path, which prepares the committed model
-     again, drops the hold (#1356 D4).
+     again, drops the successor and its held edits (#1356 D4). Its added rings are unconsumed, so
+     the transition candidate takes them by donation (#1344 D5).
 
   The catch-up's prime phase, if not yet done, counts toward `d`.
 - **D5. Render-only catch-up.** `CatchUpMode::RenderOnly`, for a host with no off-thread executor
@@ -72,8 +83,9 @@ A latency-growing edit always completes, and the host always learns how.
   after the copy returns.
 - **D6. Outcome.** A pre-roll adoption completes its revisions with `PREROLL_FALLBACK` through the
   epoch's word, and the counter rises by the revisions covered (#1314 D5).
-- **D7. Acked-batch question.** The pre-roll candidate carries every held edit before it is
-  published (D4.1), so its adoption drops none. A returned pre-roll candidate is kept whole until
+- **D7. Acked-batch question.** The pre-roll candidate carries every held edit in its cells
+  before it is published (D4.2), and no retarget overwrites one, so its adoption drops none. An
+  added ring is never consumed before adoption, so a return keeps every chunk for the donation. A returned pre-roll candidate is kept whole until
   the transition is prepared from the committed model, which holds every edit. An ack can never
   precede a drop.
 
@@ -110,13 +122,29 @@ A latency-growing edit always completes, and the host always learns how.
    which the same values are written to the successor just before block `h`. In gate 2's setup
    the same edits reach the output through the transition's retargets; the model, revision and
    watermark show them applied.
-4. **Paused host.** With no render for `10 * CATCH_UP_DEADLINE_SAMPLES(fs)` of wall time, service calls
+4. **Retarget after a return.** A successor whose join retargets strip X's fader. After the first
+   `ExactlyAt` publication, commit a live fader edit on X, force one return, then let the deadline
+   pass: the pre-roll adoption at `h` plays X at the user's value, as in a run where only that
+   value is written to the successor just before block `h`.
+5. **Render-only with an added source.** `CatchUpMode::RenderOnly`, gate 1's edit also adding
+   source `c`, fed from frame 0 during the window.
+   - Within the bound: the advance reports `PREROLL_FALLBACK`, and from `h` `c` plays every chunk
+     from frame 0.
+   - With `d` one block beyond `K_MAX_BLOCKS`: the cell returns `PreRollBound`, the donation is
+     accepted (no `DonationError::Consumed`, no counted re-preparation refusal), the advance
+     reports `TRANSITION_FALLBACK`, and from the transition's adoption `c` plays every chunk
+     submitted since the commit, from frame 0.
+6. **Unclaimed exact candidate withdrawn.** With an `ExactlyAt` candidate published for a sample
+   render has not reached when the deadline passes, the service call withdraws it before
+   publishing `PreRoll`; there is never a second publication of the successor in the mailbox. If
+   the withdrawal yields `Taken`, no pre-roll is published and the edit completes `EXACT`.
+7. **Paused host.** With no render for `10 * CATCH_UP_DEADLINE_SAMPLES(fs)` of wall time, service calls
    never fall back. After render resumes, the edit completes `EXACT`.
-5. **Realtime.** A pre-roll of `K_MAX_BLOCKS` blocks makes zero allocations and frees on the render
+8. **Realtime.** A pre-roll of `K_MAX_BLOCKS` blocks makes zero allocations and frees on the render
    thread.
-6. **Headroom.** With `ΣP = P_MAX_SAMPLES(fs)` and a peek that lags render until the deadline, a
+9. **Headroom.** With `ΣP = P_MAX_SAMPLES(fs)` and a peek that lags render until the deadline, a
    producer stall of the stall tolerance does not underrun.
-7. Commands: those of #1356, plus `cargo build --locked --release -p audit -p capi &&
+10. Commands: those of #1356, plus `cargo build --locked --release -p audit -p capi &&
    ./target/release/audit capi`.
 
 ## Test value
@@ -124,11 +152,17 @@ A latency-growing edit always completes, and the host always learns how.
 - Gate 1: a deadline counted in wall time, or a fallback that skips the pre-roll, misses the exact
   output or the flag. Red.
 - Gate 2: a pre-roll that ignores its bound renders `k_max + 1` blocks in one callback. Red.
-- Gate 3: a pre-roll published without the retargets and the hold, with the hold then dropped as
-  for a fallback, loses an acknowledged edit; one that opens the live lanes before its pre-rolled
-  blocks applies them early. Red.
-- Gate 4: a wall-clock deadline falls back on a paused host. Red.
-- Gate 6: rings grown by `P_MAX_SAMPLES` alone, without the deadline, underrun inside the stall
+- Gate 3: a pre-roll published without the retargets, or with the held edits dropped as for a
+  fallback, loses an acknowledged edit; one that opens the live lanes before its pre-rolled blocks
+  applies them early. Red.
+- Gate 4: retargets written again before the pre-roll replace the user's newer value. Red.
+- Gate 5: a pre-roll that begins the added consumer releases its chunks, so the donation is
+  refused and the re-preparation retries forever; a pre-roll that reads it at generation 1 waits
+  for PCM that may never come. Red.
+- Gate 6: a pre-roll published over an unclaimed `ExactlyAt` candidate leaves two publications of
+  one plan, or adopts it twice. Red.
+- Gate 7: a wall-clock deadline falls back on a paused host. Red.
+- Gate 9: rings grown by `P_MAX_SAMPLES` alone, without the deadline, underrun inside the stall
   tolerance while the peek lags. Red.
 
 ## Dependencies
@@ -141,4 +175,7 @@ A latency-growing edit always completes, and the host always learns how.
 - *Record the swap block's cost on the 64-track console* (#1286).
 - *Prove two Wasm instances on one shared memory in three browser engines and on iOS* (#1331).
 - *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311).
+- *Let the control thread withdraw an unadopted candidate plan* (#1343), D5: `withdraw()`.
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D5: the unconsumed check an
+  added ring passes.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

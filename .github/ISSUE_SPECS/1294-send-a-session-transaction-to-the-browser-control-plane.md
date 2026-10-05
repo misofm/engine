@@ -81,21 +81,40 @@ worklet only renders and swaps.
   `appliedSample` and `appliedOutcome` from #1349's status words (#1349 D2a); this slice adds
   none.
 - **D4. Plan shape, staged outside `process()`.** When a `rebuild` commits, the control half posts
-  `miso.plan-shape.v1 { tag, revision, trackCount, submixCount, submixIds, meterHeaderPointer,
-  meterFramePointer, meterFrameCapacity }` to the render worklet on #1332 D7's
-  control-plane-to-worklet port; this slice opens no port of its own. In `single` mode the
-  control handler and the render worklet are one realm, so it is a direct call to the same
-  staging function. The worklet's message handler builds the
-  complete view set and meter message object for that shape and stages it, keyed by `revision`. A
-  newer staged set replaces an older one (a superseded candidate's set is dropped there).
-  A staged set is cut over the current buffer, and a growth (#1332 D5) rebuilds it with the
-  current set.
-- **D5. Switch at adoption.** In `process()`, after a successful render, the worklet reads the
-  watermark revision from the status view. When it covers the staged revision, the worklet swaps
-  its view references to the staged set (assignment only; no view, array or object is built). If
-  the meter header read in `process()` disagrees with the current set's track or submix count (a
-  late shape message), the block posts no meter frame and increments a `meterShapeLosses` counter
-  reported in telemetry; the late handler then installs the set directly.
+  `miso.plan-shape.v1 { tag, revision, supersedes, trackCount, submixCount, submixIds,
+  meterHeaderPointer, meterFramePointer, meterFrameCapacity }` to the render worklet on #1332 D7's
+  control-plane-to-worklet port; this slice opens no port of its own. `supersedes` is `true` when
+  the commit withdrew an unadopted candidate (*Supersede an unadopted candidate plan by
+  compare-and-swap*, #1310 D1 `Withdrawn` or `Returned`). In `single` mode the control handler and
+  the render worklet are one realm, so it is a direct call to the same staging function.
+  - The worklet's message handler builds the complete view set and meter message object for that
+    shape and stages it, keyed by `revision`. First it applies D5's install rule against the
+    current watermark, so a set whose plan render already took (#1310 D1 `Taken`: that block has
+    returned and written its watermark before the handler can run) is installed, not dropped. A
+    `supersedes` set then drops every staged set with a lower revision: their plans never render.
+    So at most one older set waits beside the new one.
+  - A staged set is cut over the current buffer, and a growth (#1332 D5) rebuilds it with the
+    current set.
+  - **Every commit is announced.** After every other commit the control half makes (`live` or
+    `model_only`, from D1 or from #1382's live-edit messages), it posts
+    `miso.committed.v1 { tag, revision }` on the same port, after the export returns; in `single`
+    mode it is the same direct call. The worklet's handler keeps `knownRevision`, the highest
+    revision announced by either message (boot sets it to the boot revision). One port delivers in
+    order, so every revision up to `knownRevision` that changed the plan's shape has a staged or
+    installed set.
+- **D5. Switch at adoption, by revision.** In `process()`, after a successful render, the worklet
+  reads the watermark revision `W` from the status view (#1349: a per-instance record, not a
+  per-plan one).
+  - It installs the newest staged set whose revision is at most `W`, by assignment only (no view,
+    array or object is built), and drops the staged sets below it.
+  - If `W > knownRevision`, an announcement is late, and the worklet cannot tell whether a plan of
+    another shape renders. It does not call `meter_poll` and reads no meter header or frame for
+    that block, and increments `meterShapeWaits`, reported in telemetry. A view of the previous
+    plan's companions is never read once a newer plan may render: that plan is retired and
+    reclaimed in the Worker (#1381 D3). The meter windows wait in their bounded queues (a queue
+    that overflows counts its loss as today), and the first block after the late message arrives
+    polls through the right set. The late handler installs its set directly when `W` already
+    covers it.
 - **D6. Wrapper.** The host wrapper gains `apply(transaction)`, `replace(document)`,
   `seekSourceAt(request)`, `committedDocument()` and a `watermark` event, each marked `@internal` in the declarations (the
   SDK is the public surface). Copy the declarations to `sdk/src/browser/shipped-host.d.ts`.
@@ -130,10 +149,16 @@ worklet only renders and swaps.
    one post whose `revision` is the later one and whose `outcome` is the OR of both.
 3. **Switch at the adoption block.** With fake exports whose watermark covers revision R at block
    k: the meter message of block k-1 has the old track count and the one of block k the new count.
-   A shape message for a superseded R' staged before R's is never installed.
-4. **Late shape.** Watermark covers R before R's shape message arrives: no meter frame is posted
-   for those blocks, `meterShapeLosses` counts them exactly, and meters resume with the new shape
-   after the handler runs.
+   A shape message for R' staged before R's, when R's message has `supersedes`, is never
+   installed.
+4. **Late announcement.** The fake watermark covers a rebuild R before R's shape message
+   arrives: for those blocks the worklet calls no `meter_poll`, reads no meter header (the fake
+   records every read of the old set's header and frame, and there is none), and
+   `meterShapeWaits` counts them exactly. After the handler runs, the next block polls and posts
+   with R's shape. The same with a late `miso.committed.v1` for a live revision: polling waits and
+   then resumes with the unchanged shape. A `supersedes` shape message drops an older staged set;
+   one without it keeps it, and a watermark that covers the older revision for one block installs
+   it before R's.
 5. **Refusal.** A refused apply replies with the typed result and diagnostic, stages no shape and
    leaves the sticky result unchanged.
 6. **Render-callback policy and declarations.** `scripts/check-web-audioworklet.sh` (its process
@@ -151,8 +176,10 @@ worklet only renders and swaps.
   must see; it turns red.
 - Gate 3: a worklet that switches views at commit instead of adoption, or installs a superseded
   candidate's shape, posts frames of the wrong shape; it turns red.
-- Gate 4: a worklet that posts a frame read with the old views over the new layout reports the
-  wrong strip's level; it turns red.
+- Gate 4: a worklet that detects a late shape through the old views reads a retired plan's
+  header, which the Worker may already have reclaimed, and posts a frame of the wrong shape; one
+  that treats every unknown revision as unchanged posts it too; one that drops staged sets without
+  `supersedes` skips a plan render adopted. Each turns it red.
 - Gate 5: a refused edit that still stages a shape switches meters to a plan that never comes.
 
 ## Dependencies
@@ -165,4 +192,5 @@ worklet only renders and swaps.
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Diff a replacement document against the committed model and export replace from the browser
   engine module* (#1386).
-- *Move browser source submission and seeks into the Worker* (#1387) (D2 only).
+- *Move browser source submission and seeks into the Worker* (#1387).
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310).

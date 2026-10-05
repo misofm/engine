@@ -33,8 +33,9 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
   *Let the control thread withdraw an unadopted candidate plan* (#1343) D5: a published candidate
   is taken back only with `PlanPublisher::withdraw()`, which yields `Withdrawn`, `Returned { reason }`,
   `Taken` (adopted) or `Nothing`.
-- *Hold live edits during a catch-up and apply them at the adoption sample* (#1356) D4: the hold is
-  dropped only on a path that prepares the committed model again.
+- *Hold live edits during a catch-up and apply them at the adoption sample* (#1356) D1, D4: live
+  edits during a catch-up are held in the successor's own cells, which are dropped only on a path
+  that prepares the committed model again.
 - `LiveRamps::for_session(model).mute_samples` (`crates/host-core/src/live_delta.rs:39`, `:52`) is the
   session mute ramp (#1288 D5). `crates/host-core/src/transition.rs` is created by #1325 D7.
 
@@ -67,13 +68,14 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
   2. The committed model is prepared again as an ordinary successor: #1285 floors, no lead, the
      predecessor's source-read offset (#1396 D2). Inside `service` this follows #1355 D10: the
      displaced successor is the donor (*Prepare a successor across a withdrawn candidate plan*,
-     #1344 D3), its added rings pass the unconsumed check because the catch-up read them only
-     through peeks (#1355 D2), and the cross-plan admission is the one the warm submit ran. At
-     submit it is ordinary preparation, whose failure returns the error before commit.
+     #1344 D3), its added rings pass the unconsumed check because no catch-up or pre-roll ever
+     opens an added entry before adoption (#1355 D2), and the cross-plan admission is the one the
+     warm submit ran. At submit it is ordinary preparation, whose failure returns the error before
+     commit.
   3. Only after that preparation succeeds: the donation is applied, then the displaced successor
-     and its peeks are dropped on the control thread (each peek's drop ends it, #1320 D3), the
-     `CatchUp`'s added-source peeks are dropped (#1355 D2), and the hold is dropped (#1356 D4). On
-     a refusal inside `service`, all of them are kept (#1355 D10).
+     is dropped on the control thread with its carried peeks (each peek's drop ends it, #1320 D3)
+     and the edits held in its cells (#1356 D4). On a refusal inside `service`, it is kept whole
+     (#1355 D10).
   4. The strips whose arrival at any surviving node grows over the predecessor (the same
      comparison as #1354 D3's `Δ`, kept per strip) join #1324's duck set. A new host-core
      function `grown_strips(predecessor, successor)` returns them, sorted by ID.
@@ -127,8 +129,8 @@ whose arrival grows are duck-swapped, and the watermark reports `TRANSITION_FALL
 4. **Transition from service.** On a running catch-up, a direct `fall_back_to_transition` call
    with the injected refusal counts `catch_up_reprepare_refusals`, keeps the revision pending and
    the displaced candidate held, and completes the revision on the next `service` call with
-   `TRANSITION_FALLBACK`. With an edit that also adds a source `c` the catch-up has read through
-   its peek, the transition candidate holds the displaced successor's `c` ring and plays every
+   `TRANSITION_FALLBACK`. With an edit that also adds a source `c`, fed from frame 0 while the
+   catch-up ran, the transition candidate holds the displaced successor's `c` ring and plays every
    chunk submitted since frame 0.
 5. **Adopted before the fallback.** If render adopted the catch-up candidate before
    `fall_back_to_transition` runs (`withdraw()` yields `Taken`), the call publishes nothing and

@@ -23,7 +23,7 @@ catch-up ends at once.
   defines a stop without a seek (its D3): no frame is repeated or skipped.
 - A catch-up's successor is `Returned`, control-owned, published-unclaimed, or adopted (#1357
   Context), or render is copying into it (`InFlight`, #1357 D1). It
-  holds armed peeks (#1320) and a hold (#1356).
+  holds armed peeks on persisting sources (#1320) and held edits in its own cells (#1356).
 
 ## Decisions frozen for this slice
 
@@ -32,13 +32,14 @@ catch-up ends at once.
   2. #1323's preparation takes the displaced successor as donor (#1310 D2, *Prepare a successor
      across a withdrawn candidate plan*, #1344 D3): the rings of sources the edit added are reused,
      never dropped or allocated again. They pass #1344 D5's unconsumed check although the
-     catch-up rendered blocks, because it read them only through peeks (#1355 D2). If render is
+     catch-up rendered blocks, because a warm successor's added entries stay closed until adoption
+     and never begin their consumers (#1355 D2). If render is
      copying into the successor (`InFlight`), the check runs against its `DonorRecord` and the
      donation is split exactly as #1357 D1 and D1a do. The peeks stay untouched with the displaced
      successor while preparation can fail.
   3. After every fallible check of #1323 D4, it drops the displaced successor on the control
-     thread, which ends its peeks (#1320 D3), drops the `CatchUp`'s added-source peeks (#1355 D2),
-     and drops the hold (#1356 D4).
+     thread, which ends its peeks on persisting sources (#1320 D3) and drops the held edits in its
+     cells (#1356 D4).
   4. It publishes #1323's discontinuity successor for the next block.
 
   In the `InFlight` case, dropping the displaced plan, the consumer half of the donation and the

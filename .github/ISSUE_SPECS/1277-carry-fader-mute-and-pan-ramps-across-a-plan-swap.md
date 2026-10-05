@@ -70,9 +70,14 @@ then structural edit" (D15-7, carry then retarget).
   - A cell write cannot fail. There is no room check, and preparation gains no failure and never
     returns BACKPRESSURE for a retarget (D15-2). No ack precedes a drop: every fallible step of
     preparation runs before the writes, and the transaction commits after them.
-  - Copy mode writes nothing at preparation. The records are kept on the prepared successor. *Pre-roll
-    a successor whose latency grows* (#1287) writes them into the cells at publication with the held
-    live edits, so they apply at `S` (D15-17).
+  - Copy mode writes nothing at preparation. The records are kept on the prepared successor.
+    *Hold live edits during a catch-up and apply them at the adoption sample* (#1356) D3 writes
+    them exactly once, at the successor's first publication that may adopt it, and skips every
+    cell a live edit committed after the successor's commit has already written: that value is
+    newer than the prepared model these records come from. The successor's cells stay undrained
+    until adoption (*Catch up a returned successor and adopt it exactly at a scheduled sample*,
+    #1355 D4), so they apply at `S` (D15-17). This slice keeps the records and exposes them; it
+    writes nothing in copy mode.
 - **D6. Restart set.** `PreparedHost` gains `restarted_strips()`: the strip IDs present in both
   plans for which at least one owner failed D4 for a prepared difference, sorted. Added strips are
   not in it. *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) consumes it,

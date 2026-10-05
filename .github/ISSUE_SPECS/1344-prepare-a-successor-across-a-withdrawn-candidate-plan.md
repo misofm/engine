@@ -88,9 +88,9 @@ it needs; on its own it changes no host behaviour.
 - **D4. The consumer swap.** `GraphPreparedSourceSetDriver` gains `can_swap_sources(&self, other,
   pairs) -> bool` and `swap_sources(&mut self, other, pairs)`, the occupied-to-occupied twin of
   `adopt_sources`. The check verifies every pair (both occupied, equal channel counts and quanta).
-  The swap is infallible on checked pairs and moves each entry's whole contents (a later slice's
-  peek moves with its consumer, *Catch up a returned successor and adopt it exactly at a scheduled
-  sample*, #1355 D2). `graph` exposes `can_donate_sources` and `donate_sources(successor: &mut
+  The swap is infallible on checked pairs and moves each entry's whole contents. A fresh entry
+  never holds a peek: a warm successor keeps it closed until adoption (*Catch up a returned
+  successor and adopt it exactly at a scheduled sample*, #1355 D2). `graph` exposes `can_donate_sources` and `donate_sources(successor: &mut
   PreparedRenderPlan, donor: &mut PreparedRenderPlan, pairs)` through the executors, as
   `install_carry_program` reaches them. It runs on the control thread, on two plans neither of
   which render owns.
@@ -100,17 +100,18 @@ it needs; on its own it changes no host behaviour.
     render-owned `bool` that `begin_block_with` (`crates/source/src/lib.rs:1119`, called by
     `begin_block` at `:1103` and `begin_block_at` at `:1115`) sets. Before that first block the
     consumer has popped no PCM and no command, so every acked chunk, the generation and any seek
-    are still in the ring. A peek's reads release nothing (*Give the source ring a read-only peek
-    cursor that gates release*, #1320 D6), so a donor that rendered blocks through a peek still
-    passes.
-  - How many blocks the donor rendered is not a condition: a warm successor's catch-up renders
-    blocks but reads every added source through a peek (#1355 D2). A donor that played one of its
-    fresh rings is refused with `DonationError::Consumed`, a typed error.
+    are still in the ring.
+  - How many blocks the donor rendered is not a condition: a warm successor's catch-up and its
+    render-thread pre-roll render blocks, but an added entry stays closed until adoption: it reads
+    `+0.0` and its consumer's `begin_block_at` is never called (#1355 D2). A donor that played one
+    of its fresh rings is refused with `DonationError::Consumed`, a typed error.
   - With `Donor::Record` the consumer is out of reach (render may be copying into the donor). The
     condition then holds by construction: a fresh entry is never begun before its plan is adopted,
     because render's copy writes only the entries its program names (*Snapshot a running plan into
-    a returned successor at a block*, #1354) and the catch-up reads added sources through a peek
-    (#1355 D2). `donate_consumers` debug-asserts `!has_begun_block()` for each pair when it runs.
+    a returned successor at a block*, #1354), and neither the off-thread catch-up nor the
+    render-thread pre-roll (*Fall back from a missed catch-up deadline: bounded render-thread
+    pre-roll, then the transition*, #1358 D4) opens an added entry before adoption (#1355 D2).
+    `donate_consumers` debug-asserts `!has_begun_block()` for each pair when it runs.
   - An adopted plan is never a donor: it is the base (#1310's *taken* case).
 - **D6. Acked-batch question: can an ack ever precede a drop? No.** This slice acks nothing. It
   exists so that #1310 and the catch-up never drop PCM, a generation or a held seek the host was

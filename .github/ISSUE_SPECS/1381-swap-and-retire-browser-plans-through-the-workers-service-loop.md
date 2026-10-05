@@ -94,13 +94,42 @@ the Rust host* (#1290) publishes through.
     thread, in the swap block, after #1327's and #1395's sections moved the carried observers,
     before the successor renders, and before the predecessor is committed to retirement.
   - `RenderCompanions::adopt_predecessor` downcasts the predecessor through `as_any_mut`; another
-    type, or no carry record, pairs nothing. Otherwise it calls #1327 D3's
-    `pair_carried_meters` and `pair_carried_observations`, and *Carry spectrum capture state
-    across a plan swap* (#1395) D3's `pair_carried` for its single capture or collection. Each
-    carried reader's per-reader bookkeeping moves with it in the same swap. The delivery state
-    that belongs to the meter stream, not to one reader (`meter_generation`,
-    `meter_snapshot_generation`, the meter header and `meter_loss_count`), is copied from the
-    predecessor's companions. Every step is a swap or a scalar copy: no allocation, no drop.
+    type, or no carry record, pairs nothing. Otherwise it pairs the three reader kinds below. Every
+    step is a swap of two values or a scalar copy: no allocation, no drop.
+  - **Meters.** The browser's `meters` vector is host-core's `HostLiveControlHandles::meters` in
+    its own order (`hosts/host-web/src/lib.rs:7188`), so the carry record's meter indices address
+    it directly. It calls #1327 D3's `pair_carried_meters`, and swaps each pair's `meter_pending`
+    entry (`:1632`, one per meter) the same way.
+  - **Observations: two index spaces.** The carry record's observation indices are positions in
+    host-core's dense `effect_observations` vector (`crates/host-core/src/prepare.rs:452`). The
+    browser stores the handles in a gapped box indexed by its dense `effect_slot`
+    (`hosts/host-web/src/lib.rs:1586`), filled by `dense_effect_slot` at preparation (`:7031-7058`),
+    so the two indices differ and shift when a strip is added. So the companions gain
+    `observation_reader_slots: Box<[u32]>`: entry `i` is the browser slot that host-core reader `i`
+    was stored at, written in that same preparation loop. The browser does not call
+    `pair_carried_observations` (its slices are host-core's dense order). For each `Observation`
+    record `{ successor: s, predecessor: p }` it maps `s` and `p` through its own and the
+    predecessor's tables and swaps the two slots' `effect_observations`, `observation_armed` and
+    `observation_arm_samples` entries. `observation_tracks` and `observation_present` are never
+    moved: they describe the successor's own strips, so a carried reader folds into its strip's
+    new index.
+  - **Spectrum.** #1395 D3's `pair_carried` for its single capture or collection.
+  - **Meter delivery state.** The state that belongs to the meter stream, not to one reader, is
+    taken from the predecessor's companions:
+    - copied: `meter_generation`, `meter_snapshot_generation`, `meter_snapshot_drops_seen`,
+      `meter_loss_count` and `meter_windows`;
+    - from the meter header, only the delivery words: `windows`, `first_sample`, `end_sample`,
+      `sequence`, `reserved[0]` and `reserved[1]`, and `master_gr_present` (it describes the last
+      published frame). The shape words (`struct_size`, `abi_version`, `track_count`,
+      `submix_count`, `master_track_plus_one`) stay the successor's (`WebMeterHeader`,
+      `:1128-1156`). The `f32` frame is not copied: its shape may differ, and the next fold writes
+      it whole in the successor's shape;
+    - the master window state is output-level and continuous across the swap, so it moves: the
+      `master_windows` ring is swapped (both are sized by the first meter's queue capacity,
+      `:7107-7110`), and `master_read`, `master_write`, `master_count`, `master_peak`,
+      `master_start_sample` and `master_end_sample` (`:1619-1629`) are copied. Without them the
+      first fold after the swap finds no master window for its span and fails `master_valid`
+      (`:3600-3603`).
   - So after the swap block the active companions hold the readers of the observers that render.
     Carried readers keep their sequence, and the browser's `meter_generation` does not advance
     (#1290 gates it on a structural apply).
@@ -169,7 +198,9 @@ the Rust host* (#1290) publishes through.
 5. Test-support API, public only under `host-web/test-support`: #1387's `boot_split_for_test`
    now returns a `ControlHalf` that holds the `SessionState`; add `ControlHalf::service()` and
    `ControlHalf::republish_committed_for_test()`, which prepares a successor of the committed model
-   through the browser preparer and publishes it. It exists only for gates 2-4.
+   through the browser preparer and publishes it, and `ControlHalf::publish_successor_for_test(
+   document)`, which prepares a given document through the browser preparer and publishes it
+   without committing it. They exist only for gates 2-5; no export reaches them.
 6. The integration test binary `hosts/host-web/tests/plan_exchange_threads.rs`.
 
 ## Authorized paths
@@ -220,21 +251,33 @@ the Rust host* (#1290) publishes through.
      call.
    - The next service step on A reclaims exactly one plan. The old attachment is dropped on A
      (a drop counter on `RenderCompanions`, test-support only).
-3. **Single mode.** Gate 2 on one thread gives the same blocks. The retired plan and its
+3. **A shifted strip keeps its readers and its master window.** Same binary and threads as
+   gate 2. Boot tracks `b` and `c`, meters on both, `c` designated master, and a live-controlled
+   compressor insert on `c` with its gain-reduction tap armed. Render until a meter window is open.
+   Publish, with `publish_successor_for_test`, the same document plus a muted track `a` whose ID
+   sorts first, so `c` moves from strip 1 to strip 2 and its effect slot moves too. Render on.
+   - The first meter poll after the swap folds a window: its header has `track_count` 3 and
+     `master_track_plus_one` 3 (the successor's shape), its `sequence` is the last pre-swap
+     sequence plus one, `reserved[0]` is unchanged, and `reserved[1]` has `METER_VALID_MASTER` set
+     and a loss count of 0.
+   - From that poll on, every frame's peak and gain-reduction words equal those of a fresh boot of
+     the successor document fed the same input from frame 0. `c`'s gain reduction is in strip 2's
+     word, strip 0's (`a`) and strip 1's (`b`) are 0, and `masterGrDb` is present.
+4. **Single mode.** Gate 2 on one thread gives the same blocks. The retired plan and its
    attachment are reclaimed by the first service call after the swap block.
-4. **Watermark export.** In gate 2's script, `miso_engine_web_v1_watermark_read` returns
+5. **Watermark export.** In gate 2's script, `miso_engine_web_v1_watermark_read` returns
    `RESULT_OK` and a record equal, field for field, to `SessionState::watermark()`. A wrong handle
    returns `RESULT_INVALID_ARGUMENT` and writes nothing.
-5. **Exports are frozen.** `bash scripts/check-web-audioworklet.sh` (which runs
+6. **Exports are frozen.** `bash scripts/check-web-audioworklet.sh` (which runs
    `check-abi-layout-v1.py` over the shipped layout) and `bash scripts/check-sdk-generated.sh
    target/ci/qualification-artifacts` pass. `python3 -B scripts/check-abi-layout-v1.py --self-test`
    passes and turns red if one list omits an export or the record omits a field.
    `check-web-audioworklet.sh`'s self-test turns red on a second main-realm `setInterval(` site
    and on a `setInterval` in the worklet.
-6. **C ABI unchanged.** `cargo test --locked -p capi` passes. `target/release/audit capi` reports
+7. **C ABI unchanged.** `cargo test --locked -p capi` passes. `target/release/audit capi` reports
    0 allocations, locks and syscalls, with the same `pcm_digest` as the base (PR evidence).
-7. **Commands:**
-   - `cargo test --locked -p host-web --features host-web/test-support` (runs gate 2's binary)
+8. **Commands:**
+   - `cargo test --locked -p host-web --features host-web/test-support` (runs gates 2-5)
    - `cargo test --locked -p control-plane --features test-support`
    - `cargo test --locked -p engine --features engine/realtime-audit`
    - `cargo test --locked -p capi`
@@ -255,14 +298,20 @@ the Rust host* (#1290) publishes through.
   called or pairs nothing (the new attachment's readers would sit on producers that left with the
   retired plan, so every meter and the spectrum stream go silent or restart), if the render
   thread drops a retired plan or attachment, or if the Worker never reclaims them.
-- Gate 3: turns red if single mode leaks retired plans, or reclaims them inside the render
+- Gate 3: turns red if the swap copies the whole meter header (the successor would report the old
+  `track_count` and master index), if the master window state is not moved (the first fold fails
+  `master_valid`, so `METER_VALID_MASTER` is clear and a loss is counted), or if observation
+  readers are paired by host-core index or by `observation_tracks` moved with them (`c`'s gain
+  reduction lands in the wrong strip's word). Gate 2 cannot catch these: its successor has the
+  same shape and the same indices.
+- Gate 4: turns red if single mode leaks retired plans, or reclaims them inside the render
   export.
-- Gate 4: turns red if the export reads anything but #1314's record (for example the status
+- Gate 5: turns red if the export reads anything but #1314's record (for example the status
   words, which carry no counters), or writes for a wrong handle.
-- Gate 5: its export-list self-test is not new. The new mutation turns red if the timer rule is
+- Gate 6: its export-list self-test is not new. The new mutation turns red if the timer rule is
   relaxed beyond the one single-mode service tick, which would let control timers into the
   main realm unpinned.
-- Gates 1 and 6 are not new. They hold the bits of both hosts across the move.
+- Gates 1 and 7 are not new. They hold the bits of both hosts across the move.
 
 ## Dependencies
 
@@ -272,6 +321,5 @@ the Rust host* (#1290) publishes through.
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
 - *Prepare through an adapter-supplied preparer in the control-plane crate* (#1400).
-- *Carry meter and effect observation state across a plan swap* (#1327): the carry record and
-  the meter and observation pairing functions.
-- *Carry spectrum capture state across a plan swap* (#1395): the spectrum pairing calls.
+- *Carry meter and effect observation state across a plan swap* (#1327).
+- *Carry spectrum capture state across a plan swap* (#1395).
