@@ -11040,11 +11040,13 @@ fn assert_send_refusal(
 
 /// Issue #1237 gate 3: a live send edit outside the route domain -- a gain past `[-144, 24]` dB
 /// or a matrix coefficient past `[-1, 1]` -- is refused `DOMAIN` and moves nothing; the bounds
-/// themselves are admitted and land in the mirror.
+/// themselves, and subnormal coefficients of both signs (`±1.0e-45`, `±2^-127`), are admitted
+/// and land in the mirror with their exact bits.
 ///
 /// Test value: red if the browser's send admission bounds a live value other than as the session
-/// does (no bound, an exclusive one, or another limit), so a value no session may hold could be
-/// pushed live, or a value a session holds refused.
+/// does (no bound, an exclusive one, another limit, or a refusal of a subnormal coefficient the
+/// session accepts), so a value no session may hold could be pushed live, or a value a session
+/// holds refused.
 #[test]
 fn a_live_send_edit_outside_the_route_domain_is_refused() {
     const DEPTH: u64 = 4;
@@ -11061,6 +11063,10 @@ fn a_live_send_edit_outside_the_route_domain_is_refused() {
     for position in 0..4 {
         refused.extend([matrix(position, 1.5), matrix(position, -1.5)]);
         admitted.extend([matrix(position, 1.0), matrix(position, -1.0)]);
+        // Subnormal coefficients of both signs are in the session's domain (#1237 attempt 2).
+        for subnormal in [1.0e-45, f32::MIN_POSITIVE / 2.0] {
+            admitted.extend([matrix(position, subnormal), matrix(position, -subnormal)]);
+        }
     }
     for (kind, values) in refused {
         let mut host = send_host(&SEND_SEEDS, DEPTH);

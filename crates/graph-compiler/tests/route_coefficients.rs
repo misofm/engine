@@ -334,8 +334,9 @@ fn session_refusal(model: &SessionModel, path: &str) -> Option<String> {
 /// The values are gate 1's boundaries, each one `f32` step either side of them, and the
 /// non-finite values, and subnormal values of both signs with the smallest normal; each is set on
 /// the gain or on one coefficient of an otherwise unity route, under every gate. An accepted value
-/// must also compile, so the lowering (`route_values` too) cannot refuse what the session accepts. This replaces #1215's +700 dB overflow case: inside the domain no fold can
-/// overflow (the largest product is about `15.85`).
+/// must also compile, so the lowering (`route_values` too) cannot refuse what the session accepts.
+/// This replaces #1215's +700 dB overflow case: inside the domain no fold can overflow (the
+/// largest product is about `15.85`).
 ///
 /// Test value: red if the two paths' domains differ -- `route_values` left unbounded, bounded by
 /// other limits than `validate_routes`, exclusive where the session is inclusive, refusing a

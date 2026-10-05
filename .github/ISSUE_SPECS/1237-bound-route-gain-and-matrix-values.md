@@ -291,3 +291,31 @@ Not rerun in attempt 2 (attempt-1 results stand; this attempt changes only `rout
 coefficient check, which no checked-in route reaches with a subnormal value, and test files):
 test-debug-b, `check-builtins-fixtures.sh`, `check-console-fixtures.sh`, `test-web-audioworklet.sh`,
 `check-cross-targets.sh`.
+
+### Batch follow-ups (implementer, 2026-10-05) -- attempt-2 verdict NITs folded
+
+Attempt 2's verdict was PASS. This entry folds its two NITs; no behaviour changes.
+
+- **N2-1 (folded).** The 174-column doc line in `crates/graph-compiler/tests/route_coefficients.rs`
+  (gate 2's doc, "An accepted value must also compile ...") is reflowed to 100 columns.
+- **N2-2 (folded).** `hosts/host-web/src/tests.rs::a_live_send_edit_outside_the_route_domain_is_refused`
+  (gate 3) now also admits `±1.0e-45` and `±f32::MIN_POSITIVE / 2.0` (`±2^-127`) at every matrix
+  position and checks that each lands in the mirror. Defect it now also catches: the browser's send
+  admission refuses a subnormal coefficient that the session accepts (for example a DAZ-style check
+  in `into_route_edit` or in the shared `route_coefficients`). No other host-web test catches it.
+  Mutation M6 (`route_transform` in `crates/graph-compiler/src/ids.rs` checks each coefficient with
+  `v.is_finite() && !v.is_subnormal()` again): red at `tests.rs:11084`, `kind 15, [1e-45, -0.3,
+  0.25, 0.6]`, `submit_commands` returns `1` (`RESULT_INVALID_ARGUMENT`), not `0`. Green on revert.
+- **N2-3 (no change).** A negative coefficient whose product underflows past the subnormal range
+  binds `-0.0`, not `+0.0`. This is D3 as written (only a subnormal product is flushed), and the
+  route renders bit-identical to the same route with an explicit `-0.0` coefficient.
+- **Open for the S0/root coordinator (outside this spec's authorized paths):**
+  - **J1-2.** One shared route-domain bounds constant (in `crates/session/src/model.rs` or
+    equivalent) in place of the two literal copies in `session/src/validate.rs` and
+    `graph-compiler/src/ids.rs`. Gate 2 guards the drift until then.
+  - **J1-3.** The public `RouteControlRecord::new` (re-exported by host-core) bypasses
+    `route_values` and D3. File it or fold it into #1225.
+
+Gates: `cargo fmt --all -- --check` 0; `cargo clippy --locked -p graph-compiler -p host-web
+--all-targets --all-features -- -D warnings` 0; `cargo test --locked -p graph-compiler -p host-web`
+0 (350 passed, 0 failed).
