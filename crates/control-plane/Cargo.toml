@@ -1,0 +1,27 @@
+[package]
+name = "control-plane"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "control_plane"
+
+[features]
+default = []
+# Observers and fault hooks for the adapters' own tests (#1309 D8). Never enabled by a product
+# build: capi turns it on from its `[dev-dependencies]` only.
+test-support = []
+
+[dependencies]
+engine.workspace = true
+effect-contract.workspace = true
+host-core = { workspace = true, features = ["control-provider"] }
+protocol.workspace = true
+session.workspace = true
+source.workspace = true
+
+[lints]
+workspace = true

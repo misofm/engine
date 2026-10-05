@@ -1260,7 +1260,7 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("first block");
-    let revision = children.session.controller.session().revision().0;
+    let revision = children.session.test_controller().session().revision().0;
     let edit = content_edit(&parse_session_json(SESSION).expect("session"));
     let structural = command_bytes_at_revision(
         1,
@@ -1278,13 +1278,13 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
             .expect("reliable event")
             .is_some()
     );
-    let old_epoch = children.session.providers.epoch;
-    let new_epoch = children.session.pending_providers[0].epoch;
+    let old_epoch = children.session.test_providers().test_epoch();
+    let new_epoch = children.session.test_pending_providers()[0].test_epoch();
 
     // First half of `PlanState::render`: the owner swaps in the candidate.
     let report = children
         .plan
-        .owner
+        .test_owner_mut()
         .render_contiguous(
             RenderIo {
                 output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
@@ -1295,7 +1295,7 @@ fn a_live_edit_inside_a_plan_swapping_render_call_commits_without_a_candidate() 
     assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
     assert_eq!(report.active_epoch.0, new_epoch);
     assert_eq!(
-        children.plan.shared.active_epoch.load(Ordering::Acquire),
+        children.plan.test_active_epoch().load(Ordering::Acquire),
         old_epoch,
         "the window is open: the atomic still names the retired plan"
     );
@@ -1954,8 +1954,8 @@ fn an_effect_edit_larger_than_its_queue_rebuilds() {
     let descriptor = compile_children(&document, limits())
         .expect("multiband session")
         .session
-        .providers
-        .effects
+        .test_providers()
+        .test_effects()
         .iter()
         .find(|producer| &*producer.effect_id == "mb")
         .expect("multiband producer")

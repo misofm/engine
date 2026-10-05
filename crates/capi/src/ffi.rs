@@ -17,8 +17,8 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, compile_children,
-    limits_are_valid, plan_error,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailureReport,
+    compile_children, failure_bytes, limits_are_valid, plan_error, render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -703,7 +703,7 @@ pub unsafe extern "C" fn miso_engine_v1_submit_command(
                 RESULT_BACKPRESSURE
             }
             Err(CommandError::CompileRejected(failure)) => {
-                session.last_error.borrow_mut().set(&failure.diagnostics);
+                session.last_error.borrow_mut().set(&failure_bytes(failure));
                 RESULT_COMPILE_REJECTED
             }
             Err(CommandError::Internal) => {
@@ -844,12 +844,12 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
         // Issue #146 session-start re-attestation, on the thread that will render: the first block
         // this plan renders proves the canonical word actually took here, and refuses the render
         // rather than silently producing off-pin audio if it did not. Later blocks skip it.
-        if !state.fp_env_attested.get() {
+        if !state.fp_env_attested() {
             if !lane::fpenv::in_canonical_fp_environment() {
                 error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
-            state.fp_env_attested.set(true);
+            state.attest_fp_env();
         }
         if !output.samples.is_aligned() {
             error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
@@ -913,8 +913,8 @@ pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK
             }
-            Err(code) => {
-                error.store(code, Ordering::Relaxed);
+            Err(rejected) => {
+                error.store(render_error_code(rejected), Ordering::Relaxed);
                 RESULT_RENDER_REJECTED
             }
         }
@@ -1113,7 +1113,7 @@ pub(crate) fn test_transaction_snapshot(
 pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
     // SAFETY: Test callers retain the exclusively owned live plan for this inspection.
     let plan = unsafe { &(*plan).state };
-    (plan.owner.next_absolute_sample(), plan.resources())
+    (plan.owner().next_absolute_sample(), plan.resources())
 }
 
 #[cfg(test)]
@@ -1139,8 +1139,8 @@ pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
     // the render-thread state aliases no exclusive borrow.
     let state = unsafe { &(*plan).state };
     (
-        state.owner.carried_count(),
-        state.owner.carry_mismatch_count(),
+        state.owner().carried_count(),
+        state.owner().carry_mismatch_count(),
     )
 }
 
@@ -1158,7 +1158,7 @@ pub unsafe fn plan_carry_counts(plan: *const Plan) -> (u64, u64) {
 pub unsafe fn plan_replacement_count(plan: *const Plan) -> u64 {
     // SAFETY: The caller guarantees a live plan with no concurrent render, so this shared read of
     // the render-thread state aliases no exclusive borrow.
-    unsafe { &(*plan).state }.owner.active_epoch().0
+    unsafe { &(*plan).state }.owner().active_epoch().0
 }
 
 #[cfg(test)]

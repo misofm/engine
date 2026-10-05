@@ -616,7 +616,7 @@ jobs:
             --exclude conformance --exclude audit --exclude bench --exclude console-workload \
             --exclude wasm-gates --exclude wasm-gate-guest \
             --exclude wasm-gate-corpus \
-            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,control-plane/test-support,engine/realtime-audit
 
   test-debug-b:
     name: DSP crates debug tests

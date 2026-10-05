@@ -2,10 +2,13 @@
 
 use super::*;
 
-pub(crate) struct SharedPlanState {
+/// The state a plan shares with its session and its query projection.
+///
+/// `reports` holds one adapter row per plan epoch a reader can still ask for (#1309 D4).
+pub(crate) struct SharedPlanState<Row> {
     pub(crate) plan_alive: AtomicBool,
     pub(crate) active_epoch: AtomicU64,
-    pub(crate) reports: Mutex<Vec<(u64, PlanResourceReport)>>,
+    pub(crate) reports: Mutex<Vec<(u64, Row)>>,
     pub(crate) render_sequence: AtomicU64,
     pub(crate) render_sample: AtomicU64,
     pub(crate) render_peak_bits: AtomicU32,
@@ -26,7 +29,7 @@ pub(crate) struct SharedPlanState {
     pub(crate) render_peak_observed: AtomicBool,
 }
 
-impl host_core::PlanSampleSource for SharedPlanState {
+impl<Row: Send> host_core::PlanSampleSource for SharedPlanState<Row> {
     fn next_absolute_sample(&self) -> u64 {
         self.render_sample.load(Ordering::Acquire)
     }
@@ -38,7 +41,7 @@ impl host_core::PlanSampleSource for SharedPlanState {
 /// under that lock, and only once the atomic has moved past it; the atomic never moves back. So an
 /// epoch read under the lock always has its row. Read before the lock, a render could publish the
 /// next epoch and a control call remove the old row in between, and the lookup below would panic.
-pub(crate) fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
+pub(crate) fn active_resources<Row: Copy>(shared: &SharedPlanState<Row>) -> Row {
     let reports = shared
         .reports
         .lock()
@@ -50,9 +53,10 @@ pub(crate) fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
         .expect("active plan epoch retains its resource report")
 }
 
-pub(crate) struct PlanState {
+/// The render-thread plan: exclusively the render thread's, apart from its shared projection.
+pub struct PlanState<A: ControlAdapter> {
     pub(crate) owner: RealtimePlanOwner,
-    pub(crate) shared: Arc<SharedPlanState>,
+    pub(crate) shared: Arc<SharedPlanState<A::Row>>,
     /// Issue #146: the render thread's floating-point environment has been attested once.
     ///
     /// The C ABI has no "the render thread starts now" call, so the plan's first render *is* its
@@ -63,9 +67,9 @@ pub(crate) struct PlanState {
     pub(crate) fp_env_attested: core::cell::Cell<bool>,
 }
 
-impl PlanState {
-    pub(crate) fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState>) -> Self {
-        #[cfg(test)]
+impl<A: ControlAdapter> PlanState<A> {
+    pub(crate) fn new(owner: RealtimePlanOwner, shared: Arc<SharedPlanState<A::Row>>) -> Self {
+        #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_constructed += 1);
         Self {
             owner,
@@ -77,15 +81,15 @@ impl PlanState {
 
 /// Any-thread projection of a plan's frozen resource accounting.
 ///
-/// Held in its own [`crate::Plan`] field, disjoint from the render-thread-exclusive
-/// [`PlanState`], so `miso_engine_v1_plan_resources` can run concurrently with a render call.
-pub(crate) struct PlanQueries {
-    pub(crate) shared: Arc<SharedPlanState>,
+/// The adapter holds it apart from the render-thread-exclusive [`PlanState`] (capi: in its own
+/// `Plan` field), so a resource query can run concurrently with a render call.
+pub struct PlanQueries<A: ControlAdapter> {
+    pub(crate) shared: Arc<SharedPlanState<A::Row>>,
 }
 
-impl PlanQueries {
-    /// Copies the resource report of the currently active plan epoch.
-    pub(crate) fn resources(&self) -> PlanResourceReport {
+impl<A: ControlAdapter> PlanQueries<A> {
+    /// Copies the resource row of the currently active plan epoch.
+    pub fn resources(&self) -> A::Row {
         active_resources(&self.shared)
     }
 }
@@ -108,7 +112,7 @@ impl Drop for ObservedRetiredPlan {
     fn drop(&mut self) {
         if let Some(plan) = self.inner.take() {
             drop(plan);
-            #[cfg(test)]
+            #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.current_plan_disposed += 1);
         }
     }
@@ -116,7 +120,7 @@ impl Drop for ObservedRetiredPlan {
 
 impl ObservedCandidatePlan {
     pub(crate) fn new(plan: PreparedRenderPlan) -> Self {
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.candidate_plan_constructed += 1);
         Self { inner: Some(plan) }
     }
@@ -134,7 +138,7 @@ impl Drop for ObservedCandidatePlan {
     fn drop(&mut self) {
         if let Some(plan) = self.inner.take() {
             drop(plan);
-            #[cfg(test)]
+            #[cfg(feature = "test-support")]
             update_test_owners(|owners| owners.candidate_plan_disposed += 1);
         }
     }
@@ -146,7 +150,7 @@ pub(crate) struct ObservedReservation<'a> {
 
 impl<'a> ObservedReservation<'a> {
     pub(crate) fn new(inner: PlanReplacementReservation<'a>) -> Self {
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.reservation_constructed += 1);
         Self { inner: Some(inner) }
     }
@@ -160,7 +164,7 @@ impl<'a> ObservedReservation<'a> {
             .take()
             .expect("reservation commits once")
             .commit();
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         update_test_owners(|owners| {
             owners.candidate_plan_published += 1;
             owners.reservation_committed += 1;
@@ -172,7 +176,7 @@ impl Drop for ObservedReservation<'_> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             drop(inner);
-            #[cfg(test)]
+            #[cfg(feature = "test-support")]
             update_test_owners(|owners| {
                 owners.candidate_plan_disposed += 1;
                 owners.reservation_canceled += 1;
@@ -181,14 +185,42 @@ impl Drop for ObservedReservation<'_> {
     }
 }
 
-impl PlanState {
-    #[cfg(test)]
-    pub(crate) fn resources(&self) -> PlanResourceReport {
+impl<A: ControlAdapter> PlanState<A> {
+    /// Copies the resource row of the currently active plan epoch.
+    #[cfg(feature = "test-support")]
+    pub fn resources(&self) -> A::Row {
         active_resources(&self.shared)
     }
 
-    /// Clones the any-thread query projection installed in [`crate::Plan::queries`].
-    pub(crate) fn queries(&self) -> PlanQueries {
+    /// The render thread's plan owner, for reads that need no render in flight.
+    pub fn owner(&self) -> &RealtimePlanOwner {
+        &self.owner
+    }
+
+    /// The render thread's plan owner, so a test can drive a render in two halves.
+    #[cfg(feature = "test-support")]
+    pub fn test_owner_mut(&mut self) -> &mut RealtimePlanOwner {
+        &mut self.owner
+    }
+
+    /// The atomic that publishes the epoch the render thread last rendered.
+    #[cfg(feature = "test-support")]
+    pub fn test_active_epoch(&self) -> &AtomicU64 {
+        &self.shared.active_epoch
+    }
+
+    /// Whether this plan's render thread has attested its floating-point environment (#146).
+    pub fn fp_env_attested(&self) -> bool {
+        self.fp_env_attested.get()
+    }
+
+    /// Records that this plan's render thread attested its floating-point environment (#146).
+    pub fn attest_fp_env(&self) {
+        self.fp_env_attested.set(true);
+    }
+
+    /// Clones the any-thread query projection the adapter installs beside the plan.
+    pub fn queries(&self) -> PlanQueries<A> {
         PlanQueries {
             shared: Arc::clone(&self.shared),
         }
@@ -197,21 +229,16 @@ impl PlanState {
     /// Render the block that must start at the plan's own next absolute sample.
     ///
     /// Continuity, output shape and clock overflow are core's rules now, reported as typed
-    /// [`RenderError`] variants; capi maps each one to its own diagnostic code and adds nothing.
-    pub(crate) fn render(
+    /// [`RenderError`] variants; the adapter maps each one to its own diagnostic code and adds
+    /// nothing.
+    pub fn render(
         &mut self,
         absolute_sample: u64,
         output: PlanarBufferMut<'_>,
-    ) -> Result<(), u32> {
+    ) -> Result<(), RenderError> {
         let report = self
             .owner
-            .render_contiguous(RenderIo { output }, absolute_sample)
-            .map_err(|error| match error {
-                RenderError::OutputShape => plan_error::OUTPUT_SHAPE,
-                RenderError::TimeDiscontinuity { .. } => plan_error::TIME_DISCONTINUITY,
-                RenderError::TimeOverflow => plan_error::TIME_OVERFLOW,
-                _ => plan_error::PLAN_REJECTED,
-            })?;
+            .render_contiguous(RenderIo { output }, absolute_sample)?;
         self.shared
             .active_epoch
             .store(report.active_epoch.0, Ordering::Release);
@@ -226,12 +253,12 @@ impl PlanState {
     /// the stale `false` for one block costs one dropped record on the lossy telemetry lane --
     /// which that lane documents as permitted -- and `publish_render_observation` marks that block
     /// so the consumer drops it rather than reading a `0.0` that was never measured.
-    pub(crate) fn render_peak_observed(&self) -> bool {
+    pub fn render_peak_observed(&self) -> bool {
         self.shared.render_peak_observed.load(Ordering::Relaxed)
     }
 
     /// Publish this block's observation. A `NaN` peak means "not measured this block".
-    pub(crate) fn publish_render_observation(&self, peak: f32) {
+    pub fn publish_render_observation(&self, peak: f32) {
         self.shared
             .render_sample
             .store(self.owner.next_absolute_sample(), Ordering::Release);
@@ -242,10 +269,10 @@ impl PlanState {
     }
 }
 
-impl Drop for PlanState {
+impl<A: ControlAdapter> Drop for PlanState<A> {
     fn drop(&mut self) {
         self.shared.plan_alive.store(false, Ordering::Release);
-        #[cfg(test)]
+        #[cfg(feature = "test-support")]
         update_test_owners(|owners| owners.current_plan_disposed += 1);
     }
 }

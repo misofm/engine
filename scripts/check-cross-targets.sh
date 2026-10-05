@@ -203,5 +203,9 @@ CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
 CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
     cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
     -p conformance
+# control-plane: the control plane both adapters call builds for the browser target (#1309 D11).
+# It never builds `capi`.
+CARGO_TARGET_DIR="$wasm_target_dir" RUSTFLAGS="$wasm_flags" \
+    cargo check --quiet --locked --target wasm32-unknown-unknown -p control-plane
 
 printf 'cross-target matrix: PASS (x86-64-v3; aarch64 iOS and Android product crates checked and linted (#1017), ios-asm-memset-pattern16 expected failures (#1018); no eight-lane code in the iOS or Android library (#1112); wasm simd128; armv7 and scalar wasm refused (#1041, #1062); parametric-eq, builtins, effect-compiler rows deduplicated)\n'

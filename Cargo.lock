@@ -236,6 +236,7 @@ name = "capi"
 version = "0.1.0"
 dependencies = [
  "bench-support",
+ "control-plane",
  "effect-contract",
  "engine",
  "graph",
@@ -313,6 +314,18 @@ dependencies = [
  "lane",
  "rack",
  "session",
+]
+
+[[package]]
+name = "control-plane"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "engine",
+ "host-core",
+ "protocol",
+ "session",
+ "source",
 ]
 
 [[package]]

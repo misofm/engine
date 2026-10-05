@@ -255,3 +255,87 @@ are not attempts.
 ## Dependencies
 
 - None.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Base re-captured at `d6fa539a1` (after the stream-I merge) before any change.
+
+**What changed.** New crate `crates/control-plane` (lib `control_plane`): `control.rs`, `compile.rs`
+and `plan.rs` moved by `git mv`; `error.rs` holds the typed failures (`CompileFailure::{Resource,
+Diagnostics}`, `ResourceFault`); `adapter.rs` holds `ControlAdapter` (exactly `type Row:
+From<PlanResources> + Copy; const ADAPTER_ALLOCATIONS: &'static [u64]`, with `PlanResources:
+From<A::Row>` as a where clause on the items that read rows back), `ControlLimits` and
+`PlanResources`. `SessionState<A>`, `PlanState<A>`, `PlanQueries<A>`, `SharedPlanState<A::Row>`
+and `TestTransactionSnapshot<Row>` are generic; nothing adapter-specific is stored. capi keeps the
+FFI, ABI types, `FixedBytes`, `plan_error`, `limits_are_valid`/`all_limits_nonzero`,
+`CapiAdapter` (`Row = PlanResourceReport`, allocations = `size_of` of `Session` and `Plan`),
+type aliases `SessionState`/`PlanState`/`PlanQueries`, the three `From` conversions, the
+failure-byte, render-code and source-report mappings, and a `compile_children` wrapper that
+converts the limits once and builds `session_error` after the control plane returns.
+`live_peak_tests` moved to `crates/capi/src/runtime/live_peak_tests.rs` with unchanged assertions
+(its helpers convert with `.into()` and map failures with `failure_bytes`). Test-only crate items
+(`CapiResources`, `CompiledModelAdmission`, `LiveEpochResources`, `validate_live_peak`,
+`ProviderEpoch`, `LIVE_QUEUE_DEPTH`, `C_ABI_LIVE_LANES`, `prepare_caps`) are re-exported only
+under `test-support` and are crate-private otherwise (`#[cfg_attr(not(feature = "test-support"),
+allow(unreachable_pub))]` on those items only). `PlanState` gained two production accessors capi
+needs because the fields are no longer reachable: `owner()` (for `plan_carry_counts` and
+`plan_replacement_count`) and `fp_env_attested()`/`attest_fp_env()`. Policy, cross-target and CI
+edits per D9-D12. `docs/C_ABI_V1_QUALIFICATION.md` names none of the moved paths, so it is
+unchanged. No check in `command` or `commit_live` moved; no render-side lock was added.
+
+**Gate 1 (same bits, same accounting).** `target/release/audit capi`, base and head: identical
+line, `pcm_digest` `75f4e6c21da7a2a7`, allocations, deallocations, locks, syscalls and
+total_violations all 0. `resource_lifecycle -- --nocapture --test-threads=1` (serial, so the
+diff is line for line; RaceCounts lines are timing-dependent and excluded): every row identical
+except the capi-retained rows, each smaller by exactly 24 bytes:
+`capi_retained_bytes` 274153 -> 274129; observed capi 274153/145536/132304/151394 ->
+274129/145512/132280/151370; `capi: double-live requirement` 174780 -> 174756; `capi: live
+peak` 413237 -> 413213. `size_of::<CompileLimits>() - size_of::<ControlLimits>()` computed from
+the two types at the head by a scratch probe linking `capi` and `control-plane`: 208 - 184 = 24.
+Largest-allocation, graph, source, effect, builtin and plan rows unchanged.
+
+**Gate 2.** `cargo test --locked -p capi`: 72 lib tests (base 71 = 23 tests.rs + 29 live_tests.rs
++ 1 live_peak_tests + 16 ffi.rs + 2 abi.rs, plus the new one), 2 plan_swap_race, 11
+resource_lifecycle, all pass. `tests.rs`/`live_tests.rs` diffs are accessor rewrites
+(`.controller` -> `.test_controller()`, `.providers.epoch` -> `.test_providers().test_epoch()`,
+`.plan.owner` -> `.owner()`/`.test_owner_mut()`, `.plan.shared.active_epoch` ->
+`.test_active_epoch()`, `synchronize_plan_epochs` -> `test_synchronize_plan_epochs`) plus one
+panic-message format (`{code}` -> `{code:?}`, since the render error is now `RenderError`).
+`crates/capi/tests/` unchanged. No resource-byte assertion needed a change.
+
+**New test and mutation evidence.**
+`runtime::report_row_tests::a_stored_report_row_reads_back_as_the_resources_it_was_built_from`
+(capi `runtime/mod.rs`): `PlanResources -> PlanResourceReport -> PlanResources` is the identity
+for a value with every field distinct and nonzero, with `TailSamples::Finite(6)` and
+`TailSamples::Infinite`. Mutations of the readback conversion, full capi suite with
+`--no-fail-fast`:
+- M1, every stored tail reads back as `Finite`: the new test red; every other capi test green
+  (71 lib, 2 race, 11 lifecycle). This is the defect no existing test catches.
+- M2, `source_total_bytes` and `source_overhead_bytes` swapped on readback: the new test red, and
+  `double_live_oracle_drives_exact_and_one_below_c_caps` also red (admission-read fields are
+  already defended end to end; the new test adds the fields and tail kind the admissions do not
+  read).
+- Reverted: all green.
+
+**Gate 3.** `bash scripts/check-capi-abi.sh`: ok (shared and static). `--self-test`: ok.
+`cargo tree -p capi -e normal,features -i control-plane`: only `control-plane feature
+"default"`; `test-support` does not reach the release capi build.
+
+**Gate 4.** `bash scripts/check-cross-targets.sh` with the D11 row: PASS (exit 0; the wasm32 simd128 `-p control-plane` check row ran in the matrix).
+
+**Gate 5.** `check-host-core-policy.sh` ok; `test-host-core-policy.sh` ok (every old leg kept;
+new legs: control-plane recompiles the pipeline, reinvents the identity processor, hand-decodes
+the wire, drops control-provider, src deleted, manifest deleted; capi enables control-provider);
+`check-workspace-policy.sh` ok; `check-realtime-policy.sh` ok; `check-test-support-ci.py` ok;
+`check-release-shape.py` ok; `check-ci-path-routing.py` ok (CI file changed).
+
+**Gate 6.** `cargo test --locked -p control-plane --features test-support` ok (no tests of its
+own); `cargo fmt --all -- --check` ok; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings` ok; `cargo clippy --locked -p control-plane --all-targets -- -D
+warnings` ok.
+
+**Open items.** None blocking. Reviewer attention: the `cfg_attr(..., allow(unreachable_pub))`
+pattern for test-only exposure (the workspace denies `unreachable_pub`, and visibility cannot be
+feature-gated otherwise without duplicating definitions).

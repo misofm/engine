@@ -638,8 +638,15 @@ fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
 
     assert_eq!(zero.plan.resources(), explicit.plan.resources());
     assert_eq!(
-        zero.session.providers.sources.retained_bytes(),
-        explicit.session.providers.sources.retained_bytes()
+        zero.session
+            .test_providers()
+            .test_sources()
+            .retained_bytes(),
+        explicit
+            .session
+            .test_providers()
+            .test_sources()
+            .retained_bytes()
     );
 }
 
@@ -683,11 +690,11 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         Err(CommandError::BufferTooSmall { required: 4_096 })
     ));
     assert_eq!(
-        children.session.controller.session().revision(),
+        children.session.test_controller().session().revision(),
         SessionRevision(42)
     );
-    assert_eq!(children.session.providers.epoch, 0);
-    assert_eq!(children.plan.owner.active_epoch().0, 0);
+    assert_eq!(children.session.test_providers().test_epoch(), 0);
+    assert_eq!(children.plan.owner().active_epoch().0, 0);
 
     let first_len = children
         .session
@@ -695,13 +702,13 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         .expect("first structural command");
     let first_response = children.session.command_response(first_len).to_vec();
     assert_eq!(
-        children.session.controller.session().revision(),
+        children.session.test_controller().session().revision(),
         SessionRevision(43)
     );
-    assert_eq!(children.session.providers.epoch, 0);
-    assert_eq!(children.session.pending_providers[0].epoch, 1);
-    assert_eq!(children.plan.owner.active_epoch().0, 0);
-    assert_eq!(children.session.controller.replay().len(), 1);
+    assert_eq!(children.session.test_providers().test_epoch(), 0);
+    assert_eq!(children.session.test_pending_providers()[0].test_epoch(), 1);
+    assert_eq!(children.plan.owner().active_epoch().0, 0);
+    assert_eq!(children.session.test_controller().replay().len(), 1);
     children
         .session
         .submit(
@@ -764,10 +771,10 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         Err(CommandError::Backpressure)
     ));
     assert_eq!(
-        children.session.controller.session().revision(),
+        children.session.test_controller().session().revision(),
         SessionRevision(43)
     );
-    assert_eq!(children.session.controller.replay().len(), 1);
+    assert_eq!(children.session.test_controller().replay().len(), 1);
 
     // The swap block's continuity is `a_c_abi_structural_transaction_keeps_the_source_playing`'s.
     children
@@ -777,14 +784,14 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
             PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
         )
         .expect("replacement boundary");
-    assert_eq!(children.plan.owner.active_epoch().0, 1);
-    assert_eq!(children.session.providers.epoch, 0);
+    assert_eq!(children.plan.owner().active_epoch().0, 1);
+    assert_eq!(children.session.test_providers().test_epoch(), 0);
     children
         .session
-        .synchronize_plan_epochs()
+        .test_synchronize_plan_epochs()
         .expect("control promotion and retirement");
-    assert_eq!(children.session.providers.epoch, 1);
-    assert!(children.session.pending_providers.is_empty());
+    assert_eq!(children.session.test_providers().test_epoch(), 1);
+    assert!(children.session.test_pending_providers().is_empty());
 
     let second_len = children
         .session
@@ -792,16 +799,16 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         .expect("source-changing replacement after reclaim");
     assert!(second_len > 0);
     assert_eq!(
-        children.session.controller.session().revision(),
+        children.session.test_controller().session().revision(),
         SessionRevision(44)
     );
     assert_eq!(
-        source_region_end(&children.session.providers.sources),
+        source_region_end(children.session.test_providers().test_sources()),
         48_000
     );
-    assert_eq!(children.session.pending_providers[0].epoch, 2);
+    assert_eq!(children.session.test_pending_providers()[0].test_epoch(), 2);
     assert_eq!(
-        source_region_end(&children.session.pending_providers[0].sources),
+        source_region_end(children.session.test_pending_providers()[0].test_sources()),
         512
     );
     children
@@ -813,7 +820,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         .expect("second replacement boundary");
     children
         .session
-        .synchronize_plan_epochs()
+        .test_synchronize_plan_epochs()
         .expect("second provider promotion and retirement");
     // #1273 D1: the successor is diffed against the committed model before the transaction, so
     // the source whose declaration changed (frames 512) restarts in a new ring at generation 1,
@@ -832,10 +839,13 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
             },
         )
         .expect("a changed source restarts its feed at generation 1, frame 0");
-    assert_eq!(children.session.providers.epoch, 2);
-    assert_eq!(source_region_end(&children.session.providers.sources), 512);
-    assert!(children.session.pending_providers.is_empty());
-    assert!(children.session.retired_providers.is_empty());
+    assert_eq!(children.session.test_providers().test_epoch(), 2);
+    assert_eq!(
+        source_region_end(children.session.test_providers().test_sources()),
+        512
+    );
+    assert!(children.session.test_pending_providers().is_empty());
+    assert!(children.session.test_retired_providers().is_empty());
     children
         .session
         .seek(b"fixture-source", 2, 384)
@@ -876,10 +886,10 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         first_response
     );
     assert_eq!(
-        children.session.controller.session().revision(),
+        children.session.test_controller().session().revision(),
         SessionRevision(44)
     );
-    assert!(children.session.pending_providers.is_empty());
+    assert!(children.session.test_pending_providers().is_empty());
 }
 
 /// A test signal with no exact-zero sample (issue #1269's acceptance shape): every frame and
@@ -1385,12 +1395,12 @@ fn removing_a_track_and_its_source_keeps_the_other_source_playing() {
         (crate::RESULT_INVALID_ARGUMENT, &b"source.id.unknown"[..])
     );
     let swapped = feed_and_render_direct(&mut children, &both[..1], 6, 6);
-    assert_eq!(children.plan.owner.carried_count(), 1);
+    assert_eq!(children.plan.owner().carried_count(), 1);
 
     let committed = session::canonical_session_json(
         children
             .session
-            .controller
+            .test_controller()
             .session()
             .compiled()
             .normalized_model(),
@@ -1450,13 +1460,16 @@ fn a_refused_structural_transaction_moves_no_producer() {
             "{phase:?}: {refused:?}"
         );
         assert_eq!(
-            children.session.controller.session().revision(),
+            children.session.test_controller().session().revision(),
             SessionRevision(42),
             "{phase:?}"
         );
-        assert!(children.session.pending_providers.is_empty(), "{phase:?}");
+        assert!(
+            children.session.test_pending_providers().is_empty(),
+            "{phase:?}"
+        );
         rendered.extend(feed_and_render_direct(&mut children, &source, 2, 2));
-        assert_eq!(children.plan.owner.carried_count(), 0, "{phase:?}");
+        assert_eq!(children.plan.owner().carried_count(), 0, "{phase:?}");
         assert_bit_identical(&format!("{phase:?}"), 0, &rendered, &expected);
     }
 }
@@ -1556,14 +1569,14 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
                 .expect("reliable event")
                 .is_some()
         );
-        let old_epoch = children.session.providers.epoch;
-        let new_epoch = children.session.pending_providers[0].epoch;
+        let old_epoch = children.session.test_providers().test_epoch();
+        let new_epoch = children.session.test_pending_providers()[0].test_epoch();
         assert_eq!(new_epoch, old_epoch + 1);
 
         // First half of `PlanState::render`: the owner swaps and retires the old plan.
         let report = children
             .plan
-            .owner
+            .test_owner_mut()
             .render_contiguous(
                 RenderIo {
                     output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
@@ -1573,13 +1586,13 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
             .expect("swapping block");
         assert_eq!(report.swap, engine::realtime::SwapOutcome::Applied);
         assert_eq!(report.active_epoch.0, new_epoch);
-        assert_eq!(children.plan.owner.carried_count(), round);
+        assert_eq!(children.plan.owner().carried_count(), round);
         assert!(
             pcm.iter().all(|sample| *sample != 0.0),
             "round {round}: the swap block plays the carried ring"
         );
         assert_eq!(
-            children.plan.shared.active_epoch.load(Ordering::Acquire),
+            children.plan.test_active_epoch().load(Ordering::Acquire),
             old_epoch,
             "the window is open: the atomic still names the retired plan"
         );
@@ -1594,7 +1607,7 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         request_id += 1;
         pending = structural(request_id, revision, round);
         let window_structural = children.session.command(&pending, 4_096);
-        let window_revision = children.session.controller.session().revision().0;
+        let window_revision = children.session.test_controller().session().revision().0;
         // The any-thread query reads the lagging atomic's row, which must still be there.
         let window_query = children.plan.queries().resources();
         let window_rows = children.session.test_transaction_snapshot().resource_rows;
@@ -1608,8 +1621,7 @@ fn control_calls_inside_a_plan_swapping_render_call_keep_replacement_live() {
         // Second half of `PlanState::render`: publish the epoch that rendered the block.
         children
             .plan
-            .shared
-            .active_epoch
+            .test_active_epoch()
             .store(report.active_epoch.0, Ordering::Release);
         let after_structural = children.session.command(&pending, 4_096);
         let snapshot = children.session.test_transaction_snapshot();
@@ -1731,7 +1743,7 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     // First half of `PlanState::render`: swap to the eight-EQ plan.
     let report = children
         .plan
-        .owner
+        .test_owner_mut()
         .render_contiguous(
             RenderIo {
                 output: PlanarBufferMut::try_new(&mut pcm, 2, 128, 128).expect("output"),
@@ -1744,12 +1756,11 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
     let window = children.session.command(&request, 4_096);
     // Refused before compiling: the report table is full while the atomic lags.
     let window_compiles = test_lifecycle_counters().candidate_plan_constructed - compiled_before;
-    let window_revision = children.session.controller.session().revision().0;
+    let window_revision = children.session.test_controller().session().revision().0;
     // Second half: publish the epoch that rendered the block.
     children
         .plan
-        .shared
-        .active_epoch
+        .test_active_epoch()
         .store(report.active_epoch.0, Ordering::Release);
     let after = children.session.command(&request, 4_096);
     assert_eq!(
@@ -1759,7 +1770,7 @@ fn a_valid_edit_inside_the_swap_window_is_backpressured_not_compile_rejected() {
             window_compiles,
             window_revision,
             control_outcome(&after),
-            children.session.controller.session().revision().0,
+            children.session.test_controller().session().revision().0,
         ),
         (
             "Backpressure".to_owned(),
@@ -2796,8 +2807,8 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
         .collect::<Vec<_>>();
     let mut kept = c
         .session
-        .providers
-        .effects
+        .test_providers()
+        .test_effects()
         .iter()
         .map(|producer| {
             (
@@ -2816,11 +2827,11 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
 
     // One producer per strip, in canonical strip order, with no input lane.
     let model = compiled.normalized_model();
-    let strips = &c.session.providers.strips;
-    assert_eq!(strips.track_count, model.tracks.len(), "{label}");
+    let strips = c.session.test_providers();
+    assert_eq!(strips.test_track_count(), model.tracks.len(), "{label}");
     assert_eq!(
         strips
-            .controls
+            .test_strip_controls()
             .iter()
             .map(|producer| &*producer.track_id)
             .collect::<Vec<_>>(),
@@ -2832,7 +2843,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
     );
     assert!(
         strips
-            .controls
+            .test_strip_controls()
             .iter()
             .all(|producer| producer.input.is_none()),
         "{label}: no strip carries an input lane"
@@ -2879,7 +2890,7 @@ fn assert_live_lanes_render_like_lanes_free(document: &str, label: &str, expect_
                 block * quantum as u64,
                 PlanarBufferMut::try_new(&mut c_pcm, 2, quantum, quantum).expect("C output"),
             )
-            .unwrap_or_else(|code| panic!("{label}: C render {code}"));
+            .unwrap_or_else(|code| panic!("{label}: C render {code:?}"));
         let mut host_pcm = vec![f32::NAN; quantum * 2];
         plan.render_contiguous(
             RenderIo {

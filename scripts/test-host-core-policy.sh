@@ -11,6 +11,7 @@ create_fixture() {
     local root="$1"
     mkdir -p "$root/crates/host-core/src" \
         "$root/crates/capi/src" \
+        "$root/crates/control-plane/src" \
         "$root/hosts/host-web/src"
     printf '%s\n' \
         '[package]' \
@@ -27,19 +28,30 @@ create_fixture() {
         'graph.workspace = true' \
         'protocol = { workspace = true, optional = true }' \
         >"$root/crates/host-core/Cargo.toml"
+    # #1309 D9: the control-plane crate owns the control-provider edge; capi calls it.
+    printf '%s\n' \
+        '[package]' \
+        'name = "control-plane"' \
+        '' \
+        '[dependencies]' \
+        'host-core = { workspace = true, features = ["control-provider"] }' \
+        >"$root/crates/control-plane/Cargo.toml"
     printf '%s\n' \
         '[package]' \
         'name = "capi"' \
         '' \
         '[dependencies]' \
-        'host-core = { workspace = true, features = ["control-provider"] }' \
+        'control-plane.workspace = true' \
         >"$root/crates/capi/Cargo.toml"
     printf '%s\n' \
         'pub fn prepare_host_runtime() {}' \
         >"$root/crates/host-core/src/lib.rs"
     printf '%s\n' \
-        'fn compile_children() { host_core::prepare_host_runtime(); }' \
+        'fn compile_children() { control_plane::compile_children(); }' \
         >"$root/crates/capi/src/runtime.rs"
+    printf '%s\n' \
+        'pub fn compile_children() { host_core::prepare_host_runtime(); }' \
+        >"$root/crates/control-plane/src/compile.rs"
     # host-web is no longer exempt (issue #106 is done: it depends on host-core like every
     # other host) and must use the facade. It is the one host under hosts/ since #1032 removed the
     # unused native and mobile shells, so the generic host cases below mutate it too.
@@ -68,6 +80,8 @@ bash "$policy_script" "$valid" >/dev/null
 
 expect_failure capi-recompiles-the-pipeline \
     'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/capi/src/runtime.rs"'
+expect_failure control-plane-recompiles-the-pipeline \
+    'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/control-plane/src/compile.rs"'
 expect_failure host-recompiles-the-pipeline \
     'printf "%s\n" "fn x() { let _ = prepare_session_builtins(&compiled, &[], caps); }" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure host-binds-its-own-source-set \
@@ -80,6 +94,14 @@ expect_failure capi-hand-decodes-the-control-wire \
     'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure capi-reimplements-the-replay-cache \
     'printf "%s\n" "struct ReplayEntryRecord { id: u64 }" >>"$root/crates/capi/src/runtime.rs"'
+expect_failure control-plane-reinvents-the-identity-processor \
+    'printf "%s\n" "struct IdentityProcessor;" >>"$root/crates/control-plane/src/compile.rs"'
+expect_failure control-plane-hand-decodes-the-control-wire \
+    'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/control-plane/src/compile.rs"'
+expect_failure control-plane-drops-control-provider \
+    'sed -i "s/host-core = { workspace = true, features = \[\"control-provider\"\] }/host-core.workspace = true/" "$root/crates/control-plane/Cargo.toml"'
+expect_failure capi-enables-control-provider \
+    'printf "%s\n" "host-core = { workspace = true, features = [\"control-provider\"] }" >>"$root/crates/capi/Cargo.toml"'
 expect_failure facade-makes-protocol-mandatory \
     'sed -i "s/protocol = { workspace = true, optional = true }/protocol.workspace = true/" "$root/crates/host-core/Cargo.toml"'
 expect_failure facade-default-enables-control-provider \
@@ -107,6 +129,10 @@ expect_failure host-web-src-directory-deleted \
     'rm -rf -- "$root/hosts/host-web/src"'
 expect_failure capi-src-directory-deleted \
     'rm -rf -- "$root/crates/capi/src"'
+expect_failure control-plane-src-directory-deleted \
+    'rm -rf -- "$root/crates/control-plane/src"'
+expect_failure control-plane-manifest-deleted \
+    'rm -f -- "$root/crates/control-plane/Cargo.toml"'
 expect_failure hosts-directory-deleted 'rm -rf -- "$root/hosts"'
 expect_failure no-host-directories 'rm -rf -- "$root/hosts"/*'
 
