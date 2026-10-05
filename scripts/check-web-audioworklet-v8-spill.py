@@ -80,12 +80,24 @@ where it sits in the listing:
 | dual | depth-1 tail (`svf_cascade_interleaved`, no dry lane), after the pair | 2 | 2 | held |
 | mono | depth-2 pair (`svf_cascade_skewed`, admitted plan) | 1 | 2 | held |
 | mono | depth-1 tail, after the pair | 1 | 1 | held |
+| mono | depth-2 pair, masked (`svf_cascade_skewed_with_dry_masks`, refused or all-live plan) | 1 | 2 | held |
 | dual | depth-2 pair | 2 | 4 | reported |
 
-A held row must match exactly one select-free innermost loop of its function. A row that matches
-none, or more than one, fails closed and prints the loops that were found: nothing is checked, so
-nothing passes. The masked kernels (a refused or all-live plan's pairs, a tail with a dry lane) are
+A held row must match exactly one innermost loop of its shape in its function (select-free, or
+masked for the masked row). A row that matches none, or more than one, fails closed and prints the
+loops that were found: nothing is checked, so nothing passes. The masked mono pair is held since
+issue #1328 (amendment A6): the joint flush's live values once pushed one of its integrators
+through a slot while V8 rebuilt section 0's dry mask in the loop, and the EQ now reads that mask
+from channel state. The other masked kernels (the dual masked pair, a tail with a dry lane) are
 out of scope: the masked depth-one tails carried a slot before #977.
+
+**The dual tail's row also holds the EQ's block-limit fold** (issue #1328, A2 and A6). After the
+joint flush, V8 kept the fold's two per-channel flags (one packed word) in a stack slot across the
+tail's back edge (`[rbp-0xc8]`). It stopped once the dry masks were read from channel state, which
+took the in-loop mask rebuilds out of the same function's masked loops; folding both channels
+into one flag instead moved the slot rather than removing it. A general-purpose value's slot
+follows the whole function's register use, so the allocation is observed, not structurally
+guaranteed, and this row is what holds it.
 
 **Why the dual pair is reported, not held.** It carries ten values across its back edge (eight
 integrators and two skew carries) beside 24 loop-invariant coefficients, in sixteen vector
@@ -160,6 +172,7 @@ class Row:
     steps: int
     held: bool = True
     after: str | None = None  # the label of a row whose loops this loop must be reachable from
+    masked: bool = False  # the row's loop carries the dry-mask selects (not select-free)
 
 
 PAIR = "depth-2 pair, select-free"
@@ -168,6 +181,7 @@ LOOPS = (
     Row("dual", PAIR, streams=2, steps=4, held=False),
     Row("mono", PAIR, streams=1, steps=2),
     Row("mono", "depth-1 tail, select-free", streams=1, steps=1, after=PAIR),
+    Row("mono", "depth-2 pair, masked", streams=1, steps=2, masked=True),
 )
 STEP_SHAPE = {"vmulps": 7, "vaddps": 9, "vsubps": 2}
 # A blend is a select whatever its inputs. An `or` is one unless it only combines masks (below).
@@ -644,11 +658,13 @@ def describe(loop: Loop) -> str:
 
 
 def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
-    """The select-free loops of a row's shape, restricted by its `after` row."""
+    """The loops of a row's shape (select-free, or masked for a masked row), restricted by its
+    `after` row."""
     matched = [
         loop
         for loop in loops
-        if loop.select_free and loop.steps == row.steps and loop.streams == row.streams
+        if loop.select_free != row.masked and loop.steps == row.steps
+        and loop.streams == row.streams
     ]
     if row.after is not None:
         (before,) = [r for r in rows if r.function == row.function and r.label == row.after]
@@ -976,11 +992,18 @@ def self_test() -> int:
             verdicts.append(check_function("t", assemble(layout), rows))
             layout[layout.index("jnz <+TAIL>") + 1] = "jmp <+RAMP>"
             verdicts.append(check_function("t", assemble(layout), rows))
+            # A masked row holds the masked loop: a carry there fails it, a clean one passes, and
+            # a select-free loop of the same shape is not its loop (fails closed).
+            select = ["vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4", "vpor xmm1,xmm1,xmm3"]
+            masked_row = (Row("t", "masked", streams=2, steps=2, masked=True),)
+            for listing in (carried + select, tail + select, tail):
+                verdicts.append(check_function("t", synthetic(listing), masked_row))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    if verdicts != [1, 0, 1, 0, 0, 1]:
+    if verdicts != [1, 0, 1, 0, 0, 1, 1, 0, 1]:
         failures += 1
-        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 1]", file=sys.stderr)
+        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 1, 1, 0, 1]",
+              file=sys.stderr)
     if failures:
         return 1
     print(f"V8 spill gate self-test: {len(cases) + len(verdicts)} cases ok")

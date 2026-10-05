@@ -367,45 +367,140 @@ restatements in `crates/lane/tests/g2_kernel_identity.rs` (oracle of
 `g2_svf_step_yields_both_taps_of_one_state`) and `tools/audit/src/unfused_fma.rs` still use the
 per-word flush (green, since their inputs never reach the joint band).
 
-### Attempt 2 (Terra, 2026-10-05, branch `codex/d15-stream-g-1328`) -- partial, blocked
+### Attempt 2 (Terra, 2026-10-05, branch `codex/d15-stream-g-1328`)
 
-**A1 done (`691f4c1be`).** `selects` in `scripts/check-web-audioworklet-v8-spill.py`: a blend is
-always a select; an `or` is one unless both inputs are lane masks computed in the loop (compares,
-or bitwise ops over such masks alone). Unseen inputs count as a select (fails closed). Self-test 19
--> 23 cases; five classifier mutations each turn at least one case red (old "every or" rule: `flush
-pair`; "no or": four cases; "any mask input": three; outside register as mask: `outside mask`;
-"every logic op is a mask": two). Base (`0e3e21b68`) listings: every verdict unchanged. Head
-listings now match every row; the dual tail's `[rbp-0xc8]` is reported as the real carry. The
-#1000 red arms are not yet rebuilt (they need the final A2/A3 code).
+Host: AMD EPYC 7313P, Node v22.23.2 (V8 12.4.254.21-node.56), rustc 1.97.1. Commits: `691f4c1be`
+(A1) and the attempt-2 commit that carries this record.
 
-**V8 rows (pinned Node, AMD EPYC 7313P, held rows marked H):**
+**A1, the select classifier (`691f4c1be`).** `selects` in `scripts/check-web-audioworklet-v8-spill.py`:
+a blend is always a select; an `or` is one unless both inputs are lane masks the loop itself
+computed (compares, or bitwise ops over such masks alone). Anything it cannot see through counts as
+a select, so a doubtful loop reads as masked and a held row fails closed. Structural rather than a
+count of `or`s per SVF step, because a count would also pass a loop where a real select replaced
+one of the flush's `or`s. Self-test 19 -> 26 cases (four classifier cases, three masked-row
+verdicts). Mutations, each red on the self-test: the old "every `or` is a select" (`flush pair`);
+"no `or` is a select" (four cases); "one mask input suffices" (three); an outside register taken as
+a mask (`outside mask`); "every logic op makes a mask" (two); a row ignoring `masked` (verdicts).
+On the base (`0e3e21b68`) listings every row's verdict is unchanged.
 
-| loop | base | attempt 1 | joint `bool` fold (scratch) | joint fold + masks laundered (scratch) |
-|---|---|---|---|---|
-| dual tail, select-free (H) | 0 | 1 (`[rbp-0xc8]`) | 0 | 0 |
-| dual tail, masked | 0 | 1 | 0 | 0 |
-| mono pair, select-free (H) | 0 | 0 | 0 | 0 |
-| mono tail, select-free (H) | 0 | 0 | 0 | 0 |
-| mono pair, masked | 0 | 1 (`[rbp-0x220]`) | 1 | 0 |
-| dual pair (reported) | 10 | 13 | 13 | 13 |
-| dual pair, masked | 11 | 12 | 11 | 15 |
+**A3, the dry masks in channel state.** `Channel::dry[s]` holds `dry_mask(s)` as of the last
+`refresh_identity`, which every coefficient- or `remaining`-change site already calls; the
+stationary cascades (`interleave`, `interleave_mono`) read it instead of building it in place.
+Cause, from the V8 listing: the wasm computed section 0's mask once before the loop (a splat, three
+`replace_lane`s from scalar decisions and `eq 1.0`), and V8's scheduler sank that pure construction
+into the masked mono pair's loop, rebuilding it every frame from four scalar spill slots; with the
+joint flush's extra live values that pushed `ic1` through `[rbp-0x220]`. A load from channel state
+cannot be sunk. `identity_flags_agree` now re-derives `dry` too (asserted on every stationary block
+in debug). `Lane::Mask` gains `Send` so the masks can live in effect state. The other encodings
+tried first, none clean: attempt 1's `flush_pair`, compares reordered, `r1 & (f1 | r2)`, chained
+`andnot`, per-word `flush` then the rest test on the flushed words, the skewed kernel in forward
+section order, the flush after the output mix.
 
-**A2 finding.** Folding both channels into one `bool` in `StoreBound` (and letting the EQ rescan
-the planes only when that fold fails, so the per-channel verdict stays the scan's) clears the dual
-tail's integer slot. Not yet committed: the native gates cannot run (below).
+**A2, the dual tail's integer slot: no change to the check.** With A3 in, the per-channel fold
+stays in a register: the slot came from the same function's masked loops rebuilding their dry masks
+in the loop, not from the check. Folding both channels into one flag (authorized by A6, built and
+measured) is worse: with A3 it moves the slot to `[rbp-0xf0]`. A loop with one induction register
+(also built) is clean as well but adds a frames-below-depth loop to the function; not taken. So the
+check, its semantics and `[bool; S]` API are untouched, and the authorized `g2_kernel_identity.rs`
+and `interleave` edits for a joint fold were not needed. **Stability, honestly:** not structural.
+The general-purpose slot follows the whole function's register use (the joint fold flips it), so
+the gate's dual-tail row holds it. Proven by mutation: the joint-fold build fails that row with
+`[rbp-0xf0]`; attempt 1's code (A3 reverted) fails it with `[rbp-0xc8]`.
 
-**A3 finding: the spill is not the encoding's.** Every bit-identical encoding and schedule tried
-leaves the masked mono pair carrying an integrator slot: attempt 1's `flush_pair`; compares
-reordered; `r1 & (f1 | r2)`; chained `andnot`; per-word `flush` then rest on the flushed words; the
-skewed kernel with forward section order; the flush after the output mix. The cause is V8's
-scheduler sinking the section-0 dry mask -- built in `Channel::dry_mask` from four scalars and
-`eq 1.0` -- into the loop (four scalar reloads, a broadcast, three inserts and a compare every
-iteration; already so at base). The wasm computes it once before the loop. With the masks made
-opaque before the loop (scratch `black_box`, not shippable) the pair is clean and every held row
-stays clean. A shippable fix is to hold each section's dry mask in memory (a `Channel` field kept
-with the identity flags), which is payload code in `crates/parametric-eq/src/lib.rs` outside A5's
-paths: it needs a root decision.
+**The gate holds a fifth row**, `mono depth-2 pair, masked` (A6). Mutation: the mono masked pair
+reading `channel.dry_mask(at[k])` again fails it (`[rbp-0x180]`, 113 instructions), every other row
+green; attempt 1's code fails it with `[rbp-0x220]`.
 
-**Blocked:** the host disk had 0.2-6 GB free during this attempt (other worktrees' targets hold
-~75 GB); a wasm build failed with ENOSPC, and the gate-4 native set cannot be built in this
-worktree. Not started: A4, A5 items, D6 restatement.
+**Spill-gate rows** (carried slots; H held):
+
+| loop | base `0e3e21b68` | attempt 1 | attempt 2 |
+|---|---:|---:|---:|
+| dual depth-1 tail, select-free (H) | 0 | 1 (`[rbp-0xc8]`) | 0 |
+| mono depth-2 pair, select-free (H) | 0 | 0 | 0 |
+| mono depth-1 tail, select-free (H) | 0 | 0 | 0 |
+| mono depth-2 pair, masked (H since attempt 2) | 0 | 1 (`[rbp-0x220]`) | 0 |
+| dual depth-1 tail, masked | 0 | 1 | 0 |
+| dual depth-2 pair, select-free (reported) | 10 | 13 | 13 |
+| dual depth-2 pair, masked | 11 | 12 | 13 |
+
+**The #1000 red arms, rebuilt.** #977 attempt 1 (`f1bf752c`, module `0db9b2f5…`, the same bytes as
+#1009's record): red on the dual tail, `[rbp-0xa0]`, as recorded. The one-token tail edit
+(`if !admitted && (…)`) applied to this tree: **green**, and green on the base `0e3e21b68` as
+well, so it turned green before this slice (not investigated where); the rule is kept, per the
+protocol.
+
+**No rendered bit moved (A2, A3), one-time evidence.** With the A3 change in, every pinned corpus
+passes unchanged and nothing was re-pinned: `g5_native_digests_match_pins` and the delegated
+`BUILTINS_DIGESTS`, `E9_DIGESTS` and multiband `DIGESTS` at every width and on wasm simd128
+(`run-wasm-gates.sh`), `conformance_fixtures --check`, `check-builtins-fixtures.sh`,
+`check-graph-determinism.sh`; the EQ's own bit-identity gates (elision, interleave identity, mono
+collapse, randomized restores, the bounded-verdict-equals-scan check) pass. A2 changed no code.
+Mutation of the cache: never refreshing `dry` turns at least twelve EQ unit tests red
+(`identity_flags_agree`'s debug assertion, and the dry-select bit-identity tests). Dropping `dry`'s
+copy in `desymmetrize` turns no test red; the doc there says so and why.
+
+**A4, D6 restated (scratch harness on the real kernels, not committed).** Per-word flush (attempt-1
+kernel with `flush_pair` replaced by two `flush`) against the joint flush, left output bit for bit:
+4,864 samples of uniform noise (LCG, peak at the stated level) then 1.2 M samples of silence.
+- **Case 1, EQ low shelf 10 Hz, +24 dB, S 0.1, 96 kHz.** At 0 to -200 dBFS no sample moves while
+  input is live; in the tail the first moved sample is at -258.6 dBFS and the largest change is
+  `1.179e-13` (-258.6 dBFS). At -220, -240 and -260 dBFS every sample moves from sample 1, while
+  input is live: both state words sit below `REST_EPS` and are zeroed together. The largest change
+  is `1.506e-12` (**-236.4 dBFS**) at -220 dBFS input, `1.506e-13` at -240 and `1.506e-14` at
+  -260. *Deviation from A4:* attempt 1 and its verifier saw input-time moves at -160/-180 dBFS with
+  their noise; this harness's onset is between -200 and -220 dBFS, and A4's "every change below
+  2.2e-13 (< -253 dBFS)" does **not** hold: the largest change measured is `1.5e-12`, -236 dBFS.
+  The D3 bell (10 Hz, Q 18, +24 dB) moves while live from -220 dBFS too, largest `4.3e-14`.
+- **Case 2, builtin HPF 100 Hz + LPF 22 kHz at 44.1 kHz.** No sample moves while input is live; the
+  first moved sample sits in the tail at a loud level for the tail: -159.3 dBFS for 0 dBFS input
+  (sample 7,898, 3,034 samples after input stops), -179.3 at -20, -199.3 at -40, -180.5 at -60:
+  the HPF rests while the LPF still carries signal. Largest change `2.84e-14` (-270.9 dBFS).
+- **Listening line**, as A4 words it but on the measured number: every *change* is below
+  -236 dBFS (largest measured `1.5e-12`, at -220 dBFS input), far below any reproduction chain's
+  noise floor. No listening run. The restated bound needs the root's re-acceptance (open item).
+
+**A5.**
+- Floors: `tools/bench/src/floor.rs` (`EQ_LANE_OPS` 32, `BUILTINS_LANE_OPS` 79, the strip test),
+  `scripts/console-benchmark-record-lib.jq` (79, 32), `scripts/test-console-benchmark.sh` (the
+  synthetic records at 79, 322 and `79 + 32 + 81.5`). Each with its reason (#1328's `flush_pair`:
+  `svf_step` 19 -> 24, a section 24 -> 29). A2/A3 change no per-sample op count, so the ruling's
+  derived 79 / 32 / 322 stand. The ruling's interim "until their follow-up re-pins them" text is
+  removed in both places.
+- Oracles: `g2_svf_step_yields_both_taps_of_one_state` restates the joint flush from its definition
+  and now runs noise then silence, asserting the decay reaches the joint band. Mutation: `svf_step`
+  with two per-word `flush` calls is red there (band tap, `g2_kernel_identity.rs:650`), green
+  reverted. The audit's `SvfF32` arms restate `flush_pair`; `model_conformance`'s SVF pass appends
+  4,096 silent samples and asserts the band is reached. Mutation: the audit's pair without the
+  rest arm makes production match NEITHER arm (439 mismatches; the audit panics), green reverted.
+- Memset ratchet: `check-cross-targets.sh` asked builtins 194 -> 186 and parametric-eq
+  132 -> 122 at this tree (122 rather than A5's 128: the dry masks in state remove six more stored
+  splat calls); the rows are lowered to what it reports, and it passes at 186 / 122.
+- Stale prose: the ruling's "inert" definition and appendix steps 6-7 (`flush_pair`), the
+  spill-gate sentence (now five held rows), the EQ's leg-(c) description, and
+  `crates/builtins/tests/MUTATIONS.md` M2. M2 re-run: dropping `s1`'s whole flush is red at
+  `index=2645`; dropping only its per-word arm stays green (the row says why).
+- NIT: `dsp-research/filters.md` states the rest point as the end of the resting block: samples
+  773,888 and 421,888 (blocks 6,045 and 3,295). Attempt 1's 773,760 / 421,760 were those blocks'
+  first samples.
+
+**Gates (final tree).** All green, each run once on the committed tree:
+- the gate-4 `cargo test` set: 817 passed, 0 failed;
+- the release `lane`/`math`/`wasm-gates` set: 107 passed;
+- `run-wasm-gates.sh`: native and simd128 legs, and the V8 spill gate with all four held rows clean (the
+  rows above);
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh`, `check-graph-determinism.sh`;
+- `check-cross-targets.sh` (with the lowered rows), `check-lane-policy.sh`, `check-dsp-research.sh`,
+  `check-workspace-policy.sh`;
+- clippy `-D warnings`, `cargo fmt --check`;
+- the worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`;
+- also `test-console-benchmark.sh` and `audit unfused-fma conformance` (SVF `unfused`, 0 mismatches).
+
+**Open items.**
+- A4's change bound: measured `1.5e-12` (-236 dBFS) at -220 dBFS input, above the spec's 2.2e-13; the
+  class-B acceptance needs the root to re-affirm on this number.
+- The one-token #1000 arm is green at this tree and at base; when it turned green is not
+  investigated.
+- The dual-tail and masked-mono-pair allocations are observed, not structural; the gate rows hold
+  them.

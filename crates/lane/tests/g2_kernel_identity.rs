@@ -17,7 +17,7 @@ mod support;
 use lane::kernels::{
     SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
 };
-use lane::{CanonicalFpEnv, Lane, flush};
+use lane::{CanonicalFpEnv, FLUSH_EPS, Lane, REST_EPS};
 use support::{ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
 
 /// Frames per case. The `--release` count is the gate; a debug run keeps the workspace suite quick.
@@ -580,8 +580,12 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
 /// the width. Non-vacuity is asserted too: the two taps must actually differ, or a body that
 /// returned the same value twice would pass.
 ///
-/// Red mutation: return `(v2, v1)` from `svf_step`; swap `a2` and `a3` in its `d2`; drop one of
-/// the two `flush` calls.
+/// The input is noise for the first half and silence for the second, so the state decays through
+/// the joint flush's band -- both words below `REST_EPS`, one at or above `FLUSH_EPS` -- and the
+/// oracle restates that rule from its definition (issue #1328). Reaching the band is asserted.
+///
+/// Red mutation: return `(v2, v1)` from `svf_step`; swap `a2` and `a3` in its `d2`; flush each word
+/// alone (`flush` per word instead of `flush_pair`).
 #[test]
 fn g2_svf_step_yields_both_taps_of_one_state() {
     // A 1 kHz Butterworth low-pass at 48 kHz: g = tan(pi * 1000 / 48000), k = sqrt(2),
@@ -591,9 +595,11 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
     const A3: f32 = 0.003_927_913_5;
     const FRAMES: usize = 4_096;
 
-    /// Simper's recurrence, transcribed from the equations, one scalar lane at a time.
-    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>) {
+    /// Simper's recurrence, transcribed from the equations, one scalar lane at a time. Also counts
+    /// the frames where the joint rule zeroed a word the per-word law would have kept.
+    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>, usize) {
         let (mut ic1, mut ic2) = (0.0f32, 0.0f32);
+        let mut joint = 0usize;
         let mut band = Vec::with_capacity(FRAMES);
         let mut low = Vec::with_capacity(FRAMES);
         for frame in 0..FRAMES {
@@ -603,17 +609,32 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             let v1 = ic1 + d1;
             let d2 = <f32 as Lane>::fma(A3, v3, A2 * ic1);
             let v2 = ic2 + d2;
-            ic1 = flush(ic1 + (d1 + d1));
-            ic2 = flush(ic2 + (d2 + d2));
+            let (n1, n2) = (ic1 + (d1 + d1), ic2 + (d2 + d2));
+            // Each word below `FLUSH_EPS` is zeroed; both below `REST_EPS` are zeroed together.
+            let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+            if rest && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS) {
+                joint += 1;
+            }
+            ic1 = if rest || n1.abs() < FLUSH_EPS {
+                0.0
+            } else {
+                n1
+            };
+            ic2 = if rest || n2.abs() < FLUSH_EPS {
+                0.0
+            } else {
+                n2
+            };
             band.push(v1.to_bits());
             low.push(v2.to_bits());
         }
-        (band, low)
+        (band, low, joint)
     }
 
     fn check<L: Lane>() {
         let mut input = vec![0.0f32; FRAMES * L::WIDTH];
         Signal::Noise.fill(&mut input, 0x5F5F_0001);
+        input[FRAMES / 2 * L::WIDTH..].fill(0.0);
         let mut state = SvfState::<L>::default();
         let nc1 = L::splat(C1).neg();
         let (a2, a3) = (L::splat(A2), L::splat(A3));
@@ -626,7 +647,12 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             v2.store_bits(&mut low[frame * L::WIDTH..]);
         }
         for lane in 0..L::WIDTH {
-            let (expected_band, expected_low) = oracle(&input, L::WIDTH, lane);
+            let (expected_band, expected_low, joint) = oracle(&input, L::WIDTH, lane);
+            assert!(
+                joint > 0,
+                "lane {lane}: the decay must reach the joint flush's band (both words below \
+                 REST_EPS, one at or above FLUSH_EPS)"
+            );
             let mut differing = 0usize;
             for frame in 0..FRAMES {
                 assert_eq!(
@@ -646,7 +672,7 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
                 }
             }
             assert!(
-                differing > FRAMES / 2,
+                differing > FRAMES / 4,
                 "the two taps must differ: only {differing} of {FRAMES} frames do"
             );
         }

@@ -58,15 +58,17 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # Nearly every call sits inside a render function; the register in `docs/TARGET_MATRIX.md` names
 # them. #1112 lowered six rows (builtins 376, gate-expander 181, graph 20, multiband-compressor 1132,
 # parametric-eq 146, transient-shaper 534): it removed the eight-lane instantiations from the
-# AArch64 builds, and their two-half `f32x8` splats made the same calls.
+# AArch64 builds, and their two-half `f32x8` splats made the same calls. #1328 lowered two more
+# (builtins 194 -> 186, parametric-eq 132 -> 122), as `check-cross-targets.sh` asked after the
+# joint SVF flush and the EQ's dry masks held in channel state.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 194),
+    "builtins": ("1018", 186),
     "compressor": ("1018", 970),
     "gate-expander": ("1018", 91),
     "graph": ("1018", 10),
     "host-core": ("1018", 4),
     "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 132),
+    "parametric-eq": ("1018", 122),
     "soft-clip": ("1018", 22),
     "transient-shaper": ("1018", 268),
     "true-peak-limiter": ("1018", 104),
