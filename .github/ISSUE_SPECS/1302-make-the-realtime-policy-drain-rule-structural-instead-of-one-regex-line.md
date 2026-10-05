@@ -437,3 +437,141 @@ resolution stops at a `.take(64)` line (C). `bare-from-fn` red on J, `entry-name
 `entry-name-in-header` on L, `header-past-closed-body` on M, `array-from-fn-pop` on N,
 `pattern-rebound-count` on O, `paren-open-range-outer` on R; the two valid-fixture additions red on
 P and Q. Each case is green with the mutant reverted.
+
+### Attempt 3 (implementer, 2026-10-05)
+
+Answers verdict `1302-attempt2.md` (FAIL). Same two scripts; no Rust source; floors unchanged.
+Attempts 1 and 2 each patched an indentation walk (D2.5) and each verdict found rustfmt layouts
+that escaped it. Attempt 3 drops the walk instead of adding another special case.
+
+**The rule now (`scripts/check-realtime-policy.sh`, one `LC_ALL=C awk` pass, status checked as
+before).**
+- *Tokens, not lines.* Comments (line and nested block), string, raw-string and character
+  literals are blanked, keeping every other character in place. A brace stack gives each block
+  its header: the tokens of its statement since the previous `;` outside brackets or the start of
+  the enclosing block, across lines, each closed inner block one `{}` token. Indentation plays
+  no part, so D2.1's indentation and D2.5's walk-back are gone (deviation; D2.2-D2.7's claim is
+  kept).
+- *Loops, fail closed.* A block whose header holds `loop`, `while`, `for .. in` or `from_fn` is a
+  loop. A pop in a loop body must have an innermost loop whose whole header (after an optional
+  label) is exactly `for P in 0..<count>`, `for P in 0..<path>.available_at_entry()` or
+  `while <count> != 0`/`> 0` with `<count> -= 1;` first and no other mention in the body. Every
+  other enclosing loop must be bounded, `for P in 0..<literal>`, `0..<fields>.len()`,
+  `&<fields>`, `&mut <fields>`, `<fields>.iter()`/`.iter_mut()` (each optionally `.enumerate()`d)
+  or an `array::from_fn` closure. A pop in a loop header, a block nested there included, is
+  refused. Anything else is unbounded.
+- *Counts.* The nearest in-scope `let` (scope from the brace stack) binding `<count>` must be
+  exactly `let [mut] <count>[: T] = <path>.available_at_entry();` or
+  `= <path>.map_or(0, <Type>::available_at_entry);`, or one plain alias of such a count, and the
+  code from that binding to the loop names `<count>` exactly once (the header or the alias). That
+  one rule replaces attempt 2's assignment scan and pattern-binding special case, and narrows D2.6's
+  "contains `available_at_entry`" (deviation, a strengthening).
+- *Where a header may end early.* Only where Rust must start a new statement or item: after a
+  closed block, an identifier other than `as`, `else` or `in`, a label or an attribute; or a `{`
+  when the closed block was the body of a statement-leading `if`/`match`/`while`/`for`/`loop`/
+  `unsafe`/label/bare block whose head ends where an expression can end. Everywhere else the
+  header joins, which can only make a block look like a loop or miss a bounded form: both refuse.
+- *D3* stays inside the pass (attempt 2) over the blanked text. J2-7: the reason is not that a
+  bare call needs a lookbehind (`(^|[^:[:alnum:]_])from_fn` separates it); it is that the pass
+  refuses every other qualified path (`it::from_fn`) and reads comments and strings as blanked.
+- *Markers (J2-2).* A region still open at the end of its file is checked there, at the next
+  file's first line or at the end of input, so out-of-order markers never leave a tail unchecked
+  and never read the next file's unmarked lines as marked code.
+
+**Verdict findings.** J2-1: all 14 escaping shapes and all 29 candidates (`a2/c/`, `a2/rc/`) are
+refused. J2-2: fixed as above. J2-3: `entry-name-in-binding` is now `let cap = control.not_available_at_entry_cap();`
+with `for _ in 0..cap {`, so each of the two entry-name cases has its own catch (mutants Mu, Mw
+below). J2-4: both shapes are refused (`n04` by the single-mention rule, `n05` by the exact
+binding form) and leave the limits, as does an inflated count (`a12`). J2-5: outer loops are the
+finite forms above; `n01`-`n03` and `n08` are refused. J2-6: an `array::from_fn` closure is a
+finite outer loop, so `n06` passes like `n07`; a pop directly in such a closure is still refused,
+and a bare `array::from_fn` after `use core::array;` is refused by D3 (fail-safe, kept). J2-7:
+reworded above.
+
+**Found during this attempt and fixed before commit.** A first version ended a header at any `{`
+after the closed body of a statement-leading construct; `while c && { .. } {`,
+`while let x = { .. } {` and `while matches! { .. } {` then lost their loop. The head must now end
+where an expression can end (case `block-operand-condition`).
+
+**Gates.** Gate 1: `realtime policy: ok (89 marked regions in 25 files)` under gawk 5.2.1, mawk
+1.3.4 and busybox awk 1.36.1. Gate 2: `realtime policy mutation tests: ok` under all three. Gate 4:
+`workspace policy: ok`, `workspace policy mutation tests: ok`; `shellcheck` is not installed, not
+run. Every fixture file the self-test writes (valid fixture and every drain case, 1125 files) is
+`rustfmt --edition 2024 --check` clean.
+
+**Real sites (debug copy, not committed; identical under the three awks).**
+`builtins-compiler/src/lib.rs:1076` and `:1120` -> `for _ in 0..available` (outer
+`for (lane, control) in controls.iter_mut().enumerate()`, finite); `effect-contract/src/live.rs:366`
+-> `while remaining != 0`; `graph/src/runtime.rs:900` -> `for _ in 0..available`;
+`plan_exchange.rs:377` and `spsc.rs:440` -> no loop. All 89 regions close their brace stack at
+depth 0.
+
+**Shapes (scratch, not committed).** Verifier sets: `adv/` a01-a05, a11-a15, a17, b03 refused;
+a06, a07, a08, b02 and `n09` pass as listed limits (closures and helpers); a09, a10, a16, b01,
+`n06`, `n07`, `v01`-`v07` pass correctly; `c/`, `d/`, `e/`, `rc/` and `n01`-`n05`, `n08` refused.
+Thirty-five new shapes, rustfmt-formatted except one left unclosed on purpose: 27 escapes
+refused (among them a struct-pattern `for`, `[_; N]` in a header, braces in strings, chars, raw
+strings and block comments, a loop in a `match` arm, a double alias, a borrowed or raised count,
+closure-parameter, guard and closed-block rebindings, a count from another fn, an async block, a
+nested fn, a region ending inside a `while` body, and `while matches! { .. } {` and
+`while let x = { .. } {` heads), and 8 bounded shapes pass (typed count, label, `match` arm,
+strings with braces, path header, borrowed outer, `if`/`else` then drain, `for` then `if let`
+pop).
+
+**Test value (scratch mutants of the gate, each run through a copy of the self-test that reports
+every drain case and every valid run; base copy: no red).**
+
+| Mutant of the gate | Red |
+|---|---|
+| Ma: `.` after a closed block starts a new statement | `while-match-body` (J2-1's `while match .. {}.has_records()`) only |
+| Mb: a statement head holding `match` counts as complete | `while-match-brace` only |
+| Mc: a complete head may end on an operator | `block-operand-condition` only |
+| Md, Me, Mf: `in`, `else`, `as` after a closed block start a statement | `struct-pattern-for`, `if-else-condition`, `as-cast-condition`, one each |
+| Mh, Mi, Mk, Mj: strings, chars, raw strings, block comments not blanked | `brace-in-string-header`, `brace-in-char-header`, `brace-in-raw-string-header`, `brace-in-block-comment`, one each |
+| Ml: line comments not blanked | valid fixture (the comment naming `available` in `drain_lane_pairs`) |
+| Mm: only assignments between binding and loop disqualify (attempt 2) | `count-rebound-by-for-pattern` only |
+| Mn: a binding naming `available_at_entry` anywhere counts (D2 sketch) | `inflated-count` only |
+| Mo: a `while` body may name its count after the decrement | `while-count-raised-in-body` only |
+| Mp: any `for` not over an open range is a finite outer loop (attempt 2) | `outer-repeat` only |
+| Mq: a region open at a file end runs on into the next file | the open-tail valid run (an unmarked drain opens the next file) |
+| Mr: a region open at the end of input is never checked | `open-tail-last-file` only |
+| Ms: an `array::from_fn` closure is never a finite outer loop | valid fixture (`drain_lane_pairs`) |
+| Mt: `0..<literal>` is not a finite outer loop | valid fixture (`drain_two_lanes`) |
+| My: no new statement at `{` after a complete block | valid fixture (`retire_one`) |
+| Mz: no new statement at an identifier after a block | valid fixture (`retire_lanes`) |
+| Mu, Mw: `available_at_entry` matched inside a longer name, binding / header | `entry-name-in-binding`, `entry-name-in-header`, one each |
+| Mx: a pop in a loop header allowed | `marked-unbounded-try-pop-drain`, `wrapped-while-let`, `path-pop`, `header-past-closed-body` |
+| Mg: `;` inside brackets ends a header | `header-past-closed-body` |
+
+Each new case is green with its mutant reverted. Per new case, the defect it alone catches:
+`while-match-body` a header cut at `.method()` after a closed block (also J2-1's reproducer: it
+passes attempt 2's gate); `while-match-brace` a `{` after a `match` scrutinee taken as a new block;
+`block-operand-condition` a `{` after an operator taken as a new block; `struct-pattern-for`,
+`if-else-condition`, `as-cast-condition` a header cut at `in`, `else`, `as`; the four `brace-in-*`
+cases a literal or comment read as code; `count-rebound-by-for-pattern` a rebinding the
+assignment scan misses (J2-4); `inflated-count` a count computed beyond `available_at_entry`;
+`while-count-raised-in-body` a `while` count raised after its decrement; `outer-repeat` an
+infinite outer `for` (J2-5); `open-tail-last-file` an unchecked open tail (J2-2); the open-tail
+valid run a region read past its file; the valid-fixture additions `drain_lane_pairs`,
+`drain_two_lanes`, `retire_lanes` and the count-naming comment a false positive on a bounded
+shape (Ms, Mt, Mz, Ml). Three written cases were dropped for want of a catch of their own: an or-pattern
+header pop (J2-1 a: under tokens it is a plain header pop, and every mutant tried that reds it
+also reds `wrapped-while-let` or `marked-unbounded-try-pop-drain`); a pop in a block nested in a
+loop header (that block holds the loop keyword in its own header, so it is a loop itself, and no
+mutant tried reds the case alone); and `semicolon-in-brackets` (`header-past-closed-body` already
+catches Mg).
+
+The attempt-2 cases (`wrapped-*`, `paren-led-header`, `continuation-led-header`) stay as J1-1
+regression reproducers: each is red on attempt 1's gate (e3375bc1d) and green here; their
+attempt-2 mutants (A-D, H, P) named the indentation walk, which no longer exists.
+
+**Gate 3.** Outermost loop only (judge just the outermost loop around a pop): case 7's shape,
+`loop-inside-bounded-for`, passes (red), against one hit on the base, under all three awks; the
+self-test's valid fixture reds first because the per-lane drain's outer `for` is not an entry
+count. The old one-line regex restored in place of the pass: cases 1-3 and 6-8 (and every other
+drain case) red.
+
+**Limits left (in the gate comment).** Recursion; a pop in a helper function, through a function
+value, or in a closure a loop calls or hands to a repeating adapter; a loop around the drain
+outside the marked region; a macro that expands to a loop; and `available_at_entry`, `.len()`,
+`.iter()`, `.iter_mut()` taken at their word.

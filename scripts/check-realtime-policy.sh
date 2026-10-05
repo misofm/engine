@@ -79,149 +79,257 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 # #1253, #1302: a render-thread drain pops at most the records present at block entry. A loop
 # that pops until the queue is empty keeps popping whatever a concurrent producer publishes while
 # it runs (the C ABI prepares with `Concurrent` delivery) -- data-dependent, unbounded render
-# work. What this gate proves, per marked region, reading rustfmt's layout (four-space indents;
-# a wrapped header's block opens on its last line, as `) {`, `] {` or `}) {`, or on a lone `{` at
-# the opener's indentation, possibly after `.method()`, `)`, `]` or `where` lines at that
-# indentation, while a lone `{` after a statement is a bare block; `cargo fmt --all -- --check`
-# is required):
-#   - every `try_pop` that sits in a loop (the `fn try_pop` definition never does) has an
-#     innermost loop bounded by a count taken from `available_at_entry`: `for _ in 0..<count> {`,
-#     `for _ in 0..<expr naming available_at_entry> {`, or `while <count> != 0 {` (or `> 0 {`)
-#     whose body's first statement is `<count> -= 1;`. `<count>` is the nearest in-scope
-#     `let [mut] <count> = ..;` (comments dropped, the statement joined up to its `;`) naming
-#     `available_at_entry`, or a plain one-step alias `let [mut] <count> = <entry count>;`, with no
-#     other assignment to it between the binding and the loop, nor inside a `while` body;
-#   - every loop enclosing that innermost loop, up to the enclosing `fn`, is a `for .. in` over
-#     something other than an open range (`0..`, `(0..)`): a `while`, `loop` or open-range `for`
-#     around a bounded drain re-drains without bound;
-#   - a line with `while`, `loop` or `for .. in` anywhere in its code is a loop opener, and only
-#     one that starts the line (after an optional `'label:`) can be bounded, so a one-line
-#     `while let Ok(..) = ..try_pop() {` body or a `let x = loop {` is refused; a block that opens
-#     on a wrapped header's last line belongs to the header's opener, so wrapping a loop header
-#     neither hides the loop nor its unbounded condition;
+# work. The pass below reads each marked region as tokens, not lines, so layout plays no part:
+# comments and string and character literals are blanked, a brace stack gives every block its
+# header -- the tokens of its statement since the previous `;` outside brackets or the start of
+# the enclosing block, across lines, each closed inner block one `{}` token -- and a block whose
+# header holds `loop`, `while`, `for .. in` or `from_fn` is a loop. It refuses whatever it cannot
+# prove bounded. What it proves, per marked region:
+#   - a `try_pop` (the word: `Consumer::try_pop` counts, and the `fn try_pop` definition sits in
+#     no loop) in the body of a loop has an innermost loop whose whole header, after an optional
+#     label, is `for P in 0..<count>`, `for P in 0..<path>.available_at_entry()`, or
+#     `while <count> != 0` (or `> 0`) whose body opens with `<count> -= 1;` and never names
+#     `<count>` again. `<count>` is the nearest in-scope
+#     `let [mut] <count>[: T] = <path>.available_at_entry();` (or
+#     `= <path>.map_or(0, <Type>::available_at_entry);`), or one plain alias
+#     `let [mut] <count> = <entry count>;`, and the code from that binding to the loop names
+#     `<count>` nowhere else (no rebinding, assignment, borrow or other use);
+#   - every other loop around that pop is finite: a bounded loop as above, `for P in 0..<literal>`,
+#     `0..<fields>.len()`, `&<fields>`, `&mut <fields>` or `<fields>.iter()`/`.iter_mut()` (each
+#     optionally `.enumerate()`d), or the closure of `core::array::from_fn`;
+#   - a `try_pop` in the header of a loop (its condition, iterator or pattern, a block nested
+#     there included) is refused: it runs once per iteration;
 #   - `from_fn`, `repeat_with` and `successors` are refused outright, path-qualified or bare
 #     (`core::array::from_fn` and `std::array::from_fn` excepted): they run a pop in a loop without
-#     a loop keyword. `array::from_fn` is a loop opener that is never bounded (it runs its closure
-#     a constant number of times), so a pop inside it is refused.
-# It is not a Rust parser. These stay outside it: recursion; a pop inside a closure handed to some
-# other repeating adapter (`map_while` over `iter::repeat` or an open range, for example); a pop
-# in a helper method or a local closure that a loop calls; a loop enclosing the drain outside the
-# marked region (the rule is per region); a `use` that renames an iterator constructor; a count
-# inflated by arithmetic inside its own `available_at_entry` statement; a count rebound by an
-# `if let`/`while let` pattern, a closure parameter or a match arm (a `let` pattern binding it is
-# its nearest binding); and a count mutated through a `&mut` borrow.
+#     a loop keyword. A pop directly in an `array::from_fn` closure is refused (a constant count);
+#   - a region still open where its file ends (markers out of order) is checked as it stands.
+# A header ends early only where Rust must start a new statement or item. After a closed block
+# that is: an identifier other than `as`, `else` or `in`, a label or an attribute; or a `{`, when
+# the closed block was the body of a statement-leading `if`, `match`, `while`, `for`, `loop`,
+# `unsafe`, label or bare block whose head ends where an expression can end (not on an operator,
+# a keyword or a macro `!`, before which a `{` opens a block operand). Elsewhere it joins, which
+# can only make a header look like a loop or miss a bounded form: both refuse. It is not a Rust
+# parser, and it takes `available_at_entry`, `.len()`, `.iter()` and `.iter_mut()` at their word.
+# These stay outside it: recursion; a pop in a helper function, through a function value, or in
+# a closure that a loop calls or that is handed to a repeating adapter (`map_while` over
+# `iter::repeat`, `for_each`, a renaming `use` of an iterator constructor); a loop around the
+# drain outside the marked region (the rule is per region); and a macro that expands to a loop.
 if [[ -n "$marked_files" ]]; then
     mapfile -t marked_list <<<"$marked_files"
-    if drain_hits="$(awk -v q="'" '
-        function code(s,  i) { i = index(s, "//"); if (i) s = substr(s, 1, i - 1); sub(/[ \t]+$/, "", s); return s }
-        function ind(s) { match(s, /^ */); return RLENGTH }
-        function trim(s) { sub(/^ +/, "", s); return s }
-        function word(x) { return "(^|[^A-Za-z0-9_])" x "([^A-Za-z0-9_]|$)" }
-        function label() { return q "[A-Za-z_][A-Za-z0-9_]*: *" }
-        function unlabel(s) { s = trim(s); sub("^" label(), "", s); return s }
-        # A loop keyword anywhere on the line makes it a loop opener; only an opener that starts
-        # its line (after an optional label) can have a bounded header. `array::from_fn` runs its
-        # closure a constant number of times, so it opens a loop that is never bounded.
-        function isloop(s) { return s ~ word("while") || s ~ word("loop") || s ~ word("for [^{}]* in") || s ~ word("array::from_fn") }
-        function isfn(s) { return trim(s) ~ /^(pub(\([a-z: ]+\))? +)?((const|async|unsafe|default|extern( +"[^"]*")?) +)*fn +[A-Za-z_]/ }
-        # The line that opens the block starting on line `k`. A block that opens on a lone `{` or
-        # on a line led by `.`, `)`, `]` or `}` (the last line of a wrapped header) belongs to the
-        # nearest earlier line at the same indentation that is not such a continuation (nor
-        # `where`); deeper lines are the header wrapped arguments. A lone `{` after a statement
-        # closed by `;` or `}` is a bare block and opens itself.
-        function opener(k,  j, s) {
-            s = trim(c[k])
-            if (s != "{" && s !~ /^[]).}]/) return k
-            for (j = k - 1; j >= 1; j--) {
-                if (c[j] ~ /^ *$/ || ind(c[j]) > ind(c[k])) continue
-                if (ind(c[j]) < ind(c[k]) || c[j] ~ /[;}]$/) return k
-                s = trim(c[j])
-                if (s == "where" || s ~ /^[]).}]/) continue
-                return j
+    if drain_hits="$(LC_ALL=C awk -v q="'" '
+        function tw(x) { return "(^| )" x "( |$)" }
+        function trim(s) { sub(/^ +/, "", s); sub(/ +$/, "", s); return s }
+        function wc(ch) { return ch ~ /[A-Za-z0-9_]/ }
+        # Comments, string and character literals become spaces, line by line, keeping every
+        # other character in place; a block comment or a string may span lines.
+        function clean(k,  s, out, i, len, ch, nx, j, h) {
+            s = c[k]; len = length(s); out = ""
+            if (!st && s !~ /["*]/ && index(s, q) == 0) {
+                i = index(s, "//"); if (!i) return s
+                out = substr(s, 1, i - 1); while (i++ <= len) out = out " "; return out
             }
-            return k
-        }
-        # The scope chain of line `from`: walking back, a line indented less than every line seen
-        # so far opens a block enclosing `from`, and `opener` resolves it to the line heading that
-        # block. Fills chain[1..chain_n], innermost first, up to and including the function line.
-        function enclosing(from,  k, m) {
-            chain_n = 0; m = ind(c[from])
-            for (k = from - 1; k >= 1; k--) {
-                if (c[k] ~ /^ *$/ || ind(c[k]) >= m) continue
-                m = ind(c[k]); k = opener(k); chain[++chain_n] = k
-                if (isfn(c[k])) return
+            for (i = 1; i <= len; i++) {
+                ch = substr(s, i, 1)
+                if (st == 1) {
+                    if (ch == "/" && substr(s, i + 1, 1) == "*") { bd++; out = out "  "; i++; continue }
+                    if (ch == "*" && substr(s, i + 1, 1) == "/") { if (--bd == 0) st = 0; out = out "  "; i++; continue }
+                    out = out " "; continue
+                }
+                if (st == 2) {
+                    if (ch == "\\") { out = out "  "; i++; continue }
+                    if (ch == "\"") { st = 0; out = out ch; continue }
+                    out = out " "; continue
+                }
+                if (st == 3) {
+                    if (ch == "\"" && substr(s, i + 1, rh) == substr("################", 1, rh)) {
+                        st = 0; out = out ch substr(s, i + 1, rh); i += rh; continue
+                    }
+                    out = out " "; continue
+                }
+                nx = substr(s, i + 1, 1)
+                if (ch == "/" && nx == "/") { while (i <= len) { out = out " "; i++ }; break }
+                if (ch == "/" && nx == "*") { st = 1; bd = 1; out = out "  "; i++; continue }
+                if (ch == "\"") { st = 2; out = out ch; continue }
+                if ((ch == "r" || ch == "b" && nx == "r") && (i == 1 || !wc(substr(s, i - 1, 1)))) {
+                    j = i + (ch == "b") + 1; h = 0
+                    while (substr(s, j, 1) == "#") { j++; h++ }
+                    if (substr(s, j, 1) == "\"") { st = 3; rh = h; out = out substr(s, i, j - i + 1); i = j; continue }
+                }
+                if (ch == q) {
+                    if (nx == "\\") j = index(substr(s, i + 3), q) + i + 2
+                    else if (substr(s, i + 2, 1) == q) j = i + 2
+                    else if (nx ~ /[A-Za-z_]/ || nx == "") j = 0
+                    else j = index(substr(s, i + 2, 5), q) + i + 1
+                    if (j > i + 1) { out = out q; while (++i < j) out = out " "; out = out q; continue }
+                }
+                out = out ch
             }
+            return out
         }
-        # A loop header: its opener joined up to the first line ending in `{`, whitespace collapsed.
-        function header(l,  j, h) {
-            h = ""
-            for (j = l; j <= n; j++) { h = h " " trim(c[j]); if (c[j] ~ /\{$/) break }
-            header_end = j; gsub(/ +/, " ", h); sub(/^ /, "", h); return unlabel(h)
-        }
-        function assigns(x, s) {
-            if (trim(s) ~ ("^let +(mut +)?" x "([ :=]|$)")) return 0
-            return s ~ ("(^|[^A-Za-z0-9_.])" x " *([-+*/%&|^]|<<|>>)?=([^=>]|$)")
-        }
-        # Whether `x` is an entry count at line `before`: its nearest in-scope binding names
-        # available_at_entry, or aliases such a binding in one step, and nothing assigns it between.
-        function counted(x, before, depth,   k, m, b, j, st) {
-            if (depth > 1) return 0
-            b = 0; m = ind(c[before])
-            for (k = before - 1; k >= 1 && !b; k--) {
-                if (c[k] ~ /^ *$/ || ind(c[k]) > m) continue
-                if (ind(c[k]) < m) { m = ind(c[k]); k = opener(k); if (isfn(c[k])) return 0; continue }
-                # A `let` whose pattern binds `x` (`let Some(x) = ..`, `let (a, x) = ..`) rebinds it.
-                if (trim(c[k]) ~ ("^let +([^=]*[^A-Za-z0-9_=])?" x "([^A-Za-z0-9_=][^=]*)?=([^=]|$)")) b = k
+        # One token of the open statement at the current depth `D`, top level only (a closed
+        # brace group is one `{}` token), so `segtop[D]` reads as a header when a `{` follows.
+        function tok(t) { segtop[D] = segtop[D] " " t }
+        function reset(at) { segtop[D] = ""; segpops[D] = ""; segstart[D] = at }
+        # Whether `x` is an entry count at the `{` at `upto`: its nearest in-scope `let` before
+        # `before` takes it from `available_at_entry` in a recognised form (or, at depth 0,
+        # aliases one such count in one plain step), and from the end of that binding to `upto`
+        # the code names `x` exactly once (the loop header or the alias): no rebinding,
+        # assignment, borrow or other use of it in between.
+        function counted(x, before, upto, depth,   k, t, b, chain) {
+            for (k = ns; k >= 1; k--) {
+                if (!onstack[st_frame[k]] || st_end[k] >= before) continue
+                t = st_top[k]; sub(/^(# (! )?\[[^]]*\] )*/, "", t)
+                if (t !~ ("^let( [^=]*)? " x "( |$)")) continue
+                b = k; break
             }
-            if (!b) return 0
-            for (j = b + 1; j < before; j++) if (assigns(x, c[j])) return 0
-            st = ""
-            for (j = b; j <= n; j++) { st = st " " trim(c[j]); if (c[j] ~ /;$/) break }
-            gsub(/ +/, " ", st); sub(/^ /, "", st)
-            if (st ~ word("available_at_entry")) return 1
-            if (st ~ ("^let (mut )?" x "( ?:[^=]*)? = [A-Za-z_][A-Za-z0-9_]*;$")) {
-                sub(/^.*= /, "", st); sub(/;$/, "", st); return counted(st, b, depth + 1)
+            if (!b || mentions(x, st_end[b] + 1, upto) != 1) return 0
+            chain = "[A-Za-z_][A-Za-z0-9_]*( \\. [A-Za-z_][A-Za-z0-9_]*( \\( \\))?)*"
+            if (t ~ ("^let (mut )?" x "( : [A-Za-z_][A-Za-z0-9_]*)? = " chain " \\. (available_at_entry \\( \\)|map_or \\( 0 , [A-Za-z_][A-Za-z0-9_]* : : available_at_entry \\))$")) return 1
+            if (depth == 0 && t ~ ("^let (mut )?" x "( : [A-Za-z_][A-Za-z0-9_]*)? = [A-Za-z_][A-Za-z0-9_]*$")) {
+                sub(/^.* = /, "", t); return counted(t, st_start[b], st_end[b], 1)
             }
             return 0
         }
-        function bounded(l,  h, x, j, first) {
-            h = header(l)
-            if (h ~ /^for [^{}]* in 0\.\.([^{}]*[^A-Za-z0-9_{}])?available_at_entry([^A-Za-z0-9_{}][^{}]*)? \{$/) return 1
-            if (h ~ /^for [^{}]* in 0\.\.[A-Za-z_][A-Za-z0-9_]* \{$/) {
-                x = h; sub(/^.* in 0\.\./, "", x); sub(/ \{$/, "", x); return counted(x, l, 0)
-            }
-            if (h ~ /^while [A-Za-z_][A-Za-z0-9_]* (!= 0|> 0) \{$/) {
-                x = h; sub(/^while /, "", x); sub(/ .*/, "", x)
-                if (!counted(x, l, 0)) return 0
-                first = 0
-                for (j = header_end + 1; j <= n; j++) {
-                    if (c[j] ~ /^ *$/) continue
-                    if (ind(c[j]) <= ind(c[l])) break
-                    if (!first) { first = j; if (trim(c[j]) != x " -= 1;") return 0; continue }
-                    if (assigns(x, c[j])) return 0
-                }
-                return first != 0
-            }
-            return 0
+        function mentions(x, from, to,   s, m) {
+            s = substr(F, from, to - from + 1); m = 0
+            while (match(s, "(^|[^A-Za-z0-9_])" x "([^A-Za-z0-9_]|$)")) { m++; s = substr(s, RSTART + RLENGTH) }
+            return m
         }
-        function check(  i, k, l, ok, s) {
-            for (i = 1; i <= n; i++) {
-                s = c[i]; gsub(/(core|std)::array::from_fn/, " ", s)
-                if (s ~ word("(from_fn|repeat_with|successors)")) { print FILENAME ":" ln[i] ":" c[i]; continue }
-                if (c[i] !~ word("try_pop")) continue
-                enclosing(i); l = 0; ok = 1
-                if (isloop(c[i])) { l = i; ok = bounded(i) }
-                for (k = 1; k <= chain_n; k++) {
-                    if (!isloop(c[chain[k]])) continue
-                    if (!l) { l = chain[k]; ok = bounded(l) }
-                    else if (header(chain[k]) !~ /^for [^{}]* in [^{}]* \{$/ || header(chain[k]) ~ /\.\.\)* \{$/) ok = 0
-                }
-                if (!ok) print FILENAME ":" ln[i] ":" c[i]
+        # A block whose header holds `loop`, `while`, `for .. in` or `from_fn` is a loop. A loop
+        # bounds a pop only if its whole header, after an optional label, is one of these:
+        # `for P in 0..<count>`, `for P in 0..<path>.available_at_entry()`, or
+        # `while <count> != 0` (or `> 0`) whose body opens with `<count> -= 1;` and never names
+        # it again. Around such a drain, an enclosing loop may also be `for P in 0..<literal>`,
+        # `0..<fields>.len()`, `&<fields>`, `&mut <fields>` or `<fields>.iter()`/`.iter_mut()`,
+        # each optionally `.enumerate()`d, or the closure of `array::from_fn`, which runs a
+        # constant number of times but never bounds a pop in its own body.
+        function classify(f, H,   x, pat, ident, chain, fields) {
+            isl[f] = H ~ tw("loop") || H ~ tw("while") || H ~ /(^| )for( | .* )in( |$)/ || H ~ tw("from_fn")
+            inner[f] = 0; outer[f] = 0; wid[f] = ""
+            if (!isl[f]) return
+            ident = "[A-Za-z_][A-Za-z0-9_]*"
+            pat = "( [A-Za-z0-9_(),&]+)+"
+            fields = ident "( \\. " ident ")*"
+            chain = ident "( \\. " ident "( \\( \\))?)*"
+            sub("^" q " " ident " : ", "", H)
+            x = H; if (gsub(/ in( |$)/, " ", x) > 1) return
+            if (H ~ /(^| )array : : from_fn \( [|][^|]*[|]$/ && H !~ /(^| )(loop|while|for)( |$)/) {
+                outer[f] = 1
+            } else if (H ~ ("^for" pat " in 0 \\. \\. ([0-9][0-9_]*(u8|u16|u32|u64|usize)?|" fields " \\. len \\( \\))$")) {
+                outer[f] = 1
+            } else if (H ~ ("^for" pat " in 0 \\. \\. " ident "$")) {
+                x = H; sub(/.* /, "", x); inner[f] = outer[f] = counted(x, hstart[f], hopen[f] - 1, 0)
+            } else if (H ~ ("^for" pat " in 0 \\. \\. " chain " \\. available_at_entry \\( \\)$")) {
+                inner[f] = 1; outer[f] = 1
+            } else if (H ~ ("^for" pat " in (& (mut )?" fields "|" fields " \\. (iter|iter_mut) \\( \\))( \\. enumerate \\( \\))?$")) {
+                outer[f] = 1
+            } else if (H ~ ("^while " ident " (! =|>) 0$")) {
+                x = H; sub(/^while /, "", x); sub(/ .*/, "", x)
+                if (counted(x, hstart[f], hopen[f] - 1, 0)) wid[f] = x
             }
         }
-        /REALTIME_POLICY_BEGIN/ { inside = 1; n = 0; next }
-        /REALTIME_POLICY_END/ { inside = 0; check(); next }
-        inside { n++; c[n] = code($0); ln[n] = FNR }
+        function openblock(at,   f, H, k, m) {
+            f = ++nf; H = trim(segtop[D]); hdr[f] = H; hstart[f] = segstart[D]; hopen[f] = at
+            classify(f, H)
+            # A pop in a loop header runs once per iteration, and no bounded header holds one.
+            if (isl[f]) { m = split(segpops[D], tmp, " "); for (k = 1; k <= m; k++) bad[tmp[k]] = 1 }
+            D++; fid[D] = f; onstack[f] = 1; segtop[D] = ""; segpops[D] = ""; segstart[D] = at + 1; pd[D] = 0
+        }
+        # Whether a block with header `H` is the body of the block-like statement its segment
+        # starts with (`if`, `match`, `while`, `for`, `loop`, `unsafe`, a label, a bare block, or
+        # the last arm of an `if`/`else` chain): the head after its keyword holds no other
+        # construct that takes a block and ends where an expression can end (a name or a literal,
+        # `)`, `]` or `?`), not on an operator, a keyword or a macro `!`, before which the `{`
+        # would open a block operand. A `{` after such a body opens a new block.
+        function complete(H,   r, last) {
+            sub("^" q " [A-Za-z_][A-Za-z0-9_]* : ?", "", H)
+            if (H == "" || H == "loop" || H == "unsafe") return 1
+            if (H ~ /^if / && H ~ / else$/) return 1
+            if (H ~ /^if / && H ~ / else if /) { r = H; sub(/^.* else if /, "", r) }
+            else if (H ~ /^(while|for|if|match) /) { r = H; sub(/^[a-z]+ /, "", r) }
+            else return 0
+            if (r ~ /(^| )(match|if|while|for|loop|unsafe|async|move|const|else|[|]|\{\})( |$)/) return 0
+            last = r; sub(/.* /, "", last)
+            if (last ~ /^(as|break|continue|in|let|mut|ref|return|static|dyn|yield|box)$/) return 0
+            return last ~ /^([A-Za-z0-9_]+|[])?"])$/
+        }
+        function closeblock(at,   f, body, x, w, j) {
+            if (D == 0) { reset(at + 1); return }
+            f = fid[D]
+            if (wid[f] != "") {
+                x = wid[f]; body = substr(F, hopen[f] + 1, at - hopen[f] - 1)
+                if (match(body, ("^ *" x " *-= *1 *;"))) inner[f] = outer[f] = mentions(x, hopen[f] + RLENGTH + 1, at - 1) == 0
+            }
+            onstack[f] = 0; D--
+            tok("{}")
+            # After a closed block, outside brackets, a new statement or item starts at a `{`
+            # when the block was a complete statement body, or at an identifier other than `as`,
+            # `else` or `in` (which continue the expression or pattern), a label or an
+            # attribute. Anything else keeps the segment open.
+            if (pd[D]) return
+            j = at + 1; while (substr(F, j, 1) == " ") j++
+            if (substr(F, j, 1) == "{" && complete(hdr[f])) { reset(j); return }
+            if (substr(F, j, 1) == q || substr(F, j, 1) == "#") { reset(j); return }
+            w = ""; while (wc(substr(F, j + length(w), 1))) w = w substr(F, j + length(w), 1)
+            if (w ~ /^[A-Za-z_]/ && w != "as" && w != "else" && w != "in") reset(j)
+        }
+        function check(  k, i, j, L, ch, w, line, s, m, f, l, ok) {
+            st = 0; F = ""
+            for (k = 1; k <= n; k++) {
+                cl[k] = clean(k); off[k] = length(F) + 1; F = F cl[k] " "
+                s = cl[k]; gsub(/(core|std)::array::from_fn/, " ", s)
+                if (s ~ "(^|[^A-Za-z0-9_])(from_fn|repeat_with|successors)([^A-Za-z0-9_]|$)") hit(k)
+            }
+            off[n + 1] = length(F) + 1
+            D = 0; nf = 0; np = 0; ns = 0; fid[0] = 0; onstack[0] = 1; pd[0] = 0; reset(1)
+            for (line = 1; line <= n; line++) {
+              s = cl[line]; L = length(s)
+              for (j = 1; j <= L; j++) {
+                ch = substr(s, j, 1); i = off[line] + j - 1
+                if (ch == " ") continue
+                if (wc(ch)) {
+                    w = ch; while (wc(substr(s, j + 1, 1))) w = w substr(s, ++j, 1)
+                    tok(w)
+                    if (w == "try_pop") {
+                        np++; pline[np] = line; bad[np] = segtop[D] ~ tw("from_fn"); stack[np] = ""
+                        for (k = 1; k <= D; k++) stack[np] = fid[k] " " stack[np]
+                        segpops[D] = segpops[D] " " np
+                    }
+                    continue
+                }
+                if (ch == "{") { openblock(i); continue }
+                if (ch == "}") { closeblock(i); continue }
+                if (ch == ";" && !pd[D]) {
+                    ns++; st_top[ns] = trim(segtop[D]); st_start[ns] = segstart[D]; st_end[ns] = i; st_frame[ns] = fid[D]
+                    reset(i + 1); continue
+                }
+                if (ch == "(" || ch == "[") pd[D]++
+                if ((ch == ")" || ch == "]") && pd[D]) pd[D]--
+                tok(ch)
+              }
+            }
+            # Judge each pop: its innermost enclosing loop must bound it, every other must be a
+            # finite outer loop. A block left open at the region end is judged as it stands.
+            for (i = 1; i <= np; i++) {
+                ok = !bad[i]; l = 0; m = split(stack[i], tmp, " ")
+                for (k = 1; k <= m && ok; k++) {
+                    f = tmp[k]
+                    if (!isl[f]) continue
+                    ok = l ? outer[f] : inner[f]; l = 1
+                }
+                if (!ok) hit(pline[i])
+            }
+            for (k = 1; k <= nf; k++) { delete onstack[k] }
+            for (i = 1; i <= np; i++) delete bad[i]
+            delete seen_line
+        }
+        function hit(k) { if (!seen_line[k]++) print regfile ":" ln[k] ":" c[k] }
+        function finish() { check(); inside = 0 }
+        FNR == 1 && inside { finish() }
+        /REALTIME_POLICY_BEGIN/ { if (!inside) { inside = 1; n = 0; regfile = FILENAME }; next }
+        /REALTIME_POLICY_END/ { if (inside) finish(); next }
+        inside { n++; c[n] = $0; ln[n] = FNR }
+        END { if (inside) finish() }
     ' "${marked_list[@]}" 2>&1)"; then :; else rc=$?; printf '%s\n' "$drain_hits" >&2; fail "realtime drain-bound scan failed (awk status $rc)"; fi
     [[ -z "$drain_hits" ]] || {
         printf '%s\n' "$drain_hits" >&2

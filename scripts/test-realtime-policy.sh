@@ -66,6 +66,9 @@ create_fixture() {
         'fn exchange() {}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/plan.rs"
+    # `enter_block` is the real single pop. In `retire_one` and `retire_lanes` a pop follows a closed
+    # `for` statement, in a bare block or an `if let`: that statement ends there, so the pop is in no
+    # loop (#1302 attempt 3).
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn exchange_plane() {}' \
@@ -85,6 +88,14 @@ create_fixture() {
         '            let Ok(retired) = self.retirement.try_pop() else {' \
         '                return;' \
         '            };' \
+        '            self.retire(retired);' \
+        '        }' \
+        '    }' \
+        '    fn retire_lanes(&mut self) {' \
+        '        for lane in 0..self.lanes {' \
+        '            self.clear(lane);' \
+        '        }' \
+        '        if let Ok(retired) = self.retirement.try_pop() {' \
         '            self.retire(retired);' \
         '        }' \
         '    }' \
@@ -224,7 +235,9 @@ create_fixture() {
         'fn scatter_tiled() {}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/rack/src/lib.rs"
-    # Five regions, mirroring the real crates/builtins/src/lib.rs after #371.
+    # Five regions, mirroring the real crates/builtins/src/lib.rs after #371. The first also holds
+    # two bounded drains inside finite outer loops (an `array::from_fn` closure, `for lane in 0..2`)
+    # and a comment naming the count between its binding and its loop (#1302 attempt 3).
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn input_process() {}' \
@@ -232,6 +245,31 @@ create_fixture() {
         '    let gains: [u8; 4] = core::array::from_fn(|lane| lane as u8);' \
         '    let trims: [u8; 4] = std::array::from_fn(|lane| lane as u8);' \
         '    [gains, trims]' \
+        '}' \
+        'fn drain_lane_pairs(control: &mut Consumer<Record>) -> [usize; 2] {' \
+        '    core::array::from_fn(|lane| {' \
+        '        let available = control.available_at_entry();' \
+        '        // `available` is fixed at entry: a push during this drain waits for the next block.' \
+        '        let mut applied = 0;' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            applied += apply(lane, record);' \
+        '        }' \
+        '        applied' \
+        '    })' \
+        '}' \
+        'fn drain_two_lanes(control: &mut Consumer<Record>) {' \
+        '    for lane in 0..2 {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(lane, record);' \
+        '        }' \
+        '    }' \
         '}' \
         '// REALTIME_POLICY_END' \
         '// REALTIME_POLICY_BEGIN' \
@@ -414,6 +452,24 @@ sed -i -E '/^[[:space:]]*fn [a-z_]+\(\) \{\}[[:space:]]*$/d' \
     "$empty_bodies/crates/builtins-compiler/src/lib.rs" \
     "$empty_bodies/hosts/host-web/src/lib.rs"
 bash "$policy_script" "$empty_bodies" >/dev/null
+# A region left open by out-of-order markers ends with its file: the unmarked lines that open the
+# next file (here an unbounded test-only drain at the top of each marked file without inner
+# attributes) are not read as marked code (#1302 attempt 3).
+open_tail_valid="$scratch_root/open-tail-valid"
+create_fixture "$open_tail_valid"
+while IFS= read -r marked; do
+    [[ "$(head -c 2 -- "$marked")" == '#!' ]] && continue
+    { printf '%s\n' \
+        'fn oracle_drain(control: &mut Consumer<Record>) {' \
+        '    while let Ok(record) = control.try_pop() {' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+      cat -- "$marked"; } >"$marked.tmp"
+    mv -- "$marked.tmp" "$marked"
+done < <(rg -l REALTIME_POLICY_BEGIN "$open_tail_valid" --glob '*.rs')
+printf '%s\n' '// REALTIME_POLICY_END' '// REALTIME_POLICY_BEGIN' 'fn render_tail() {}' >>"$open_tail_valid/crates/floor/src/pad_1.rs"
+bash "$policy_script" "$open_tail_valid" >/dev/null
 
 # The forbidden-surface rules, on the file the gate has always scanned.
 expect_failure allocation "$alloc_class" \
@@ -795,8 +851,8 @@ mutate_bare_from_fn() {
 mutate_entry_name_in_binding() {
     replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
         'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
-        '    let not_available_at_entry_cap = control.capacity();' \
-        '    for _ in 0..not_available_at_entry_cap {' \
+        '    let cap = control.not_available_at_entry_cap();' \
+        '    for _ in 0..cap {' \
         '        let Ok(record) = control.try_pop() else {' \
         '            break;' \
         '        };' \
@@ -866,6 +922,221 @@ mutate_paren_open_range_outer() {
         '    }' \
         '}'
 }
+# #1302 attempt 3: the drain rule reads tokens, not lines. A `match` closed inside a loop
+# header and continued by `.method()` (J2-1) is still that header.
+mutate_while_match_body() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl LaneDrain {' \
+        '    fn drain_matrix_controls(&mut self, control: &mut Consumer<Record>) {' \
+        '        while match self.lane_selector_for_this_block {' \
+        '            Lane::Left => &self.left_consumer,' \
+        '            Lane::Right => &self.right_consumer,' \
+        '        }' \
+        '        .has_records()' \
+        '        {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            self.apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# A `{` after a closed block opens the loop body when the block was part of the header.
+mutate_while_match_brace() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, lane: Lane) {' \
+        '    while match lane {' \
+        '        Lane::Left => control.left_ready(),' \
+        '        Lane::Right => control.right_ready(),' \
+        '    } {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# After a closed block, `in`, `else` and `as` continue the header: a struct pattern, an
+# `if`/`else` condition and a cast.
+mutate_struct_pattern_for() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, lanes: &[Lane]) {' \
+        '    for Lane { left, right } in lanes.iter().cycle() {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record, left, right);' \
+        '    }' \
+        '}'
+}
+mutate_if_else_condition() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while if control.left_first() {' \
+        '        control.left_ready()' \
+        '    } else {' \
+        '        control.right_ready()' \
+        '    } {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_as_cast_condition() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, lane: Lane) {' \
+        '    while match lane {' \
+        '        Lane::Left => 0_u8,' \
+        '        Lane::Right => 1_u8,' \
+        '    } as usize' \
+        '        != control.cursor()' \
+        '    {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A `{` after an operator opens a block operand of the header, not the loop body.
+mutate_block_operand_condition() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while control.ready() && {' \
+        '        control.refresh();' \
+        '        control.more()' \
+        '    } {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# Braces and `;` inside literals and comments are not code.
+mutate_brace_in_string_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while control.name() != "};{" {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_brace_in_char_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        "    while control.tag() != '}' {" \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_brace_in_raw_string_header() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while control.name() != r#"}";{"# {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_brace_in_block_comment() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while control.more() {' \
+        '        /* } closes nothing: a comment */' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# Between its binding and its loop the count is named nowhere else: a `for` pattern rebinding
+# it is not an entry count (J2-4).
+mutate_count_rebound_by_for_pattern() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, limits: &[usize]) {' \
+        '    let available = control.available_at_entry();' \
+        '    for &available in limits.iter() {' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# The binding takes the count from `available_at_entry` and nothing else.
+mutate_inflated_count() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry() + control.capacity();' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A `while <count> != 0` body names its count once, in its first statement.
+mutate_while_count_raised_in_body() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let mut remaining = control.available_at_entry();' \
+        '    while remaining != 0 {' \
+        '        remaining -= 1;' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        if apply(record) {' \
+        '            remaining += 1;' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# A loop around a bounded drain must be finite by its form (J2-5).
+mutate_outer_repeat() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    for _ in core::iter::repeat(()) {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# Markers out of order leave a region open where its file ends; that tail is still checked (J2-2).
+append_open_tail() {
+    printf '%s\n' '// REALTIME_POLICY_END' '// REALTIME_POLICY_BEGIN' \
+        'fn drain_tail(control: &mut Consumer<Record>) {' \
+        '    loop {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}' >>"$1"
+}
+mutate_open_tail_last_file() {
+    append_open_tail "$root/hosts/host-web/src/lib.rs"
+}
 for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
     second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
     bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
@@ -873,7 +1144,11 @@ for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_
     wrapped_while_body wrapped_for_bound wrapped_outer_while paren_led_header \
     continuation_led_header bare_from_fn entry_name_in_binding entry_name_in_header \
     header_past_closed_body array_from_fn_pop pattern_rebound_count \
-    paren_open_range_outer; do
+    paren_open_range_outer while_match_body while_match_brace \
+    struct_pattern_for if_else_condition as_cast_condition block_operand_condition \
+    brace_in_string_header brace_in_char_header brace_in_raw_string_header brace_in_block_comment \
+    count_rebound_by_for_pattern inflated_count while_count_raised_in_body outer_repeat \
+    open_tail_last_file; do
     expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
