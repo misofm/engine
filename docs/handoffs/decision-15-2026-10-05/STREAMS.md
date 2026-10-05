@@ -325,6 +325,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 19 | #1422 | Run doctests in CI | — | — |
 | 20 | #1416 | Let only host-core build the live route records that hosts push | #1422 | — |
 | 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
+| 22 | #1426 | Bound each realtime drain per queue: require the pop receiver to be the counted queue | #1418 | — |
 
 ## Stream K
 
