@@ -15,8 +15,7 @@ A C host can ask, from any thread, "which committed revision is audible, and sin
 sample?" `miso_engine_v1_plan_watermark` returns `(revision, first sample fully in effect, outcome
 flags)` plus saturating per-outcome counters. The revision is the highest one that is in effect
 together with every revision before it. Every committed revision is *pending* until the watermark
-covers it. Submit never waits for render, a swap or a catch-up: completion is observed, never
-awaited, and the watermark never uses the reliable event lane.
+covers it. Submit never waits for render or a swap: completion is observed, never awaited, and the watermark never uses the reliable event lane.
 
 ## Context
 
@@ -24,7 +23,7 @@ awaited, and the watermark never uses the reliable event lane.
   entry by whatever render call comes next: each drain takes exactly what was published at its
   entry (`available_at_entry`, `crates/builtins-compiler/src/lib.rs:1072-1075`,
   `crates/graph/src/runtime.rs:896-897`). A rebuild applies when render adopts the candidate
-  (`enter_block`, `crates/engine/src/realtime/plan_exchange.rs:375-439`), which a paused host never
+  (`enter_block`, `crates/engine/src/realtime/plan_exchange.rs:375-437`), which a paused host never
   reaches.
 - *Let the control thread withdraw an unadopted candidate plan* (#1343) replaces publication with
   a two-cell mailbox: one cell is `Active` (the plan render runs), the other `Empty` or `Full` (the
@@ -68,17 +67,15 @@ awaited, and the watermark never uses the reliable event lane.
   candidate, never to the running plan.
   - **Pending candidate in a cell.** `PlanPublisher::set_revision(revision)` loads the state word
     and stores `revision` (`Release`) into the `Full` cell, if there is one. A concurrent claim
-    does not change which cell is right: the `Full` cell becomes the `Active` one. *Adopt a
-    successor plan no earlier than a scheduled sample, with a return queue* (#1311) adds the
-    `Returned` cell state after this slice and extends this rule to it (#1311 D6).
+    does not change which cell is right: the `Full` cell becomes the `Active` one. A candidate
+    published `NoEarlierThan` or `Primed` by *Adopt a successor plan no earlier than a scheduled
+    sample* (#1311) is a `Full` cell like any other; render adopts in the same step as it claims,
+    so no other cell state exists.
   - **Pending candidate held by control.** A candidate the control thread holds outside the
     mailbox carries its own word: `UnadoptedCandidate::set_revision(revision)` (a withdrawn
-    candidate, D1, and after #1311 one taken back from `Returned`), `PlanReplacementReservation::set_revision(revision)` (a reserved one,
-    written before `commit`), and the owner of any other control-held candidate writes the word it
-    will publish with (a catch-up successor: *Hold live edits during a catch-up and apply them at
-    the adoption sample*, #1356 D3; a newer candidate held while a copy is in flight: *Supersede a
-    running catch-up by a structural edit*, #1357 D1a). `set_revision` on the publisher is not
-    called while control holds a candidate.
+    candidate, D1) and `PlanReplacementReservation::set_revision(revision)` (a reserved one,
+    written before `commit`). `set_revision` on the publisher is not called while control holds a
+    candidate.
   - **No candidate pending.** Only then does `PlanPublisher::set_revision` store into the `Active`
     cell. It returns which cell it wrote (`RevisionTarget::{Pending, Active}`), so the control
     plane can debug-assert that it never writes `Active` while it records a pending candidate.
@@ -95,24 +92,25 @@ awaited, and the watermark never uses the reliable event lane.
   sample, and a rebuilt plan renders from it.
 - **D4. Record and reads.** New module `crates/engine/src/realtime/watermark.rs`, the
   `observe.rs` seqlock pattern in safe Rust, with one writer (render). Words: `revision`,
-  `first_sample`, `flags`, `exact`, `preroll_fallback`, `transition_fallback`, `superseded`. A read
+  `first_sample`, `flags`, `exact`, `transition_fallback`, `superseded`. A read
   retries at most `observe.rs`'s 64 attempts, then reports "busy". Reader handle:
   `PlanWatermarkReader`, cloned from `PlanPublisher::watermark_reader()`.
-- **D5. Flags and counters.** Bits: `EXACT = 1`, `PREROLL_FALLBACK = 2`, `TRANSITION_FALLBACK = 4`,
-  `SUPERSEDED = 8`. An advance's flags are the OR over the revisions it covers. Counters are
-  saturating counts of revisions completed per outcome. An advance from `a` to `b` adds `b - a` in
-  total.
+- **D5. Flags and counters.** Bits: `EXACT = 1`, `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`.
+  The value 2 is unassigned (D15-8 (round-5 amendment) removed the pre-roll outcome). An
+  advance's flags are the OR over the revisions it covers. Counters are saturating counts of
+  revisions completed per outcome. An advance from `a` to `b` adds `b - a` in total.
   - At a claim, render takes the claimed cell's `superseded` value into render-local state. The
     first advance after that claim adds it to the `superseded` counter and sets `SUPERSEDED`.
     `exact` takes the rest of `b - a`, saturating at 0. Later advances on the same plan add none.
   - In this slice every candidate's `superseded` is 0, so every advance publishes `EXACT` and adds
     `b - a` to `exact`.
   - **Who writes `superseded`:** *Supersede an unadopted candidate plan by compare-and-swap*
-    (#1310) owns the `SUPERSEDED` outcome. It stores the count beside its successor's revision.
-    *Supersede a running catch-up by a structural edit* (#1357) does the same for a catch-up.
-  - `PREROLL_FALLBACK` and `TRANSITION_FALLBACK` are set only by the catch-up fallback path, *Fall
-    back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition*
-    (#1358).
+    (#1310) owns the `SUPERSEDED` outcome. It stores the count beside its successor's revision,
+    for a superseded warm candidate as for any other.
+  - `TRANSITION_FALLBACK` is set only when a warm successor falls back to the transition: on
+    `WarmUnavailable` at submit (*Duck-swap the strips a latency growth restarts, and fall back to
+    the transition when a warm successor cannot adopt*, #1397) or at the readiness deadline (*Fall
+    back to the transition when a warm successor is not ready by its deadline*, #1358).
   - A planned D15-9 transition (*Fade in a strip that a swap adds during playback* #1288,
     *Duck-swap a strip whose state cannot continue across a plan swap* #1324, *Remove a strip in
     two phases: ramp out, then a scheduled swap* #1325) is not a fallback and sets no flag: its
@@ -121,8 +119,8 @@ awaited, and the watermark never uses the reliable event lane.
   miso_engine_v1_watermark *out)`, thread: any, concurrent with render, like
   `miso_engine_v1_plan_resources`. Struct (96 bytes, `MISO_ENGINE_V1_WATERMARK_SIZE`):
   `uint32_t struct_size; uint32_t reserved0; uint64_t revision; uint64_t first_sample;
-  uint64_t outcome_flags; uint64_t exact_count; uint64_t preroll_fallback_count;
-  uint64_t transition_fallback_count; uint64_t superseded_count; uint64_t reserved[4];`.
+  uint64_t outcome_flags; uint64_t exact_count; uint64_t transition_fallback_count;
+  uint64_t superseded_count; uint64_t reserved[5];`.
   - Wrong `struct_size` or nonzero reserved words: `MISO_ENGINE_V1_INVALID_ARGUMENT`.
   - A read that gives up: `MISO_ENGINE_V1_BACKPRESSURE`, out untouched; the host retries.
   - The query writes nothing through the plan handle, its diagnostic word included: like
@@ -168,7 +166,7 @@ awaited, and the watermark never uses the reliable event lane.
 - *Publish the applied-revision watermark in the browser status* (#1349): the status words and the
   engine-side hook the Worker of *Run the browser control plane in a Worker and keep the
   AudioWorklet render-only* (#1332) calls.
-- Any producer of a nonzero `superseded` or of the fallback flags (#1310, #1357, #1358).
+- Any producer of a nonzero `superseded` or of the fallback flag (#1310, #1358, #1397).
 
 ## Hazards
 
@@ -176,7 +174,7 @@ awaited, and the watermark never uses the reliable event lane.
   reordering. The reviewer checks that the store is the last write of each commit path, including
   the EQ `commit_owner` loop and (after #1312) the cell writes.
 - D2's routing is the other half. Writing a revision committed while a candidate is pending (in a
-  cell, withdrawn, returned or held by a catch-up) into the `Active` cell would report it in effect
+  cell or withdrawn) into the `Active` cell would report it in effect
   at the next block of the old plan; gate 8 is built to catch that.
 - Render must read only the `Active` cell (D3). Reading "the newest cell" or a cell chosen from the
   epoch would report a candidate's revision before render adopts it; gate 1 is built to catch that.

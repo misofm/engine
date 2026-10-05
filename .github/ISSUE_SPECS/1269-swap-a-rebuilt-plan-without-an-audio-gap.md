@@ -47,7 +47,8 @@ On both hosts, a structural edit while audio plays has no gap:
 - a new node starts at rest; a new source starts at an exact render sample the host chooses;
 - a strip whose state cannot continue (added, edited in a prepared value, removed) passes through a
   declared ramp, never a click (D15-9);
-- a latency change is exact on every path (D15-8), and any fallback is counted and reported;
+- a latency change is exact on every carried path (D15-8); a strip it restarts takes its D15-9
+  transition, and any fallback is counted and reported;
 - no acknowledged edit is lost, and every committed revision completes observably (D15-17);
 - the swap block allocates nothing, frees nothing, takes no lock and makes no syscall.
 
@@ -111,11 +112,10 @@ instance; that changes no bit (AGENTS.md: banking "may couple lanes' cost, never
     scratch buffer the successor preallocates. #1278 made every restore allocation-free and exact
     mid-ramp. Builtins copy plain-data lane state between two instances of the same concrete type
     (`as_any_mut`, `crates/graph/src/lib.rs:1291`).
-  - **Copy mode (D15-8):** the carry program can also run with the predecessor kept intact, so a
-    warm successor (P7) takes a copy while the predecessor keeps rendering. Bounded `memcpy` and
-    allocation-free payload calls only (*Carry plan state by copy as well as by move*, #1322). Every
-    carry family from #1277 on implements both modes; a per-node effect copies in one pass (*Copy a
-    per-node effect's state into a same-layout instance in one pass*, #1362).
+  - **Claim-line fill (D15-8):** at a warm adoption, render fills each grown source claim line from
+    the predecessor's pending frames and a raw-frame prime (P7). It copies no plan state. The carry
+    runs in move mode only: the D15-8 round-5 amendment retired copy-mode carry (#1322, #1362 closed
+    as not planned).
 - **Bounded work:** the program's length and copy bytes are known when it is built. The swap
   block's cost is measured on the 64-track console (#1286).
 
@@ -143,8 +143,8 @@ source-read clock (*Anchor every seek on the plan's source-read clock*, #1316), 
   is a scheduled swap at the ramp's end. Its source retires with phase 2, not with the commit (*Remove
   a strip in two phases: ramp out, then a scheduled swap*, #1325). Until phase 2, a submit to that
   source is accepted; after it, refused with `source.id.unknown`.
-- **Mechanisms:** a scheduled swap ("adopt no earlier than S") and exact-sample adoption with a
-  return queue (#1311); candidate supersession by compare-and-swap (#1310, on #1343 and #1344); live strip fader and
+- **Mechanisms:** a scheduled swap ("adopt no earlier than S", *Adopt a successor plan no earlier
+  than a scheduled sample*, #1311); candidate supersession by compare-and-swap (#1310, on #1343 and #1344); live strip fader and
   mute lanes on every plan, on both hosts (the C ABI has them since #1256; the browser gains them in
   #1326).
 - **A route added to or removed from a surviving strip** ramps in or out (*Ramp a route that a
@@ -162,9 +162,9 @@ source-read clock (*Anchor every seek on the plan's source-read clock*, #1316), 
   `crates/rack/src/lib.rs:937`, drained at `:1257`). So the successor's lane **inherits** the
   predecessor lane's unconsumed controls and applies them before its own in its first block.
 - A record admitted while a successor is pending goes to the newest candidate (#1257's rule;
-  `commit_live` targets `pending_providers.last_mut()`, `control.rs:1089`). During a warm-successor
-  catch-up a live edit is held in the control plane and written to the successor at publication
-  (D15-17).
+  `commit_live` targets `pending_providers.last_mut()`, `control.rs:1089`). A pending warm
+  successor is an ordinary pending candidate (#1053 D7, D15-17): the edit goes to its cells and
+  applies at adoption. Its retargets were written once, at preparation (#1277 D5).
 - **Latest-target cells (D15-2, #1312)** replace the live value queues on both hosts. A cell holds
   its target and ramp as one unit, with a per-lane dirty mask. The inheritance rule carries over: a
   dirty predecessor cell is applied by the successor in its first block. The queue-capacity split
@@ -190,32 +190,40 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
   playback*, #1285). Floors and the accumulated read-ahead reset at a discontinuity the host
   declares: a stop, or a seek of every source (*Reset latency floors at a host-declared
   discontinuity*, #1323).
-- **A node's arrival would grow by `P`: a warm successor** (*Pre-roll a successor whose latency
-  grows*, #1287). "History fill" is impossible: the samples needed are future processed samples.
-  1. The successor is prepared with floors at the predecessor plus `P`.
-  2. At block B, render copies state into it (copy mode, #1322) and returns it through a
-     capacity-1 queue (#1311; *Snapshot a running plan into a returned successor at a block*,
-     #1354).
-  3. The control thread renders it forward with the FP environment pinned (*Render a successor plan
-     off the render thread with a pinned floating-point environment*, #1321). It reads sources
-     through a read-only peek cursor whose position gates the ring's release (#1320), over source
-     blocks kept immutable in a shared pool (#1353).
-  4. Once it leads render by `P`, it is published as "adopt exactly at S, else return". At S render
-     adopts it by pointer swap and moves the consumers with their read index at `S + P` (*Catch up a
-     returned successor and adopt it exactly at a scheduled sample*, #1355).
-  5. Live edits during the window are held and apply at S (#1356). A structural edit during the
-     window supersedes the catch-up (#1357). A host-declared stop turns it into a plain rebuild
-     (#1359).
-  6. `ΣP` is bounded by ring headroom (`P_max`).
-  7. The C ABI runs the catch-up in bounded `miso_engine_v1_service` slices (#1348, #1360); the
-     browser runs it in the Worker's service loop (#1361).
-- **Fallbacks, each counted and reported** through the watermark's outcome flags (#1314):
-  render-thread pre-roll bounded by `k_max` (*Fall back from a missed catch-up deadline: bounded
-  render-thread pre-roll, then the transition*, #1358), then the duck-swap transition of the strips
-  whose arrival grows (*Duck-swap the strips a latency growth restarts, and fall back to the
-  transition when no catch-up can finish*, #1397). They apply on a deadline counted in render
-  samples (a paused host never falls back; decision 15, D15-17) or on a non-isolated browser page.
-  #1286 derives `k_max`, the deadline and `P_max`, with the browser row from the spike (#1331).
+- **A node's arrival would grow by `P`: a primed warm successor** (*Grow latency during playback
+  by adopting a primed warm successor*, #1287; D15-8 (round-5 amendment)). "History fill" is
+  impossible: the samples needed are future processed samples, which the host already queues as
+  raw source frames. The successor's nodes split into carried nodes (C), the nodes of the strips it
+  restarts (R, #1324's `restarted_strips()`) and added nodes (N).
+  1. Submit prepares the successor with floors at `a(n) + P` on carried nodes only (R keeps
+     #1285's floors, N has none). `Δ` is the largest arrival growth over C, `P = q·⌈Δ/q⌉`, and the
+     source-read offset is the predecessor's plus `P` (*Give a plan a source-read clock that leads
+     its render clock*, #1396). Preparation checks that every carried node arrives at exactly
+     `a(n) + P`; a node that does not is `WarmUnavailable::Misaligned`, its strip is restarted whole
+     and `Δ` recomputed, and if it cannot be restarted the edit takes the transition (*Prepare a warm
+     successor whose carried nodes lead the predecessor by P*, #1354).
+  2. Submit publishes it as `Primed { not_before, lead_blocks }` (#1311).
+  3. Render checks readiness on the **active** plan's consumers before it claims: S is at or after
+     `not_before`, every carried source has its next `P/q + 1` blocks queued and playable, and no
+     command or held seek is anchored in the prime window (*Let a source consumer check and replay
+     its next blocks for a prime*, #1320). Once ready, it claims and adopts in move mode in the
+     same block, then replays `P/q` blocks per carried consumer (`prime_block_at`) into the claim
+     lines (*Adopt a warm successor with a raw-frame prime at the first ready block*, #1355).
+  4. Live edits while it is pending are ordinary pending-candidate edits (#1053 D7). A structural
+     edit supersedes it (#1310). A host-declared stop supersedes it by a plain rebuild (#1323).
+  5. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
+  6. The C ABI checks the deadline in `miso_engine_v1_service` (#1348, *Check the warm-successor
+     deadline in miso_engine_v1_service and report its outcome*, #1360); the browser checks it in
+     the Worker's service loop (*Check the warm-successor deadline in the browser Worker's service
+     loop and report its outcome*, #1361).
+- **Fallback, counted and reported** through the watermark's outcome flags (#1314): the transition
+  only, the duck-swap of the strips whose arrival grows (*Duck-swap the strips a latency growth
+  restarts, and fall back to the transition when a warm successor cannot adopt*, #1397), counted
+  `TRANSITION_FALLBACK`. It applies on `WarmUnavailable` at submit, or when readiness is still
+  unmet `PRIME_DEADLINE_SAMPLES` of render after publication (*Fall back to the transition when a
+  warm successor is not ready by its deadline*, #1358). The deadline is counted in render samples,
+  so a paused host never falls back (D15-17). There is no render-thread pre-roll. #1286 derives
+  `P_MAX` and `PRIME_BYTES_MAX`, with the browser row from the spike (#1331).
 - **No permanent latency reserve.** A reserve is a permanent cost on every session.
 
 VST3 states that a plug-in's latency change may interrupt playback, because the host must recompute
@@ -240,16 +248,16 @@ adopted plan.
 - **Structural transaction.** Submit validates, classifies, prepares the successor and reserves its
   publication slot and retirement credit (`control.rs:962`), then commits (`:1007-1009`) and writes
   the response (`:1033`). Preparation stays in submit because it can fail; nothing is acked before
-  it succeeds. Submit never waits for render, a swap or a catch-up.
+  it succeeds. Submit never waits for render, a swap or a warm adoption.
 - **Completion.** The response carries `{revision, path}` (#1313). A committed revision is pending
   until the applied-revision watermark covers it (#1314; browser status #1349). It completes as
-  `exact`, with a counted fallback (`preroll_fallback`, `transition_fallback`), or as `superseded`
+  `exact`, with a counted fallback (`transition_fallback`), or as `superseded`
   into a later revision whose committed model contains it. Never as nothing.
 - **A planned transition completes as `exact`.** An added strip's fade-in (#1288), an edited strip's
   duck-swap (#1324), a two-phase removal (#1325) and a route ramp (#1363) are the designed outcome
   of their edit, so their revision completes `exact` with no fallback flag. `transition_fallback`
-  is set only when a missed catch-up deadline forces the fallback transition, which is the
-  duck-swap (#1324, via #1358).
+  is set only when a warm successor cannot adopt (`WarmUnavailable`, or a missed deadline), and the
+  fallback transition, the duck-swap (#1324), runs instead (#1397, #1358).
 - **Source PCM.** Accepted PCM for a persisting source stays in the carried ring. Accepted PCM for a
   removed source is discarded with phase 2 of its removal (P4).
 - **Live records.** P5. None is dropped; a superseded cell value is counted (D15-2).
@@ -273,7 +281,7 @@ its vacant sources render `+0.0`, and `carry_mismatched` counts it (`plan_exchan
 ### P12. The browser: one control plane, off the audio thread (D15-10, D15-11)
 
 - Wasm threads on one shared `WebAssembly.Memory`. A Worker instance runs the control plane (model,
-  classifier, preparation, catch-up, retirement, disposal); the AudioWorklet instance only renders
+  classifier, preparation, the warm-successor deadline check, retirement, disposal); the AudioWorklet instance only renders
   and swaps, and never allocates or frees after boot (*Run the browser control plane in a Worker and
   keep the AudioWorklet render-only*, #1332). The module imports one shared memory at every
   instantiation site (#1380); plans swap and retire through the Worker's service loop (#1381); live
@@ -285,7 +293,8 @@ its vacant sources render `+0.0`, and `carry_mismatched` counts it (`plan_exchan
   nightly with `-Zbuild-std` (#1334). The spike (#1331) proves two instances on one shared memory in
   three browser engines and on iOS before #1332 starts.
 - Cross-origin isolation is required for structural edits. A non-isolated page keeps the same API
-  and artifact; its structural edit runs the blocking rebuild, reported and counted.
+  and artifact; its structural edit runs the blocking rebuild, reported and counted. Warm latency
+  growth needs no isolation: both pages adopt a `Primed` successor and report it `exact` (#1361).
 - **One edit API.** The SDK gains `engine.apply(transaction) -> {revision, path}` plus the
   watermark. `replaceSession(document)` exists only as a convenience that diffs the document
   against the committed model into one transaction (#1386). The SDK builds and encodes
@@ -310,10 +319,11 @@ carry only between bank lanes.
 | Console effect lanes | `EffectBankStage` (`rack/src/lib.rs:750`) | lane copy (payload) | #1279 |
 | Live-controlled effect lanes | `LiveControlEffectBankStage` (`rack/src/lib.rs:937`) | lane copy, inherited controls | #1280 |
 | Insert lanes that change representation | bank lane and `NodeKind::Effect` / `LiveControlEffect` | lane copy (payload) | #1281 |
-| Per-node effects | `NodeKind::LiveControlEffect` (`graph/src/runtime.rs:1143`, `:1184`) | move or copy | #1282 |
-| Compensation lines | `CompensationDelay` (`graph/src/runtime.rs:940`) | move or head-aligned copy | #1283 |
-| Strip and submix delay lines, live send ramps | `TrackDelayLine` (`:1021`), `LiveRoute` (`:861`) | move or copy, drain | #1284 |
+| Per-node effects | `NodeKind::LiveControlEffect` (`graph/src/runtime.rs:1143`, `:1184`) | move | #1282 |
+| Compensation lines | `CompensationDelay` (`graph/src/runtime.rs:940`) | move, or a head-aligned copy for a changed length | #1283 |
+| Strip and submix delay lines, live send ramps | `TrackDelayLine` (`:1021`), `LiveRoute` (`:861`) | move (delay lines); drain, then copy (send ramps) | #1284 |
 | Meters, observation taps, spectrum | builtins meters, observation lanes | copy | #1327 |
+| Source claim lines (after a warm growth) | `pdc_delay_block` claim lines, keyed by claiming node and source | move; a grown line is filled from pending frames and the prime (D15-8 L2, L3) | #1287 |
 
 ## Slices
 
@@ -329,49 +339,42 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 
 | Issue | Title | Stream | Depends on |
 |---|---|---|---|
-| #1300 | *Let soft-clip restore its own non-finite history* | A | #1322 |
-| #1322 | *Carry plan state by copy as well as by move* | A | none |
-| #1277 | *Carry fader, mute and pan ramps across a plan swap* | A | #1312, #1322 |
-| #1279 | *Carry console effect lanes across a plan swap* | A | #1277, #1322 |
+| #1300 | *Let soft-clip restore its own non-finite history* | A | none |
+| #1277 | *Carry fader, mute and pan ramps across a plan swap* | A | #1312 |
+| #1279 | *Carry console effect lanes across a plan swap* | A | #1277 |
 | #1280 | *Carry live-controlled effect lanes across a plan swap* | A | #1279, #1312, #1345 |
 | #1281 | *Carry an insert lane that moves between a bank and a per-node instance* | A | #1280 |
-| #1362 | *Copy a per-node effect's state into a same-layout instance in one pass* | A | none |
-| #1282 | *Carry per-node effect instances across a plan swap* | A | #1281, #1362 |
+| #1282 | *Carry per-node effect instances across a plan swap* | A | #1281 |
 | #1283 | *Carry compensation lines across a plan swap* | A | #1282 |
 | #1284 | *Carry strip delay lines and live send ramps across a plan swap* | A | #1283 |
 | #1285 | *Keep every node's latency from dropping during playback* | A | #1284 |
-| #1323 | *Reset latency floors at a host-declared discontinuity* | A | #1285, #1309, #1310 |
-| #1286 | *Record the swap block's cost on the 64-track console* | A | #1284, #1321, #1322, #1331 |
+| #1323 | *Reset latency floors at a host-declared discontinuity* | A | #1285, #1309, #1310, #1311, #1314 |
+| #1286 | *Record the swap block's cost on the 64-track console* | A | #1284, #1331, #1354, #1355 |
 | #1327 | *Carry meter and effect observation state across a plan swap* | A | #1284 |
 | #1395 | *Carry spectrum capture state across a plan swap* | A | #1327, #1401 |
 | #1343 | *Let the control thread withdraw an unadopted candidate plan* | B | #1309 |
 | #1344 | *Prepare a successor across a withdrawn candidate plan* | B | #1277 |
 | #1398 | *Size the C ABI's plan capacities and resource admission for a superseding candidate* | B | #1309 |
 | #1310 | *Supersede an unadopted candidate plan by compare-and-swap* | B | #1309, #1314, #1343, #1344, #1398 |
-| #1311 | *Adopt a successor plan no earlier than a scheduled sample, with a return queue* | B | #1309, #1314, #1343 |
+| #1311 | *Adopt a successor plan no earlier than a scheduled sample* | B | #1309, #1314, #1343 |
 | #1348 | *Add miso_engine_v1_service for bounded control work between edits* | B | #1309, #1311, #1314 |
 | #1349 | *Publish the applied-revision watermark in the browser status* | B | #1309, #1314, #1348, #1381, #1399 |
-| #1287 | *Pre-roll a successor whose latency grows* | C | #1285 |
-| #1353 | *Keep source transfer blocks in a shared pool, immutable from publication to release* | C | #1316, #1318, #1319, #1350 |
-| #1320 | *Give the source ring a read-only peek cursor that gates release* | C | #1287, #1316, #1318, #1319, #1353 |
-| #1321 | *Render a successor plan off the render thread with a pinned floating-point environment* | C | #1287 |
-| #1354 | *Snapshot a running plan into a returned successor at a block* | C | #1284, #1285, #1286, #1287, #1311, #1320, #1322, #1327, #1395 |
-| #1355 | *Catch up a returned successor and adopt it exactly at a scheduled sample* | C | #1277, #1310, #1312, #1314, #1320, #1321, #1327, #1344, #1345, #1346, #1347, #1354, #1396, #1398 |
-| #1356 | *Hold live edits during a catch-up and apply them at the adoption sample* | C | #1277, #1309, #1311, #1312, #1314, #1345, #1346, #1347, #1355 |
-| #1357 | *Supersede a running catch-up by a structural edit* | C | #1310, #1314, #1320, #1344, #1348, #1354, #1355, #1356 |
-| #1358 | *Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition* | C | #1286, #1311, #1314, #1331, #1343, #1344, #1355, #1356, #1396, #1397 |
-| #1359 | *Turn a pending catch-up into a plain rebuild at a host-declared stop* | C | #1310, #1323, #1344, #1355, #1357, #1396 |
-| #1360 | *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1313, #1314, #1348, #1358, #1359, #1397 |
-| #1361 | *Run the browser catch-up in the Worker's service loop* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1360, #1381 |
+| #1287 | *Grow latency during playback by adopting a primed warm successor* | C | #1283, #1285 |
 | #1396 | *Give a plan a source-read clock that leads its render clock* | C | #1316, #1323 |
-| #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish* | C | #1288, #1311, #1314, #1324, #1344, #1354, #1355, #1356, #1396 |
+| #1320 | *Let a source consumer check and replay its next blocks for a prime* | C | #1316, #1318, #1319 |
+| #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1286, #1287, #1324, #1396 |
+| #1355 | *Adopt a warm successor with a raw-frame prime at the first ready block* | C | #1277, #1287, #1310, #1311, #1314, #1320, #1323, #1327, #1343, #1344, #1354, #1395, #1396 |
+| #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt* | C | #1288, #1311, #1314, #1324, #1325, #1343, #1344, #1354, #1355, #1396, #1398 |
+| #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1286, #1314, #1343, #1354, #1355, #1396, #1397 |
+| #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398 |
+| #1361 | *Check the warm-successor deadline in the browser Worker's service loop and report its outcome* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1355, #1360, #1381 |
 | #1326 | *Give every browser plan live strip fader and mute lanes* | D | none |
 | #1288 | *Fade in a strip that a swap adds during playback* | D | #1054 |
 | #1325 | *Remove a strip in two phases: ramp out, then a scheduled swap* | D | #1054, #1288, #1309, #1310, #1311, #1312, #1313, #1314, #1347, #1363, #1391 |
 | #1324 | *Duck-swap a strip whose state cannot continue across a plan swap* | D | #1277, #1288, #1310, #1325, #1363, #1391 |
 | #1363 | *Ramp a route that a plan swap adds to or removes from a surviving strip* | D | #1054, #1283, #1284, #1285, #1288, #1310, #1314 |
 | #1391 | *Give every route whose tap precedes its strip's fader a live lane on every plan* | D | #1225, #1326, #1347 |
-| #1392 | *Keep an added strip's pending fade-in across a later plan swap* | D | #1277, #1283, #1284, #1288, #1322, #1363 |
+| #1392 | *Keep an added strip's pending fade-in across a later plan swap* | D | #1277, #1283, #1284, #1288, #1363 |
 | #1380 | *Ship the browser module with one imported shared memory at every instantiation site* | H | #1331, #1333, #1334 |
 | #1332 | *Run the browser control plane in a Worker and keep the AudioWorklet render-only* | H | #1057, #1331, #1333, #1334, #1380 |
 | #1387 | *Move browser source submission and seeks into the Worker* | H | #1316, #1318, #1332 |
@@ -439,8 +442,9 @@ The 2026-10-04 owner questions are answered; none blocks a slice.
 
 - **Q1** (value edits inside a structural transaction): carry, then retarget for live values; a
   changed prepared value restarts behind a transition (D15-7, P1).
-- **Q2** (latency growth during playback): a warm successor rendered off the render thread, with
-  counted fallbacks and no permanent reserve (D15-8, P7, #1287).
+- **Q2** (latency growth during playback): a primed warm successor adopted with a raw-frame prime,
+  with the transition as its one counted fallback and no permanent reserve (D15-8 (round-5 amendment),
+  P7, #1287).
 - **Q3** (fade in an added strip): yes, over the session mute ramp from its first played block
   (D15-9, #1288).
 - **Q4** (browser rebuild cost on the audio thread): the control plane moves to a Worker on shared

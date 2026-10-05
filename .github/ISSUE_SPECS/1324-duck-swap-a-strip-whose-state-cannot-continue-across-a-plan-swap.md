@@ -55,6 +55,20 @@ never leaves it muted.
   ducked; its value changes stay live or carried-then-retargeted (D15-7). A changed route source,
   tap or destination does not put the source strip in this set (R8: #1283 and #1284 leave it out;
   #1363 ramps the route itself).
+  - **Sidechain consumers join the set.** A sidechain edge (`GraphEdgeId::EffectSidechain`) has no
+    gain lane: the compiler wires the routed sidechain's source tap straight into the effect's
+    `SidechainInput` port (`crates/graph-compiler/src/compile.rs:390-416`; the tap's stage,
+    `crates/graph-compiler/src/ids.rs:187-193` and `:210-220`). So a duck cannot reach it. When a
+    restarted strip's tap feeds a carried effect's sidechain and that tap follows a restarted owner
+    with state (taps `post_input`, `insert_send`, `insert_return`, `pre_fader`), the detector sees
+    the old chain's output until `S` and the restarted chain's at-rest output after it: a step at the
+    swap, even in a plain duck-swap. So the strip that holds the consuming effect joins the set. The
+    rule is applied after the carry join and repeated until no strip is added, since a joined strip
+    may itself feed a sidechain; `restarted_strips()` reports the closed set. An `input` tap is
+    the raw source (a track) or the sum of the strip's incoming routes (a submix), which no owner of
+    the restarted strip touches, so it adds nothing. A `post_fader` or `post_pan` tap is exact `+0.0`
+    from the end of the duck until the fire (the fader is ducked to a settled `+0.0`, then armed
+    muted), so it adds nothing either.
 - **D2. Whole pre-fader restart.** For a duck-swapped strip, preparation marks not carried, after
   the join: every owner before the fader, the fader stage, and every route out of the strip whose
   tap precedes the fader. A partial carry upstream of a restarted latent owner would emit its
@@ -64,8 +78,9 @@ never leaves it muted.
 - **D3. Arm.** Each duck-swapped strip is armed through #1288's arm entry point (its D1 strip-set
   argument; channels the model leaves unmuted), with `D` per #1288 D4 (its pre-fader latency; for a
   submix plus the longest compensation delay of an input route whose line starts at rest). Its
-  routes from taps before the fader are armed with it by #1363 D1 (c). The fire waits for adoption
-  (#1288 D3), so for a playing source the fade starts at the first block at or after `S + D`.
+  routes from taps before the fader are armed with it by #1363 D1 (c). The fire comes no earlier
+  than adoption (#1288 D3), so for a playing source the fade starts at the first block at or after
+  `S + D`.
 - **D4. Duck.** This issue extends #1325 D7's `plan_strip_transition`: the duck set is the removed
   strips plus `successor.restarted_strips()`, and the duck routes are every route from those strips
   whose tap precedes the fader, minus every strip and route already in the running plan's duck
@@ -86,9 +101,9 @@ never leaves it muted.
 - **D6. Reporting.** As #1325 D5: a planned duck-swap is the designed result of its edit, so its
   revision reports path `rebuild` and completes at `S` as `EXACT` (or `SUPERSEDED`), with no
   fallback flag and no counter. `TRANSITION_FALLBACK` and its counter are set only when the fallback
-  path of *Duck-swap the strips a latency growth restarts, and fall back to the transition when no
-  catch-up can finish* (#1397) publishes this duck-swap because no catch-up can finish; that issue
-  owns the flag. This issue never sets it.
+  path of *Duck-swap the strips a latency growth restarts, and fall back to the transition when a
+  warm successor cannot adopt* (#1397) publishes this duck-swap because a warm successor cannot
+  adopt; that issue owns the flag. This issue never sets it.
 - **D7. Realtime and the acked-batch question.** As #1325 D8. The arm table is sized at
   preparation.
 
@@ -99,7 +114,8 @@ never leaves it muted.
    state.
 2. The control plane passes the duck set through #1325's path (no new control-plane code beyond
    the call).
-3. Header comment and `docs/C_ABI_V1_QUALIFICATION.md`: which edits duck-swap, the dip length
+3. Header comment and `docs/C_ABI_V1_QUALIFICATION.md`: which edits duck-swap (and that a strip
+   whose effect is sidechained from a ducked strip's tap ducks with it, D1), the dip length
    (`N`, the wait to `S`, `D`, `N`).
 4. Tests below.
 
@@ -113,9 +129,11 @@ never leaves it muted.
 ## Non-goals
 
 - Added strips (#1288) and removed strips (#1325).
-- Composing with a warm successor: *Pre-roll a successor whose latency grows* (#1287) fixes `S`
-  for the catch-up and must not pick an `S` below this duck's bound. The fire needs no change for
-  it: it waits for adoption and measures the played block in the plan's own render time (#1288 D3).
+- Composing with a warm successor: *Duck-swap the strips a latency growth restarts, and fall back
+  to the transition when a warm successor cannot adopt* (#1397) publishes the warm candidate with
+  `not_before` at this duck's `S`, and render adopts it no earlier (*Grow latency during playback by
+  adopting a primed warm successor*, #1287). The fire needs no change for it: it measures the played
+  block in the plan's own render time (#1288 D3).
 - An arm still waiting when the adopted plan is itself succeeded: *Keep an added strip's pending
   fade-in across a later plan swap* (#1392).
 - No crossfade. A true crossfade with ghost strips is deferred by D15-9; it reopens on a measured,
@@ -164,8 +182,16 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    (b) Gate 5's session (B's `pre_fader` send into R with its compensation delay `C`): the revert
    at `k + 4` likewise leaves R's output up to `S` equal to gate 5's reference, and the adoption
    is at gate 5's `S`, which counts `C`.
-7. **Realtime.** As #1325's realtime gate, over the fade blocks too.
-8. Commands:
+7. **A sidechain consumer ducks with its source.** Gate 1's transaction, with B muted in the model
+   and track C audible. C holds a compressor insert whose `sidechain-in` port is routed from a tap
+   of B. (a) From B's `insert_return` tap: every block up to `S` equals a reference that live-mutes
+   C at the same point; from `S` every block equals a fresh plan of the successor session with C
+   muted and live-unmuted with `N` at its fire block; C is in `restarted_strips()`. (b) From B's
+   `input` tap: C carries every owner, is not in `restarted_strips()`, and every block equals a run
+   with no transaction. Bit-identical, at `Backend::Simd8` and `Backend::Simd4` in
+   `successor_swap.rs` and through the C entries.
+8. **Realtime.** As #1325's realtime gate, over the fade blocks too.
+9. Commands:
    - `cargo test --locked -p capi --test strip_transitions`
    - `cargo test --locked -p host-core -p capi --features host-core/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
@@ -186,6 +212,9 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
 - Gate 5: a pre-fader send carried across the duck-swap (it keeps sending through the dip, then
   steps when the restarted chain behind it emits) or left unarmed turns it red, and so does an `S`
   without the send's `C` (the line's last ducked frames cut at `S`).
+- Gate 7(a): a duck set that ignores sidechain edges (C's compressor reads B's old chain until
+  `S`, then its restarted chain's at-rest output, so C's gain reduction steps at `S`) turns it red.
+  Gate 7(b): a rule that also adds consumers of an `input` tap ducks C needlessly; it turns red.
 - Gate 6: a supersession whose base omits the overlay (the strip carries its ducked fader and stays
   muted) or does not arm the restored strip (it enters at full gain) turns it red. A revert that
   writes a second mute to the ducked strip or its send (the ramp restarts at `k + 4`, the blocks

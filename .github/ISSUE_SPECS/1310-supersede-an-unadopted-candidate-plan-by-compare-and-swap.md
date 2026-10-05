@@ -24,8 +24,10 @@ successor is adopted.
   impossible, and sums every held plan and model in admission. This slice relies on its
   capacities: report rows 4, pending providers 2, retirement capacity 3, retired providers 2.
 - **The exchange can take a candidate back** after *Let the control thread withdraw an unadopted
-  candidate plan* (#1343): `PlanPublisher::withdraw() -> Withdrawal::{Withdrawn, Taken, Nothing}`,
-  and after #1311 also `Returned`. `Taken` means render adopted it.
+  candidate plan* (#1343): `PlanPublisher::withdraw() -> Withdrawal::{Withdrawn, Taken, Nothing}`.
+  `Taken` means render adopted it. *Adopt a successor plan no earlier than a scheduled sample*
+  (#1311) keeps these three outcomes: render adopts in the same step as it claims, so no
+  candidate is ever in flight or handed back.
 - **Base and producers.** A candidate is prepared against the newest epoch's inventory and the
   current committed model (`control.rs:907-914`, `SuccessorBase`,
   `crates/host-core/src/prepare.rs:641`). The carry program names its predecessor's plan identity
@@ -47,10 +49,15 @@ successor is adopted.
 
 - **D1. Withdraw first, then prepare.** When a transaction needs a rebuild and a candidate A is
   the newest epoch, the control plane withdraws A before preparing. Outcomes:
-  - **Withdrawn**, or **Returned** (#1311): A is back unrendered and control-owned, and render
-    still runs P0. The new candidate B is prepared against P0, with A as a donor (D2).
+  - **Withdrawn:** A is back unrendered and control-owned, and render still runs P0. The new
+    candidate B is prepared against P0, with A as a donor (D2).
   - **Taken:** render adopted A. A is the base, exactly as today's path with A newest.
   - **Nothing:** no candidate is pending; today's path.
+
+  A is published `Next`, `NoEarlierThan(S)` or `Primed` (#1311); the outcomes and every step below
+  are the same for each. A pending `Primed` warm successor (D15-8 (round-5 amendment)) is an
+  ordinary pending candidate here. B is published with the adoption kind of its own
+  classification, never with A's.
 
   This replaces the plan's "CAS, then re-target if render took it": B's preparation must know its
   render predecessor (the carry program names it), and A's host-fed rings can move only while
@@ -83,7 +90,9 @@ successor is adopted.
      `P0.sources.adopt_persisting(&mut A.sources)` (`crates/host-core/src/source.rs:286`). A's
      commit moved P0's persisting producers into A's set (`crates/capi/src/runtime/control.rs:1019`);
      step 2 moved into B the ones B keeps, so what remains for P0 are the producers of sources P0
-     still renders and B removed. Infallible and allocation-free; keyed by source ID;
+     still renders and B removed. Infallible and allocation-free; keyed by source ID. This covers
+     a superseded `Primed` warm candidate too: its preparation moved P0's persisting producers into
+     its set like any successor's;
   6. drop A's plan, provider epoch and credit on the control thread; remove A's report row.
 
   B is published only after it owns the donated rings, because render may adopt it at once. Step 5
@@ -127,7 +136,8 @@ epoch before A drops (D5 step 5). If B is refused, A is republished untouched (D
 
 - The exchange mailbox (#1343), the host-core base and donation functions (#1344), the watermark
   (#1314), and the capacities and admission terms (#1398).
-- Scheduled or exact-sample adoption (#1311). Superseding a running catch-up (#1357).
+- Scheduled and primed adoption (#1311). The warm successor's own preparation and fallback
+  (#1354, #1358).
 - The browser (it adopts the control plane in #1332).
 
 ## Objective gates

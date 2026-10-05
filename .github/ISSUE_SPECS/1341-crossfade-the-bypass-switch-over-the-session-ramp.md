@@ -50,9 +50,8 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
 - **Hot file, and the order.** `crates/effect-contract/src/live.rs` is edited first by
   *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), which turns
   the live bypass into a one-word cell drained first (#1345 D1, D3). Then *Carry live-controlled
-  effect lanes across a plan swap* (#1280) carries those cells and the shunt words in move mode and
-  in copy mode (#1280 D2-D6), under the copy rules of *Carry plan state by copy as well as by move*
-  (#1322). This slice lands after all three (plan risk 3) and extends both carries.
+  effect lanes across a plan swap* (#1280) carries those cells and the shunt words in move mode
+  (#1280 D2-D6). This slice lands after both (plan risk 3) and extends that carry.
 
 ## Decisions frozen for this slice
 
@@ -102,9 +101,8 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
   from the record until the ramp settles at wet. Collapse is declined during a ramp exactly as it
   is under a bypass.
 - **D7. Carry.** The mix ramp and `k` are live lane state, carried with the bypass cell by #1280's
-  lane carry in both modes. Move mode moves them. Copy mode copies them and leaves the
-  predecessor's untouched, so the predecessor renders on bit for bit (#1322's copy rule). A swap in
-  the middle of a ramp continues the ramp.
+  move-mode lane carry: the swap block moves them, and the predecessor then retires. A swap in the
+  middle of a ramp continues the ramp.
 - **D8. Acked-batch question.** No queue or admission rule changes, and a record still applies at
   its block boundary. A bypass record is never acked without effect: its ramp starts at the next
   block.
@@ -118,7 +116,7 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
 3. D1 producers: the classifier (`live_delta.rs:391-393`) with the session mute ramp; the browser
    decode (`hosts/host-web/src/lib.rs:4489-4501`) with `ramp_samples = 0` (D1); every other
    construction of the record or cell (mechanical).
-4. D7 in #1280's move and copy carries.
+4. D7 in #1280's move carry.
 5. Docs: `docs/C_ABI_V1_QUALIFICATION.md:450-452` and `docs/EFFECT_CONTRACT_V1.md`'s bypass
    text.
 6. The tests below.
@@ -187,8 +185,7 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
    follows gate 1's law with the session's `mute_ms`, then equals a control booted bypassed. The
    ramp blocks allocate nothing (`bench_support::alloc` thread counters, statics warmed).
 6. **Carry** (`crates/host-core/tests/successor_swap.rs`). A swap at a block inside a ramp renders
-   bit-identically to the same session without the swap, in move mode and in copy mode; in copy
-   mode the predecessor, rendered on, equals its own unswapped render.
+   bit-identically to the same session without the swap.
 7. **Cross-target.** `bash scripts/check-cross-targets.sh` and the browser legs pass. The mix uses
    no fused multiply-add, so the native, AArch64 and Wasm bits match.
 8. **Commands:**
@@ -220,8 +217,7 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
 - Gate 4 turns red if a zero length is not a step, which would move today's bits for an explicit
   0.
 - Gate 5 turns red if the C ABI producer forgets the session ramp (the toggle steps).
-- Gate 6 turns red if the carry drops the ramp position, so the successor jumps to the endpoint,
-  or if copy mode advances the predecessor's ramp.
+- Gate 6 turns red if the carry drops the ramp position, so the successor jumps to the endpoint.
 
 ## Dependencies
 
@@ -231,7 +227,6 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
   (#1055), whose decision-15 addition confirms `mute_ms` for the bypass row.
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): D1 widens
   its bypass cell.
-- *Carry plan state by copy as well as by move* (#1322): D7 follows its copy rules.
 - *Carry live-controlled effect lanes across a plan swap* (#1280): D7 extends its carries.
 
 Dependent: *Crossfade the browser's live bypass command over the session ramp* (#1393) depends on

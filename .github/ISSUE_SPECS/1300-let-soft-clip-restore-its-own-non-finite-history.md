@@ -2,10 +2,9 @@
 
 Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
 Code anchors verified on `main` at `6fb211594`: no file this spec cites changed since `d2fe0555a`.
-Stream A order (the one edge with #1322): *Carry plan state by copy as well as by move* (#1322),
-then this issue, then the effect-lane carries (#1279-#1282). Those carries restore soft-clip lanes
-through the same payload calls, in move and copy mode (D15-7, D15-8 step 2), so an own-snapshot
-refusal would leave a carried lane at rest. #1322 touches no soft-clip code; the edge is order only.
+Stream A order: this issue, then the effect-lane carries (#1279-#1282). Those carries restore
+soft-clip lanes through the same payload calls (D15-7), so an own-snapshot refusal would leave a
+carried lane at rest.
 
 Successor item of *Make every banked effect's state restore allocation-free* (#1278, closed). Its
 attempt-1 amendment and attempts 2 and 3 left it open as "soft-clip's two open non-finite history
@@ -258,10 +257,9 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
 
 ## Dependencies
 
-- *Carry plan state by copy as well as by move* (#1322)
+- None open. #1071 and #1278 are on `main`.
 
-The edge is stream order only; there is no code dependency (#1071 and #1278 are on `main`). This
-issue lands before *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane
+This issue lands before *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane
 carries (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusal.
 
 ## Standing rules for the implementer

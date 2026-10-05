@@ -100,10 +100,10 @@ effect (D15-17, #1314).
   Render applies every value it reads, because D1 refused every value the setter would refuse. **So
   no ack ever precedes a drop.** A superseded value is counted, never silently lost (D15-2).
 - **D7. Which plan gets the values.** The newest epoch: the pending candidate if there is one, else
-  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). While a
-  warm successor catches up, a live edit is held in the control plane and written to the successor
-  at publication (D15-17; *Hold live edits during a catch-up and apply them at the adoption
-  sample*, #1356).
+  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). A pending
+  warm successor (D15-8, round-5 amendment) is an ordinary pending candidate: the edit goes to
+  its cells and applies at its adoption (D15-17). Its retargets were written once, at preparation
+  (*Carry fader, mute and pan ramps across a plan swap*, #1277 D5), so nothing overwrites the edit.
 - **D8. The live admission.** The prospective compiled model lives beside the current one until the
   commit, and a value edit can grow the canonical JSON. The edit is admitted only if the graph bytes,
   the capi retained bytes and the largest named allocation stay within their maxima, counted as
@@ -114,8 +114,9 @@ effect (D15-17, #1314).
   changes neither the model nor the plan. #1269 P1.4 uses this invariant as its carry base.
 - **D10. What the host sees (D15-3, D15-17).** This reverses the 2026-10-04 "no new field" answer.
   - The response carries `{revision, path}`, where path is exactly one of `live`, `model_only` or
-    `rebuild` (#1313). Fallbacks (pre-roll, transition) and supersession are known only after
-    submit, so the watermark's outcome flags report them (#1314).
+    `rebuild` (#1313). A fallback (the transition, when a warm successor cannot adopt) and
+    supersession are known only after submit, so the watermark's outcome flags report them
+    (#1314).
   - The applied-revision watermark `(revision, first sample in effect, outcome flags)` is a C ABI
     query and a browser status field. It never uses the reliable event lane (#1314).
   - The host calls `miso_engine_v1_service` from a non-realtime thread; every other control call

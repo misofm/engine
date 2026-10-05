@@ -8,8 +8,8 @@ Slice 11b of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ve
 
 An insert whose lane changes representation at a swap keeps its exact state. Adding the eighth
 compressor insert makes a group of seven per-node instances bank, and removing one makes a full bank
-fall apart. Both directions continue bit for bit, live state included, in move mode and in copy
-mode.
+fall apart. Both directions continue bit for bit, live state included. The carry moves the state at
+the swap block, and the predecessor never renders again.
 
 ## Context
 
@@ -30,7 +30,7 @@ mode.
   lands. The gates use the compressor and the limiter.
 - The effect rule, the retarget, the carried cells and the shunt copy come from *Carry console
   effect lanes across a plan swap* (#1279, D1) and *Carry live-controlled effect lanes across a
-  plan swap* (#1280, D2-D6).
+  plan swap* (#1280, D2-D5).
 
 ## Decisions frozen for this slice
 
@@ -42,10 +42,12 @@ mode.
 
   The control state follows #1280 D2's `carry_from`. The shunt words move between the per-node
   `BypassShunt` and the lane's words of the bank line, relative to the bank's shared cursor.
-- **D3. Copy mode.** The same payload path. Both snapshots take `&self`, and a collapsed bank is
-  desymmetrized first, which is bit-neutral (#1322 D2). The control state follows the same
-  `carry_from` (#1280 D2, D6), which never consumes a predecessor value. The shunt words are
-  copied. The bytes go into `carry_program_copy_bytes`.
+- **D3. A collapsed bank is desymmetrized first.** Before a bank snapshot, a collapsed predecessor
+  bank is desymmetrized, once per bank (`desymmetrize_channels`,
+  `crates/effect-contract/src/lib.rs:2173-2182`). This is bit-neutral: it writes into the right
+  channel the state a dual run would hold, and collapse never changes bits. So the bank snapshot is
+  exactly the payload a dual run would write, and the per-node restore continues it bit for bit
+  (#1279 D4 states the same rule for bank-to-bank lanes).
 
 ## Deliverables
 
@@ -75,10 +77,8 @@ mode.
    is bit-identical to the reference fed the same value. A second case also changes the threshold of
    a lane that changes representation (a live value): it is bit-identical to "live edit, then
    structural edit" (#1280 gate 5's shape).
-4. **Copy mode.** Gates 1 and 2 with a copy, followed at once by the adoption, and one unread
-   compressor value at the copy. Every block equals the move run, and the predecessor equals its uncopied twin.
-5. **Realtime.** Each swap block and copy call makes zero allocations and frees.
-6. Commands:
+4. **Realtime.** Each swap block makes zero allocations and frees.
+5. Commands:
    - `cargo test --locked -p rack -p graph -p host-core --features rack/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
@@ -91,8 +91,6 @@ mode.
   A carry that handles only gate 1's direction turns it red.
 - Gate 3: control state lost across a representation change, or a retarget routed to the old
   representation's producer, turns it red.
-- Gate 4: a copy that takes the predecessor's per-node processor by move (correct for move mode)
-  leaves the still-rendering predecessor without state. Its twin turns red.
 
 ## Dependencies
 

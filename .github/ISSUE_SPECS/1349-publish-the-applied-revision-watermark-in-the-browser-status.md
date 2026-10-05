@@ -57,8 +57,9 @@ the browser's own `applied_at_sample` arithmetic.
   (offset 56), `watermark_first_sample` (64) and `watermark_outcome_flags` (72). The record then
   reads, from offset 48: `live_values_superseded` (#1399), the three watermark words, and no
   reserved word; size stays 80 and no expansion word remains (D15-3 asks for exactly these three
-  words). The outcome flags fit one `u64` word. The flag bits are #1314's (`EXACT = 1`,
-  `PREROLL_FALLBACK = 2`, `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`). Boot writes the initial watermark
+  words). The outcome flags fit one `u64` word. The flag bits are #1314's: `EXACT = 1`,
+  `TRANSITION_FALLBACK` and `SUPERSEDED`, with no pre-roll flag (D15-8 (round-5 amendment)). The
+  browser copies the word and assigns no bit of its own. Boot writes the initial watermark
   (`(initial revision, 0, EXACT)`); `render_next` overwrites the three words when D1 is `Some`.
 - **D2a. JS readers.** Because boot writes `EXACT` at offset 72, every JS reader changes in this
   slice, or the first status read would throw:
@@ -104,7 +105,7 @@ the browser's own `applied_at_sample` arithmetic.
 ## Non-goals
 
 - The SDK API (`engine.apply`'s completion promise) and the Worker loop (stream H, #1381, #1382).
-  Any producer of non-`EXACT` flags (#1310, #1357, #1358).
+  Any producer of non-`EXACT` flags (#1310, #1358, #1397).
 
 ## Objective gates
 

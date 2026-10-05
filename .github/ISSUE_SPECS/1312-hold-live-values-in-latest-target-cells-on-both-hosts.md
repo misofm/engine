@@ -83,7 +83,7 @@ cells alike* (#1399).
     to this cell can start before the peek ends), because a write after the peek began may reuse
     that slot. The plan-swap carry (*Carry live-controlled effect lanes across a plan swap*, #1280
     D2) is its only caller; it peeks a predecessor whose cells no control write reaches once its
-    successor is published (D15-17, #1356). The reader also exposes `last_applied(&self) -> u64`.
+    successor is published (D15-17; #1053 D7). The reader also exposes `last_applied(&self) -> u64`.
 - **D2. One counter unit: cell values replaced unread.** `live_values_superseded` counts, per
   cell, committed values that a later write to the **same cell** replaced before render read them.
   When render reads sequence `s` after `p`, it adds `s - p - 1`. A record that writes two cells
@@ -101,10 +101,10 @@ cells alike* (#1399).
   writes; the input lane stays a queue until #1346. The rings at `:3583-3587` for these two lanes
   and their resource rows are replaced by the cells' rows, computed from the types.
 - **D6. The contract the carry slices rely on.** A stage exposes `apply_pending(&mut self)`: the
-  D1 read and D4 order for every dirty cell, the same code the block drain runs. #1277's move and
-  copy modes call it on the predecessor before exporting a lane; every write to the predecessor's
-  cells happened before the successor's publication, so it sees them all. #1277 writes its
-  retarget values into the successor's cells with the D5 writers, which cannot fail.
+  D1 read and D4 order for every dirty cell, the same code the block drain runs. #1277's carry
+  calls it on the predecessor before exporting a lane; every write to the predecessor's cells
+  happened before the successor's publication, so it sees them all. #1277 writes its retarget
+  values into the successor's cells with the D5 writers, which cannot fail.
 - **D7. Validate before any write (D15-2 condition 3).** `commit_live`'s order stays: every
   fallible check, then the cell writes, then the protocol commit. The fader and matrix room terms
   of step 4 go; nothing else moves. The browser writes cells only after its whole batch passed
@@ -215,7 +215,8 @@ cells alike* (#1399).
 - Gate 3: a cell that tears, applies twice, or skips the latest completed write (the single
   sequence-word design this replaces would skip it); judged by the interleavings loom reaches.
 - Gate 3's peek case: a `peek_unread` that consumes the value (swaps `middle` or clears `FRESH`
-  or the dirty bit), so the predecessor in copy mode never applies it (#1280 D6).
+  or the dirty bit), so a second peek or the next read no longer sees it. #1280 D2's carry and
+  its count rely on a peek that changes nothing.
 - Gate 4: a carry path that applies pending cells differently from the block drain, which #1277
   relies on.
 

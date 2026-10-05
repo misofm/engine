@@ -87,8 +87,10 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 - **D5. Reporting.** The response path is `rebuild` (#1313). The revision completes when render
   adopts at `S`: the watermark (#1314) reports first sample `S` with `EXACT` (or `SUPERSEDED` when
   #1310 displaces it) and counts it in `exact_count`. A planned D15-9 transition is the designed
-  result of this edit, not a fallback: it never sets `PREROLL_FALLBACK` or `TRANSITION_FALLBACK`
-  nor their counters, which belong only to the catch-up fallback (#1358).
+  result of this edit, not a fallback: it never sets `TRANSITION_FALLBACK` nor its counter, which
+  belong only to the fallback of a warm successor that cannot adopt (*Duck-swap the strips a
+  latency growth restarts, and fall back to the transition when a warm successor cannot adopt*,
+  #1397).
 - **D6. Supersession and restore: the duck overlay.** The phase-1 writes are records pushed to the
   displaced plan, so they are part of its base (D15-7, P1.4).
   - The control plane keeps them in the displaced plan's epoch as a **duck overlay**: the strips and
@@ -206,8 +208,7 @@ two render calls, so the ramp starts at `p`).
    is not a valid reference: muting its fader does not reach the `pre_fader` send, and it runs B's
    pre-fader state from frame 0. In both runs B carries no insert, its input filters are off and
    the session's console sections are empty, so the restart of B's strip at `S` (D6) restarts
-   nothing but its lanes, which the arming then drives. From `S + N` on, B's output is the
-   unducked reference's.
+   nothing but its lanes, which the arming then drives.
    (b) The same with B's source fed one block ahead only, as in gate 2. Every submit for it before
    and after the restore returns OK, none is refused, and from `S` on B plays the frames submitted
    for those blocks (the bit-identity above holds with the same source frames).
@@ -252,7 +253,7 @@ two render calls, so the ramp starts at `p`).
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
-- *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311).
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311).
 - *Hold live values in latest-target cells on both hosts* (#1312).
 - *Report each transaction's edit path in its response* (#1313).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

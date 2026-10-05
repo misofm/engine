@@ -7,10 +7,11 @@ Slice 10 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 ## Product outcome
 
 A console slot keeps its exact state through a plan swap when the transaction changed none of its
-prepared values. This holds on every strip, also when the strip's lane moves to another bank, and
-in move mode and copy mode. The state covers EQ filter memories, compressor, gate and
-transient-shaper envelopes, soft-clip filters and limiter look-ahead lines. Adding a track to a
-playing session with a console EQ, compressor and limiter is bit-continuous for every other track.
+prepared values. This holds on every strip, also when the strip's lane moves to another bank. The
+carry moves the state at the swap block, and the predecessor never renders again. The state covers
+EQ filter memories, compressor, gate and transient-shaper envelopes, soft-clip filters and limiter
+look-ahead lines. Adding a track to a playing session with a console EQ, compressor and limiter is
+bit-continuous for every other track.
 Mono-source chains keep collapsing after the swap.
 
 ## Context
@@ -30,9 +31,8 @@ Mono-source chains keep collapsing after the swap.
   the premise that restore never runs on a bound bank. Every witness term a stage caches for a lane
   must be refreshed after a restore, the RESTORED term included (`ChannelSymmetryWitness`,
   `crates/effect-contract/src/symmetry.rs:155`).
-- The base, the live/prepared split, the restart set and the copy-mode rules come from *Carry
-  fader, mute and pan ramps across a plan swap* (#1277, D2-D6) and *Carry plan state by copy as
-  well as by move* (#1322).
+- The base, the live/prepared split and the restart set come from *Carry fader, mute and pan ramps
+  across a plan swap* (#1277, D2-D6).
 
 ## Decisions frozen for this slice
 
@@ -60,11 +60,15 @@ Mono-source chains keep collapsing after the swap.
   3. restore it into the successor lane.
 
   The successor preallocates the scratch at the largest carried `state_sizes.total()`.
-- **D4. Copy mode.** The same three steps. Desymmetrizing moves none of the predecessor's bits
-  (#1322 D2), and the snapshot takes `&self`. The bytes go into `carry_program_copy_bytes`.
+- **D4. Desymmetrizing is bit-neutral.** It writes into the right channel the state a dual run
+  would hold, not an approximation of it (`desymmetrize_channels`' doc,
+  `crates/effect-contract/src/lib.rs:2173-2182`). Collapse saves cost and never changes bits. So
+  the bank's output is the same after the call as before, and the snapshot of step 2 is exactly the
+  payload a dual run would write. Every carry slice that snapshots a bank lane (#1280, #1281)
+  relies on this rule.
 - **D5. Witness refresh.** After a lane is restored, recompute every term the stage caches for it
   (the `designed` flag and any RESTORED term), and update the cache's rustdoc: restore now also runs
-  on a bound bank, in the swap block or copy block only. Chains take #1276's AND rule for their
+  on a bound bank, in the swap block only. Chains take #1276's AND rule for their
   agreement flag. Update the two "no engine path snapshots a bound bank" docs.
 - **D6. Refusal.** A restore that refuses leaves the lane as prepared (at rest) and increments its
   console bank stage's saturating `u64` count `carry_refused`. The prepared graph plan sums these
@@ -74,7 +78,7 @@ Mono-source chains keep collapsing after the swap.
 
 ## Deliverables
 
-1. D1-D6 in `crates/rack` and `crates/graph` (both modes), and the inventory rows and the join in
+1. D1-D6 in `crates/rack` and `crates/graph`, and the inventory rows and the join in
    `crates/host-core`.
 2. Gap-free tests in `crates/host-core/tests/successor_swap.rs`.
 
@@ -108,13 +112,9 @@ Mono-source chains keep collapsing after the swap.
    prepared: an `EffectBankStage` has no live lane. That slot does not carry, its other slots do,
    and `restarted_strips()` is exactly that strip. A second case adds a compressor insert to one
    strip: its console slots carry, and the strip is in the restart set.
-4. **Copy mode.** Gate 1 and gate 2 with a copy after block 6, followed at once by the adoption.
-   Every block equals the move run, and A, rendered on after the copy, equals its uncopied twin
-   (collapsed case included).
-5. **Realtime.** The swap block of gate 1, and the copy call of gate 4, each make zero allocations
-   and frees with every console effect carried (`bench_support::alloc` thread counters and the
-   engine render audit).
-6. Commands:
+4. **Realtime.** The swap block of gate 1 makes zero allocations and frees with every console
+   effect carried (`bench_support::alloc` thread counters and the engine render audit).
+5. Commands:
    - `cargo test --locked -p rack -p graph -p host-core --features rack/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
    - `cargo test --locked -p console-workload`
@@ -130,12 +130,9 @@ Mono-source chains keep collapsing after the swap.
   asymmetric words (bits move) or never collapses again. One of gates 1-2 turns red.
 - Gate 3: a rule that carries an owner whose prepared value changed keeps the old threshold. A
   restart set that misses effect owners fails the exact list. Either turns it red.
-- Gate 4: a copy-mode desymmetrize that is not bit-neutral fails the twin, and a copy into the
-  wrong successor lane fails the move comparison.
-- Gate 5: a payload call that still allocates on any console effect turns it red.
+- Gate 4: a payload call that still allocates on any console effect turns it red.
 
 ## Dependencies
 
 - *Carry fader, mute and pan ramps across a plan swap* (#1277).
-- *Carry plan state by copy as well as by move* (#1322).
 - #1278 is on `main`.
