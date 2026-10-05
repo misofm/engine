@@ -11,9 +11,9 @@ A producer's stored input trim rides (row 2) and polarity flips (row 1) play on 
 grid completion sample the lane's trim coefficient equals the trim of the curve value exactly; a
 polarity step flips the sign at its exact sample and ramps through zero over the session mute
 length. A track with a `both` entry keeps its mono collapse; a track whose input automation differs
-between its lanes declines it. A trim or polarity automation edit is a carried rebuild, and the
-browser refuses a live trim command on an automated trim lane, or a live polarity command on an
-automated polarity lane, until #1382.
+between its lanes declines it. A trim or polarity automation edit is a carried rebuild. A static
+edit of an automated row, and a browser live command on it, commit as `model_only` on both hosts
+through the one shared rule of draft 10.
 
 ## Context
 
@@ -42,7 +42,8 @@ automated polarity lane, until #1382.
   latest-target cells* (#1346) holds them in cells.
 - **Jump lengths** (#1054 D3): `fader_ms` for trim, `mute_ms` for polarity (draft 12's words).
 - **Browser kinds.** `COMMAND_TRIM_DB = 10`, `COMMAND_POLARITY_INVERT = 11`
-  (`hosts/host-web/src/lib.rs:882`, `:891`).
+  (`hosts/host-web/src/lib.rs:882`, `:891`). After *Admit browser live edits in the Worker through
+  the committed model* (#1382) both are lowered to transactions and meet the shared classifier.
 - *Keep every trim, fader and matrix ramp inside its endpoints* (#1408) changes the trim ramp's
   per-sample law; it does not change where events go.
 
@@ -77,19 +78,19 @@ automated polarity lane, until #1382.
   a `left` or `right` entry, unless both lanes' entries of that row have bit-identical segment
   tables, is asymmetric upstream of the seam and declines its collapse. A `both` entry keeps it, and
   its events apply identically to both channels, so the input stage's own witness stays symmetric.
-- **D5. Edits.** The classifier's row list (draft 10a D1) gains rows 1 and 2: their automation edits
+- **D5. Edits.** The classifier's row list (draft 10 D1) gains rows 1 and 2: their automation edits
   are carried rebuilds. A static trim edit on an automated trim lane, or a static polarity edit on
-  an automated polarity lane, gives no record. The browser refuses `COMMAND_TRIM_DB` whose channel
-  covers an automated trim lane, and `COMMAND_POLARITY_INVERT` whose channel covers an automated
-  polarity lane, with draft 10b's `COMMAND_REASON_AUTOMATED`, admitting nothing from the batch.
+  an automated polarity lane, gives no record (draft 10 D3), on both hosts: a browser
+  `COMMAND_TRIM_DB` or `COMMAND_POLARITY_INVERT` is lowered to that edit (#1382 D2) and replies
+  `model_only`.
 - **D6. The acked-batch question: can an ack ever precede a drop? No.** Curve events come from the
-  plan; refusals precede admission; nothing is queued.
+  plan; an edit of an automated row gives no record or rebuilds; nothing is queued.
 
 ## Deliverables
 
 1. D1 in `crates/builtins` (the input stage) and the input bank processor.
 2. D2-D4: events, preparation's witness term.
-3. D5: the classifier and browser admission.
+3. D5: the classifier row.
 
 ## Authorized paths
 
@@ -100,12 +101,11 @@ automated polarity lane, until #1382.
 - `crates/host-core/src/prepare.rs`, `crates/host-core/src/live_delta.rs`,
   `crates/host-core/tests/{live_delta.rs,symmetry_witness.rs}`
 - `crates/capi/src/runtime/live_tests.rs`
-- `hosts/host-web/src/lib.rs` (admission only), `hosts/host-web/src/tests.rs`,
-  `hosts/host-web/tests/input_automation_realtime.rs` (new)
+- `hosts/host-web/src/tests.rs`, `hosts/host-web/tests/input_automation_realtime.rs` (new)
 
 ## Non-goals
 
-- HPF and LPF automation (draft 16a), though the split runs the filter kernels unchanged.
+- HPF and LPF automation (drafts 16a and 16b), though the split runs the filter kernels unchanged.
 - `delay_samples` (row 11), which is not a target.
 
 ## Hazards
@@ -114,8 +114,6 @@ automated polarity lane, until #1382.
   A piece boundary with no filter event must pick the same plan; gate 5 holds it.
 - **Sign of zero.** A polarity ramp passes through zero; with trim at its domain minimum the
   coefficient's sign must still follow the curve. Gate 3 checks the sign bit at completion.
-- **Size.** Near half a working day. If it overruns, split D5 (classifier and browser refusal) into
-  its own slice in batch R2.
 
 ## Objective gates
 
@@ -139,8 +137,9 @@ automated polarity lane, until #1382.
    with a `left`-only ride declines it.
 7. **Edits** (`crates/host-core/tests/live_delta.rs`, new; browser in `hosts/host-web/src/tests.rs`).
    A trim entry change gives `Err(LiveRebuild::Automation)`; a static trim change on an automated
-   lane gives no record; a static polarity change on that lane gives its record. The browser refuses
-   `COMMAND_TRIM_DB` on the automated lane and admits `COMMAND_POLARITY_INVERT` there.
+   lane gives no record; a static polarity change on that lane gives its record. In the browser,
+   `COMMAND_TRIM_DB` on the automated lane replies `model_only` and moves no bit, and
+   `COMMAND_POLARITY_INVERT` there replies `live`.
 8. **Realtime.** `hosts/host-web/tests/input_automation_realtime.rs` (new integration binary; links
    `bench_support::alloc`, calls `assert_installed()` first): `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&
@@ -173,19 +172,19 @@ automated polarity lane, until #1382.
   duplication, or recovers only the failing piece.
 - Gate 6: red if asymmetric input automation keeps the collapse (wrong audio on the right lane), or
   symmetric automation retires it.
-- Gate 7: red if the rows stay masked, or the browser refuses a row the session does not automate.
+- Gate 7: red if the rows stay masked, if a live command on an automated row fights the curve, or
+  if a row the session does not automate stops being live.
 - Gate 8: red if event handling allocates on render.
 
 ## Dependencies
 
 Batch R2. Direct dependencies:
 
-- Draft 10a *Classify fader automation edits as carried rebuilds*.
-- Draft 10b *Refuse browser live commands on automated fader lanes* (the lane mask and the reason).
+- Draft 10 *Classify fader automation edits as carried rebuilds*.
 - Draft 12 *Hold the automation jump lengths in a plan cell* (the jump lengths).
 - *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261), for the C
   ABI's static-edit path.
 - *Hold strip input-lane values in latest-target cells* (#1346), for the C ABI's static-edit path.
 
 Draft 07's events, draft 08's model (D1 follows it) and *Session `controlSmoothing`: configurable
-ramp lengths for live mute, fader and pan changes* (#1054) arrive through drafts 10a and 12.
+ramp lengths for live mute, fader and pan changes* (#1054) arrive through drafts 10 and 12.

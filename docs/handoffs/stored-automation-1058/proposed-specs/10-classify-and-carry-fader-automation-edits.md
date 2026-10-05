@@ -7,18 +7,20 @@ to file. Code anchors verified on `6ee64f484`.
 
 ## Product outcome
 
-On the C ABI, a transaction that adds, changes or removes stored fader automation on a playing
-engine takes the rebuild path. The successor plan holds the new automation program, every owner
+On both hosts, a transaction that adds, changes or removes stored fader automation on a playing
+engine takes the rebuild path. Both hosts run the shared commit of `crates/control-plane`: the C
+ABI directly, the browser in its Worker (#1382, which lands before draft 09a). The successor plan holds the new automation program, every owner
 carries, the fader lane continues from the value it has, and the revision completes `exact` at
 adoption. The response reports `rebuild`. A transaction that changes only the static fader value
 of a lane the session automates commits as `model_only`: that value is the lane's fallback, and no
-plan renders it while the automation exists. Every other automation row stays model-only and inert
+plan renders it while the automation exists. A browser live fader command on such a lane is
+lowered to that same transaction (#1382 D2) and meets the same rule: the reply reports
+`model_only`, and the curve keeps playing. This is one permanent rule in the shared commit, for
+both hosts (README A2). Every other automation row stays model-only and inert
 until its own rendering slice.
 
 Today every automation edit is "live with no records": it commits with no plan change, so after
-drafts 09a and 09b render fader automation, an edit would be acked and never heard. The browser half
-of the same rule (refusing live fader commands on an automated lane) is draft 10b.
-
+drafts 09a and 09b render fader automation, an edit would be acked and never heard.
 
 ## Context
 
@@ -62,8 +64,9 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
     in table order, by canonical bytes. Any difference returns a new `LiveRebuild::Automation`.
     The numbered rules and the model-only paragraph (`:181-185`) are rewritten to say so.
 - **D2. The rebuild carries every owner** (A1.8; D15-7).
-  - **The stage.** #1277 D4 is amended: gaining, losing or changing stored automation is neither a
-    prepared value nor a change of control kind, so the fader stage carries.
+  - **The stage.** This slice extends the carry predicate of #1277 D4 (which lands first): gaining,
+    losing or changing stored automation is neither a prepared value nor a change of control kind,
+    so the fader stage carries. #1277 itself is not amended.
   - **The cell.** A cell's whole event state (draft 07 D2: cursor, current target bits, in-flight
     ramp end, held grid, last seek boundary) carries by its stable address `(strip ID, parameter ID,
     lane)`. Draft 09a D1 keeps that state in the fader bank stage beside the lane's ramp state, so
@@ -83,12 +86,18 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
     record is written: render alone knows the carried target.
 - **D3. A static fader edit on an automated lane gives no record** (A2).
   - One predicate, `automated_cell(model: &SessionModel, address: CellAddress) -> bool`, built on
-    the same enumeration draft 09a's preparation compiles cells from. Draft 10b and the later slices
-    reuse it.
+    the same enumeration draft 09a's preparation compiles cells from. The later slices reuse it.
   - The per-track step (step 5) emits no `FaderDb` for a lane that `next` automates. After D1,
-    `current` automates the same lanes. Mute records are unchanged. A transaction that changes only such a value yields an
-    empty delta and commits `model_only` (#1313 D2); D2's release cell reads the value when the
-    automation goes. Root confirms this reading of #1315 (README finding F9).
+    `current` automates the same lanes. Since *Deliver value-only VCA edits to the running C ABI
+    plan* (#1247) D2 that step diffs the effective faders, so the rule covers a VCA move that
+    reaches an automated lane too; draft 11 makes that move reach the lane's offsets cell. Mute
+    records are unchanged. A transaction that changes only such a value yields an empty delta and
+    commits `model_only` (#1313 D2); D2's release cell reads the value when the automation goes.
+  - **One rule, both hosts.** The rule lives in the shared classifier, which both hosts' commits
+    call (#1309; #1382 D2 for the browser). No host refuses such an edit and no host has its own
+    admission for automated lanes. README A2 and finding F9 give why `model_only` is not
+    "acknowledged with no effect" in #1315's sense: the edit sets the committed document's fallback
+    value, the response names the path, and the value is rendered when the automation goes.
 - **D4. Docs.** The header sentence (`miso_engine_v1.h:41-43`), `CONTROL_PROTOCOL_SEMANTICS.md:15`
   and `C_ABI_V1_QUALIFICATION.md:268-274` say: a fader automation edit rebuilds and carries; a
   static fader edit on an automated lane is model-only; the other rows stay model-only until they
@@ -110,16 +119,17 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
 - `crates/graph/src/lib.rs`, `crates/graph/src/runtime.rs`, `crates/builtins-compiler/src/lib.rs`
   (the fader stage carry's move of cell event state only; stream A's files, sequenced by root)
 - `crates/control-plane/src/` (the commit path; #1309 is on `main` through draft 09a's
-  dependency), `crates/capi/src/runtime/live_tests.rs`
+  dependency), `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs` (gate 5)
 - `crates/capi/include/miso_engine_v1.h` (comment text), `docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   `docs/C_ABI_V1_QUALIFICATION.md`
 
 ## Non-goals
 
-- The browser refusal and its reason (draft 10b). Rendering fader automation (drafts 09a and 09b).
+- Rendering fader automation (drafts 09a and 09b).
   VCA offsets on an automated member (draft 11). The jump length cell (draft 12). Mute, pan, matrix,
   trim, polarity, filter and effect rows (drafts 13a to 20).
-- Options B and C of OQ1. A browser transaction path (#1382). Live VCA edits on the C ABI (#1247).
+- Options B, C and D of OQ1. The browser's Worker commit itself (#1382, which lands before draft
+  09a).
 
 ## Hazards
 
@@ -131,9 +141,6 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
   variant and its refusal; gate 1 holds the order.
 - **A redundant jump moves bits.** The adoption rule compares bits; a jump to the same target
   re-enters the ramp kernel. Gate 3 holds it.
-- **The browser half.** Until draft 10b lands, the browser admits a live fader command on an
-  automated lane, and the next grid event overwrites it. Both halves are in batch R1, so `main`
-  never holds one without the other.
 
 ## Objective gates
 
@@ -154,14 +161,19 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
    session.
 4. **Removal** (same file). Removing the ride: from the end of the release jump, every block equals
    a fresh plan of the new session (static fader) from the same timeline sample.
-5. **Static edit** (same file). A `left_db` change on the automated lane: path `model_only`, the
-   same epoch, every block bit-identical to the uninterrupted render.
+5. **Static edit, both hosts** (same file; `hosts/host-web/src/tests.rs`, new). A `left_db` change
+   on the automated lane: path `model_only`, the same epoch, every block bit-identical to the
+   uninterrupted render. In the browser, a live fader command (kind 3) on the automated lane,
+   lowered by the Worker's commit, replies `path: "model_only"` with the revision advanced by 1,
+   and every block is bit-identical to the uninterrupted render; the same command on the other
+   lane replies `live`.
 6. **Realtime.** The swap block allocates and frees nothing (`bench_support::alloc` thread counters
    in `crates/host-core/tests/successor_swap.rs`, statics warmed).
 7. **Commands:**
    - `cargo test --locked -p host-core --features host-core/test-support --test live_delta`,
      `cargo test --locked -p host-core --features host-core/test-support --test successor_swap`,
-     `cargo test --locked -p capi`, `cargo test --locked -p graph --features test-support`
+     `cargo test --locked -p capi`, `cargo test --locked -p graph --features test-support`,
+     `cargo test --locked -p host-web --features host-web/test-support`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` (all
      violation counts 0)
@@ -182,7 +194,8 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
   the adoption jump is missing or has the wrong length.
 - Gate 3: red if adoption emits a jump to an unchanged target.
 - Gate 4: red if a removed entry leaves the lane on its last automated value.
-- Gate 5: red if a static edit on an automated lane rebuilds or retargets.
+- Gate 5: red if a static edit on an automated lane rebuilds or retargets, or if either host has a
+  path that writes a live record onto an automated lane.
 - Gate 6: red if the carry of cell event state allocates or frees on the swap block.
 
 ## Dependencies
@@ -190,10 +203,10 @@ of the same rule (refusing live fader commands on an automated lane) is draft 10
 - Draft 09b *Render moving stored fader automation, seeks and latency* (same batch). It brings
   draft 09a's cells and event state, draft 07's reposition, draft 05's session seek (gate 2's
   reference) and draft 02's D5 route (which runs first).
-- *Carry fader, mute and pan ramps across a plan swap* (#1277), amended at D4.
+- *Carry fader, mute and pan ramps across a plan swap* (#1277): the stage carry D2 extends.
 - *Report each transaction's edit path in its response* (#1313).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314), for `EXACT`.
 - *Refuse automation on effect parameters that are not block-rate* (#1335): its step 4 and
   `LiveRebuild::AutomationTarget`.
-- Batch: R1, with drafts 09a, 09b and 10b. Draft 10b *Refuse browser live commands on automated
-  fader lanes* uses D3's predicate.
+- Batch: R1, with drafts 09a and 09b. *Admit browser live edits in the Worker through the
+  committed model* (#1382) arrives through draft 09a.

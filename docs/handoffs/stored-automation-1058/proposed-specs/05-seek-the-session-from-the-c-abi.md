@@ -8,7 +8,7 @@ to file. Code anchors verified on `6ee64f484`.
 ## Product outcome
 
 A C host moves the playhead with one call. `miso_engine_v1_session_seek` (and its anchored form
-`miso_engine_v1_session_seek_at`) seeks the session's timeline (draft 04) and every source of the
+`miso_engine_v1_session_seek_at`) seeks the session's timeline (drafts 04a and 04b) and every source of the
 newest committed session to one timeline sample, under one new generation, all or nothing. Either
 every consumer takes the seek, in the same render block, or nothing changes and the call returns a
 typed refusal. The host then refills each source from that frame under that generation. Per-source
@@ -25,14 +25,14 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   `crates/capi/src/runtime/control.rs:1546-1557`).
 - **The producer table.** `SourceControlSet` (`crates/host-core/src/source.rs:127-130`) holds every
   source producer, its region `0..frames` (`ControlSource`, `:15-26`; filled from the model,
-  `crates/host-core/src/prepare.rs:1231-1253`) and, after draft 04, the timeline producer. Its
+  `crates/host-core/src/prepare.rs:1231-1253`) and, after draft 04b, the timeline producer. Its
   `queue_seek` (`crates/host-core/src/source.rs:233-261`) checks the region, then calls the
   producer's `try_seek`. Its diagnostics are one table (`SourceControlError::diagnostic`,
   `:75-103`): `source.generation.stale`, `source.seek.backpressure`, `source.ring.vacated`,
   `source.seek.anchor_unaligned`.
 - **Why all or nothing is possible.** Each consumer's command queue has one slot. Only the control
   thread pushes and render only pops, so the room a check sees cannot shrink before the push.
-  Draft 04 D1 gives every producer `check_seek` (every rule except the push) and `try_seek`.
+  Draft 04a D1 gives every producer `check_seek` (every rule except the push) and `try_seek`.
 - **The browser has no access to capi.** `hosts/host-web` calls `host-core` directly; the C ABI
   control plane is capi code until *Extract the C ABI control plane into a portable crate both hosts
   call* (#1309) moves it to `crates/control-plane`, which does not exist on `6ee64f484`. The one
@@ -43,8 +43,8 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   merges. `scripts/check-capi-abi.sh` holds the frozen exported symbol set (`:204-210`).
 - **Header text.** "Sources across a structural transaction" (`miso_engine_v1.h:85-94`) and
   "Starting an added stem in time" (`:96-108`). *Document the seek contract and the C ABI growth
-  rule in the header* (#1317) rewrites the seek text; the README amendment row adds the timeline to
-  it.
+  rule in the header* (#1317) rewrites the seek text; this slice adds the timeline and the
+  session seek to that text (D5).
 - **The audit.** `audit capi` renders 100,000 calls with one structural transaction outside the
   render scope (`tools/audit/src/capi.rs:460-540`) and prints a `pcm_digest` that no gate pins
   (`.github/workflows/qualification.yml:759-779` checks only its shape).
@@ -54,7 +54,7 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - **D1. One function, in host-core.** `SourceControlSet::seek_session(&mut self, generation: u64,
   timeline_sample: u64, anchor_sample: Option<u64>) -> Result<(), SourceControlError>`:
   1. `generation` 0 is `GenerationZero`.
-  2. Check the timeline producer and every source producer with `check_seek` (draft 04 D1) for a
+  2. Check the timeline producer and every source producer with `check_seek` (draft 04a D1) for a
      command of generation `g`, frame `min(timeline_sample, region_end)` per source
      (`timeline_sample` for the timeline) and the anchor. The first failure is returned and
      nothing is pushed: a vacant entry is `Vacated`, a generation not above that producer's is
@@ -130,12 +130,11 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 ## Non-goals
 
 - The browser export and the SDK (drafts 06a and 06b).
-- The seek report's timeline row (*Anchor every seek on the plan's source-read clock*, #1316,
-  amended by the README).
+- The seek report's timeline row (draft 04b D6).
 - The declaration itself (*Reset latency floors at a host-declared discontinuity*, #1323). This
   slice does not call it for the host.
 - A loop feature. A host loops with an anchored session seek at the end of each pass (README A1.2).
-- Retiring or redefining `TRANSPORT_SET`'s stored position (README finding F4).
+- The protocol's stored transport position (draft 25 retires it).
 
 ## Hazards
 
@@ -145,7 +144,7 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 - **Pending candidate.** A test that seeks while a candidate waits must see the seek in the
   candidate's new rings and in the running plan's carried rings at the same block, through D2.
 - **The timeline frame is not clamped.** Only sources clamp to their regions; the timeline takes
-  `timeline_sample` as given (up to draft 04's limit), so automation past the end of every stem
+  `timeline_sample` as given (up to draft 04a's limit), so automation past the end of every stem
   still follows the playhead.
 
 ## Objective gates
@@ -154,7 +153,7 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
    two-source session (sources of 10,000 and 4,000 frames), 48 kHz, quantum 128, playing. After
    `miso_engine_v1_session_seek(session, 2, 6_000)` and one generation-2 quantum per source from
    its frame, the next rendered block reads frame 6,000 from the long source, the short source is at
-   its end of region (frame 4,000) and the timeline reads 6,000 (draft 04's test reader). With
+   its end of region (frame 4,000) and the timeline reads 6,000 (draft 04b's test reader). With
    `session_seek_at(session, 3, 1_000, A)`, `A` two quanta ahead, the timeline and both sources
    change at the block whose sample is `A`, not before.
 2. **Stale generation changes nothing.** After gate 1, `session_seek(session, 2, 0)` returns
@@ -200,7 +199,9 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
 
 ## Dependencies
 
-- Draft 04 *Give every plan a timeline clock that seeks and carries like a source*.
+- Draft 04b *Give every plan a timeline that carries like a source* (it brings draft 04a).
+- *Document the seek contract and the C ABI growth rule in the header* (#1317): this slice adds
+  the session seek to the text #1317 writes.
 - *Reset latency floors at a host-declared discontinuity* (#1323), which adds
   `miso_engine_v1_declare_discontinuity`, named by D5's sentence.
 - Batch: R1. #1309 is not a dependency: D1's function stays in host-core in either merge order,

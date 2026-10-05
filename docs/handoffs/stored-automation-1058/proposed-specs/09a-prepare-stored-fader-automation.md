@@ -15,6 +15,11 @@ both hosts and through any VCA composition. A session with no stored automation 
 renders exactly as before. Moving curves, seeks and latency in render are draft 09b, in the same
 batch and push.
 
+This slice lands after *Admit browser live edits in the Worker through the committed model*
+(#1382). From then on every browser live edit goes through the shared commit, so the browser and
+the C ABI meet one rule for a live edit of an automated lane (draft 10), and no host-only
+admission path remains that could write a live record onto an automated lane.
+
 ## Context
 
 - **The table renders nothing today.** `docs/SESSION_SCHEMA_V1.md:220-225`; the builtin target
@@ -50,8 +55,9 @@ batch and push.
   unit and domain), 07 (the builder, its byte report and the jump-length key), 08 (`SetGain`), 12
   (the plan cell that holds the jump lengths, seeded from #1054's
   `control_smoothing_samples()`). #1285 D2 records each node's floored input arrival `a(n)`. #1312
-  gives the latest-target cell; draft 11 states the #1312 D1 amendment for a cell whose word count
-  is set at construction.
+  gives the latest-target cell (`crates/engine/src/realtime/latest_cell.rs`, #1312 D1), with a word
+  count fixed per stage; this slice adds a constructor whose word count is set at construction
+  (D1).
 
 ## Decisions frozen for this slice
 
@@ -63,8 +69,10 @@ batch and push.
     no jump length; no `no_restart`;
   - **the offsets cell.** For a lane that at least one VCA reaches, preparation builds draft 11's
     offsets cell directly: a #1312 latest-target cell whose word count is set at construction
-    (here, at preparation, and never resized), one `f32` word per reaching VCA, seeded with the
-    reaching VCAs' offsets in the order `effective_strip_faders` adds them (ascending VCA-ID order,
+    (here, at preparation, and never resized). This slice adds that constructor to #1312's cell
+    module: the word count is an argument, all three slots are allocated by the constructor and
+    never resized, and the write and read rules of #1312 D1 are unchanged. The cell has one `f32`
+    word per reaching VCA, seeded with the reaching VCAs' offsets in the order `effective_strip_faders` adds them (ascending VCA-ID order,
     `crates/session/src/vca.rs:96-120`). A value `v` becomes the gain
     `checked_fader_gain(vca_effective_db(v, offsets))`, the same composition preparation bakes,
     with `offsets` the cell's newest slot. No static copy of the offsets is kept in the program, so
@@ -75,7 +83,7 @@ batch and push.
   - **Where the event state lives.** Each cell's event state (draft 07's `CellState`) lives in the
     fader bank stage beside the lane's ramp state, keyed by the cell's stable address (strip, row
     5, channel). So the stage's carry program (*Carry fader, mute and pan ramps across a plan
-    swap*, #1277) moves it with the ramp state at a swap, and no second carry path exists. Draft 10a
+    swap*, #1277) moves it with the ramp state at a swap, and no second carry path exists. Draft 10
     relies on that carry.
   The program is installed on the strip's fader bank processor (or the scalar track's), as
   immutable plan data.
@@ -108,7 +116,8 @@ batch and push.
 1. D1, D2 and D4 in `crates/host-core/src/prepare.rs` and `crates/builtins-compiler/src/lib.rs` (the
    program and the event state on the fader bank processor and the scalar track, the offsets cells
    and their seed, the prepared value, the bank-payload charge).
-2. Tests in `crates/host-core/tests/stored_fader_automation.rs` (new),
+2. The cell constructor of D1 in `crates/engine/src/realtime/latest_cell.rs`, with its loom case.
+3. Tests in `crates/host-core/tests/stored_fader_automation.rs` (new),
    `crates/capi/src/runtime/tests.rs` and `hosts/host-web/src/tests.rs` (one test).
 
 ## Authorized paths
@@ -117,6 +126,8 @@ batch and push.
 - `crates/builtins-compiler/src/lib.rs` (program and event-state installation on the fader bank
   processor and the scalar track; the offsets cell's read; the program charge)
 - `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (one test)
+- `crates/engine/src/realtime/latest_cell.rs` (the constructor with a word count set at
+  construction, and its loom case, only)
 - Tests that pin a builtin bank or graph plan row that D4 moves for a session with automation (none
   exists today; a session without automation moves no row)
 
@@ -124,8 +135,8 @@ batch and push.
 
 - Events in render: the grid, jumps, held events, seeks, the timed chain call (draft 09b).
 - The documents that say the fader row renders (draft 09b).
-- Classifying fader automation edits and carrying event state across a swap (draft 10a); refusing
-  browser live commands on automated lanes (draft 10b).
+- Classifying fader automation edits, the rule for a live edit of an automated lane, and carrying
+  event state across a swap (draft 10).
 - The live VCA move that rewrites the offsets cell (draft 11). The plan cell of jump lengths and
   its edit path (draft 12).
 - Mute, pan, matrix, input and effect rows (drafts 13a to 20).
@@ -158,11 +169,16 @@ batch and push.
 4. **No change without automation.** Every existing render test passes with unchanged digests;
    `./target/release/audit capi` shows the same `pcm_digest` as the base (PR evidence; the audit
    session has no automation) and 0 violations.
-5. **Commands:**
+5. **The constructor** (`crates/engine/src/realtime/latest_cell.rs`, new loom case beside #1312's
+   `spsc_loom_cells_*`). A cell of 3 words built by the new constructor never shows a slot that
+   mixes two writes and never skips the newest completed write under a racing writer.
+6. **Commands:**
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p builtins-compiler --features test-support`
    - `cargo test --locked -p capi`
    - `cargo test --locked -p host-web --features host-web/test-support`
+   - `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test
+     --locked --release -p engine --lib spsc_loom`
    - `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
      `./target/release/audit capi`
    - `bash scripts/run-aarch64-tests.sh debug` (the `aarch64-debug` job)
@@ -178,6 +194,8 @@ batch and push.
   replacement peak.
 - Gate 3 turns red if fader automation declines the collapse, which costs a plane per track for no
   audible change.
+- Gate 5 turns red if a cell whose word count is set at construction can tear or skip, which
+  #1312's fixed-count model does not cover.
 
 ## Dependencies
 
@@ -192,7 +210,10 @@ batch and push.
 - *Keep every node's latency from dropping during playback* (#1285): `a(n)`.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309): the C ABI
   preparation path both hosts share.
-- *Hold live values in latest-target cells on both hosts* (#1312): merge order of the fader bank
-  processor, and the cell with a word count set at construction (#1312 D1 as amended; draft 11
-  states the amendment) for the offsets cell.
+- *Hold live values in latest-target cells on both hosts* (#1312): the cell module this slice adds
+  a constructor to, and the merge order of the fader bank processor.
+- *Admit browser live edits in the Worker through the committed model* (#1382): every browser live
+  edit goes through the shared commit before any host renders stored automation. #1382 brings the
+  shared classifier rows of #1225, #1226, #1247, #1261, #1262 and #1390 and the cells of #1345,
+  #1346 and #1347, which the later drafts build on.
 - Batch: R1, in one push with draft 09b *Render moving stored fader automation, seeks and latency*.

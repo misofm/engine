@@ -89,9 +89,9 @@ to seek the same sources again, so no ring stalls. No suspended-context requirem
 ## Non-goals
 
 - The module export and the headless SDK (draft 06a).
-- The anchored browser form (#1293, amended).
-- Moving browser source control into the Worker (*Move browser source submission and seeks into
-  the Worker*, #1387); this slice keeps today's thread.
+- The anchored session seek's export (draft 06a).
+- Any change to the routing of *Move browser source submission and seeks into the Worker* (#1387),
+  which lands first (through #1293): the session seek takes the thread the source seek takes.
 - Any change to `prepareSeek`, `waitForPcmRunway` or the per-source seek's semantics.
 
 ## Hazards

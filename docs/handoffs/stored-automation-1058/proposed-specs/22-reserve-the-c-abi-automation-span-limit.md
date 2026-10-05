@@ -8,7 +8,7 @@ to file. Code anchors verified on `6ee64f484`. Batch P2, after batch R3.
 ## Product outcome
 
 A C ABI caller no longer chooses an automation span limit: the engine sizes every effect window
-from its own plan (#1306), and the protocol has no automation queue (drafts 21a and 21b). The word at offset
+from its own plan (#1306), and the protocol has no automation queue (drafts 21a-21c). The word at offset
 8 of `miso_engine_v1_compile_limits` becomes a reserved word that must be zero, like `reserved0`
 beside it. The struct stays 208 bytes, no symbol or `ABI_VERSION` changes, and a nonzero word is
 refused before the call reads anything else, so no session is created.
@@ -24,7 +24,7 @@ refused before the call reads anything else, so no session is created.
   (`crates/capi/src/runtime/compile.rs:482-508`, term at `:483`); `protocol_queue_config` makes it
   the protocol's `per_block_automation_density` (`:130-133`); `prepare_caps` passes it to effect
   preparation (`:528`). #1306 D3 removes the preparation read and keeps the density read "until
-  slice 22 reserves the field" (amendment to #1306 D3); draft 21b D4 removes the density read. After
+  slice 22 reserves the field" (amendment to #1306 D3); draft 21c D4 removes the density read. After
   both, `all_limits_nonzero` is its only reader: a validated value nothing uses.
 - **The reserved-field rule.** `limits_are_valid` (`compile.rs:510-515`) requires `reserved0 == 0`
   and `reserved == [0; 2]`; `miso_engine_v1_compile_session` returns
@@ -61,7 +61,7 @@ refused before the call reads anything else, so no session is created.
 - **D3. Every literal sets zero.** Each literal above sets `reserved1: 0`; `ControlLimits` and the
   conversion lose the field.
 - **D4. Docs.** `docs/C_ABI_V1_QUALIFICATION.md` gains a paragraph beside `:83-105`: the word at
-  offset 8 is reserved since this slice, why (#1306 sizes windows from the plan, drafts 21a and 21b retired
+  offset 8 is reserved since this slice, why (#1306 sizes windows from the plan, drafts 21a-21c retired
   the queue), and that a library older than this slice refuses a zero word with
   `RESULT_INVALID_ARGUMENT` while a caller written before it must now pass zero. `:346` drops "S =
   128".
@@ -94,8 +94,8 @@ refused before the call reads anything else, so no session is created.
 - **Every existing C caller breaks at runtime** if it is not rebuilt: it passed a nonzero S
   because the field was required nonzero. The rename turns that into a compile error for any
   caller rebuilt against the new header. Apps and SDK move in lockstep before launch.
-- **Order.** Merging before #1306 or draft 21b would remove a value something still reads. The
-  slice lands in batch P2, after batch P1 (draft 21b) and batch R3 (#1306). Until then `main`
+- **Order.** Merging before #1306 or draft 21c would remove a value something still reads. The
+  slice lands in batch P2, after batch P1 (draft 21c) and batch R3 (#1306). Until then `main`
   validates a value that nothing reads; that changes no rendered bit and costs nothing at render.
 
 ## Objective gates
@@ -128,10 +128,10 @@ refused before the call reads anything else, so no session is created.
 
 Batch P2, after batch R3 (#1306). Direct dependencies:
 
-- Draft 21b *Delete the protocol automation queue, its records and counters* (removes the density
+- Draft 21c *Delete the protocol automation queue, its records and counters* (removes the density
   read).
 - *Size each effect's automation span window from the producers its plan has* (#1306) (removes the
   preparation read).
 
 *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for
-`ControlLimits`, arrives through drafts 21a and 21b.
+`ControlLimits`, arrives through drafts 21a-21c.

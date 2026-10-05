@@ -13,7 +13,7 @@ each ramp's completion sample on a fixed 64-sample grid, takes each discontinuit
 sample over the session's fader ramp length, lines up with the audio it acts on through every
 latent insert, and is set exactly where a session seek reaches the fader. The output does not
 depend on the quantum or on where a seek landed. A session with no stored automation renders
-exactly as before. The fader row leaves the classifier's mask in draft 10a, in the same batch.
+exactly as before. The fader row leaves the classifier's mask in draft 10, in the same batch.
 
 ## Context
 
@@ -22,7 +22,7 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
   processor does the same and fuses only when nothing ramps (`:1198-1219`). Graph runs a strip's
   builtin chain with the block's first sample (`crates/graph/src/runtime.rs:3046-3048`) through
   `GraphPreparedBuiltinBankProcessor::process` (`crates/graph/src/lib.rs:1347-1353`). The graph
-  executor calls the source set at block entry (`crates/graph/src/lib.rs:3254-3256`), where draft 04
+  executor calls the source set at block entry (`crates/graph/src/lib.rs:3254-3256`), where draft 04b
   advances the timeline.
 - **What draft 09a leaves.** Each automated lane has a cell program (draft 07) with its `a(n)`, its
   grid and its jump-length key (the `fader` word of draft 12's plan cell), an offsets cell when a
@@ -33,14 +33,14 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
 - **The documents.** `docs/SESSION_SCHEMA_V1.md:220-225` says the table renders nothing; the
   comments at `crates/session/src/validate.rs:812-822` and `:842-853` say the same;
   `docs/REALTIME_MEMORY.md:13` gives #1058 the rendering.
-- **What this slice builds on.** Draft 04 (the timeline and its reader), 05 and 06a (the session
+- **What this slice builds on.** Drafts 04a and 04b (the timeline and its reader), 05 and 06a (the session
   seek on each host), 07 (events), 08 (operations inside a block, the held-gain rule).
 
 ## Decisions frozen for this slice
 
 - **D1. Render.** Per block, after the live drain at block entry, the fader bank processor:
   1. reads, for each automated lane, its node-time mapping: graph passes the block's source-read
-     sample and a timeline reader (draft 04) to the strip chain through a new defaulted method on
+     sample and a timeline reader (draft 04a) to the strip chain through a new defaulted method on
      `GraphPreparedBuiltinBankProcessor` (`process_timed`, which forwards to `process` by default),
      and the processor reads `timeline_block(s0 - a(n))` into draft 07's `NodeSpan`. The same call
      passes the block's jump lengths, the three words draft 12's read gives the graph for that
@@ -59,7 +59,7 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
 - **D2. First blocks.** A fresh plan starts every automated lane at its prepared value (draft 09a
   D2), so its first block emits no `Set`. A lane a successor adds or restarts takes a `Set` at its
   first block when the curve at that block's node time differs from its prepared bits (README A1.4,
-  "New lanes"). Carrying a lane's event state across a swap is draft 10a's.
+  "New lanes"). Carrying a lane's event state across a swap is draft 10's.
 - **D3. Seeks.** A session seek reaches the fader where its node time steps; the cell emits `Set`
   there and the lane takes the curve's value exactly, with no ramp (README A1.4).
 - **D4. Docs.** `docs/SESSION_SCHEMA_V1.md:220-225`: the fader row (5) renders; every other row is
@@ -90,8 +90,8 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
 ## Non-goals
 
 - Preparation, prepared values, bytes and the mono collapse (draft 09a).
-- Classifying fader automation edits and carrying event state across a swap (draft 10a); refusing
-  browser live commands on automated lanes (draft 10b).
+- Classifying fader automation edits, the rule for a live edit of an automated lane, and carrying
+  event state across a swap (draft 10).
 - The live VCA move that rewrites the offsets cell (draft 11). The `control_smoothing` edit path
   that writes the jump-length cell (draft 12).
 - Mute, pan, matrix, input and effect rows (drafts 13a to 20). The live path's held-gain rule (#1054
@@ -100,9 +100,9 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
 
 ## Hazards
 
-- **Batch R1 only.** Until draft 10a is in, a rebuild for another reason sets each automated lane
-  exactly at adoption (D2), and until drafts 10a and 10b are in, a live fader edit on an automated
-  lane retargets it until the next event. They merge in the same batch, so `main` never holds this
+- **Batch R1 only.** Until draft 10 is in, a rebuild for another reason sets each automated lane
+  exactly at adoption (D2), and until draft 10 is in, a live fader edit on an automated lane, on
+  either host, retargets it until the next event. They merge in the same batch, so `main` never holds this
   state.
 - **The chain call is shared.** `process_timed` defaults to `process`, so every other builtin bank
   is untouched; only the fader bank processor and the scalar track override it.
@@ -128,7 +128,7 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
    render sample `4,800 + a(n)` on each track's fader (a test-support event probe), so the two
    events are `λ` apart, and in the output both steps meet the source frame 4,800 they act on.
 4. **Session seek.** After a session seek to `T` that reaches the fader at render sample `r`, the
-   lane equals `checked_fader_gain(curve(T))` exactly from `r`, with no ramp: through draft 04's
+   lane equals `checked_fader_gain(curve(T))` exactly from `r`, with no ramp: through draft 04b's
    producer in host-core, and through `miso_engine_v1_session_seek` in
    `crates/capi/src/runtime/tests.rs`.
 5. **Quantum invariance.** The same session at quantum 128 and at quantum 100 gives the same fader
@@ -169,10 +169,9 @@ exactly as before. The fader row leaves the classifier's mask in draft 10a, in t
 - Draft 09a *Prepare stored fader automation and render it flat*, in the same push. It brings
   drafts 07, 08 and 12 and #1312 (the events, the timed operations, the jump-length cell and the
   live input D1 drains first).
-- Draft 04 *Give every plan a timeline clock that seeks and carries like a source*.
+- Draft 04b *Give every plan a timeline that carries like a source*.
 - Draft 05 *Seek the timeline and every source in one C ABI call* and draft 06a *Seek the timeline
   and every source from the browser module export and the headless SDK* (the session seek on each
   host).
-- Batch: R1, in one push with draft 09a, and in the same batch as draft 10a *Classify fader
-  automation edits as carried rebuilds* and draft 10b *Refuse browser live commands on automated
-  fader lanes*.
+- Batch: R1, in one push with draft 09a, and in the same batch as draft 10 *Classify fader
+  automation edits as carried rebuilds*.

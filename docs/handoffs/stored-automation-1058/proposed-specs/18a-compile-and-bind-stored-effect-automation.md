@@ -122,7 +122,7 @@ and 09b give it to the fader stage.
   entry keeps it. Draft 09a adds nothing to `track_mono_source` (`:3967`), which stays the source
   rule. Draft 17b D7 is the render-side form of this rule.
 - **D8. Memory.** Effect programs are charged through `effect_control_resource`
-  (`crates/graph-compiler/src/estimate.rs:188`): each program's bytes (`48 + 32·n` per cell, A4) and
+  (`crates/graph-compiler/src/estimate.rs:188`): each program's bytes (`80 + 32·n` per cell, A4) and
   each window go to the graph plan rows there, and the exact-charge oracles stay exact.
 
 ## Deliverables
@@ -148,10 +148,10 @@ and 09b give it to the fader stage.
 
 - The piece loop (draft 17b). The seek step, the browser host, quantum independence and the docs
   (draft 18b). The EQ (draft 20).
-- The classifier, the browser's refusal of live edits on automated cells, and carry across a swap
+- The classifier, the one rule for a live edit of an automated cell on both hosts, and carry across a swap
   (draft 19). Until draft 19, an effect automation edit stays model-only.
 - The window sizing function itself (#1306).
-- `AUTOMATION_ENQUEUE` (drafts 21a, 21b, 22). Sample-rate parameters (none at launch, #1335 D1).
+- `AUTOMATION_ENQUEUE` (drafts 21a, 21c, 22). Sample-rate parameters (none at launch, #1335 D1).
 
 ## Hazards
 
@@ -224,7 +224,7 @@ and 09b give it to the fader stage.
 Batch R3. Direct dependencies:
 
 - Draft 03a *Validate effect automation units, domains and shapes at preparation*.
-- Draft 10a *Classify fader automation edits as carried rebuilds* (the per-row mask this batch
+- Draft 10 *Classify fader automation edits as carried rebuilds* (the per-row mask this batch
   extends).
 - Draft 17b *Process an effect node in pieces at automation events* (same batch).
 - *Size each effect's automation span window from the producers its plan has* (#1306), same batch.
@@ -232,5 +232,5 @@ Batch R3. Direct dependencies:
 
 Draft 07, drafts 09a and 09b (node time and `a(n)`), *Keep every node's latency from dropping
 during playback* (#1285) and *Refuse automation on effect parameters that are not block-rate*
-(#1335) arrive through drafts 03a, 10a and 17b. Draft 18b *Render stored effect parameter
+(#1335) arrive through drafts 03a, 10 and 17b. Draft 18b *Render stored effect parameter
 automation across seeks and on both hosts* depends on this draft and lands in the same push.

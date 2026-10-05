@@ -25,8 +25,8 @@ already in flight keeps the length it started with.
   #1054 adds both. This slice is written against #1054.
 - **The edit.** *Edit control_smoothing by a session transaction, model-only* (#1365) adds opcode
   `0x0008` and masks `control_smoothing` in the classifier (#1365 D4), so its delta is empty and its
-  path `model_only` (#1313 D2). README amendment row #1365: with stored automation the path is
-  `live`.
+  path `model_only` (#1313 D2). #1365 lands before this slice and is not amended: this slice
+  makes the path `live` when stored automation reads the lengths (D3).
 - **The cell primitive.** #1312 D1: a triple-buffered latest-target cell with one writer (control)
   and one reader (render); a write that completes before a block's drain is applied in that block,
   and render never skips the newest completed write.
@@ -62,22 +62,24 @@ already in flight keeps the length it started with.
   #1053 D7, as every live write does.
 - **D4. Swaps.** A successor is prepared from the committed model, which holds the edit, so its cell
   starts with the new lengths. Nothing carries.
-- **D5. The browser.** Preparation fills the cell. The browser has no `control_smoothing` edit until
-  *Admit browser live edits in the Worker through the committed model* (#1382) (#1365 non-goal), so
-  no browser path writes it.
-- **D6. #1365 and D3.** D1, D2, D4 and D5 do not need #1365; draft 09a needs them. D3 is the
-  `live` classification of #1365's `control_smoothing` edit, so D3 alone depends on #1365. This slice
-  and #1365 may merge in either order, under one rule: whichever lands second wires the edit to the
-  cell (D3 and gate 3). The README's #1365 amendment row records the same rule.
-- **D7. The acked-batch question: can an ack ever precede a drop? No.** The cell write cannot fail,
+- **D5. The browser.** Preparation fills the cell. The browser edits `control_smoothing` through
+  the shared commit in its Worker (*Admit browser live edits in the Worker through the committed
+  model*, #1382, which lands before draft 09a), so D3 is one rule on both hosts.
+- **D6. #1365.** D3 is the `live` classification of #1365's `control_smoothing` edit. This slice
+  depends on #1365, which lands first, and changes the classifier code #1365 adds; #1365 is not
+  amended.
+- **D7. Docs.** The `controlSmoothing` paragraph that #1054 adds to `docs/SESSION_SCHEMA_V1.md`
+  gains one sentence: the same row lengths are the jump ramps of stored automation (README A3).
+  #1054 is not amended.
+- **D8. The acked-batch question: can an ack ever precede a drop? No.** The cell write cannot fail,
   every check precedes it, and a replaced value is in the committed model.
 
 ## Deliverables
 
 1. D1 and D2: the cell, preparation's seed and the graph's block-entry read. The strip stages' reads
-   come with their rendering slices (draft 09b for the fader; drafts 13a, 14a and 15 for their
+   come with their rendering slices (draft 09b for the fader; drafts 13a, 14b and 15 for their
    words).
-2. D3 in the classifier and the commit path, under D6's rule.
+2. D3 in the classifier and the commit path; D7.
 
 ## Authorized paths
 
@@ -86,6 +88,7 @@ already in flight keeps the length it started with.
 - `crates/graph/src/lib.rs` (the block-entry read and its `test-support` reader only; stream A's
   file, sequenced by root)
 - `crates/control-plane/src/` (the commit path), `crates/capi/src/runtime/live_tests.rs`
+- `docs/SESSION_SCHEMA_V1.md` (D7's sentence only)
 - Tests that pin a plan byte row the cell moves (re-pin each with the reason "the jump-length cell,
   draft 12 D1", never in bulk)
 
@@ -101,7 +104,7 @@ already in flight keeps the length it started with.
   one owned value, moved into the graph at preparation and not `Clone`, so a second reader cannot be
   written.
 - **A transaction that changes `control_smoothing` and a rendered automated row together** is a
-  rebuild once draft 10a classifies that row (its D1); the successor is prepared with the new
+  rebuild once draft 10 classifies that row (its D1); the successor is prepared with the new
   lengths (D4), so D3's write is not needed there.
 
 ## Objective gates
@@ -114,8 +117,7 @@ already in flight keeps the length it started with.
    entry: a `control_smoothing` change gives a live delta with `jump_lengths` and no other record.
    Without stored automation, or with only an effect entry: an empty delta. A change of `fader_ms`
    from 10.0 to 10.001 at 48 kHz (both 480 samples): an empty delta.
-3. **C ABI** (`crates/capi/src/runtime/live_tests.rs`, new; landed by whichever of this slice and
-   #1365 merges second, D6). A playing session with a fader entry takes a `SetControlSmoothing`
+3. **C ABI** (`crates/capi/src/runtime/live_tests.rs`, new). A playing session with a fader entry takes a `SetControlSmoothing`
    edit: the response path is `live`, the provider epoch is unchanged, and the plan's cell holds the
    new lengths from the next block (gate 1's reader). The same edit on a session without automation
    reports `model_only`.
@@ -150,7 +152,7 @@ already in flight keeps the length it started with.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054).
 - *Hold live values in latest-target cells on both hosts* (#1312).
-- For D3, the edit path, only: *Edit control_smoothing by a session transaction, model-only*
-  (#1365), in either merge order under D6's rule. #1365 brings the edit's `model_only` path from
-  *Report each transaction's edit path in its response* (#1313).
-- Batch: R1. Draft 09a builds on it; no dependency on draft 10a.
+- *Edit control_smoothing by a session transaction, model-only* (#1365), for D3. It brings the
+  edit's `model_only` path from *Report each transaction's edit path in its response* (#1313).
+- *Admit browser live edits in the Worker through the committed model* (#1382), for D5.
+- Batch: R1. Draft 09a builds on it; no dependency on draft 10.

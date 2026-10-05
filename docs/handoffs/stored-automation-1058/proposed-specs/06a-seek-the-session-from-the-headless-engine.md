@@ -21,7 +21,11 @@ export in draft 06b.
   (`hosts/host-web/src/ffi.rs:3787-3812`) reads the staged source ID and calls
   `AudioWorkletEngineHost::seek_source` (`hosts/host-web/src/lib.rs:3170-3208`), which seeks the
   producer in `ready.host.sources` (a `SourceControlSet`) and then calls
-  `plan.prepare_source_seek` (`:3193-3203`). Errors map through `source_result` (`:6543`).
+  `plan.prepare_source_seek` (`:3193-3203`). Errors map through `source_result` (`:6543`). These
+  are the anchors of `6ee64f484`; before this slice lands, *Move browser source submission and
+  seeks into the Worker* (#1387) moves the seek to the Worker on an isolated page, and *Swap and
+  retire browser plans through the Worker's service loop* (#1381) moves the set into the Worker's
+  `SessionState`. Both arrive through #1293, a dependency.
 - **Draft 05's function.** `SourceControlSet::seek_session(generation, timeline_sample, anchor)`
   in host-core checks the timeline and every source producer, then pushes to all of them. The C ABI
   calls it; this slice makes the browser call the same function.
@@ -35,18 +39,21 @@ export in draft 06b.
   `sdk/assets/miso-engine-v1-abi-layout.json`, `sdk/src/generated/abi.ts` and the hermetic mock in
   `scripts/test-web-audioworklet.mjs` (`:2277`).
 - **The anchored browser form** is *Export transaction apply and anchored seek from the browser
-  engine module* (#1293), amended by the README to export the anchored session seek beside its
-  anchored source seek.
+  engine module* (#1293), which lands first. This slice exports the anchored session seek beside
+  #1293's anchored source seek (D1).
 
 ## Decisions frozen for this slice
 
 - **D1. The export.** `miso_engine_web_v1_session_seek(handle, generation: u64, frame: u64) -> u32`.
-  It calls `AudioWorkletEngineHost::seek_session`, which calls draft 05's
-  `SourceControlSet::seek_session(generation, frame, None)` on `ready.host.sources` and maps an
+  It calls draft 05's `SourceControlSet::seek_session(generation, frame, None)` on the browser
+  session's `SourceControlSet`, the one the source seek export uses (in the Worker's `SessionState`
+  after #1381, on the thread #1387's routing picks), and maps an
   error through `source_result`. It does **not** call `prepare_source_seek`: every consumer
   observes the seek through its command queue at the next block, the timeline included, so all of
   them change in one block. Outside `STATE_READY` it returns `RESULT_WRONG_STATE` as
-  `seek_source` does.
+  `seek_source` does. Beside it, `miso_engine_web_v1_session_seek_at(handle, generation: u64,
+  frame: u64, anchor: u64) -> u32` passes `Some(anchor)`, with #1293's anchor rules, so a browser
+  host loops or starts the session in exact time (README A1.2).
 - **D2. Headless `seek`.** `OfflineEngine.seek(frame: bigint, options?: { generation?: bigint }):
   { generation: bigint } & EngineCallResult` calls a new `WasmBoundary.sessionSeek` once, which
   calls the export. The generation is `options.generation`, else one above the largest generation
@@ -54,7 +61,7 @@ export in draft 06b.
   the timeline start at 1). A stale generation is refused with `source.generation.stale` and
   nothing changes. The caller then submits each source's PCM from its clamped frame,
   `min(frame, source frames)`, with that generation, as after `seekSource`.
-- **D3. Mirrors.** The new export joins every list in the context; the generated SDK files are
+- **D3. Mirrors.** The two new exports join every list in the context; the generated SDK files are
   regenerated with the repository's generators; every checker's self-test passes.
 - **D4. The acked-batch question.** The export is draft 05's all-or-nothing function: an OK means
   every consumer holds the seek, and a refusal changes nothing. No ack can precede a drop.
@@ -67,7 +74,9 @@ export in draft 06b.
 
 ## Authorized paths
 
-- `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs` (the export and `seek_session` only),
+- `hosts/host-web/src/ffi.rs`, `hosts/host-web/src/lib.rs`, `hosts/host-web/web/` and
+  `crates/control-plane/src/` as #1387 and #1381 leave them (the session seek export, its routing
+  beside the source seek's, and its call into draft 05's function only),
   `hosts/host-web/src/tests.rs`
 - `sdk/src/headless/engine.ts`, `sdk/src/core/boundary.ts`, `sdk/src/generated/abi.ts`,
   `sdk/assets/miso-engine-v1-abi-layout.json`, `sdk/test/capability-evals.mjs`
@@ -78,12 +87,12 @@ export in draft 06b.
 ## Non-goals
 
 - The shipped host message, the browser SDK `seek` and the PCM feed's ring rule (draft 06b).
-- The anchored browser form (#1293, amended).
-- Moving browser source control into the Worker (*Move browser source submission and seeks into
-  the Worker*, #1387); this slice keeps today's thread.
+- The anchored source seek's export (#1293), which lands first.
+- Any change to the routing of *Move browser source submission and seeks into the Worker* (#1387),
+  which lands first (through #1293): the session seek takes the thread the source seek takes.
 - Any change to the per-source seek's semantics.
 - A browser plan swap: the browser has no successor path yet (*Replace the running browser session
-  in the Rust host*, #1290); the timeline's browser carry follows from draft 04 when it lands.
+  in the Rust host*, #1290); the timeline's browser carry follows from draft 04b when it lands.
 
 ## Hazards
 
@@ -100,7 +109,7 @@ export in draft 06b.
 1. **One block for everything** (`hosts/host-web/src/tests.rs`, new). A two-source session at
    quantum 128, playing. Call the `extern "C"` export with generation 2 and frame 6,000, submit one
    generation-2 quantum per source from its clamped frame, render one block: both sources read
-   their seek frames and the timeline reads 6,000 (draft 04's test reader) in that block. A stale
+   their seek frames and the timeline reads 6,000 (draft 04b's test reader) in that block. A stale
    generation returns `RESULT_INVALID_ARGUMENT` and the next block equals a run without the call.
    One full source slot returns `RESULT_BACKPRESSURE` and nothing changes.
 2. **Headless** (`sdk/test/capability-evals.mjs`, new case beside the seek case at `:162`). After
@@ -132,7 +141,9 @@ export in draft 06b.
 
 ## Dependencies
 
-- Draft 05 *Seek the timeline and every source in one C ABI call* (its D1 function; draft 04's
-  timeline comes with it).
+- Draft 05 *Seek the timeline and every source in one C ABI call* (its D1 function; drafts 04a and
+  04b come with it).
+- *Export transaction apply and anchored seek from the browser engine module* (#1293): the
+  anchored export's rules and its mirrors.
 - Batch: R1. Draft 06b *Seek the timeline and every source from the browser SDK and the PCM feed*
   builds on it.

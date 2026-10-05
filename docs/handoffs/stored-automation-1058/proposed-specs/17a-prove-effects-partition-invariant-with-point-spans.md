@@ -41,13 +41,13 @@ with its first user, draft 17b.
 | Effect | Span entry | Block cutting |
 |---|---|---|
 | compressor | `apply_automation`, `crates/compressor/src/lib.rs:403-458`: per-lane `LinearRamp` retarget | ramp prefix and settled body; partition test with spans at sample 0 (`tests/partition.rs:59`) |
-| gate-expander | `apply_automation`, `crates/gate-expander/src/lib.rs:534-593` | split at the bank-wide `ramp_frames_left`; the no-ramp variant omits only no-op updates (`run_block`, `:597-604`) |
+| gate-expander | `apply_automation`, `crates/gate-expander/src/lib.rs:534-595` | split at the bank-wide `ramp_frames_left`; the no-ramp variant omits only no-op updates (`run_block`, `:597-604`) |
 | soft-clip | `apply_automation`, `crates/soft-clip/src/lib.rs:591-650`: converts, then ramps | segments at ramp snaps (`:489-537`) |
 | transient-shaper | `apply_automation`, `crates/transient-shaper/src/lib.rs:743-800` | per-sample advance over the ramp prefix (`:541-585`) |
 | true-peak-limiter | `apply_automation`, `crates/true-peak-limiter/src/lib.rs:3816-3870`: ramps of linear coefficients, 64 per-sample updates | 32-frame detector chunks with carried history (`:87`, `:2755`) |
 | delay | `apply_automation`, `crates/delay/src/lib.rs:1407-1477`: a time `Point` sets `pending_delay` | a crossfade starts only at a chunk start (`:1279-1284`; `begin_transition`, `:504-509`); chunks end where a crossfade ends (`chunk_frames`, `:821-841`) |
 | parametric-eq | counts every span invalid (`crates/parametric-eq/src/lib.rs:3513-3521`) | takes prepared targets only (`apply_target_lane`, `:2860-2894`) |
-| multiband-compressor | `apply_automation`, `crates/multiband-compressor/src/lib.rs:1228-1279` | splits at bank-wide ramp arrivals (`process_block`, `:956-1012`) and refreshes ratio, attack and release coefficients once per segment from the ramps' current values (`BandCache::refresh`, `:608-617`, called at `:1107`) |
+| multiband-compressor | `apply_automation`, `crates/multiband-compressor/src/lib.rs:1228-1282` | splits at bank-wide ramp arrivals (`process_block`, `:956-1012`) and refreshes ratio, attack and release coefficients once per segment from the ramps' current values (`BandCache::refresh`, `:608-617`, called at `:1107`) |
 
 - **The multiband compressor is not partition-invariant with spans.** Its per-segment
   coefficients depend on where block boundaries and other lanes' ramp arrivals cut a segment. That

@@ -52,7 +52,7 @@ that would cross a curve with the same code. Nothing renders the table yet.
   `effect_automation_diagnostics` on `next` whenever the automation differs, and a non-empty result
   returns `LiveRebuild::AutomationTarget`, so the commit takes the rebuild path whose preparation
   refuses. The anchors in this draft stay those of `6ee64f484`. Note A10 removes the mask one row at
-  a time, from slice 10a to slice 20, so until slice 20 some automation edits still skip
+  a time, from slice 10 to slice 20, so until slice 20 some automation edits still skip
   preparation.
 - **Checked-in builtin automation** (`fixtures/session/v1/builtins-automation.json`, after draft 01's
   migration): fader `both` linear `db` 0 to -3, matrix `both` linear `linear` 1 to 0.5 on a matrix

@@ -34,10 +34,10 @@ it yet; drafts 09a and 09b are its first users.
   sample `τ` equals the target at `τ + L - 1`. The EQ and input-filter coefficient ramps reach the
   target at `A + 64` (`docs/EFFECT_CONTRACT_V1.md:165-166`), one sample later.
 - **Node time** (README A1.3): a node at render sample `r` reads source-read sample
-  `s = r + ΣP - a(n)`, and its node time is `τ(r) = timeline(s)`. Draft 04's
+  `s = r + ΣP - a(n)`, and its node time is `τ(r) = timeline(s)`. Draft 04a's
   `timeline_block` gives one node block's mapping: a start value and at most one step (a seek).
   This crate cannot depend on `source` (D1), so it takes the mapping as its own plain type, and
-  draft 09b fills it from draft 04's reader.
+  draft 09b fills it from draft 04a's reader.
 - **The cross-target corpus.** Gate G5 digests every case on x86-64, AArch64 and wasm and compares
   with one set of pins (`tools/wasm-gate-corpus/src/lib.rs:1-45`). Crates delegate scalar cases
   through their own `corpus` module and pins (`math::corpus`, `:55`, `:118`); new blocks are
@@ -99,7 +99,7 @@ it yet; drafts 09a and 09b are its first users.
     current target does not change. The caller reports ramps it starts itself (a mute ramp, a live
     record's ramp) through `CellState::hold_until(node_time)`.
   - **Set.** At a seek step, `Exact` emits `Set` (no ramp) to `value_at(τ)` and `Ramp` emits a
-    `Jump` over `J` to `value_at(completion(τ, J))`. The step may be at offset 0: draft 04's reader
+    `Jump` over `J` to `value_at(completion(τ, J))`. The step may be at offset 0: draft 04a's reader
     reports `step = (0, t)` when the seek's source-read block starts the node block, and the cell
     then emits its `Set` (or ramped `Jump`) at offset 0. So every seek that reaches a block yields
     its event, whatever its offset. The cursor is repositioned first by binary

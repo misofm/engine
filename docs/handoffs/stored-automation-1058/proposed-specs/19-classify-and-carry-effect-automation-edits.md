@@ -12,15 +12,15 @@ the shared commit, and hears the new curve from the swap block on, with no gap a
 every effect keeps its state, every unchanged curve keeps its place, a changed curve takes one
 jump at the swap block, and a removed curve ramps to the static value. The revision completes
 `exact` at adoption. A static value edit on an automated effect parameter is stored and not heard,
-and commits as `model_only`. The browser's record admission refuses a live effect parameter
-command on an automated cell with a typed reason until #1382 replaces it. The EQ's rows stay
-masked until draft 20.
+and commits as `model_only`, on both hosts: a browser live effect parameter command on an
+automated cell is lowered to that edit by the Worker's commit (#1382) and replies `model_only`. The
+EQ's rows stay masked until draft 20.
 
 ## Context
 
 **The classifier** (`crates/host-core/src/live_delta.rs`).
 - `classify_live_delta` (`:211`) masks the whole automation table (`:236`); its rustdoc says the
-  first slice that renders automation must remove that line (`:181-185`). Draft 10a makes the mask
+  first slice that renders automation must remove that line (`:181-185`). Draft 10 makes the mask
   per target row, adds `LiveRebuild::Automation` and one predicate `automated_cell(model,
   address)`, and removes the fader row.
 - The numbered rules are `:149-179`; the rebuild reasons are `LiveRebuild` (`:117-141`).
@@ -40,9 +40,9 @@ masked until draft 20.
   control lane, every parameter value and its bypass" as prepared values. #1280 D1 adds "live
   controls attached in both plans or in neither".
 
-**The browser.** `admit_commands` (`hosts/host-web/src/lib.rs:4596`) admits an effect parameter
-command (kind 5, `COMMAND_EFFECT_PARAM`, `:835`) at `:5030-5076`, lowering it to effect records.
-Draft 10b adds the typed reason for a live command on an automated lane.
+**The browser.** After *Admit browser live edits in the Worker through the committed model*
+(#1382), an effect parameter command (kind 5, `COMMAND_EFFECT_PARAM`, `hosts/host-web/src/lib.rs:835`)
+is lowered to a session transaction and meets the shared classifier, as a C ABI transaction does.
 
 **What drafts 18a and 18b give.** Each automated cell has a stable address `(strip ID, rack, effect ID,
 parameter_index, channel)`, a compiled program and an event state (cursor, current target, ramp
@@ -81,24 +81,22 @@ lane and a window of `stored(i)` spans.
   differs from it, to the curve's value at `+ L - 1`. Draft 18a D6's rule (current target = the
   prepared value) applies only to an instance that does not carry. Host-core writes the seed into
   the move table.
-- **D6. The stage carries** (amendment rows of the README).
-  - #1279 D1: the automation program, the prepared values it writes (draft 18a D3) and the window
+- **D6. The stage carries.** This slice extends the carry predicates that #1279 and #1280 build
+  (both land first); neither spec is amended.
+  - #1279 D1's prepared-value test: the automation program, the prepared values it writes (draft 18a D3) and the window
     capacity it sets are not prepared values; nor is the static value of a cell the successor
     automates. An owner that gains, loses or changes stored automation carries.
-  - #1279 D2: an owner whose stored automation gives it a channel-less lane carries like one
+  - #1279 D2's rule: an owner whose stored automation gives it a channel-less lane carries like one
     without.
-  - #1280 D1: "live controls attached in both plans or in neither" ignores a channel-less lane
+  - #1280 D1's rule "live controls attached in both plans or in neither" ignores a channel-less lane
     that exists only for stored automation.
   - The lane state itself moves by #1279's snapshot and restore, whatever stage type holds it.
-- **D7. Browser admission.** Until #1382, `admit_commands` refuses a kind-5 command whose lowered
-  record addresses an automated cell of a span-driven effect, with draft 10b's typed reason,
-  and admits nothing from that
-  batch (as #1315 D4). The set of automated cells is computed at boot from the session, off
-  render.
+- **D7. One rule, both hosts.** D2's static-edit rule lives in the shared classifier, so the
+  browser meets it through #1382's Worker commit; no host has its own admission for automated
+  cells.
 - **D8. The acked-batch question: can an ack ever precede a drop? No.** A static edit on an
   automated cell is committed to the model and stored, which is its whole meaning (A2), and the
-  response says `model_only`. An automation edit is acked at adoption, after its moves ran. A
-  browser refusal admits nothing.
+  response says `model_only`. An automation edit is acked at adoption, after its moves ran.
 
 ## Deliverables
 
@@ -106,10 +104,10 @@ lane and a window of `stored(i)` spans.
 2. D3-D5: the inventory rows and the join in `crates/host-core/src/prepare.rs`, the move table in
    `crates/graph/src/lib.rs`, the cell moves in the stages (`crates/rack/src/lib.rs`,
    `crates/graph/src/runtime.rs`).
-3. D7 in `hosts/host-web/src/lib.rs`.
-4. The tests below. D6 is text root applies to #1279 and #1280 before this slice.
+3. D6's predicate changes in host-core's join.
+4. The tests below.
 
-The slice has two parts: classification (D1, D2, D7) and carry (D3-D5). They may be two commits,
+The slice has two parts: classification (D1, D2, D7) and carry (D3-D6). They may be two commits,
 but they merge together, in one push: classification without carry makes an automation edit a
 rebuild whose cells restart, and carry without classification is never reached.
 
@@ -121,20 +119,19 @@ rebuild whose cells restart, and carry without classification is never reached.
   `crates/graph/src/runtime.rs` (the carry path), `crates/rack/src/lib.rs` (the carry path),
   `crates/graph/tests/rt11_swap_carry_alloc.rs`.
 - `crates/capi/src/runtime/live_tests.rs` (tests).
-- `hosts/host-web/src/{lib.rs,tests.rs}` (admission only).
+- `hosts/host-web/src/tests.rs` (gate 6).
 
 ## Non-goals
 
 - The EQ's rows and its group cell (draft 20).
 - OQ1: what a live move does to an automated control. Option A ships (A2).
-- The browser's commit in the Worker (#1382).
+- The browser's commit in the Worker (#1382, which lands before draft 09a).
 - Carrying the effect lane state itself (#1279, #1280).
 
 ## Hazards
 
-- **#1279 and #1280 must carry the amendment first.** Without D6, an automation edit puts the
-  strip in the restart set and the edit is heard as a duck-swap, not a jump. Root applies the rows
-  before this slice starts.
+- **D6 is required.** Without it, an automation edit puts the strip in the restart set and the
+  edit is heard as a duck-swap, not a jump. Gate 4 holds it.
 - **Restart set.** A strip in the restart set for another reason (D15-9) restarts its effects; its
   cells then start fresh (D5), not carried.
 - **Cohort capacity.** Adding automation to one instance of a cohort can raise the cohort's
@@ -164,9 +161,9 @@ rebuild whose cells restart, and carry without classification is never reached.
    adoption). Removing the entry stages one release `Point` with the static value.
 5. **Static edit.** A static `params` edit on an automated cell commits `model_only`, the plan is
    not replaced, and the next blocks equal an engine that never received it.
-6. **Browser** (`hosts/host-web/src/tests.rs`, new): a kind-5 command on an automated cell is
-   refused with draft 10b's reason and admits nothing from its batch; the same command on a
-   non-automated cell of the same instance is admitted.
+6. **Browser** (`hosts/host-web/src/tests.rs`, new): a kind-5 command on an automated cell replies
+   `model_only` and moves no bit; the same command on a non-automated cell of the same instance
+   replies `live`.
 7. **Allocation.** `crates/graph/tests/rt11_swap_carry_alloc.rs` gains a swap with carried and
    released cells: 0 allocations and 0 frees in the swap block and the 1,000 blocks after it
    (`bench_support::alloc::current_thread_delta_since`).
@@ -181,7 +178,6 @@ rebuild whose cells restart, and carry without classification is never reached.
      `cargo test --locked -p host-web --features test-support`
    - `cargo build --locked --release -p audit -p capi && target/release/audit capi` (every
      violation count 0)
-   - `python3 -B scripts/check-command-reason-vocabulary.py` if draft 10b's reason list changes
    - `for x in host-core realtime workspace; do bash scripts/check-$x-policy.sh && bash scripts/test-$x-policy.sh || exit 1; done`
    - `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
@@ -195,7 +191,7 @@ rebuild whose cells restart, and carry without classification is never reached.
 - Gate 4 turns red if a stage-type or capacity change restarts a lane, or if a removed curve
   leaves the parameter at the curve's last value.
 - Gate 5 turns red if a static edit on an automated cell rebuilds or moves a bit.
-- Gate 6 turns red if the browser admits a live edit that a plan would apply over automation.
+- Gate 6 turns red if the browser has a path that applies a live value over automation.
 - Gate 7 turns red if the moves allocate on the render thread.
 
 ## Dependencies
@@ -203,9 +199,8 @@ rebuild whose cells restart, and carry without classification is never reached.
 Batch R3. Direct dependencies:
 
 - Draft 18b *Render stored effect parameter automation across seeks and on both hosts*.
-- *Carry console effect lanes across a plan swap* (#1279), with the D6 amendments.
-- *Carry live-controlled effect lanes across a plan swap* (#1280), with the D6 amendments.
+- *Carry console effect lanes across a plan swap* (#1279): the carry D6 extends.
+- *Carry live-controlled effect lanes across a plan swap* (#1280): the carry D6 extends.
 
-Draft 18a, draft 10a (the mask per row, `LiveRebuild::Automation`, `automated_cell`), draft 10b
-(the browser reason), draft 07 (the cursor reposition) and *Report each transaction's edit path in
+Draft 18a, draft 10 (the mask per row, `LiveRebuild::Automation`, `automated_cell`), draft 07 (the cursor reposition) and *Report each transaction's edit path in
 its response* (#1313) arrive through draft 18b.

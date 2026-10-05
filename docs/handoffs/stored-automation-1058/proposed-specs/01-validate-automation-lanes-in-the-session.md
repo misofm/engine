@@ -65,7 +65,7 @@ the table yet.
 - **The hold rule has no home in the schema doc.** `docs/SESSION_SCHEMA_V1.md:220-225` says only
   that the table renders nothing. The protocol's record rule ("holds its end value until
   replaced", `docs/CONTROL_PROTOCOL_REGISTRY.md:45`) leaves the registry with *Delete the
-  protocol automation queue, its records and counters* (draft 21b).
+  protocol automation queue, its records and counters* (draft 21c).
 
 ## Decisions frozen for this slice
 
@@ -212,4 +212,6 @@ the table yet.
 ## Dependencies
 
 - None.
-- Batch: R1. Drafts 02, 03a and 03b and draft 07 (the evaluator crate) build on it.
+- Batch: P1, first in it. Drafts 21a-21c (the hold rule's new home before 21c deletes the old one),
+  02, 03a and 03b and draft 07 (the evaluator crate) build on it. It is a product outcome alone:
+  it refuses automation lanes that no rendering could honour.

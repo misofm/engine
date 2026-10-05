@@ -84,9 +84,9 @@ the note's heading for each. No product code change.
 
 ## Decision record
 
-The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 1; anchors checked on
-`6ee64f484`; reviewed by a fresh adversarial verifier, FAIL, every finding folded in). One line per
-answer:
+The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 2; anchors checked on
+`6ee64f484`, whose code equals `45c5a1819`'s; every finding of the attempt-1 verdict folded in). One
+line per answer:
 
 - **A1** ([Design](../../docs/handoffs/stored-automation-1058/README.md#a1-design)): the control
   plane compiles each automated cell into an immutable segment table in the plan; render evaluates it
@@ -95,7 +95,9 @@ answer:
   session seek.
 - **A2** ([Live changes against automation](../../docs/handoffs/stored-automation-1058/README.md#a2-live-changes-against-automation)):
   owner question OQ1; recommendation: offset on level rows, OR on mute, automation wins elsewhere;
-  automation wins until the ruling.
+  until the ruling, automation wins by one permanent rule in the shared commit on both hosts: a live
+  edit of an automated cell commits as its fallback value, `model_only`, with no host-only path; no
+  answer (B, C or D) undoes it.
 - **A3** ([Format](../../docs/handoffs/stored-automation-1058/README.md#a3-format)): the table is
   enough; it gains the hold rule, one entry per lane, the pan or matrix form, 64 samples between
   jumps, unit, domain, shape and filter-order rules, and jump ramps from `control_smoothing`.
@@ -108,8 +110,8 @@ answer:
   landed and of the quantum.
 - **A6** ([Automated mute and follows_mute sends](../../docs/handoffs/stored-automation-1058/README.md#a6-automated-mute-and-follows_mute-sends)):
   every route into a submix whose source mute is automated gets a lane with `follows_mute` in its
-  cell; render calls `graph::gated_route_coefficients` at each automated mute event, at the strip's
-  sample and ramp.
+  cell; render calls `graph::gated_route_coefficients` at each automated mute event, at the render
+  sample where the send's tap carries the curve's timeline sample (A1.3), over the strip's ramp.
 - **A7** ([Stored span bound, for #1306 D1](../../docs/handoffs/stored-automation-1058/README.md#a7-stored-span-bound-for-1306-d1)):
   `stored(i)` is the number of distinct automated cells of the instance, 0 for a target-owning
   effect; at most its `Block` cell count.
@@ -117,22 +119,60 @@ answer:
   no; #1306 D1 has no third term.
 - **A9** ([Serving AUTOMATION_ENQUEUE, for #1315 D3](../../docs/handoffs/stored-automation-1058/README.md#a9-serving-automation_enqueue-for-1315-d3)):
   never served; the refusal is permanent and the command, its event and its queue leave the protocol
-  registry (slices 21a and 21b; slice 22 reserves the C limit); no ack can precede a drop.
+  registry (slices 21a-21c in batch P1, which needs only slice 01; slice 26 retires the span kinds
+  and sample rate no producer uses; slice 22 reserves the C limit); no ack can precede a drop.
 - **A10** ([The classifier mask, for #1260](../../docs/handoffs/stored-automation-1058/README.md#a10-the-classifier-mask-for-1260)):
-  the mask becomes per row; slice 10a removes the fader row and slice 20 the last; an automation edit
+  the mask becomes per row; slice 10 removes the fader row and slice 20 the last; an automation edit
   is a carried `rebuild` that completes `exact`; a static-value edit on an automated lane gives no
-  record.
+  record on either host; a group's other cell is a `live` group-cell write from the slice that
+  renders the group.
 - **A11** ([The staged plan](../../docs/handoffs/stored-automation-1058/README.md#a11-the-staged-plan)):
-  thirty-seven slices in twenty-four steps, drafted in
-  `docs/handoffs/stored-automation-1058/proposed-specs/`; slices 18a and 18b render stored effect
-  automation and #1306 lands in their batch.
+  forty-one slices in twenty-six steps and seven batches, drafted in
+  `docs/handoffs/stored-automation-1058/proposed-specs/`; every rendering slice lands after #1382;
+  slices 18a and 18b render stored effect automation and #1306 lands in their batch.
 
 ## Attempt record
 
-**Attempt 1** (stream K research worker). No product code changed and no benchmark ran. A fresh
-adversarial verifier returned FAIL on the first draft (one blocker: a render-clock grid made the bits
-after a seek depend on when it landed; six majors); the note records each fold in its "Verification"
-section. Gate 3 deviates by root's instruction: the slices are drafts under
+**Attempt 1** (stream K research worker, `436cc137d`). No product code changed and no benchmark ran.
+Two fresh internal verifiers reviewed it: the first returned FAIL on the first draft (one blocker: a
+render-clock grid made the bits after a seek depend on when it landed; six majors), the second
+PASS-WITH-FIXES on the revision (eight majors on package consistency); the note records each fold in
+its "Verification" section. Gate 3 deviates by root's instruction: the slices are drafts under
 `docs/handoffs/stored-automation-1058/proposed-specs/` for root to file as specs and GitHub issues.
 Gates run: `bash scripts/check-workspace-policy.sh` and `bash scripts/check-dsp-research.sh` (the
 latter checks the DSP research corpus, which this issue does not change).
+
+**Attempt 2** (stream K research worker). The attempt-1 adversarial verdict returned FAIL (one major,
+seven minors, seven nits). No product code changed and no benchmark ran. Per finding:
+
+- **M1** (browser placeholders): slice 09a depends on *Admit browser live edits in the Worker through
+  the committed model* (#1382), so every rendering slice acts on the shared commit on both hosts.
+  Draft 10b and `COMMAND_REASON_AUTOMATED` are deleted; the browser refusals of drafts 11, 13a, 14a,
+  15, 16a, 19 and 20 are removed; 13b is rewritten onto the shared commit and split. The permanent
+  rule is decided: automation wins and a live edit of an automated cell commits `model_only` in the
+  shared commit, not a typed refusal (A2, F9). Amendments that made an earlier-landing spec name a
+  later slice became the slice's own change ("Not amended" list), which also removed a cycle
+  (draft 04 depended on #1316, which an amendment asked to report the timeline). The graph is
+  acyclic and no slice edits code an earlier slice deletes (A11, "No placeholder and no cycle").
+- **m1**: batch P1 depends on draft 01 alone; 01 moves into P1.
+- **m2**: a send's follow ramp is timed at its tap's arrival, which A1.3 requires (A6, draft 13b D2).
+- **m3**: A2 states what option D would change and requires it as a cell word read at events, so
+  A10, draft 17b D5 and the #1306 live term stay true; B and C likewise.
+- **m4**: 04 split into 04a/04b, 13b into 13b/13c, 21a into 21a/21b (the queue is 21c); 14 and 16
+  re-split by layer so no same-batch slice holds an interim rebuild classification; must-land-together
+  groups fell from five to four.
+- **m5**: F4 decided (slice 25 retires the protocol's stored transport position); F6 decided
+  (slice 26 retires the span kinds and the sample rate no producer uses).
+- **m6**: 18a D8 reads `80 + 32·n`; F12 decided and the #1054 D10 row states it, read by draft 08
+  D2; the #1225 row is gone and draft 13c writes the route cell consistently.
+- **m7**: [S6] cites the deep pages, [S7] adds Delay-Line Interpolation, [S8] uses the real section
+  titles and the author URL; each was fetched again.
+- **Nits**: loop points are quantum-granular (A1.2); the cursor bound is `q` per cell and block and
+  joins the CPU bound; draft 17b lists #1345; this record names both internal reviews; the three
+  anchor ranges are fixed; F3 needs no change; F10 asks root to file promptly.
+- **New finding** F16: a VCA reach change on an automated fader lane is a carried rebuild (decision
+  14 rule 1), a narrowing of D15-6's live set that root records.
+
+The plan is now forty-one slices in twenty-six steps and seven batches (P1, R1, R2, R3, R4, P2, Q).
+Gate 3 deviates as in attempt 1. Gates run: `bash scripts/check-workspace-policy.sh` and
+`bash scripts/check-dsp-research.sh`.

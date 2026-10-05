@@ -108,9 +108,9 @@ ramp in flight blocks the skip (`crates/compressor/src/lib.rs:568`;
     an asymmetric program clears `LIVE` at render, and draft 18a D7 declines the collapse at
     preparation for the same asymmetric program.
 - **D8. Node time.** Node time reaches the stage as draft 07's `NodeSpan`. `graph` computes it for
-  each lane with draft 04's reader, `timeline_block(s0 - a(n))`, from the block's source-read sample
+  each lane with draft 04a's reader, `timeline_block(s0 - a(n))`, from the block's source-read sample
   `s0` and the lane's arrival `a(n)`, as draft 09b D1 does for the fader stage, and passes it into
-  the rack stage. The rack never reads draft 04's timeline history itself. This slice adds no
+  the rack stage. The rack never reads draft 04b's timeline history itself. This slice adds no
   second node-time path.
 - **D9. The rack's dependency boundary.** `rack` gains the `automation` crate (draft 07), as A1.1
   names. `scripts/check-rack-policy.sh:23` and its fixture in `scripts/test-rack-policy.sh:14`
@@ -195,10 +195,10 @@ Batch R3. Direct dependencies:
 - Draft 07 *Compile stored automation into per-cell events in node time*: the event generator and
   `NodeSpan`.
 - Draft 17a *Prove every launch effect partition-invariant with Point spans*.
-- Draft 04 *Give every plan a timeline clock that seeks and carries like a source*: the
+- Draft 04b *Give every plan a timeline that carries like a source*: the
   `timeline_block` reader that `graph` calls for D8.
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): this slice
+  is written on its lane; D2's merge reads the window `stage` fills, whatever fills it.
 
-This slice is written on the lane of *Hold effect parameter, bypass and EQ-target values in
-latest-target cells* (#1345); D2's merge reads the window `stage` fills, whatever fills it. It
-merges in batch R3 with its first user, draft 18a *Compile and bind stored effect parameter
+It merges in batch R3 with its first user, draft 18a *Compile and bind stored effect parameter
 automation*.

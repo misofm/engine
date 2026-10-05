@@ -92,7 +92,7 @@ cross-host harness `hosts/host-web/tests/strip_cells_cross_host.rs`.
 - AArch64 and seek-time invariance (draft 23b).
 - A new digest owner, or a digest of a rendered session outside `expected.json`.
 - Timing (drafts 24a, 24b). Listening tests.
-- Live edits during the fixture: drafts 10a, 10b, 19 and 20 gate them.
+- Live edits during the fixture: drafts 10, 11, 13c, 14b, 16b, 19 and 20 gate them.
 
 ## Hazards
 
@@ -132,10 +132,10 @@ cross-host harness `hosts/host-web/tests/strip_cells_cross_host.rs`.
 
 Batch Q. Direct dependencies:
 
-- Draft 13b *Let following sends follow an automated mute*.
-- Draft 14a *Render stored pan and matrix automation*.
+- Draft 13c *Write a following send's route cell from the shared commit* (it brings 13a and 13b).
+- Draft 14b *Render stored pan and matrix automation*.
 - Draft 15 *Render stored input trim and polarity automation*.
-- Draft 16a *Render stored input HPF and LPF automation*.
+- Draft 16b *Render stored input HPF and LPF automation*.
 - Draft 20 *Render stored parametric EQ automation*.
 - *Report live_values_superseded in the browser status and prove both hosts drain strip cells
   alike* (#1399): the cross-host harness.

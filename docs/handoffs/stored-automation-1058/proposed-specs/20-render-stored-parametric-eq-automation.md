@@ -43,8 +43,9 @@ Batch R4.
 **Live edits today.** The classifier designs EQ targets on the control thread with
 `EqTargetPreparer` (`crates/host-core/src/control_preparation.rs:304-380`; called from
 `design_targets`, `crates/host-core/src/live_delta.rs:463-502`). #1345 D1 holds them in one
-12-word target cell per `(section, channel)`. The browser takes EQ edits as prepared submissions
-(`hosts/host-web/src/lib.rs:5076-5100`).
+12-word target cell per `(section, channel)`. The browser took EQ edits as prepared submissions
+(`hosts/host-web/src/lib.rs:5076-5100`); after *Admit browser live edits in the Worker through the
+committed model* (#1382) they are lowered to transactions and meet the shared classifier.
 
 **The render closure gate.** `scripts/check-web-audioworklet.sh` requires the render export's
 call closure to reach no allocator and own no trap outside one documented site (`:389-421`), and
@@ -72,11 +73,12 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
 - **D3. A refused design** keeps the current target and increments a saturating
   `automation_designs_refused` count on the stage, read after render. Draft 03a's domain and order
   rules make it unreachable; the gates assert 0.
-- **D4. The group cell** (amendment to #1345 D1, README row). For a section with an automated
-  value, the section's target cell holds the section's semantic values, not designed words. A live
+- **D4. The group cell.** For a section with an automated value, this slice gives #1345's
+  section target cell the meaning "group cell": it holds the section's semantic values, not designed words. A live
   edit of a value of that section that is not automated writes the semantic value into the cell
   (`live`); the control thread designs nothing for it. A section with no automated value keeps
-  #1345's designed target cell.
+  #1345's designed target cell. #1345 is not amended: it lands first, and this slice adds the
+  meaning for a section kind that exists only from this slice on.
 - **D5. The classifier.**
   - The EQ's automation rows leave the mask, which is then empty: the mask line
     (`crates/host-core/src/live_delta.rs:236`) and its rustdoc (`:181-185`) go.
@@ -88,12 +90,11 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
   - With the mask empty, every automation edit is a rebuild, so the separate
     `LiveRebuild::AutomationTarget` routing that #1335 D4 adds and draft 02 D5 extends is deleted: an
     automation edit with a refusable entry returns `LiveRebuild::Automation`, and the rebuild's
-    preparation refuses it with the same diagnostic. The classifier cases of drafts 10a and 03a
+    preparation refuses it with the same diagnostic. The classifier cases of drafts 10 and 03a
     that pin `AutomationTarget` are rewritten to expect `Automation`.
-- **D6. The browser.** Until #1382, `admit_commands` refuses an EQ prepared submission that
-  touches a section with an automated value, with draft 10b's typed reason, and admits nothing from
-  that batch. This is the rule drafts 14a and 16a apply to the pan and matrix group and to the input
-  filter pair.
+- **D6. One rule, both hosts.** D4 and D5 live in the shared classifier, so a browser EQ edit meets
+  them through #1382's Worker commit, as drafts 14b and 16b do for the pan and matrix group and the
+  input filter pair. No host has its own admission for automated sections.
 - **D7. No span, no window.** The EQ stages no span: `stored(i) = 0` (A7). An automated EQ with
   no live lane still uses the live-control stage with a channel-less lane (draft 17b D6), for its
   program and its group cells.
@@ -113,7 +114,7 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
 1. D1-D3 and D7 in the stage (`crates/rack/src/lib.rs`, `crates/graph/src/runtime.rs`) and the
    cell programs in `crates/host-core/src/prepare.rs`.
 2. D4-D5 in `crates/host-core/src/live_delta.rs` and the cell writer.
-3. D6 in `hosts/host-web/src/lib.rs`. D8's text.
+3. D8's text.
 4. The tests below.
 
 ## Authorized paths
@@ -124,8 +125,7 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
 - `crates/host-core/src/{prepare.rs,live_delta.rs,control_preparation.rs}`,
   `crates/host-core/tests/live_delta.rs`.
 - `crates/rack/src/lib.rs`, `crates/graph/src/runtime.rs` (the EQ's events in the stage).
-- `crates/capi/src/runtime/` tests, `hosts/host-web/src/{lib.rs,tests.rs}` (admission and one
-  test).
+- `crates/capi/src/runtime/` tests, `hosts/host-web/src/tests.rs` (gate 7).
 - `scripts/check-web-audioworklet-callgraph.py` (a `KERNEL_ROSTER` note, only if the gate needs
   one for the design path, with the reason).
 - `docs/EFFECT_CONTRACT_V1.md`.
@@ -170,12 +170,13 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
    rebuild refuses it with draft 02's diagnostic.
 6. **Bounded designs.** One section group designs at most
    `(⌈q/64⌉ + 1) + Σ_cells(⌈q/64⌉ + 1) + 1 seek + 1 cell change` times per channel and lane per
-   block, as draft 16a D5 states: the group's cells share one 64-sample grid, and each automated
+   block, as draft 16b D4 states: the group's cells share one 64-sample grid, and each automated
    cell adds its jumps. At `q = 128`, band 2 with frequency, gain and Q automated, a seek and a
    group-cell change in one block designs at most `3 + 3·3 + 1 + 1 = 14` times (test-support
    counter); `automation_designs_refused` is 0 in every gate.
-7. **Browser refusal** (`hosts/host-web/src/tests.rs`): an EQ prepared submission touching an
-   automated section is refused with draft 10b's reason and admits nothing.
+7. **Browser, one rule** (`hosts/host-web/src/tests.rs`): an EQ edit of an automated value replies
+   `model_only` and moves no bit; an edit of a non-automated value of that section replies `live`
+   and, after its ramp, equals a plan prepared with the new value and the same automation.
 8. **Allocation.** 1,000 blocks with designs in every block make 0 allocations and 0 frees
    (`bench_support::alloc::current_thread_delta_since` after one warm block);
    `cargo build --locked --release -p audit -p capi && target/release/audit capi` reports every
@@ -209,7 +210,7 @@ counts scalar arithmetic in the listed kernels (`KERNEL_ROSTER`,
   another row, or if the `AutomationTarget` route survives the empty mask.
 - Gate 6 turns red if a group designs once per cell at a shared grid sample instead of once per
   event sample.
-- Gate 7 turns red if the browser admits a designed target that would overwrite automation.
+- Gate 7 turns red if the browser has a path that writes a designed target over automation.
 - Gate 8 turns red if the design path allocates on the render thread.
 
 ## Dependencies
@@ -221,6 +222,6 @@ Batch R4. Direct dependencies:
 - Root's confirmation of finding F1.
 
 Draft 17b (the pieces), draft 03a (the domain and shape rules that make a refused design
-unreachable), draft 10b (the browser reason), *Hold effect parameter, bypass and EQ-target values in
-latest-target cells* (#1345, with the D4 amendment) and *Carry live-controlled effect lanes across a
+unreachable), *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345, the cell D4
+lays out) and *Carry live-controlled effect lanes across a
 plan swap* (#1280) arrive through draft 19.

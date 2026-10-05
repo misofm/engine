@@ -56,9 +56,11 @@ retarget while the lane is muted or a mute ramp is in flight. Nothing feeds oper
   it. The stage tracks the second with one flag per lane and channel: `SetMute` with a nonzero
   window sets it; the lane's countdown reaching 0, or a later gain retarget on that lane through
   the live path, clears it. `gain_held(lane, channel)` and `remaining(lane, channel)` are readable,
-  so a caller (draft 07's `hold_until`) knows when the lane's ramp ends. Whether the live path's
-  `set_fader_gain` also uses the held rule is *Session controlSmoothing: configurable ramp lengths
-  for live mute, fader and pan changes* (#1054) D10, and is not changed here.
+  so a caller (draft 07's `hold_until`) knows when the lane's ramp ends. The live path's
+  `set_fader_gain` keeps its own rule, which *Session controlSmoothing: configurable ramp lengths for
+  live mute, fader and pan changes* (#1054) D10 sets as amended by the #1058 note (finding F12):
+  while the lane is muted (settled, or ramping toward 0) a live gain change only remembers the gain;
+  during an unmute ramp it retargets as today. This slice does not change the live path.
 - **D3. In-block application.** `FaderRampStage::process_with` takes the block and a pull source of
   operations: `next_offset() -> Option<u32>` and `apply(offset, &mut FaderOperationSink)`, which
   applies every operation at that offset. The stage runs `process_plane`'s existing logic over each
@@ -93,9 +95,10 @@ retarget while the lane is muted or a mute ramp is in flight. Nothing feeds oper
 ## Non-goals
 
 - Producing operations from stored automation (drafts 09a and 09b); the matrix, input and route
-  stages (drafts 13a-13b, 14a-14b, 15 and 16a-16b).
-- Changing the live path's records, drains or `set_fader_gain` (#1054 D10, finding F12).
-- The mute-cell composition with VCA and solo terms (drafts 13a-13b).
+  stages (drafts 13a-13c, 14a-14b, 15 and 16a-16b).
+- Changing the live path's records, drains or `set_fader_gain` (#1054 D10 as amended, finding
+  F12).
+- The mute-cell composition with VCA and solo terms (drafts 13a-13c).
 
 ## Hazards
 
