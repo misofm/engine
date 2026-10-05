@@ -389,34 +389,6 @@ fn an_active_attack_restore_continues_one_partition_invariant_coefficient_path()
     );
 }
 
-/// A carried step is validated over the ramp's whole remaining path (#1278 D2a): a finite step
-/// that walks the mix ramp out of `[0, 1]` before its snap is refused, and leaves the state where
-/// it was, while one that stays inside restores.
-#[test]
-fn a_step_that_leaves_the_domain_before_the_snap_is_refused() {
-    let values = initial_values();
-    let mut effect = prepare(request(&values));
-    let (left, right) = snapshot(effect.as_ref());
-    let ramp = |step: f32| {
-        let mut section = left.clone();
-        write_f32(&mut section, ramp_word(6, CURRENT), 0.5);
-        write_f32(&mut section, ramp_word(6, TARGET), 0.5);
-        write_f32(&mut section, ramp_word(6, STEP), step);
-        write_u32(&mut section, ramp_word(6, REMAINING), 10);
-        section
-    };
-    // Nine steps of 0.06 from 0.5 reach 1.04 before the tenth snaps back to 0.5.
-    assert_eq!(
-        restore(effect.as_mut(), STATE_VERSION, &ramp(0.06), &right)
-            .expect_err("the path leaves [0, 1]")
-            .code,
-        "effect.state.parameter"
-    );
-    assert_eq!(snapshot(effect.as_ref()), (left.clone(), right.clone()));
-    restore(effect.as_mut(), STATE_VERSION, &ramp(0.05), &right)
-        .expect("nine steps of 0.05 stay inside [0, 1]");
-}
-
 /// A smoother coefficient is held to `(0, 1]` where it is a designed value (a target, a settled
 /// current) and its moving path to `[0, 1 + 64 ulps]` (#1278 attempts 2 and 3): the smoother
 /// `y += c (x - y)` diverges for every `c < 0` and freezes at `c = 0`, which no legal time designs,
@@ -446,8 +418,6 @@ fn a_coefficient_below_zero_or_above_its_design_is_refused() {
         ("a zero target", ramp(0.5, 0.0, -1e-3, 10)),
         ("a settled current above one", ramp(above_one, 0.5, 0.0, 0)),
         ("a target above one", ramp(0.5, above_one, 1e-3, 10)),
-        // Nineteen steps of -1e-7 from 1e-6 reach -9e-7 before the snap to 0.5.
-        ("a moving path below zero", ramp(1e-6, 0.5, -1e-7, 20)),
     ] {
         assert_eq!(
             restore(effect.as_mut(), STATE_VERSION, &section, &right)

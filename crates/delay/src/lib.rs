@@ -54,6 +54,7 @@ use effect_runtime::ramp::LinearRamp;
 use effect_runtime::state_payload::{
     RAMP_WORDS, ramp_path_within, read_f32, read_ramp, read_u32, write_f32, write_ramp, write_u32,
 };
+use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
 
 pub mod corpus;
@@ -762,19 +763,26 @@ struct LaneChunk<'a> {
     /// `(129 - transition_remaining) / 128 - 1/128`, so the first `+=` inside the kernel lands on
     /// update `j`'s exact weight `j / 128`.
     alpha: f32,
-    /// `(first value, per-sample step)` of the damping coefficient ramp.
-    damping: (f32, f32),
-    /// `(first value, per-sample step)` of the feedback ramp.
-    feedback: (f32, f32),
-    /// `(first value, per-sample step)` of the wet-mix ramp.
-    mix: (f32, f32),
+    /// `(first value, per-sample step, target)` of the damping coefficient ramp.
+    damping: (f32, f32, f32),
+    /// `(first value, per-sample step, target)` of the feedback ramp.
+    feedback: (f32, f32, f32),
+    /// `(first value, per-sample step, target)` of the wet-mix ramp.
+    mix: (f32, f32, f32),
+}
+
+impl LaneChunk<'_> {
+    /// `true` when any of the lane's three ramps steps over this chunk (issue #1409 D5).
+    fn ramping(&self) -> bool {
+        self.damping.1 != 0.0 || self.feedback.1 != 0.0 || self.mix.1 != 0.0
+    }
 }
 
 /// The shared part of a chunk: the feedback matrix position and the bypass flag.
 #[derive(Clone, Copy, Debug)]
 struct CrossChunk {
-    /// `(first value, per-sample step)` of the cross-feedback ramp.
-    position: (f32, f32),
+    /// `(first value, per-sample step, target)` of the cross-feedback ramp.
+    position: (f32, f32, f32),
     /// Prepared bypass: the wet path still runs and the ring still fills, only the output is dry.
     bypass: bool,
 }
@@ -879,24 +887,49 @@ impl PreparedDelay {
         );
         let cross_segment = self.cross.advance_block::<f32>(frames);
         let cross_chunk = CrossChunk {
-            position: (cross_segment.start, cross_segment.step),
+            position: (
+                cross_segment.start,
+                cross_segment.step,
+                cross_segment.target,
+            ),
             bypass,
         };
 
         {
             let left = &mut self.left;
             let right = &mut self.right;
-            delay_chunk(
-                io_left,
-                io_right,
-                &mut left.ring[cursor..cursor + frames],
-                &mut right.ring[cursor..cursor + frames],
-                left_chunk,
-                right_chunk,
-                cross_chunk,
-                &mut left.damping_state,
-                &mut right.damping_state,
-            );
+            // Issue #1409 D5: the clamp runs only on a chunk in which some ramp steps. A chunk with
+            // every step zero keeps today's additions (and bits): `x + 0.0` is already inside
+            // `[min(x, target), max(x, target)]`, so the clamp would return it unchanged.
+            let ramping =
+                left_chunk.ramping() || right_chunk.ramping() || cross_chunk.position.1 != 0.0;
+            let write_left = &mut left.ring[cursor..cursor + frames];
+            let write_right = &mut right.ring[cursor..cursor + frames];
+            if ramping {
+                delay_chunk::<true>(
+                    io_left,
+                    io_right,
+                    write_left,
+                    write_right,
+                    left_chunk,
+                    right_chunk,
+                    cross_chunk,
+                    &mut left.damping_state,
+                    &mut right.damping_state,
+                );
+            } else {
+                delay_chunk::<false>(
+                    io_left,
+                    io_right,
+                    write_left,
+                    write_right,
+                    left_chunk,
+                    right_chunk,
+                    cross_chunk,
+                    &mut left.damping_state,
+                    &mut right.damping_state,
+                );
+            }
         }
 
         let advanced = frames as u32;
@@ -999,9 +1032,9 @@ fn chunk_of<'a>(
         fading: remaining > 0,
         fade_last: remaining as usize == frames,
         alpha: (128 - remaining.min(128)) as f32 * STEP_ALPHA,
-        damping: (damping.start, damping.step),
-        feedback: (feedback.start, feedback.step),
-        mix: (mix.start, mix.step),
+        damping: (damping.start, damping.step, damping.target),
+        feedback: (feedback.start, feedback.step, feedback.target),
+        mix: (mix.start, mix.step, mix.target),
     }
 }
 
@@ -1012,7 +1045,10 @@ fn chunk_of<'a>(
 /// Per frame, per lane: tap (`fma` blend while crossfading), damping (`sub`, `mul`, `fma`, `add`,
 /// `flush`), feedback gain (`mul`), the matrix (`sub`, two `mul`, two `fma`, four `select`), the
 /// ring write (`add`, `flush`) and the wet mix (`sub`, `fma`, two compares, two `select`). Seven
-/// coefficient additions carry the D11 ramps. No division, no modulo, no branch on a sample value
+/// coefficient updates carry the D11 ramps: at `RAMPING`, `ramp_toward(value, step, target)`, the
+/// step added and held inside `[min(value, target), max(value, target)]` so no word passes its
+/// target (issue #1409); otherwise, on a chunk where every step is zero, the plain addition, which
+/// the clamp would leave unchanged (D5). No division, no modulo, no branch on a sample value
 /// and no classification of a sample: the two `flush` calls are the entire denormal policy and the
 /// finiteness check happens once per block in [`PreparedDelay::finish_block`].
 ///
@@ -1024,7 +1060,7 @@ fn chunk_of<'a>(
 /// two lanes stay independent even when one of them has gone non-finite.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn delay_chunk(
+fn delay_chunk<const RAMPING: bool>(
     io_left: &mut [f32],
     io_right: &mut [f32],
     write_left: &mut [f32],
@@ -1122,17 +1158,28 @@ fn delay_chunk(
         io_left[frame] = mix_sample(dry_left, tap_left, mix_left, bypass);
         io_right[frame] = mix_sample(dry_right, tap_right, mix_right, bypass);
 
-        gain_left += left.damping.1;
-        feedback_left += left.feedback.1;
-        mix_left += left.mix.1;
-        gain_right += right.damping.1;
-        feedback_right += right.feedback.1;
-        mix_right += right.mix.1;
-        position += cross.position.1;
+        gain_left = ramp_word::<RAMPING>(gain_left, left.damping);
+        feedback_left = ramp_word::<RAMPING>(feedback_left, left.feedback);
+        mix_left = ramp_word::<RAMPING>(mix_left, left.mix);
+        gain_right = ramp_word::<RAMPING>(gain_right, right.damping);
+        feedback_right = ramp_word::<RAMPING>(feedback_right, right.feedback);
+        mix_right = ramp_word::<RAMPING>(mix_right, right.mix);
+        position = ramp_word::<RAMPING>(position, cross.position);
     }
 
     *state_left = state_l;
     *state_right = state_r;
+}
+
+/// One coefficient update of [`delay_chunk`]: `ramp_toward(value, step, target)` while some ramp
+/// of the chunk steps, the plain `value + step` (with a zero step) otherwise (issue #1409 D5).
+#[inline(always)]
+fn ramp_word<const RAMPING: bool>(value: f32, (_, step, target): (f32, f32, f32)) -> f32 {
+    if RAMPING {
+        ramp_toward(value, step, target)
+    } else {
+        value + step
+    }
 }
 
 /// One tap sample: the active tap, or the crossfade blend `old + alpha * (new - old)`.
@@ -2039,7 +2086,7 @@ mod tests {
             let mut value = segment.start;
             for _ in 0..frames {
                 produced.push(value.to_bits());
-                value += segment.step;
+                value = ramp_toward(value, segment.step, segment.target);
             }
         }
         assert_eq!(produced, expected);
@@ -2738,8 +2785,9 @@ mod tests {
     }
     /// #1278 D2a: a carried ramp is validated whole before anything is committed. Each row
     /// rewrites one word of the left feedback ramp of a mid-ramp snapshot: a non-finite step, a
-    /// `remaining` past the 64-sample ramp, a step whose remaining path leaves the domain, and a
-    /// settled ramp that still carries a step. Each must be refused with the effect unchanged. Red
+    /// `remaining` past the 64-sample ramp, and a settled ramp that still carries a step. (A finite
+    /// step of any size no longer leaves the domain: the clamped ramp stays between its restored
+    /// `current` and its target, issue #1409 D2.) Each must be refused with the effect unchanged. Red
     /// when `read_carried_ramp` drops its `ramp_path_within` clause, which every other delay test
     /// survives.
     #[test]
@@ -2765,17 +2813,11 @@ mod tests {
         );
         let valid = snapshot(&effect);
         let word = LANE_RAMP_WORD;
-        let rows: [(&str, usize, u32); 7] = [
+        let rows: [(&str, usize, u32); 5] = [
             ("NaN step", word + 2, f32::NAN.to_bits()),
             ("infinite step", word + 2, f32::INFINITY.to_bits()),
             ("remaining 65", word + 3, RAMP_SAMPLES + 1),
             ("remaining u32::MAX", word + 3, u32::MAX),
-            ("path past the domain", word + 2, 0.1_f32.to_bits()),
-            (
-                "path past the domain, downward",
-                word + 2,
-                (-0.1_f32).to_bits(),
-            ),
             ("settled with a step", usize::MAX, 0),
         ];
         for (row, index, bits) in rows {

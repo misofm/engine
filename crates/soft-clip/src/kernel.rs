@@ -14,8 +14,13 @@
 //!
 //! # Frozen operation order, per frame
 //!
-//! 1. `drive += drive_step`, `output += output_step`, `mix += mix_step` — D11: the increment was
-//!    computed once at event time, and the ramp advances *before* the sample uses it.
+//! 1. `drive = ramp_toward(drive, drive_step, drive_target)`, and likewise `output` and `mix` —
+//!    D11: the increment was computed once at event time, and the ramp advances *before* the
+//!    sample uses it. `ramp_toward` is the step added and held inside `[min(word, target),
+//!    max(word, target)]`, so no word passes its target (issue #1409). A block in which every
+//!    lane's three steps are zero takes the plain additions instead (one branch, decided before
+//!    the frame loop), which the clamp would leave unchanged, so a settled block pays no clamp
+//!    (#1409 D5).
 //! 2. `xin = load(frame)`; push `xin` into the dry history (unflushed — see below).
 //! 3. `X = flush((drive + drive) * xin)` — `drive + drive` is exact, and is the `2 * drive` of the
 //!    brief; push `X` into the interpolation history.
@@ -45,12 +50,13 @@ use lane::kernels::halfband::{
     HALFBAND63_BASE, HALFBAND63_ROWS, halfband2x_decim_even, halfband2x_interp_even,
     history_advance, history_push, history_row,
 };
+use lane::kernels::ramp_toward;
 use lane::{Lane, flush};
 
 /// Samples of dry delay, which is also the effect's latency and the deepest history age read.
 pub const DRY_DELAY: usize = 31;
 
-/// Per-block, per-lane coefficients: the D11 ramp increments and the bypass mask.
+/// Per-block, per-lane coefficients: the D11 ramp increments and targets, and the bypass mask.
 ///
 /// Every field is block-constant. A ramp that ends inside a block is handled by splitting the
 /// block, not by branching per sample (the prepared channel's driver), so a step never changes while
@@ -63,6 +69,13 @@ pub struct SoftClipCoef<L: Lane> {
     pub output_step: L,
     /// Per-sample increment of the dry/wet mix.
     pub mix_step: L,
+    /// Target of the linear drive gain ramp: no iterated word passes it (issue #1409 D4). On a lane
+    /// that is not ramping it is the lane's current drive, so the zero step leaves the word alone.
+    pub drive_target: L,
+    /// Target of the linear output gain ramp.
+    pub output_target: L,
+    /// Target of the dry/wet mix ramp.
+    pub mix_target: L,
     /// All-ones on lanes whose effect instance is bypassed. Block-uniform: bypass is part of the
     /// program key, so a cohort is either bypassed or not for its whole life.
     pub bypass: L::Mask,
@@ -170,6 +183,16 @@ pub fn soft_clip_block<L: Lane>(
     s: &mut SoftClipState<L>,
     h: &mut SoftClipHistory,
 ) {
+    // Issue #1409 D5: decided once per block, before the frame loop. A step of either zero sign
+    // compares equal to zero. The choice is a loop-invariant branch rather than two copies of the
+    // body: a second copy of this kernel doubles its stored splat constants, which the AArch64
+    // Apple targets lower to `memset_pattern16` calls (#1018).
+    let zero = L::zero();
+    let settled = L::mask_and(
+        c.drive_step.eq(zero),
+        L::mask_and(c.output_step.eq(zero), c.mix_step.eq(zero)),
+    );
+    let ramping = L::mask_any(L::mask_not(settled));
     let width = L::WIDTH;
     debug_assert_eq!(io.len(), frames * width);
     debug_assert_eq!(h.x.len(), HALFBAND63_ROWS * width);
@@ -178,14 +201,19 @@ pub fn soft_clip_block<L: Lane>(
 
     let one = L::splat(1.0);
     let half = L::splat(0.5);
-    let zero = L::zero();
     let (mut drive, mut output, mut mix) = (s.drive, s.output, s.mix);
     let mut pos = h.pos as usize;
 
     for frame in io.chunks_exact_mut(width) {
-        drive = drive.add(c.drive_step);
-        output = output.add(c.output_step);
-        mix = mix.add(c.mix_step);
+        if ramping {
+            drive = ramp_toward(drive, c.drive_step, c.drive_target);
+            output = ramp_toward(output, c.output_step, c.output_target);
+            mix = ramp_toward(mix, c.mix_step, c.mix_target);
+        } else {
+            drive = drive.add(c.drive_step);
+            output = output.add(c.output_step);
+            mix = mix.add(c.mix_step);
+        }
 
         let xin = L::load(frame);
         history_push::<L>(&mut h.dry, pos, xin);

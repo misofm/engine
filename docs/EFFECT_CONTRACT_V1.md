@@ -134,9 +134,15 @@ Smoothing length is `smoothing_samples` from the parameter descriptor; it is bin
 effect may substitute a literal.
 
 For `N` smoothing updates, **linear precomputes its increment once, at the moment the target
-changes** (master plan decision D11): `step = (target - current) / N`, then `current += step` per
-update, and the exact target is assigned on update `N`. There is no per-sample division anywhere
-in the engine. The audited rule — "linear adds `(target-current)/remaining`" — is withdrawn by
+changes** (master plan decision D11): `step = (target - current) / N`, then
+`current = ramp_toward(current, step, target)` per update, and the exact target is assigned on
+update `N`. `ramp_toward` (`lane::kernels::ramp_toward`, issues #1408 and #1409) is
+`current + step` held inside `[min(current, target), max(current, target)]`, so no ramp word ever
+passes its target: without it, accumulated rounding carries a 64-update ramp up to about 30 ulps
+past its target before the snap, which can leave the parameter's domain. Every word therefore lies
+between the value at the event (or at a restore) and the target, for any finite step; an in-range
+word keeps the unadjusted sum's bits, signed zeros included, and a NaN step propagates. There is
+no per-sample division anywhere in the engine. The audited rule — "linear adds `(target-current)/remaining`" — is withdrawn by
 issue #95 finding F2: it cost one integer-to-float convert and one `fdiv` per parameter per lane
 per sample for the whole length of every ramp. One-pole-99 likewise precomputes `a =
 exp(ln(0.01)/N)` and `1-a` once, then `y = a*y_previous + (1-a)*target`, and assigns the exact

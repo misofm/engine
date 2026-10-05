@@ -258,6 +258,9 @@ fn polyphase_matches_the_frozen_63_tap_graph() {
             drive_step: 0.0,
             output_step: 0.0,
             mix_step: 0.0,
+            drive_target: case.drive,
+            output_target: case.output,
+            mix_target: case.mix,
             bypass,
         };
         // Split into odd-sized blocks so the block boundary is exercised too.

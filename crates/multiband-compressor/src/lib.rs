@@ -58,7 +58,7 @@ use effect_runtime::state_payload::{
     STATE_LENGTH_CODE, STATE_VERSION_CODE, ramp_path_within, read_f32, read_u32, write_f32,
     write_u32,
 };
-use lane::kernels::{SvfState, svf_step};
+use lane::kernels::{SvfState, ramp_toward, svf_step};
 use lane::silence_step;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
@@ -646,9 +646,13 @@ struct BandCoef<L: Lane> {
 
 /// The ten ramps of one channel, as lanes, for the duration of one segment.
 #[derive(Clone, Copy)]
+///
+/// `target` rides beside `step` so each frame's update holds the word inside its endpoints
+/// (issue #1409 D4); it is transient, never state.
 struct Segment<L: Lane> {
     current: [L; RAMP_COUNT],
     step: [L; RAMP_COUNT],
+    target: [L; RAMP_COUNT],
 }
 
 /// How far the next segment reaches, and whether anything is ramping over it.
@@ -892,7 +896,8 @@ fn band_target<L: Lane>(level: L, threshold: L, inv_ratio_minus_one: L, knee: (f
 /// defaults, `apply_automation`, `snap`, and a restored payload — every one of which runs
 /// `normalize_zero` over a `parameter_value_valid` word. So on the skipped path every lane of
 /// every `step` is `+0.0` and every lane of every `current` is finite and is not `-0.0`, which
-/// makes `current.add(step)` the identity on all of them. The two exclusions matter and are the
+/// makes `ramp_toward(current, step, target)` (whose add is the identity there, and whose clamp
+/// keeps an in-range word's bits) the identity on all of them. The two exclusions matter and are the
 /// same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by an
 /// addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
 /// than leaving it as a comment.
@@ -919,10 +924,15 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     for frame in 0..frames {
         if RAMPING {
             for index in 0..RAMP_COUNT {
-                segments[0].current[index] =
-                    segments[0].current[index].add(segments[0].step[index]);
-                segments[1].current[index] =
-                    segments[1].current[index].add(segments[1].step[index]);
+                // Issue #1409: the step added, held inside `[min(current, target),
+                // max(current, target)]`, so no word passes its target.
+                for segment in segments.iter_mut() {
+                    segment.current[index] = ramp_toward(
+                        segment.current[index],
+                        segment.step[index],
+                        segment.target[index],
+                    );
+                }
             }
         }
         let input_near = L::load(&left[frame * W..]);
@@ -1092,23 +1102,31 @@ impl<L: Lane, const W: usize> Side<L, W> {
     fn segment(&self) -> Segment<L> {
         let mut current = [L::zero(); RAMP_COUNT];
         let mut step = [L::zero(); RAMP_COUNT];
+        let mut target = [L::zero(); RAMP_COUNT];
         for index in 0..RAMP_COUNT {
             let mut values = [0.0f32; 8];
             let mut steps = [0.0f32; 8];
+            let mut targets = [0.0f32; 8];
             for track in 0..W {
                 values[track] = self.ramps[track][index].current;
                 steps[track] = self.ramps[track][index].step;
+                targets[track] = self.ramps[track][index].target;
             }
             current[index] = L::load(&values[..W]);
             step[index] = L::load(&steps[..W]);
+            target[index] = L::load(&targets[..W]);
         }
-        Segment { current, step }
+        Segment {
+            current,
+            step,
+            target,
+        }
     }
 
     /// Writes a finished segment's lane values back into the scalar ramps.
     ///
-    /// The lane accumulation is `current + step` iterated once per frame, lane by lane, which is
-    /// exactly what `LinearRamp::next_value` does at `remaining >= 2`; the segment split
+    /// The lane accumulation is `ramp_toward(current, step, target)` iterated once per frame, lane
+    /// by lane, which is exactly what `LinearRamp::next_value` does at `remaining >= 2`; the segment split
     /// guarantees no ramp reaches `remaining == 1` inside a segment, so no snap can be missed and
     /// the state can be written back instead of replayed.
     fn store_segment(&mut self, segment: &Segment<L>, advanced: u32) {
@@ -1204,7 +1222,8 @@ impl<L: Lane, const W: usize> Instance<L, W> {
     /// The precondition that makes the flat path bit-identical to the ramped one.
     ///
     /// Debug-only, and asserted at the point of use rather than argued in a comment: on a segment
-    /// the split sends down the flat path, dropping `current.add(step)` must be the identity on
+    /// the split sends down the flat path, dropping `ramp_toward(current, step, target)` must be
+    /// the identity on
     /// every lane of every parameter of both channels. It is, when each ramp is at rest with a
     /// `+0.0` step and holds a value that `x + 0.0 == x` preserves bit for bit — which excludes
     /// `-0.0` (it would become `+0.0`) and the non-finite values (a NaN is quieted by the

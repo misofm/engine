@@ -362,4 +362,183 @@ exceptions recorded in
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (implementer, 2026-10-05)
+
+**Change (D1-D6).** One body: `lane::kernels::ramp_toward` (#1408's, re-exported from
+`kernels::builtins`) replaces `current + step` at every site; each site keeps its own snap.
+
+- Site 1, `lane::kernels::ramp_block`: `g = ramp_toward(g, step, target)` (frozen order step 5).
+- Site 2, `LinearRamp::next_value` and `advance_block`'s first-frame word
+  (`crates/effect-runtime/src/ramp.rs`); module doc states the clamp.
+- Site 3, `ParameterSmoother`'s `Linear` arm (`crates/effect-contract/src/lib.rs`), at `L = f32`
+  through `lane::kernels::ramp_toward` (lane is already a dependency); its D11 doc states the clamp.
+- Site 4, compressor `RampVec::advance_where`; site 5, the gate's `RAMPING` prologue; site 9, the
+  limiter's `RampLanes::advance`. These already run only while a ramp is in flight.
+- Site 6, multiband `run_segment`: `Segment` gains `target: [L; RAMP_COUNT]`, gathered in
+  `Side::segment` (D4). The flat-path identity docs now name `ramp_toward`.
+- Site 7, delay: `LaneChunk`/`CrossChunk` carry `(start, step, target)`; `delay_chunk` is
+  `delay_chunk::<RAMPING>`, and `process_chunk` picks `true` once per chunk when any of the seven
+  steps is non-zero (`LaneChunk::ramping`, D5). The settled shape keeps the plain additions.
+- Site 8, soft clip: `SoftClipCoef` gains `drive_target`, `output_target`, `mix_target`
+  (`process` fills them with the new `target_vector`). `soft_clip_block` decides once per block,
+  before its frame loop, with `mask_any` over the three step vectors, whether to take the clamped
+  update or today's additions (D5). The choice is a loop-invariant branch, not two copies of the
+  body: a first version with two const-generic copies raised soft clip's iOS
+  `memset_pattern16` count from 22 to 37 in `check-cross-targets.sh` (#1018; the stored splat
+  constants double with the body). The ceiling was not touched; with the branch the count is 22
+  again and the check passes. The delay's two-copy `delay_chunk::<RAMPING>` moved no count.
+- D6: `ramp_path_inside` keeps its `remaining`, finite-step, endpoint and settled-step clauses and
+  loses the walk; its doc gives D2. `ramp_path_within` and the 64-ulp slacks are unchanged (#1411).
+- `docs/EFFECT_CONTRACT_V1.md` states the clamped law.
+
+Edits outside the listed paths, each forced by D4 or by accuracy: the two other `SoftClipCoef`
+literals, `crates/soft-clip/src/corpus.rs` (case 4's ramps run for the whole case, so each targets
+the value 1024 steps from its start, twice the case length, and the clamp never acts:
+`SOFT_CLIP_DIGESTS` does not move) and `crates/soft-clip/tests/polyphase_identity.rs` (zero steps,
+targets the case's values); in `crates/lane/src/kernels.rs` the `IndexedRamp` doc's one-line
+statement of D11; in `state_payload.rs` two words of `ramp_path_within`'s doc that named the
+deleted walk.
+
+**Deleted (D6, D8(b), D9(a)).**
+- Delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`: the two `"path past the
+  domain"` rows and their doc clause (the test keeps its five other rows; M19 still names it).
+- Limiter restore corruptions: the `"moving limit walked past its bounds by its step"` row.
+- Compressor `a_step_that_leaves_the_domain_before_the_snap_is_refused` (whole test) and the
+  `"a moving path below zero"` row of `a_coefficient_below_zero_or_above_its_design_is_refused`.
+- Soft clip `state_roundtrip.rs`: `an_overshooting_ramp_restores_and_continues`, its four callers,
+  `a_drive_overshoot_retargeted_inward_restores_and_continues` and the `decibels_near` helper.
+- Soft clip `randomized.rs`: the `crossed` counter, its every-edge assertion and `converted`;
+  `near_edge_case` returns `()`; the bit-for-bit continuation is unchanged. The module doc's
+  overshoot paragraph is rewritten.
+- No other effect test row rested on a finite step walking past its target.
+
+**Oracle updated (gate 3).** `crates/effect-runtime/tests/partition.rs`'s makeup ramp and the
+delay unit test that iterates `segment.step` by hand now use `ramp_toward`.
+`contract_ramp_identity.rs` passes unchanged. The other oracles in Context pass unchanged (their
+ramps do not overshoot, or they drive `LinearRamp` itself).
+
+**Gate 1** (`crates/effect-runtime/tests/ramp_endpoint.rs`, three tests).
+`every_statement_of_the_law_stays_inside_its_endpoints_and_agrees`: seeded `(start, target, n)`,
+100,000 in `--release` (4,000 in debug, a prefix of the same sequence, as #1408's law test),
+half with an edge target from the probe (1, 0.95, -0.95, 0.995, 20, -80, 96, -3, 0.5) and a start
+1..=4096 ulps from it on either side, half with both ends of magnitude `[2^-20, 2^7]` and either
+sign; `n` is 64 for half and uniform in `1..=4096` for the rest. `LinearRamp::next_value`,
+`ParameterSmoother` (`Linear`) and `ramp_block` at every width (`lane::each_lane!`, random
+partitions of 1..=97 frames through `advance_block`) agree word for word, every word is inside
+`[min, max]`, the words equal the unclamped law's up to its first out-of-interval frame, the last
+is the target, and both halves reach the clamp. `the_ratio_floor_example_holds_its_target` pins the
+probe's ratio example. `a_restored_ramp_with_any_finite_step_stays_inside_and_the_validator_agrees`:
+200,000 restored ramps (20,000 debug) with a step drawn independently of the endpoints (any finite
+bit pattern, scaled engine steps, `0.0`, subnormals) and `remaining` in `0..=65`: every walked word
+stays inside, and `ramp_path_inside` equals a walking reference on four bound pairs each. Timing:
+3.5 s debug, 6.0 s release.
+
+**Gate 2** (each crate's `tests/ramp_endpoint.rs`). One harness (copied per crate): prepare with
+the parameter at `start`, send `Point`s to `target` at sample 0 on every channel, render 72 frames
+in one-frame blocks; after each, every ramp word of the payload must lie between its value at rest
+and its snapshot target; the moved word's own unclamped walk (rest word, snapshot step) must leave
+that interval (so the move reaches the clamp); and a second instance rendering the window as one
+block must give the same ramp words, output and snapshot. The compressor runs unconnected (site 4)
+and connected (site 2). A second test per banking effect (all but the delay) runs the move on the
+last lane of a native-width bank whose other lanes rest at the defaults, and requires the moving
+lane's output and ramp words to be bit-identical to a scalar instance after every frame (D4's
+target lane). Moves found by the scan (start bits, target, first out-of-interval step of the
+unclamped walk):
+
+| Effect | Word | Start | Target | First out |
+| --- | --- | --- | --- | --- |
+| compressor | threshold | `0xc29fffdf` | -80 | 34 |
+| compressor | ratio | `0x3f800021` | 1 | 34 |
+| compressor | knee | `0x41bfffdf` | 24 | 34 |
+| compressor | attack | `0x3dccccee` | 0.1 | 34 |
+| compressor | release | `0x459c3fdf` | 5000 | 34 |
+| compressor | makeup | `0x41bfffdf` | 24 | 34 |
+| compressor | mix | `0x3f7fffa0` | 1 | 49 |
+| compressor | attack coefficient | attack `0x3dccccf4` | 0.1 | 34 |
+| compressor | release coefficient | release `0x40a00027` | 5 | 34 |
+| gate | threshold, ratio, range, hysteresis | `0xc29fffdf`, `0x3f800021`, `0x42bfffdf`, `0x41bfffdf` | -80, 1, 96, 24 | 34 |
+| multiband | low and high threshold, ratio, attack, release, makeup | `0xc29fffdf`, `0x3f800021`, `0x3dccccee`, `0x459c3fdf`, `0x41bfffdf` | -80, 1, 0.1, 5000, 24 | 34 |
+| delay | feedback | `0x3f733312` | 0.95 | 34 |
+| delay | damping coefficient `g` | damping `0x3e800021` | 0.25 | 34 |
+| delay | mix, cross feedback | `0x3f7fffa0` | 1 | 49 |
+| soft clip | drive gain | drive `0x420ffffc` | 36 dB | 34 |
+| soft clip | output gain | output `0x41bffff7` | 24 dB | 34 |
+| soft clip | mix | `0x3f7fffa0` | 1 | 49 |
+| transient | attack, sustain, mix | `0x3f7fffa0`, `0xbf7fffa0`, `0x3f7fffa0` | 1, -1, 1 | 49 |
+| limiter | limit coefficient | ceiling `0xc1bffff6` | -24 dB | 34 |
+| limiter | release coefficient | release `0x41200027` | 10 | 34 |
+
+Scan bounds where an edge had no move: delay damping `g` has none within 4096 word ulps of either
+edge (toward 0 the designed word jumps past 4096 ulps at once; toward 0.995 the unclamped walks stay
+inside), so its move is an interior pair from a scan over 17 targets (26 hits); the limiter's 0 dB
+ceiling edge designs the same limit word for every start the scan reached (distance 0), so its move
+is at -24 dB. Every other parameter had moves at both edges; the table uses one per word, avoiding
+subnormal starts.
+
+Deviation, for the verifier: for the multiband compressor's ratio, attack and release moves the
+partition half compares the ramp words only, not the output and whole snapshot. That effect
+refreshes those coefficients once per segment by its frozen design (`tests/identity.rs`,
+`partition_control_trajectory_preserves_ramp_positions`), so one-frame and one-block renders of
+such a move differ in output whatever the ramp law. Threshold and makeup moves compare everything.
+
+**Mutation evidence** (each applied alone, the named tests run, reverted; all green after revert):
+
+| Mutant | Red test |
+| --- | --- |
+| site 1 `ramp_block` back to `g.add(step)` | gate 1 (`ramp_block at f32 differs from LinearRamp`) |
+| site 2 `next_value` back to `current += step` | gate 1 (three tests); compressor connected (threshold, frame 33, `0xc2a00001`); transient (attack, frame 48); delay (feedback, frame 33) |
+| site 2 `advance_block` first word back to `current + step` | gate 1; delay (one-block output) |
+| site 3 smoother back to `current + step` | gate 1 (`ParameterSmoother differs`) |
+| `ramp_path_inside` without its target clause | gate 1 restore test |
+| site 4 `advance_where` back to `add` | compressor unconnected (threshold, frame 33) |
+| site 4 gather: target from lane `W - 1 - lane` | compressor bank test |
+| site 5 gate prologue back to `add` | gate (threshold, frame 33) |
+| site 6 `run_segment` back to `add` | multiband (low threshold, frame 33) |
+| site 6 `Side::segment` target from lane `W - 1 - track` | multiband bank test |
+| site 7 `ramp_word` at `RAMPING` back to `value + step` | delay (one-block output) |
+| site 7 D5 choice inverted | delay (one-block output) |
+| site 8 drive back to `add` | soft clip (drive, frame 33, `0x427c620b`) |
+| site 8 D5 choice inverted (`ramping` negated) | soft clip (drive, frame 33) |
+| site 8 `target_vector` from lane `W - 1 - lane` | soft clip bank test |
+| site 9 limiter back to `add` | limiter (limit coefficient, frame 33, `0x3d6655c2`) |
+
+The scalar instance cannot see a wrong target lane (`W = 1`), which is why the bank half exists:
+the multiband wrong-lane mutant was green before it was added.
+
+**D7, bits moved.** No pinned table moved: `g5_native_corpus` (`D1_DIGESTS`, `C1_DIGESTS`,
+`GATE_DIGESTS`, multiband `DIGESTS`, `G5_DIGESTS`, `SOFT_CLIP_DIGESTS`, transient
+`CROSS_TARGET_DIGESTS`, `D90_DIGESTS`, `LANE_DIGESTS`, and `E9_DIGESTS`, `M3_DIGESTS`,
+`BUILTINS_DIGESTS`) passes unchanged, so there is no re-pin. Every existing bit-exact test passes
+unchanged apart from the deletions above. The only moved words are the ones the new tests force:
+each is a frame on which the unclamped word was strictly past its target (gate 1 asserts bit
+identity before the first such frame; gate 2 asserts the unclamped walk leaves the interval).
+
+**Gate 5, #1301 re-measured (PR evidence).** Delay M18, gate strict current and limiter 4-ulp
+budget, each applied as #1301 states them, per pull request and full: 0 and 0 refusals each, lists
+identical (empty), green after revert; recorded in the #1301 amendment note. All three catches fall
+to zero, as expected; #1411's gate 3 restores a catch per probe in the same pull request.
+
+**Gates.**
+- `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p effect-contract -p delay
+  -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper
+  -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features
+  math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`: pass (soft clip
+  rerun in full after the branch change: pass).
+- `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`: pass, no pin
+  moved.
+- `test-debug-a` workspace command: pass.
+- `bash scripts/run-wasm-gates.sh` (native, simd128, V8 spill gate): pass.
+- `conformance_fixtures -- --check`: pass.
+- Worklet chain (`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`): pass.
+- `check-cross-targets.sh`: pass (memset ceilings unchanged; counts unchanged, see site 8).
+- `check-lane-policy.sh`, `check-effect-runtime-policy.sh`, `test-effect-runtime-policy.sh .`,
+  `check-effect-contract.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`: pass.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`:
+  pass.
+
+**Open items.** The multiband partition deviation above. The 64-ulp restore slacks are now unused
+headroom and #1301's three catches are zero; both are #1411's, which ships in the same pull
+request. The #1411 spec already covers soft clip's `ramp_current_valid`/`ulp_at` (its site 8 and
+D3), so it was not edited.

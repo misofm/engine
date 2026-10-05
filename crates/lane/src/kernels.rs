@@ -25,6 +25,11 @@
 pub mod builtins;
 pub mod halfband;
 
+/// The one D11 ramp update every engine ramp uses (issues #1408, #1409); see
+/// [`builtins::ramp_toward`]. Re-exported here so the effect ramps and the contract's smoother call
+/// the same body at `L = f32` as the bank kernels do at every width.
+pub use builtins::ramp_toward;
+
 use crate::{FLUSH_EPS, Lane, flush, flush_pair_with, flush_with, silence_step};
 
 /// Coefficients of one TPT state-variable filter, one set per lane.
@@ -1020,7 +1025,8 @@ pub struct RampSegment<L: Lane> {
 /// 2. `x = load(frame)`
 /// 3. `y = x * gain`
 /// 4. `store(frame, y)`
-/// 5. `g = g + step`
+/// 5. `g = ramp_toward(g, step, target)` -- `g + step` held inside `[min(g, target),
+///    max(g, target)]`, so the gain never passes its target ([`ramp_toward`], issue #1409)
 ///
 /// The returned gain is the `g` a following block must start from, which is what makes the kernel
 /// partition-invariant: `start + step` iterated is not `start + n * step` in `f32` (gate P1).
@@ -1036,7 +1042,7 @@ pub fn ramp_block<L: Lane>(io: &mut [f32], frames: usize, seg: &RampSegment<L>) 
         };
         let x = L::load(frame);
         x.mul(gain).store(frame);
-        g = g.add(seg.step);
+        g = ramp_toward(g, seg.step, seg.target);
     }
     g
 }
@@ -1252,8 +1258,8 @@ pub const INDEXED_RAMP_LENGTH_MAXIMUM: u32 = 1 << 22;
 /// # Why it is not D11
 ///
 /// D11, the law of the faders, matrices and effects ([`ramp_block`] and
-/// `builtins::gain_mute_ramp_block`), carries `current = current + step` from frame to frame, so a
-/// D11 coefficient's bits depend on the frame's history. Here `c(k)` is a pure function of `k`:
+/// `builtins::gain_mute_ramp_block`), carries `current = ramp_toward(current, step, target)` from
+/// frame to frame, so a D11 coefficient's bits depend on the frame's history. Here `c(k)` is a pure function of `k`:
 /// the ramp vectorises over frames, any later fused or folded traversal can compute a frame's
 /// coefficients in any order, the snap frame is decided by `k` rather than by a running value, and
 /// a settled ramp is `target` exactly, so a route that has ramped and settled mixes the bits a

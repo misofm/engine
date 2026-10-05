@@ -270,15 +270,16 @@ pub fn read_ramp(bytes: &[u8], word: usize) -> LinearRamp {
 
 /// Whether every value a restored ramp can take lies in `[low - slack, high + slack]`: its
 /// `current` and `target`, and each value its remaining steps visit before the snap to the target,
-/// iterated exactly as [`LinearRamp::next_value`] iterates them.
+/// iterated exactly as [`LinearRamp::next_value`] iterates them ([`ramp_path_inside`] decides it
+/// from the endpoints, issue #1409 D2).
 ///
-/// A ramp also needs `remaining <= max_remaining` (checked first, so the walk is bounded) and a
+/// A ramp also needs `remaining <= max_remaining` and a
 /// finite step, and a settled ramp (`remaining == 0`) must carry the `+0.0` step that
 /// [`LinearRamp::fixed`], [`LinearRamp::snap`], [`LinearRamp::set_target`] and the last
 /// [`LinearRamp::next_value`] all write.
 ///
 /// `slack` is a rounding budget for an effect whose own iterated ramps may round a few ulps past
-/// an endpoint; it is not a domain widening. The walk reads nothing but its argument and allocates
+/// an endpoint; it is not a domain widening. The check reads nothing but its argument and allocates
 /// nothing, so a restore may run it on the render thread.
 #[must_use]
 pub fn ramp_path_within(
@@ -291,9 +292,18 @@ pub fn ramp_path_within(
 }
 
 /// Whether every value a restored ramp can take lies in the closed interval `[low, high]`, with
-/// the same `remaining`, step and walk rules as [`ramp_path_within`]. For an effect whose
+/// the same `remaining` and step rules as [`ramp_path_within`]. For an effect whose
 /// rounding budget is one-sided: a smoother coefficient, for example, may round a few ulps above
 /// its top but never below zero, where the recurrence diverges.
+///
+/// # Why the endpoints decide the whole path (issue #1409 D2)
+///
+/// [`LinearRamp::next_value`] advances the word with `lane::kernels::ramp_toward`, which returns a
+/// value inside `[min(current, target), max(current, target)]` for any finite step, and that
+/// interval lies inside the previous update's. By induction every value the remaining steps visit,
+/// and the snap's `target`, lie between the restored `current` and `target`, so the path is inside
+/// `[low, high]` exactly when its two endpoints are. No walk is needed, and none is made: the check
+/// is four comparisons whatever `remaining` is.
 #[must_use]
 pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining: u32) -> bool {
     let inside = |value: f32| (low..=high).contains(&value);
@@ -304,17 +314,7 @@ pub fn ramp_path_inside(ramp: LinearRamp, (low, high): (f32, f32), max_remaining
     {
         return false;
     }
-    if ramp.remaining == 0 {
-        return ramp.step.to_bits() == 0;
-    }
-    let mut value = ramp.current;
-    for _ in 1..ramp.remaining {
-        value += ramp.step;
-        if !inside(value) {
-            return false;
-        }
-    }
-    true
+    ramp.remaining != 0 || ramp.step.to_bits() == 0
 }
 // REALTIME_POLICY_END
 

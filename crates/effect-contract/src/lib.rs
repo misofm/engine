@@ -1521,7 +1521,9 @@ pub fn validate_automation_block(
 /// # D11
 ///
 /// One division, at the moment the target changes: `step = (target - current) / N`. Then
-/// `current += step` per sample, and an exact assignment of `target` on update `N`. The audited
+/// `current = ramp_toward(current, step, target)` per sample (`current + step` held inside
+/// `[min(current, target), max(current, target)]`, issue #1409), and an exact assignment of
+/// `target` on update `N`. The audited
 /// form divided by `remaining` on **every** sample (issue #95 finding F2); that is deleted here.
 /// [`SmoothingRule::OnePole99`] likewise precomputes `a` and `1 - a` once, at construction.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1591,7 +1593,8 @@ impl ParameterSmoother {
     ///
     /// * `remaining == 0` — at rest: returns `current` unchanged.
     /// * `remaining == 1` — the final update: assigns `target` exactly (the D11 snap).
-    /// * otherwise — `current += step` for [`SmoothingRule::Linear`], one precomputed-coefficient
+    /// * otherwise — `current = ramp_toward(current, step, target)` for [`SmoothingRule::Linear`]
+    ///   (the word never passes its target, issue #1409), one precomputed-coefficient
     ///   product for [`SmoothingRule::OnePole99`]. No division on either path.
     pub fn next_value(&mut self) -> f32 {
         match self.remaining {
@@ -1605,7 +1608,11 @@ impl ParameterSmoother {
             _ => {
                 self.current = match self.rule {
                     SmoothingRule::None => self.target,
-                    SmoothingRule::Linear => self.current + self.step,
+                    // Issue #1409: the one D11 update, `current + step` held inside
+                    // `[min(current, target), max(current, target)]`, as `LinearRamp` does.
+                    SmoothingRule::Linear => {
+                        lane::kernels::ramp_toward(self.current, self.step, self.target)
+                    }
                     SmoothingRule::OnePole99 => {
                         self.one_pole_a * self.current + self.one_pole_k * self.target
                     }

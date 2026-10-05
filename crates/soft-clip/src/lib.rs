@@ -515,6 +515,9 @@ impl<L: Lane> Channel<L> {
                 drive_step: self.step_vector(0),
                 output_step: self.step_vector(1),
                 mix_step: self.step_vector(2),
+                drive_target: self.target_vector(0),
+                output_target: self.target_vector(1),
+                mix_target: self.target_vector(2),
                 bypass: bypass_mask,
             };
             soft_clip_block::<L>(
@@ -542,6 +545,17 @@ impl<L: Lane> Channel<L> {
         for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
             let ramp = &self.ramps[lane][parameter];
             *slot = if ramp.remaining > 0 { ramp.step } else { 0.0 };
+        }
+        L::load(&words[..L::WIDTH])
+    }
+
+    /// The per-lane target vector of one parameter, which no iterated word passes (issue #1409
+    /// D4). A lane that is not ramping has a zero step, which the clamp leaves unchanged whatever
+    /// the target.
+    fn target_vector(&self, parameter: usize) -> L {
+        let mut words: LaneWords = [0.0; 8];
+        for (lane, slot) in words[..L::WIDTH].iter_mut().enumerate() {
+            *slot = self.ramps[lane][parameter].target;
         }
         L::load(&words[..L::WIDTH])
     }

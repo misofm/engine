@@ -70,6 +70,7 @@ use effect_runtime::state_payload::{
     HEADER_WORDS, StateLayout, ramp_path_inside, read_f32, read_header, read_u32, validate_lengths,
     write_f32, write_header, write_u32,
 };
+use lane::kernels::ramp_toward;
 use lane::{Backend, Lane, flush};
 
 /// Parameters in the frozen descriptor.
@@ -1161,8 +1162,10 @@ impl<L: Lane> RampLanes<L> {
 
     /// Produces this sample's value and advances the ramp (decision D11).
     ///
-    /// `remaining = max(remaining - 1, 0)` then `current = select(remaining > 0, current + step,
-    /// target)`: the last ramping sample is an assignment of the target, never an addition, which
+    /// `remaining = max(remaining - 1, 0)` then `current = select(remaining > 0,
+    /// ramp_toward(current, step, target), target)`: the step added and held inside
+    /// `[min(current, target), max(current, target)]`, so no coefficient passes its target (issue
+    /// #1409); the last ramping sample is an assignment of the target, never an addition, which
     /// is exactly `LinearRamp::next_value` and is why a block boundary is not observable. `step` is
     /// cleared on the snap so a resting ramp cannot drift.
     #[inline(always)]
@@ -1170,7 +1173,11 @@ impl<L: Lane> RampLanes<L> {
         let zero = L::zero();
         self.remaining = self.remaining.sub(L::splat(1.0)).max(zero);
         let stepping = self.remaining.gt(zero);
-        self.current = L::select(stepping, self.current.add(self.step), self.target);
+        self.current = L::select(
+            stepping,
+            ramp_toward(self.current, self.step, self.target),
+            self.target,
+        );
         self.step = L::select(stepping, self.step, zero);
         self.current
     }
@@ -7599,7 +7606,9 @@ mod tests {
         let reference = snapshot(peer.as_ref());
         type Corruption = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
         // #1278 attempt 2: a target and a settled coefficient are held to the designed range
-        // exactly, and a moving ramp's whole path to its relaxed bounds.
+        // exactly, and a moving ramp's whole path to its relaxed bounds. A finite step no longer
+        // walks a moving ramp past its bounds: the clamped ramp stays between its restored
+        // `current` and its target (issue #1409 D2).
         let above_ceiling = f32::from_bits(limit_coefficient(0.0).to_bits() + 1);
         let limit_ramp = |current: f32, target: f32, step: f32, remaining: u32| {
             move |bytes: &mut Vec<u8>| {
@@ -7610,7 +7619,7 @@ mod tests {
             }
         };
         let ceiling = limit_coefficient(0.0);
-        let corruptions: [Corruption; 10] = [
+        let corruptions: [Corruption; 9] = [
             (
                 "settled limit one ulp above the ceiling",
                 Box::new(limit_ramp(above_ceiling, ceiling, 0.0, 0)),
@@ -7618,10 +7627,6 @@ mod tests {
             (
                 "limit target one ulp above the ceiling",
                 Box::new(limit_ramp(ceiling, above_ceiling, 0.0, 8)),
-            ),
-            (
-                "moving limit walked past its bounds by its step",
-                Box::new(limit_ramp(ceiling, ceiling, -1e30, 8)),
             ),
             (
                 "settled limit with a nonzero step",
