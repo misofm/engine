@@ -2,8 +2,14 @@
 #
 # Deliberately NOT a workspace member: the empty `[workspace]` table below makes this package its
 # own workspace root, so it adds nothing to `cargo test --workspace`, no gate and no product code.
-# It links the engine's own `builtins` crate by path and drives the shipped fader/mute ramp
-# (`FaderMuteRampBuiltins`) and 2x2 matrix/pan ramp (`MatrixBuiltins::set_target_smoothed`).
+# It links the engine's own `builtins` crate by path and drives the shipped input trim/polarity
+# ramp (`InputBuiltins::set_polarity_invert`), fader/mute ramp (`FaderMuteRampBuiltins`) and 2x2
+# matrix/pan ramp (`MatrixBuiltins::set_target_smoothed`). The decision-15 addition
+# (`src/live_rows.rs`) also links, by path only: `lane` for the live route's indexed ramp and its
+# kernel (`IndexedRamp`, `route_mix_ramp_block`); `effect-contract` for the bypass shunt
+# (`BypassShunt`) and the effect factory contract; and the six launch effects that have a bypass
+# shunt, whose shipped kernels give the dry and wet signals the bypass and link emulations
+# crossfade.
 #
 # See ../README.md for the exact commands.
 [package]
@@ -20,6 +26,14 @@ path = "src/main.rs"
 
 [dependencies]
 builtins = { path = "../../../../crates/builtins" }
+compressor = { path = "../../../../crates/compressor" }
+effect-contract = { path = "../../../../crates/effect-contract" }
+gate-expander = { path = "../../../../crates/gate-expander" }
+lane = { path = "../../../../crates/lane" }
+parametric-eq = { path = "../../../../crates/parametric-eq" }
+soft-clip = { path = "../../../../crates/soft-clip" }
+transient-shaper = { path = "../../../../crates/transient-shaper" }
+true-peak-limiter = { path = "../../../../crates/true-peak-limiter" }
 
 [profile.release]
 debug = false

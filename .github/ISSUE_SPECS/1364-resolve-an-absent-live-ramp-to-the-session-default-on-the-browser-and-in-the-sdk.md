@@ -34,7 +34,8 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
   per key and `for_row(row)`. *Carry an optional per-edit ramp length on live session edits*
   (#1394) adds `LiveRamps::resolve(row, edit_ramp)` and the transaction field. #1054's D3 maps
   each row to a key: fader, trim, send gain and VCA offset use `fader`; mute, solo, polarity, send
-  mute, send `follows_mute` and VCA mute use `mute`; pan, matrix and send matrix use `pan`. #1054
+  mute, send `follows_mute` and VCA mute use `mute`, polarity at twice its length (`for_row` gives
+  `2 * mute_samples`; root, 2026-10-05, from #1055); pan, matrix and send matrix use `pan`. #1054
   D5 sets the precedence for a strip's pan or matrix record: the strip's model
   `smoothing_samples` (`MatrixOrPan`, `crates/session/src/model.rs:655-677`) if non-zero, else
   `pan_samples`. #1054 makes `control_smoothing` a required tagged root key (`default` or
@@ -59,8 +60,9 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 - **D2. The engine resolves it.**
   - At boot, host-web computes `LiveRamps::for_session` from the session it prepared, and keeps it
     with the live controls. That is control-thread work, done once.
-  - For the ramped kinds, admission replaces a sentinel with the field that #1054 D3 names, before
-    the kind's own checks.
+  - For the ramped kinds, admission replaces a sentinel with `for_row(row)` for the kind's #1054 D3
+    row (the D3 key's field; twice `mute_samples` for polarity; root, 2026-10-05, from #1055),
+    before the kind's own checks.
   - For a strip's pan and matrix kinds, the replacement follows #1054 D5's precedence: the strip's
     `smoothing_samples` in the session host-web prepared, if non-zero, else `pan_samples`. Host-web
     keeps those per-strip windows beside `LiveRamps`, computed on the control thread whenever it
@@ -128,11 +130,14 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 ## Objective gates
 
 1. **Resolution** (`hosts/host-web/src/tests.rs`, new). For each of the 12 ramped kinds, a record
-   with the sentinel is admitted with the D3-mapped length at 48 kHz: 960 for fader, trim, send
-   gain and VCA offset, 480 for the mute rows, and 960 for the pan rows. A record with 37 keeps 37.
-   A session with all keys at 0 resolves to 0. On a strip whose session pan says
-   `smoothing_samples: 96`, a pan and a matrix sentinel resolve to 96; a send matrix sentinel
-   still resolves to 960. A sentinel on input filters or bypass is `MALFORMED`.
+   with the sentinel is admitted with the D3-mapped length at 48 kHz: 960 for fader, trim, send gain
+   and VCA offset, 480 for mute, solo, send mute, `follows_mute` and VCA mute, 960 for polarity
+   (twice the mute length; root, 2026-10-05, from #1055), and 960 for the pan rows. Because the
+   defaults give polarity and fader the same 960, a session with `mute_ms` 5 and `fader_ms` 15 also
+   resolves polarity to 480 and fader to 720. A record with 37 keeps 37. A session with all keys at
+   0 resolves to 0. On a strip whose session pan says `smoothing_samples: 96`, a pan and a matrix
+   sentinel resolve to 96; a send matrix sentinel still resolves to 960. A sentinel on input filters
+   or bypass is `MALFORMED`.
 2. **SDK** (`sdk/test/live-controls-evals.mjs`, new).
    - Every ramped builder method writes `0xFFFFFFFF` at offset 16 when no length is given, and the
      given value otherwise.
@@ -167,9 +172,10 @@ the same edits with no per-edit length, the browser and the C ABI render the sam
 
 ## Test value
 
-- Gate 1 turns red if a kind skips resolution, if the row map is wrong (for example polarity on
-  the fader key), if a pan record ignores the strip's own window (#1054 D5), or if a finite length
-  is overwritten.
+- Gate 1 turns red if a kind skips resolution, if the row map is wrong (for example polarity on the
+  fader key, which only the non-default session tells apart, or polarity at the plain mute length;
+  root, 2026-10-05, from #1055), if a pan record ignores the strip's own window (#1054 D5), or if a
+  finite length is overwritten.
 - Gate 2 turns red if the SDK still writes 0 for an absent length, or lets the sentinel through as
   a length.
 - Gate 3 turns red if the two hosts compute different lengths (rounding, rate or row map) or
