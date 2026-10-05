@@ -16,15 +16,28 @@ Modes
     `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
     `--trap-owner` substrings the caller named.
 
-    The C allocator names (`free`, `malloc`, `calloc`, `realloc`) match only as the *whole* symbol
-    name (issue #1234). Searched as substrings they also matched any out-of-line Rust function
-    whose mangled name merely ends in `4free` -- an ordinary queue accessor named `free` read as
-    the allocator. On `wasm32-unknown-unknown` the Rust allocator is already matched by
-    `dlmalloc`, `dealloc`, `__rust_alloc` and `__rust_realloc`. This checker never sees an import:
-    an import has no body, so `wasm-objdump -d` prints no function header for it, and
-    `check-web-audioworklet.sh` refuses a module with any import before this gate runs. A member
-    named exactly `free`, `malloc`, `calloc` or `realloc` is therefore a defined C allocator
-    entry point, and that is exactly what the anchored alternative refuses.
+    A C allocator name (any name containing `free`, `alloc`, `memalign` or `sbrk`) fails anywhere
+    in an *unmangled* member name and never in a mangled Rust name (issues #1234 and #1417). A
+    Rust v0 (`_R`) name is a Rust item. A `_ZN` prefix is Itanium C++ mangling, which Rust's legacy
+    scheme and C++ namespaced names share: the rule assumes the worklet links no C++, so a `_ZN`
+    name in it is a Rust legacy item, and a C++ dependency would need this rule revisited. An
+    out-of-line accessor whose mangled name ends in `4free` is an ordinary method named `free`,
+    not the allocator. The Rust allocator's own symbols on `wasm32-unknown-unknown` are matched by
+    the other alternatives (`dlmalloc`, `dealloc`, `__rust_alloc`, `__rust_realloc`) or through
+    their dlmalloc callees: `__rdl_alloc`, `__rdl_alloc_zeroed` and `__rdl_realloc` match no
+    alternative themselves and fail because each calls dlmalloc's `malloc` or `memalign`. Any
+    other name is C or a `#[no_mangle]` symbol, and a C allocator is not always spelled with one
+    of the four bare names: `dlfree`, `__libc_malloc`, `mi_free` and `je_malloc` are prefixed,
+    and `posix_memalign`, `aligned_alloc`, `memalign`, jemalloc's `sdallocx` and `rallocx`,
+    mimalloc's `mi_zalloc` and snmalloc's `sn_rust_alloc` contain none of them. A C-backed
+    `#[global_allocator]` whose `__rust_*` shim LTO inlined would reach such a name with no other
+    alternative matching; on an over-aligned path it can call `posix_memalign` with no `malloc`
+    beside it. So any unmangled name that contains `free`, `alloc`, `memalign` or `sbrk` fails.
+    This fails safe: an unmangled engine function whose name matches fails too, and the fix is to
+    rename it, not to relax the rule. This checker never sees an import: an import has no body,
+    so `wasm-objdump -d` prints no function header for it, and `check-web-audioworklet.sh`
+    refuses a module with any import before this gate runs. `scripts/test-web-audioworklet.sh`
+    runs `--self-test`, which pins these cases.
 
     `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
     control path (`port.onmessage`), where the engine's rule is "never allocate on the render
@@ -111,7 +124,7 @@ PANIC_ENTRY = re.compile(
     r"|panic_const|panic_fmt"
 )
 FORBIDDEN = re.compile(
-    r"^(free|malloc|calloc|realloc)$"
+    r"^(?!_R|_ZN).*(?:free|alloc|memalign|sbrk)"
     r"|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
     r"|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc"
 )
@@ -623,36 +636,78 @@ def self_test() -> int:
     ) + "000030 func[2] <_ZN8dlmalloc4free17h0E>:\n 000031: 0b                         | end\n"
     expect("(a) dlmalloc free", check_callgraph(parse(freeing), "miso_engine_web_v1_render") == 1)
 
-    # (a1) issue #1234: the C allocator names are anchored to the whole symbol name.
+    # (a1) issues #1234 and #1417: a C allocator name fails anywhere in an unmangled name and
+    # never in a mangled Rust name.
     def reaching(name: str) -> dict[int, Function]:
         return parse(freeing.replace("<_ZN8dlmalloc4free17h0E>", f"<{name}>"))
 
     # An out-of-line Rust accessor that is merely *named* like a C allocator is not the
-    # allocator, for each of the four names (a name that contains or ends in one, unanchored).
+    # allocator, for each of the four names (v0 mangling) and for legacy mangling.
     for length, c_name in ((4, "free"), (6, "malloc"), (6, "calloc"), (7, "realloc")):
         expect(
-            f"(a1) out-of-line accessor named {c_name} passes",
+            f"(a1) out-of-line v0 accessor named {c_name} passes",
             check_callgraph(
                 reaching(f"_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer{length}{c_name}"),
                 "miso_engine_web_v1_render",
             )
             == 0,
         )
-    # An unmangled name that merely *begins* with a C allocator name is not the allocator: the
-    # anchor holds at the end too.
-    for c_name in ("free", "malloc", "calloc", "realloc"):
-        expect(
-            f"(a1) unmangled {c_name}_count passes",
-            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 0,
+    expect(
+        "(a1) out-of-line legacy accessor named free passes",
+        check_callgraph(
+            reaching("_ZN5graph25GraphRouteControlProducer4free17h0123456789abcdefE"),
+            "miso_engine_web_v1_render",
         )
+        == 0,
+    )
     # A member named exactly like a C allocator entry point fails, each of the four.
     for c_name in ("free", "malloc", "calloc", "realloc"):
         expect(
             f"(a1) bare C allocator {c_name}",
             check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
         )
-    # The Rust allocator's symbols still fail; `__rust_realloc` is new to the list.
-    for rust_name in ("_ZN8dlmalloc4free17h0E", "__rust_realloc"):
+    # A prefixed C or third-party allocator spelling fails: a C allocator is not always bare.
+    for c_name in (
+        "dlfree",
+        "__libc_free",
+        "mi_free",
+        "mi_malloc_aligned",
+        "je_malloc",
+        "tlsf_free",
+        "__libc_calloc",
+        "je_realloc",
+    ):
+        expect(
+            f"(a1) prefixed C allocator {c_name}",
+            check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
+        )
+    # A C allocator entry point that contains none of the four bare names fails (Amendment 1 of
+    # #1417): aligned and sized entry points, and allocators whose names end in `alloc`.
+    for c_name in (
+        "posix_memalign",
+        "aligned_alloc",
+        "memalign",
+        "sdallocx",
+        "rallocx",
+        "mi_zalloc",
+        "sn_rust_alloc",
+        "sbrk",
+    ):
+        expect(
+            f"(a1) C allocator entry point {c_name}",
+            check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
+        )
+    # An unmangled name that contains a C allocator name is refused, wherever the name sits: it
+    # may be a C allocator (`free_list`, `malloc_usable`), and an unmangled engine function so
+    # named is renamed rather than admitted.
+    for c_name in ("free", "malloc", "calloc", "realloc"):
+        expect(
+            f"(a1) unmangled {c_name}_count fails: an unmangled name containing a C allocator name",
+            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 1,
+        )
+    # The Rust allocator's symbols still fail, each through its own alternative: the mangled
+    # `__rust_realloc` shim is exempt from the C alternative, so only `__rust_realloc` matches it.
+    for rust_name in ("_ZN8dlmalloc4free17h0E", "_RNvCs0_7___rustc14___rust_realloc"):
         expect(
             f"(a1) Rust allocator {rust_name}",
             check_callgraph(reaching(rust_name), "miso_engine_web_v1_render") == 1,

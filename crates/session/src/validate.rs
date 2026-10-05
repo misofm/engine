@@ -1,7 +1,8 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
     AutomationShape, AutomationTarget, ConsoleEntry, Diagnostic, DiagnosticCode, DiagnosticSet,
-    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit, Rack,
+    DualMonoBuiltins, DualMonoFader, Effect, MatrixOrPan, ParameterChannel, ParameterUnit,
+    ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM, ROUTE_GAIN_DB_MAXIMUM, ROUTE_GAIN_DB_MINIMUM, Rack,
     RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source,
     Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
@@ -685,15 +686,10 @@ fn vcas_on_cycles(edges: &[Vec<usize>]) -> Vec<bool> {
     on_cycle
 }
 
-/// A route's gain domain in dB, inclusive (issue #1237 D1; owner question Q2 of decision 13).
-///
-/// The graph compiler's `route_values` refuses the same domain for the lowering and every live
-/// record; `graph-compiler`'s `route_coefficients` test holds the two to the same boundaries.
-const ROUTE_GAIN_DB_MINIMUM: f32 = -144.0;
-const ROUTE_GAIN_DB_MAXIMUM: f32 = 24.0;
-/// A route's `channel_matrix` coefficient domain is `[-1, 1]`, inclusive (issue #1237 D1).
-const ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM: f32 = 1.0;
-
+/// Validates each route's endpoints, `follows_mute` and value domain. The gain domain
+/// ([`ROUTE_GAIN_DB_MINIMUM`], [`ROUTE_GAIN_DB_MAXIMUM`]) and the coefficient domain
+/// ([`ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM`]) are the session model's constants (issue #1237); the
+/// graph compiler's `route_values` reads the same constants for the lowering and every live record.
 fn validate_routes(
     session: &SessionModel,
     index: &Index<'_>,

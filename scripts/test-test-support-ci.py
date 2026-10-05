@@ -25,6 +25,11 @@ DEBUG_A_FEATURES = (
 DEBUG_B_FEATURES = (
     "--features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support\n"
 )
+# Each debug job runs its doctests in a second step with the same packages and features (#1422),
+# so a feature-list anchor occurs twice. Mutations of the whole-package step are scoped to the
+# command that starts it, through the end of its `--features` line.
+DEBUG_A_COMMAND = "cargo test --locked --workspace --all-targets \\\n"
+DEBUG_B_COMMAND = "cargo test --locked --all-targets \\\n"
 
 
 def workspace() -> pathlib.Path:
@@ -87,12 +92,33 @@ def passes(reason: str, *mutations: tuple[str, str, str]) -> None:
         raise AssertionError(f"mutation rejected ({reason}): {result.stderr}")
 
 
+def in_step(command: str, old: str, new: str) -> tuple[str, str, str]:
+    """A workflow mutation of `old` inside the step whose command starts with `command`."""
+    text = (ROOT / WORKFLOW).read_text(encoding="utf-8")
+    if text.count(command) != 1:
+        raise AssertionError(f"step command must occur once in {WORKFLOW}: {command!r}")
+    start = text.index(command)
+    end = text.index("\n", text.index("--features", start)) + 1
+    block = text[start:end]
+    if block.count(old) != 1:
+        raise AssertionError(f"mutation anchor must occur once in the step: {old!r}")
+    return (WORKFLOW, block, block.replace(old, new, 1))
+
+
+def in_a(old: str, new: str) -> tuple[str, str, str]:
+    return in_step(DEBUG_A_COMMAND, old, new)
+
+
+def in_b(old: str, new: str) -> tuple[str, str, str]:
+    return in_step(DEBUG_B_COMMAND, old, new)
+
+
 def feature_a(removed: str) -> tuple[str, str, str]:
-    return (WORKFLOW, DEBUG_A_FEATURES, DEBUG_A_FEATURES.replace(removed + ",", "", 1))
+    return in_a(DEBUG_A_FEATURES, DEBUG_A_FEATURES.replace(removed + ",", "", 1))
 
 
 def feature_b(removed: str) -> tuple[str, str, str]:
-    return (WORKFLOW, DEBUG_B_FEATURES, DEBUG_B_FEATURES.replace("," + removed, "", 1))
+    return in_b(DEBUG_B_FEATURES, DEBUG_B_FEATURES.replace("," + removed, "", 1))
 
 
 def main() -> int:
@@ -122,15 +148,15 @@ def main() -> int:
     fails("every test-support feature removed from test-debug-a",
           {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
            "rack"},
-          (WORKFLOW, DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
+          in_a(DEBUG_A_FEATURES, "--features engine/realtime-audit\n"))
     fails("every test-support feature removed from test-debug-b", {"builtins", "lane", "parametric-eq"},
-          (WORKFLOW, DEBUG_B_FEATURES, "--features math/lane\n"))
+          in_b(DEBUG_B_FEATURES, "--features math/lane\n"))
 
     # Forwarding is modelled from the manifests, not from the feature list's spelling: host-web
     # forwards host-core, which forwards effect-compiler, so both explicit entries are redundant
     # until the manifest stops forwarding.
     redundant = feature_a("host-core/test-support")
-    redundant = (WORKFLOW, DEBUG_A_FEATURES,
+    redundant = (WORKFLOW, redundant[1],
                  redundant[2].replace("effect-compiler/test-support,", "", 1))
     passes("host-core and effect-compiler still forwarded from host-web/test-support", redundant)
     fails("host-web stops forwarding host-core/test-support", {"effect-compiler", "host-core"},
@@ -145,8 +171,8 @@ def main() -> int:
 
     # The step must test the package, whole and unconditionally.
     fails("host-web excluded from test-debug-a", {"host-web"},
-          (WORKFLOW, "--exclude wasm-gate-corpus \\\n",
-           "--exclude wasm-gate-corpus --exclude host-web \\\n"))
+          in_a("--exclude wasm-gate-corpus \\\n",
+                 "--exclude wasm-gate-corpus --exclude host-web \\\n"))
     step_b = "      - name: DSP crates debug tests (lane feature unification pinned explicitly)\n"
     fails("test-debug-b behind a step-level if:", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, step_b, step_b + "        if: needs.route.outputs.math_closure == 'true'\n"))
@@ -157,7 +183,7 @@ def main() -> int:
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --lib \\\n            -p lane"))
     fails("test-debug-b with a harness name filter", {"builtins", "lane", "parametric-eq"},
-          (WORKFLOW, DEBUG_B_FEATURES, DEBUG_B_FEATURES[:-1] + " -- --exact bank\n"))
+          in_b(DEBUG_B_FEATURES, DEBUG_B_FEATURES[:-1] + " -- --exact bank\n"))
     fails("test-debug-b with a positional name filter", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --all-targets bank \\\n            -p lane"))
@@ -173,7 +199,7 @@ def main() -> int:
 
     # A misspelt feature must not read as coverage or be silently ignored.
     refused("a misspelt test-support feature", "'host-web' declares no feature 'test-suport'",
-            (WORKFLOW, "host-web/test-support,", "host-web/test-suport,"))
+            in_a("host-web/test-support,", "host-web/test-suport,"))
 
     print("test-support CI coverage mutation tests passed")
     return 0

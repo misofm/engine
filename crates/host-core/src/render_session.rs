@@ -43,16 +43,26 @@ use crate::source::SourceControlSet;
 ///
 /// `Send` and `Sync` are both refused. The `PhantomData<*const ()>` field is what refuses `Send`;
 /// `Sync` is refused twice over, because `PreparedRenderPlan` is already `!Sync` and this owns one
-/// (red mutation M-146-4 in `tests/MUTATIONS.md` shows exactly which claim the marker carries):
+/// (red mutation M-146-4 in `tests/MUTATIONS.md` shows exactly which claim the marker carries).
+/// rustc reports E0277 for each (`Send`, then `Sync`, is not implemented); the fences carry no
+/// code because stable rustdoc does not check one.
 ///
 /// ```compile_fail
-/// fn requires_send<T: Send>() {}
-/// requires_send::<host_core::StartedRenderSession>();
+/// fn requires<T: Send>() {}
+/// requires::<host_core::StartedRenderSession>();
 /// ```
 ///
 /// ```compile_fail
-/// fn requires_sync<T: Sync>() {}
-/// requires_sync::<host_core::StartedRenderSession>();
+/// fn requires<T: Sync>() {}
+/// requires::<host_core::StartedRenderSession>();
+/// ```
+///
+/// The twin of both: each doctest above differs from it in its one bound only, so a renamed type
+/// turns it red (issue #1422 D2).
+///
+/// ```
+/// fn requires<T>() {}
+/// requires::<host_core::StartedRenderSession>();
 /// ```
 pub struct StartedRenderSession {
     plan: PreparedRenderPlan,
