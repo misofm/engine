@@ -1576,3 +1576,56 @@ fn submix_effect_params_are_structural() {
         .is_ok()
     );
 }
+
+/// An automation on `with_effects`' EQ insert (`insert(2)` of the first track).
+fn eq_automation(model: &SessionModel, parameter_id: u32, unit: ParameterUnit) -> Automation {
+    Automation {
+        id: id("eq-ride"),
+        target: AutomationTarget {
+            entity_id: model.tracks[0].id.clone(),
+            rack: RackName::Inserts,
+            effect_id: id("eq"),
+            parameter_id,
+            channel: ParameterChannel::Left,
+        },
+        segments: vec![AutomationSegment {
+            shape: AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 960,
+            start_value: 1.0,
+            end_value: 1.0,
+            unit,
+        }],
+    }
+}
+
+/// #1335 gate 4. An edit that only adds an automation on the EQ's `band-1-enabled`
+/// (`automation_rate` `None`) routes to the rebuild, whose preparation refuses it; one that adds
+/// an automation on the block-rate `band-1-gain` stays live with no records (#1260 D2).
+///
+/// Red mutations: no step-4 check -> the prepared target is live with no records, acked and never
+/// heard; route every automation change to the rebuild -> the block-rate target is not live.
+#[test]
+fn an_automation_on_a_prepared_effect_parameter_needs_a_rebuild() {
+    let mut declared = with_effects();
+    // The automations need their `(parameter, channel)` declared on the instance.
+    declared.tracks[0].inserts.effects[2].params = vec![
+        param(1, ParameterChannel::Left, ParameterUnit::Linear, 1.0),
+        param(4, ParameterChannel::Left, ParameterUnit::Db, 0.0),
+    ];
+    let current = normalized(&declared);
+    assert_eq!(
+        classify_effects(&current, |next| {
+            let ride = eq_automation(next, 1, ParameterUnit::Linear);
+            next.automation.push(ride);
+        }),
+        Err(LiveRebuild::AutomationTarget)
+    );
+    assert_eq!(
+        classify_effects(&current, |next| {
+            let ride = eq_automation(next, 4, ParameterUnit::Db);
+            next.automation.push(ride);
+        }),
+        Ok((Vec::new(), Vec::new()))
+    );
+}
