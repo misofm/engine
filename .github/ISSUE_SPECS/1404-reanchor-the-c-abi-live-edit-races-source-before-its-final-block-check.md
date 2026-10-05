@@ -131,7 +131,7 @@ enough, and every extra block weakens the ramp bound D3 keeps.
 1. **Red on revert.** Without the restart, the settle is `main`'s, and `main` fails under the split
    contention of the evidence table. This is PR evidence, not a committed test.
 2. **The oracle keeps its teeth.** Each mutant below fails the fixed test. This is PR evidence.
-   - In `commit_live` (`crates/capi/src/runtime/control.rs:1087-1091`), resolve producers from
+   - In `commit_live` (`crates/control-plane/src/control.rs:1223-1227`), resolve producers from
      `self.providers` instead of the newest pending epoch. A live edit committed behind a pending
      candidate then reaches the retiring plan.
    - In `classify_live_delta` (`crates/host-core/src/live_delta.rs:308-313`), make the matrix

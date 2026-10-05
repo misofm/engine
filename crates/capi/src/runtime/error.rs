@@ -154,3 +154,60 @@ impl SourceFailureReport for SourceFailure {
         }
     }
 }
+
+#[cfg(test)]
+mod failure_bytes_tests {
+    //! #1309 D6 follow-up: every failure kind's exact C ABI diagnostic bytes.
+    //!
+    //! These bytes are C ABI output (`miso_engine_v1_compile_session`'s diagnostics and a source
+    //! call's last error), so AGENTS.md permits pinning them exactly. Each pin is the literal the
+    //! capi runtime emitted before #1309 moved the control plane out (`d6fa539a1`).
+
+    use super::*;
+
+    /// The pinned line for each fault. The match is exhaustive, so a new fault cannot ship unpinned.
+    const fn pinned(fault: ResourceFault) -> &'static [u8] {
+        match fault {
+            ResourceFault::Arithmetic => b"capi.resource.arithmetic\t$\n",
+            ResourceFault::Platform => b"capi.resource.platform\t$\n",
+            ResourceFault::Limit => b"capi.resource.limit\t$\n",
+            ResourceFault::Allocation => b"capi.resource.allocation\t$\n",
+            ResourceFault::ProtocolQueue => b"capi.protocol.queue\t$\n",
+            ResourceFault::PlanExchange => b"capi.plan.exchange\t$\n",
+        }
+    }
+
+    #[test]
+    fn every_failure_kind_reports_its_frozen_c_abi_bytes() {
+        for fault in [
+            ResourceFault::Arithmetic,
+            ResourceFault::Platform,
+            ResourceFault::Limit,
+            ResourceFault::Allocation,
+            ResourceFault::ProtocolQueue,
+            ResourceFault::PlanExchange,
+        ] {
+            assert_eq!(
+                failure_bytes(CompileFailure::Resource(fault)),
+                pinned(fault),
+                "{fault:?}"
+            );
+            assert_eq!(
+                CompileRejection::from(CompileFailure::Resource(fault)).diagnostics,
+                pinned(fault),
+                "{fault:?} through CompileRejection"
+            );
+        }
+
+        let lines = b"session.json.invalid\t$.tracks\ngraph.cycle\t$.routes[0]\n".to_vec();
+        assert_eq!(
+            failure_bytes(CompileFailure::Diagnostics(lines.clone())),
+            lines
+        );
+
+        assert_eq!(
+            SourceFailure::Internal.report(),
+            (RESULT_INTERNAL, &b"capi.source.epoch"[..])
+        );
+    }
+}

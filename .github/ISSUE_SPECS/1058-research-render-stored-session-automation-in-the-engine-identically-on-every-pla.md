@@ -42,7 +42,7 @@ option list.
 - **A8. `AUTOMATION_ENQUEUE` and effect windows, for #1306 D1.** Whether accepted
   `AUTOMATION_ENQUEUE` batches stage spans into effect span windows. If they do, the per-block,
   per-instance bound of those spans (at most S, the protocol's `per_block_automation_density`,
-  `crates/capi/src/runtime/compile.rs:130-133`), which becomes #1306 D1's third term. If they do
+  `crates/control-plane/src/compile.rs:158-161`), which becomes #1306 D1's third term. If they do
   not, say so, and #1306 drops that term.
 - **A9. Serving `AUTOMATION_ENQUEUE`, for #1315 D3.** Whether the C ABI serves the command at all.
   If it does: the render-side drain that consumes `ProtocolQueues::try_dequeue_automation`

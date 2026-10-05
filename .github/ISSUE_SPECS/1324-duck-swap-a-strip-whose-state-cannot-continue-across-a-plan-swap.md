@@ -35,7 +35,7 @@ never leaves it muted.
   duck runs on the predecessor before `S` and the fade-in on the successor after it.
 - The shared step: *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325) writes
   ramped mutes into the displaced plan's strip lanes and pre-fader route lanes, reads
-  `p = render_sample` (`crates/capi/src/runtime/plan.rs:10`, `:236`) and schedules the successor
+  `p = render_sample` (`crates/control-plane/src/plan.rs:13`, `:263`) and schedules the successor
   at `S = ceil_q(p + q + N + C)`. Its host-core function `plan_strip_transition(base, overlay,
   next, successor)` runs after preparation and reads the prepared successor (#1325 D7); it returns the
   duck set, never an arm set. This issue extends the duck set; arming happens in preparation.

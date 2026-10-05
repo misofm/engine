@@ -10,9 +10,10 @@
 #   3. A host re-implementing the control protocol's wire format by hand. capi carried a private
 #      header parser and replay cache until #102 made the protocol's own public.
 #   4. The facade making the host-specific control protocol mandatory/default, or any consumer
-#      except the control-plane crate (#1309 D9) enabling its optional adapter. A default edge would push protocol into the
-#      browser artifact. The facade also exports no `no_mangle` symbol: a `cdylib` re-exports every
-#      one it links and would push the C ABI's exports into the browser artifact's frozen set.
+#      except the control-plane crate (#1309 D9) enabling its optional adapter. A default edge
+#      would push protocol into the browser artifact. The facade also exports no `no_mangle`
+#      symbol: a `cdylib` re-exports every one it links and would push the C ABI's exports into
+#      the browser artifact's frozen set.
 set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_directory/lib/gate.sh"

@@ -39,14 +39,14 @@ effect (D15-17, #1314).
 - **Delivered.** The core slices (#1253-#1258), model-only edits (#1260) and effects (#1263-#1266)
   are closed. The classifier is `host_core::classify_live_delta`
   (`crates/host-core/src/live_delta.rs:211`); capi's live arm is `SessionState::commit_live`
-  (`crates/capi/src/runtime/control.rs:1065`), which targets the newest epoch
-  (`pending_providers.last_mut()`, `:1089`).
+  (`crates/control-plane/src/control.rs:1201`), which targets the newest epoch
+  (`pending_providers.last_mut()`, `:1225`).
 - **Live records step.** `LiveRamps::for_session` returns 0 for fader and mute
   (`live_delta.rs:52-58`). D15-1 replaces it (#1054).
 - **Live lanes are FIFO queues of depth 16** (`LIVE_QUEUE_DEPTH`,
-  `crates/capi/src/runtime/compile.rs:11-13`; requested at `:589`). A full lane is
-  `control.live.backpressure` (`control.rs:404-405`). D15-2 replaces them with cells (#1312).
-- **A pending candidate refuses the next structural edit** (`control.rs:959-961`). D15-9 replaces
+  `crates/control-plane/src/compile.rs:13-17`; requested at `:595`). A full lane is
+  `control.live.backpressure` (`control.rs:493-494`). D15-2 replaces them with cells (#1312).
+- **A pending candidate refuses the next structural edit** (`control.rs:1095-1097`). D15-9 replaces
   that with supersession (#1310).
 - **A live input lane makes the strip's builtin tail infinite**
   (`crates/builtins-compiler/src/lib.rs:3559-3566`). The C ABI attaches no input lane yet. D15-4
@@ -54,7 +54,7 @@ effect (D15-17, #1314).
 - **Guards still in the classifier:** any VCA is a rebuild (`live_delta.rs:216-217`); a mute change
   of a `follows_mute` source is a rebuild (`:278-279`); a submix strip's fields are structural by
   the mask.
-- The reliable event lane holds 2 events (`compile.rs:128`).
+- The reliable event lane holds 2 events (`compile.rs:156`).
 
 ## Decision record
 
@@ -100,7 +100,7 @@ effect (D15-17, #1314).
   Render applies every value it reads, because D1 refused every value the setter would refuse. **So
   no ack ever precedes a drop.** A superseded value is counted, never silently lost (D15-2).
 - **D7. Which plan gets the values.** The newest epoch: the pending candidate if there is one, else
-  the current provider (`replacement_base_report`, `control.rs:760`, uses the same rule). A pending
+  the current provider (`replacement_base_report`, `control.rs:897`, uses the same rule). A pending
   warm successor (D15-8, round-5 amendment) is an ordinary pending candidate: the edit goes to
   its cells and applies at its adoption (D15-17). Its retargets were written once, at preparation
   (*Carry fader, mute and pan ramps across a plan swap*, #1277 D5), so nothing overwrites the edit.
@@ -148,7 +148,7 @@ effect (D15-17, #1314).
   shunt* (#1339) and *Give the multiband compressor a live bypass shunt* (#1340) land (D15-13 E4);
   until then a change of it is a rebuild with a D15-9 transition. With cells (#1312) a transaction
   can no longer exceed an effect lane's capacity, so the "rebuild instead of endless
-  `BACKPRESSURE`" rule (`control.rs:1051`) is deleted with the queue.
+  `BACKPRESSURE`" rule (`control.rs:1187`) is deleted with the queue.
 - **D15. The span window (D15-5, *Size each effect's automation span window from the producers its
   plan has*, #1306).** It is sized once, from the producers the plan really has:
   the live lane depth plus the stored-automation spans per block that preparation computes, after

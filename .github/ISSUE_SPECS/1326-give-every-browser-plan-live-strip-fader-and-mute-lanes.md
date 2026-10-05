@@ -14,10 +14,10 @@ one bit.
 ## Context
 
 - **The C ABI already has these lanes on every plan (verified, no work here).**
-  `prepare_runtime` (`crates/capi/src/runtime/compile.rs:572`) always passes
-  `control_queue_depth: Some(LIVE_QUEUE_DEPTH)` (`:588-591`) with `C_ABI_LIVE_LANES` (`:18-21`,
-  `FADER_AND_MATRIX` plus effect lanes). Its only callers are the boot compile (`:717`) and the
-  structural arm (`crates/capi/src/runtime/control.rs:907`), which prepares every successor with
+  `prepare_runtime` (`crates/control-plane/src/compile.rs:578`) always passes
+  `control_queue_depth: Some(LIVE_QUEUE_DEPTH)` (`:594-597`) with `C_ABI_LIVE_LANES` (`:25-28`,
+  `FADER_AND_MATRIX` plus effect lanes). Its only callers are the boot compile (`:721`) and the
+  structural arm (`crates/control-plane/src/control.rs:1043`), which prepares every successor with
   the same lanes. host-core attaches one control request per strip, tracks then submixes
   (`crates/host-core/src/prepare.rs:1421-1443`). The test
   `a_live_fader_after_a_carrying_structural_commit_reaches_the_successor`
@@ -46,8 +46,8 @@ one bit.
   the app's `live_control_command_queue_records` when it is nonzero, else
   `host_core::STRIP_LIVE_QUEUE_DEPTH`.
 - **D2. One depth constant.** host-core exports `pub const STRIP_LIVE_QUEUE_DEPTH: NonZeroUsize`
-  = 16 (#1053 D4's value). capi's `LIVE_QUEUE_DEPTH` (`compile.rs:11`) becomes an alias of it, so
-  both hosts read one number.
+  = 16 (#1053 D4's value). capi's `LIVE_QUEUE_DEPTH` (`crates/control-plane/src/compile.rs:17`)
+  becomes an alias of it, so both hosts read one number.
 - **D3. Lane selection.** With a nonzero option the browser keeps `HostLiveLanes::ALL` (today's
   behaviour). With 0 it selects `HostLiveLanes::FADER_AND_MATRIX`: no input, effect or route lane,
   so no strip's builtin tail turns infinite and no route loses its fold. The three host-core entries
@@ -67,7 +67,7 @@ one bit.
 ## Deliverables
 
 1. D1-D4 in `hosts/host-web/src/lib.rs` and `crates/host-core/src/prepare.rs` (plus the
-   re-export in `crates/host-core/src/lib.rs`), the alias in `crates/capi/src/runtime/compile.rs`.
+   re-export in `crates/host-core/src/lib.rs`), the alias in `crates/control-plane/src/compile.rs`.
 2. Call-site updates for the new argument (D3) in host-core tests and `tools/console-workload`.
 3. Tests below; the measured bytes and any ceiling re-pin in
    `hosts/host-web/tests/browser-v1/expected.json` with reasons.
@@ -81,7 +81,7 @@ one bit.
   `crates/host-core/tests/spectrum.rs`, `crates/host-core/tests/strip_meters.rs`,
   `crates/host-core/tests/prepare.rs` (argument only)
 - `tools/console-workload/src/lib.rs` (argument only)
-- `crates/capi/src/runtime/compile.rs` (the one constant line; stream B owns this file, root
+- `crates/control-plane/src/compile.rs` (the one constant line; stream B owns this file, root
   sequences the merge)
 
 ## Non-goals

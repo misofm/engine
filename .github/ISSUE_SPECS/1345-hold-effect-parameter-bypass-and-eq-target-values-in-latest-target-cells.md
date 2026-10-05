@@ -26,9 +26,9 @@ Superseded values are counted by #1312's `live_values_superseded`.
   `preflight`/`try_push` and, for the EQ, the owner transaction `begin_owner`,
   `preflight_candidate_targets`, `publish_candidate_targets`, `commit_owner` (`:785-850`).
 - **C ABI admission.** `commit_live` rebuilds an instance whose records outnumber its queue
-  (`crates/capi/src/runtime/control.rs:1130-1137`) and refuses with `LiveBackpressure` when the
-  room or the owner's target preflight fails (`:1179-1184`, `:1203-1212`). The queue depth is
-  `min(16, automation capacity)` (`crates/capi/src/runtime/compile.rs:12-19`). The header states
+  (`crates/control-plane/src/control.rs:1266-1273`) and refuses with `LiveBackpressure` when the
+  room or the owner's target preflight fails (`:1315-1320`, `:1339-1348`). The queue depth is
+  `min(16, automation capacity)` (`crates/control-plane/src/compile.rs:17-26`). The header states
   it (`crates/capi/include/miso_engine_v1.h:50-55`).
 - **Browser admission.** The effect band's room pass and `in_flight` accounting, and the
   prepared-owner markers (`hosts/host-web/src/lib.rs:1762-1792`, `:5568-5600`, `:5705`).
@@ -59,8 +59,8 @@ Superseded values are counted by #1312's `live_values_superseded`.
   window for stored automation is #1306.
 - **D5. Producers and admission.** `EffectControlProducer` writes cells: `preflight` keeps its
   domain checks, writes are infallible. The EQ owner transaction keeps its revision checks and
-  loses its capacity check. In `commit_live` the queue-capacity rebuild (`:1130-1137`) and the
-  effect room checks (`:1179-1184`, `:1203-1212`) go; every remaining check still precedes the
+  loses its capacity check. In `commit_live` the queue-capacity rebuild (`:1266-1273`) and the
+  effect room checks (`:1315-1320`, `:1339-1348`) go; every remaining check still precedes the
   first write. The browser's effect band leaves the room pass and `in_flight`.
 - **D6. Header and docs.** The 16-record effect room and "an effect edit that could never fit its
   lane rebuilds" leave the header; `docs/C_ABI_V1_QUALIFICATION.md` follows.

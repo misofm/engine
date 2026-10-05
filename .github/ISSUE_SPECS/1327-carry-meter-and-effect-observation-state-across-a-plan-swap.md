@@ -39,8 +39,8 @@ changed or added owners start fresh.
 - **The browser** bumps `meter_generation` and counts a loss when a snapshot's `reset_generation`
   changes (`hosts/host-web/src/lib.rs:3545-3561`), which is what a swap to fresh meters causes.
 - **The C ABI** has no strip meter, observation tap or spectrum capture. Its telemetry is the
-  output peak each render publishes (`crates/capi/src/runtime/plan.rs:234`, read by
-  `collect_render_activity`, `crates/capi/src/runtime/control.rs:522`). That is continuous across a
+  output peak each render publishes (`crates/control-plane/src/plan.rs:261`, read by
+  `collect_render_activity`, `crates/control-plane/src/control.rs:625`). That is continuous across a
   swap already, so this slice has nothing to carry there.
 - The carry scaffold, the effect carries and the source-producer precedent
   (`SourceControlSet::adopt_persisting`, `crates/host-core/src/source.rs:286`) are on `main` or come

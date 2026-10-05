@@ -24,8 +24,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   - the entry point takes the session handle (D4);
   - its duty text (D5).
 - After *Extract the C ABI control plane into a portable crate both hosts call* (#1309), the
-  structural path of `crates/capi/src/runtime/control.rs` (reservation at `:962`) lives in
-  `crates/control-plane`.
+  structural path of `crates/capi/src/runtime/control.rs` (reservation now at
+  `crates/control-plane/src/control.rs:1098`) lives in `crates/control-plane`.
 - Warm preparation (`warm_lead`, `WarmConfig`, `WarmUnavailable`) is host-core code from #1354.
   Classification with an injected `WarmConfig`, the `Primed` publication and the `PrimedCandidate`
   record are *Classify a latency-growth edit and publish its warm successor from the control
@@ -35,9 +35,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   `miso_engine_v1_plan_watermark` are #1314's.
 - The C header's live-edit paragraph is `crates/capi/include/miso_engine_v1.h:35-62`; its session
   thread rule is `:18-22`.
-- The C ABI builds its `SessionState` in `crates/capi/src/runtime/compile.rs:815`. The structural
-  fault and owner counters for tests are `TestOwnerCounters` (`crates/capi/src/runtime/control.rs`,
-  read by `test_lifecycle_counters`, `:233-235`), which #1309 moves into the control plane.
+- The C ABI builds its `SessionState` in `crates/control-plane/src/compile.rs:818`. The structural
+  fault and owner counters for tests are `TestOwnerCounters` (`crates/control-plane/src/control.rs:163`,
+  read by `test_lifecycle_counters`, `:315-317`), which #1309 moves into the control plane.
 - The release audit runs `./target/release/audit capi` (`.github/workflows/qualification.yml:715`)
   from `tools/audit/src/capi.rs`.
 

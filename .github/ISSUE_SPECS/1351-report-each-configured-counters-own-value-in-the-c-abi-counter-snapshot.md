@@ -14,13 +14,13 @@ counter the C ABI does not serve is refused with a type.
 
 - **The defect.** `collect_render_activity` stages one snapshot per control call that sees a new
   render, and gives every configured counter the value `sequence`, the render-call count
-  (`crates/capi/src/runtime/control.rs:558-575`: `CounterValue { id, value: sequence }`). A host
+  (`crates/control-plane/src/control.rs:661-678`: `CounterValue { id, value: sequence }`). A host
   that configures `TELEMETRY_DROPPED` reads the number of render calls. `counter_period_blocks` is
   checked only for being nonzero (`crates/protocol/src/controller.rs:2492-2497`).
 - **The real values.** The provider answers `COUNTERS_GET` from `counter_snapshot`
   (`crates/host-core/src/control_provider.rs:345-367`), filled lazily by `set_counter` (`:597`):
   `TELEMETRY_COALESCED` and `TELEMETRY_DROPPED` from `set_telemetry_counters` (`:251-262`, called
-  by `command` only, `control.rs:850-853`) and `CANCELED_AUTOMATION` from
+  by `command` only, `control.rs:986-989`) and `CANCELED_AUTOMATION` from
   `record_canceled_automation` (`:369`). Before its first write a counter is absent, so
   `COUNTERS_GET` answers `NOT_FOUND` for it.
 - **Configuration is never refused.** `ControlProvider::telemetry_configure` returns the
@@ -54,7 +54,7 @@ counter the C ABI does not serve is refused with a type.
   `StatusCode::NotFound`; the stored configuration does not change. Meter handles use the same
   path in #1352.
 - **D3. Own values, refreshed by the service step.** The telemetry counter refresh of
-  `control.rs:850-853` moves into `SessionState::service` (#1348 D1), before
+  `control.rs:986-989` moves into `SessionState::service` (#1348 D1), before
   `collect_render_activity`, so every control call refreshes the provider's counters once, not
   only `command`. The snapshot's values are, for each configured ID in order, the provider's
   current value for that ID, read after that refresh in the same service step.

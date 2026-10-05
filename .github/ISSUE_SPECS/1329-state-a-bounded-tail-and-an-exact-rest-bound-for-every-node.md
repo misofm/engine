@@ -19,7 +19,7 @@ gets its own slice (see "Non-goals").
   (`QualityDescriptor::tail`, `:513-521`), composed by PDC with `Infinite` winning and finite
   tails added along a path after latency (`crates/graph-compiler/src/pdc.rs:105-137`), and capped by
   `maximum_finite_tail_samples` (`:132-135`). The C ABI reports it as `TAIL_FINITE`/`TAIL_INFINITE`
-  plus samples (`crates/capi/src/abi.rs:36-39`, `crates/capi/src/runtime/compile.rs:649-650`). No
+  plus samples (`crates/capi/src/abi.rs:36-39`, `crates/capi/src/runtime/mod.rs:184-185`). No
   render path reads it.
 - **The builtins today.** `BuiltinTail::{FiniteZero, Infinite}` (`crates/builtins/src/lib.rs:224-227`).
   `InputBuiltins::tail` (`:3433-3445`) says `Infinite` while any HPF/LPF is enabled or a filter

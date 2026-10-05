@@ -34,17 +34,17 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 - `RealtimePlanOwner` (`plan_exchange.rs:80`) renders through `render_contiguous` (`:448`) and
   `render` (`:473`); both call `enter_block` first. `plan_exchange_resource_report` (`:163`) is the
   exchange's exact retained-byte projection, which the C ABI's resource check uses
-  (`crates/capi/src/runtime/compile.rs:169`).
+  (`crates/control-plane/src/compile.rs:197`).
 - The engine already has a safe-Rust, allocation-free single-writer seqlock with bounded reads:
   `crates/engine/src/realtime/observe.rs` (module doc `:12-18`, `MAXIMUM_READ_ATTEMPTS = 64` at
   `:71`). It is inside the realtime root that `scripts/check-realtime-policy.sh` holds to its
   approved-unsafe list, so it uses no `unsafe`.
-- The C ABI commits a live edit at `crates/capi/src/runtime/control.rs:1338-1346` (after every push
-  and target publication, then each EQ owner's `commit_owner`) and a rebuild at `:1006-1025`
+- The C ABI commits a live edit at `crates/control-plane/src/control.rs:1474-1482` (after every push
+  and target publication, then each EQ owner's `commit_owner`) and a rebuild at `:1142-1161`
   (protocol commit, then `reservation.commit()`).
 - `miso_engine_v1_plan_resources` (`crates/capi/src/ffi.rs:932`) is the any-thread plan query
-  this mirrors; it reads `PlanQueries` (`crates/capi/src/runtime/plan.rs:82-91`), never `PlanState`.
-- The reliable event lane has capacity 2 (`crates/capi/src/runtime/compile.rs:128`).
+  this mirrors; it reads `PlanQueries` (`crates/control-plane/src/plan.rs:86-95`), never `PlanState`.
+- The reliable event lane has capacity 2 (`crates/control-plane/src/compile.rs:156`).
 - The feature mask is 63 (`crates/capi/src/abi.rs:66-71`, `crates/capi/include/miso_engine_v1.h:136-142`);
   the frozen exported set is listed in `scripts/check-capi-abi.sh:192-208`.
 

@@ -37,9 +37,9 @@ drain strip cells alike* (#1399).
 - **No record carries a sample time.** Every record popped at one block entry lasts zero samples
   except the last per address, so a FIFO and a latest-value cell differ only when two records for
   one address meet in one drain: FIFO snaps to the earlier value, then ramps from it.
-- **C ABI admission.** `commit_live` checks room (`crates/capi/src/runtime/control.rs:1189-1198`,
+- **C ABI admission.** `commit_live` checks room (`crates/control-plane/src/control.rs:1325-1334`,
   `LiveBackpressure`, `control.live.backpressure`) and pushes after every fallible check
-  (`:1288-1303`); the live lane depth is 16 (`crates/capi/src/runtime/compile.rs:12-13`). Push
+  (`:1424-1439`); the live lane depth is 16 (`crates/control-plane/src/compile.rs:17`). Push
   order is `FaderDb` then `Mute`, left before right (`crates/host-core/src/live_delta.rs:62-77`).
   The header promises 16 pending values and the backpressure string
   (`crates/capi/include/miso_engine_v1.h:50-55`).

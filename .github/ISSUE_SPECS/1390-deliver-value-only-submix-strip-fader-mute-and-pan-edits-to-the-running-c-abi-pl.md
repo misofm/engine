@@ -37,12 +37,13 @@ that swaps the plan.
 - **The lanes exist already.** host-core attaches one control producer per strip, tracks first,
   then submixes, with the submix ID in `track_id` (`HostLiveControlHandles::strip_controls`,
   `crates/host-core/src/prepare.rs:424-433`). capi keeps all of them in its epoch
-  (`StripLanes`, `crates/capi/src/runtime/control.rs:13-17`; built at
-  `crates/capi/src/runtime/compile.rs:604-617`).
-- **capi resolves track producers only.** `commit_live` (`control.rs:1065`) searches
-  `strips.controls[..track_count]` (`:1093-1109`) by strip ID. #1309 moves `control.rs` unchanged
-  to `crates/control-plane/src/control.rs`; capi's tests stay in capi. The anchors name the
-  locations at `6fb211594`; the implementer edits the moved code.
+  (`StripLanes`, `crates/control-plane/src/control.rs:13-17`; built at
+  `crates/control-plane/src/compile.rs:610-623`).
+- **capi resolves track producers only.** `commit_live` (`control.rs:1201`) searches
+  `strips.controls[..track_count]` (`:1229-1245`) by strip ID. #1309 moves `control.rs` unchanged
+  to `crates/control-plane/src/control.rs`; capi's tests stay in capi. The anchors into the
+  moved code name its locations in `crates/control-plane/src/`; the others name the locations at
+  `6fb211594`.
 - **Opcodes.** `SetTrackFader` `0x020f` and `SetTrackMatrixOrPan` `0x0210` address a submix by its
   ID (#1204).
 - **After #1225:** route records and `LiveDelta::routes` exist; the classifier still treats every

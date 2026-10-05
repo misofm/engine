@@ -339,3 +339,44 @@ warnings` ok.
 **Open items.** None blocking. Reviewer attention: the `cfg_attr(..., allow(unreachable_pub))`
 pattern for test-only exposure (the workspace denies `unreachable_pub`, and visibility cannot be
 feature-gated otherwise without duplicating definitions).
+
+### Batch follow-up to the attempt-1 verdict (worker, 2026-10-05)
+
+Root approved three follow-ups from the attempt-1 verdict (MINOR 1, NIT 1, NIT 2).
+
+**MINOR 1: the D6 byte table is pinned.** New test
+`runtime::error::failure_bytes_tests::every_failure_kind_reports_its_frozen_c_abi_bytes`
+(`crates/capi/src/runtime/error.rs`). It drives every `ResourceFault` variant through
+`failure_bytes` and through `CompileRejection::from`, a `CompileFailure::Diagnostics` passthrough,
+and `SourceFailure::Internal.report()`, and pins each kind's exact bytes. The pins are the
+literals that base `d6fa539a1`'s `crates/capi/src/runtime/{compile,control,error}.rs` emitted
+(`failure(code)` was `format!("{code}\t$\n")`; `SourceFailure::Internal` was
+`(RESULT_INTERNAL, b"capi.source.epoch")`). These bytes are C ABI output, so AGENTS.md permits
+the exact pin; the test says so. The expected-bytes match is exhaustive, so a new fault cannot
+ship unpinned. Plausible defect it catches that no existing test does: a typo or a swap in the
+one table every resource-fault site now goes through (the verdict's M5 stayed green on the
+whole capi suite). Mutations, `cargo test -p capi --lib failure_bytes_tests`:
+- `Arithmetic` and `Platform` strings swapped in `failure_bytes`: red (`Arithmetic`); reverted:
+  green.
+- `ProtocolQueue` mapped to `capi.plan.exchange`: red (`ProtocolQueue`).
+- `capi.source.epoch` misspelt: red (the `SourceFailure` assertion).
+- Reverted: green.
+
+**NIT 1: open specs re-anchored.** Every open spec that cited `crates/capi/src/runtime/
+{control,compile,plan}.rs` (or its bare `control.rs:`/`compile.rs:`/`plan.rs:` follow-on
+anchors) now cites the current location in `crates/control-plane/src/`, each line checked
+against the current tree (`3bb27fdc1` plus this commit). Items that stayed in capi keep capi
+paths: the tail mapping is now `crates/capi/src/runtime/mod.rs:183-186`, and
+`all_limits_nonzero` is `crates/capi/src/runtime/mod.rs:111-137`. Anchors only: no scope,
+decision or gate changed. #1326's authorized constant line is now in
+`crates/control-plane/src/compile.rs`. Not re-anchored: #349 (a dated audit table whose every
+row is a snapshot) and #1350 (its `crates/capi/src/runtime/error.rs` is still where capi's own
+diagnostics live). #1020's anchor names code that no longer exists, so it is pinned to the commit
+it was written at (`d70956bf8`).
+
+**NIT 2.** The header comment at `scripts/check-host-core-policy.sh:12-16` is reflowed to 95
+columns; the wording is unchanged.
+
+**Gates.** `cargo test --locked -p capi`: ok (73 lib, 2 race, 11 lifecycle). `cargo fmt --all --
+--check`: ok. `cargo clippy --locked -p capi --all-targets --all-features -- -D warnings`: ok.
+`check-host-core-policy.sh`, `test-host-core-policy.sh`, `check-workspace-policy.sh`: ok.

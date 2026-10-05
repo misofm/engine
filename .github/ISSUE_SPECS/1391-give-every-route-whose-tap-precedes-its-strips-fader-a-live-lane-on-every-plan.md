@@ -48,7 +48,7 @@ its master already does not fold.
   (`crates/host-core/src/live_route_state.rs:78-83`), routes into a submix. The browser checks by
   ID that it equals the producer list (`hosts/host-web/src/lib.rs:6932-6943`,
   `web.live_controls.routes`), and addresses a send command by its live-route index (`:3063`).
-- Every plan has a control channel: the C ABI always (`crates/capi/src/runtime/compile.rs:572-600`);
+- Every plan has a control channel: the C ABI always (`crates/control-plane/src/compile.rs:578-606`);
   the browser after *Give every browser plan live strip fader and mute lanes* (#1326), which keeps
   `routes` off when the app's live-command option is 0 (#1326 D3).
 - C ABI: *Deliver value-only send edits to the running C ABI plan* (#1225) sets `routes: true`,

@@ -47,7 +47,7 @@ never meets an unrenderable target.
     #1260 D2), so an edit that changes only automation (opcodes `0x0600`-`0x0603`,
     `crates/protocol/src/model.rs:103-110`) is a live delta with no records.
   - `commit_live` then commits it with no effect preparation
-    (`crates/capi/src/runtime/control.rs:1065-1080`, `:1358-1386`).
+    (`crates/control-plane/src/control.rs:1201-1216`, `:1494-1522`).
   - The live admission does not look at descriptors.
 - **Decision 14's probe.** An automation on `band-1-enabled` added to
   `fixtures/session/v1/observation-frame-shape.json` (an EQ insert, `:140-160`) passed all five

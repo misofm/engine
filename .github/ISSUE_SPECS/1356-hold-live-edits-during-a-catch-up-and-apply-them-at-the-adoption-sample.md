@@ -30,8 +30,8 @@ effect from S. The running plan's output is not changed by them, so the catch-up
 - #1312 D1's cell writer is control-owned and keeps the next sequence; render, the only writer of
   `live_values_superseded`, counts `s - p - 1` when it reads (#1312 D2). #1355 D4 keeps a warm
   successor's cells undrained until adoption.
-- Today `commit_live` (`crates/capi/src/runtime/control.rs:1065`) pushes to the newest plan's
-  providers (`newest_providers`, `:1488`). After *Extract the C ABI control plane into a portable
+- Today `commit_live` (`crates/control-plane/src/control.rs:1201`) pushes to the newest plan's
+  providers (`newest_providers`, `:1628`). After *Extract the C ABI control plane into a portable
   crate both hosts call* (#1309) this code lives in `crates/control-plane`.
 
 ## Decisions frozen for this slice

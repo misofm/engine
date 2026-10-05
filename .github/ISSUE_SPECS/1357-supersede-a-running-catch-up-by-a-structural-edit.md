@@ -29,7 +29,7 @@ is never interrupted.
   closed until adoption (#1355 D2).
 - `SUPERSEDED` and `superseded_count` are #1314 D5's.
 - Today a structural transaction is refused while a candidate is pending
-  (`crates/capi/src/runtime/control.rs:959-961`). After #1309 this lives in `crates/control-plane`.
+  (`crates/control-plane/src/control.rs:1095-1097`). After #1309 this lives in `crates/control-plane`.
 
 ## Decisions frozen for this slice
 

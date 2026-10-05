@@ -23,7 +23,7 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   the ring config at `:1207-1212`. A carried ring keeps its inventory row's configuration.
   `default_source_ring_frames` (`:65-77`) is today's default: 100 ms (`:57`) plus two quanta. The
   C ABI uses it when the host passes `source_ring_frames == 0`
-  (`crates/capi/src/runtime/compile.rs:705-707`), and so does the browser
+  (`crates/control-plane/src/compile.rs:709-711`), and so does the browser
   (`hosts/host-web/src/lib.rs:2100-2101`). *Grow the default source ring by the warm-prime
   headroom* (#1406) D2 grows that default by the warm headroom.
 - *Keep every node's latency from dropping during playback* (#1285) D1-D2: the compile request's

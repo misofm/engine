@@ -16,21 +16,21 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
 ## Context
 
 - **The lag refusal.** `if self.shared.active_epoch.load(Ordering::Acquire) < self.providers.epoch
-  { return Err(CommandError::Backpressure) }` (`crates/capi/src/runtime/control.rs:892-899`). Its
+  { return Err(CommandError::Backpressure) }` (`crates/control-plane/src/control.rs:1028-1035`). Its
   comment gives the reason: the retired epoch's report row stays for any-thread readers, so the
-  report table (capacity 2, `crates/capi/src/runtime/compile.rs:765`) is full. The control state is
-  already correct in that window: `synchronize_plan_epochs` (`control.rs:783-824`) reclaims the
+  report table (capacity 2, `crates/control-plane/src/compile.rs:768`) is full. The control state is
+  already correct in that window: `synchronize_plan_epochs` (`control.rs:920-961`) reclaims the
   retired plan and promotes the pending provider; only the atomic and its row lag.
-- **Capacities.** Exchange retirement capacity 1 (`compile.rs:170-171` for the resource report,
-  `:758-759` for the exchange itself), report rows 2 (`:765`), pending providers 1 and retired
-  providers 1 (`:800-807`). Refusals they cause: `control.rs:961-974` (`PublicationFull`,
-  `RetirementFull`, mapped to `Backpressure`) and `:992-996` (report table or pending list full).
-  `plan_alive == false` (`:876-878`) is a separate refusal.
-- **Admission.** `validate_replacement_peak` (`compile.rs:339-417`) checks the newest plan's row
-  plus the candidate; `validate_live_peak` (`:443-480`) checks the current and pending rows plus
+- **Capacities.** Exchange retirement capacity 1 (`compile.rs:198` for the resource report,
+  `:762` for the exchange itself), report rows 2 (`:768`), pending providers 1 and retired
+  providers 1 (`:803-810`). Refusals they cause: `control.rs:1097-1110` (`PublicationFull`,
+  `RetirementFull`, mapped to `Backpressure`) and `:1128-1132` (report table or pending list full).
+  `plan_alive == false` (`:1012-1014`) is a separate refusal.
+- **Admission.** `validate_replacement_peak` (`compile.rs:371-449`) checks the newest plan's row
+  plus the candidate; `validate_live_peak` (`:483-520`) checks the current and pending rows plus
   the compiled models of `CompiledModelAdmission`.
 - The C ABI has no engine default caps: every `CompileLimits` field is caller-chosen and nonzero
-  (`all_limits_nonzero`, `compile.rs:482-508`).
+  (`all_limits_nonzero`, `crates/capi/src/runtime/mod.rs:111-137`).
 - **Tests that pin the refusal.** Three issue-#1042 tests run the two halves of a plan-swapping
   render call apart and make control calls between them (`crates/capi/src/runtime/tests.rs:1472`):
   `control_calls_inside_a_plan_swapping_render_call_keep_replacement_live` (`:1492`),
@@ -52,13 +52,13 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
     successor's reservation.
   - Retired providers 2.
 
-  Each capacity's resource row (`compile.rs:169-172` and the capi retained rows that count the
+  Each capacity's resource row (`compile.rs:197-199` and the capi retained rows that count the
   report table and provider lists) follows from its capacity, so the plan resource report states
   the new bytes.
-- **D2. Delete the lag refusal.** `control.rs:892-899` and its comment go. With D1's rows a
+- **D2. Delete the lag refusal.** `control.rs:1028-1035` and its comment go. With D1's rows a
   candidate's row always fits beside the lagging one, and admission reads the providers, never
   the atomic. It is not mapped to another error.
-- **D3. Impossible refusals.** With D1, `:961-974` and `:992-996` cannot fire for a candidate; each
+- **D3. Impossible refusals.** With D1, `:1097-1110` and `:1128-1132` cannot fire for a candidate; each
   becomes `CommandError::Internal`, with a debug assertion. `plan_alive == false` stays
   `BACKPRESSURE`.
 - **D4. Admission sums what is held.** `validate_replacement_peak` and `validate_live_peak` take

@@ -67,7 +67,7 @@ today.
   handler calls the exports, outside the render-locked window.
 - **D3. The clock.** `seek_at` and the seek report read the plan's source-read clock (#1316). The
   render half stores it in an atomic after every block, as capi's `SharedPlanState::render_sample`
-  does (`crates/capi/src/runtime/plan.rs:10`), and the Worker's set reads it there.
+  does (`crates/control-plane/src/plan.rs:13`), and the Worker's set reads it there.
 - **D4. Messages.** In `worker` mode, `miso.source.v1` and `miso.seek.v1` travel on #1332's
   page-to-control-plane port to the Worker. Their fields and replies are unchanged.
 - **D5. The MSB1 drain moves with the producer.**

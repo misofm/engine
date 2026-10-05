@@ -17,12 +17,12 @@ calls the same engine-side step.
 ## Context
 
 - Today the step exists in pieces. `synchronize_plan_epochs`
-  (`crates/capi/src/runtime/control.rs:783-824`) promotes a pending provider when render has
-  adopted its plan and reclaims retired plans (`retirer.try_reclaim`, loop at `:789-805`;
+  (`crates/control-plane/src/control.rs:920-961`) promotes a pending provider when render has
+  adopted its plan and reclaims retired plans (`retirer.try_reclaim`, loop at `:926-942`;
   `PlanRetirer::try_reclaim`, `crates/engine/src/realtime/plan_exchange.rs:512`).
-  `collect_render_activity` (`control.rs:522`) stages the render peak and counter telemetry.
+  `collect_render_activity` (`control.rs:625`) stages the render peak and counter telemetry.
   `command` then refreshes the provider's telemetry counters from the controller's queues
-  (`set_telemetry_counters`, `control.rs:850-853`); no other call does.
+  (`set_telemetry_counters`, `control.rs:986-989`); no other call does.
 - Two specs rely on that refresh running on every control call: *Hold live values in
   latest-target cells on both hosts* (#1312, D8: `live_values_superseded`) and *Report each
   configured counter's own value in the C ABI counter snapshot* (#1351, D3: the snapshot reads
@@ -31,11 +31,11 @@ calls the same engine-side step.
   mailbox cell, `Full` and withdrawable, until a due sample (`NoEarlierThan`) or until render finds
   it ready (`Primed`). Render adopts in the same step as it claims, so nothing is ever handed back
   to control.
-- Which control calls run them: `command` runs both (`:848-849`); `dequeue_event` runs both
-  (`:1397-1402`); `submit` (`:1506`), `seek` (`:1520`) and `seek_at` (`:1537`) run only the
+- Which control calls run them: `command` runs both (`:984-985`); `dequeue_event` runs both
+  (`:1536-1541`); `submit` (`:1646`), `seek` (`:1661`) and `seek_at` (`:1678`) run only the
   epoch synchronization. A host that renders but makes no control call never reclaims a retired
   plan, so the plan's memory stays allocated until its next call, and with retirement capacity 1
-  (`crates/capi/src/runtime/compile.rs:755-761`) the next swap waits for that call.
+  (`crates/control-plane/src/compile.rs:759-764`) the next swap waits for that call.
 - The engine handle owns no session (`crates/capi/src/abi.rs:364-369`); the control state is the
   session's `SessionState`. Decision 15 records that the entry point takes the session handle (the
   agreed plan's `miso_engine_v1_service(engine)` spelling is superseded).
@@ -86,7 +86,7 @@ calls the same engine-side step.
   `synchronize_plan_epochs`. The revision stays committed, and the watermark (#1314) reports it when
   render adopts the candidate or its replacement.
 - **D8. Counter refresh.** The refresh moves `command`'s `set_telemetry_counters` call
-  (`control.rs:850-853`) into service, so every control call runs it. It sets every counter the
+  (`control.rs:986-989`) into service, so every control call runs it. It sets every counter the
   provider serves from a source outside the provider: the controller's telemetry counters today,
   and `live_values_superseded` once #1312 lands (#1312 D8 and #1351 D3 call this the control
   plane's refresh). A counter added later joins this refresh, not a single call.

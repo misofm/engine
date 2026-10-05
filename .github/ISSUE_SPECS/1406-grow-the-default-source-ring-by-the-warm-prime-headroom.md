@@ -26,7 +26,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
   one. It is taken at the session's quantum, so it is a whole number of quanta.
 - A ring that is not a whole number of quanta is refused (`host.source.ring_frames`,
   `crates/host-core/src/prepare.rs:167-170`), on both default paths
-  (`crates/capi/src/runtime/compile.rs:705-707`, `hosts/host-web/src/lib.rs:2100-2101`). The SDK
+  (`crates/control-plane/src/compile.rs:709-711`, `hosts/host-web/src/lib.rs:2100-2101`). The SDK
   boots 96 kHz at quantum 127 (`sdk/test/boot-evals.mjs:71-84`).
 - **The published rule.** The ABI layout document's `sourceRing` carries the rule's inputs
   (`tools/parameter-metadata/src/abi_layout.rs:109-115`, `:2266-2270`). These pin the rule or its

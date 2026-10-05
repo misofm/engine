@@ -111,7 +111,7 @@ D15-9 duck-swap covers a link-mode change only for effects whose link stays prep
   A's files: coordinate)
 - `crates/host-core/src/live_delta.rs`, `crates/host-core/tests/live_delta.rs`,
   `crates/host-core/src/prepare.rs` (the carry rule only), `crates/control-plane/src/` (if #1309
-  has moved the classifier), `crates/capi/src/runtime/control.rs` (the link write in
+  has moved the classifier), `crates/control-plane/src/control.rs` (the link write in
   `commit_live`), `crates/capi/src/runtime/live_tests.rs`, `crates/capi/include/miso_engine_v1.h`
   (docs only); stream B owns these: coordinate the merge
 - `docs/C_ABI_V1_QUALIFICATION.md`

@@ -11,7 +11,7 @@ bit may move.
 
 ## Problem
 
-A live C ABI edit (`commit_live`, `crates/capi/src/runtime/control.rs:1065`) does three kinds of
+A live C ABI edit (`commit_live`, `crates/control-plane/src/control.rs:1201`) does three kinds of
 control-thread work whose cost grows with the session, not with the edit.
 
 1. **Every track's effects are lowered twice, even when nothing in them changed (N2).**
@@ -24,15 +24,15 @@ control-thread work whose cost grows with the session, not with the edit.
    at `:505`). A fader-only edit on one track of a 200-track session lowers all 200 tracks twice.
 2. **Each effect instance's producer is found by a linear scan (N3).** `commit_live` finds it
    with `effects.iter().position(..)` over the whole producer table, per instance in the delta
-   (`control.rs:1123-1128`).
+   (`control.rs:1259-1264`).
 3. **Each record's readback handle is found by a linear scan of the whole catalog (N3).**
    `commit_live` calls `SessionControlProvider::parameter_handle` per parameter record
-   (`control.rs:1259-1265`). That is `parameter_metadata.iter().find(..)` over every row of every
+   (`control.rs:1395-1401`). That is `parameter_metadata.iter().find(..)` over every row of every
    effect in the session (`crates/host-core/src/control_provider.rs:216-234`). An EQ alone has
    dozens of rows.
 
 The strip lookup is already fine: it resumes a wrapping search where the last one stopped, and the
-delta and the strip table share canonical track order (`control.rs:1094-1107`).
+delta and the strip table share canonical track order (`control.rs:1230-1243`).
 
 **The order both tables already have.** Both tables are built from the same
 `EffectPreparedSession::entries`, which preparation sorts by `(track_id, rack, effect_id)`
@@ -45,7 +45,7 @@ delta and the strip table share canonical track order (`control.rs:1094-1107`).
 - the producers: `attach_effect_live_controls(&mut effects, depth)` (`crates/host-core/src/prepare.rs:1390-1395`;
   `crates/effect-compiler/src/prepare.rs:1372`), which pushes one producer per entry in entry
   order, and returns an error, not a partial table, if any entry fails; capi keeps that order
-  (`effect_controls.into_boxed_slice()`, `crates/capi/src/runtime/compile.rs:619`).
+  (`effect_controls.into_boxed_slice()`, `crates/control-plane/src/compile.rs:625`).
 
 So both tables are sorted by `track_id` (byte order of the ID string). This is *not* the canonical
 track order: `"t10"` sorts before `"t2"`. A strip's rows and producers form one contiguous run.
@@ -106,7 +106,7 @@ transaction; that is out of scope here.
 - `build_parameter_catalog`'s per-row `find` over `initial_values` (`control_provider.rs:506-514`),
   which runs at preparation.
 - A read-only provider accessor in `protocol` (the verdict noted `provider_mut()` for reads,
-  `control.rs:1224`).
+  `control.rs:1360`).
 - Anything on the render thread.
 
 ## Hazards

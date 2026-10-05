@@ -45,7 +45,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 - **The classifier.** `classify_live_delta(current, next, ramps)` (`live_delta.rs:211-215`) puts
   `ramps.fader_samples` on `FaderDb` records (`:293`) and `ramps.mute_samples` on `Mute` records
   (`:301`); the matrix record carries `smoothing_after` (`:308-313`). `commit_live` calls it once per
-  commit (`crates/capi/src/runtime/control.rs:1071-1075`), with `next` from the prepared token's
+  commit (`crates/control-plane/src/control.rs:1207-1211`), with `next` from the prepared token's
   `prospective_session()` (`crates/protocol/src/controller.rs:1139`).
 - **Crate boundary.** `host-core` depends on `protocol` only under its `control-provider` feature
   (`crates/host-core/Cargo.toml:15`, `:32`), and `live_delta` is always built (`lib.rs:98`). Both
@@ -114,7 +114,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 3. Every construction of a D1 variant outside `crates/protocol` gains `ramp_samples: None`
    (mechanical).
 4. D5 and D6 in `crates/host-core/src/live_delta.rs`, and the call change in
-   `crates/capi/src/runtime/control.rs`.
+   `crates/control-plane/src/control.rs`.
 5. The corpus: its `SetTrackFader` edit sets `ramp_samples`, with one re-pin (gate 5).
 6. `docs/C_ABI_V1_QUALIFICATION.md`: a live edit's own length overrides the session's.
 7. The tests below.
@@ -130,7 +130,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
   `fuzz/corpus/complete-schema-manifest.md`, `docs/CONTROL_PROTOCOL_CONFORMANCE.md`,
   `docs/CONTROL_PROTOCOL_REGISTRY.md`
 - `crates/host-core/src/live_delta.rs` (stream B owns it), `crates/host-core/tests/live_delta.rs`
-- `crates/capi/src/runtime/control.rs` (the `commit_live` call only),
+- `crates/control-plane/src/control.rs` (the `commit_live` call only),
   `crates/capi/src/runtime/live_tests.rs` (tests only), `docs/C_ABI_V1_QUALIFICATION.md`
 - Field additions only (deliverable 3), in any file that builds one of D1's variants
 

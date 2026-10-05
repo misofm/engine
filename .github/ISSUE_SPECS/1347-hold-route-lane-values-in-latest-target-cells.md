@@ -25,7 +25,7 @@ the next block, and #1312's counter records every replaced target. The C ABI's s
 - **Browser admission.** The route band (`queue_available`, `hosts/host-web/src/lib.rs:1783-1786`;
   `push`, `:1821-1827`). `free()` is `#[inline(always)]` for the worklet call-graph gate
   (`crates/graph/src/lib.rs:1005-1013`).
-- **C ABI.** No route lane today (`crates/capi/src/runtime/compile.rs:15-21`); #1225 attaches
+- **C ABI.** No route lane today (`crates/control-plane/src/compile.rs:19-28`); #1225 attaches
   them, written to these cells.
 
 ## Decisions frozen for this slice

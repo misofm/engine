@@ -28,11 +28,11 @@ watermark and complete edits asynchronously* (#1314).
   The protocol-only path `process_structural_plan_into` (`:1826`) encodes its own frame; no product
   host uses it (only `crates/protocol/src/controller/tests.rs` and `tools/audit/src/protocol.rs`).
 - The C ABI decides the path after preparation. `SessionState::command`
-  (`crates/capi/src/runtime/control.rs:843`) calls `commit_live` (`:888-891`), which classifies
-  with `host_core::classify_live_delta` (`:1071`; `crates/host-core/src/live_delta.rs:211`).
-  `LiveCommit::Done` is the live arm (`control.rs:411-416`); `LiveCommit::Rebuild` continues to the
-  successor preparation and commits at `:1008`. Both commits go through
-  `ObservedPreparedToken::commit` (`:353`).
+  (`crates/control-plane/src/control.rs:983`) calls `commit_live` (`:1024-1027`), which classifies
+  with `host_core::classify_live_delta` (`:1207`; `crates/host-core/src/live_delta.rs:211`).
+  `LiveCommit::Done` is the live arm (`control.rs:502-507`); `LiveCommit::Rebuild` continues to the
+  successor preparation and commits at `:1144`. Both commits go through
+  `ObservedPreparedToken::commit` (`:437`).
 - A delta that changes only the session ID, a profile ID or the stored automation is "live with no
   records" (`live_delta.rs:181-185`); so is a transaction that rewrites identical values
   (`:109-110`). Both are `model_only` here.
@@ -95,7 +95,8 @@ watermark and complete edits asynchronously* (#1314).
 
 - `crates/protocol/src/message_wire.rs`, `schema.rs`, `typed_frame.rs`, `controller.rs` (it holds
   `ReplayCache`, `:209`), `queue.rs`, `model.rs`, `lib.rs`, `controller/tests.rs`, `message_wire/tests.rs`
-- `crates/capi/src/runtime/control.rs` (or its successor file in the crate that #1309 creates),
+- `crates/control-plane/src/control.rs` (the successor #1309 made of
+  `crates/capi/src/runtime/control.rs`),
   `crates/capi/src/runtime/live_tests.rs`, `crates/capi/src/runtime/tests.rs`,
   `crates/capi/include/miso_engine_v1.h` (comment text only)
 - `crates/host-core/src/live_delta.rs` (`LiveDelta::is_empty` only)

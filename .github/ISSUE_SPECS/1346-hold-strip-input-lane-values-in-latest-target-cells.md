@@ -28,7 +28,7 @@ replaced value. The C ABI's input edits (#1261, #1262) are built on these cells.
   `:590-594`).
 - **Browser admission.** The input band (`queue_available`, `hosts/host-web/src/lib.rs:1771-1782`;
   `push`, `:1816-1820`) and the per-strip filter shadows (`input_filter_shadows`, `:1562`).
-- **C ABI.** No input lane today (`crates/capi/src/runtime/compile.rs:15-21`); #1261 attaches one
+- **C ABI.** No input lane today (`crates/control-plane/src/compile.rs:19-28`); #1261 attaches one
   and #1262 adds filter targets, both written to these cells.
 
 ## Decisions frozen for this slice

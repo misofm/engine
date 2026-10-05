@@ -50,7 +50,7 @@ and SDK are the rewritten slices #1293-#1297.
   status.next_absolute_sample }` (`:3234-3239`). It has no plan exchange.
 - **The C ABI's shape, which this slice reuses.**
   - The control thread moves the persisting source producers into the candidate at commit
-    (`crates/capi/src/runtime/control.rs:1010-1019`). In the browser the producers have one
+    (`crates/control-plane/src/control.rs:1146-1155`). In the browser the producers have one
     owner, the Worker: *Move browser source submission and seeks into the Worker* (#1387) puts the
     `SourceControlSet` there, and #1381 D1-D2 puts it inside the Worker's `SessionState`, which
     routes every source call.
