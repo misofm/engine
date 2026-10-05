@@ -75,7 +75,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`) in any order, the later slice rebases |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`) and J #1429 (the `artifact-gates` "Hermetic browser host and worklet tests" step) in any order, the later slice rebases |
 
 ## Stream S0
 
@@ -326,6 +326,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 20 | #1416 | Let only host-core build the live route records that hosts push | #1422 | — |
 | 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
 | 22 | #1426 | Bound each realtime drain per queue: require the pop receiver to be the counted queue | #1418 | — |
+| 23 | #1429 | Fail the web AudioWorklet test step when it leaves anything in its temporary directory | #1421 | — |
 
 ## Stream K
 
