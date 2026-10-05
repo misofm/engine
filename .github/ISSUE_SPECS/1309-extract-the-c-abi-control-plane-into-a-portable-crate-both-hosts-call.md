@@ -11,7 +11,10 @@ preparation, plan publication and retirement, provider epochs) lives in one port
 `wasm32-unknown-unknown` with `simd128`, so the browser can adopt the same control plane
 (*Run the browser control plane in a Worker and keep the AudioWorklet render-only*, #1332).
 No C ABI behaviour changes: every result code, diagnostic string, response byte and rendered
-bit is the same before and after.
+bit is the same before and after, with one measured exception (Amendment 1): the `Session` fixed
+row and `capi_retained_bytes` (so the retained-bytes value `miso_engine_v1_plan_resources`
+returns) fall by exactly `size_of::<CompileLimits>() - size_of::<ControlLimits>()`, because the
+session stores `ControlLimits` (D3).
 
 ## Context
 
@@ -57,6 +60,10 @@ bit is the same before and after.
   into the crate. Items capi calls become `pub`; the rest stay private to the crate. Type and
   function names stay as they are (`SessionState`, `PlanState`, `compile_children`, …), so the
   diff is a move, not a rewrite.
+  Amendment 1: `boxed_zeroed`'s use of `FixedBytes` is replaced by a crate-local zeroed-buffer
+  helper, and capi builds `CompiledChildren`' `session_error` (`FixedBytes`) itself after
+  `compile_children` returns, with the same codes. `PlanState::render` returns the engine's
+  `RenderError`, and capi maps it to today's `plan_error` codes.
 - **D3. Plain limits.** The crate defines `ControlLimits`: every numeric field of
   `CompileLimits`, same names and types, without `struct_size`, `reserved0` and `reserved`, and
   with `maximum_capi_retained_bytes` named `maximum_control_retained_bytes`. capi validates its
@@ -70,6 +77,11 @@ bit is the same before and after.
   (`crates/capi/src/runtime/plan.rs:8` stores `(u64, PlanResourceReport)` today). capi
   instantiates `Row = PlanResourceReport` and converts once, when a row is inserted; its
   `miso_engine_v1_plan_resources` copies the stored row as today.
+  Amendment 1: the crate reads stored rows back (`replacement_base_report` into
+  `validate_replacement_peak`, `live_admission` into `validate_live_peak`), so the bound is
+  `Row: From<PlanResources> + Copy` and `PlanResources: From<Row>`. For `PlanResourceReport` the
+  conversion is lossless: `TAIL_FINITE` maps to `TailSamples::Finite(n)` and `TAIL_INFINITE` to
+  `TailSamples::Infinite`, and back.
 - **D5. Adapter allocations.** The crate's constructor takes `adapter_allocations: &[u64]`, the byte
   sizes of the fixed allocations the adapter keeps per session: capi passes `Session` and `Plan`
   (today's `compile.rs:233-234` rows). They enter the fixed allocation rows and the
@@ -78,12 +90,19 @@ bit is the same before and after.
   adapter's `Row` type (D4), so it is the same layout and the same bytes as today. Together, D4 and
   D5 keep every fixed row, `capi_retained_bytes` and the largest-allocation fold unchanged, which
   gate 1 checks.
+  Amendment 1: one exception. `SessionState` stores `ControlLimits` (D3), which is smaller than
+  `CompileLimits`, so the `Session` fixed row, and with it `capi_retained_bytes`, falls by exactly
+  `size_of::<CompileLimits>() - size_of::<ControlLimits>()`. Every other fixed row and the
+  largest-allocation fold stay the same.
 - **D6. Typed failures.** The crate never spells `capi.`. `CompileFailure` becomes an enum:
   `Resource(ResourceFault)` with `ResourceFault::{Arithmetic, Platform, Limit, Allocation,
   ProtocolQueue, PlanExchange}`, and `Diagnostics(Vec<u8>)` for the session and preparation
   diagnostic lines it builds today (`error.rs:99`, `prepare_failure`). `SourceFailure::Internal`
   stays a variant without text. capi maps each to today's exact bytes (`capi.resource.arithmetic\t$\n`
   and so on; `capi.source.epoch`).
+  Amendment 1: `graph.resource.limit`, `source.resource.limit` and `effect.resource.limit` (from
+  `validate_replacement_peak` and `validate_live_peak`) are not resource faults of the adapter;
+  they become `CompileFailure::Diagnostics` with today's exact bytes.
 - **D7. The render-activity code stays.** `RENDER_DIAGNOSTIC_CODE` (`control.rs:100`) keeps the
   text `capi.render.activity`, because `host-core` sizes it by that literal
   (`crates/host-core/src/control_provider.rs:117`) and it is protocol-visible. Choosing the
@@ -154,10 +173,19 @@ bit is the same before and after.
    `cargo build --locked --release -p audit -p capi && target/release/audit capi`. Both report
    `allocations`, `deallocations`, `locks`, `syscalls` and `total_violations` 0 and the same
    `pcm_digest`. `cargo test --locked -p capi --test resource_lifecycle -- --nocapture` prints the
-   same resource rows at both, `capi_retained_bytes` and the report-table row included (D4-D5).
+   same resource rows at both, `capi_retained_bytes` and the report-table row included (D4-D5),
+   with one exception (Amendment 1): the `Session` fixed row and `capi_retained_bytes` fall by
+   exactly `size_of::<CompileLimits>() - size_of::<ControlLimits>()`. The gate computes that
+   difference from the two types at the head (not a literal) and checks base minus head equals it;
+   every other row is identical.
 2. **The C ABI suite is unchanged and green.** `cargo test --locked -p capi` passes with no test
-   added, deleted or weakened; `git diff --stat` on `crates/capi/src/runtime/tests.rs`,
-   `live_tests.rs` and `crates/capi/tests/` shows import and accessor changes only.
+   deleted or weakened, and one test added (the D4 row round trip below); `git diff --stat` on
+   `crates/capi/src/runtime/tests.rs`, `live_tests.rs` and `crates/capi/tests/` shows import and
+   accessor changes only. Amendment 1: the `live_peak_tests` module (today `compile.rs:837-994`)
+   stays in capi with unchanged assertions; `validate_live_peak`, `LiveEpochResources` and
+   `CapiResources` are exposed under the crate's `test-support` feature for it. Expected
+   resource-byte assertions that read `capi_retained_bytes` or the `Session` row may change only by
+   the gate-1 difference, computed from the two types.
 3. **The header is unchanged.** `bash scripts/check-capi-abi.sh` and
    `bash scripts/check-capi-abi.sh --self-test` pass.
 4. **Browser target.** `bash scripts/check-cross-targets.sh` passes with the D11 row.
@@ -172,9 +200,33 @@ bit is the same before and after.
 
 ## Test value
 
-No new test. The extraction is proven by the unchanged C ABI suite (gate 2) and the one-time
+One new test (Amendment 1): in capi, `PlanResources -> PlanResourceReport -> PlanResources` is the
+identity for a value with every field distinct and nonzero, once with `TailSamples::Finite(n)` and
+once with `TailSamples::Infinite`. It turns red if a conversion drops, swaps or mis-maps a field or
+a tail kind, which would corrupt the replacement and live peak checks that read stored rows back
+(no existing test reads a stored row through the conversion); the mutation run is recorded in the
+Attempt record. Otherwise no new test. The extraction is proven by the unchanged C ABI suite (gate 2) and the one-time
 same-bits comparison (gate 1). The D11 cross-target row is a build check: it turns red if the crate
 gains a dependency or API the browser target cannot compile, which no existing row checks.
+
+## Amendment 1 (root, 2026-10-05)
+
+The first implementation run stopped before any change because the spec contradicted itself; it
+had no verdict and is not an attempt. Root ruled:
+
+1. **Measured accounting change accepted.** Storing `ControlLimits` (D3) shrinks `Session`, so the
+   `Session` fixed row and `capi_retained_bytes` (and the retained-bytes value
+   `miso_engine_v1_plan_resources` returns) fall by exactly
+   `size_of::<CompileLimits>() - size_of::<ControlLimits>()`. Product outcome, D5 and gate 1 carry
+   this one exception; the gate computes it from the two types. No padding, and `CompileLimits`
+   does not enter the crate.
+2. **D4 bound.** `Row: From<PlanResources> + Copy` and `PlanResources: From<Row>`, with a
+   lossless round-trip test (Test value).
+3. **Authorized adjustments** (in D2, D6 and gate 2): a crate-local zeroed-buffer helper, with capi
+   building `session_error` after `compile_children`; `PlanState::render` returns `RenderError`
+   and capi maps it; `graph`/`source`/`effect` `.resource.limit` become
+   `CompileFailure::Diagnostics` with today's exact bytes; `live_peak_tests` stays in capi with
+   `validate_live_peak`, `LiveEpochResources` and `CapiResources` exposed under `test-support`.
 
 ## Dependencies
 
