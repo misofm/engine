@@ -122,6 +122,8 @@ the lift is heard with the tail already in place.
   `sdk/src/core/live-controls.ts`, `sdk/src/browser/shipped-host.d.ts`, `sdk/test/console-evals.mjs`
   (coordinate with stream H)
 - `docs/C_ABI_V1_QUALIFICATION.md`
+- `docs/handoffs/control-smoothing-defaults/` (gate 8 only: the harness `measure/` and its `data/`
+  CSVs; root, 2026-10-05, from #1055)
 
 ## Non-goals
 
@@ -173,7 +175,26 @@ the lift is heard with the tail already in place.
 7. **Deleted, superseded:** `the_delay_keeps_its_prepared_bypass_because_a_shunt_would_move_a_bit`
    (`bypass_shunt_identity.rs:798-858`), whose claim gate 1 now reverses. Update the red-mutation
    doc of `the_never_banked_list_is_exactly_the_launch_effects_that_decline_a_bank` (`:754-760`).
-8. Commands:
+8. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass
+   crossfade's click is measured against #1055's mute baseline, at the session's `muteMs` default,
+   with the `docs/handoffs/control-smoothing-defaults/measure/` harness and method (`FINDINGS.md`
+   9.4, `data/bypass_crossfade.csv`, `data/mute_click.csv`). What is recorded: the delay's new
+   rows in `data/bypass_crossfade.csv`, reproduced byte for byte over two runs of the harness
+   (`measure/README.md`); the result is recorded in the PR.
+   Representative setting, as 9.4 sets one per effect: the delay at its defaults (delay time
+   250 ms, damping 0.25, no cross feedback) with mix 0.5 and feedback 0.5, a large change between
+   wet and dry that stays at about a mute's step, on the bass, kick and mix materials.
+   What passes, at the `muteMs` default (10 ms), on every launch rate, material and transition of
+   the new rows, by 9.4's own rule and tolerances: (a) on the bass and kick, wherever the step is
+   above -40 dB, the click's OOB is the `mute-reference` row's OOB plus the step, within -1.1 to
+   +1.8 dB ("the crossfade's click is the mute's at the same length scaled by that step"); and
+   (b) the step is at most 0 dB and no measure (OOB, worst OOB, CTR, HF splatter, total splatter)
+   exceeds the `mute-reference` row's at the same length, rate, material and transition ("No
+   effect's click exceeds the mute reference's ... on any measure"). Every existing row of
+   `data/bypass_crossfade.csv` stays byte-identical (`git diff` shows added rows only). If (a) or
+   (b) fails, the PR records the failing rows and the issue stops for root to decide the key or
+   the length; it does not pass silently (root, 2026-10-05, from #1055).
+9. Commands:
    - `cargo test --locked --workspace --all-targets --exclude lane --exclude math --exclude effect-runtime --exclude delay --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip --exclude parametric-eq --exclude builtins --exclude dsp-reference --exclude conformance --exclude audit --exclude bench --exclude console-workload --exclude wasm-gates --exclude wasm-gate-guest --exclude wasm-gate-corpus --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit`
    - `cargo test --locked -p delay`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit && ./target/release/audit capi && ./target/release/audit delay --blocks 100000`
