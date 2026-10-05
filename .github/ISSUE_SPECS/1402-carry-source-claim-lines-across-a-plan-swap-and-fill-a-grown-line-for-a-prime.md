@@ -48,7 +48,8 @@ successor with a raw-frame prime at the first ready block* (#1355) calls with th
 - **D2. Fill routine.** One allocation-free routine in `crates/graph` fills a W line from A's
   pending samples (and, for L3, A's claim pending) and a prime slice of `P` frames, per L2 and L3,
   for both lanes of a dual-mono claim. Its order for a grown line is A's pending at the read end,
-  then the prime: not #1283 D4's zeros-first order. This slice tests it with given prime slices;
+  then the prime. #1283 D4's head-aligned copy emits the pending samples, then `+0.0`; this
+  routine puts the prime where that copy puts `+0.0`. This slice tests it with given prime slices;
   #1355 calls it with the replayed blocks.
 - **D3. Host-core join.** The inventory records each claim line's key and length, and the carry
   join adds the claim-line rows beside #1283's. A `test-support` preparation takes an explicit
@@ -108,8 +109,8 @@ successor with a raw-frame prime at the first ready block* (#1355) calls with th
 
 - Gate 1: claim lines left out of the carry table restart at rest, so every source drops out for
   `P` samples after the rebuild (round-4 M1). Red.
-- Gate 2: #1283's zeros-first order in a grown line, or an L3 fill without A's claim pending,
-  emits the wrong samples. Red.
+- Gate 2: #1283 D4's head-aligned copy in a grown line (A's pending samples, then `+0.0` where
+  the prime belongs), or an L3 fill without A's claim pending, emits the wrong samples. Red.
 - Gate 3: a fill that stages the prime in a buffer allocates on render. Red.
 
 ## Dependencies

@@ -7,8 +7,8 @@ Slice 18 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 Owner question Q3 of #1269 (fade in added strips, and over what length) is answered by decision 15
 D15-9: yes, from the strip's first played block, over the session mute ramp. No blocker remains.
 
-Split (R10): this slice is the fade for one swap. Keeping an arm that has not fired yet across a
-later swap is the successor *Keep an added strip's pending fade-in across a later plan swap*
+Split (AGENTS.md's half-day rule): this slice is the fade for one swap. Keeping an arm that has
+not fired yet across a later swap is the successor *Keep an added strip's pending fade-in across a later plan swap*
 (#1392). The two merge to `main` in the same batch.
 
 ## Product outcome

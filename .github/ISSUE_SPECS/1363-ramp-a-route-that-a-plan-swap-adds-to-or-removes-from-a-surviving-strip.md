@@ -39,7 +39,7 @@ fade in with it. Every other path stays bit-identical. D15-9 covers added, edite
   successor's model:
   - (a) **Added or removed.** A route whose source strip and destination exist in both plans and
     whose ID is in exactly one of the two models: D3 or D4.
-  - (b) **Re-pointed (R8), or a prepared value change.** A route whose ID is in both models and
+  - (b) **Re-pointed (D15-9), or a prepared value change.** A route whose ID is in both models and
     either (1) whose source strip, tap or destination differs, or (2) whose source strip, tap and
     destination are equal but one of `gain_db`, `mute`, `channel_matrix` or `follows_mute` differs
     (or its `follows_mute` source's mute does) and the change is prepared on this host: the route
@@ -157,7 +157,7 @@ between render calls.
    predecessor's output with the route live-muted with `N` at `S`: bit-identical.
 3. **Only the route moves.** With A's source fed exact zeros, gates 1 and 2 leave every block equal
    to a run without the transaction.
-4. **Re-pointed send (R8).** Track A sends `post_fader` to submix B; a transaction re-points that
+4. **Re-pointed send (D15-9).** Track A sends `post_fader` to submix B; a transaction re-points that
    route (same ID) to submix C. B's input equals gate 2's fade-out, C's input equals gate 1's
    fade-in, and A's own output to the master equals a run with no transaction, bit for bit (A is
    not ducked). The same with the tap changed from `post_fader` to `pre_fader` instead. Both cases

@@ -26,43 +26,37 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - After *Extract the C ABI control plane into a portable crate both hosts call* (#1309), the
   structural path of `crates/capi/src/runtime/control.rs` (reservation at `:962`) lives in
   `crates/control-plane`.
-- Warm preparation (`warm_lead`, `WarmUnavailable`) is host-core code from #1354. The `Primed`
-  publication and render's prime adoption are #1311's and #1355's. The deadline
+- Warm preparation (`warm_lead`, `WarmConfig`, `WarmUnavailable`) is host-core code from #1354.
+  Classification with an injected `WarmConfig`, the `Primed` publication and the `PrimedCandidate`
+  record are *Classify a latency-growth edit and publish its warm successor from the control
+  plane* (#1403). Render's prime adoption is #1311's and #1355's. The deadline
   (`PRIME_DEADLINE_SAMPLES`, in render samples) is #1358's. `fall_back_to_transition` and the
   session counter `transition_reprepare_refusals` are #1397's. The watermark, its flags and
   `miso_engine_v1_plan_watermark` are #1314's.
 - The C header's live-edit paragraph is `crates/capi/include/miso_engine_v1.h:35-62`; its session
   thread rule is `:18-22`.
+- The C ABI builds its `SessionState` in `crates/capi/src/runtime/compile.rs:815`. The structural
+  fault and owner counters for tests are `TestOwnerCounters` (`crates/capi/src/runtime/control.rs`,
+  read by `test_lifecycle_counters`, `:233-235`), which #1309 moves into the control plane.
 - The release audit runs `./target/release/audit capi` (`.github/workflows/qualification.yml:715`)
   from `tools/audit/src/capi.rs`.
 
 ## Decisions frozen for this slice
 
-- **D1. Classify.** The control plane's rebuild path calls `host_core::warm_lead` (#1354), the
-  only computation of the lead `P`, with a `WarmConfig` built from `P_MAX_SAMPLES` (#1358) and
-  `PRIME_BYTES_MAX` for the session's rate and quantum. This slice writes `PRIME_BYTES_MAX` into
-  `crates/host-core/src/warm.rs` with the value *Record the swap block's cost on the 64-track
-  console* (#1286) D3 derives; the constant's comment names the record row.
-  - With `Warm` and `P > 0`, the candidate's admission uses `AdmissionPeak::WithReprepare` (#1398
-    D4), so the transition's re-preparation inside a later service step never exceeds the caller's
-    caps. The candidate is prepared warm (#1354) and published `Primed { not_before, lead_blocks }`
-    (#1311, #1355). When it also restarts strips, it is composed with their duck as *Duck-swap the
-    strips a latency growth restarts, and fall back to the transition when a warm successor cannot
-    adopt* (#1397) D1 states.
-  - With `Warm { lead_samples: 0, restart_whole }` (the restarts confine the growth to restarted
-    strips), it is an ordinary rebuild plus those restarts: prepared with that `WarmLead` (#1354
-    D4) and published as a planned duck-swap (#1397 D1, last paragraph). No deadline is pending.
-  - If warm preparation returns `WarmUnavailable` (#1354), the edit takes
-    `fall_back_to_transition` (#1397 D2) at once, in the same submit. A valid edit is never refused
-    for it.
-  - With `Ordinary`, it is published as today.
-
-  The transaction response is `rebuild` in every case (*Report each transaction's edit path in its
-  response*, #1313).
+- **D1. The production `WarmConfig`.** The C ABI creates every session with
+  `warm: Some(WarmConfig { p_max: P_MAX_SAMPLES(fs), prime_bytes_max: PRIME_BYTES_MAX })` for the
+  session's rate (#1403 D1), so its rebuilds are classified by #1403 D2 and routed by #1397 D1-D2.
+  Before this slice only `test-support` sessions hold a `WarmConfig`; every arm of #1403 D2 exists
+  once #1397 has landed, which this slice depends on.
+  This slice writes `PRIME_BYTES_MAX` into `crates/host-core/src/warm.rs` with the value *Record
+  the swap block's cost on the 64-track console* (#1286) D3 derives; the constant's comment names
+  the record row. It writes no classification, publication or routing of its own. A valid edit is
+  never refused for its warm path, and the transaction response is `rebuild` in every case
+  (*Report each transaction's edit path in its response*, #1313).
 - **D2. Service step.** `SessionState::service` gains one step after `synchronize_plan_epochs`:
   the deadline check of #1358.
-  - If no `Primed` candidate is pending, or its deadline in render samples has not passed, the step
-    does nothing.
+  - If the control plane holds no #1403 record, or the record's deadline in render samples has not
+    passed, the step does nothing.
   - Otherwise it withdraws the candidate (`withdraw()`, #1343 D5, through #1358 D3's
     `check_prime_deadline`). `Withdrawal::Taken` means render
     adopted it exactly, and the step publishes nothing. `Withdrawal::Withdrawn` hands the candidate
@@ -78,18 +72,25 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - **D4. Header and qualification doc.** `miso_engine_v1.h`, beside the live-edit paragraph
   (`:35-62`), and `docs/C_ABI_V1_QUALIFICATION.md` state:
   - A latency-growing edit is adopted by render, not by a control call. For it to be exact, the
-    host keeps at least `P + q` frames of each source queued ahead of render, where `P` is the
-    latency growth rounded up to whole render quanta and `q` is the render quantum. A host that
-    keeps its rings full always qualifies, because ring headroom covers `P_MAX` (#1358).
+    host keeps at least `P + q` frames of each source queued past that source's read position,
+    where `P` is the latency growth rounded up to whole render quanta and `q` is the render
+    quantum. A host that keeps its rings full always qualifies with the default ring
+    (`source_ring_frames = 0`), whose headroom covers `P_MAX` (#1358).
+  - A host that passes a nonzero `source_ring_frames` needs at least `stall + P_MAX + q` frames
+    for warm growth: `stall` is the stall body of the default rule (#1354 D1's
+    `stall_ring_frames`) and `P_MAX` is #1358's `P_MAX_SAMPLES` for the session's rate. With
+    less, a growth whose `P + q` exceeds the ring's frames above `stall` takes the transition
+    (`WarmUnavailable::LeadBound`, #1354 D2), which still completes the edit.
   - At adoption the engine reads each carried source `P` frames further ahead in that one render
     call. From that block on, the source-read clock leads render by `P` more (#1396), and a command
     or `seek_at` that arrives during that call is applied at that block on the new clock.
   - Outcomes: `MISO_ENGINE_V1_OUTCOME_EXACT` when render adopted it;
-    `MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK` when the successor was unavailable at submit or
-    not ready by the deadline (the edited strips duck and fade back in);
-    `MISO_ENGINE_V1_OUTCOME_SUPERSEDED` set when a later structural edit or a declared stop (#1323)
-    replaced it before adoption. A paused host stays pending and never falls back, because the
-    deadline counts render samples.
+    `MISO_ENGINE_V1_OUTCOME_TRANSITION_FALLBACK` when the successor was unavailable at submit or not
+    ready by the deadline (the edited strips duck and fade back in);
+    `MISO_ENGINE_V1_OUTCOME_SUPERSEDED` set when a later structural edit replaced it before
+    adoption. A declared stop (#1323) completes it `EXACT`, with `SUPERSEDED` only when it had
+    itself folded in earlier revisions (#1323 D4). A paused host stays pending and never falls back,
+    because the deadline counts render samples.
   - Any session call may do at most one bounded service step, and that step may re-prepare once.
   - The counter `TRANSITION_REPREPARE_REFUSALS` (#1351) is read with `COUNTERS_GET` or a
     configured `COUNTER_SNAPSHOT`. It counts transition re-preparations that were refused anyway
@@ -109,11 +110,13 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 ## Deliverables
 
-1. D1, D2, D3 and D5 in `crates/control-plane/src/`, and D1's `PRIME_BYTES_MAX` in
-   `crates/host-core/src/warm.rs`.
-2. D4 in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md`.
-3. D6 in `tools/audit/src/capi.rs`.
-4. C ABI tests in `crates/capi/tests/latency_growth.rs` (new).
+1. D1's config in `crates/capi/src/runtime/compile.rs` (the session constructor), D2, D3 and D5
+   in `crates/control-plane/src/`, and D1's `PRIME_BYTES_MAX` in `crates/host-core/src/warm.rs`.
+2. Two `test-support` owner counters beside `TestOwnerCounters`' existing ones: deadline
+   withdrawals and transition re-preparations, each raised once per event by D2's step.
+3. D4 in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md`.
+4. D6 in `tools/audit/src/capi.rs`.
+5. C ABI tests in `crates/capi/tests/latency_growth.rs` (new).
 
 ## Authorized paths
 
@@ -145,7 +148,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
    watermark reports `TRANSITION_FALLBACK`.
 4. **Bounded and patient.** Before the deadline, 1,000 service calls with no render leave the
    candidate pending and publish nothing. After it, one call does exactly one withdrawal and one
-   re-preparation (the control-plane test counters).
+   re-preparation (deliverable 2's counters each grow by exactly 1).
 5. **Refusal counter (control-plane test, `test-support`).** With one injected re-preparation
    refusal, the service step keeps the revision pending, `COUNTERS_GET` reports
    `TRANSITION_REPREPARE_REFUSALS` 1, and the next service call publishes the transition.
@@ -170,12 +173,17 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   re-preparations, breaks the counts. Red.
 - Gate 5: a refresh that never copies the session counter, or a refusal that completes the
   revision, reports 0 or completes early. Red.
+- Gate 6: an audit leg that services from the render thread, or a growth whose prime allocates,
+  fails the audit's allocation or thread checks; a production session built without a
+  `WarmConfig` takes the ordinary path and fails the leg's `EXACT` and output checks. Red.
 
 ## Dependencies
 
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
-- *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `warm_lead` and
-  `WarmUnavailable`.
+- *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `WarmConfig`
+  and `stall_ring_frames`.
+- *Classify a latency-growth edit and publish its warm successor from the control plane* (#1403):
+  the classification D1 configures and the record D2 checks.
 - *Adopt a successor plan no earlier than a scheduled sample* (#1311): `Primed`.
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): render's
   adoption.

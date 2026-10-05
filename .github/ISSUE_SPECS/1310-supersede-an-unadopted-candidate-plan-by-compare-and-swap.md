@@ -78,9 +78,9 @@ successor is adopted.
 - **D4. Every check runs while A is withdrawn, before the commit.** In order: preparation of B; the
   resource admission; the publication reservation; `check_donation(B, A)` (#1344 D3); the
   protocol's commit predicate. Nothing moves before the last one passes. On any refusal A is
-  republished unchanged, with its own retirement credit, revision and `superseded` words, and the
-  refusal is returned. Republishing cannot fail: the control thread is the only publisher and the
-  mailbox has an `Empty` cell.
+  republished unchanged, with its own retirement credit and its revision, `superseded` and
+  `outcome` words (#1314 D1), and the refusal is returned. Republishing cannot fail: the control
+  thread is the only publisher and the mailbox has an `Empty` cell.
 - **D5. Then, infallibly, in this order:**
   1. protocol commit;
   2. `apply_donation` with D4's checked plan (it cannot fail, #1344 D3) and the producer moves;
@@ -93,7 +93,10 @@ successor is adopted.
      still renders and B removed. Infallible and allocation-free; keyed by source ID. This covers
      a superseded `Primed` warm candidate too: its preparation moved P0's persisting producers into
      its set like any successor's;
-  6. drop A's plan, provider epoch and credit on the control thread; remove A's report row.
+  6. drop A's plan, provider epoch and credit on the control thread; remove A's report row. For a
+     warm A this also drops the control plane's `PrimedCandidate` record of A; a B published
+     `Primed` sets its own (*Classify a latency-growth edit and publish its warm successor from
+     the control plane*, #1403 D4, which adds the record and this drop).
 
   B is published only after it owns the donated rings, because render may adopt it at once. Step 5
   runs before step 6 because P0's consumers keep rendering until B is adopted: a producer dropped

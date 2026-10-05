@@ -106,8 +106,8 @@ when the same transaction makes a structural edit that swaps the plan.
     The longest wins so that no changed field moves faster than its own row asks.
   - With no edit ramp, a row resolves to its session length from `LiveRamps::for_session(next)`,
     the send lengths that *Session `controlSmoothing`: configurable ramp lengths for live mute,
-    fader and pan changes* (#1054) defines. An explicit 0 is a step (rule R9), and a step occurs
-    only when the governing row resolves to 0.
+    fader and pan changes* (#1054) defines. An explicit 0 is a step (D15-1's recorded
+    resolution), and a step occurs only when the governing row resolves to 0.
 - **D5. Route lanes on the C ABI.** `C_ABI_LIVE_LANES` sets `routes: true`. The C ABI epoch keeps
   the `route_controls` handles beside its strip and effect producers, addressed by route ID. The
   lanes are the latest-target cells of *Hold live values in latest-target cells on both hosts*

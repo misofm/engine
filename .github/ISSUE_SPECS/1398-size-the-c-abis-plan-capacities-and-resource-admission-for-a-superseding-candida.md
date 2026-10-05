@@ -83,10 +83,10 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
     same model terms. Every other held candidate is dropped before a re-preparation can run, so it
     is not in that peak. Both peaks must fit, or the submit is refused before commit with the
     cap's diagnostic. `service` then runs no cross-plan admission. The default,
-    `AdmissionPeak::Single`, is today's check; *Check the warm-successor deadline in
-    miso_engine_v1_service and report its outcome* (#1360) passes `WithReprepare` when it
-    publishes a `Primed` candidate. Releasing the withdrawn plan's row before re-preparing is not
-    an option: the withdrawn plan is the donor of the rings it holds.
+    `AdmissionPeak::Single`, is today's check; *Classify a latency-growth edit and publish its
+    warm successor from the control plane* (#1403) D2 passes `WithReprepare` when it admits a
+    warm candidate. Releasing the withdrawn plan's row before re-preparing is not an option: the
+    withdrawn plan is the donor of the rings it holds.
 - **D5. Sizing rule and reference limits.** The header states it: each cap above must be at least
   three times one plan's row, and the graph cap also covers three compiled models. The repository's
   reference limits must admit three plans of their sessions: `audit_limits`

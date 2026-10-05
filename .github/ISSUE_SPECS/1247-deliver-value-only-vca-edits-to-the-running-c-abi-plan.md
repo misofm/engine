@@ -183,8 +183,8 @@ same commit.
 
 ## Dependencies
 
-- *Let C ABI sends follow their source strip's mute live* (#1226), and through it *Deliver
-  value-only send edits to the running C ABI plan* (#1225)
+- *Let C ABI sends follow their source strip's mute live* (#1226)
+- *Deliver value-only send edits to the running C ABI plan* (#1225), through #1226
 - *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390),
   for submix strip records
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)

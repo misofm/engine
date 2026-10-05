@@ -50,13 +50,18 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 
 ## Decisions frozen for this slice
 
-- **D1. The revision travels with its plan.** Each mailbox cell of #1343 gains two words beside its
-  plan: `revision: AtomicU64` and `superseded: u64`.
+- **D1. The revision travels with its plan.** Each mailbox cell of #1343 gains three words beside
+  its plan: `revision: AtomicU64`, `superseded: u64` and `outcome: u32`.
   - `revision` is the newest committed revision whose content that cell's plan carries.
   - `superseded` is the number of revisions this candidate folds in from candidates it replaced.
     It is written only while the cell is control-owned, before publication.
-  - `UnadoptedCandidate` carries both, so a withdrawn candidate takes its revision with it and
-    `republish` writes them into whichever cell it lands in.
+  - `outcome` is the flag the candidate's own revisions complete with: `EXACT` unless written.
+    Like `superseded`, it is written only while control owns the candidate, before publication
+    (`PlanReplacementReservation::set_outcome`, `UnadoptedCandidate::set_outcome`). Its only
+    writer of another value is the transition fallback (*Duck-swap the strips a latency growth
+    restarts, and fall back to the transition when a warm successor cannot adopt*, #1397).
+  - `UnadoptedCandidate` carries all three, so a withdrawn candidate takes its revision and outcome
+    with it and `republish` writes them into whichever cell it lands in.
   - The initial plan's revision is written into cell 0 (`Active`) by `plan_exchange`, which also
     writes the initial watermark `(initial revision, 0, EXACT)` with every counter 0.
   - The words are part of the cells, so `plan_exchange_resource_report` charges them with the
@@ -102,8 +107,11 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
   - At a claim, render takes the claimed cell's `superseded` value into render-local state. The
     first advance after that claim adds it to the `superseded` counter and sets `SUPERSEDED`.
     `exact` takes the rest of `b - a`, saturating at 0. Later advances on the same plan add none.
-  - In this slice every candidate's `superseded` is 0, so every advance publishes `EXACT` and adds
-    `b - a` to `exact`.
+  - At the same claim render takes the cell's `outcome`. If it is `TRANSITION_FALLBACK`, the
+    first advance after that claim sets that flag instead of `EXACT`, and the rest of `b - a`
+    goes to `transition_fallback` instead of `exact`. Later advances on the same plan are `EXACT`.
+  - In this slice every candidate's `superseded` is 0 and its `outcome` `EXACT`, so every advance
+    publishes `EXACT` and adds `b - a` to `exact`.
   - **Who writes `superseded`:** *Supersede an unadopted candidate plan by compare-and-swap*
     (#1310) owns the `SUPERSEDED` outcome. It stores the count beside its successor's revision,
     for a superseded warm candidate as for any other.
@@ -151,7 +159,7 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 
 ## Authorized paths
 
-- `crates/engine/src/realtime/watermark.rs` (new), `spsc.rs` (the mailbox cell's two words only),
+- `crates/engine/src/realtime/watermark.rs` (new), `spsc.rs` (the mailbox cell's three words only),
   `plan_exchange.rs`, `mod.rs`
 - `crates/capi/src/abi.rs`, `ffi.rs`, `lib.rs`, `include/miso_engine_v1.h`, `tests/c/abi_smoke.c`,
   `tests/c/header_smoke.cpp`, capi tests
@@ -195,7 +203,11 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
    block 4: watermark `(r, 512, EXACT)`; render block 5: unchanged.
 4. **Superseded accounting (engine unit test).** A candidate published with `superseded = 2` at
    revision `a + 3`: its adoption block publishes `EXACT | SUPERSEDED`, `superseded` +2, `exact`
-   +1. A later live edit on that plan adds 1 to `exact` only.
+   +1. A later live edit on that plan adds 1 to `exact` only. Then a candidate at revision `b + 2`,
+   with `b` the watermark's revision and `outcome = TRANSITION_FALLBACK`
+   (`PlanReplacementReservation::set_outcome`), is withdrawn and republished before render claims
+   it: its adoption block publishes `TRANSITION_FALLBACK` without `EXACT`, `transition_fallback`
+   +2 and `exact` +0, and a later live edit adds 1 to `exact` only.
 5. **Torn reads.** Stress test in `watermark.rs` modelled on `observe.rs`'s: a writer thread
    publishes records whose words are all derived from one counter; a reader never returns a record
    whose words disagree, and a busy result is the only alternative.
@@ -230,7 +242,8 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
 - Gate 3: red if render loads the word after `render_inner` (an edit committed during a render
   would be claimed one block early) or publishes on every block.
 - Gate 4: red if `superseded` is added on every advance of a plan instead of once, or if `exact`
-  is not reduced by it.
+  is not reduced by it; red if a withdrawn candidate's `outcome` stays in the cell it left, so the
+  republished transition reports `EXACT`.
 - Gate 5: red if a field store escapes the odd/even window or the reader skips the second sequence
   check.
 - Gate 7: red if the header, the Rust struct and the export drift apart, or the bit is missing

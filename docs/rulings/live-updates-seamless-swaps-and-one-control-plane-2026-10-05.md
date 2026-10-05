@@ -166,11 +166,15 @@ when a dependency forces the order, and then sequence the correct solution.
   1. Submit prepares the successor with floors at `a(n) + P` on carried nodes only; restarted nodes
      keep #1285's floors `a(n)`, added nodes have none. `Δ` is the largest arrival growth over the
      carried nodes, and `P = q·⌈Δ/q⌉`. Its source-read offset is the predecessor's plus `P` (#1396).
-  2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. If one does
-     not, its strip is restarted whole (#1324 D2) and `Δ` recomputed (#1354). If it cannot be
-     restarted (the output, or a submix whose growth reaches the output), preparation returns
-     `WarmUnavailable::Misaligned` and the edit takes the transition. If the restarts leave
-     `Δ = 0`, the edit is an ordinary rebuild that duck-swaps those strips.
+  2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. If one is
+     late because a restarted or added strip's `Input` stage is held late by carried feeders,
+     those feeders are restarted whole (recursively through submix feeders); otherwise the late
+     node's own strip is restarted whole (#1324 D2). `Δ` is recomputed and the check repeats
+     (#1354). Only if every strip that reaches the output would restart does preparation return
+     `WarmUnavailable::Misaligned`, and the edit takes the transition, which gives the same audio.
+     So a latent insert on a bus restarts the bus's carried feeders and stays exact on every
+     other path, the output included. If the restarts leave `Δ = 0`, the edit is an ordinary
+     rebuild that duck-swaps those strips.
   3. Submit publishes the candidate as `Primed { not_before, lead_blocks }` (#1311).
   4. Render checks readiness (C4 below) on the **active** plan's consumers before it claims the
      candidate. Once ready, it claims and adopts in move mode in the same block, and fills the
@@ -209,9 +213,12 @@ when a dependency forces the order, and then sequence the correct solution.
        fires (fader and post-fader paths, ducked routes, armed fades). A sidechain edge has no gain
        lane, so the tap decides, by #1324 D1's rule: a sidechain from an R strip's `post_input`,
        `insert_send`, `insert_return` or `pre_fader` tap makes the consuming strip join R
-       (repeated until none joins). An `input` tap (raw source, or a submix's sum of incoming
-       routes) and a `post_fader` or `post_pan` tap (exact `+0.0` from the duck's end to the fire)
-       keep the consumer in C.
+       (repeated until none joins). A track's `input` tap (raw source) and a `post_fader` or
+       `post_pan` tap (exact `+0.0` from the duck's end to the fire) keep the consumer in C. A
+       restarted submix's `input` tap (the sum of its incoming routes) keeps it in C only if that
+       submix's `Input` stage arrives at exactly `a(n) + P`, checked with C1 (with `P = 0` for a
+       rebuild that grows nothing, #1354 D2 step 4); otherwise the lines into that stage and out
+       of it change length and the consuming strip joins R.
     3. C3, bounds: `ΣP + P ≤ P_MAX` and prime bytes `≤ PRIME_BYTES_MAX`.
     4. C4, readiness, checked by render on the active plan before it claims: S is at or after
        `not_before`; every source W carries has its next `P/q + 1` blocks queued and playable; no
@@ -246,7 +253,7 @@ when a dependency forces the order, and then sequence the correct solution.
     The model is `docs/handoffs/decision-15-2026-10-05/m6/model.py` and `mutants.py`
     (`python3 model.py`; `python3 mutants.py`); it is design evidence, not a gate.
   - *Why it replaces the catch-up.* The catch-up computes nothing for a carried node that the
-    predecessor does not. Where it differs it is worse: #1283 D4's zeros-first fill leaves a
+    predecessor does not. Where it differs it is worse: its zeros-first claim-line fill leaves a
     detector hole in a carried effect sidechained from a restarted strip's Input tap, so the
     effect's state jumps at S; and restarted or added chains warm for `S − B` samples, a length
     that depends on wall time, is not reproducible and does not match #1324's reference (a fresh
@@ -259,7 +266,7 @@ when a dependency forces the order, and then sequence the correct solution.
   carried path, and render pays one bounded raw-frame fill (round 1, C2; round 2; round 5). An
   edited or restarted strip takes its D15-9 transition, which no mechanism can avoid.
 - *Issues:* #1285, #1323 (stream A); #1287 and its slices #1320, #1354, #1355, #1358, #1360, #1361,
-  #1396, #1397, #1402 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
+  #1396, #1397, #1402, #1403 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
   planned): #1321, #1322, #1353, #1356, #1357, #1359, #1362.
 
 **D15-9. Transitions for strips whose state cannot continue.**
@@ -466,8 +473,8 @@ automation mask and `AUTOMATION_ENQUEUE`.
   successor's retargets are written once, at preparation (#1277 D5, move mode), and a live edit
   goes to the pending candidate's cells like any other (#1053 D7), so no later write can overwrite
   it.
-- *Issues:* #1313, #1314, #1348, #1349 (stream B); #1360 and #1361 (stream C); the Worker in #1332
-  and #1381 (stream H).
+- *Issues:* #1313, #1314, #1348, #1349 (stream B); #1403, #1360 and #1361 (stream C); the Worker
+  in #1332 and #1381 (stream H).
 
 ### Earlier open questions, answered
 
@@ -565,7 +572,7 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
 
 ### Verification
 
-Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it four times:
+Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it five times:
 
 - **Round 1 (whole record, about 900 anchors): FAIL**, five blockers (an ack lost on the pre-roll
   fallback, a watermark that aliased under supersession, BACKPRESSURE for a live link value, an
@@ -584,16 +591,22 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
   supersession step, the pre-N3 text in #1287 W5 and D15-17, an unpassable #1280 gate, and M6:
   the catch-up computes nothing the predecessor does not), and majors in non-C specs. All were
   folded in.
-- **Round 5 (M6, a design analysis, not a whole-record round):** an extra-high-effort analysis
+- **Round 5 design analysis (M6, not a verifier round):** an extra-high-effort analysis
   confirmed M6 with a standalone model and three mutants. Root amended D15-8 to prime adoption
   (D15-8, "Recorded amendment (round 5)"), which also resolves B1 (floors on carried nodes only,
   with the alignment check), M1 (claim lines carry and fill by L2 and L3, #1402), M2 (no candidate
   is returned), M3 (a warm candidate is superseded through #1310, its step 5 included), M4 (D15-17's
   recorded resolution) and M5 (the copy-mode gate goes with copy mode), and retires seven stream C
   slices.
+- **Round 5 (the prime-adoption fold): PASS-WITH-FIXES**, no blocker. It confirmed M6 and found six
+  majors: an `input`-tap sidechain from a restarted submix whose `Input` stage misses `a(n) + P`
+  (M1), a C1 iteration that sent a limiter on a bus to the whole-mix transition (M2), a ring
+  headroom baseline measured against a default that #1358 grows (M3), a control-plane warm path
+  with no owner or lifecycle (M4), four unpassable gates (M5) and an over-size #1355 (M6), plus
+  minors. All were folded in before merge.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
 passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its
 seams with streams B, D and H. Stream C is now #1287, #1320, #1354, #1355, #1358, #1360, #1361,
-#1396, #1397 and #1402. Its coordinator still runs one fresh design verification of those specs
+#1396, #1397, #1402 and #1403. Its coordinator still runs one fresh design verification of those specs
 before the first implementation slice (`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).

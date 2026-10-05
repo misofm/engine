@@ -53,8 +53,9 @@ never leaves it muted.
   carry slice extends with its family. This is the D15-9 list on the carry rules, and it stays
   correct for any future reason an owner cannot carry. A strip whose owners all carry is never
   ducked; its value changes stay live or carried-then-retargeted (D15-7). A changed route source,
-  tap or destination does not put the source strip in this set (R8: #1283 and #1284 leave it out;
-  #1363 ramps the route itself).
+  tap or destination does not put the source strip in this set (D15-9: a re-pointed route is
+  ramped at route level and never ducks its source strip; #1283 and #1284 leave it out; #1363
+  ramps the route itself).
   - **Sidechain consumers join the set.** A sidechain edge (`GraphEdgeId::EffectSidechain`) has no
     gain lane: the compiler wires the routed sidechain's source tap straight into the effect's
     `SidechainInput` port (`crates/graph-compiler/src/compile.rs:390-416`; the tap's stage,
@@ -64,9 +65,16 @@ never leaves it muted.
     the old chain's output until `S` and the restarted chain's at-rest output after it: a step at the
     swap, even in a plain duck-swap. So the strip that holds the consuming effect joins the set. The
     rule is applied after the carry join and repeated until no strip is added, since a joined strip
-    may itself feed a sidechain; `restarted_strips()` reports the closed set. An `input` tap is
-    the raw source (a track) or the sum of the strip's incoming routes (a submix), which no owner of
-    the restarted strip touches, so it adds nothing. A `post_fader` or `post_pan` tap is exact `+0.0`
+    may itself feed a sidechain; `restarted_strips()` reports the closed set. A track's `input` tap
+    is its raw source, which no owner of the restarted strip touches, so it adds nothing. A
+    submix's `input` tap is the sum of its incoming routes. It adds nothing only while the
+    submix's `Input` stage keeps its place against the consumer: the consumer's sidechain line
+    from it keeps its length (moved by #1283 D2). Under a warm lead `P` that means the stage
+    arrives at exactly its predecessor arrival plus `P` (*Prepare a warm successor whose carried
+    nodes lead the predecessor by P*, #1354 D2 step 6); without one, at its predecessor arrival.
+    This holds for every rebuild, warm or not; #1354 D2 step 4 applies the same check with `P = 0`.
+    If the line changes length, #1283 D4's head-aligned copy breaks the detector's input at `S`,
+    so the consuming strip joins the set. A `post_fader` or `post_pan` tap is exact `+0.0`
     from the end of the duck until the fire (the fader is ducked to a settled `+0.0`, then armed
     muted), so it adds nothing either.
 - **D2. Whole pre-fader restart.** For a duck-swapped strip, preparation marks not carried, after
@@ -166,16 +174,21 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    `k + 1` a transaction adds a compressor insert to B. (a) Every block up to `S` equals a reference
    that live-mutes B at the same point. (b) From `S` on, every block equals a fresh plan of the
    successor session, fed the same source frames, with B muted and live-unmuted with `N` at its
-   first block. (c) The same with a true-peak limiter insert: the fresh plan's unmute lands at
-   block `ceil_q(D)/q`. All bit-identical. (d) The watermark reports the revision with first
-   sample `S` and `MISO_ENGINE_V1_OUTCOME_EXACT` only; `transition_fallback_count` is unchanged.
+   first block. (c) The same with B holding a true-peak limiter insert in A as well, so `D` is
+   the limiter's latency: the fresh plan's unmute lands at block `ceil_q(D)/q`. The compressor
+   adds no latency (`crates/compressor/src/lib.rs:295`), so no node's arrival grows and the edit
+   stays a plain duck-swap after the warm successor lands (*Prepare a warm successor whose
+   carried nodes lead the predecessor by P*, #1354 D2 step 4 returns `Ordinary`); a latency
+   growth on an audible strip is #1397's gate 1. All bit-identical. (d) The watermark reports the
+   revision with first sample `S` and `MISO_ENGINE_V1_OUTCOME_EXACT` only;
+   `transition_fallback_count` is unchanged.
 2. **Only edited strips duck.** A and B audible, B's source fed exact zeros; the gate 1 transaction
    leaves every block equal to a run with no transaction.
 3. **Every trigger ducks.** For each edit (insert added; removed; reordered; an insert's quality;
    `delay_samples`; the true-peak limiter's `lookahead`, which is `AutomationRate::None`,
    `crates/true-peak-limiter/src/lib.rs:198-210`), B's output holds at least `q` consecutive
    exact-zero frames per channel ending at `S`. A value-only fader edit produces no such run, and
-   neither does a re-pointed send from B (R8).
+   neither does a re-pointed send from B (D15-9).
 4. **Whole restart.** In `successor_swap.rs`, at `Backend::Simd8`, `Backend::Simd4` and prepared
    between render calls: a strip whose second insert is replaced has all its pre-fader owners and
    its fader not carried and is armed; an untouched strip carries every owner.
@@ -219,7 +232,8 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
   (it pops in at full gain) turns it red. Gate 1(c): a fade that ignores `D` turns it red.
 - Gate 2: a duck applied to every strip, or an untouched strip restarted, turns it red.
 - Gate 3: an edit kind that restarts an owner without the duck (a step at `S`) turns it red.
-- Gate 3: a re-pointed send that still ducks its source strip (R8) turns its last clause red.
+- Gate 3: a re-pointed send that still ducks its source strip (against D15-9) turns its last
+  clause red.
 - Gate 4: a partial carry upstream of a restarted owner (the hole in D2) turns it red.
 - Gate 5: a pre-fader send carried across the duck-swap (it keeps sending through the dip, then
   steps when the restarted chain behind it emits) or left unarmed turns it red, and so does an `S`

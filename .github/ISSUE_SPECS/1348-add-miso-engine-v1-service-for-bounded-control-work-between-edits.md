@@ -74,17 +74,17 @@ calls the same engine-side step.
 - **D6. Acked-batch question: can an ack ever precede a drop? No.** Service commits nothing and
   acknowledges nothing, and adds no queue. It discards nothing a host was acked for: retired plans
   are already displaced, and a pending candidate is kept (D7).
-- **D7. Pending candidates and the deadline check.** Neither `synchronize_plan_epochs` nor any
-  other part of this step takes a pending candidate: it stays in its cell with its plan, epoch,
-  revision word and retirement credit until render adopts it or the control plane withdraws it
-  (#1311 D2, D6). The only service work on a pending candidate is the warm successor's deadline
-  check: when a `Primed` candidate is still pending `PRIME_DEADLINE_SAMPLES` of render after its
-  publication, the step withdraws it and publishes the transition instead (`Taken` means it was
+- **D7. Pending candidates and the deadline check.** Neither `synchronize_plan_epochs` nor any other
+  part of this step takes a pending candidate: it stays in its cell with its plan, epoch, revision
+  word and retirement credit until render adopts it or the control plane withdraws it (#1311 D2,
+  D6). The only service work on a pending candidate is the warm successor's deadline check: when a
+  `Primed` candidate is still pending `PRIME_DEADLINE_SAMPLES` of render after its `not_before`
+  (#1358 D1), the step withdraws it and publishes the transition instead (`Taken` means it was
   adopted exactly). The check and the fallback belong to *Fall back to the transition when a warm
   successor is not ready by its deadline* (#1358) and *Check the warm-successor deadline in
   miso_engine_v1_service and report its outcome* (#1360); they run inside this step, after
-  `synchronize_plan_epochs`. The revision stays committed, and the watermark (#1314) reports it
-  when render adopts the candidate or its replacement.
+  `synchronize_plan_epochs`. The revision stays committed, and the watermark (#1314) reports it when
+  render adopts the candidate or its replacement.
 - **D8. Counter refresh.** The refresh moves `command`'s `set_telemetry_counters` call
   (`control.rs:850-853`) into service, so every control call runs it. It sets every counter the
   provider serves from a source outside the provider: the controller's telemetry counters today,

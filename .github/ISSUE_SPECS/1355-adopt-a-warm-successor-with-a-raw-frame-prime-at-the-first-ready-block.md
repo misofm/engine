@@ -2,14 +2,18 @@
 
 Stream C of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-8 (round-5 amendment), D15-12, D15-17).
 Slice of *Grow latency during playback by adopting a primed warm successor* (#1287): render's
-readiness check, the move-mode adoption with its prime, and the per-epoch outcome word. Code
-anchors verified on `main` at `6fb211594`.
+readiness check and the move-mode adoption with its prime. The control plane's classification,
+publication and record are *Classify a latency-growth edit and publish its warm successor from the
+control plane* (#1403); the outcome word is *Duck-swap the strips a latency growth restarts, and
+fall back to the transition when a warm successor cannot adopt* (#1397). Code anchors verified on
+`main` at `6fb211594`.
 
 ## Product outcome
 
 In host-core, a structural edit that grows a carried node's latency by up to `P` swaps in with no
 gap and no jump.
-- The warm successor W (#1354) is published `Primed { not_before, lead_blocks }` (#1311).
+- The warm successor W (#1354) is published `Primed { not_before, lead_blocks }` (#1311). The
+  control plane does that in #1403; this slice's tests publish through #1311 D6 directly.
 - Render keeps playing the predecessor A, unchanged, until the first block S at which every source
   W carries has its next `P + q` frames queued and playable (`q` is the quantum).
 - In that block render claims W, adopts it in move mode, and fills the source-claim lines from A's
@@ -63,21 +67,10 @@ gap and no jump.
   - If W is withdrawn, the ring is unconsumed, so it passes *Prepare a successor across a
     withdrawn candidate plan* (#1344) D5 as a donation.
   - An added source is never primed and never flagged.
-- **D3. Publication.** New `crates/host-core/src/warm.rs`:
-  `publish_primed(publisher, candidate, running_sources, candidate_sources, not_before)`.
-  1. It stores `prime_required` (#1320 D4) on every ring the running plan renders: `true` for each
-     ring W carries, `false` for every other. The rings are reached through the providers in W's
-     source control set and in the running epoch's set.
-  2. It then reserves and publishes W with `Primed { not_before, lead_blocks: P / q }`.
-
-  It returns a `PrimedCandidate { epoch, not_before, lead_blocks }` record, which the control
-  plane keeps while W is pending. `not_before` is the `render_clock()` read at publication, unless
-  the edit also ducks strips (*Duck-swap the strips a latency growth restarts, and fall back to the
-  transition when a warm successor cannot adopt*, #1397 D1).
-
-  Control publishes only into an `Empty` cell (#1343 D3), so no `Primed` candidate is `Full` while
-  the flags are written. Render reads them only for a `Full` `Primed` cell, so a stale `true` left
-  by an earlier candidate is never read. The next `Primed` publication rewrites every flag.
+- **D3. Publication is #1403's.** `publish_primed`, the `PrimedCandidate` record and its
+  lifecycle moved to #1403 (D3, D4) in round 5. This slice's gates publish W with #1311 D6's
+  `reserve_replacement(plan, Primed { not_before, lead_blocks: P / q })`, after the test stores
+  `prime_required` (#1320 D4) on each ring W carries and clears it on every other ring A renders.
 - **D4. Readiness, on the active plan, before the claim.** This slice implements #1311 D3's hook
   for the graph plan.
   - For a due `Primed` candidate, render calls `prime_ready(S, lead_blocks)` on the **active**
@@ -110,13 +103,10 @@ gap and no jump.
   - A structural edit supersedes W by #1310, including D5 step 5: `adopt_persisting` returns to
     the running epoch the producers of sources A renders and the superseding plan removed.
   - A host-declared stop supersedes W with a plain rebuild through #1310 (#1323 D2). Its revision
-    completes `EXACT` or `SUPERSEDED`.
-- **D7. Per-epoch outcome word.** #1314 D1's per-epoch revision cell gains a sibling outcome word.
-  - `PlanPublisher::set_outcome(epoch, flags)` writes it before publication. It is `EXACT` unless
-    written.
-  - When render adopts an epoch, the watermark advance it publishes (#1314 D3) ORs in that epoch's
-    word and adds the covered revisions to that word's counter.
-  - A primed adoption leaves `EXACT`. The transition writes `TRANSITION_FALLBACK` (#1397 D2).
+    completes `EXACT`, with `SUPERSEDED` only when W itself folded in earlier revisions (#1323 D4).
+  - #1403 gate 3 checks all three through the control plane.
+- **D7. Outcome.** A primed adoption completes `EXACT`, the watermark's default (#1314 D5). The
+  outcome word and its only non-`EXACT` writer, the transition, are #1397's (round-5 M6).
 - **D8. Acked-batch question.** Render never drops a candidate. It claims W only when ready, and
   until then W stays withdrawable in its cell (#1311 D2). The prime plays only blocks A's consumer
   would have played, and leaves every command queued (#1320 D3). An added ring releases nothing
@@ -126,37 +116,38 @@ gap and no jump.
 ## Deliverables
 
 1. D1 in `crates/host-core/src/prepare.rs`.
-2. D3 in `crates/host-core/src/warm.rs` (new) and `crates/host-core/src/source.rs` (the flag
-   handles of the source control set).
-3. D7 in `crates/engine/src/realtime/plan_exchange.rs` and #1314's `watermark.rs`.
-4. D4 and D5 in `crates/graph/src/lib.rs` (the two driver methods, `GraphExecutor::prime_ready`,
+2. D4 and D5 in `crates/graph/src/lib.rs` (the two driver methods, `GraphExecutor::prime_ready`,
    the prime in the source section) and the source driver's implementations in `crates/source/src/lib.rs`.
-5. Gates 1-4 and 6 in `crates/host-core/tests/warm_successor.rs` (new). Gate 5 in the
-   control-plane unit tests.
+3. Gates 1-6 in `crates/host-core/tests/warm_successor.rs`, which #1354 creates.
 
 ## Authorized paths
 
-- `crates/engine/src/realtime/plan_exchange.rs`, `watermark.rs` (#1314's), `mod.rs` (the outcome
-  word only)
 - `crates/graph/src/lib.rs` (the source section and the two driver methods)
 - `crates/source/src/lib.rs` (`SourceGraphSourceSetDriver`'s two new methods only)
-- `crates/host-core/src/warm.rs` (new), `crates/host-core/src/prepare.rs`,
-  `crates/host-core/src/source.rs`, `crates/host-core/src/lib.rs`
-- `crates/host-core/tests/warm_successor.rs` (new), `crates/control-plane/src/` (gate 5's tests only)
+- `crates/host-core/src/prepare.rs`
+- `crates/host-core/tests/warm_successor.rs` (created by #1354)
 
 ## Non-goals
 
 - Warm preparation and its refusals (#1354). The duck of restarted strips and the transition
   (#1397). The deadline and ring headroom (#1358).
-- Control-plane classification, the C ABI and the browser (#1360, #1361).
+- Control-plane classification, `Primed` publication and the `PrimedCandidate` record (#1403).
+  The outcome word (#1397). The C ABI and the browser (#1360, #1361).
 
 ## Objective gates
 
 Unless a gate says otherwise: A is the two-track fixture of
-`crates/host-core/tests/successor_swap.rs`. Every source is kept queued at least `P + q` frames
-ahead. "Equals A continued" means bit-identical, every block, to A rendered on with no swap and
-the same host commands, timed on the source-read clock. Each gate runs at all four launch rates
-and both bank widths.
+`crates/host-core/tests/successor_swap.rs`. Its caps
+(`crates/host-core/tests/support/successor.rs:33`) give every ring 4,096 frames, below today's
+5,120-frame default at 48 kHz and quantum 128. So every gate sets each source ring explicitly
+through `HostPrepareCaps::source_ring_frames` (`crates/host-core/src/prepare.rs:106`) to
+`stall_ring_frames(fs, q)` (#1354 D1, today's default ring) plus #1286 D3's `P_MAX_SAMPLES(fs)` plus
+`q`. At quantum 128 that is 6,912, 7,296, 12,800 and 14,080 frames at 44.1, 48, 88.2 and 96 kHz
+(4,736 + 2,048 + 128; 5,120 + 2,048 + 128; 9,088 + 3,584 + 128; 9,856 + 4,096 + 128), so #1354 D2's
+headroom check passes at every growth. Every source is kept queued at least `P + q` frames ahead.
+"Equals A continued" means bit-identical, every block, to A rendered on with no swap and the same
+host commands, timed on the source-read clock. Each gate runs at all four launch rates and both bank
+widths.
 
 1. **Added-strip growth.** W adds a muted track with a true-peak limiter insert and silent input.
    The swapped output equals A continued. Block `j` of it also equals block `j + k` of a fresh W
@@ -177,22 +168,29 @@ and both bank widths.
      output is still equal.
    - A `seek_at` anchored inside `[S + O, S + O + P + q)`: adoption waits until after the seek has
      applied, then the output equals A continued with the same seek.
-5. **Edits while pending (control-plane unit test, `test-support`).** W is published with frames
-   withheld.
-   - A live fader edit on track 2 applies at S. The output equals A with the same value written to
-     A's cell just before block S.
-   - A structural edit that removes carried source `c` supersedes W. Its adoption reports
-     `EXACT | SUPERSEDED`. Until then, `c`'s producer is back in the running epoch, its submits are
-     accepted, and A plays them without underrun.
-   - A declared stop supersedes W, and the revision completes `EXACT | SUPERSEDED`.
-6. **Realtime.** Every pending block's readiness check and an adoption block with a prime at
-   `ΣP + P` equal to *Record the swap block's cost on the 64-track console* (#1286) D3 item 1's
-   `P_MAX_SAMPLES` (four true-peak-limiter growths, computed in the test) make zero allocations and
-   frees on the render thread (`bench_support::alloc`'s current-thread counters). Locks and syscalls
-   are checked by the realtime policy scripts on these functions and by #1360 D6's `audit capi` leg.
+5. **`input`-tap sidechain from a restarted submix at exactly `a + P`.** Tracks 1 and 2 route to
+   submix B. B and track 3 route to the output. Track 3 carries a compressor whose routed sidechain
+   reads B's `input` tap. Tracks 1 and B are muted in the model, and A has no latency anywhere. The
+   edit inserts a true-peak limiter on track 1 and a compressor (zero latency,
+   `crates/compressor/src/lib.rs:295`) on B, which restarts tracks 1 and B. Track 2 is carried at
+   `a + P`, so B's `Input` stage arrives at exactly `a + P` (#1354's check), and track 3 stays
+   carried. The output equals A continued. (#1354 gates the `g < P` case, which restarts track 3.)
+6. **Realtime.** Every pending block's readiness check, and the adoption block of a fourth growth
+   whose `ΣP + P` equals #1286 D3 item 1's `P_MAX_SAMPLES(fs)`, make zero allocations and frees on
+   the render thread (`bench_support::alloc`'s current-thread counters). Locks and syscalls are
+   checked by the realtime policy scripts on these functions and by #1360 D6's `audit capi` leg.
+   - The four growths are #1286 D1's growth chain, the one construction: growth `j` (1 to 4) adds
+     to track 1 one true-peak limiter (`L = fs / 100 + 6`,
+     `crates/true-peak-limiter/src/lib.rs:236-242`) plus `c(fs)` soft clippers (31 samples,
+     `crates/soft-clip/src/lib.rs:178`), with `c` = 2, 0, 0 and 1 at 44.1, 48, 88.2 and 96 kHz.
+     A has no latency, so track 1 arrives at `j · (L + 31c)` (`j ·` 509, 486, 888 and 997), each
+     growth has `P = ceil_q(L)` (512, 512, 896 and 1,024), and `ΣP` after the fourth is 2,048,
+     2,048, 3,584 and 4,096, which is `P_MAX_SAMPLES(fs)`. #1286 D1's table shows the arithmetic
+     per rate and why no other `c` works (track delay cannot pad an arrival,
+     `crates/graph-compiler/src/pdc.rs:12-17`). The test asserts that `ΣP` equals
+     `P_MAX_SAMPLES(fs)` first; a mismatch fails it.
 7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support --test warm_successor`
-   - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `cargo test --locked -p graph --features graph/test-support`, `cargo test --locked -p source`
    - `cargo test --locked -p engine --features realtime-audit`, `cargo test --locked -p capi`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh`,
@@ -205,15 +203,16 @@ and both bank widths.
 - Gate 1: an adoption that does not read sources at `S + O + P`, or a prime that leaves `+0.0` in
   the claim lines, repeats or gaps `P` frames. Red.
 - Gate 2: claim lines re-created at rest by the ordinary rebuild, or a second prime that fills
-  only the new `P`, drops `ΣP` frames. Red. The zeros-first fill (pending frames behind zeros)
-  and a grown line left at rest each diverge first at block S; that is recorded red once on each
-  mutant as PR evidence.
+  only the new `P`, drops `ΣP` frames. Red. #1283 D4's fill of a grown line (A's pending frames at
+  the head, then `+0.0` where the prime belongs) and a grown line left at rest each diverge first
+  at block S; that is recorded red once on each mutant as PR evidence.
 - Gate 3: an `Input`-tap sidechain line filled with zeros instead of A's pending frames and the
   prime puts a hole in track 2's detector, so its gain steps at S. Red.
 - Gate 4: a check that claims before every ring is ready underruns in the prime; one that ignores
   the held seek primes across it. Red.
-- Gate 5: a supersession that drops W's producers with W leaves `c` with no producer, so its
-  submits are refused and A underruns. Red.
+- Gate 5: a C1 that restarts the consumer of every restarted submix's `input` tap ducks track 3;
+  a sidechain line from B's `Input` stage, or track 2's line into it, re-created at rest instead
+  of moved puts a hole in track 3's detector at S. Red.
 - Gate 6: a prime that stages blocks in a buffer allocates on render. Red.
 
 ## Dependencies
@@ -233,4 +232,4 @@ and both bank widths.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277), D5.
 - *Carry meter and effect observation state across a plan swap* (#1327).
 - *Carry spectrum capture state across a plan swap* (#1395).
-- *Reset latency floors at a host-declared discontinuity* (#1323), D2.
+- *Reset latency floors at a host-declared discontinuity* (#1323), D2: the rule D6 cites.

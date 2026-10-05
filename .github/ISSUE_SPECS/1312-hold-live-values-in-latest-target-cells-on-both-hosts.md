@@ -17,9 +17,9 @@ This is the first slice of D15-2: the strip fader/mute and matrix/pan lanes, and
 primitive. The remaining cell slices reuse the primitive and the counter: *Hold effect parameter,
 bypass and EQ-target values in latest-target cells* (#1345), *Hold strip input-lane values in
 latest-target cells* (#1346) and *Hold route-lane values in latest-target cells* (#1347). Under
-R10 the browser status field and the cross-host agreement test are split out into the
-successor *Report live_values_superseded in the browser status and prove both hosts drain strip
-cells alike* (#1399).
+AGENTS.md's half-day rule, the browser status field and the cross-host agreement test are split
+out into the successor *Report live_values_superseded in the browser status and prove both hosts
+drain strip cells alike* (#1399).
 
 ## Context
 
@@ -75,7 +75,7 @@ cells alike* (#1399).
     writer is writing. Render reads the newest completed write in one pass: no retry, no spin, no
     skip.
   - A write that completes before a block's drain begins is applied in that block. That is D15-2
-    condition 2 and the ack meaning of R1.
+    condition 2 and D15-2's ack meaning.
   - **Peek (carry only):** `peek_unread(&self) -> Option<(words, sequence)>` returns the `middle`
     slot's words and sequence when `middle` has `FRESH`, and `None` otherwise. It changes nothing:
     `middle`, the front index, the last applied sequence and the dirty word stay as they were, so
@@ -115,8 +115,8 @@ cells alike* (#1399).
   The browser's status field is #1399's.
 - **D9. Ack meaning (unchanged bytes).** Header text: a committed live value reaches render no
   later than the first block whose render call begins after the submit returns, or, while a
-  successor is pending, at its adoption, which the watermark reports (R1); a later value for the
-  same lane committed before that block replaces it, and `LIVE_VALUES_SUPERSEDED` counts it. The
+  successor is pending, at its adoption, which the watermark reports (D15-2, D15-17); a later
+  value for the same lane committed before that block replaces it, and `LIVE_VALUES_SUPERSEDED` counts it. The
   16-value room and the backpressure string are removed for fader, mute and pan or matrix; effect
   lanes keep theirs until #1345.
 - **D10. FIFO stays FIFO.** Effect records (including `Observe`), input records, route records,

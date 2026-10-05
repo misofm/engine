@@ -204,7 +204,8 @@ and SDK are the rewritten slices #1293-#1297.
    and the spectrum read returns no `Failed` epoch and no sequence gap.
 8. **Realtime.** Integration test binary `hosts/host-web/tests/structural_apply_realtime.rs`.
    Decision 15 rules that host-web's native allocation-count gates live in an integration binary,
-   never in `src/tests.rs`, which already registers a `#[global_allocator]`. It links
+   never in the lib's unit tests, whose test build already registers a `#[global_allocator]`
+   (`hosts/host-web/src/ffi.rs:4540`, in `live_response_ffi_tests`). It links
    `bench_support::alloc`, calls `assert_installed()` first, and runs the scripts of gates 1, 2
    and 4 through the test-support halves (#1381). The render thread's thread-scoped counters read
    `allocations == 0 && frees == 0` around every render call, after warm-up. Every retired plan

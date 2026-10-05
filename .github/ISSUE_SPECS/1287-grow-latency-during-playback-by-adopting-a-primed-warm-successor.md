@@ -55,7 +55,8 @@ rules are *Carry source-claim lines across a plan swap and fill a grown line for
   passed to the executor as `RenderTime` (`:943`). *Give a plan a source-read clock that leads its
   render clock* (#1396) adds the source-read offset `O`.
 - **Ring headroom.** `default_source_ring_frames` (`crates/host-core/src/prepare.rs:65`) is 100 ms
-  (`SOURCE_STALL_TOLERANCE_MS`, `:57`) plus two quanta.
+  (`SOURCE_STALL_TOLERANCE_MS`, `:57`) plus two quanta. #1354 D1 names that body
+  `stall_ring_frames`, the baseline a warm successor's ring headroom is measured above.
 
 ## The lemma (binding on every slice)
 
@@ -77,20 +78,31 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
 **Conditions.** Each holds exactly, or the edit takes the counted transition.
 - **C1 (alignment).** `a'(n) = a(n) + P` for every `n` in C, checked at preparation. Floors are
   lower bounds (#1285 D1), so a node can arrive later than its floor. If one does, preparation
-  restarts that node's strip whole (every node of the strip joins R), recomputes `Δ` over the new
-  C, and checks again. It iterates until C1 holds or a misaligned node cannot be restarted: the
-  output, which a submix whose growth reaches the output misaligns. Then preparation returns
-  `WarmUnavailable::Misaligned` and the edit takes the transition. Latency growth on a submix that grows the output is
-  never warm-exact in any design: its carried inputs arrive `P` later, so its output grows by `P`
-  plus its own growth. A growth that the restarts confine to R leaves `Δ = 0`: the edit is then an
-  ordinary rebuild that duck-swaps those strips, not a transition.
+  restarts strips whole (every node of a restarted strip joins R), recomputes `Δ` over the new C,
+  and checks again:
+  - if the late node's input comes through an R or N strip whose `Input` stage is held later than
+    its floor by carried feeders (which arrive at their lead), it restarts those feeders whole,
+    recursively through every feeder that is a submix, so that `Input` stage falls back to `a(n)`;
+  - otherwise it restarts the late node's own strip whole.
+
+  It iterates until C1 holds. Only if every strip that reaches the output would restart does
+  preparation return `WarmUnavailable::Misaligned`, and the edit takes the transition, which gives
+  that same audio. So a latent insert added on a submix (a limiter on a bus) is warm-exact: its
+  carried feeders restart with it and duck-swap (W9), and every other path, the output included,
+  stays exact. A
+  growth that the restarts confine to R leaves `Δ = 0`: the edit is then an ordinary rebuild that
+  duck-swaps those strips, not a transition.
 - **C2 (isolation).** Every edge from R or N into C carries exact `+0.0` over `[S, fire)`: fader
   and post-fader paths, ducked routes (#1324, #1391, #1363), armed fades (#1288). An
   `EffectSidechain` edge has no gain lane, so the tap decides, exactly as #1324 D1's rule: a
   sidechain from an R strip's `post_input`, `insert_send`, `insert_return` or `pre_fader` tap puts
-  the consuming strip in R (repeated until no strip joins). An `input` tap (a track's raw source,
-  whose line L3 fills, or a submix's sum of incoming routes) and a `post_fader` or `post_pan` tap
-  (exact `+0.0` from the duck's end to the fire) keep the consumer in C.
+  the consuming strip in R (repeated until no strip joins). A track's `input` tap (its raw source,
+  whose line L3 fills) and a `post_fader` or `post_pan` tap (exact `+0.0` from the duck's end to
+  the fire) keep the consumer in C. A restarted submix's `input` tap (the sum of its incoming
+  routes) keeps the consumer in C only if that submix's `Input` stage arrives at exactly
+  `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354 D2 step 4).
+  If it arrives at `a(n) + g` with `g ≠ P`, every carried line into that stage and the sidechain
+  line out of it change length by `P - g` samples, so the consuming strip joins R.
 - **C3 (bounds).** `ΣP + P <= P_MAX` and the prime's bytes `<= PRIME_BYTES_MAX`, else the
   transition (`WarmUnavailable::LeadBound`, `WarmUnavailable::PrimeBudget`).
 - **C4 (readiness).** Render checks it on the **active** plan's consumers before it claims: `S >=
@@ -109,7 +121,7 @@ render sample `r`. At S it is filled with the last `λ'` samples of `[A's λ pen
 The prime is `k` consumer blocks at source-read `S + O + j·q`, `j = 0, ..., k - 1`, on A's own
 schedule, read without observing new commands.
 - C lines (`λ' = λ + P`): the emission equals A's. The order is A's pending at the read end, then
-  the prime. This is **not** #1283's zeros-first order.
+  the prime. #1283 D4's head-aligned copy would put `+0.0` where the prime goes.
 - R lines (`λ' = λ`): the shifted fill.
 - N lines: `+0.0` at the head only when `λ' > P`, behind the arm.
 - With `P = 0` and equal lengths (every ordinary rebuild), L2 is the move: swap the rings and the
@@ -140,8 +152,8 @@ during the adoption callback is observed at block S on the new clock.
 ## Mechanism (binding on every slice)
 
 - **W1. Preparation.** Submit prepares W with the lemma's floors, checks C1 with the strip-restart
-  iteration, checks C2 and C3, and publishes `Primed { not_before, lead_blocks }` (#1311). It
-  never waits for render.
+  iteration, checks C2 and C3, and publishes `Primed { not_before, lead_blocks }` (#1311, #1403).
+  It never waits for render.
 - **W2. Prime adoption.** While a `Primed` candidate is pending, render runs C4 before it claims.
   It reads per-ring `prime_required` atomics, which control stores before the `Release` that
   publishes. Once ready, it claims and adopts in move mode in the same block. Then, in the source
@@ -158,8 +170,8 @@ during the adoption callback is observed at block S on the new clock.
   (*Supersede an unadopted candidate plan by compare-and-swap*, #1310, including its D5 step 5,
   `adopt_persisting`). A host-declared stop supersedes it with a plain rebuild through #1310
   (#1323). Its revision completes `exact` or `superseded`.
-- **W5. Observers.** Meters, observation taps and spectrum captures carry by move (#1327, #1395).
-  A warm successor whose observers are not carried is never adopted.
+- **W5. Observers.** Meters, observation taps and spectrum captures carry by move (#1327, #1395):
+  observers carry by #1327 D1's keys, in a warm adoption as at any swap.
 - **W6. Fallback.** The transition is the only fallback, counted `TRANSITION_FALLBACK` and
   reported through the watermark's `transition_fallback` flag (#1314). It runs on
   `WarmUnavailable` at submit, or when C4 is still unmet `PRIME_DEADLINE_SAMPLES` of render after
@@ -216,7 +228,8 @@ host-core join are *Carry source-claim lines across a plan swap and fill a grown
 - No claim-line carry, fill routine or host-core join (#1402).
 - No `warm_lead`, no C1 iteration and no `WarmUnavailable` (#1354): gate 1 passes the lemma's floor
   map to the compiler directly.
-- No readiness check, `prime_block_at`, `Primed` publication or adoption (#1320, #1311, #1355).
+- No readiness check, `prime_block_at`, `Primed` publication or adoption (#1320, #1311, #1403,
+  #1355).
 - No duck-swap or fallback (#1397, #1358).
 
 ## Hazards
@@ -281,13 +294,16 @@ Every slice must also keep zero allocations, frees and syscalls on render.
    over C, the C1 iteration, C2's sidechain restart, C3 and `WarmUnavailable`.
 5. *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): W2, `Primed`,
    the source-read offset `O + P`, and the render-level gates (including the render-level M1).
-6. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+6. *Classify a latency-growth edit and publish its warm successor from the control plane*
+   (#1403): classification with an injected `WarmConfig`, `publish_primed` and the
+   `PrimedCandidate` record.
+7. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
    successor cannot adopt* (#1397): W9 and W6's `fall_back_to_transition`.
-7. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7,
+8. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7,
    `PRIME_DEADLINE_SAMPLES` and the ring headroom.
-8. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
-9. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
-   (#1361).
+9. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
+10. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
+    (#1361).
 
 `P_MAX` and `PRIME_BYTES_MAX` come from *Record the swap block's cost on the 64-track console*
 (#1286). *Adopt a successor plan no earlier than a scheduled sample* (#1311) adds the `Primed`

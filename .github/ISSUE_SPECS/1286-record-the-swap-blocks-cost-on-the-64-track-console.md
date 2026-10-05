@@ -41,7 +41,18 @@ whole-bank move (#1269, Deferred) earns a brief.
   run on silence would time the fast path. The tone is `source_block(track, false)` (`:2046`).
 - The default source ring is `ceil(100 ms · fs / quantum) + 2` quanta
   (`default_source_ring_frames`, `crates/host-core/src/prepare.rs:65-77`;
-  `SOURCE_STALL_TOLERANCE_MS`, `:57`).
+  `SOURCE_STALL_TOLERANCE_MS`, `:57`). *Prepare a warm successor whose carried nodes lead the
+  predecessor by P* (#1354) D1 names that body `stall_ring_frames(fs, q)`, and #1358 D2 makes the
+  default `stall_ring_frames(fs, q) + P_MAX_SAMPLES(fs) + q`. A host sets the ring itself with
+  `HostPrepareCaps::source_ring_frames` (`crates/host-core/src/prepare.rs:106`).
+- **Rounding slack carries.** `Δ` is taken against the floored arrivals `a(n)` of the previous
+  growth, so `ΣP` after `j` growths is `ceil_q` of track 1's natural arrival, not the sum of each
+  growth's `ceil_q`. With the true-peak limiter alone (`L = 966` at 96 kHz), four limiters arrive at
+  3,864 and the growths are 1,024, 1,024, 896 and 1,024: `ΣP = 3,968`, short of
+  `P_MAX_SAMPLES = 4,096` (at 44.1 kHz the same chain gives 1,792 against 2,048). The soft clipper
+  (`miso.soft-clip`) declares 31 samples at every rate (`crates/soft-clip/src/lib.rs:178`), and
+  its latency counts in PDC. A track's `delay_samples` does not
+  (`crates/graph-compiler/src/pdc.rs:12-17`), so it cannot pad an arrival.
 - **Prime adoption** (D15-8 (round-5 amendment)). A warm successor is published `Primed`. Render
   adopts it at the first block at or after `not_before` whose readiness check passes, and in that
   block each carried source consumer replays its next `k = P / q` blocks (`prime_block_at`, #1320)
@@ -62,12 +73,38 @@ whole-bank move (#1269, Deferred) earns a brief.
   - Session A is the 64-track fixture at 96 kHz. Session B is A plus one muted track whose ID sorts
     first, on an existing source, so every bank shifts a lane: the worst carry shape for lane
     copies.
-  - Sessions `C_1` to `C_4`: `C_j` is A plus `j` instances, in series on track 1, of the launch
-    native effect whose latency is `L_max(96 kHz)` (D3 item 1; the true-peak limiter unless the
-    record finds a larger one). Each step `C_(j-1) -> C_j` is a warm growth of
-    `P = ceil_q(L_max)`: track 1 is restarted, every other node is carried at `a(n) + P` (C1 holds,
-    because the floor dominates every other node's arrival), and `ΣP` after `C_j` is
-    `j · ceil_q(L_max)`, so `C_4` reaches `P_MAX_SAMPLES(96 kHz)`.
+  - **The growth chain (the one construction; #1355 gate 6 uses it at every rate).** Let
+    `L = L_max(fs)` (D3 item 1; the true-peak limiter's `fs/100 + 6`,
+    `crates/true-peak-limiter/src/lib.rs:236-242`, unless the record finds a larger one),
+    `K = ceil_q(L)`, and `u = L + 31 · c(fs)`, where `c(fs)` soft clippers (31 samples at every
+    rate, `crates/soft-clip/src/lib.rs:178`) pad one limiter. Growth `j` (1 to 4) adds one limiter
+    and `c(fs)` soft clippers in series on track 1, so track 1 arrives at `j · u`. Every growth is
+    then a warm growth of `P = K` and `ΣP` after growth `j` is `j · K` exactly when
+    `ceil_q(j · u) = j · K` for `j = 1..4`, that is when `K − q/4 < u <= K`. `c(fs)` is the
+    smallest count that meets it:
+
+    | fs | `L` | `K` | `c` | `u` | `j · u` (j = 1..4) | `ceil_q` | `ΣP` after 4 = `P_MAX_SAMPLES` |
+    |---|---|---|---|---|---|---|---|
+    | 44.1 kHz | 447 | 512 | 2 | 509 | 509, 1,018, 1,527, 2,036 | 512, 1,024, 1,536, 2,048 | 2,048 |
+    | 48 kHz | 486 | 512 | 0 | 486 | 486, 972, 1,458, 1,944 | 512, 1,024, 1,536, 2,048 | 2,048 |
+    | 88.2 kHz | 888 | 896 | 0 | 888 | 888, 1,776, 2,664, 3,552 | 896, 1,792, 2,688, 3,584 | 3,584 |
+    | 96 kHz | 966 | 1,024 | 1 | 997 | 997, 1,994, 2,991, 3,988 | 1,024, 2,048, 3,072, 4,096 | 4,096 |
+
+    `c = 0` fails at 44.1 kHz (`u = 447 <= 480`) and at 96 kHz (`u = 966 <= 992`); `c = 3` at
+    44.1 kHz and `c = 2` at 96 kHz exceed `K` (540 and 1,028). The `Δ` of each step against the
+    previous floored arrival lies in `(K − q, K]` (at 96 kHz: 997, 970, 943 and 916), so each `P`
+    is `K`. If the record finds a larger `L_max`, it recomputes `c(fs)` by the same rule and states
+    it. A has no latency anywhere (its console EQ and compressor declare 0,
+    `crates/parametric-eq/src/lib.rs:652`, `crates/compressor/src/lib.rs:295`), so these are the
+    arrivals.
+  - Sessions `C_1` to `C_4`: `C_j` is A after growths 1 to `j` of the chain at 96 kHz (one limiter
+    and one soft clipper each). Each step `C_(j-1) -> C_j` restarts track 1 and carries every
+    other node at `a(n) + P` (C1 holds, because the floor dominates every other node's arrival),
+    and `C_4` reaches `P_MAX_SAMPLES(96 kHz) = 4,096`.
+  - Every source ring is set explicitly through `HostPrepareCaps::source_ring_frames` to
+    `stall_ring_frames(96 kHz, 128) + P_MAX_SAMPLES(96 kHz) + 128 = 9,856 + 4,096 + 128 = 14,080`
+    frames, so each growth has #1354 D2 step 7's headroom whether or not #1358 has changed the
+    default; a default ring before #1358 would make every growth `LeadBound`.
   - All sessions are prepared through host-core as the C ABI prepares them, with live lanes; each
     `C_j` through #1354's warm preparation, with a `WarmConfig` whose `prime_bytes_max` is
     unbounded, since this run is what sets it.
@@ -102,15 +139,19 @@ whole-bank move (#1269, Deferred) earns a brief.
   3. **`PRIME_BYTES_MAX`.** `β = (a_P − o) / b_P` is the adoption's extra time per prime byte, with
      the swap's and the prime's fixed costs charged to the bytes, so a prime larger than `b_P` is
      not under-estimated.
-     - Native row: the adoption block fits one quantum when `o + β · b <= D`, so
-       `b_native = floor((D − o) / β)`.
+     - **Margin.** The adoption block may use at most `m = 0.7` of its quantum, the release
+       gate's callback ceiling (*026 End-to-end release, performance, and listening
+       qualification*, #26: P99.99 callback time below 70% of the quantum). The rest is the
+       host's own work and the scheduler's jitter, which this bench does not time.
+     - Native row: the adoption block fits when `o + β · b <= m · D`, so
+       `b_native = floor((m · D − o) / β)`.
      - Browser row: the browser's ordinary block takes `1 / h` of its quantum at `fs_h` (#1331 D7).
        Taking the native ratio `(o + β · b) / o` of the adoption block to the ordinary block as the
-       browser's, the adoption block fits its quantum when `(o + β · b) / o <= h`, so
-       `b_browser = floor((h − 1) · o / β)`. The record states this ratio assumption. A byte count
-       does not depend on the rate, so no rate conversion enters this row.
-     - `PRIME_BYTES_MAX = min(b_native, b_browser)`. If it is below `b_P`, or `h <= 1`, the
-       measured `P_MAX` prime does not fit one quantum on that row: the record says so and derives
+       browser's, the adoption block fits when `(o + β · b) / o <= m · h`, so
+       `b_browser = floor((m · h − 1) · o / β)`. The record states this ratio assumption. A byte
+       count does not depend on the rate, so no rate conversion enters this row.
+     - `PRIME_BYTES_MAX = min(b_native, b_browser)`. If it is below `b_P`, or `m · h <= 1`, the
+       measured `P_MAX` prime does not fit the margin on that row: the record says so and derives
        no value, and the slice that writes it stops for an owner ruling. (Scaling down from `b_P`
        would charge the fixed costs too little.)
      - The estimate for the 64-track console at 96 kHz is about 512 KiB for the first growth and up
@@ -158,7 +199,8 @@ whole-bank move (#1269, Deferred) earns a brief.
 
 1. The preflight passes. The self-test, without timing, renders A and B through one move swap,
    and one cycle A → `C_1` → … → `C_4` through four primed adoptions: each adoption happens at its
-   `not_before` block with `carry == Carried`, `C_4`'s `ΣP` equals `P_MAX_SAMPLES(96 kHz)`, and
+   `not_before` block with `carry == Carried` and `P == ceil_q(L_max)`, `C_4`'s `ΣP` equals
+   `P_MAX_SAMPLES(96 kHz)`, and
    every block has a nonzero output peak.
 2. The validator refuses:
    - a record with a missing distribution or a missing D3 value;

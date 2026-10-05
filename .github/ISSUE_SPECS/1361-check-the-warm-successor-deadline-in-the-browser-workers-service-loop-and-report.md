@@ -21,8 +21,8 @@ cross-origin isolation.
   `miso_engine_web_v1_service` export (D5) and the service loop in both modes (D6), which calls
   `SessionState::service`.
 - *Replace the running browser session in the Rust host* (#1290): the browser's structural apply is
-  `control_plane::SessionState`'s transaction apply, so classification is #1360 D1 with no
-  browser-specific code.
+  `control_plane::SessionState`'s transaction apply, so classification is #1403 D2 with the
+  `WarmConfig` of #1360 D1, with no browser-specific code.
 - *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360) D2
   adds the deadline check to `SessionState::service`, so the browser's service loop runs it with no
   browser-specific engine code.
@@ -41,8 +41,9 @@ cross-origin isolation.
 
 ## Decisions frozen for this slice
 
-- **D1. One path in both modes.** The browser classifies, publishes `Primed` and checks the
-  deadline exactly as the C ABI does (#1360 D1-D2), through `SessionState`. The warm path has no
+- **D1. One path in both modes.** The browser classifies (#1403 D2, with the `WarmConfig` of
+  #1360 D1), publishes `Primed` (#1403 D3) and checks the deadline (#1360 D2) exactly as the C ABI
+  does, through `SessionState`. The warm path has no
   page-mode choice: isolated and non-isolated pages take the same path. A non-isolated page runs
   the same step from its single-mode service tick (#1381 D6).
 - **D2. Render does the adoption.** The readiness check, the claim and the raw-frame prime run in
@@ -58,7 +59,13 @@ cross-origin isolation.
 1. The native test binary `hosts/host-web/tests/latency_growth.rs` (new) for gate 3.
 2. One browser qualification case per page mode for gates 1 and 2, in
    `hosts/host-web/qualification/`, each with a red mutation in `mutate()`.
-3. Any browser wiring that D1 finds missing in `hosts/host-web/src/`.
+3. One wiring change in `hosts/host-web/src/`: where the browser host builds its
+   `control_plane::SessionState` (#1290), it sets #1403 D1's `warm` field to the production
+   `WarmConfig` (#1360 D1) for the session's rate and quantum, the same value the C ABI injects.
+   Gates 1 and 2 are red without it. This slice adds no other browser wiring: a missing piece of
+   the classification, the publication, the deadline step, the prime, the service loop or the
+   status words is a defect of its owner (#1403, #1360, #1355, #1381, #1349), and this slice stops
+   and reports it.
 
 ## Authorized paths
 
@@ -112,6 +119,7 @@ cross-origin isolation.
 ## Dependencies
 
 - *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
+- *Classify a latency-growth edit and publish its warm successor from the control plane* (#1403).
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).
 - *Swap and retire browser plans through the Worker's service loop* (#1381).

@@ -18,19 +18,22 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Start immediately (no file conflicts): A's #1300, B's #1309, E's #1055, G's #1328, H's #1331
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
-  and #1381, and round 5 split #1287's first slice (the claim-line carry and fill went to #1402).
-  The verifiers still flagged #1280, #1316, #1325, #1332, #1333, #1334 and #1363 as tight; their
-  stream coordinator splits any that does not fit half a day before implementation (AGENTS.md).
+  and #1381, and round 5 split #1287's first slice (the claim-line carry and fill went to #1402) and #1355
+  (the control plane's classification, publication and record went to #1403).
+  The verifiers still flagged #1280, #1316, #1320, #1325, #1332, #1333, #1334, #1354, #1358, #1363
+  and #1397 as tight; their stream coordinator splits any that does not fit half a day before
+  implementation (AGENTS.md). #1358 splits most easily into its default ring with the pins outside
+  host-core, and the deadline step.
 - **Stream C design gate.** Every adversarial round from round 2 on found new defects in the warm
   successor, and round 5 replaced its design with prime adoption (decision 15, "Verification";
   D15-8 (round-5 amendment)). Before its first implementation slice, stream C's coordinator runs
   one fresh opus-xhigh design verification of #1287, #1320, #1354, #1355, #1358, #1360, #1361,
-  #1396, #1397 and #1402 together, and folds every BLOCKER and MAJOR into the specs (and GitHub)
+  #1396, #1397, #1402 and #1403 together, and folds every BLOCKER and MAJOR into the specs (and GitHub)
   first.
 - Critical path: S0, then B #1309, then B #1312 (cells) and #1343, then A's carry slices (#1277 onward)
   and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
   slices that write into them (#1312 before #1277, #1345 before #1280). Inside C: #1287, then
-  #1402 and (after D #1324) #1354, then #1355, then #1397; A's #1286 measures on #1355, and
+  #1402 and (after D #1324) #1354, then #1355, then #1403, then #1397; A's #1286 measures on #1355, and
   #1358 and #1360 take its constants, so #1361 comes last.
 - Umbrellas (no stream; root keeps them current): #1269 *Swap a rebuilt plan without an audio gap*
   and #1053 *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
@@ -46,6 +49,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | File | Order |
 |---|---|
 | `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1358) → F |
+| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → B (#1315, #1345) → G (#1339, #1340, #1377, #1378); F #1306 after B #1345, either order with G, the second rebases |
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | J #1330 → G #1377 |
@@ -55,7 +59,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319, #1343, #1344) → C (#1320, #1355) |
 | `crates/host-core/src/transition.rs` | D (#1325, #1324) → C #1397 |
 | `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371 |
-| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1355, #1397, #1358, #1360) → F → H #1381 |
+| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371 |
 | `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
@@ -138,7 +142,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 ## Stream C
 
 - **Coordinator scope:** Latency growth by prime adoption (D15-8 (round-5 amendment)): lead floors and source-claim lines, their carry and fill, the source-read clock, the readiness check and raw-frame prime, warm preparation, adoption at the first ready block, the duck-swap of restarted strips, the transition fallback and its deadline, and the service wiring on both hosts. There is no off-thread executor, catch-up, peek pool, copy-mode carry or render-thread pre-roll.
-- **Owns:** `crates/source` readiness and prime (#1320) and the source driver's two prime methods (#1355), after B's #1316-#1319, #1343, #1344, #1350; `crates/engine/src/realtime/spsc.rs` `peek` only (#1320); `crates/engine/src/realtime` source-read clock (#1396) and per-epoch outcome word (#1355), after #1310, #1311, #1314, #1343; host-core warm-successor code (`crates/host-core/src/warm.rs`, new) and its rows in `prepare.rs`, `source.rs` and `transition.rs` (`grown_strips`, #1397), after streams A and D; the control-plane growth path and service step (#1355 tests, #1358, #1360, #1397); `crates/capi` and `tools/audit/src/capi.rs` for #1360; `hosts/host-web` for #1361. #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285; #1402 edits `crates/graph` and `prepare.rs` after #1283.
+- **Owns:** `crates/source` readiness and prime (#1320) and the source driver's two prime methods (#1355), after B's #1316-#1319, #1343, #1344, #1350; `crates/engine/src/realtime/spsc.rs` `peek` only (#1320); `crates/engine/src/realtime` source-read clock (#1396), after #1310, #1311, #1314, #1343; host-core warm-successor code (`crates/host-core/src/warm.rs`, new) and its rows in `prepare.rs`, `source.rs` and `transition.rs` (`grown_strips`, #1397), after streams A and D; the control-plane growth path and service step (#1355 tests, #1396's declaration term, #1403, #1358, #1360, #1397); `crates/capi` and `tools/audit/src/capi.rs` for #1360, with `docs/C_ABI_V1_QUALIFICATION.md`; the source-report assertions in `crates/host-core/tests/` and `crates/capi/tests/`, and `Cargo.lock`, for #1320; `crates/host-core/tests/source_read_clock.rs` (new) for #1396; `hosts/host-web` for #1361. By named exception in stream H's files, for #1358's ring rule only: `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance`), `tools/parameter-metadata/src/abi_layout.rs` and `tools/parameter-metadata/tests/abi_layout.rs`, `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`, `sdk/src/core/abi.ts` (`defaultSourceRingFrames`), the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`, and the qualification record's ring label in `hosts/host-web/qualification/{qualification.js,run.mjs,generate-matrix.mjs}`; `crates/capi/src/runtime/tests.rs` (B's) for the same assertions. #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285; #1402 edits `crates/graph` and `prepare.rs` after #1283.
 - **Depends on:** A (#1277, #1283, #1285, #1286, #1323, #1327, #1395), B (#1309, #1310, #1311, #1313, #1314, #1316, #1318, #1319, #1343, #1344, #1348, #1349, #1351, #1398), D (#1288, #1324, #1325), and for #1361 H (#1290, #1293, #1294, #1331, #1332, #1333, #1381).
 - **Parallel-safe with:** E, F, G, J.
 
@@ -148,12 +152,13 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 2 | #1402 | Carry source-claim lines across a plan swap and fill a grown line for a prime | #1287 | #1283, #1285 |
 | 3 | #1396 | Give a plan a source-read clock that leads its render clock | — | #1316, #1323 |
 | 4 | #1320 | Let a source consumer check and replay its next blocks for a prime | — | #1316, #1318, #1319 |
-| 5 | #1354 | Prepare a warm successor whose carried nodes lead the predecessor by P | #1287, #1396 | #1277, #1285, #1324 |
+| 5 | #1354 | Prepare a warm successor whose carried nodes lead the predecessor by P | #1287, #1396, #1402 | #1277, #1285, #1324 |
 | 6 | #1355 | Adopt a warm successor with a raw-frame prime at the first ready block | #1287, #1320, #1354, #1396, #1402 | #1277, #1310, #1311, #1314, #1323, #1327, #1343, #1344, #1395 |
-| 7 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt | #1354, #1355, #1396 | #1288, #1311, #1314, #1324, #1325, #1343, #1344, #1398 |
-| 8 | #1358 | Fall back to the transition when a warm successor is not ready by its deadline | #1354, #1355, #1396, #1397 | #1286, #1314, #1343 |
-| 9 | #1360 | Check the warm-successor deadline in miso_engine_v1_service and report its outcome | #1354, #1355, #1358, #1397 | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1398 |
-| 10 | #1361 | Check the warm-successor deadline in the browser Worker's service loop and report its outcome | #1355, #1360 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
+| 7 | #1403 | Classify a latency-growth edit and publish its warm successor from the control plane | #1320, #1354, #1355, #1396 | #1310, #1311, #1313, #1314, #1323, #1343, #1348, #1398 |
+| 8 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt | #1354, #1355, #1396, #1403 | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1398 |
+| 9 | #1358 | Fall back to the transition when a warm successor is not ready by its deadline | #1354, #1355, #1396, #1397, #1403 | #1286, #1310, #1314, #1343 |
+| 10 | #1360 | Check the warm-successor deadline in miso_engine_v1_service and report its outcome | #1354, #1355, #1358, #1397, #1403 | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1398 |
+| 11 | #1361 | Check the warm-successor deadline in the browser Worker's service loop and report its outcome | #1355, #1360, #1403 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
 
 ## Stream D
 

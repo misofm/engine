@@ -47,11 +47,17 @@ with nothing to reset changes nothing.
   - The ABI growth rule of *Document the seek contract and the C ABI growth rule in the header*
     (#1317) applies: one feature bit, the mask never compared with `==`.
 - **D2. What it does.**
-  - If the newest plan (the pending candidate, or else the active plan) was compiled with any floor
-    above its node's natural arrival, the control plane prepares the committed model as a successor
-    at a discontinuity. That successor has no floors and carries only the source consumers (ring,
-    generation and read position). Every other owner starts at rest: there is no continuity
-    constraint. It is published for adoption at the next block.
+  - The declaration rebuilds if the newest plan (the pending candidate, or else the active plan)
+    was compiled with any floor above its node's natural arrival, or reads its sources ahead of
+    render (a source-read offset above 0). The control plane then prepares the committed model as a
+    successor at a discontinuity. That successor has no floors and carries only the source
+    consumers (ring, generation and read position). Every other owner starts at rest: there is no
+    continuity constraint. It is published for adoption at the next block.
+  - The offset term matters because a plan can lead with no raised floor: after a warm growth, a
+    later edit can make a node's natural arrival equal its floor. The offset is recorded in the
+    inventory by *Give a plan a source-read clock that leads its render clock* (#1396) D2, which
+    lands after this slice and adds the term to this test. Before #1396 no plan has an offset, so
+    the floor term alone is the whole test.
   - The call lives in `crates/control-plane/src/`; the capi entry point only forwards to it.
   - A pending candidate is superseded by *Supersede an unadopted candidate plan by
     compare-and-swap* (#1310): withdrawn, used as the donor of the rings it created (#1310 D2), its
@@ -61,8 +67,11 @@ with nothing to reset changes nothing.
     pending, even when the active plan has no raised floor. It is superseded as above. The
     discontinuity successor is published `Next`, never with the withdrawn candidate's `Primed`
     kind: it has no lead, no readiness check, no deadline and no transition. The same holds before
-    a seek of every source.
-  - If no floor is raised, the call returns OK and publishes nothing.
+    a seek of every source. The control plane's `PrimedCandidate` record of the withdrawn candidate
+    is dropped with it, and the discontinuity successor leaves none (*Classify a latency-growth
+    edit and publish its warm successor from the control plane*, #1403 D4, which adds the record
+    and this drop).
+  - If neither term holds, the call returns OK and publishes nothing.
 - **D3. Host-core.** `SuccessorBase` gains `discontinuity: bool`. When it is true, the successor
   is compiled with an empty floor map, and the join carries sources only. Its source-read offset
   is 0 (#1396 D2, which lands after this slice and reads this flag). The declaration may or may not
@@ -145,7 +154,8 @@ with nothing to reset changes nothing.
    and the mask test checks that the mask is the OR of every feature symbol, the new one
    included (by symbol, never by a literal number).
 7. Commands:
-   - `cargo test --locked -p host-core -p control-plane -p capi --features host-core/test-support`
+   - `cargo test --locked -p host-core -p control-plane -p capi --features
+     host-core/test-support,control-plane/test-support`
    - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test`
    - `cargo build --locked --release -p audit && ./target/release/audit capi`
    - `bash scripts/check-workspace-policy.sh`, `cargo fmt --all -- --check`,

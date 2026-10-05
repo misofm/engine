@@ -51,7 +51,8 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
   *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345), which turns
   the live bypass into a one-word cell drained first (#1345 D1, D3). Then *Carry live-controlled
   effect lanes across a plan swap* (#1280) carries those cells and the shunt words in move mode
-  (#1280 D2-D6). This slice lands after both (plan risk 3) and extends that carry.
+  (cells #1280 D2, retarget D4, shunt words D5). This slice lands after both (plan risk 3) and
+  extends that carry.
 
 ## Decisions frozen for this slice
 

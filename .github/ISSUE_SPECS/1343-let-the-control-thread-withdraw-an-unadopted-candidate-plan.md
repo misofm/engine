@@ -93,8 +93,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
 
 ## Non-goals
 
-- The revision word per cell (#1314). Supersession itself (#1310). Scheduled or exact adoption and
-  the return path (#1311).
+- The revision word per cell (#1314). Supersession itself (#1310). Scheduled and primed adoption
+  (#1311).
 
 ## Hazards
 

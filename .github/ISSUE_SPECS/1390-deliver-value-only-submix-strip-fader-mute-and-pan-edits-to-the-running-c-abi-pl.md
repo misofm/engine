@@ -70,8 +70,9 @@ that swaps the plan.
   same domain checks, one `FaderDb` per changed lane, one `Mute` per changed lane, one matrix
   record when a lowered bit changes, and the same ramp lengths (`ramps.fader_samples`,
   `ramps.mute_samples`, the lowered matrix smoothing), including whatever per-edit ramp the track
-  records take (rule R9; the strip's `EditRamps` entries through `LiveRamps::resolve`, *Carry an
-  optional per-edit ramp length on live session edits*, #1394 D6). If #1277 has already extracted
+  records take (D15-1's recorded resolution; the strip's `EditRamps` entries through
+  `LiveRamps::resolve`, *Carry an optional per-edit ramp length on live session edits*, #1394
+  D6). If #1277 has already extracted
   this function (its D5), reuse it. Never write a second copy.
 - **D3. Order.** `LiveDelta::strips` holds the tracks first, then the submixes, each in canonical
   ID order. That is the order of `HostLiveControlHandles::strip_controls`.

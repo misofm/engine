@@ -78,13 +78,19 @@ scope (see Hazards).
   `crates/compressor`) use it. `crates/engine` cannot (`bench-support` depends on `engine`) and fixes
   its two sites locally.
 - **D4. The capi copy (NIT).** `crates/capi` already has `bench-support` as a dev-dependency
-  (`crates/capi/Cargo.toml:26`). `bench-support` installs its audited `#[global_allocator]`
+  (`crates/capi/Cargo.toml:25`). `bench-support` installs its audited `#[global_allocator]`
   (`tools/bench-support/src/alloc.rs:169`) in any binary that links it, and
   `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`), from
   which its allocation counts come. That test binary cannot link `bench_support`, so its
   `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason. Sites 1 and 6 sit
-  in capi's library test binary, which has no global allocator of its own and arms no render
-  scope; they use `bench_support::producer::StopOnDrop` (D3).
+  in capi's library test binary, which has no global allocator of its own. It already links
+  `bench-support` through that dev-dependency, so it already runs under the audited allocator, and
+  `bench-support` enables `engine/realtime-audit` (`tools/bench-support/Cargo.toml:14`), so every
+  engine render in that binary already runs inside `in_render_scope`
+  (`crates/engine/src/realtime/audit.rs:174-204`) under the default `Mode::Abort`. `StopOnDrop`
+  only stores an atomic flag when dropped (`tools/bench-support/src/producer.rs:28-34`) and
+  allocates nothing, so using it changes no allocator, no feature and no render scope. Sites 1
+  and 6 use `bench_support::producer::StopOnDrop` (D3).
 
 ## Authorized paths
 
