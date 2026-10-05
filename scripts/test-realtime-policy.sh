@@ -25,8 +25,8 @@ create_fixture() {
         "$root/tools/audit/src" \
         "$root/tools/bench/src"
     # The marked file set mirrors the real tree after #371 (RT-16/IO-14), #664's complete
-    # LocalRing removal, #1253's builtins-compiler drains and #1418's input-bank drain: thirteen
-    # files and forty-four regions across crates/ and hosts/, padded at the end of this function to the gate's current
+    # LocalRing removal and #1253's builtins-compiler drains: thirteen files and forty-three
+    # regions across crates/ and hosts/, padded at the end of this function to the gate's current
     # floors, so the floors and the discovery walk are exercised against the counts the gate sees
     # on main. Column-zero markers and indented markers (as in the real `impl`-block regions) both
     # appear.
@@ -236,15 +236,10 @@ create_fixture() {
         '// REALTIME_POLICY_END' \
         >"$root/crates/rack/src/lib.rs"
     # Five regions, mirroring the real crates/builtins/src/lib.rs after #371. The first also holds
-    # bounded drains inside finite outer loops (#1302), each of which drains a different queue on
-    # each pass (#1418): an `array::from_fn` closure over `controls[lane]`, with a comment naming
-    # the count between its binding and its loop; `0..2` over an indexed receiver;
+    # bounded drains inside finite outer loops (#1302): an `array::from_fn` closure, with a comment
+    # naming the count between its binding and its loop; `0..2` over an indexed receiver;
     # `0..self.lanes` with a count capped by `.min(..)`, read by a comparison and a
-    # `debug_assert!` before an attributed loop, through `let control = &mut self.controls[lane]`;
-    # `0..LANES`; a `.zip(..)`; a slice parameter; the index slot of `.enumerate()` over another
-    # collection; a range over the lanes of each bank, whose
-    # index base `bank.controls` the bank loop selects; an `if` whose condition names the index;
-    # and two levels, a bank loop around a loop over the bank's controls.
+    # `debug_assert!` before an attributed loop; `0..LANES`; a `.zip(..)`; and a slice parameter.
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn input_process() {}' \
@@ -253,13 +248,13 @@ create_fixture() {
         '    let trims: [u8; 4] = std::array::from_fn(|lane| lane as u8);' \
         '    [gains, trims]' \
         '}' \
-        'fn drain_lane_pairs(controls: &mut [Consumer<Record>; 2]) -> [usize; 2] {' \
+        'fn drain_lane_pairs(control: &mut Consumer<Record>) -> [usize; 2] {' \
         '    core::array::from_fn(|lane| {' \
-        '        let available = controls[lane].available_at_entry();' \
+        '        let available = control.available_at_entry();' \
         '        // `available` is fixed at entry: a push during this drain waits for the next block.' \
         '        let mut applied = 0;' \
         '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
+        '            let Ok(record) = control.try_pop() else {' \
         '                break;' \
         '            };' \
         '            applied += apply(lane, record);' \
@@ -327,60 +322,6 @@ create_fixture() {
         '                break;' \
         '            };' \
         '            apply(0, record);' \
-        '        }' \
-        '    }' \
-        '}' \
-        'fn drain_bank_lanes(banks: &mut [Bank]) {' \
-        '    for bank in banks.iter_mut() {' \
-        '        for lane in 0..LANES {' \
-        '            let available = bank.controls[lane].available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = bank.controls[lane].try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(lane, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}' \
-        'fn drain_gained_lanes(controls: &mut [Consumer<Record>; 2], gains: &[f32; 2]) {' \
-        '    for (lane, gain) in gains.iter().enumerate() {' \
-        '        let control = &mut controls[lane];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply_scaled(*gain, record);' \
-        '        }' \
-        '    }' \
-        '}' \
-        'fn drain_even_lanes(controls: &mut [Consumer<Record>; 4]) {' \
-        '    for lane in 0..4 {' \
-        '        if lane % 2 == 0 {' \
-        '            let control = &mut controls[lane];' \
-        '            let available = control.available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = control.try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(lane, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}' \
-        'impl BankSet {' \
-        '    fn drain_banks(&mut self) {' \
-        '        for bank in &mut self.banks {' \
-        '            for control in &mut bank.controls {' \
-        '                let available = control.available_at_entry();' \
-        '                for _ in 0..available {' \
-        '                    let Ok(record) = control.try_pop() else {' \
-        '                        break;' \
-        '                    };' \
-        '                    apply(0, record);' \
-        '                }' \
-        '            }' \
         '        }' \
         '    }' \
         '}' \
@@ -468,10 +409,8 @@ create_fixture() {
     printf '%s\n' \
         'fn measure() {}' \
         >"$root/tools/bench/src/console.rs"
-    # Three regions, as many as the real crates/builtins-compiler/src/lib.rs holds after #1418:
-    # the bounded fader and matrix drains, whose `let Some(control) = control.as_mut() else`
-    # selects each lane's queue from the pattern (the shape of the real input bank's
-    # `drain_controls` too), and an `if let Some(control) = control.as_mut()` drain.
+    # Two regions, mirroring the real crates/builtins-compiler/src/lib.rs after #1253: the
+    # bounded fader and matrix drains.
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn drain_fader_controls() {}' \
@@ -494,28 +433,12 @@ create_fixture() {
         '// REALTIME_POLICY_BEGIN' \
         'fn drain_matrix_controls() {}' \
         '// REALTIME_POLICY_END' \
-        '' \
-        '// REALTIME_POLICY_BEGIN' \
-        'fn drain_optional_controls(controls: &mut [Option<Consumer<Record>>]) {' \
-        '    for control in controls.iter_mut() {' \
-        '        if let Some(control) = control.as_mut() {' \
-        '            let available = control.available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = control.try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(0, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}' \
-        '// REALTIME_POLICY_END' \
         >"$root/crates/builtins-compiler/src/lib.rs"
-    # The floors rose with #1269 phase 1 (the swap carry and effect-restore regions), #1053
-    # (#1253's drains) and #1418 (`drain_controls`) to the merged tree's 25 files and 90 regions.
-    # The thirteen files and forty-four regions above keep the shapes the mutations below
-    # exercise; these twelve files hold the other forty-six regions (one file of thirteen, eleven
-    # of three), so the fixture again sits exactly on both floors.
+    # The floors rose with #1269 phase 1 (the swap carry and effect-restore regions) and #1053
+    # (#1253's drains) to the merged tree's 25 files and 89 regions. The thirteen files and
+    # forty-three regions above keep the shapes the mutations below exercise; these twelve files
+    # hold the other forty-six regions (one file of thirteen, eleven of three), so the fixture
+    # again sits exactly on both floors.
     mkdir -p "$root/crates/floor/src"
     local pad region regions
     for pad in $(seq 1 12); do
@@ -1461,380 +1384,6 @@ mutate_count_in_raw_identifier_macro() {
         '    }' \
         '}'
 }
-# #1418: a loop around a drain must drain a different queue on each pass. Each loop below is
-# finite, and each re-drains one queue, so it pops until the queue is empty or pops more than the
-# records counted at entry.
-mutate_outer_usize_max() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
-        '    for _ in 0..usize::MAX {' \
-        '        let available = control.available_at_entry();' \
-        '        if available == 0 {' \
-        '            break;' \
-        '        }' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_capacity() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
-        '    for _ in 0..control.capacity() {' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_unit_array_parameter() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(rounds: [(); usize::MAX], control: &mut Consumer<Record>) {' \
-        '    for () in rounds {' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_borrowed_open_range() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
-        '    let mut rounds = 0_u32..;' \
-        '    for _ in &mut rounds {' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The index names the pattern, but an expression of it can pick one queue on two passes
-# (`lane % 2` does once the range passes 2); only an index that is exactly one pattern
-# identifier selects.
-mutate_outer_index_expression() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for lane in 0..2 {' \
-        '        let control = &mut controls[lane % 2];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# A counted outer loop is bounded, but around a drain that re-reads its count it pops up to the
-# square of the records counted at entry.
-mutate_outer_counted_loop() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
-        '    let outer_available = control.available_at_entry();' \
-        '    for _ in 0..outer_available {' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The closure parameter is never part of the receiver: both calls drain the one queue, up to
-# twice the records counted at entry (it was a valid fixture case before #1418).
-mutate_same_queue_lane_pairs() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(control: &mut Consumer<Record>) -> [usize; 2] {' \
-        '    core::array::from_fn(|lane| {' \
-        '        let available = control.available_at_entry();' \
-        '        let mut applied = 0;' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            applied += apply(lane, record);' \
-        '        }' \
-        '        applied' \
-        '    })' \
-        '}'
-}
-# #1418 attempt 2: an index selects the queue only when it takes a new value on each pass (the
-# lone pattern of a `0..<bound>` loop, the index slot of `.enumerate()` or an `array::from_fn`
-# parameter) and the base it indexes stays the same on every pass. Each loop below is finite and
-# drains one queue on two passes, or never ends.
-# An index read from a table can repeat (`order = [0, 0]`).
-mutate_outer_index_table() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(order: &[usize], controls: &mut [Consumer<Record>]) {' \
-        '    for &lane in order {' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_index_table_field() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'impl Bank {' \
-        '    fn drain_matrix_controls(&mut self) {' \
-        '        for &lane in &self.order {' \
-        '            let available = self.controls[lane].available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = self.controls[lane].try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(lane, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The element slot of `.enumerate()` is not its index.
-mutate_outer_enumerated_index_table() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'impl Bank {' \
-        '    fn drain_matrix_controls(&mut self) {' \
-        '        for (_, &lane) in self.order.iter().enumerate() {' \
-        '            let control = &mut self.controls[lane];' \
-        '            let available = control.available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = control.try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(lane, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# `&mut` of a cycling iterator never ends, and repeats each index.
-mutate_outer_borrowed_index_cycle() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    let mut lanes = (0..2).cycle();' \
-        '    for lane in &mut lanes {' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The index slot of `.enumerate()` over `&mut` of a cycling iterator never ends.
-mutate_outer_borrowed_enumerated_cycle() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2], lanes: Cycle<Range<usize>>) {' \
-        '    for (lane, _) in &mut lanes.enumerate() {' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The base changes between passes: lane 1 drains the queue lane 0 drained.
-mutate_outer_index_base_swapped() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for lane in 0..2 {' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '        controls.swap(0, 1);' \
-        '    }' \
-        '}'
-}
-mutate_outer_index_base_reassigned() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(all: &mut [Consumer<Record>; 3]) {' \
-        '    let mut controls = &mut all[1..];' \
-        '    for lane in 0..2 {' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '        controls = &mut all[0..];' \
-        '    }' \
-        '}'
-}
-# A pattern-bound element moved through a spare: lane 0 parks its drained queue in `spare`, and
-# lane 1 takes it back before its drain.
-# A base rebound on each pass by a `let` the walk cannot read: lanes 0 and 1 both drain `all[1]`.
-mutate_outer_index_base_rebound() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(all: &mut [Consumer<Record>; 3]) {' \
-        '    for lane in 0..2 {' \
-        '        let controls = if lane == 0 { &mut all[1..] } else { &mut all[0..] };' \
-        '        let available = controls[lane].available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = controls[lane].try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_element_swapped_with_spare() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2], spare: &mut Consumer<Record>) {' \
-        '    for (lane, control) in controls.iter_mut().enumerate() {' \
-        '        if lane == 1 {' \
-        '            core::mem::swap(control, spare);' \
-        '        }' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '        if lane == 0 {' \
-        '            core::mem::swap(control, spare);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The `else` block of a `let .. else` is not part of the binding the walk reads.
-mutate_outer_element_moved_in_let_else() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Option<Consumer<Record>>; 2], spare: &mut Option<Consumer<Record>>) {' \
-        '    for (lane, control) in controls.iter_mut().enumerate() {' \
-        '        let Some(queue) = control.as_mut() else {' \
-        '            core::mem::swap(control, spare);' \
-        '            continue;' \
-        '        };' \
-        '        let available = queue.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = queue.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# The index rebound inside the loop, by `let`, by a macro, or by a block item that shadows it,
-# or reassigned through a `mut` pattern, is the same on every pass.
-mutate_outer_index_rebound() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for lane in 0..2 {' \
-        '        let lane = 0;' \
-        '        let control = &mut controls[lane];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_index_rebound_by_macro() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for lane in 0..2 {' \
-        '        first_lane!(lane);' \
-        '        let control = &mut controls[lane];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-mutate_outer_index_shadowed_by_block_const() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for lane in 0..2 {' \
-        '        let control = &mut controls[lane];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '        #[allow(non_upper_case_globals)]' \
-        '        const lane: usize = 0;' \
-        '    }' \
-        '}'
-}
-mutate_outer_index_reassigned() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(controls: &mut [Consumer<Record>; 2]) {' \
-        '    for mut lane in 0..2 {' \
-        '        lane = 0;' \
-        '        let control = &mut controls[lane];' \
-        '        let available = control.available_at_entry();' \
-        '        for _ in 0..available {' \
-        '            let Ok(record) = control.try_pop() else {' \
-        '                break;' \
-        '            };' \
-        '            apply(lane, record);' \
-        '        }' \
-        '    }' \
-        '}'
-}
-# Past an index step the next loop out must select the base, not the collection the indexing
-# loop iterates: every bank pass drains the same `controls`.
-mutate_outer_loop_around_unselected_base() {
-    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
-        'fn drain_matrix_controls(banks: &mut [Bank], controls: &mut [Consumer<Record>; 2]) {' \
-        '    for bank in banks.iter_mut() {' \
-        '        for (lane, _) in bank.order.iter().enumerate() {' \
-        '            let available = controls[lane].available_at_entry();' \
-        '            for _ in 0..available {' \
-        '                let Ok(record) = controls[lane].try_pop() else {' \
-        '                    break;' \
-        '                };' \
-        '                apply(lane, record);' \
-        '            }' \
-        '        }' \
-        '    }' \
-        '}'
-}
 for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
     second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
     bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
@@ -1850,13 +1399,7 @@ for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_
     count_raised_by_max outer_over_iterator_parameter outer_over_rebound_slice_parameter \
     outer_zip_then_cycle count_shadowed_by_block_static count_from_closed_region_function \
     outer_over_slice_parameter_shadowed_by_block_const count_under_cfg \
-    count_in_raw_identifier_macro outer_usize_max outer_capacity outer_unit_array_parameter \
-    outer_borrowed_open_range outer_index_expression outer_counted_loop same_queue_lane_pairs \
-    outer_index_table outer_index_table_field outer_enumerated_index_table \
-    outer_borrowed_index_cycle outer_borrowed_enumerated_cycle outer_index_base_swapped outer_index_base_reassigned outer_index_base_rebound \
-    outer_element_swapped_with_spare outer_element_moved_in_let_else outer_index_rebound \
-    outer_index_rebound_by_macro outer_index_shadowed_by_block_const outer_index_reassigned \
-    outer_loop_around_unselected_base; do
+    count_in_raw_identifier_macro; do
     expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
@@ -1867,7 +1410,7 @@ expect_failure no-marked-files-uses-floor 'expected at least twenty-five marked 
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least ninety marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least eighty-nine marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.

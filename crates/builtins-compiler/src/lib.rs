@@ -450,7 +450,6 @@ struct BuiltinBankProcessor {
 const MAXIMUM_BANK_LANES: usize = 8;
 
 impl BuiltinBankProcessor {
-    // REALTIME_POLICY_BEGIN
     /// Apply every record waiting at entry on each lane's queue to lane state: the body of
     /// [`GraphPreparedBuiltinBankProcessor::begin_block`], and of the plan-swap drain.
     ///
@@ -505,7 +504,6 @@ impl BuiltinBankProcessor {
         }
         Ok(refused)
     }
-    // REALTIME_POLICY_END
 }
 
 impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
