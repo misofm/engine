@@ -152,3 +152,58 @@ no verdict; the next implementation is attempt 1.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt 1 record (implementer, 2026-10-05)
+
+**D3: observed, not re-derived.** Production's selection is observable: the thread-local witness
+`graph::test_only_selected_split_fader()` records the fader of the split pair `build_sequential`
+admits, and builtins-compiler's dev-dependency on `graph` enables it in both feature sets. So under
+Amendment 1 the harness reads it and re-derives nothing; no production-rule mutant applies. The
+nonadjacent slot assertions in `prepared_pair_graph_variant_observed` move after `into_bound`: the
+harness keeps a copy of the schedule it built, reads the witness, maps its node to the harness
+track whose `PostFader` it is (a panic if it is no harness track's post-fader), and runs the slot
+assertions on that track. D3's "the witness is `selected_index`'s `PostFader`" becomes exactly that
+mapping, since `selected_index` now comes from the witness. The harness also asserts that a
+nonadjacent scalar preparation has a witness exactly when it is the paired one
+(`between_render_calls`): the separate-owner twin selects no split pair, so its witness is `None`
+and it has no selected track to check. The adjacent (track-major) branch keeps its one adjacency
+assertion on the last track, now named `n - 1` literally instead of through `selected_index`.
+
+**`PAIR_WITNESS_LOCK` note (Hazards).** The witness is thread-local and `graph::build_sequential`
+resets it on every build (`crates/graph/src/runtime.rs:5723`), so the read right after the
+harness's own `into_bound` describes that binding only. The harness does not take
+`PAIR_WITNESS_LOCK`: its callers hold it and it is not re-entrant. Recorded in the harness comment.
+
+**D2.** The #916 test asserts, by literal ID, that the `Output` edge's source in
+`track_graph_variant(2, _)` is t00's `PostMatrix` for `Nonadjacent` and t01's for
+`NonadjacentOutputConflict`.
+
+**D4.** No test outcome depends on `NonadjacentTrackA`'s output track (M5 green on `main`; since
+#916 the `Output` is dedicated storage), so its arm is deleted and the variant takes track 0. No
+render comparison moved: every affected test compares a paired graph with its twin from the same
+variant. The comment in the TrackA post-matrix capture test that relied on the old output track is
+reworded. **D5.** `output_track` is two `cfg`'d `let`s (the conflict variant exists only under
+test-support), and the nonadjacent predicate is one `match` computed once; both clippy runs are
+clean.
+
+**Gate 1.**
+
+| Mutant | Result |
+| --- | --- |
+| M1 (`NonadjacentOutputConflict` output `n - 1` -> `0`) | red: `actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated` (test-support lib run: 53 passed, 1 failed) |
+| M3 (`selected_index` arm for `NonadjacentOutputConflict`) | arm deleted: `selected_index` is read from production's witness (D3, Amendment 1) |
+| M5 (`NonadjacentTrackA` output `n - 1`) | arm deleted: no outcome reads it (D4) |
+| M7 (`selected_index` arm for `NonadjacentTrackA`) | arm deleted: as M3 |
+
+Candid note on test value: with `n == 2` and a stage-major schedule the slot assertions hold for
+either orientation, so they still cannot tell t00's pair from t01's. Which pair production selects
+stays defended by the tests that assert the witness by literal ID
+(`actual_scalar_nonadjacent_schedule_selects_the_split_owner`,
+`actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`, the #916
+test). The harness change removes the misleading per-variant choice rather than adding a catch.
+
+**Gates 2-4 (all pass).** `cargo test --locked -p builtins-compiler --features test-support` and
+without features; both `cargo clippy --locked -p builtins-compiler --all-targets` runs with
+`-D warnings`; `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`; `scripts/check-builtins-policy.sh`;
+`scripts/check-workspace-policy.sh`; `scripts/check-realtime-policy.sh`.
