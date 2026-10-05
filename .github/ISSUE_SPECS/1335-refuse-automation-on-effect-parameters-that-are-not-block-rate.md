@@ -155,7 +155,7 @@ never meets an unrenderable target.
 6. **Commands:**
    - `cargo test --locked -p effect-compiler --features test-support`,
      `cargo test --locked -p session-validator`,
-     `cargo test --locked -p host-core --features test-support --test live_delta`,
+     `cargo test --locked -p host-core --features test-support,control-provider --test live_delta`,
      `cargo test --locked -p capi`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
@@ -233,7 +233,8 @@ never meets an unrenderable target.
   `console_and_submix_automations_on_a_prepared_parameter_are_refused` is red.
 - M4, walk only the tracks: the same test is red at the submix assertion.
 - M5, report an automation whose effect the registry lacks:
-  `unavailable_factory_and_resource_caps_return_no_partial_session` is red (the hazard assertion).
+  `unavailable_factory_and_resource_caps_return_no_partial_session` is red (the hazard assertion),
+  and so is session-validator's existing `fixtures_distinguish_schema_examples_from_launch_effects`.
 - M10, run the check twice: gate 1 is red (3 tests).
 - M6, no classifier step 4: gate 4 is red, and gate 3 is red (the edit commits live).
 - M7, step 4 routes every automation change: gate 4 is red at the block-rate assertion, as are the
@@ -266,3 +267,36 @@ never meets an unrenderable target.
 **Gate 7.** No fixture, generated file or digest changed. `fixtures_distinguish_schema_examples_from_launch_effects`
 still passes every launch fixture through stage 5. Only `canonical.json` stops there, with its one
 `effect.native.unavailable`.
+
+### Attempt 1 folds (implementer, 2026-10-05)
+
+The verdict was PASS. These changes fold its MINOR and NIT findings. All of them are in
+`crates/effect-compiler/tests/native_session.rs` and this spec.
+
+- **MINOR 1.** New test `automation_skips_targets_already_refused_for_another_reason`, on
+  `canonical.json`'s automated `eq` insert:
+  - with a `cid` identity, preparation returns exactly
+    `[effect.third_party.unavailable_at_launch @ $.tracks[id=vocal].effects[id=eq]]`;
+  - retargeted to the multiband, with its retired parameter 2 declared and automated, it returns
+    exactly `[effect.parameter.unknown @ $.tracks[id=vocal].effects[id=eq]]`.
+- **MINOR 2.** The hazard block in `unavailable_factory_and_resource_caps_return_no_partial_session`
+  is deleted. M5 above is corrected: session-validator's fixture test was red too.
+- **NIT 1.** The console case now also refuses the `post_insert` `limiter` slot's `lookahead`
+  (parameter 3, rate `None`).
+- **NIT 2.** Gate 6's `live_delta` command now has `--features test-support,control-provider`.
+
+**Mutation runs.** Each was applied to `prepare.rs`, run and reverted with `git checkout`.
+- M11, report the rate refusal for a third-party identity: the new test is red at its `cid` case.
+- M12, report it for a parameter ID the descriptor lacks: the new test is red at its
+  unknown-parameter case.
+- M3b, a console target takes the first slot: `console_and_submix_automations_on_a_prepared_parameter_are_refused`
+  is red at the `lookahead` assertion.
+- M5, again after the deletion: session-validator's `fixtures_distinguish_schema_examples_from_launch_effects`
+  is red. `unavailable_factory_and_resource_caps_return_no_partial_session` is red too, but only
+  because its existing empty-registry assertion reads `diagnostics[0]`, and the extra
+  `$.automation...` diagnostic sorts first.
+
+**Commands.** `cargo test --locked -p effect-compiler --features test-support`,
+`cargo clippy --locked -p effect-compiler --all-targets --all-features -- -D warnings`,
+`cargo fmt --all -- --check` and `bash scripts/check-workspace-policy.sh`: 39 passed and
+0 failed; clippy, fmt and the workspace policy are clean.

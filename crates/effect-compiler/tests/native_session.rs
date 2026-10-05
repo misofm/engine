@@ -228,19 +228,6 @@ fn unavailable_factory_and_resource_caps_return_no_partial_session() {
         .err()
         .unwrap();
     assert_eq!(diagnostics.0[0].code, "effect.native.unavailable");
-    // #1335 hazard: the launch registry lacks `canonical.json`'s unprefixed `parametric-eq`, and
-    // its automation is not reported a second time.
-    let launch = launch_native_effect_registry().expect("launch registry");
-    let diagnostics = prepare_native_session_effects(&compiled(), &launch, caps())
-        .err()
-        .unwrap();
-    assert_eq!(
-        diagnostics.0,
-        [effect_compiler::EffectDiagnostic {
-            code: "effect.native.unavailable",
-            path: "$.tracks[id=vocal].effects[id=eq]".to_owned(),
-        }]
-    );
     let registry =
         NativeEffectRegistry::new([Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>])
             .unwrap();
@@ -736,6 +723,18 @@ fn console_and_submix_automations_on_a_prepared_parameter_are_refused() {
     ));
     assert_eq!(launch_diagnostics(&model), rate_refusal("desk-enabled"));
 
+    // The `post_insert` `limiter` slot's `lookahead` (parameter 3, rate `None`) is refused too: a
+    // lookup that ignored the slot ID would resolve it to the EQ's block-rate parameter 3.
+    let mut model = fixture();
+    model.automation.push(automation(
+        "desk-lookahead",
+        ("ch00", session::RackName::Console, "limiter"),
+        3,
+        ParameterChannel::Both,
+        SessionParameterUnit::Milliseconds,
+    ));
+    assert_eq!(launch_diagnostics(&model), rate_refusal("desk-lookahead"));
+
     // Its block-rate `band-1-gain` on the left lane is accepted.
     let mut model = fixture();
     model.automation.push(automation(
@@ -803,4 +802,60 @@ fn an_automatable_sample_rate_target_is_refused() {
     };
     let automation_id = model.automation[0].id.as_str();
     assert_eq!(diagnostics, rate_refusal(automation_id));
+}
+
+/// #1335 D2: an automation is refused by rate only when its target resolves to a native
+/// descriptor parameter. A third-party insert reports only its own
+/// `effect.third_party.unavailable_at_launch`, and a declared parameter the descriptor lacks
+/// reports only `effect.parameter.unknown`; neither adds `effect.automation.rate`.
+///
+/// Red mutations: report the rate refusal for a `cid` identity, or for a parameter ID the
+/// descriptor lacks -> a second diagnostic.
+#[test]
+fn automation_skips_targets_already_refused_for_another_reason() {
+    let canonical = || {
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+            .expect("canonical session fixture")
+    };
+    let only = |code: &'static str| {
+        vec![effect_compiler::EffectDiagnostic {
+            code,
+            path: "$.tracks[id=vocal].effects[id=eq]".to_owned(),
+        }]
+    };
+
+    // `canonical.json` automates the `eq` insert's declared parameter 1 on `both`.
+    let mut model = canonical();
+    assert_eq!(model.automation.len(), 1);
+    model.tracks[0].inserts.effects[0].identity = session::EffectIdentity::ThirdPartyCid {
+        cid: "bafyopaque".to_owned(),
+    };
+    assert_eq!(
+        launch_diagnostics(&model),
+        only("effect.third_party.unavailable_at_launch")
+    );
+
+    // The multiband's retired parameter 2, declared and automated.
+    let mut model = canonical();
+    {
+        let effect = &mut model.tracks[0].inserts.effects[0];
+        effect.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.multiband-compressor")
+                .expect("multiband effect ID"),
+        };
+        effect.params = vec![EffectParam {
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+            unit: SessionParameterUnit::Hz,
+            value: 1_000.0,
+        }];
+    }
+    model.automation = vec![automation(
+        "retired",
+        ("vocal", session::RackName::Inserts, "eq"),
+        2,
+        ParameterChannel::Both,
+        SessionParameterUnit::Hz,
+    )];
+    assert_eq!(launch_diagnostics(&model), only("effect.parameter.unknown"));
 }
