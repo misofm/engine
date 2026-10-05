@@ -184,8 +184,8 @@ paths, and a check keeps it that way.
 - A changed rustflags set changes cargo's fingerprints: the CI steps that share a target directory
   (`test-release`, `audit-native`) must all read the same D2 definition, or each step rebuilds the
   others' artifacts.
-- Hot files: `.github/workflows/*.yml` (STREAMS.md row with #877, H #1334, J #1422 and G's
-  #1407 follow-up); `scripts/check-workspace-policy.sh` (only if D2 touches it).
+- Hot files: `.github/workflows/*.yml` (STREAMS.md row with #877, H #1334, J #1422 and G #1428
+  (the #1407 follow-up)); `scripts/check-workspace-policy.sh` (only if D2 touches it).
 
 ## Objective gates
 

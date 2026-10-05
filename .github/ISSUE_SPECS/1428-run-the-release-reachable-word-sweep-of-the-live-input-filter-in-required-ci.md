@@ -119,7 +119,7 @@ rate, quanta 1-63, 22 histories of 512 blocks) runs in the required `qualificati
 - `scripts/check-test-support-ci.py` (lint job) reads the workflow's `cargo test` steps; it must
   stay green.
 - Hot file: `.github/workflows/qualification.yml` (STREAMS.md row `rust-toolchain.toml`,
-  `.github/workflows/*.yml`: #877, H #1334, J #1422, J's checkout-path issue); this slice edits only
+  `.github/workflows/*.yml`: #877, H #1334, J #1422, J #1427); this slice edits only
   `test-release`'s steps, so any order works and the later slice rebases.
 
 ## Objective gates
