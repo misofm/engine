@@ -48,9 +48,10 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
   - An effect owner that restarts (#1279 D1) does not stop the lines around it from carrying.
 - **D2. Equal length, move mode.** Swap the two rings and the cursor.
 - **D3. Only edge lines.** This slice carries only lines keyed by a `GraphEdgeId`. A source-claim
-  line (a raw-source line on a source-reading node) is not an edge. *Grow latency during playback
-  by adopting a primed warm successor* (#1287) carries it, keyed by claiming node and source, and
-  fills it by its own rules (its L2 and L3).
+  line (a raw-source line on a source-reading node, *Grow latency during playback by adopting a
+  primed warm successor*, #1287 D1) is not an edge. *Carry source-claim lines across a plan swap
+  and fill a grown line for a prime* (#1402) carries it, keyed by claiming node and source, and
+  fills it by #1287's L2 and L3.
 - **D4. Different lengths: a head-aligned copy.** The successor emits the predecessor's pending
   samples first, in the order the predecessor would have emitted them, truncated to fit or followed
   by `+0.0`.
@@ -79,7 +80,8 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 
 ## Non-goals
 
-- No change to how PDC computes delays. No floors (#1285) and no source-claim lines (#1287, D3).
+- No change to how PDC computes delays. No floors (#1285), no source-claim lines (#1287 D1) and no
+  claim-line carry (#1402).
 - No strip or submix input delay lines, and no live send ramps (#1284).
 - No route-level ramp for a re-pointed route, and no fading-route line alias (#1363 D4).
 

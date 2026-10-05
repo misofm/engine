@@ -85,7 +85,7 @@ worklet only renders and swaps.
   meterHeaderPointer, meterFramePointer, meterFrameCapacity }` to the render worklet on #1332 D7's
   control-plane-to-worklet port; this slice opens no port of its own. `supersedes` is `true` when
   the commit withdrew an unadopted candidate (*Supersede an unadopted candidate plan by
-  compare-and-swap*, #1310 D1 `Withdrawn` or `Returned`). In `single` mode the control handler and
+  compare-and-swap*, #1310 D1 `Withdrawn`). In `single` mode the control handler and
   the render worklet are one realm, so it is a direct call to the same staging function.
   - The worklet's message handler builds the complete view set and meter message object for that
     shape and stages it, keyed by `revision`. First it applies D5's install rule against the

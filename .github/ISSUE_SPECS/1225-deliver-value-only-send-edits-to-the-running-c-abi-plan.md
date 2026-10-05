@@ -157,7 +157,7 @@ when the same transaction makes a structural edit that swaps the plan.
 - `crates/control-plane/src/control.rs`: `commit_live` and its helpers (moved there by #1309).
 - `crates/control-plane/src/compile.rs`: `capi_resources` (moved there by #1309).
 - `C_ABI_LIVE_LANES` (D5), where it lives when this slice merges (*Prepare through an
-  adapter-supplied preparer in the control plane crate*, #1400 D3): in
+  adapter-supplied preparer in the control-plane crate*, #1400 D3): in
   `crates/control-plane/src/compile.rs` if this slice merges before #1400 (which then moves the
   edited constant to capi unchanged); beside `CapiPreparer` in `crates/capi/src/` if it merges
   after. Root rebases whichever lands second; neither order changes a value.

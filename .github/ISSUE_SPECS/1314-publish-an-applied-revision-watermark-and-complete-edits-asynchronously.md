@@ -95,8 +95,8 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
   `first_sample`, `flags`, `exact`, `transition_fallback`, `superseded`. A read
   retries at most `observe.rs`'s 64 attempts, then reports "busy". Reader handle:
   `PlanWatermarkReader`, cloned from `PlanPublisher::watermark_reader()`.
-- **D5. Flags and counters.** Bits: `EXACT = 1`, `TRANSITION_FALLBACK = 4`, `SUPERSEDED = 8`.
-  The value 2 is unassigned (D15-8 (round-5 amendment) removed the pre-roll outcome). An
+- **D5. Flags and counters.** Bits: `EXACT = 1`, `TRANSITION_FALLBACK = 2`, `SUPERSEDED = 4`.
+  There is no pre-roll outcome (D15-8 (round-5 amendment)), so no bit is left unassigned. An
   advance's flags are the OR over the revisions it covers. Counters are saturating counts of
   revisions completed per outcome. An advance from `a` to `b` adds `b - a` in total.
   - At a claim, render takes the claimed cell's `superseded` value into render-local state. The

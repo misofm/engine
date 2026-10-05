@@ -154,7 +154,8 @@ and SDK are the rewritten slices #1293-#1297.
   browser engine module* (#1293) and #1386.
 - No transitions of its own. Fade-in, duck-swap and two-phase removal come from #1288, #1324 and
   #1325.
-- No warm-successor catch-up: *Run the browser catch-up in the Worker's service loop* (#1361).
+- No warm-successor deadline check: *Check the warm-successor deadline in the browser Worker's
+  service loop and report its outcome* (#1361).
 
 ## Hazards
 

@@ -150,9 +150,9 @@ the Rust host* (#1290) publishes through.
     failure as `RESULT_INTERNAL` with the session diagnostic. It commits and acknowledges nothing.
   - `miso_engine_web_v1_watermark_read(handle: u32) -> u32` copies the watermark and its counters
     into a fixed record, `WebPlanWatermark`, found at `miso_engine_web_v1_watermark_ptr(handle) ->
-    u32`. The record mirrors `miso_engine_v1_watermark` (#1314 D6) field for field, in its order
-    and size, reserved words included: `struct_size`, `revision`, `first_sample`,
-    `outcome_flags`, `exact_count`, `transition_fallback_count` and `superseded_count`. It has no
+    u32`. The record is 96 bytes and mirrors `miso_engine_v1_watermark` (#1314 D6) field for
+    field, in its order: `struct_size`, `reserved0`, `revision`, `first_sample`, `outcome_flags`,
+    `exact_count`, `transition_fallback_count`, `superseded_count`, `reserved[5]`. It has no
     pre-roll counter (D15-8 (round-5 amendment)). It lives in the control half and is allocated
     at boot. A read that gives up after #1314 D4's attempts returns `RESULT_BACKPRESSURE` and
     leaves the record untouched: a read to retry, never a refused edit.

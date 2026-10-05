@@ -75,6 +75,18 @@ never leaves it muted.
   carried tail, then the restarted owner's at-rest zeros: a hole with a step at each edge. Owners
   after the fader (matrix/pan, post-fader and post-pan sends, their compensation lines) carry as the
   join says; they carry the ducked tail.
+  - A source-claim line (*Grow latency during playback by adopting a primed warm successor*, #1287
+    D1) is not an owner of the strip: it holds raw source frames and no processing state, so it
+    carries for a duck-swapped strip too (*Carry source-claim lines across a plan swap and fill a
+    grown line for a prime*, #1402 D1).
+  - **A strip restarted whole.** A strip that warm preparation restarts whole (*Prepare a warm
+    successor whose carried nodes lead the predecessor by P*, #1354 D2 step 6, `restart_whole`)
+    is in `restarted_strips()` (#1354 D4) and is marked not carried in every owner, after the
+    fader too (matrix/pan, post-fader and post-pan sends, their compensation lines), except its
+    claim lines. It is ducked (D4) and armed (D3) like any duck-swapped strip. Nothing is lost by
+    restarting its post-fader owners at rest: by `S` its fader output and every route line out of
+    it hold exact `+0.0` (D4's duck and #1325 D3's `C`), and its armed fader keeps them at `+0.0`
+    until the fire.
 - **D3. Arm.** Each duck-swapped strip is armed through #1288's arm entry point (its D1 strip-set
   argument; channels the model leaves unmuted), with `D` per #1288 D4 (its pre-fader latency; for a
   submix plus the longest compensation delay of an input route whose line starts at rest). Its

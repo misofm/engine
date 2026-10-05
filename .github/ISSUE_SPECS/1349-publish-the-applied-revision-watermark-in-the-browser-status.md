@@ -58,9 +58,10 @@ the browser's own `applied_at_sample` arithmetic.
   reads, from offset 48: `live_values_superseded` (#1399), the three watermark words, and no
   reserved word; size stays 80 and no expansion word remains (D15-3 asks for exactly these three
   words). The outcome flags fit one `u64` word. The flag bits are #1314's: `EXACT = 1`,
-  `TRANSITION_FALLBACK` and `SUPERSEDED`, with no pre-roll flag (D15-8 (round-5 amendment)). The
-  browser copies the word and assigns no bit of its own. Boot writes the initial watermark
-  (`(initial revision, 0, EXACT)`); `render_next` overwrites the three words when D1 is `Some`.
+  `TRANSITION_FALLBACK = 2` and `SUPERSEDED = 4`, with no pre-roll flag (D15-8 (round-5
+  amendment)). The browser copies the word and assigns no bit of its own. Boot writes the initial
+  watermark (`(initial revision, 0, EXACT)`); `render_next` overwrites the three words when D1 is
+  `Some`.
 - **D2a. JS readers.** Because boot writes `EXACT` at offset 72, every JS reader changes in this
   slice, or the first status read would throw:
   - `readStatus()` checks no reserved word any more (after #1399 it checks only 56, 64 and 72;

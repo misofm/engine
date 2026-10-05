@@ -15,9 +15,11 @@ derivation** of every warm-successor constant. It measures, against an ordinary 
   the first ready block*, #1355): the first growth, and the growth that brings `ΣP` to `P_MAX`.
 
 D3 below is the only place where `P_MAX_SAMPLES`, the ring headroom and `PRIME_BYTES_MAX` are
-defined. *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354) D1 and
-*Fall back to the transition when a warm successor is not ready by its deadline* (#1358) take
-their values from it and restate no formula. `P_MAX_SAMPLES` and the ring headroom are formulas
+defined. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358)
+writes `P_MAX_SAMPLES` and the ring headroom into code, and *Check the warm-successor deadline in
+miso_engine_v1_service and report its outcome* (#1360) writes `PRIME_BYTES_MAX` and passes both
+bounds to *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354)'s
+`WarmConfig`. None restates a formula. `P_MAX_SAMPLES` and the ring headroom are formulas
 that need no timed run; only `PRIME_BYTES_MAX` needs this record. The record also says whether a
 whole-bank move (#1269, Deferred) earns a brief.
 
@@ -134,7 +136,7 @@ whole-bank move (#1269, Deferred) earns a brief.
 
 1. D1-D5.
 2. `artifacts/steps/swap-carry-base/` with the record and the report.
-3. A comment on #1269, #1287, #1354 and #1358 with the move and adoption block p50 and p99
+3. A comment on #1269, #1287, #1358 and #1360 with the move and adoption block p50 and p99
    against the ordinary p50 and p99, and D3's values.
 
 ## Authorized paths
@@ -150,7 +152,7 @@ whole-bank move (#1269, Deferred) earns a brief.
 - No optimisation of the carry or the prime. A large number opens a weekly-pass issue; it is not
   chased here.
 - No browser number (#1331), and no AArch64 timing (that waits for funding).
-- No change to any engine constant: #1354 and #1358 write D3's values into code.
+- No change to any engine constant: #1358 and #1360 write D3's values into code.
 
 ## Objective gates
 
@@ -180,7 +182,7 @@ whole-bank move (#1269, Deferred) earns a brief.
 - Gate 2: a run whose swaps silently stopped carrying (every swap cold) would time the wrong thing;
   so would an adoption that primed nothing, one deferred because the bench fed its rings too late,
   a growth chain that never reached `P_MAX`, or blocks on the silent fast path. A record without
-  D3's values would leave #1354 and #1358 without their bounds. The validator turns red on each.
+  D3's values would leave #1358 and #1360 without their bounds. The validator turns red on each.
 
 ## Dependencies
 

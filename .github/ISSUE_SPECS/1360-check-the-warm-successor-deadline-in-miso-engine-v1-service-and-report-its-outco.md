@@ -39,17 +39,23 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 ## Decisions frozen for this slice
 
 - **D1. Classify.** The control plane's rebuild path calls `host_core::warm_lead` (#1354), the
-  only computation of the lead `P`.
-  - With `P > 0`, the candidate's admission uses `AdmissionPeak::WithReprepare` (#1398 D4), so the
-    transition's re-preparation inside a later service step never exceeds the caller's caps. The
-    candidate is prepared warm (#1354) and published `Primed { not_before, lead_blocks }` (#1311,
-    #1355). When it also restarts strips, it is composed with their duck as *Duck-swap the strips a
-    latency growth restarts, and fall back to the transition when a warm successor cannot adopt*
-    (#1397) D1 states.
+  only computation of the lead `P`, with a `WarmConfig` built from `P_MAX_SAMPLES` (#1358) and
+  `PRIME_BYTES_MAX` for the session's rate and quantum. This slice writes `PRIME_BYTES_MAX` into
+  `crates/host-core/src/warm.rs` with the value *Record the swap block's cost on the 64-track
+  console* (#1286) D3 derives; the constant's comment names the record row.
+  - With `Warm` and `P > 0`, the candidate's admission uses `AdmissionPeak::WithReprepare` (#1398
+    D4), so the transition's re-preparation inside a later service step never exceeds the caller's
+    caps. The candidate is prepared warm (#1354) and published `Primed { not_before, lead_blocks }`
+    (#1311, #1355). When it also restarts strips, it is composed with their duck as *Duck-swap the
+    strips a latency growth restarts, and fall back to the transition when a warm successor cannot
+    adopt* (#1397) D1 states.
+  - With `Warm { lead_samples: 0, restart_whole }` (the restarts confine the growth to restarted
+    strips), it is an ordinary rebuild plus those restarts: prepared with that `WarmLead` (#1354
+    D4) and published as a planned duck-swap (#1397 D1, last paragraph). No deadline is pending.
   - If warm preparation returns `WarmUnavailable` (#1354), the edit takes
     `fall_back_to_transition` (#1397 D2) at once, in the same submit. A valid edit is never refused
     for it.
-  - With no growth, it is published as today.
+  - With `Ordinary`, it is published as today.
 
   The transaction response is `rebuild` in every case (*Report each transaction's edit path in its
   response*, #1313).
@@ -57,7 +63,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   the deadline check of #1358.
   - If no `Primed` candidate is pending, or its deadline in render samples has not passed, the step
     does nothing.
-  - Otherwise it withdraws the candidate (`withdraw()`, #1311). `Withdrawal::Taken` means render
+  - Otherwise it withdraws the candidate (`withdraw()`, #1343 D5, through #1358 D3's
+    `check_prime_deadline`). `Withdrawal::Taken` means render
     adopted it exactly, and the step publishes nothing. `Withdrawal::Withdrawn` hands the candidate
     to `fall_back_to_transition` as its donor (#1397 D2), which re-prepares and publishes the
     transition.
@@ -90,7 +97,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   - No new symbol and no new feature bit.
 - **D5. Counter surface.** The service step's counter refresh (#1348 D8) copies the session's
   `transition_reprepare_refusals` (#1397) into the provider's `TRANSITION_REPREPARE_REFUSALS`
-  (#1351 D1), beside the telemetry counters.
+  (#1351 D6), beside the telemetry counters.
 - **D6. Audit.** `audit capi` gains one leg. During playback, with every source queued ahead, it
   adds a muted track with a true-peak limiter, renders on one thread and services from a second
   until the watermark covers the revision. It checks `EXACT`, zero render allocations, and output
@@ -102,7 +109,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 
 ## Deliverables
 
-1. D1, D2, D3 and D5 in `crates/control-plane/src/`.
+1. D1, D2, D3 and D5 in `crates/control-plane/src/`, and D1's `PRIME_BYTES_MAX` in
+   `crates/host-core/src/warm.rs`.
 2. D4 in `crates/capi/include/miso_engine_v1.h` and `docs/C_ABI_V1_QUALIFICATION.md`.
 3. D6 in `tools/audit/src/capi.rs`.
 4. C ABI tests in `crates/capi/tests/latency_growth.rs` (new).
@@ -110,6 +118,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 ## Authorized paths
 
 - `crates/control-plane/src/`, `crates/capi/src/`, `crates/capi/include/miso_engine_v1.h`
+- `crates/host-core/src/warm.rs` (`PRIME_BYTES_MAX` only)
 - `crates/capi/tests/latency_growth.rs` (new), `tools/audit/src/capi.rs`
 - `docs/C_ABI_V1_QUALIFICATION.md`
 
@@ -167,11 +176,13 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348).
 - *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `warm_lead` and
   `WarmUnavailable`.
-- *Adopt a successor plan no earlier than a scheduled sample* (#1311): `Primed` and `withdraw()`.
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311): `Primed`.
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): render's
   adoption.
 - *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): the
-  deadline D2 checks.
+  deadline D2 checks, and `P_MAX_SAMPLES`.
+- *Record the swap block's cost on the 64-track console* (#1286): the `PRIME_BYTES_MAX` value D1
+  writes.
 - *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
   successor cannot adopt* (#1397): D1's composition, `fall_back_to_transition` and the session
   counter.

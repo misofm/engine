@@ -40,10 +40,12 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 
 ## Decisions frozen for this slice
 
-- **D1. A warm edit that restarts strips (W10).** When `warm_lead` is `Some` and the warm
-  successor's `restarted_strips()` is not empty, the control plane runs #1325 D7's shared step
-  with #1324 D4's duck set, with one change at the end:
+- **D1. A warm edit that restarts strips (W10).** When `warm_lead` returns `Warm` with
+  `lead_samples > 0` and the warm successor's `restarted_strips()` is not empty, the control plane
+  runs #1325 D7's shared step with #1324 D4's duck set, with one change at the end:
   1. The warm successor applies #1324 D2-D3 to those strips: a whole pre-fader restart, armed.
+     A strip in `restart_whole` (#1354 D2 step 6) is restarted in every owner as #1324 D2 states
+     for such a strip, and ducked and armed the same way.
   2. In the same transaction, the control plane writes their ramped mutes to the running plan
      (#1325 D2) and reads `p`.
   3. It publishes through `publish_primed` (#1355 D3) with `not_before` = #1325 D3's `S`, instead
@@ -54,6 +56,12 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 
   Every carried path stays exact, downstream nodes included. It is a planned duck-swap: the
   epoch's word stays `EXACT` (#1324 D6).
+
+  When `warm_lead` returns `Warm` with `lead_samples == 0` (the restarts confine the growth to R,
+  so `Δ = 0` over C), there is no lead and no prime. The successor is prepared with that
+  `WarmLead` (#1354 D4), so its `restart_whole` strips join `restarted_strips()`, and it is
+  published as #1324 D4 publishes an ordinary duck-swap (`NoEarlierThan(S)`, not `Primed`), with
+  `AdmissionPeak::Single`. It completes `EXACT`; it is not a transition fallback.
 - **D2. The transition fallback.** One host-core entry point, `fall_back_to_transition(..)` in
   `crates/host-core/src/warm.rs`, takes an optional donor. It runs:
   - at submit, when warm preparation returns `WarmUnavailable` (any reason), with no donor;

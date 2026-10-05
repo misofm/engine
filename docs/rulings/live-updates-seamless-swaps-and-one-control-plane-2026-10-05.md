@@ -166,10 +166,11 @@ when a dependency forces the order, and then sequence the correct solution.
   1. Submit prepares the successor with floors at `a(n) + P` on carried nodes only; restarted nodes
      keep #1285's floors `a(n)`, added nodes have none. `Δ` is the largest arrival growth over the
      carried nodes, and `P = q·⌈Δ/q⌉`. Its source-read offset is the predecessor's plus `P` (#1396).
-  2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. A node that
-     does not is `WarmUnavailable::Misaligned`; its strip is restarted whole and `Δ` recomputed. If
-     it cannot be restarted (the output, or a submix whose growth reaches the output), the edit
-     takes the transition.
+  2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. If one does
+     not, its strip is restarted whole (#1324 D2) and `Δ` recomputed (#1354). If it cannot be
+     restarted (the output, or a submix whose growth reaches the output), preparation returns
+     `WarmUnavailable::Misaligned` and the edit takes the transition. If the restarts leave
+     `Δ = 0`, the edit is an ordinary rebuild that duck-swaps those strips.
   3. Submit publishes the candidate as `Primed { not_before, lead_blocks }` (#1311).
   4. Render checks readiness (C4 below) on the **active** plan's consumers before it claims the
      candidate. Once ready, it claims and adopts in move mode in the same block, and fills the
@@ -180,12 +181,15 @@ when a dependency forces the order, and then sequence the correct solution.
      goes to the newest candidate's cells and applies at adoption (#1053 D7). A structural edit
      supersedes the candidate by compare-and-swap (#1310).
   6. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
-- **Fallback, counted and reported:** the transition only, the D15-9 duck-swap of the strips whose
-  arrival grows (#1397), counted `TRANSITION_FALLBACK`. It applies when preparation returns
+- **Fallback, counted and reported:** the transition only, the D15-9 duck-swap of every strip whose
+  content timing moves (#1397 D2's `grown_strips`: a strip with a node whose arrival grows, or with
+  an outgoing edge whose compensation line changes length, unedited strips included), joined with
+  #1324's restarted strips, counted `TRANSITION_FALLBACK`. It applies when preparation returns
   `WarmUnavailable`, or when readiness is still unmet `PRIME_DEADLINE_SAMPLES` of render after
-  publication (counted in render samples, #1358). There is no render-thread pre-roll. While render
-  waits for readiness, the predecessor keeps playing exactly. A host that never queues `P + q`
-  frames ahead gets the transition, because any exact mechanism needs those future frames.
+  `not_before` (counted in render samples: one stall tolerance plus `P_MAX` plus one quantum,
+  #1358 D1). There is no render-thread pre-roll. While render waits for readiness, the
+  predecessor keeps playing exactly. A host that never queues `P + q` frames ahead gets the
+  transition, because any exact mechanism needs those future frames.
 - **No permanent latency reserve.**
 - *Recorded resolution:* "a host that renders nothing" is not a fallback trigger. D15-17 counts the
   deadline in render samples, so a paused host's edit stays pending and never falls back; D15-17
@@ -202,12 +206,18 @@ when a dependency forces the order, and then sequence the correct solution.
     and offset `O + P`. Conditions, each exact or the edit takes the transition:
     1. C1, alignment: `a'(n) = a(n) + P` for every carried node, checked at preparation.
     2. C2, isolation: every edge from R or N into C carries exact `+0.0` from S until its fade
-       fires (fader and post-fader paths, ducked routes, armed fades). A sidechain edge from R into
-       C is allowed only from an Input-stage tap; any later tap makes the consuming strip join R.
+       fires (fader and post-fader paths, ducked routes, armed fades). A sidechain edge has no gain
+       lane, so the tap decides, by #1324 D1's rule: a sidechain from an R strip's `post_input`,
+       `insert_send`, `insert_return` or `pre_fader` tap makes the consuming strip join R
+       (repeated until none joins). An `input` tap (raw source, or a submix's sum of incoming
+       routes) and a `post_fader` or `post_pan` tap (exact `+0.0` from the duck's end to the fire)
+       keep the consumer in C.
     3. C3, bounds: `ΣP + P ≤ P_MAX` and prime bytes `≤ PRIME_BYTES_MAX`.
     4. C4, readiness, checked by render on the active plan before it claims: S is at or after
        `not_before`; every source W carries has its next `P/q + 1` blocks queued and playable; no
-       command and no held seek is anchored in `[S + O, S + O + P + q)`.
+       command is queued and no held seek is anchored below `S + O + P + q` (#1320 D2: the window
+       `[S + O, S + O + P + q)` and an anchor in `(S + O − q, S + O)`, which applies late at
+       `S + O`).
 
     Then:
     1. L1, edges: a C-to-C edge keeps its length, so its line moves unchanged.
@@ -249,7 +259,7 @@ when a dependency forces the order, and then sequence the correct solution.
   carried path, and render pays one bounded raw-frame fill (round 1, C2; round 2; round 5). An
   edited or restarted strip takes its D15-9 transition, which no mechanism can avoid.
 - *Issues:* #1285, #1323 (stream A); #1287 and its slices #1320, #1354, #1355, #1358, #1360, #1361,
-  #1396, #1397 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
+  #1396, #1397, #1402 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
   planned): #1321, #1322, #1353, #1356, #1357, #1359, #1362.
 
 **D15-9. Transitions for strips whose state cannot continue.**
@@ -422,11 +432,12 @@ automation mask and `AUTOMATION_ENQUEUE`.
   - A pending edit progresses only while the host calls control functions, the same duty as
     draining events today.
   - The browser's Worker runs the same service loop continuously.
-- **Deadline and fallback.** The warm-successor deadline (`PRIME_DEADLINE_SAMPLES`) is counted in
-  render samples, so a paused host never triggers a fallback; its edit stays pending until render
-  resumes. When the deadline passes, the next control call withdraws the `Primed` candidate (a
-  `Taken` result means render adopted it exactly), re-prepares with the withdrawn candidate as the
-  donor and publishes the transition (#1358, #1397). `transition_fallback` reports it.
+- **Deadline and fallback.** The warm-successor deadline (`PRIME_DEADLINE_SAMPLES`, #1358 D1) is
+  counted in render samples from the candidate's `not_before`, so a paused host never triggers a
+  fallback; its edit stays pending until render resumes. When the deadline passes, the next control
+  call withdraws the `Primed` candidate (a `Taken` result means render adopted it exactly),
+  re-prepares with the withdrawn candidate as the donor and publishes the transition (#1358, #1397).
+  `transition_fallback` reports it.
 - **Edits submitted during a pending window:**
   - **Live:** committed at once. If a rebuild candidate is pending, the edit goes to the newest
     candidate's cells and applies at adoption (#1053 D7). A pending warm candidate is an ordinary
@@ -576,12 +587,13 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
 - **Round 5 (M6, a design analysis, not a whole-record round):** an extra-high-effort analysis
   confirmed M6 with a standalone model and three mutants. Root amended D15-8 to prime adoption
   (D15-8, "Recorded amendment (round 5)"), which also resolves B1 (floors on carried nodes only,
-  with the alignment check), M1 (claim lines carry by L2 and L3), M2 (no candidate is returned),
-  M3 (a warm candidate is superseded through #1310, its step 5 included), M4 (D15-17's recorded
-  resolution) and M5 (the copy-mode gate goes with copy mode), and retires seven stream C slices.
+  with the alignment check), M1 (claim lines carry and fill by L2 and L3, #1402), M2 (no candidate
+  is returned), M3 (a warm candidate is superseded through #1310, its step 5 included), M4 (D15-17's
+  recorded resolution) and M5 (the copy-mode gate goes with copy mode), and retires seven stream C
+  slices.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
 passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its
 seams with streams B, D and H. Stream C is now #1287, #1320, #1354, #1355, #1358, #1360, #1361,
-#1396 and #1397. Its coordinator still runs one fresh design verification of those specs before
-the first implementation slice (`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).
+#1396, #1397 and #1402. Its coordinator still runs one fresh design verification of those specs
+before the first implementation slice (`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).

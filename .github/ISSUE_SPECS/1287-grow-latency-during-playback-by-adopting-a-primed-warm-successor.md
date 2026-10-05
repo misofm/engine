@@ -21,10 +21,12 @@ through the watermark's `transition_fallback` flag.
 
 ## Product outcome (this slice)
 
-A floor on a node that reads a source is realised as a source-claim compensation line. Claim lines
-carry across a plan swap in move mode, keyed by claiming node and source, and a line whose length or
-source-read clock changes is filled by the lemma's L2 and L3 rules. A plan compiled with lead
-floors renders the predecessor's mix delayed by exactly `P`. Gates 1-4 check these.
+A floor on a node that reads a source is realised as a source-claim compensation line, in the
+compiler and the graph runtime. A successor compiled with the lemma's lead floors (on carried
+nodes only) puts every carried node at exactly its predecessor arrival plus `P`, and gives a
+restarted strip's `Input` stage no claim line. A plan compiled with lead floors renders the
+predecessor's mix delayed by exactly `P`. Gates 1-3 check these. The claim-line carry and the fill
+rules are *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402).
 
 ## Context
 
@@ -64,9 +66,9 @@ does not weaken it.
 D2), and claim lines of length `λ`. Successor W's nodes split into:
 - C, carried nodes;
 - R, the nodes of `PreparedHost::restarted_strips()` (*Carry fader, mute and pan ramps across a
-  plan swap*, #1277 D6): every node before the fader, and the fader (*Duck-swap a strip whose
-  state cannot continue across a plan swap*, #1324 D2), plus every node of a strip that the C1
-  iteration restarts whole;
+  plan swap*, #1277 D6; *Duck-swap a strip whose state cannot continue across a plan swap*, #1324
+  D1): every node before the fader, and the fader (#1324 D2), plus every node of a strip that the
+  C1 iteration restarts whole (#1324 D2, `restart_whole`);
 - N, added nodes.
 
 `Δ` is the largest arrival growth over **C only**, and `P = q · ceil(Δ / q)` for quantum `q`.
@@ -84,16 +86,20 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
   ordinary rebuild that duck-swaps those strips, not a transition.
 - **C2 (isolation).** Every edge from R or N into C carries exact `+0.0` over `[S, fire)`: fader
   and post-fader paths, ducked routes (#1324, #1391, #1363), armed fades (#1288). An
-  `EffectSidechain` edge from R into C is allowed only from an `Input`-stage tap (raw source),
-  which L3 fills. A sidechain from any later tap of an R strip puts the consuming strip in R. (The
-  same gap exists in a plain duck-swap; #1324 D1 adds that strip to its duck set.)
+  `EffectSidechain` edge has no gain lane, so the tap decides, exactly as #1324 D1's rule: a
+  sidechain from an R strip's `post_input`, `insert_send`, `insert_return` or `pre_fader` tap puts
+  the consuming strip in R (repeated until no strip joins). An `input` tap (a track's raw source,
+  whose line L3 fills, or a submix's sum of incoming routes) and a `post_fader` or `post_pan` tap
+  (exact `+0.0` from the duck's end to the fire) keep the consumer in C.
 - **C3 (bounds).** `ΣP + P <= P_MAX` and the prime's bytes `<= PRIME_BYTES_MAX`, else the
   transition (`WarmUnavailable::LeadBound`, `WarmUnavailable::PrimeBudget`).
 - **C4 (readiness).** Render checks it on the **active** plan's consumers before it claims: `S >=
   not_before` (the duck has settled and its lines have drained); every source W carries has its
   next `k + 1 = P/q + 1` blocks queued and playable (active generation, contiguous from
   `next_frame`, or past the end of the region); and no command is queued and no held seek is
-  anchored in `[S + O, S + O + P + q)`.
+  anchored below `S + O + P + q` (*Let a source consumer check and replay its next blocks for a
+  prime*, #1320 D2: that covers the window `[S + O, S + O + P + q)` and an anchor in
+  `(S + O - q, S + O)`, which applies late at `S + O`).
 
 **L1 (edges).** For a C->C edge, `c' = (a(n) + P) - (a(m) + P) - lat(m) = c`. Each such line moves
 unchanged (*Carry compensation lines across a plan swap*, #1283 D2).
@@ -157,8 +163,8 @@ during the adoption callback is observed at block S on the new clock.
 - **W6. Fallback.** The transition is the only fallback, counted `TRANSITION_FALLBACK` and
   reported through the watermark's `transition_fallback` flag (#1314). It runs on
   `WarmUnavailable` at submit, or when C4 is still unmet `PRIME_DEADLINE_SAMPLES` of render after
-  publication. Then the next control call withdraws the candidate (`Taken` means it was adopted
-  exactly), re-prepares with the withdrawn candidate as donor, and publishes
+  `not_before` (#1358 D1). Then the next control call withdraws the candidate (`Taken` means it
+  was adopted exactly), re-prepares with the withdrawn candidate as donor, and publishes
   (`fall_back_to_transition`, #1397). While render waits, the predecessor keeps playing exactly. A
   host that never queues `P + q` frames ahead gets the transition: any exact mechanism needs those
   frames.
@@ -166,8 +172,9 @@ during the adoption callback is observed at block S on the new clock.
 - **W8. Constants.** `P_MAX` and `PRIME_BYTES_MAX` are engine constants. *Record the swap block's
   cost on the 64-track console* (#1286) owns their single derivation (the prime adoption block
   measured at `ΣP = P_MAX`), with *Prove two Wasm instances on one shared memory in three browser
-  engines and on iOS* (#1331) for the browser rows. Ring headroom is `P_MAX` plus one quantum
-  (#1358). No other spec restates a formula.
+  engines and on iOS* (#1331) for the browser rows. #1358 writes `P_MAX_SAMPLES` and the ring
+  headroom (`P_MAX` plus one quantum) into code, and #1360 writes `PRIME_BYTES_MAX`. No other spec
+  restates a formula.
 - **W9. Edits that restart strips.** An edit that both grows latency and restarts strips (#1324
   D1, such as a latent insert added to an audible strip) ducks those strips on the predecessor
   through #1324, and `not_before` holds adoption until the duck has settled and its lines have
@@ -182,25 +189,17 @@ during the adoption callback is observed at block S on the new clock.
   (`pdc_delay_block`, `crates/lane/src/kernels.rs:990`). A claim read in place (#918) through such a
   line becomes a copy.
 - **D2. No change without floors.** Without floors the program and its bytes do not change.
-- **D3. Claim-line carry.** #1283's carry location table gains claim lines, keyed by (claiming
-  node, claimed source's stable ID). A key present in both plans carries in move mode by L2; with
-  `P = 0` and equal lengths that is a swap of the rings and the cursor (#1283 D2). A claim line holds
-  raw source frames and no processing state, so it carries for an R strip too. A key only in W is an
-  N line. The carry takes nothing on a mismatch, like the rest of the program.
-- **D4. Fill routine.** One allocation-free routine fills a W line from A's pending samples (and,
-  for L3, A's claim pending) and a prime slice of `P` frames, per L2 and L3, for both lanes of a
-  dual-mono claim. This slice provides it and tests it with given prime slices; *Adopt a warm
-  successor with a raw-frame prime at the first ready block* (#1355) calls it with the replayed
-  blocks.
-- **D5. Record.** Before implementing, check the lemma against the compiler and record any
+- **D3. Record.** Before implementing, check the lemma against the compiler and record any
   correction in this spec's decision record.
+
+The claim-line carry, keyed by (claiming node, source), the L2 and L3 fill routine and the
+host-core join are *Carry source-claim lines across a plan swap and fill a grown line for a prime*
+(#1402).
 
 ## Deliverables
 
-1. D5, then D1-D4 in the graph compiler and the graph runtime, and the claim-line rows of the
-   carry join in host-core beside #1283's.
-2. `crates/graph-compiler/tests/latency_growth.rs` (gate 1), fill-routine unit tests in
-   `crates/graph` (gate 4), and `crates/host-core/tests/latency_growth.rs` (gates 2-3).
+1. D3, then D1-D2 in the graph compiler and the graph runtime.
+2. `crates/graph-compiler/tests/latency_growth.rs` (new) with gates 1-3.
 
 ## Authorized paths
 
@@ -209,23 +208,21 @@ during the adoption callback is observed at block S on the new clock.
   `crates/graph-compiler/src/estimate.rs` (their bytes, beside the `InsertedDelay` row at `:385`),
   `crates/graph-compiler/src/canonical.rs` (their evidence and `dot` rows, `:157`, `:343`),
   `crates/graph-compiler/tests/latency_growth.rs` (new)
-- `crates/graph/src/lib.rs` and `crates/graph/src/runtime.rs` (the claim-line runtime, its carry
-  and the fill routine only)
-- `crates/host-core/src/prepare.rs` (the claim-line rows of the carry join, and a `test-support`
-  preparation that takes an explicit floor map, only)
-- `crates/host-core/tests/latency_growth.rs` (new),
-  `.github/ISSUE_SPECS/1287-grow-latency-during-playback-by-adopting-a-primed-warm-successor.md`
+- `crates/graph/src/lib.rs` and `crates/graph/src/runtime.rs` (the claim-line runtime only)
+- `.github/ISSUE_SPECS/1287-grow-latency-during-playback-by-adopting-a-primed-warm-successor.md`
 
 ## Non-goals
 
-- No `warm_lead`, no C1 iteration and no `WarmUnavailable` (#1354).
+- No claim-line carry, fill routine or host-core join (#1402).
+- No `warm_lead`, no C1 iteration and no `WarmUnavailable` (#1354): gate 1 passes the lemma's floor
+  map to the compiler directly.
 - No readiness check, `prime_block_at`, `Primed` publication or adoption (#1320, #1311, #1355).
 - No duck-swap or fallback (#1397, #1358).
 
 ## Hazards
 
 - **Ownership.** `crates/graph` and `crates/graph-compiler` are stream A's files. This slice lands
-  after #1285 and #1283, in the merge order root sets.
+  after #1285, in the merge order root sets.
 
 ## Objective gates
 
@@ -240,23 +237,15 @@ during the adoption callback is observed at block S on the new clock.
    same checks hold with `P` from the submix's growth.
 2. **Delay relation.** A plan compiled from A with every node floored at A plus `P` renders A's
    output delayed by exactly `P` samples, bit for bit, from frame 0, after `P` samples of `+0.0`.
-   All four launch rates, both bank widths.
-3. **M1, carry level.** W1 is gate 2's plan; it stands in for a plan after a warm adoption, with
-   claim lines of length `P`. After 8 blocks, an ordinary successor of W1 that adds a muted track
-   is prepared (floors from W1's inventory) and adopted in move mode. Every claim line carries
-   bit-exactly, and the next 64 blocks equal W1's continued run (W1 never swapped), bit for bit, all
-   four rates, both bank widths. The render-level M1 gate (a growth, an ordinary rebuild, then a
-   second growth, equal to A never swapped) lives in #1355.
-4. **Fill rules.** Unit tests of D4 with given pending and prime slices: a C line (`λ -> λ + P`)
-   emits A's pending samples, then the prime; an R line (`λ -> λ`) emits the shifted fill; an N line
-   with `λ' > P` emits `+0.0` then the prime; an L3 line emits A's line pending, A's claim pending,
-   then the prime. Each at every predecessor cursor position modulo the block, both lanes.
-5. **No change without floors.** `cargo test --locked -p graph-compiler` and the graph fixture
+   Both plans are bound with `bind_with_source_set` (`crates/graph/src/lib.rs:1882`) to a test
+   `GraphPreparedSourceSetDriver` that plays frame-encoded samples, as
+   `crates/graph/tests/rt10_source_in_place_alloc.rs:64` does. All four launch rates, both bank
+   widths.
+3. **No change without floors.** `cargo test --locked -p graph-compiler` and the graph fixture
    corpus pass unchanged.
-6. Commands:
+4. Commands:
    - `cargo test --locked -p graph-compiler`
    - `cargo test --locked -p graph --features graph/test-support`
-   - `cargo test --locked -p host-core --features host-core/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
@@ -268,15 +257,12 @@ during the adoption callback is observed at block S on the new clock.
   #1285 D1 alone would give, show none on track 2. Red.
 - Gate 2: a claim line padded at the wrong end, or a line on only one lane of a dual-mono track,
   breaks the exact delay. Red.
-- Gate 3: claim lines left out of the carry table restart at rest, so every source drops out for
-  `P` samples after the rebuild (round-4 M1). Red.
-- Gate 4: #1283's zeros-first order in a grown line, or an L3 fill without A's claim pending,
-  emits the wrong samples. Red.
+- Gate 3: a claim line or estimate row emitted with no floor changes an existing plan's bytes.
+  Red.
 
 ## Dependencies
 
 - *Keep every node's latency from dropping during playback* (#1285): floors.
-- *Carry compensation lines across a plan swap* (#1283): the carry location table.
 
 Each later slice below names its own dependencies in its own body.
 
@@ -284,20 +270,23 @@ Each later slice below names its own dependencies in its own body.
 
 Every slice must also keep zero allocations, frees and syscalls on render.
 
-1. *Let a source consumer check and replay its next blocks for a prime* (#1320): the C4 readiness
+1. *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402): the
+   claim-line carry keyed by (claiming node, source), the L2 and L3 fill routine, the host-core
+   join and the carry-level M1 gate.
+2. *Let a source consumer check and replay its next blocks for a prime* (#1320): the C4 readiness
    check, `prime_block_at` and `prime_required`.
-2. *Give a plan a source-read clock that leads its render clock* (#1396): W3's offset inheritance,
+3. *Give a plan a source-read clock that leads its render clock* (#1396): W3's offset inheritance,
    its reset at #1323's declaration, and the clock readers.
-3. *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `warm_lead`
+4. *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `warm_lead`
    over C, the C1 iteration, C2's sidechain restart, C3 and `WarmUnavailable`.
-4. *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): W2, `Primed`,
-   the source-read offset `O + P`, and the render-level gates (including M1).
-5. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+5. *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): W2, `Primed`,
+   the source-read offset `O + P`, and the render-level gates (including the render-level M1).
+6. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
    successor cannot adopt* (#1397): W9 and W6's `fall_back_to_transition`.
-6. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7,
+7. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7,
    `PRIME_DEADLINE_SAMPLES` and the ring headroom.
-7. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
-8. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
+8. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
+9. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
    (#1361).
 
 `P_MAX` and `PRIME_BYTES_MAX` come from *Record the swap block's cost on the 64-track console*

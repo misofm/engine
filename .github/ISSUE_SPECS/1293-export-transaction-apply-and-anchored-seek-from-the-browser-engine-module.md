@@ -75,7 +75,7 @@ module* (#1386), which uses this slice's staging and outcome record.
 - **D2. Apply.** `miso_engine_web_v1_apply(handle, len) -> u32` decodes the staged bytes as one
   `SESSION_TRANSACTION_APPLY` frame (`crates/protocol/src/session_wire.rs`; the bytes the C ABI
   accepts) and runs #1290's `apply`. It returns as soon as the transaction commits (D15-17) and
-  never waits for render, a swap or a catch-up.
+  never waits for render, a swap or a warm adoption.
 - **D3. Outcome.** `miso_engine_web_v1_edit_outcome_ptr(handle) -> u32` points at a fixed
   `#[repr(C)]` record rewritten by every apply (and by #1386's replace): `struct_size u32`,
   `abi_version u32`, `result u32`, `path u32` (#1313's codes), `revision u64` (the committed

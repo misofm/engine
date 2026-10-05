@@ -69,7 +69,7 @@ counter the C ABI does not serve is refused with a type.
   frozen registry and `parse_counter_id` at the next free value when this merges (17 if #1312's
   16 has landed), never a reused one; tests use the name, never the number. The provider serves
   it at 0 from construction. #1360 writes it in the service step's counter refresh. It counts
-  `transition_reprepare_refusals`, which replaces the retired `catch_up_reprepare_refusals`.
+  `transition_reprepare_refusals` (D15-17).
 
 ## Deliverables
 

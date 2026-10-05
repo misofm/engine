@@ -46,4 +46,4 @@ that differ in bits.
 
 ## Dependencies
 
-- #1112, the feature-keyed lane width predicate.
+- None open. #1112, the feature-keyed lane width predicate, is closed as completed.

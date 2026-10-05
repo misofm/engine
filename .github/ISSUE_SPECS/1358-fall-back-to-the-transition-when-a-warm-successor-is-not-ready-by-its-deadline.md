@@ -77,10 +77,13 @@ A latency-growing edit always completes, and the host always learns how.
   prepared from the committed model, which holds every acked edit (#1397 D4). While render waits
   for readiness, the predecessor keeps playing every queued frame. An ack can never precede a
   drop.
+- **D5. `P_MAX_SAMPLES`.** This slice writes `P_MAX_SAMPLES(fs)`, a `const fn` in
+  `crates/host-core/src/warm.rs`, with #1286 D3 item 1's value; its comment names the record
+  row. D1, D2 and the control plane's `WarmConfig` (#1360 D1) read it.
 
 ## Deliverables
 
-1. D1 and D3 in `crates/host-core/src/warm.rs`.
+1. D1, D3 and D5 in `crates/host-core/src/warm.rs`.
 2. D2 in `crates/host-core/src/prepare.rs`, with the source-report assertions updated.
 3. One control-plane method in `crates/control-plane/src/` that runs D3 for the pending
    `PrimedCandidate`. The hosts' service steps call it (#1360 D2, #1361).

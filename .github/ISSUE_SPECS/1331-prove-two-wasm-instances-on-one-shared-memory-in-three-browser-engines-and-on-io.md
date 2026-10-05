@@ -11,7 +11,7 @@ shape is one `host-web` module, built with a pinned dated nightly and `-Zbuild-s
 twice on one shared `WebAssembly.Memory`: a Worker instance and an AudioWorklet instance. The
 answer covers Chromium, Firefox and WebKit on desktop and Safari on a real iOS device, the
 non-isolated fallback, memory growth, the largest shared-memory maximum iOS reserves, how much
-faster than real time a Worker can render (catch-up headroom), and the repo's parity gates on the
+faster than real time a Worker can render (render headroom), and the repo's parity gates on the
 nightly compiler. This is a spike: it changes no shipped file. Its result is the decision record
 below, and it gates *Run the browser control plane in a Worker and keep the AudioWorklet
 render-only* (#1332).
@@ -97,12 +97,12 @@ render-only* (#1332).
   device model, D4 1-5, D5, and the largest of 512 MiB, 1 GiB, 2 GiB, 4 GiB maxima for which
   `new WebAssembly.Memory({initial, maximum, shared: true})` succeeds, each tried in a fresh page
   load and after opening three other tabs. This leg needs a person with the device.
-- D7. **Catch-up headroom (descriptive).** In each engine and on iOS, while the worklet renders the
+- D7. **Render headroom (descriptive).** In each engine and on iOS, while the worklet renders the
   64-track app session in real time, the Worker instance renders a second copy of it as fast as it
   can for 10 s of audio. Report `headroom = rendered_audio_seconds / wall_seconds`. One warmup,
-  two measured rounds, no retry (AGENTS.md benchmark rule). The numbers are inputs for sizing
-  `k_max`, the timeout and `P_max` (D15-8) together with *Record the swap block's cost on the
-  64-track console* (#1286); this spike sizes nothing.
+  two measured rounds, no retry (AGENTS.md benchmark rule). The numbers are the browser row's input
+  to `PRIME_BYTES_MAX` (D15-8) in *Record the swap block's cost on the 64-track console* (#1286)
+  D3; this spike sizes nothing.
 - D8. **Parity gates on the nightly compiler.** Run, with `RUSTUP_TOOLCHAIN=nightly-2026-08-20`,
   the native and AArch64 gates listed under Objective gates, and the browser digest gates against
   the nightly modules. A digest difference is a finding; nothing is re-pinned.
@@ -129,7 +129,7 @@ render-only* (#1332).
 
 - No change to `hosts/host-web`, `sdk/`, scripts or workflows (that is #1332, #1333, #1334).
 - No handoff of a prepared plan between instances (that is #1332).
-- No sizing of `k_max`, the timeout or `P_max`.
+- No sizing of `PRIME_BYTES_MAX` or `P_MAX`.
 - No Android device run (iOS is the named risk; Android Chrome shares Chromium's behaviour).
 
 ## Hazards

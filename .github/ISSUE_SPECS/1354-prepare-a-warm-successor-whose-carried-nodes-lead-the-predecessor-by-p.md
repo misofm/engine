@@ -27,7 +27,9 @@ a block and no return path: render adopts the warm successor in move mode (#1355
 - *Carry fader, mute and pan ramps across a plan swap* (#1277) D6: `PreparedHost::restarted_strips()`.
   *Duck-swap a strip whose state cannot continue across a plan swap* (#1324) D2 restarts every node
   before the fader, and the fader, of such a strip.
-- #1287's first slice: lead floors become source-claim lines, which carry by L2 and L3.
+- #1287's first slice: lead floors become source-claim lines (#1287 D1). *Carry source-claim
+  lines across a plan swap and fill a grown line for a prime* (#1402) carries them and fills them
+  by L2 and L3.
 - *Give a plan a source-read clock that leads its render clock* (#1396) D2: the inventory records
   the predecessor's source-read offset, `ΣP`.
 - `EffectSidechain` edges (`crates/graph-compiler/src/compile.rs:393-416`) read a strip's tap
@@ -41,19 +43,24 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   - `WarmLead { lead_samples: u64, restart_whole: Box<[String]> }` (strip IDs, sorted), with
     `prime_bytes()`.
   - `WarmDecision { Ordinary, Warm(WarmLead), Unavailable(WarmUnavailable) }`.
-  - `WarmConfig { p_max: u64, prime_bytes_max: u64 }`. Its default takes `P_MAX` and
-    `PRIME_BYTES_MAX` from *Record the swap block's cost on the 64-track console* (#1286) for the
-    session's rate and quantum (no formula is restated here; the constants' comments name the
-    record row). Gates lower it.
+  - `WarmConfig { p_max: u64, prime_bytes_max: u64 }`. It has no default: every caller passes
+    both bounds. *Check the warm-successor deadline in miso_engine_v1_service and report its
+    outcome* (#1360) builds it from `P_MAX_SAMPLES` (written by *Fall back to the transition when
+    a warm successor is not ready by its deadline*, #1358) and `PRIME_BYTES_MAX` (written by
+    #1360), both derived by *Record the swap block's cost on the 64-track console* (#1286) D3. No
+    formula is restated here. Gates set it directly.
 - **D2. `warm_lead`, over C only.** `host_core::warm_lead(compiled, caps, base, &WarmConfig) ->
   Result<WarmDecision, PrepareDiagnostics>` is the only place `P` is computed; the control plane
   calls it at classification (#1360 D1). It runs, in order:
   1. R is the nodes of the strips the ordinary preparation's carry join restarts
      (`restarted_strips()`, every node before the fader and the fader, #1324 D2). N is the nodes
      not in the predecessor. C is every other node.
-  2. **C2's sidechain rule.** An `EffectSidechain` edge from an R strip's tap other than `Input`
-     into a C node puts the consuming strip in R (its nodes before the fader and its fader). An
-     `Input`-tap sidechain stays; #1287's L3 fills its line.
+  2. **C2's sidechain rule**, the same as #1324 D1's. An `EffectSidechain` edge from an R strip's
+     `post_input`, `insert_send`, `insert_return` or `pre_fader` tap into a C node puts the
+     consuming strip in R (its nodes before the fader and its fader); repeat until no strip joins.
+     An `input`, `post_fader` or `post_pan` tap keeps the consumer in C: #1287's L3 fills a
+     track's `input`-tap line, and a `post_fader` or `post_pan` tap is exact `+0.0` from the
+     duck's end to the fire.
   3. **`Δ` over C.** Compile with #1285's floors and no lead. `Δ` is the largest
      `arrival(n) - a(n)` over C. Nodes in R or N do not count, so a growth that the restarts
      confine to R is not a growth.
@@ -63,10 +70,10 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   5. `P = q · ceil(Δ / q)`. Compile with floors `a(n) + P` on C, `a(n)` on R, none on N.
   6. **C1.** Every C node must arrive at exactly `a(n) + P`. If one arrives later, its strip
      (track or submix) is restarted whole: every node of the strip joins R and the strip joins
-     `restart_whole`. Go to step 2. A misaligned node that belongs to no strip (the output) cannot
-     be restarted: return `Unavailable(Misaligned)`. A submix whose growth reaches the output
-     therefore ends here, at the output. Each pass adds a strip, so the loop ends within the
-     strip count.
+     `restart_whole` (restarted and ducked as #1324 D2 states for such a strip). Go to step 2. A
+     misaligned node that belongs to no strip (the output) cannot be restarted: return
+     `Unavailable(Misaligned)`. A submix whose growth reaches the output therefore ends here, at the
+     output. Each pass adds a strip, so the loop ends within the strip count.
   7. **C3, lead.** Return `Unavailable(LeadBound)` if `ΣP + P > p_max`, or if any carried ring's
      capacity above `default_source_ring_frames` for the session's rate and quantum is below
      `P + q` frames. A ring without that headroom (the round-4 "hold cap 0" case) cannot hold the
@@ -81,8 +88,8 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   `ΣP = P_MAX` against it.
 - **D4. Preparation.** `SuccessorBase` gains `warm: Option<&WarmLead>`.
   - With `Some`, preparation compiles with D2's floors, marks every node of each `restart_whole`
-    strip not carried, and adds those strips to `restarted_strips()`, so #1324 ducks them. It
-    installs the carry program in move mode.
+    strip not carried (its source-claim lines still carry, #1402 D1), and adds those strips to
+    `restarted_strips()`, so #1324 ducks them. It installs the carry program in move mode.
   - It re-checks C1. A mismatch is a `PrepareDiagnostics` invariant error, since `warm_lead` has
     checked it.
   - It refuses a `lead_samples` that is not a multiple of the quantum with a typed error.
@@ -142,8 +149,9 @@ All at 48 kHz, quantum 128, unless stated. `L` is the true-peak limiter's latenc
    D3 summed over its compiled lines and carried sources. `prime_bytes_max` at that value returns
    `Warm`; one byte less returns `Unavailable(PrimeBudget)`.
 5. **Sidechain isolation.** Gate 1's first edit, plus a compressor on track 2 sidechained from
-   track 1. From track 1's pre-fader tap, `warm_lead`'s preparation restarts track 2 as well
-   (`restarted_strips() == [track 1, track 2]`). From track 1's `Input` tap, track 2 stays carried.
+   track 1. From track 1's `pre_fader` tap, `warm_lead`'s preparation restarts track 2 as well
+   (`restarted_strips() == [track 1, track 2]`). From track 1's `input` tap, and from its
+   `post_fader` tap, track 2 stays carried.
 6. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
@@ -159,16 +167,16 @@ All at 48 kHz, quantum 128, unless stated. `L` is the true-peak limiter's latenc
   zero-headroom ring, fails the exact cases. Red.
 - Gate 4: a prime count that leaves out the L3 lines or one lane, or compares with `<`, fails the
   threshold. Red.
-- Gate 5: a sidechain from a restarted strip's later tap left carried leaves a detector hole in
-  track 2's compressor; restarting it for an `Input` tap restarts a strip that L3 keeps exact. Red.
+- Gate 5: a sidechain from a restarted strip's `pre_fader` tap left carried leaves a detector
+  hole in track 2's compressor; restarting it for an `input` or `post_fader` tap (a rule that
+  differs from #1324 D1's) restarts a strip that stays exact. Red.
 
 ## Dependencies
 
 - *Grow latency during playback by adopting a primed warm successor* (#1287), first slice: lead
-  floors as claim lines, and their carry.
+  floors as claim lines.
 - *Keep every node's latency from dropping during playback* (#1285): the floors `warm_lead`
   compiles with.
 - *Carry fader, mute and pan ramps across a plan swap* (#1277): `restarted_strips()`.
 - *Duck-swap a strip whose state cannot continue across a plan swap* (#1324): the restart set R.
 - *Give a plan a source-read clock that leads its render clock* (#1396): `ΣP` in the inventory.
-- *Record the swap block's cost on the 64-track console* (#1286): `P_MAX` and `PRIME_BYTES_MAX`.

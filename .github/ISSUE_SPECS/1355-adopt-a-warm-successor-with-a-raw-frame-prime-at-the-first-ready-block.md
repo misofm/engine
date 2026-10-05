@@ -44,8 +44,10 @@ gap and no jump.
     `prime_required` flag (D4);
   - #1354: warm preparation, `warm_lead` over the carried nodes, `lead_samples()` and
     `WarmUnavailable`;
-  - #1287's first slice: source-claim lines, their move-mode carry keyed by claiming node and
-    source, and the fill rules L2 and L3 of the lemma;
+  - #1287's first slice: source-claim lines (#1287 D1);
+  - *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402): their
+    move-mode carry keyed by claiming node and source (D1), and the fill routine for the lemma's
+    L2 and L3 (D2);
   - #1396: `source_read_offset` (D1), its inheritance (D2) and `PlanPublisher::render_clock()` (D4);
   - #1314: the per-epoch revision cell (D1) and the watermark advance (D3, D5).
 
@@ -91,13 +93,12 @@ gap and no jump.
     pending, the cost per block is at most `lead_blocks + 2` loads per flagged ring.
 - **D5. Adoption and prime, in the same block.** The claim adopts W by pointer swap and runs the
   move-mode carry as today (`:418`, `:421`). In `GraphExecutor::adopt_predecessor`, after
-  `adopt_sources` (`crates/graph/src/lib.rs:3161-3172`) and the claim-line carry of #1287's first
-  slice:
+  `adopt_sources` (`crates/graph/src/lib.rs:3161-3172`) and the claim-line carry (#1402 D1):
   - for each moved source and each `j` in `0..lead_blocks`, the driver calls
     `prime_block_at(S + O + j * q)` on its consumer, through a new
     `GraphPreparedSourceSetDriver::prime_block_at(&mut self, source_index, sample)`;
-  - it hands each primed block's planes to #1287's fill: every claim line of that source (L2), and
-    every line of an `Input`-tap sidechain edge from a restarted strip into a carried node (L3);
+  - it hands each primed block's planes to #1402 D2's fill: every claim line of that source (L2),
+    and every line of an `Input`-tap sidechain edge from a restarted strip into a carried node (L3);
   - block S then renders as an ordinary block of W, whose driver begins its sources at
     `S + O + P`.
 
@@ -185,9 +186,10 @@ and both bank widths.
      accepted, and A plays them without underrun.
    - A declared stop supersedes W, and the revision completes `EXACT | SUPERSEDED`.
 6. **Realtime.** Every pending block's readiness check and an adoption block with a prime at
-   `ΣP + P = P_MAX` make zero allocations and frees on the render thread
-   (`bench_support::alloc`'s current-thread counters). Locks and syscalls are checked by the
-   realtime policy scripts on these functions and by #1360 D6's `audit capi` leg.
+   `ΣP + P` equal to *Record the swap block's cost on the 64-track console* (#1286) D3 item 1's
+   `P_MAX_SAMPLES` (four true-peak-limiter growths, computed in the test) make zero allocations and
+   frees on the render thread (`bench_support::alloc`'s current-thread counters). Locks and syscalls
+   are checked by the realtime policy scripts on these functions and by #1360 D6's `audit capi` leg.
 7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support --test warm_successor`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
@@ -217,7 +219,9 @@ and both bank widths.
 ## Dependencies
 
 - *Grow latency during playback by adopting a primed warm successor* (#1287), its first slice:
-  claim lines, their carry and the fill rules.
+  claim lines.
+- *Carry source-claim lines across a plan swap and fill a grown line for a prime* (#1402): their
+  carry and the fill routine.
 - *Let a source consumer check and replay its next blocks for a prime* (#1320).
 - *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354).
 - *Give a plan a source-read clock that leads its render clock* (#1396).

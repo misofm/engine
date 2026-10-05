@@ -12,7 +12,7 @@ synchronously, from the same response that carries the new revision. Exact repla
 returns the same bytes, path included.
 
 This reverses #1053 Q3 ("not now"). D15-17 refines D15-3: the path is exactly one of these three
-values, all known at submit. Fallbacks (pre-roll, transition) and supersession are known only after
+values, all known at submit. A fallback (the transition) and supersession are known only after
 submit, so they are reported by the watermark's outcome flags in *Publish an applied-revision
 watermark and complete edits asynchronously* (#1314).
 

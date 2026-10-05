@@ -42,16 +42,15 @@ cross-origin isolation.
 ## Decisions frozen for this slice
 
 - **D1. One path in both modes.** The browser classifies, publishes `Primed` and checks the
-  deadline exactly as the C ABI does (#1360 D1-D2), through `SessionState`. There is no catch-up,
-  no off-thread executor and no page-mode choice of warm path: `RenderOnly` and the mode selection
-  it belonged to are deleted, never added. A non-isolated page runs the same step from its
-  single-mode service tick (#1381 D6).
+  deadline exactly as the C ABI does (#1360 D1-D2), through `SessionState`. The warm path has no
+  page-mode choice: isolated and non-isolated pages take the same path. A non-isolated page runs
+  the same step from its single-mode service tick (#1381 D6).
 - **D2. Render does the adoption.** The readiness check, the claim and the raw-frame prime run in
-  the worklet's `miso_engine_web_v1_render` (#1355). The worklet runs no catch-up, copy or
-  pre-roll. The render-locked allocation counter stays exactly 0 across the readiness check and a
-  prime (#1333's runtime gate).
+  the worklet's `miso_engine_web_v1_render` (#1355); the worklet renders nothing ahead and copies
+  no plan state. The render-locked allocation counter stays exactly 0 across the readiness check and
+  a prime (#1333's runtime gate).
 - **D3. Outcome report.** The status words carry the outcome (#1349 D2): `EXACT`,
-  `TRANSITION_FALLBACK`, or with `SUPERSEDED` set. The browser has no pre-roll outcome.
+  `TRANSITION_FALLBACK`, or with `SUPERSEDED` set.
 - **D4. Acked-batch question.** As #1360 D7, unchanged.
 
 ## Deliverables

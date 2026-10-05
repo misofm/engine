@@ -199,16 +199,20 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
      #1285's floors, N has none). `Δ` is the largest arrival growth over C, `P = q·⌈Δ/q⌉`, and the
      source-read offset is the predecessor's plus `P` (*Give a plan a source-read clock that leads
      its render clock*, #1396). Preparation checks that every carried node arrives at exactly
-     `a(n) + P`; a node that does not is `WarmUnavailable::Misaligned`, its strip is restarted whole
-     and `Δ` recomputed, and if it cannot be restarted the edit takes the transition (*Prepare a warm
-     successor whose carried nodes lead the predecessor by P*, #1354).
+     `a(n) + P`; a node that does not has its strip restarted whole (#1324 D2) and `Δ` recomputed,
+     and if it cannot be restarted preparation returns `WarmUnavailable::Misaligned` and the edit
+     takes the transition (*Prepare a warm successor whose carried nodes lead the predecessor by
+     P*, #1354). A sidechain from a restarted strip's tap after its input and before its fader
+     restarts the consuming strip too (#1324 D1).
   2. Submit publishes it as `Primed { not_before, lead_blocks }` (#1311).
   3. Render checks readiness on the **active** plan's consumers before it claims: S is at or after
-     `not_before`, every carried source has its next `P/q + 1` blocks queued and playable, and no
-     command or held seek is anchored in the prime window (*Let a source consumer check and replay
-     its next blocks for a prime*, #1320). Once ready, it claims and adopts in move mode in the
-     same block, then replays `P/q` blocks per carried consumer (`prime_block_at`) into the claim
-     lines (*Adopt a warm successor with a raw-frame prime at the first ready block*, #1355).
+     `not_before`, every carried source has its next `P/q + 1` blocks queued and playable, no
+     command is queued and no held seek is anchored below `S + O + P + q` (*Let a source consumer
+     check and replay its next blocks for a prime*, #1320). Once ready, it claims and adopts in
+     move mode in the same block, then replays `P/q` blocks per carried consumer
+     (`prime_block_at`) into the claim lines (*Adopt a warm successor with a raw-frame prime at
+     the first ready block*, #1355), which carry and fill by L2 and L3 (*Carry source-claim lines
+     across a plan swap and fill a grown line for a prime*, #1402).
   4. Live edits while it is pending are ordinary pending-candidate edits (#1053 D7). A structural
      edit supersedes it (#1310). A host-declared stop supersedes it by a plain rebuild (#1323).
   5. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
@@ -217,13 +221,16 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
      the Worker's service loop (*Check the warm-successor deadline in the browser Worker's service
      loop and report its outcome*, #1361).
 - **Fallback, counted and reported** through the watermark's outcome flags (#1314): the transition
-  only, the duck-swap of the strips whose arrival grows (*Duck-swap the strips a latency growth
-  restarts, and fall back to the transition when a warm successor cannot adopt*, #1397), counted
-  `TRANSITION_FALLBACK`. It applies on `WarmUnavailable` at submit, or when readiness is still
-  unmet `PRIME_DEADLINE_SAMPLES` of render after publication (*Fall back to the transition when a
-  warm successor is not ready by its deadline*, #1358). The deadline is counted in render samples,
-  so a paused host never falls back (D15-17). There is no render-thread pre-roll. #1286 derives
-  `P_MAX` and `PRIME_BYTES_MAX`, with the browser row from the spike (#1331).
+  only, the duck-swap of every strip whose content timing moves (a node whose arrival grows, or an
+  outgoing edge whose compensation line changes length) and of #1324's restarted strips
+  (*Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+  successor cannot adopt*, #1397 D2), counted `TRANSITION_FALLBACK`. It applies on
+  `WarmUnavailable` at submit, or when readiness is still unmet `PRIME_DEADLINE_SAMPLES` of render
+  after `not_before` (one stall tolerance plus `P_MAX` plus one quantum; *Fall back to the
+  transition when a warm successor is not ready by its deadline*, #1358 D1). The deadline is counted
+  in render samples, so a paused host never falls back (D15-17). There is no render-thread pre-roll.
+  #1286 derives `P_MAX` and `PRIME_BYTES_MAX`, with the browser row from the spike (#1331); ring
+  headroom is `P_MAX` plus one quantum (#1358).
 - **No permanent latency reserve.** A reserve is a permanent cost on every session.
 
 VST3 states that a plug-in's latency change may interrupt playback, because the host must recompute
@@ -323,7 +330,7 @@ carry only between bank lanes.
 | Compensation lines | `CompensationDelay` (`graph/src/runtime.rs:940`) | move, or a head-aligned copy for a changed length | #1283 |
 | Strip and submix delay lines, live send ramps | `TrackDelayLine` (`:1021`), `LiveRoute` (`:861`) | move (delay lines); drain, then copy (send ramps) | #1284 |
 | Meters, observation taps, spectrum | builtins meters, observation lanes | copy | #1327 |
-| Source claim lines (after a warm growth) | `pdc_delay_block` claim lines, keyed by claiming node and source | move; a grown line is filled from pending frames and the prime (D15-8 L2, L3) | #1287 |
+| Source claim lines (after a warm growth) | `pdc_delay_block` claim lines, keyed by claiming node and source | move; a grown line is filled from pending frames and the prime (D15-8 L2, L3) | #1402 |
 
 ## Slices
 
@@ -359,14 +366,15 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1311 | *Adopt a successor plan no earlier than a scheduled sample* | B | #1309, #1314, #1343 |
 | #1348 | *Add miso_engine_v1_service for bounded control work between edits* | B | #1309, #1311, #1314 |
 | #1349 | *Publish the applied-revision watermark in the browser status* | B | #1309, #1314, #1348, #1381, #1399 |
-| #1287 | *Grow latency during playback by adopting a primed warm successor* | C | #1283, #1285 |
+| #1287 | *Grow latency during playback by adopting a primed warm successor* | C | #1285 |
+| #1402 | *Carry source-claim lines across a plan swap and fill a grown line for a prime* | C | #1283, #1285, #1287 |
 | #1396 | *Give a plan a source-read clock that leads its render clock* | C | #1316, #1323 |
 | #1320 | *Let a source consumer check and replay its next blocks for a prime* | C | #1316, #1318, #1319 |
-| #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1286, #1287, #1324, #1396 |
-| #1355 | *Adopt a warm successor with a raw-frame prime at the first ready block* | C | #1277, #1287, #1310, #1311, #1314, #1320, #1323, #1327, #1343, #1344, #1354, #1395, #1396 |
+| #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1287, #1324, #1396 |
+| #1355 | *Adopt a warm successor with a raw-frame prime at the first ready block* | C | #1277, #1287, #1310, #1311, #1314, #1320, #1323, #1327, #1343, #1344, #1354, #1395, #1396, #1402 |
 | #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt* | C | #1288, #1311, #1314, #1324, #1325, #1343, #1344, #1354, #1355, #1396, #1398 |
 | #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1286, #1314, #1343, #1354, #1355, #1396, #1397 |
-| #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398 |
+| #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398 |
 | #1361 | *Check the warm-successor deadline in the browser Worker's service loop and report its outcome* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1355, #1360, #1381 |
 | #1326 | *Give every browser plan live strip fader and mute lanes* | D | none |
 | #1288 | *Fade in a strip that a swap adds during playback* | D | #1054 |
