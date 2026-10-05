@@ -81,8 +81,11 @@ the stream-J `README.md` there, "Open for root/S0"). The gap predates #1237.
   `--all-targets`, which excludes doctests (`.github/workflows/qualification.yml:609-620`).
   *Run doctests in CI* (#1422) adds the doctest steps; this issue lands after it, so gate 1 runs in
   `test-debug-a`. Do not change CI in this issue.
-- **Shipped module bytes.** A newtype should not change generated code, but `push`'s signature
-  changes. Gate 3 confirms that no render digest moves.
+- **Shipped module bytes.** The newtype changes generated code: `push`'s signature changes, and
+  the shipped module moved (attempt 1, gate 3: `d13e812c...` (2896157 B) to `46c8b035...`
+  (2896155 B); host-web's `ReadyOwnership::push` body shrank from 1407 to 1383 B and the impl order
+  moved call indices in 51 other bodies). Rendered PCM did not move. Gate 3 confirms that no
+  rendered digest moves; the PR's `artifact-identity` job reports the module change.
 
 ## Objective gates
 
@@ -202,7 +205,7 @@ code moved.
   so the fence is red for any public associated `new`, not only one of a given signature.
 - **MINOR-1.** A third fence: the twin's text with `<expr>` = `inner.into()` (the
   `From<graph::RouteControlRecord>` door; `RouteControlRecord::from(inner)` needs the same impl).
-- **NIT-1.** The doc now says what the fences check (`new` of any signature or a re-export, the
+- **NIT-1.** The doc now says what the fences check (a non-generic `new` or a re-export, the
   tuple constructor, `From`/`Into`) and records the limit: no fence can see a public constructor
   under another name (such as `from_graph`) or a named public field. Privacy and review hold those.
 - **MINOR-2.** Attempt 1's gate-3 sentence is corrected in place above.
@@ -256,7 +259,57 @@ field (D1 forbids that shape).
    `check-host-core-policy.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`.
 
 *Test value.* Fence 1 is red if host-core re-exports graph's record or gives the newtype a public
-associated `new` of any signature; fence 2 is red if the tuple field becomes public; fence 3 is red
+non-generic associated `new`; fence 2 is red if the tuple field becomes public; fence 3 is red
 if host-core adds `From<graph::RouteControlRecord>` (or re-exports graph's record); the twin is red
 if a shared item is renamed, so no fence passes for the wrong reason. No runtime test can see any of
 these, because the bypass is an API.
+
+### Follow-ups (attempt 2 verdict: PASS with MINOR-1, NIT-1 to NIT-3)
+
+**Change.** `crates/host-core/src/route_controls.rs`, doc comment of `RouteControlRecord` only; no
+code moved. The twin is unchanged.
+
+- **MINOR-1.** Fence 3's forbidden expression is now `inner.try_into().ok().unwrap()`. Through the
+  standard blanket impls `try_into` exists if there is a `From`, an `Into` or a `TryFrom`, so the
+  fence now also sees `TryFrom`; `.ok()` puts no `Debug` bound on the error. The doc above the
+  fence says so. Fence 3 turned plain gives exactly one error at baseline: `E0277: the trait bound
+  'host_core::RouteControlRecord: TryFrom<graph::RouteControlRecord>' is not satisfied`. Reverted.
+- **NIT-1.** "of any signature" is now "non-generic" in the doc and in this spec (attempt 2's NIT-1
+  bullet and test-value line). The optional trait-probe doctest is **not added**: it would catch a
+  generic `new` (a unique catch), but it also catches everything fence 1 catches, so fence 1 would
+  be superseded and must then be deleted in the same change (AGENTS.md); that replaces D4's
+  `compile_fail` form with another form, which is a spec change for root, not a follow-up. A
+  generic public `new` stays in the stated limit.
+- **NIT-2.** The stated limit now names a generic `new`, and a public constructor, conversion or
+  mutator under another name: `from_graph`, `DerefMut` or `AsMut` to graph's record, a `&mut self`
+  setter, a manual `Default` built from graph's `new`.
+- **NIT-3.** The twin's sentence now says it differs from fence 1 only by fence 1's extra
+  `let _ = ..::new;` statement, and from fences 2 and 3 only in that the producer builds the record.
+- **Hazards.** The line "A newtype should not change generated code" is corrected with attempt 1's
+  numbers.
+
+**Mutation runs** (`cargo test --locked -p host-core --features control-provider,test-support --doc
+route_controls`, applied by script and restored after each run; byte-identical after the last):
+
+| Mutation | F1 (`new`) | F2 (tuple) | F3 (`try_into`) | Twin |
+|---|---|---|---|---|
+| Baseline | green | green | green | green |
+| Spec's: `pub use graph::RouteControlRecord` in place of the newtype | **red** | green | **red** | green |
+| `impl From<graph::RouteControlRecord> for RouteControlRecord` | green | green | **red** | green |
+| `impl Into<RouteControlRecord> for graph::RouteControlRecord` | green | green | **red** | green |
+| `impl TryFrom<graph::RouteControlRecord> for RouteControlRecord` | green | green | **red** | green |
+| Delete F3's forbidden expression (replaced by the twin's) | green | green | **red** | green |
+
+**Gates** (all exit 0): host-core doctests (9 passed: 3 plain, 6 `compile_fail`); host-core
+(`control-provider,test-support`): 284 passed; `cargo fmt --all -- --check`; `cargo clippy --locked
+--workspace --all-targets --all-features -- -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc
+--locked --workspace --no-deps`; `check-host-core-policy.sh`; `check-workspace-policy.sh`. Doc
+lines moved, so the module was rebuilt: `build-web-audioworklet.sh --named-twin` with this change
+and `--module-only` with the file at `9d955dc66` both give the shipped module
+`9b2b1a0ff095784801e5bf2dfd1326de2066bab8be4789bab720eeb5fdb7203c` (2896155 B). The follow-ups move
+no shipped byte. (The digest differs from attempt 2's `ffc62262...` because `9d955dc66` changed
+`crates/builtins-compiler/src/lib.rs`.) `check-web-audioworklet.sh --without-metadata-regeneration`
+and `check-browser-expected-resources.py --artifacts` pass.
+
+*Test value (fence 3).* Red if host-core adds `From`, `Into` or `TryFrom` from graph's record, or
+re-exports graph's record; no other test sees it, because the bypass is an API.

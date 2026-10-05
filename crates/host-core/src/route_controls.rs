@@ -36,9 +36,9 @@ pub use graph::RouteControlResources;
 /// every record a host can push has passed `route_coefficients`.
 ///
 /// The fences below check three doors, each beside a plain twin that differs only in the one
-/// forbidden construct. A public associated `new` of any signature (or a re-export of graph's
-/// record, which has one) turns the first red; rustc reports E0599 today (no function `new`). The
-/// fences carry no code because stable rustdoc does not check one (issue #1422 D2):
+/// forbidden construct. A public non-generic associated `new` (or a re-export of graph's record,
+/// which has one) turns the first red; rustc reports E0599 today (no function `new`). The fences
+/// carry no code because stable rustdoc does not check one (issue #1422 D2):
 ///
 /// ```compile_fail
 /// fn send(
@@ -65,21 +65,23 @@ pub use graph::RouteControlResources;
 /// }
 /// ```
 ///
-/// Nor can it convert graph's record with `From`/`Into`. rustc reports E0277 (no
-/// `From<graph::RouteControlRecord>`):
+/// Nor can it convert graph's record with `From`, `Into` or `TryFrom`: through the standard blanket
+/// impls, `try_into` exists if any of the three does. rustc reports E0277 (no
+/// `TryFrom<graph::RouteControlRecord>`):
 ///
 /// ```compile_fail
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
-///     let record: host_core::RouteControlRecord = inner.into();
+///     let record: host_core::RouteControlRecord = inner.try_into().ok().unwrap();
 ///     producer.push(record)
 /// }
 /// ```
 ///
-/// The twin of all three: identical except that the producer builds the record, so a renamed item
-/// in the shared code turns it red:
+/// The twin of all three: it differs from fence 1 only by fence 1's extra `let _ = ..::new;`
+/// statement, and from fences 2 and 3 only in that the producer builds the record. So a renamed
+/// item in the shared code turns it red:
 ///
 /// ```
 /// fn send(
@@ -92,7 +94,9 @@ pub use graph::RouteControlResources;
 /// }
 /// ```
 ///
-/// No fence can see a public constructor under another name, or a named public field; privacy and
+/// No fence can see a generic public `new`; a public constructor, conversion or mutator under
+/// another name (such as `from_graph`, `DerefMut` or `AsMut` to graph's record, a `&mut self`
+/// setter, or a manual `Default` built from graph's `new`); or a named public field. Privacy and
 /// review hold those doors.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RouteControlRecord(graph::RouteControlRecord);
