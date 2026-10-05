@@ -2,6 +2,15 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# Issue #1421: a shell has one EXIT trap, so one cleanup removes every directory this script makes,
+# each only if it was made (the bun branch never makes `host_test_dir`).
+host_test_dir=
+mutation_dir=
+cleanup() {
+  if [[ -n "${host_test_dir:-}" ]]; then rm -rf -- "$host_test_dir"; fi
+  if [[ -n "${mutation_dir:-}" ]]; then rm -rf -- "$mutation_dir"; fi
+}
+trap cleanup EXIT
 if command -v node >/dev/null; then
 node "$repo_root/scripts/test-web-audioworklet.mjs"
 
@@ -14,8 +23,6 @@ unchecked_host="$host_test_dir/unchecked-host.mjs"
 # Keep the copy beside both transformed modules so this red-path test cannot pass by accidentally
 # exercising a missing or stale prepared-control asset.
 cp "$repo_root/hosts/host-web/web/prepared-control.js" "$host_test_dir/prepared-control.js"
-cleanup_safe() { rm -rf -- "$host_test_dir"; }
-trap cleanup_safe EXIT
 sed 's/#lastRequestId = 0;/#lastRequestId = Number.MAX_SAFE_INTEGER - 1;/' \
   "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >"$safe_host"
 MISO_ENGINE_WEB_HOST_TEST_MODULE="$safe_host" MISO_ENGINE_WEB_HOST_MAX_SAFE_TEST=1 \
@@ -26,7 +33,6 @@ if MISO_ENGINE_WEB_HOST_TEST_MODULE="$unchecked_host" MISO_ENGINE_WEB_HOST_MAX_S
   echo "unchecked safe-integer allocator mutation escaped the red test" >&2
   exit 1
 fi
-rm -f -- "$safe_host" "$unchecked_host"
 echo "safe-integer allocator boundary and red mutation passed"
 elif command -v bun >/dev/null; then
   bun "$repo_root/scripts/test-web-audioworklet.mjs"
@@ -39,11 +45,7 @@ worklet="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$worklet"
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-opcodes
 python3 -B "$repo_root/scripts/check-web-audioworklet-callgraph.py" --self-test
-mutation_dir=$(mktemp -d)
-cleanup() {
-  rm -rf -- "$mutation_dir"
-}
-trap cleanup EXIT
+mutation_dir=$(mktemp -d "${TMPDIR:-/tmp}/miso-engine-mutation.XXXXXX")
 
 # Issue #288: mutate the real qualification caller module and run the same hermetic boot check.
 # Keep the helper import's relative layout under the temporary directory so a missing module or
