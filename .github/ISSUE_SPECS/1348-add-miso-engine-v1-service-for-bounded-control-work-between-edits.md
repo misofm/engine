@@ -259,3 +259,13 @@ on the command/dequeue path) or the new export accepts a null session (M6).
   `engine` on two pre-existing failures: the known `watermark.rs` `MAXIMUM_READ_ATTEMPTS` link and
   a third one not on the known list, `spsc.rs:521` linking private `Self::admits` (from #1311,
   `efad0080a`); this change touches neither.
+
+### Batch follow-up (2026-10-05)
+
+- **N-4 (header wording).** `crates/capi/include/miso_engine_v1.h` and
+  `docs/C_ABI_V1_QUALIFICATION.md` now say that every other session call that passes its argument
+  checks runs the service step first, and that a call refused for its arguments returns before the
+  step. The qualification doc names the refusals (a null `source_id`, a bad struct size, an
+  invalid lane, an empty request). The D5 duty text is unchanged. Comment and prose only; no test.
+- Gates: `check-capi-abi.sh` ok; `check-capi-abi.sh --self-test` ok; `cargo test --locked -p capi`
+  green.

@@ -158,8 +158,10 @@ reclaims the plans render has retired and brings the provider epochs up to rende
 provider's counters (the controller's telemetry counters today), stages the render observation,
 and refreshes the counters again so a record that staging coalesced or dropped is counted in the
 same call. Every other session control call (`source_submit_planar_f32`, `source_seek`,
-`source_seek_at`, `submit_command`, `dequeue_event`) runs the same step first, in place of the
-parts each ran before; before #1348 only `submit_command` refreshed the counters and the source
+`source_seek_at`, `submit_command`, `dequeue_event`) that passes its argument checks runs the same
+step first, in place of the parts each ran before; a call refused for its arguments (a null
+`source_id`, a bad struct size, an invalid lane, an empty request) returns before the step. Before
+#1348 only `submit_command` refreshed the counters and the source
 calls staged no telemetry. The step reclaims at most the retirement queue's capacity of plans,
 because each retired plan holds one of that many retirement credits and only a publication
 reserves one; it stages at most one render observation, never waits for render and never loops on

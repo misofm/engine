@@ -87,7 +87,8 @@ extern "C" {
  * between edits. miso_engine_v1_service(session) runs one bounded step of it: it reclaims plans
  * render has retired, brings the session's view of the running plan up to render, refreshes the
  * session counters, and stages render telemetry. Every other session call (source submit, seek,
- * seek_at, submit_command, dequeue_event) runs the same step first, so a host that makes those
+ * seek_at, submit_command, dequeue_event) that passes its argument checks runs the same step
+ * first; a call refused for its arguments returns before the step. So a host that makes those
  * calls anyway need not also call service. The step never waits for render, never commits or
  * acknowledges anything, and never takes or drops a pending edit; its cost does not grow with the
  * time since the last call. It returns MISO_ENGINE_V1_OK; a null session as
