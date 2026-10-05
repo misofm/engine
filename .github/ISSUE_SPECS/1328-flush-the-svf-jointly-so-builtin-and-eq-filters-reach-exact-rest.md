@@ -348,3 +348,46 @@ memset ceiling can drop from 132 to 128 (`check-cross-targets.sh` asks for it); 
 restatements in `crates/lane/tests/g2_kernel_identity.rs` (oracle of
 `g2_svf_step_yields_both_taps_of_one_state`) and `tools/audit/src/unfused_fma.rs` still use the
 per-word flush (green, since their inputs never reach the joint band).
+
+### Attempt 2 (Terra, 2026-10-05, branch `codex/d15-stream-g-1328`) -- partial, blocked
+
+**A1 done (`691f4c1be`).** `selects` in `scripts/check-web-audioworklet-v8-spill.py`: a blend is
+always a select; an `or` is one unless both inputs are lane masks computed in the loop (compares,
+or bitwise ops over such masks alone). Unseen inputs count as a select (fails closed). Self-test 19
+-> 23 cases; five classifier mutations each turn at least one case red (old "every or" rule: `flush
+pair`; "no or": four cases; "any mask input": three; outside register as mask: `outside mask`;
+"every logic op is a mask": two). Base (`0e3e21b68`) listings: every verdict unchanged. Head
+listings now match every row; the dual tail's `[rbp-0xc8]` is reported as the real carry. The
+#1000 red arms are not yet rebuilt (they need the final A2/A3 code).
+
+**V8 rows (pinned Node, AMD EPYC 7313P, held rows marked H):**
+
+| loop | base | attempt 1 | joint `bool` fold (scratch) | joint fold + masks laundered (scratch) |
+|---|---|---|---|---|
+| dual tail, select-free (H) | 0 | 1 (`[rbp-0xc8]`) | 0 | 0 |
+| dual tail, masked | 0 | 1 | 0 | 0 |
+| mono pair, select-free (H) | 0 | 0 | 0 | 0 |
+| mono tail, select-free (H) | 0 | 0 | 0 | 0 |
+| mono pair, masked | 0 | 1 (`[rbp-0x220]`) | 1 | 0 |
+| dual pair (reported) | 10 | 13 | 13 | 13 |
+| dual pair, masked | 11 | 12 | 11 | 15 |
+
+**A2 finding.** Folding both channels into one `bool` in `StoreBound` (and letting the EQ rescan
+the planes only when that fold fails, so the per-channel verdict stays the scan's) clears the dual
+tail's integer slot. Not yet committed: the native gates cannot run (below).
+
+**A3 finding: the spill is not the encoding's.** Every bit-identical encoding and schedule tried
+leaves the masked mono pair carrying an integrator slot: attempt 1's `flush_pair`; compares
+reordered; `r1 & (f1 | r2)`; chained `andnot`; per-word `flush` then rest on the flushed words; the
+skewed kernel with forward section order; the flush after the output mix. The cause is V8's
+scheduler sinking the section-0 dry mask -- built in `Channel::dry_mask` from four scalars and
+`eq 1.0` -- into the loop (four scalar reloads, a broadcast, three inserts and a compare every
+iteration; already so at base). The wasm computes it once before the loop. With the masks made
+opaque before the loop (scratch `black_box`, not shippable) the pair is clean and every held row
+stays clean. A shippable fix is to hold each section's dry mask in memory (a `Channel` field kept
+with the identity flags), which is payload code in `crates/parametric-eq/src/lib.rs` outside A5's
+paths: it needs a root decision.
+
+**Blocked:** the host disk had 0.2-6 GB free during this attempt (other worktrees' targets hold
+~75 GB); a wasm build failed with ENOSPC, and the gate-4 native set cannot be built in this
+worktree. Not started: A4, A5 items, D6 restatement.
