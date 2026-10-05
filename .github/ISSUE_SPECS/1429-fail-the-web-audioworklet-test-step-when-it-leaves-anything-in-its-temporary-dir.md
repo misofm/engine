@@ -104,7 +104,7 @@ directory hides it.
   tests" becomes a block: `mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX"`, an `EXIT`
   trap that removes it, `export TMPDIR="$scratch"`, then `bash scripts/test-web-audioworklet.sh`
   on its own line, then a `find -mindepth 1 -maxdepth 1` of the directory that, if not empty,
-  prints every entry and exits 1. Under GitHub's `bash -eo pipefail` a script failure ends the step
+  prints every entry and exits 1. Under GitHub's `bash -e {0}` a script failure ends the step
   with the script's status before the check (D1: never masked; checked locally with an `exit 3`
   inserted: step exit 3, directory gone).
 - **D3.** The command stays a line of its own, so `unconditional_step_commands` still finds
@@ -116,7 +116,8 @@ directory hides it.
 - **D4.** No router or verdict-table change; the step keeps no `if:`.
 - **D2.** None found: gate 1 left nothing in the private TMPDIR (node, the `cargo run` of
   `parameter-metadata` and the python checkers included). No script change.
-- **Gate 1** (step body extracted from the YAML and run with `bash --noprofile --norc -eo pipefail`,
+- **Gate 1** (step body extracted from the YAML and run with `bash --noprofile --norc -eo pipefail`; *corrected
+  in the follow-ups: CI's shell is `bash -e {0}`, see below*,
   `RUNNER_TEMP` a scratch directory, after `scripts/build-web-audioworklet.sh --named-twin` into
   `target/ci/qualification-*`): exit 0; `RUNNER_TEMP` empty afterwards.
 - **Gate 2** (`scripts/test-web-audioworklet.sh` from `26208ceaa^`): exit 1,
@@ -127,3 +128,25 @@ directory hides it.
 - **Gate 4.** `python3 -B scripts/check-ci-path-routing.py`: passed. `python3 -B
   scripts/test-ci-path-routing.py`: passed (red before the anchor move, as above).
   `bash scripts/check-workspace-policy.sh`: ok. The CI half comes from the batch PR run.
+
+### Follow-ups (attempt 1 verdict: PASS with MINOR-1)
+
+- **Shell, corrected.** The step has no `shell:`, and neither the job nor the workflow sets
+  `defaults.run.shell`, so GitHub runs it with its default `bash -e {0}`, which has no `pipefail`.
+  Attempt 1's record named `bash -eo pipefail`; the two lines above are corrected.
+- **MINOR-1.** The step body now starts with `set -o pipefail`, as other steps in
+  `qualification.yml` do, so a `find` failure in the emptiness check fails the step by itself and
+  not only through the `EXIT` trap's failing `rm`.
+- **Mutation (pipefail).** A stub `scripts/test-web-audioworklet.sh` leaks a file in `TMPDIR` and
+  then makes it unreadable (`chmod 000`); the step body is extracted from the YAML with its `trap`
+  line removed, so only the check can fail it, and run under `bash -e`: with `set -o pipefail`,
+  exit 1; with that line deleted, exit 0 (the leak passes unseen).
+- **Gates 1 to 3, re-run under `bash -e`** (step body extracted from the YAML with PyYAML, which
+  also confirmed no `shell:`; `RUNNER_TEMP` a scratch directory):
+  - Gate 1: exit 0; `RUNNER_TEMP` empty afterwards.
+  - Gate 2 (`scripts/test-web-audioworklet.sh` from `26208ceaa^`): exit 1, "left these entries in
+    its TMPDIR: miso-engine-host.QvYfva"; `RUNNER_TEMP` empty afterwards. Reverted.
+  - Gate 3 (`trap 'true' EXIT` after `:13`): exit 1, naming `miso-engine-host.Vadsld` and
+    `miso-engine-mutation.7Fga6l`; `RUNNER_TEMP` empty afterwards. Reverted; `cmp` matches.
+- **Gate 4.** `python3 -B scripts/check-ci-path-routing.py`: passed. `python3 -B
+  scripts/test-ci-path-routing.py`: passed. `bash scripts/check-workspace-policy.sh`: ok.

@@ -350,6 +350,9 @@ jobs:
       # leak). The script's own failure still fails the step first; the trap removes the directory.
       - name: Hermetic browser host and worklet tests
         run: |
+          # pipefail: GitHub's default shell is `bash -e {0}`, so without it a `find` failure in the
+          # emptiness check would leave `leftover` empty and the check would pass.
+          set -o pipefail
           scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"
           trap 'rm -rf -- "$scratch"' EXIT
           export TMPDIR="$scratch"
