@@ -93,11 +93,13 @@ out of scope: the masked depth-one tails carried a slot before #977.
 
 **The dual tail's row also holds the EQ's block-limit fold** (issue #1328, A2 and A6). After the
 joint flush, V8 kept the fold's two per-channel flags (one packed word) in a stack slot across the
-tail's back edge (`[rbp-0xc8]`). It stopped once the dry masks were read from channel state, which
-took the in-loop mask rebuilds out of the same function's masked loops; folding both channels
-into one flag instead moved the slot rather than removing it. A general-purpose value's slot
-follows the whole function's register use, so the allocation is observed, not structurally
-guaranteed, and this row is what holds it.
+tail's back edge (`[rbp-0xc8]`). The slot follows the tail site's own dry masks: built in place
+there (`dry_mask(at)`), they also feed the masked tail loop, and V8 sank their construction into
+it. It stopped once the tail read them from channel state. Reverting only the tail's mask build
+brings `[rbp-0xc8]` back; reverting only the dual masked pair's leaves the tail clean (#1328
+attempt 2's verifier). Folding both channels into one flag instead moved the slot rather than
+removing it. A general-purpose value's slot follows the whole function's register use, so the
+allocation is observed, not structurally guaranteed, and this row is what holds it.
 
 **Why the dual pair is reported, not held.** It carries ten values across its back edge (eight
 integrators and two skew carries) beside 24 loop-invariant coefficients, in sixteen vector
@@ -122,9 +124,16 @@ Nothing in the listing is pinned: no offset, register or instruction count. Ever
 names the CPU model, since a CI runner's codegen is observed only there.
 
 Re-pinning Node (`PINNED_NODE`, `PINNED_V8`) is a change to the reference V8, not a chore: build
-the #1000 red arms (#977 attempt 1, and the one-token tail edit) and the current head, run the gate
-on the new V8, and record what each gives. Keep the rule whatever they show; if a red arm turns
-green, say so, rather than loosening a row to match.
+the red arms and the current head, run the gate on the new V8, and record what each gives. Keep the
+rule whatever they show; if a red arm turns green, say so, rather than loosening a row to match.
+The red arms (issue #1328, attempt 3) are #977 attempt 1 (module `0db9b2f5`, red on the dual tail
+at `[rbp-0xa0]`) and #1328 attempt 1's code, which is the EQ with `Channel::dry` reverted to masks
+built in place: red on the dual tail at `[rbp-0xc8]` and on the masked mono pair at `[rbp-0x220]`.
+The one-token tail edit #977's attempt-2 verifier recorded (`if !admitted && (...)`) is no longer
+one: bisected with today's gate, it is red at `6f4c0379e` (#1009) and at `d09d50248`, and green
+from the #999 merge `27cf24132` on, which replaced the tail with the bounded-verdict kernel (84 to
+112 instructions). It was never red on `main` (green at `a9414c0c6`, the first `main` commit with
+#1009).
 
 Usage
 -----
@@ -958,6 +967,10 @@ def self_test() -> int:
         # through: the `or` counts as a select, so a held row fails closed.
         ("outside mask", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
                                     "vpor xmm1,xmm1,xmm9"]), (2, 2, [], False)),
+        # An `or` with a memory operand is not seen through either, even beside a mask the loop
+        # computed: the loaded word may be data, so the `or` counts as a select.
+        ("memory operand", synthetic([*tail, "vcmpps xmm1,xmm12,xmm10, (lt)",
+                                      "vpor xmm1,xmm1,[r10]"]), (2, 2, [], False)),
         # A ramped section's six coefficient increments.
         ("ramped", synthetic(svf_step("rax") + ["vaddps xmm5,xmm5,xmm6"] * 6), (None, 1, [], True)),
         # An out-of-line stack guard that spills around its call.

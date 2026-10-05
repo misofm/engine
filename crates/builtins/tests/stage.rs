@@ -201,6 +201,112 @@ fn scalar_stage_is_bit_identical_to_reference_recurrence() {
     }
 }
 
+/// T2b: the scalar stage is the reference recurrence where the flush's per-word arm fires, on
+/// either word.
+///
+/// Issue #1328 made the flush a pair rule, and T2's signals now reach exact rest through its joint
+/// arm: no state word of theirs falls below `FLUSH_EPS` beside a partner at or above `REST_EPS`, so
+/// a reference that dropped its per-word arm stayed green there. Ordinary signals reach that arm
+/// only by coincidence, so this test constructs the input. A 1 kHz high-pass (low-pass off) takes
+/// an impulse and then decays; on each silent frame, while an arm is still unreached, it searches
+/// the 129 `f32` values around the input that would cancel one new word (`ic1 + 2*d1` or
+/// `ic2 + 2*d2`, restated from the reference's coefficient words and state) for one that leaves
+/// that word non-zero inside the flush band and its partner at or above `REST_EPS`, and feeds it.
+/// Each arm fires once, and the test asserts both did. A word the arm zeroes moves no output bit
+/// (the next step overwrites it), so the stage runs one frame per block (partition invariance holds
+/// that equal to one block) and its high-pass state words are held to the reference's after every
+/// frame, beside the output.
+#[test]
+fn scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires() {
+    const CUTOFF_HZ: f32 = 1_000.0;
+    for rate in launch_rates() {
+        let channel = ChannelParameters {
+            hpf_hz: CUTOFF_HZ,
+            ..ChannelParameters::default()
+        };
+        let parameters = BuiltinParameters {
+            left: channel,
+            right: channel,
+            ..BuiltinParameters::default()
+        };
+        let mut input_builtins = prepared_input(rate, parameters);
+        let mut high = ReferenceRetainedTptF32::conditioned_butterworth(
+            rate,
+            CUTOFF_HZ,
+            ReferenceTptOutput::HighPass,
+        )
+        .expect("reference high");
+        let [c1, a2, a3, ..] = high.section_words().map(f32::from_bits);
+        // The two new words before the flush, for input `x` from the reference's current state.
+        let new_words = |state: [u32; 2], x: f32| {
+            let [ic1, ic2] = state.map(f32::from_bits);
+            let v3 = x - ic2;
+            let d1 = ((-c1) * ic1) + (a2 * v3);
+            let d2 = (a3 * v3) + (a2 * ic1);
+            [ic1 + (d1 + d1), ic2 + (d2 + d2)]
+        };
+        let in_band = |word: f32| word.abs() < lane::FLUSH_EPS && word.to_bits() != 0;
+        let mut fired = [None; 2];
+        let mut index = 0_usize;
+        while fired.contains(&None) {
+            assert!(
+                index < 20_000,
+                "rate={rate}: the arms were not reached, {fired:?}"
+            );
+            let mut sample = f32::from(u8::from(index == 0));
+            if index > 0 {
+                let state = high.state_bits();
+                let [ic1, ic2] = state.map(f32::from_bits);
+                'arms: for arm in 0..2 {
+                    if fired[arm].is_some() {
+                        continue;
+                    }
+                    // The input whose step cancels this arm's word, in exact arithmetic.
+                    let cancel = if arm == 0 {
+                        ic2 + (c1 * ic1 - 0.5 * ic1) / a2
+                    } else {
+                        ic2 - (a2 * ic1 + 0.5 * ic2) / a3
+                    };
+                    for offset in -64_i32..=64 {
+                        let x = f32::from_bits(cancel.to_bits().wrapping_add_signed(offset));
+                        if !x.is_finite() {
+                            continue;
+                        }
+                        let words = new_words(state, x);
+                        if in_band(words[arm]) && words[1 - arm].abs() >= lane::REST_EPS {
+                            fired[arm] = Some(index);
+                            sample = x;
+                            break 'arms;
+                        }
+                    }
+                }
+            }
+            let mut left = [sample];
+            let mut right = [sample];
+            input_builtins.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+            let step = high.process(sample);
+            assert_eq!(
+                left[0].to_bits(),
+                step.output_bits,
+                "rate={rate}, index={index}"
+            );
+            assert_eq!(
+                right[0].to_bits(),
+                step.output_bits,
+                "rate={rate}, index={index}"
+            );
+            let words = test_support::input_state_words(&input_builtins);
+            let [ic1, ic2] = step.next_state_bits;
+            assert_eq!(
+                [words[0], words[1], words[4], words[5]],
+                [ic1, ic2, ic1, ic2],
+                "rate={rate}, index={index}"
+            );
+            index += 1;
+        }
+    }
+}
+
 /// T3: a bank is the scalar stage at another width, and a padding lane changes nothing.
 #[test]
 fn bank_is_bit_identical_to_scalar_stage_at_every_width() {

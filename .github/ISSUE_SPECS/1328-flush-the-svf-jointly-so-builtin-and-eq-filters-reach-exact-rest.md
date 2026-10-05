@@ -126,15 +126,18 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   implementer proves with evidence that no correct encoding avoids it does the slice measure the
   browser cost (V8, the existing timing method) and record it here as an explicit accepted
   exception with that evidence; the gate then holds that row with its reason.
-- **A4. D6 restated (class B, re-accepted).** The joint flush moves bits by change size, not only
-  in tails: below about -160 dBFS input a low-frequency state word can stay under `REST_EPS` and be
-  zeroed while input is live (10 Hz, S 0.1, +24 dB low shelf at 96 kHz fed -160/-180 dBFS), and in a
-  multi-section chain the first moved sample can sit at a loud level (about -169 dBFS in the input
-  HPF 100 Hz + LPF 22 kHz chain, where the HPF rests while the LPF still carries signal). Every
-  change is below 2.2e-13 (< -253 dBFS; largest measured -256.7 dBFS). Accepted: the slice fixes a
-  correctness defect (a limit cycle and a stuck fixed point) and the change is far below
-  audibility. The listening line reads "every *change* is below -253 dBFS"; the PR evidence
-  reproduces both named cases.
+- **A4. D6 restated (class B, re-accepted; premises corrected by A7).** The joint flush moves
+  output bits by a bounded amount, at any input level. While every input sample satisfies
+  |x| < L* = REST_EPS/(2·max(a2,a3)), the section stays at rest and outputs only its direct term
+  (m0 + m1·a2 + m2·a3)·x; the change at the section's output is at most ‖h − g_direct·δ‖₁·L*. L* is
+  at most 3.05e-11 (−210.3 dBFS) (EQ low shelf 10 Hz +24 dB 96 kHz); worst change about 5.0e-10
+  (−186 dBFS), measured 4.94e-10. For input at or above −140 dBFS every change measured is below
+  3.2e-13 (−250 dBFS). Below L* a section loses its whole response (up to +24.5 dB; the HPF passes
+  DC below about −216 dBFS). The bound 5.0e-10 is below the f32 rounding error of any signal above
+  about −30 dBFS passing the same section (half an ulp at 0.03 is about 1e-9), so the dead zone sits
+  under the arithmetic noise the engine already accepts; it is a defined rest threshold, not a
+  deferred defect. Accepted under D15-4(a). The listening line reads "every change is below
+  −186 dBFS at the section's output; no listening run".
 - **A5. Authorized paths extended** (each re-pin or constant change with its own reason, never bulk):
   the test modules of `crates/parametric-eq` (the four attempt-1 test edits are ratified) and, for A2,
   the EQ's per-frame output-check code in `crates/parametric-eq/src/lib.rs`;
@@ -166,6 +169,43 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
     `crates/parametric-eq/src/lib.rs`), so the loop never rebuilds it. Output is bit-identical,
     and the spill gate's row for the masked mono depth-2 pair holds clean.
 
+- **A7. Root decisions for attempt 3 (2026-10-05; doc + one test; no DSP change).** Decided by
+  the decision-15 root coordinator under the owner's delegation of math decisions
+  (`no-shortcuts-correctness-first`, `user-math-expertise`), after attempt 2's verdict
+  (`/home/bl/misofm/submix-verdicts/1328-attempt2.md`, FAIL on M1 only).
+  1. A4 re-affirmed on this corrected text (replace A4's premises and the Listening line): "The
+     joint flush moves output bits by a bounded amount, at any input level. While every input
+     sample satisfies |x| < L* = REST_EPS/(2·max(a2,a3)), the section stays at rest and outputs only
+     its direct term (m0 + m1·a2 + m2·a3)·x; the change at the section's output is at most
+     ‖h − g_direct·δ‖₁·L*. L* is at most 3.05e-11 (−210.3 dBFS) (EQ low shelf 10 Hz +24 dB 96 kHz);
+     worst change about 5.0e-10 (−186 dBFS), measured 4.94e-10. For input at or above −140 dBFS
+     every change measured is below 3.2e-13 (−250 dBFS). Below L* a section loses its whole
+     response (up to +24.5 dB; the HPF passes DC below about −216 dBFS). The bound 5.0e-10 is below
+     the f32 rounding error of any signal above about −30 dBFS passing the same section (half an ulp
+     at 0.03 is about 1e-9), so the dead zone sits under the arithmetic noise the engine already
+     accepts; it is a defined rest threshold, not a deferred defect. Accepted under D15-4(a)."
+     Listening line: "every change is below −186 dBFS at the section's output; no listening run".
+     Rejected alternative: gating the flush on x == 0 exactly (no dead zone) -- adds a lane compare
+     to the mask #1328 fought to keep spill-free, buys nothing measurable at −186 dBFS. The
+     dead-zone limit (L* formula, worst case, the HPF DC note, LR4 ~1.9e-12 at 80 Hz, builtin 10 Hz
+     ~1.5e-11) goes into `dsp-research/filters.md` (numerical limits).
+  2. Ratified: A3 (cached dry mask) satisfies A2, given the held dual-tail row goes red when the
+     spill returns. Keep the honest note that the allocation is not structural. Correct the stated
+     cause per the verifier (m3): reverting only the tail's own mask build (parametric-eq `lib.rs`
+     ~:2587) brings the slot back; reverting only the dual masked pair's masks leaves the tail clean.
+  3. Authorized: `tools/wasm-gates/MUTATIONS.md` and the spill gate's re-pin paragraph name #1328
+     attempt 1's code (dual tail `[rbp-0xc8]`, masked mono pair `[rbp-0x220]`) and #977 attempt 1
+     (module `0db9b2f5`, `[rbp-0xa0]`) as the red arms; record the bisect: one-token arm red at
+     `6f4c0379e` (#1009) and `d09d50248`, green since the #999 merge `27cf24132` (tail 84 -> 112
+     instructions), never red on `main` (green at `a9414c0c6`).
+  4. Authorized: one EQ test covering the desymmetrize copies of the dry and identity caches; must
+     go red on a stale-identity-flag mutant (and on a dropped dry copy); record red/green.
+  5. Fold NITs: the self-test pins the memory-operand arm (dropping `not from_memory` must turn a
+     case red); the spec's "five held rows" vs "four" -> four held rows + one reported; note that T2
+     (builtins) no longer exercises the twin's per-word flush arm (fix or record).
+  6. Do NOT edit decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`);
+     the root relayed A4 to S0. A7 stays in this spec and the note in `dsp-research/filters.md` only.
+
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** TPT SVF in stored A1 form, `v3 = v0 - ic2`, `d1 = -c1·ic1 + a2·v3`,
@@ -181,8 +221,9 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   limit cycles in recursive filters), all in `dsp-research/BIBLIOGRAPHY.md`.
 - **Fixtures and objective tests:** gates 1-4 below. **Benchmarks:** descriptive only; round-2
   scratch measured +10 % on one isolated section (latency-bound) and no measurable change on four
-  interleaved sections; the floor-accounting rows record the +5 ops. **Listening:** none run; every
-  moved sample is below -204 dBFS, under any reproduction chain's noise floor.
+  interleaved sections; the floor-accounting rows record the +5 ops. **Listening:** every change is
+  below −186 dBFS at the section's output; no listening run (A4 as corrected by A7; the dead zone is
+  in `dsp-research/filters.md`, numerical limits).
 
 ## Deliverables
 
@@ -455,9 +496,9 @@ kernel with `flush_pair` replaced by two `flush`) against the joint flush, left 
   first moved sample sits in the tail at a loud level for the tail: -159.3 dBFS for 0 dBFS input
   (sample 7,898, 3,034 samples after input stops), -179.3 at -20, -199.3 at -40, -180.5 at -60:
   the HPF rests while the LPF still carries signal. Largest change `2.84e-14` (-270.9 dBFS).
-- **Listening line**, as A4 words it but on the measured number: every *change* is below
-  -236 dBFS (largest measured `1.5e-12`, at -220 dBFS input), far below any reproduction chain's
-  noise floor. No listening run. The restated bound needs the root's re-acceptance (open item).
+- **Listening line** (corrected in attempt 3): this white-noise harness missed the dead zone's
+  peak, and its `1.5e-12` bound was 50 dB short. The verifier measured `4.94e-10` (-186.1 dBFS);
+  A7 restates A4 and the Listening line on that number.
 
 **A5.**
 - Floors: `tools/bench/src/floor.rs` (`EQ_LANE_OPS` 32, `BUILTINS_LANE_OPS` 79, the strip test),
@@ -476,7 +517,7 @@ kernel with `flush_pair` replaced by two `flush`) against the joint flush, left 
   132 -> 122 at this tree (122 rather than A5's 128: the dry masks in state remove six more stored
   splat calls); the rows are lowered to what it reports, and it passes at 186 / 122.
 - Stale prose: the ruling's "inert" definition and appendix steps 6-7 (`flush_pair`), the
-  spill-gate sentence (now five held rows), the EQ's leg-(c) description, and
+  spill-gate sentence (now four held rows and one reported row; corrected in attempt 3), the EQ's leg-(c) description, and
   `crates/builtins/tests/MUTATIONS.md` M2. M2 re-run: dropping `s1`'s whole flush is red at
   `index=2645`; dropping only its per-word arm stays green (the row says why).
 - NIT: `dsp-research/filters.md` states the rest point as the end of the resting block: samples
@@ -499,8 +540,102 @@ kernel with `flush_pair` replaced by two `flush`) against the joint flush, left 
 
 **Open items.**
 - A4's change bound: measured `1.5e-12` (-236 dBFS) at -220 dBFS input, above the spec's 2.2e-13; the
-  class-B acceptance needs the root to re-affirm on this number.
+  class-B acceptance needs the root to re-affirm on this number. *(Closed by A7: the true worst
+  change is `4.94e-10`, -186 dBFS, through the dead zone; A4 is re-affirmed on that.)*
 - The one-token #1000 arm is green at this tree and at base; when it turned green is not
-  investigated.
+  investigated. *(Closed in attempt 3: green since the #999 merge `27cf24132`, never red on
+  `main`; see A7 item 3.)*
 - The dual-tail and masked-mono-pair allocations are observed, not structural; the gate rows hold
   them.
+
+### Attempt 3 (2026-10-05, branch `codex/d15-stream-g`; doc + tests, no DSP change)
+
+Host: AMD EPYC 7313P, Node v22.23.2 (V8 12.4.254.21-node.56). Applies A7 items 1-6. No kernel,
+coefficient or render code changed: `crates/parametric-eq/src/lib.rs` changes only in two doc
+comments, so no rendered bit and no wasm instruction can move, and nothing was re-pinned.
+
+**M1, A4 and the dead zone (A7 item 1).** A4's premises and the DSP-evidence Listening line are
+replaced by A7's corrected text ("every change is below −186 dBFS at the section's output; no
+listening run"). Attempt 2's white-noise Listening bullet and its open item are marked superseded,
+with the verifier's number, rather than deleted. `dsp-research/filters.md`, numerical limits,
+gains the dead zone: `L* = REST_EPS/(2·max(a2, a3))`, the direct-term output and the
+`‖h − g_direct·δ‖₁·L*` bound, the worst case (`L* = 3.05e-11`, -210.3 dBFS, EQ low shelf 10 Hz
++24 dB 96 kHz; change about `5.0e-10`, -186 dBFS, measured `4.94e-10`), the builtin 10 Hz
+(`1.5e-11`) and LR4 80 Hz (`1.9e-12`) cases, the loss of the whole response below `L*` and the HPF
+DC note, the -140 dBFS bound, the f32-rounding comparison, and the rejected `x == 0` gate. The
+numbers are the attempt-2 verifier's measurements and analysis, not re-measured here.
+
+**m3, the dual-tail slot's cause (A7 item 2).** The `interleave` doc in
+`crates/parametric-eq/src/lib.rs` and the spill gate's dual-tail paragraph now say the slot follows
+the tail site's own in-place dry masks (which also feed the masked tail loop), with the verifier's
+two reverts: tail-only brings `[rbp-0xc8]` back, pair-only leaves the tail clean. The
+"observed, not structural" statement stands. Not re-measured here.
+
+**m1, the red arms (A7 item 3).** `tools/wasm-gates/MUTATIONS.md` names #977 attempt 1
+(`0db9b2f5`, `[rbp-0xa0]`) and #1328 attempt 1's code (dual tail `[rbp-0xc8]`, masked mono pair
+`[rbp-0x220]`) as the red arms, records the one-token arm's bisect (red at `6f4c0379e` and
+`d09d50248`, green from `27cf24132`, tail 84 -> 112 instructions, never red on `main`, green at
+`a9414c0c6`) and keeps its #1009 listing as history. It also states the four held rows and the
+select rule (it still said three select-free rows). The gate script's re-pin paragraph names the
+same arms and the bisect. The verifier's builds; not rebuilt here.
+
+**m2, the desymmetrize copies (A7 item 4).** New test
+`crates/parametric-eq/tests/mono_collapse.rs::a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks`:
+every lane switches the dedicated HPF (section 0) on both channels while the bank runs collapsed,
+off -> on and on -> off; the ramp ends on the left channel only; `desymmetrize_channels`; then
+dual blocks, both planes compared bit for bit with a never-collapsed bank. Mutations (introduce,
+run, revert):
+
+| mutant in `desymmetrize` | debug (`cargo test`, the gate profile) | release |
+|---|---|---|
+| `self.right.identity = self.left.identity;` dropped (stale identity flag) | red: `assertion failed: channels.1.identity_flags_agree()` (`lib.rs:1815`) | green |
+| `self.right.dry = self.left.dry;` dropped | red: same assertion | green |
+| none | green | green |
+
+`a_desymmetrized_bank_is_a_never_collapsed_bank` stays green on both mutants (its ramp moves a
+general band's gain, which changes neither cache). Release stays green, as the test's doc says: a
+stale `identity` only chooses a schedule (the crate's gates prove the schedules render the same
+bits), and
+a stale `dry` runs the HPF wet at the identity words, which can move at most `-0.0` -> `+0.0`; four
+HPF cutoffs (30, 500, 2,000, 9,000 Hz) all left the bits equal. The defence is the debug
+re-derivation, which is what this test reaches and nothing did before. The `desymmetrize` doc now
+names this test as the gate for `identity` and `dry`. **Test value:** a disengage copy that drops
+or stales the identity flags or the dry masks turns this test red; no existing test reaches a
+stale copy of either.
+
+**NITs (A7 item 5).**
+- n1: self-test case `memory operand` (an `or` of a loop-computed mask and a non-stack memory word
+  counts as a select). Mutation: `not from_memory` dropped from `selects` ->
+  `self-test FAIL memory operand: got [(2, 2, [], True)], want [(2, 2, [], False)]`; reverted, 27
+  cases ok. **Test value:** a classifier that sees through a memory operand reads a loaded data
+  word as a mask and a masked loop as select-free; no other case has a memory operand on an `or`.
+- n2: "five held rows" corrected to four held rows and one reported row (attempt 2 record).
+- n3, fixed: new `crates/builtins/tests/stage.rs::scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires`
+  (T2b). Ordinary signals reach the per-word arm only by coincidence (a scratch sweep of impulse,
+  DC, sine and noise over cutoffs and rates found `ic1` hits only for DC through HPF 10 Hz + LPF
+  20 kHz at 88.2/96 kHz, and two `ic2` hits in the whole sweep), so T2b constructs its input: a
+  1 kHz high-pass takes an impulse, and on silent frames it feeds the `f32` value, searched within
+  ±64 ulps of the cancelling input, that leaves one new word non-zero inside the flush band beside a
+  partner at or above `REST_EPS`; it asserts each arm fired, at every launch rate, and holds output
+  and state to the twin after every one-frame block. Mutations in `crates/dsp-reference/src/tpt.rs`:
+  `s1`'s per-word arm dropped (`else { n1 }`) -> T2b red at `rate=44100, index=257`; `s2`'s
+  (`else { n2 }`) -> red at `rate=44100, index=276`; T2 green on both; reverted, green. Recorded as
+  row M2b in `crates/builtins/tests/MUTATIONS.md`. **Test value:** a reference (or production
+  kernel) whose per-word arm is dropped or wrong on either word turns T2b red; T2 cannot see it.
+
+**A7 item 6.** Decision 15 is not edited.
+
+**Gates.**
+- `cargo test --locked -p parametric-eq -p builtins --features parametric-eq/test-support,builtins/test-support`:
+  every suite ok, 0 failed (`mono_collapse` 4, `stage` 12).
+- `check-web-audioworklet-v8-spill.py --check-toolchain` and `--self-test` (27 cases ok), and the
+  gate itself on a fresh `build-web-audioworklet.sh --module-only --named-twin` build: ok, the four
+  held rows clean (dual tail 123 instructions, mono pair 93, mono tail 60, masked mono pair 103),
+  dual pair reported with 13 slots, as in attempt 2.
+- `check-dsp-research.sh`, `check-workspace-policy.sh`: ok.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`: ok.
+- Not run: the worklet chain (no browser-compiled code changed beyond two comments) and the rest
+  of gate 4 (no code under them changed).
+
+**Open items.** None from the attempt-2 verdict. The dual-tail and masked-mono-pair allocations
+stay observed, not structural; the gate rows hold them.

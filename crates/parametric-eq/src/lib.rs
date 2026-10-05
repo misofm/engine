@@ -2505,11 +2505,14 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// instead, the two accumulators went through stack slots across the loop's back edge in V8, which
 /// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
 /// tail's integrators stay in vector registers (no carried stack slot). Those two flags went through
-/// a stack slot once again after issue #1328's joint SVF flush, while V8 also rebuilt the dry masks
-/// inside the masked loops of the same function; with the masks read from channel state
-/// (`Channel::dry`) the tail is clean again. Folding both channels into one flag did not help
-/// (the flag moved to another slot), so the per-channel fold stands; the V8 spill gate's dual-tail
-/// row is what holds the allocation (issue #1328, A2 and A6).
+/// a stack slot once again after issue #1328's joint SVF flush, while the tail site below built its
+/// two dry masks in place (`dry_mask(at)`); those masks also feed the masked tail loop, and V8 sank
+/// their construction into it. With the tail's masks read from channel state (`Channel::dry`) the
+/// tail is clean again. The slot follows that site and not the dual masked pair's: with only the
+/// tail's mask build reverted it comes back (`[rbp-0xc8]`), and with only the pair's reverted the
+/// tail stays clean (#1328 attempt 2's verifier). Folding both channels into one flag did not help
+/// (the flag moved to another slot), so the per-channel fold stands. The allocation is observed,
+/// not structural, and the V8 spill gate's dual-tail row is what holds it (issue #1328, A2 and A6).
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
@@ -3071,18 +3074,19 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// # Which entries are individually gated, and which are here by the rule
     ///
     /// `crates/parametric-eq/tests/mono_collapse.rs` fails if `sections` is dropped.
-    /// `remaining` and `identity` are **not** individually gated, and the reason is specific: both
-    /// are read only to choose a *schedule* -- `no_ramp_in_flight` selects the interleaved cascade
-    /// over the per-section one, and `identity` selects the elided cascade over the full one --
-    /// and this crate's own gates prove all three schedules render the same bits. So a stale copy
-    /// of either leaves the two channels taking different schedules to the same words. They are
+    /// `remaining` is **not** individually gated, and the reason is specific: it is read only to
+    /// choose a *schedule* -- `no_ramp_in_flight` selects the interleaved cascade over the
+    /// per-section one -- and this crate's own gates prove the schedules render the same bits. So
+    /// a stale copy leaves the two channels taking different schedules to the same words. It is
     /// copied because "the two channels are in the same state" is the invariant, not "the two
-    /// channels happen to agree on their output". `dry` is different: the masked cascades select
-    /// with it, so a stale copy could move rendered bits on a dedicated cut at the identity. It is
-    /// not individually gated either (dropping its copy turns no test red, issue #1328): a stale
-    /// copy needs a ramp to end on the left channel while the bank is collapsed, and then
-    /// `identity_flags_agree`, which re-derives `dry` from the copied `coef` and `remaining`, fails
-    /// on the next stationary block of a debug build.
+    /// channels happen to agree on their output". `identity` (which selects the elided cascade
+    /// over the full one) and `dry` (which the masked cascades select with, so a stale copy could
+    /// move rendered bits on a dedicated cut at the identity) are gated by
+    /// `a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks` in the
+    /// same file (issue #1328): a dedicated cut switched while the bank is collapsed ends its ramp
+    /// on the left channel only, and dropping either copy fails `identity_flags_agree`, which
+    /// re-derives both from the copied `coef` and `remaining`, on the first dual block of a debug
+    /// build.
     fn desymmetrize(&mut self) {
         self.right.sections = self.left.sections;
         self.right.remaining = self.left.remaining;

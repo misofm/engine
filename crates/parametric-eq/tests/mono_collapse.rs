@@ -284,6 +284,143 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
     }
 }
 
+/// The HPF's enable parameter index (`hpf-enabled`); 25 and 26 are its frequency and Q.
+const HPF_ENABLED: usize = 24;
+
+/// [`configured`] with the dedicated HPF at 120 Hz, switched on or off on both channels.
+fn configured_with_hpf(track: usize, enabled: bool) -> Vec<effect_contract::InitialParameterValue> {
+    let mut configured = configured(track);
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(
+            &mut configured,
+            HPF_ENABLED,
+            channel,
+            f32::from(u8::from(enabled)),
+        );
+        set_initial(&mut configured, HPF_ENABLED + 1, channel, 120.0);
+        set_initial(&mut configured, HPF_ENABLED + 2, channel, 0.7);
+    }
+    configured
+}
+
+/// After `desymmetrize_channels`, the right channel's derived identity flags and dry masks are the
+/// left channel's, when a ramp that changes them ended while the bank was collapsed.
+///
+/// Every lane switches the dedicated HPF (physical section 0) on both channels in block 2, while
+/// the bank runs collapsed. Only the left channel's ramp advances, so only the left channel's
+/// snap re-derives `identity` and `dry`; the right channel keeps what `start_ramp` derived when the
+/// ramp began (section 0 identity or not as before, and no dry lane, since a ramp is in flight).
+///
+/// * **Off to on.** The left channel's section 0 stops being the identity. A right channel that
+///   kept its own flag claims a live section is the identity.
+/// * **On to off.** The left channel's section 0 becomes the identity, and every lane is dry.
+///   A right channel that kept its own flag and mask claims section 0 is not the identity and has
+///   no dry lane.
+///
+/// From block 12 the bank runs dual. Its stationary path asserts in debug builds that each
+/// channel's flags and masks equal what its words say (`identity_flags_agree`), and both planes
+/// are compared bit for bit with a bank that never collapsed. Dropping `identity`'s copy from
+/// `desymmetrize`, or `dry`'s, turns this test red in a debug build, through that assertion on the
+/// first dual block (issue #1328). `a_desymmetrized_bank_is_a_never_collapsed_bank` stays green on
+/// both, since its ramp moves a general band's gain and changes neither. In a release build both
+/// mutants render the same bits here: the stale `identity` only chooses a schedule, and the stale
+/// `dry` runs the HPF's lanes wet at the identity words, which can move at most a `-0.0` to `+0.0`
+/// and, for this input and state, moves none.
+#[test]
+fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    for (before, after) in [(false, true), (true, false)] {
+        let bind_hpf = |enabled: bool| {
+            let values_by_track: Vec<_> = (0..lanes)
+                .map(|track| configured_with_hpf(track, enabled))
+                .collect();
+            let requests: Vec<_> = values_by_track
+                .iter()
+                .map(|values| request(values, false))
+                .collect();
+            ParametricEqFactory
+                .bind_homogeneous_bank(PrepareEffectBankRequest {
+                    backend,
+                    width,
+                    requests: &requests,
+                    active_mask: width.full_mask(),
+                })
+                .expect("valid HPF bank request")
+                .expect("the native width must bind")
+        };
+        let mut mixed = bind_hpf(before);
+        let mut never = bind_hpf(before);
+        for step in 0..BLOCKS {
+            let collapsed_half = step < BLOCKS / 2;
+            if step == BLOCKS / 2 {
+                mixed.desymmetrize_channels();
+            }
+            if step == 2 {
+                for bank in [mixed.as_mut(), never.as_mut()] {
+                    for lane in 0..lanes {
+                        let target_values = configured_with_hpf(lane, after);
+                        let mut changed = vec![false; target_values.len()];
+                        changed[HPF_ENABLED * 2] = true;
+                        changed[HPF_ENABLED * 2 + 1] = true;
+                        apply_prepared_targets_lane(bank, lane, 48_000, &target_values, &changed);
+                    }
+                }
+            }
+            let mut never_left = block(step * FRAMES, lanes);
+            let mut never_right = never_left.clone();
+            let mut mixed_left = never_left.clone();
+            let mut mixed_right = if collapsed_half {
+                vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes]
+            } else {
+                never_left.clone()
+            };
+            let first = (step * FRAMES) as u64;
+            run_block(
+                never.as_mut(),
+                &mut never_left,
+                &mut never_right,
+                width,
+                first,
+                step,
+                false,
+                false,
+            );
+            run_block(
+                mixed.as_mut(),
+                &mut mixed_left,
+                &mut mixed_right,
+                width,
+                first,
+                step,
+                false,
+                collapsed_half,
+            );
+            let planes = if collapsed_half {
+                vec![("left", &mixed_left, &never_left)]
+            } else {
+                vec![
+                    ("left", &mixed_left, &never_left),
+                    ("right", &mixed_right, &never_right),
+                ]
+            };
+            for (plane, mixed_plane, never_plane) in planes {
+                for (word, (mixed_word, never_word)) in
+                    mixed_plane.iter().zip(never_plane.iter()).enumerate()
+                {
+                    assert_eq!(
+                        mixed_word.to_bits(),
+                        never_word.to_bits(),
+                        "HPF {before} -> {after}, block {step} word {word}: {plane} plane"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The final LPF remains in the mono-collapse body and affects the gathered left plane.
 #[test]
 fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
