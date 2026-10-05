@@ -13,14 +13,18 @@ pub enum ReferenceTptOutput {
 
 /// The retained-state boundary action taken by the twin `f32` recurrence.
 ///
-/// Master plan #83 D7 replaced the per-sample classification with one mechanism: each recursive
-/// state word is flushed once per sample inside the kernel, and nothing else looks at it. There is
-/// no per-sample recovery any more -- non-finite output is caught once per block, by the caller.
+/// Master plan #83 D7 replaced the per-sample classification with one mechanism: the recursive
+/// state is flushed once per sample inside the kernel, and nothing else looks at it. There is no
+/// per-sample recovery any more -- non-finite output is caught once per block, by the caller. The
+/// flush is the joint pair rule of issue #1328: each word follows the per-word [`FLUSH_EPS`] law,
+/// and both words are zeroed together when both magnitudes are below `REST_EPS` (`1.0e-14`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceTptRetainedAction {
-    /// Both retained words were at or above [`FLUSH_EPS`] in magnitude, or non-finite.
+    /// Neither rule zeroed a word: each was at or above [`FLUSH_EPS`] in magnitude (or
+    /// non-finite), and at least one was at or above `REST_EPS` (or non-finite).
     FiniteNormal,
-    /// At least one retained word was below [`FLUSH_EPS`] and became positive zero.
+    /// At least one retained word was zeroed by either rule: it was below [`FLUSH_EPS`], or both
+    /// words were below `REST_EPS`; every zeroed word became positive zero.
     Flushed,
 }
 
@@ -29,6 +33,12 @@ pub enum ReferenceTptRetainedAction {
 /// The same constant as `lane::FLUSH_EPS`, written out here because this twin is
 /// deliberately independent of the lane crate.
 pub const FLUSH_EPS: f32 = 1.0e-20;
+
+/// Magnitude below which *both* retained words are flushed together to `+0.0` (issue #1328).
+///
+/// The same constant as `lane::REST_EPS`, written out here because this twin is deliberately
+/// independent of the lane crate.
+const REST_EPS: f32 = 1.0e-14;
 
 /// One conditioned TPT recurrence step evaluated by the twin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,10 +173,12 @@ impl ReferenceRetainedTptF32 {
     /// v1 = ic1 + d1
     /// d2 = (a3 * v3) + (a2 * ic1)
     /// v2 = ic2 + d2
-    /// ic1 = flush(ic1 + (d1 + d1))
-    /// ic2 = flush(ic2 + (d2 + d2))
+    /// (ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))
     /// y  = (m2 * v2) + ((m1 * v1) + (m0 * v0))
     /// ```
+    ///
+    /// `flush_pair(n1, n2)` zeroes a word below `FLUSH_EPS`, and zeroes both when both are below
+    /// `REST_EPS` (issue #1328); a NaN passes both ordered compares untouched.
     ///
     /// `-c1` is a sign-bit flip and `d + d` is exact. Every multiply-add is **unfused**: the
     /// multiply rounds, then the add rounds (issue #163 phase 2). This twin is written in the same
@@ -188,9 +200,10 @@ impl ReferenceRetainedTptF32 {
         let v2 = self.s2 + d2;
         let n1 = self.s1 + (d1 + d1);
         let n2 = self.s2 + (d2 + d2);
-        let flushed = below_flush_epsilon(n1) | below_flush_epsilon(n2);
-        self.s1 = flush(n1);
-        self.s2 = flush(n2);
+        let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+        let flushed = rest | below_flush_epsilon(n1) | below_flush_epsilon(n2);
+        self.s1 = if rest { 0.0 } else { flush(n1) };
+        self.s2 = if rest { 0.0 } else { flush(n2) };
         let y = (self.m2 * v2) + ((self.m1 * v1) + (self.m0 * v0));
 
         ReferenceTptRetainedStep {

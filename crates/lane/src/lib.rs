@@ -187,6 +187,49 @@ pub fn flush<L: Lane>(x: L) -> L {
     x.andnot(x.abs().lt(L::splat(FLUSH_EPS)))
 }
 
+/// Magnitude below which *both* words of a two-word recursive state are flushed together by
+/// [`flush_pair`] (issue #1328, decision 15 D15-4(a)).
+///
+/// The per-word law alone perturbs each word by at most [`FLUSH_EPS`] per step, and that is enough
+/// to stall a decaying second-order state short of rest: a period-2 limit cycle where the input
+/// filter's `c1` rounds to `1.0`, or a fixed point where `2 * d2` is below half an ulp of `ic2`
+/// (an EQ low shelf). Such a trajectory can only stall inside a ball of radius
+/// `κ·√2·FLUSH_EPS / (1 - ρ - 6·2^-24·κ)` around the origin (κ the eigenvector condition number
+/// of the step matrix, ρ its spectral radius). Over the designable sections the largest radius is
+/// the EQ's (about `3.4e-15`), so `1.0e-14` clears every domain by about 3x; the derivation and the
+/// recomputed per-domain radii are in `dsp-research/filters.md`.
+pub const REST_EPS: f32 = 1.0e-14;
+
+/// The joint flush of a two-word recursive state `(n1, n2)` (issue #1328).
+///
+/// Each word follows [`flush`]'s per-word law and, in addition, when *both* magnitudes are below
+/// [`REST_EPS`] the pair is zeroed together:
+///
+/// ```text
+/// rest = (|n1| < REST_EPS) & (|n2| < REST_EPS)
+/// ic1  = andnot(n1, (|n1| < FLUSH_EPS) | rest)
+/// ic2  = andnot(n2, (|n2| < FLUSH_EPS) | rest)
+/// ```
+///
+/// Eleven operations for the two words (two `abs`, four compares, one mask `and`, two mask `or`,
+/// two `andnot`), against six for two [`flush`] calls. The rest test is an `and`: one word at or
+/// above `REST_EPS` keeps the pair on the per-word law bit for bit, so an audible partner word is
+/// never zeroed. It is two ordered compares, never [`Lane::max`] (which is `select(gt)` and would
+/// drop a NaN), so a NaN in either word passes through both rules and reaches the once-per-block
+/// boundary check; `-0.0` becomes `+0.0`. Branch-free, one generic body at every width.
+#[inline(always)]
+pub fn flush_pair<L: Lane>(n1: L, n2: L) -> (L, L) {
+    let a1 = n1.abs();
+    let a2 = n2.abs();
+    let rest_eps = L::splat(REST_EPS);
+    let flush_eps = L::splat(FLUSH_EPS);
+    let rest = L::mask_and(a1.lt(rest_eps), a2.lt(rest_eps));
+    (
+        n1.andnot(L::mask_or(a1.lt(flush_eps), rest)),
+        n2.andnot(L::mask_or(a2.lt(flush_eps), rest)),
+    )
+}
+
 /// One width of `f32` lanes with pinned IEEE-754 semantics.
 ///
 /// Implemented by [`prim@f32`] (`WIDTH = 1`, the oracle), [`wide::f32x4`] and [`wide::f32x8`].

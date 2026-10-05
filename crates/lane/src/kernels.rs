@@ -25,7 +25,7 @@
 pub mod builtins;
 pub mod halfband;
 
-use crate::{Lane, flush};
+use crate::{Lane, flush, flush_pair};
 
 /// Coefficients of one TPT state-variable filter, one set per lane.
 ///
@@ -120,12 +120,12 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 /// 4. `v1 = ic1 + d1`
 /// 5. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
 /// 6. `v2 = ic2 + d2`
-/// 7. `ic1 = flush(ic1 + (d1 + d1))` — `d1 + d1` is exact
-/// 8. `ic2 = flush(ic2 + (d2 + d2))`
-/// 9. `y = fma(m2, v2, fma(m1, v1, m0 * v0))`
-/// 10. `store(frame, y)`
+/// 7. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))` — `d1 + d1` and `d2 + d2` are
+///    exact; the joint flush of [`crate::flush_pair`] (issue #1328)
+/// 8. `y = fma(m2, v2, fma(m1, v1, m0 * v0))`
+/// 9. `store(frame, y)`
 ///
-/// `-c1` is computed once per block as a sign-bit flip, which is exact. Steps 2 to 9 are
+/// `-c1` is computed once per block as a sign-bit flip, which is exact. Steps 2 to 7 are
 /// [`svf_step`], which is the only copy of them: this kernel, [`svf_block_ramped`] and the fused
 /// chain kernels of [`builtins`] all call it, so the numeric contract has one home.
 #[inline(always)]
@@ -149,7 +149,7 @@ pub fn svf_block<L: Lane>(io: &mut [f32], frames: usize, c: &SvfCoef<L>, s: &mut
 ///
 /// The TPT recurrence is first-order: frame `n`'s `ic1`/`ic2` are frame `n + 1`'s inputs. Within
 /// one filter the block loop is therefore a serial dependency chain whose period is the *latency*
-/// of `sub -> fma -> add -> add -> flush`, while the frame body issues about a dozen vector
+/// of `sub -> fma -> add -> add -> flush_pair`, while the frame body issues about a dozen vector
 /// operations that the FMA ports could retire in a third of that. A lone chain leaves the vector
 /// units idle most of the window -- which is why [`svf_block`] at `Simd4` and at `Simd8` take the
 /// same wall time per chain-frame on the bench host. The kernel is latency-bound, not width-bound,
@@ -602,7 +602,7 @@ fn svf_cascade_interleaved_impl<
 /// the body written once below. A crossover embedded in a segment driver, where the filter output
 /// feeds a ring in the same frame, cannot call either block kernel; it calls this.
 ///
-/// Steps 2 to 8 of [`svf_block`]'s frozen order, in that order — everything except the load, the
+/// Steps 2 to 7 of [`svf_block`]'s frozen order, in that order — everything except the load, the
 /// output mix and the store. `nc1` is `-c1`, hoisted out of the caller's frame loop because a
 /// sign-bit flip is exact and a filter whose coefficients do not move should not recompute it per
 /// sample; [`svf_block_ramped`] recomputes it per frame because its coefficients do move.
@@ -637,8 +637,8 @@ fn svf_cascade_interleaved_impl<
 /// 3. `v1 = ic1 + d1`
 /// 4. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
 /// 5. `v2 = ic2 + d2`
-/// 6. `ic1 = flush(ic1 + (d1 + d1))` — `d1 + d1` is exact
-/// 7. `ic2 = flush(ic2 + (d2 + d2))`
+/// 6. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))` — `d1 + d1` and `d2 + d2` are
+///    exact; the joint flush of [`crate::flush_pair`] (issue #1328)
 #[inline(always)]
 pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, s: &mut SvfState<L>) -> (L, L) {
     let v3 = v0.sub(s.ic2);
@@ -646,8 +646,7 @@ pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, s: &mut SvfState<L>) -> (L
     let v1 = s.ic1.add(d1);
     let d2 = a3.fma(v3, a2.mul(s.ic1));
     let v2 = s.ic2.add(d2);
-    s.ic1 = flush(s.ic1.add(d1.add(d1)));
-    s.ic2 = flush(s.ic2.add(d2.add(d2)));
+    (s.ic1, s.ic2) = flush_pair(s.ic1.add(d1.add(d1)), s.ic2.add(d2.add(d2)));
     (v1, v2)
 }
 

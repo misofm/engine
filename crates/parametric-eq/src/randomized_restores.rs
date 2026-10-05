@@ -8,7 +8,8 @@
 //! * random legal targets per lane and channel, drawn from the descriptor's domains;
 //! * random restores through [`Channel::restore_track`], with integrator words rewritten to the
 //!   edge values around the elision's gates -- both zeros, subnormals of both signs, either side
-//!   of `FLUSH_EPS`, tiny and ordinary normals -- on one or both channels;
+//!   of `FLUSH_EPS` and of `REST_EPS` (the joint flush, issue #1328), tiny and ordinary normals --
+//!   on one or both channels;
 //! * random ramps started and discontinuity resets, and random legal input, subnormal and
 //!   signed-zero words included;
 //! * every block rendered twice: the shipped decision (`stationary` when no ramp is in flight)
@@ -29,7 +30,7 @@ const REPLAY: &str = "cargo test -p parametric-eq --lib -- --exact \
 /// Integrator words around the elision's gates.
 fn integrator_word(draw: &mut Draw) -> f32 {
     let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
-    let value = match draw.below(10) {
+    let value = match draw.below(11) {
         0 => 0.0,
         1 => -0.0,
         2 => draw.subnormal(),
@@ -39,6 +40,14 @@ fn integrator_word(draw: &mut Draw) -> f32 {
         6 => draw.pick(&[1.0e-30_f32, 1.5e-20, 1.0e-12]),
         7 => draw.noise(0.5),
         8 => f32::from_bits(0x8000_0001),
+        // Either side of `REST_EPS` (issue #1328): a pair with both magnitudes below it is zeroed
+        // by the joint flush, so a word here, beside a `+0.0` or another such word, is a state an
+        // executed section moves and an elided one would keep.
+        9 => draw.pick(&[
+            f32::from_bits(lane::REST_EPS.to_bits() - 1),
+            lane::REST_EPS,
+            5.0e-15,
+        ]),
         _ => draw.noise(1.0e-3),
     };
     if draw.chance(1, 2) { value } else { -value }

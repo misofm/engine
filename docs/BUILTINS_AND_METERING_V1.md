@@ -56,7 +56,10 @@ at the input stage: a sample whose magnitude is not below `1e30` — which inclu
 because an ordered compare against NaN is false — becomes exact positive zero and increments
 `sanitized_input`. A subnormal input is no longer sanitized: it is a legal finite sample. The two
 recursive state words of each section are flushed to positive zero below `1e-20` inside the kernel,
-which is the only denormal mechanism and strictly contains the band hardware FTZ acts on. Output
+which is the only denormal mechanism and strictly contains the band hardware FTZ acts on; and when
+both are below `1e-14` (`REST_EPS`) they are flushed to positive zero together (`lane::flush_pair`,
+issue #1328), so an enabled filter reaches exact rest after its input stops instead of holding a
+limit cycle near the top of the cutoff domain. Output
 finiteness is checked **once per block, per lane**, on the output of the recursive stage: a failing
 lane has its block zeroed and both of its sections reset, and increments `recovered_left_state` or
 `recovered_right_state` — which therefore count lane-blocks, not samples. No other lane's bits

@@ -36,8 +36,9 @@ Both are recorded here rather than quietly worked around, because a floor that a
 expectation it cannot reproduce is not a measurement.
 
 **Current-lowering recount (#368); #805 masked stationary EQ update.** The live authorities now
-use compressor **81.5** lane-ops, limiter **129.5**, EQ **27** (53 until #976 dropped the identity
-padding section), and builtins **69**. x86 and wasm
+use compressor **81.5** lane-ops, limiter **129.5**, EQ **32** (27 until #1328's joint SVF flush
+added five lane-ops per section; 53 until #976 dropped the identity padding section), and builtins
+**79** (69 until #1328). x86 and wasm
 max/min are one lane-op, the shared
 stereo links retain their fractional half-op accounting, and `exp2_int_in_range` is the two-op
 synthesis established by #367. The old compressor and limiter values remain below only where they
@@ -140,6 +141,7 @@ Applied identically to all four inventories. Each is the `Lane` trait's own defi
 | `Lane::max` / `Lane::min` | **1 on x86/wasm; 2 on NEON** | current x86/wasm lowerings are one instruction; native AArch64/NEON qualification is deferred, so its two-op compare/select shape is source-level intent only |
 | `Lane::fma(a, b, c)` | **2** | `(a * b) + c`, deliberately unfused on every backend (#163 phase 2) |
 | `flush(x)` | **3** | `x.andnot(x.abs().lt(EPS))` |
+| `flush_pair(n1, n2)` | **11** | two `abs`, four `lt`, one `mask_and`, two `mask_or`, two `andnot` -- the joint SVF state flush of issue #1328, against 6 for two `flush` |
 | a load or a store | 0 in the floor | counted separately; see "the unit, and the criterion" |
 
 **`select` at 1 is both the floor and the current x86 lowering.** The current `wide` 1.6.1
@@ -223,14 +225,14 @@ runs masked pairs. Per lane-sample:
 
 | item | lane-ops |
 |---|---:|
-| `svf_step`: `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines with `flush` 10 | 19 |
+| `svf_step`: `sub` 1, two unfused `fma` with their multiplies 6, two `add` 2, two state lines `ic + (d + d)` 4, their joint `flush_pair` 11 (issue #1328; the two lines cost 10 with two `flush` before it, and the step 19) | 24 |
 | output mix `m2.fma(v2, m1.fma(v1, m0.mul(x)))` | 5 |
-| **one section, select-free** (every pair of an admitted plan; a depth-1 tail with no dry lane) | **24** |
+| **one section, select-free** (every pair of an admitted plan; a depth-1 tail with no dry lane) | **29** |
 | `Lane::select(dry, x, wet)` output selection (every pair of a refused or all-live plan; a depth-1 tail with a dry lane) | 1 |
-| **one section, masked** | **25** |
-| the standing fixture: its one live section, as a select-free depth-1 tail | 24 |
+| **one section, masked** | **30** |
+| the standing fixture: its one live section, as a select-free depth-1 tail | 29 |
 | 4.4 boundary scan | 3 |
-| **total, standing fixture** | **27** |
+| **total, standing fixture** | **32** |
 
 The block-data elision gate (`block_admits_elision`) adds four integer operations per lane-sample
 (since #980 an `xor`, an unsigned `min`, an `and` and an unsigned `max` per input word) and is not
@@ -242,12 +244,12 @@ stated per kept section. For an **admitted stationary elision plan**, the `activ
 physical sections are exactly the kept ones (#976: no identity section is kept as padding), run as
 `floor(active / 2)` select-free depth-2 passes (#977) and, when `active` is odd, one depth-1 tail:
 
-`floor_lane_ops(active) = 24 * active + 3`, for `active` in `0..=5`, plus 1 when the tail has a
+`floor_lane_ops(active) = 29 * active + 3`, for `active` in `0..=5`, plus 1 when the tail has a
 dry lane in either channel (a dedicated cut that is the last live section and off on some lanes).
 
 A **refused** block (a `-0.0`, a non-finite word or a word above the bound in either input plane, a
 non-inert state in a dead section, a `-0.0` or non-finite state in a live one), and every block
-with all six sections live, runs all six in three masked depth-2 passes: **153**. Since #979 a
+with all six sections live, runs all six in three masked depth-2 passes: **183**. Since #979 a
 dead section's state is inert when every word is `+0.0` or has a magnitude between the flush floor
 and the elision bound; `-0.0` and smaller or larger magnitudes refuse.
 
@@ -260,19 +262,20 @@ inventory must follow that implementation.
 | active physical sections | kept sections | passes | lane-ops floor |
 |---:|---:|---|---:|
 | 0 | 0 | none | 3 |
-| 1 | 1 | one depth-1 tail | 27 (28 with a dry lane) |
-| 2 | 2 | one pair | 51 |
-| 3 | 3 | one pair, one tail | 75 (76) |
-| 4 | 4 | two pairs | 99 |
-| 5 | 5 | two pairs, one tail | 123 (124) |
-| 6, or refused | 6 | three masked pairs | 153 |
+| 1 | 1 | one depth-1 tail | 32 (33 with a dry lane) |
+| 2 | 2 | one pair | 61 |
+| 3 | 3 | one pair, one tail | 90 (91) |
+| 4 | 4 | two pairs | 119 |
+| 5 | 5 | two pairs, one tail | 148 (149) |
+| 6, or refused | 6 | three masked pairs | 183 |
 
 `active` counts physical sections whose current coefficient words are nonidentity for any required
 bank lane/channel; it is not a user-enabled-control count. Mono counts the selected channel. At
 the standing fixture's one active general band, `kept = 1`, the tail is select-free, and the floor
-is 27. A full six-section pass is 153. `tools/bench/src/floor.rs` and
-`scripts/console-benchmark-record-lib.jq` are pinned at 27 for the standing workload; these values
-move with the source inventory and do not claim a new timing result.
+is 32. A full six-section pass is 183. Issue #1328's joint flush added five lane-ops per section
+(27 and 153 before it); `tools/bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq`
+still pin the pre-#1328 27 for the standing workload until their follow-up re-pins them. These
+values move with the source inventory and do not claim a new timing result.
 
 ### Prepared state accounting
 
@@ -366,14 +369,14 @@ the graph's routing in `crates/graph/src/runtime.rs`. Per lane-sample:
 | stage | lane-ops |
 |---|---:|
 | input sanitise and trim: `abs`, `lt`, `mask_not`, `1.0 & bad`, `add` (the counter), `andnot`, `mul` | 7 |
-| HPF section (one 2nd-order TPT SVF, Butterworth `k = sqrt(2)`) | 24 |
-| LPF section | 24 |
+| HPF section (one 2nd-order TPT SVF, Butterworth `k = sqrt(2)`; 24 before #1328's `flush_pair`) | 29 |
+| LPF section | 29 |
 | output boundary scan: `abs`, `lt`, `mask_not`, `mask_or` | 4 |
 | fader: `mul`, `andnot` (mute) | 2 |
 | pan matrix: two `mul`, an `add`, a `select`, per channel | 4 |
 | route `mix2x2`: `mul` + unfused `fma` per channel | 3 |
 | output node's 64-input reduction, amortised per track | 1 |
-| **total** | **69** |
+| **total** (69 before issue #1328) | **79** |
 
 Polarity inversion is **0**: it is folded into the trim coefficient at prepare time
 (`trim_signed: if params.polarity_invert { -trim } else { trim }`).
@@ -404,9 +407,9 @@ wasm artifact must carry, and no builtin kernel has a row in it -- the two new b
 Historically, the trim-ramping arm did not consult the elision plan. Over a decided-elidable section the unelided body computes the same
 `v |-> v + 0.0` map and writes back the same `+0.0` integrators, which is the appendix below's own
 proof, so the ramping arm renders the elision-planned bits without a second three-shape dispatch to
-keep bit-identical to the first. What it costs is `24 x sections` lane-ops that the settled arm
+keep bit-identical to the first. What it costs is `29 x sections` lane-ops that the settled arm
 would have elided, on the blocks a ramp is in flight and on those only. Charged honestly: *ramping
-input chain does not elide -- up to 48 lane-ops per lane-sample while a retarget is in flight,
+input chain does not elide -- up to 58 lane-ops per lane-sample while a retarget is in flight,
 floor 0*.
 
 **#808 DSP amendment (attempt2 qualified and reviewed):** the trim-only dispatch now
@@ -446,7 +449,7 @@ section's content was believed to be workload-dependent. It is not:
 
 So the section count is fixed at **two per channel** by the prepared type `[[SvfCoef<L>; 2]; 2]`,
 and the *enabled* count changes only the values in the coefficient registers. The floor is stated
-per **executed** section — `24 x sections` — and at the time of writing `sections = 2`
+per **executed** section — `29 x sections` (24 before issue #1328) — and at the time of writing `sections = 2`
 unconditionally, so the two rack-free benchmark rows shared one floor. In the standing fixture every
 one of the 128 channel-lanes declares a non-zero HPF (30-70 Hz) and LPF (17 250-19 000 Hz), so
 enabled and executed coincide there.
@@ -566,8 +569,8 @@ reduction that job 3's fold removed from every banked row — and they are histo
 row.
 
 **The control that does subtract cleanly** stays available and undeclared:
-`sixty_four_track_builtins_only − sixty_four_track_gain_pan_only` is 69 − 22 = 47 lane-ops, the
-two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows that
+`sixty_four_track_builtins_only − sixty_four_track_gain_pan_only` is 79 − 22 = 57 lane-ops (47
+before issue #1328), the two 29-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows that
 realise the same bank slots and the same round-trips. Declaring it would move an existing row's
 `floor_control_row`, which is a ruling of its own.
 
@@ -587,7 +590,7 @@ none of which this table counts.
 `sixty_four_track_console_half_mono` render `fixtures/session/v1/console-sixty-four-track-mono.toml`,
 which is the standing fixture with its source mapping and its upstream per-channel parameters
 symmetrised. They carry the whole intended strip and are costed at the whole intended strip's
-current inventory — 307 lane-ops since #976, 333 before it — because their fixture differs from the standing one in per-channel
+current inventory — 322 lane-ops since #1328, 307 since #976, 333 before it — because their fixture differs from the standing one in per-channel
 *values* only, and a floor is an inventory of operations, not of operands.
 
 **One question is deliberately left open**, and it is left open here rather than answered quietly in
@@ -614,15 +617,19 @@ Composed by `tools/bench/src/floor.rs` from the inventories above, restated
 independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 `console_session` record of a run whose runner could measure the core clock.
 
+The table states the inventories after issue #1328's joint SVF flush (builtins 79, EQ 32, strip
+322). Until their follow-up re-pins them, `floor.rs` and the `jq` restatement still compose the
+pre-#1328 69, 27 and 307 (2.331, 0.912 and 10.372 cycles).
+
 | kernel | lane-ops | derived floor, cycles/lane-sample |
 |---|---:|---:|
 | routing component: route and master reduction (a line of the two builtins inventories; no row's floor) | 4 | 0.135 |
-| builtins chain and routing | 69 | 2.331 |
+| builtins chain and routing | 79 | 2.669 |
 | builtins chain, identity sections (`dispatch_only`, `gain_pan_only`, `gain_pan_ring`; the floor of the table) | 22 | 0.743 |
-| parametric EQ, one live section (a select-free depth-1 tail) | 27 | 0.912 |
+| parametric EQ, one live section (a select-free depth-1 tail) | 32 | 1.081 |
 | compressor | 81.5 | 2.753 |
 | true-peak limiter, uniform cohort | 129.5 | 4.375 |
-| the whole intended strip | 307.0 | 10.372 |
+| the whole intended strip | 322.0 | 10.878 |
 
 ### The standing table
 
@@ -745,8 +752,8 @@ finding "the compressor is at 88 % of floor and there is nothing left".
 
 **Historical four-section evidence.** The timing, floor and gap in this section describe
 the pre-#805 implementation. The masked stationary inventory after #805 was 53 operations
-(1.791 derived cycles at the same machine constants), and 27 (0.912) since #976 dropped the
-identity padding section; no new measured gap or percentage is claimed without a timing of that
+(1.791 derived cycles at the same machine constants), 27 (0.912) since #976 dropped the
+identity padding section, and 32 (1.081) since #1328's joint SVF flush; no new measured gap or percentage is claimed without a timing of that
 implementation.
 
 The EQ isolate measures 4.984 cycles/lane-sample against a 1.723 floor: 34.6 %, the best of the

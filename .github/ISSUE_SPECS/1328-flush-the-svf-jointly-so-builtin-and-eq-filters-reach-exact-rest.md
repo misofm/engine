@@ -200,3 +200,105 @@ output `+0.0`, within a stated bound. Today two traps keep some of them ringing 
 ## Dependencies
 
 none
+
+## Attempt record
+
+### Attempt 1 (Terra, 2026-10-05, branch `codex/d15-stream-g`)
+
+**Implemented.** D1 `REST_EPS`/`flush_pair` in `lane` (two ordered compares, `mask_and`,
+`mask_or`, `andnot`; one generic body); D2 `svf_step` calls it, frozen-order docs updated in
+`svf_block` (steps 7-8 -> 7) and `svf_step` (6-7 -> 6); D4 twin with its own private `REST_EPS`,
+`Flushed` = "at least one word zeroed by either rule"; D5 `lane_is_inert`/`lane_is_flush_shaped`
+now take the pair (per-word test **and** not "both below `REST_EPS` with a word non-zero"),
+`section_state_is_*` call them, proof text updated; generator arm with `REST_EPS - 1 ulp`,
+`REST_EPS`, `5e-15`; gates 1-3; D7 re-pin; docs.
+
+**Outside the listed paths, forced by D5 (flagged for review).** Four unit tests in
+`crates/parametric-eq/src/lib.rs`'s test module encoded the per-word law and went red:
+`elision::a_non_inert_state_in_a_dead_section_refuses_elision` and
+`stationary_subnormal::leg_c_refuses_below_flush_eps_admits_it_and_re_engages` admitted lone words
+in `[FLUSH_EPS, REST_EPS)` beside a `+0.0` partner (the joint rule now zeroes that pair, so they
+move to "refused" and `±REST_EPS` becomes the admitted lone-word floor);
+`elision::an_elided_cascade_is_the_full_cascade_bit_for_bit` (and the interleave `compare`) seeded
+`(1.5e-20, -1.25e-20)` as "a pair the kernel can write" (it no longer can; seed `ic1` is now
+`2.0e-14`); `interleave_identity::prepared_hpf_and_last_lpf_are_reached_at_every_backend_width`
+asserted a 1 kHz HPF still holds state 512 frames after an impulse (it now rests exactly; the
+input is a unit step instead).
+
+**D3 recomputed** (scratch, f64 over the cast `f32` words; `A = [[1-2c1, -2a2], [2a2, 1-2a3]]`,
+unit-column eigenvector condition number): input HPF/LPF worst `6.659e-16` (44.1 kHz max cutoff,
+rho 0.99994785, kappa 2.415); EQ grid (81 freq x 17 gain x 25 Q x 4 slope x 6 kinds x 4 rates)
+worst `3.385e-15` (bell 10 Hz, Q 18, +24 dB, 96 kHz; rho 0.99999543, kappa 1.007); LR4 worst
+`9.24e-18` (80 Hz, 96 kHz). Matches D3.
+
+**Gates 1-2, rest sample** (end of the 128-frame block that reaches rest): input LPF 773,760;
+EQ shelf 421,760. Both red on the per-word flush: gate 1 never rests within 2.4M samples (state
+`l_lpf_ic1 = 0xa4c99363`), gate 2 stuck at `ic2 = 6.0120676e-20`.
+
+**Mutation evidence** (introduce, run, revert):
+- gate 3, rest test `mask_or` instead of `mask_and`: `g4_pair_law_cases_at_every_width` and
+  `g4_pair_law_holds_at_every_width` red; `g4_flush_*` green.
+- gate 3, rest test `a1.max(a2).lt(REST_EPS)`: both pair tests red (the cases test at the NaN
+  arm).
+- gate 3, rest test `le` instead of `lt`: both pair tests red.
+- D5, pair term dropped from `lane_is_inert`: `a_non_inert_state_in_a_dead_section_refuses_elision`,
+  the randomized restore differential and the three `ramping_elision` width tests red. The same
+  mutation **without** the new generator arm leaves the randomized differential green: the
+  `REST_EPS`-adjacent values are what make it reach the joint band.
+- D5, pair term dropped from `lane_is_flush_shaped`: only `leg_c_refuses_below_flush_eps_admits_it_and_re_engages`
+  is red (a kept section runs either way, so no rendered bit or integrator differs; the term is
+  D5's mandated exactness of the predicate, not a bit-identity defence).
+- Gates 1 and 2: red on the per-word kernel (above).
+
+**Class-B evidence (one-time, scratch harness on the real kernels, not committed).** 240 runs:
+4,800 samples of white noise then 1.2M samples of silence, at 0, -20, ..., -180 dBFS; 12 builtin
+chains (`BuiltinChain`, LPF/HPF at both domain maxima at 44.1 and 96 kHz, HPF 10/20/80 Hz, LPF
+20 Hz/1 kHz/20 kHz, two HPF+LPF bands) and 12 single-band EQs (`ParametricEqFactory`, including
+the D3 bell and the gate-2 shelf), per-word flush vs joint flush, left output compared bit for bit.
+- Largest change anywhere: `1.21e-13` (-258.3 dBFS), EQ low shelf 10 Hz S 0.1 at -160 dBFS.
+  Builtins: `2.29e-14` (-272.8 dBFS).
+- **Deviation from D6:** two runs moved samples while the input was non-silent: the 10 Hz +24 dB
+  S 0.1 low shelf at 96 kHz driven at -160 and -180 dBFS (4,795 samples each, from sample 5; change
+  at most `1.21e-13`, -258 dBFS, on output near -159/-179 dBFS). At that level both integrators sit
+  below `REST_EPS` while signal is present, so the joint rule zeroes them every sample. No other
+  run (and no run at -140 dBFS or louder) moved a sample during input.
+- **Deviation from D6:** measured as the level of the first moved output sample, single-section
+  runs move first at -267.5 dBFS or lower, but the HPF 100 Hz + LPF 22 kHz chain at 0 dBFS moves
+  first at -156.7 dBFS (sample 7,637): the HPF's pair rests while the LPF still carries signal; the
+  change itself is `3.55e-15` (-289 dBFS).
+- Never-resting runs within the window: builtins 21 -> 0; EQ 29 -> 10 (the 10 remaining are the
+  10 Hz Q 18 bell, still decaying above `REST_EPS` at 12.5 s, not stalled).
+
+**D7 re-pin** (scalar oracle digests printed by `g5_native_digests_match_pins`; the three widths
+agreed): `tools/wasm-gate-corpus/src/lane_digests.in` cases 1 `svf_block/low/impulse`, 5
+`svf_block/high/impulse`, 9 `svf_block/band/impulse`, 13 `svf_block/bell/impulse`, 17
+`svf_block_ramped/impulse`, 21 `svf_block_ramped/idle/impulse`. Each moved 1,152 of 8,192 samples
+from frame index 331 on, largest change `5.8e-15` to `9.2e-15` (-285 to -281 dBFS). Reason: joint
+SVF flush, D15-4(a): tail samples below -200 dBFS. `BUILTINS_DIGESTS`, `E9_DIGESTS`, the multiband
+`DIGESTS`, `fixtures/builtins/v1/MANIFEST.tsv` and `conformance_fixtures --check` did not move.
+
+**Gates.** Green: the gate-4 `cargo test` set (816 passed), the release `lane`/`math`/`wasm-gates`
+set (107 passed, after the re-pin), `conformance_fixtures --check`, `check-builtins-fixtures.sh`
+(50 files), `check-graph-determinism.sh` (100/100), `check-cross-targets.sh`,
+`check-lane-policy.sh`, `check-dsp-research.sh`, `check-workspace-policy.sh`, clippy `-D warnings`,
+`cargo fmt --check`, and the worklet chain (`build-web-audioworklet.sh --named-twin`,
+`check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh`).
+
+**Red: `scripts/run-wasm-gates.sh`, V8 spill gate (the Hazards case; not weakened).** Three held
+rows fail closed: `scripts/check-web-audioworklet-v8-spill.py` classifies a loop as select-free
+only if it has no `vpor`/`vorps`, and `flush_pair`'s two `mask_or` per step lower to `vpor`, so no
+SVF loop is select-free any more. Spelling the pair as two chained `andnot` does not help (LLVM
+refolds it to the `or`). With a scratch classifier that discounts two `or` per SVF step, the mono
+depth-2 pair and mono depth-1 tail carry no stack slot, but **the dual depth-1 tail carries one
+(`[rbp-0xc8]`)** where the base build carries none: a genuine V8 spill from the five extra
+lane-ops. The dual depth-2 pair (reported, not held) goes from 10 to 13 carried slots. Both the
+classifier change and the spill need a decision outside this slice's paths.
+
+**Open items outside the listed paths.** `tools/bench/src/floor.rs` and
+`scripts/console-benchmark-record-lib.jq` still pin builtins 69 / EQ 27 / strip 307 (the ruling
+now states 79 / 32 / 322 and says so); `scripts/lib/aarch64-known-defects.py`'s parametric-eq
+memset ceiling can drop from 132 to 128 (`check-cross-targets.sh` asks for it); the recurrence
+restatements in `crates/lane/tests/g2_kernel_identity.rs` (oracle of
+`g2_svf_step_yields_both_taps_of_one_state`) and `tools/audit/src/unfused_fma.rs` still use the
+per-word flush (green, since their inputs never reach the joint band).
