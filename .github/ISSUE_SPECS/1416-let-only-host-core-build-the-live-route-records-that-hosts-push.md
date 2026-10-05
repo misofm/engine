@@ -127,3 +127,58 @@ a behaviour.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, stream J batch 2)
+
+**Change.** `crates/host-core/src/route_controls.rs` only. `RouteControlRecord` is now
+`pub struct RouteControlRecord(graph::RouteControlRecord)` with a private field, the derives
+`Clone, Copy, Debug, PartialEq` and the `const` accessors `target`, `mute`, `length` (D1).
+`RouteControlProducer::record` builds it (`graph::RouteControlRecord::new(..).map(RouteControlRecord)`);
+`push` takes it and pushes `record.0`. `RouteControlResources` stays a re-export. The module doc's
+"One authority" section says the producer is the only builder. `lib.rs` and host-web are unchanged
+and compile (D2). graph is unchanged (D3).
+
+**Doctests (D4).** On the newtype: two `compile_fail` fences and one plain twin. All three share
+`fn send(producer: &mut host_core::RouteControlProducer, inner: graph::RouteControlRecord) ->
+Result<(), host_core::RouteControlError>` with `let record: host_core::RouteControlRecord = <expr>;
+producer.push(record)`; only `<expr>` differs: `host_core::RouteControlRecord::new([1.0, 0.0, 0.0,
+1.0], false, 0).unwrap()` (fence 1), `host_core::RouteControlRecord(inner)` (fence 2),
+`producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap()` (twin). Codes are
+comments only; no `RUSTC_BOOTSTRAP`.
+
+**Each fence fails only for its stated reason.** With both fences turned into plain doctests, rustc
+reports exactly one error each: fence 1 `error[E0599]: no associated function or constant named
+`new` found for struct `host_core::RouteControlRecord``; fence 2 `error[E0423]: cannot initialize a
+tuple struct which contains private fields`. Reverted.
+
+**Mutation runs** (`cargo test --locked -p host-core --features control-provider,test-support --doc
+route_controls`; each reverted, then green 3/3):
+
+| Mutation | Fence 1 (`new`) | Fence 2 (tuple) | Twin |
+|---|---|---|---|
+| Spec's: `pub use graph::RouteControlRecord` in place of the newtype (record/push restored) | **red** | green | green |
+| Public `new(..) -> Option<Self>` on the newtype | **red** | green | green |
+| Field made `pub` | green | **red** | green |
+| Pair rename: `RouteControlProducer` -> `RouteControlProduce` in all three snippets | green | green | **red** (E0425) |
+| Pair 1 delete: fence 1's `<expr>` replaced by the twin's | **red** | green | green |
+| Pair 2 delete: fence 2's `<expr>` replaced by the twin's | green | **red** | green |
+
+**Gates at the attempt head** (all exit 0):
+
+1. `cargo test --locked -p host-core --features control-provider,test-support --doc`: 8 passed.
+2. host-core (`control-provider,test-support`): 283 passed; host-web (`test-support`): 189 passed;
+   graph-compiler `live_routes`: 11 passed; `route_coefficients`: 5 passed.
+3. `build-web-audioworklet.sh --named-twin`: shipped module
+   `46c8b035206b350470b41d7f20a4cd29341215e556511b8fb1f21bd71a610e79` (2896155 B);
+   `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts` pass (the
+   module digest agrees with `expected.json`, so no rendered bit moved);
+   `test-web-audioworklet.sh` passes.
+4. `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features --
+   -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+   `check-host-core-policy.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`.
+
+*Test value.* Fence 1 is red if host-core again exposes graph's record or gives the newtype a
+public constructor; fence 2 is red if the newtype's field becomes public; no runtime test can see
+either, because the bypass is an API.

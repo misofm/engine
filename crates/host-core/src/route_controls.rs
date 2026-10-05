@@ -12,6 +12,11 @@
 //! mute with. Nothing here re-derives a coefficient or a domain rule, so a settled live send and a
 //! freshly prepared one carry the same bits.
 //!
+//! [`RouteControlProducer::record`] is the only builder of a [`RouteControlRecord`], and
+//! [`RouteControlProducer::push`] accepts nothing else (issue #1416). The record is host-core's
+//! own type, not a re-export of `graph::RouteControlRecord`, whose public constructor does not check
+//! the route domain; so a host cannot queue a target that `route_coefficients` would refuse.
+//!
 //! # No ack precedes a drop
 //!
 //! Every refusal is decided before the queue is touched: [`RouteControlProducer::record`] is pure,
@@ -22,7 +27,74 @@
 use graph::{GraphRouteControlProducer, ROUTE_RAMP_LENGTH_MAXIMUM, RouteGate};
 use graph_compiler::route_coefficients;
 
-pub use graph::{RouteControlRecord, RouteControlResources};
+pub use graph::RouteControlResources;
+
+/// One validated live send record, built only by [`RouteControlProducer::record`] (issue #1416).
+///
+/// It wraps `graph::RouteControlRecord`, whose public constructor checks the ramp length and the
+/// mute rule but not the route domain. This type has a private field and no public constructor, so
+/// every record a host can push has passed `route_coefficients`.
+///
+/// A host cannot build one with an associated function. rustc reports E0599 (no function `new`);
+/// the fence carries no code because stable rustdoc does not check one (issue #1422 D2):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord =
+///         host_core::RouteControlRecord::new([1.0, 0.0, 0.0, 1.0], false, 0).unwrap();
+///     producer.push(record)
+/// }
+/// ```
+///
+/// Nor can it wrap graph's record with the tuple constructor. rustc reports E0423 (the constructor
+/// is private):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord = host_core::RouteControlRecord(inner);
+///     producer.push(record)
+/// }
+/// ```
+///
+/// The twin of both: identical except that the producer builds the record, so a renamed item in
+/// the shared code turns it red:
+///
+/// ```
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord =
+///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
+///     producer.push(record)
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RouteControlRecord(graph::RouteControlRecord);
+
+impl RouteControlRecord {
+    /// The coefficients `[ll, lr, rl, rr]` the ramp ends on.
+    #[must_use]
+    pub const fn target(&self) -> [f32; 4] {
+        self.0.target()
+    }
+    /// Whether the route is silenced once the ramp ends.
+    #[must_use]
+    pub const fn mute(&self) -> bool {
+        self.0.mute()
+    }
+    /// The ramp's length in samples; `0` is a step.
+    #[must_use]
+    pub const fn length(&self) -> u32 {
+        self.0.length()
+    }
+}
 
 /// Why a live send record was refused. Every refusal leaves the queue unchanged.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +170,9 @@ impl RouteControlProducer {
         .silences();
         // A silencing gate's coefficients are the four `+0.0` the record requires, so with the
         // length in bounds `new` cannot refuse; the arm is the domain rule's, never a drop.
-        RouteControlRecord::new(target, silenced, length).ok_or(RouteControlError::Domain)
+        graph::RouteControlRecord::new(target, silenced, length)
+            .map(RouteControlRecord)
+            .ok_or(RouteControlError::Domain)
     }
 
     /// Pushes a record [`Self::record`] built. A full queue refuses with
@@ -108,7 +182,7 @@ impl RouteControlProducer {
             return Err(RouteControlError::Full);
         }
         self.producer
-            .try_push(record)
+            .try_push(record.0)
             .map_err(|_| RouteControlError::Full)
     }
 
