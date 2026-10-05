@@ -164,3 +164,28 @@ No test is added. The note is design evidence; the implementing issues' gates ch
 - None to start. It reads the specs of *Extract the C ABI control plane into a portable crate both
   hosts call* (#1309) and *Run the browser control plane in a Worker and keep the AudioWorklet
   render-only* (#1332), and should land before #1332 starts implementation.
+
+## Attempt record
+
+**Attempt 1** (stream K research worker). The note is
+`docs/handoffs/one-edit-api/1057-design-note.md`; every anchor in it is checked on `8be19c86e`.
+Host: `Linux devbox 6.8.0-139-generic x86_64`, AMD EPYC 7313P, loaded (load average 18-48), so
+every number is uncontrolled and descriptive. Scratch builds and probes stay in
+`/tmp/claude-1002/w1057/` and are not committed.
+
+- Module size: scratch tree from `git archive HEAD`; the cargo line of
+  `scripts/build-web-audioworklet.sh:113-114` with `CARGO_TARGET_DIR=/tmp/claude-1002/w1057/target`,
+  then `scripts/strip-wasm-names.py strip`. Baseline 2,894,202 bytes (digest equal to the official
+  script's); with `capi` and `protocol` linked and reachable, 3,222,313 bytes (+328,111, +11.3 %);
+  gzip -9 926,483 → 1,039,871.
+- `cargo tree -p host-web -e normal`: 66 distinct crates; the proxy adds exactly `capi` and
+  `protocol`.
+- Structural edit (#1289 base moved): `run-web-mixing-automation-benchmark.sh prepare`,
+  `rebuild-preflight`, `rebuild-run --step w1057-rebuild-head` with
+  `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`; round 2 p50 23.851 ms (64-track console), 39.366 ms
+  (sends), as at the base.
+- Live-edit hop: Chromium 151 (Playwright 1.62.1), COOP/COEP, a Worker running the C ABI control
+  plane in Wasm, 500 edits per round, one warmup and two rounds: hop to cell p50 2.715-7.460 ms,
+  max 5.560-14.975 ms on the 64-track documents; the post is 0.020-0.045 ms (p50).
+- Gates: `bash scripts/check-workspace-policy.sh` ok; `bash scripts/check-dsp-research.sh` ok (it
+  checks the DSP research corpus, which this issue does not change).
