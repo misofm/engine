@@ -42,7 +42,9 @@ use crate::measure::{
 };
 use crate::strip::{Control, Event, QUANTUM, probe};
 
-pub const POLARITY_RAMPS_MS: [f32; 6] = [0.0, 2.0, 5.0, 10.0, 20.0, 50.0];
+/// The brief's lengths plus 40 ms: twice each `muteMs` the preregistered rules can choose (5, 10
+/// or 20 ms), so the flip at twice the mute length is measured for every one of them.
+pub const POLARITY_RAMPS_MS: [f32; 7] = [0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 50.0];
 pub const BYPASS_RAMPS_MS: [f32; 5] = [0.0, 2.0, 5.0, 10.0, 20.0];
 pub const LINK_RAMPS_MS: [f32; 6] = [0.0, 2.0, 5.0, 10.0, 20.0, 50.0];
 /// Every length `mute_click.csv`, `fader_drag.csv` and `pan_drag.csv` measured.
@@ -794,6 +796,39 @@ mod tests {
                 .iter()
                 .all(|&v| v == target[0])
         );
+    }
+
+    /// Every record restarts the ramp index from the coefficients the route has reached, as
+    /// `LiveRoute::drain` does (`position = 0`): one record lands mid-ramp and one after the
+    /// previous ramp has settled. A probe that kept the old position would start the second ramp
+    /// part-way through and turn the third into a step to its target.
+    #[test]
+    fn a_retarget_restarts_the_index_from_where_the_route_is() {
+        let unity = [1.0, 0.0, 0.0, 1.0];
+        let (t1, n1) = ([0.5, 0.25, -0.5, 0.75], 600_u32);
+        let (t2, n2) = ([-0.25, 0.5, 0.125, -1.0], 400_u32);
+        let (t3, n3) = (unity, 300_u32);
+        // Admitted inside blocks 2 and 8, so applied at the tops of blocks 3 and 9: the second
+        // lands at index 384 of the 600-frame ramp, the third 368 frames after the second settled.
+        let (a2, a3) = (2 * QUANTUM + 5, 8 * QUANTUM + 23);
+        let (s2, s3) = (3 * QUANTUM, 9 * QUANTUM);
+        let frames = s3 + n3 as usize + 2 * QUANTUM;
+        let (left, right) = route_probe(frames, unity, &[(0, t1, n1), (a2, t2, n2), (a3, t3, n3)]);
+        let r1 = IndexedRamp::new(unity, t1, n1);
+        let r2 = IndexedRamp::new(r1.coefficients_at(s2 as u32), t2, n2);
+        let r3 = IndexedRamp::new(r2.coefficients_at(n2), t3, n3);
+        for f in 0..frames {
+            let c = if f < s2 {
+                r1.coefficients_at(f as u32 + 1)
+            } else if f < s3 {
+                r2.coefficients_at((f - s2) as u32 + 1)
+            } else {
+                r3.coefficients_at((f - s3) as u32 + 1)
+            };
+            assert_eq!(left[f].to_bits(), c[0].to_bits(), "ll, frame {f}");
+            assert_eq!(right[f].to_bits(), c[2].to_bits(), "rl, frame {f}");
+        }
+        assert_eq!(left[frames - 1], t3[0]);
     }
 
     /// A polarity flip on the engine's input stage is the D11 ramp of the signed trim through
