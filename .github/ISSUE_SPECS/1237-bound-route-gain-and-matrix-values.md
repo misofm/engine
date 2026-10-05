@@ -134,3 +134,63 @@ non-goals). It is outside *Submix strips and live aux sends* (#1196), whose clos
 
 - None blocking. Schedule after batch K3 of #1196 (it touches `route_coefficients`, which K3's live
   sends use).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05) -- implementation committed, gates incomplete (host disk)
+
+Commit `d1a9daf30` on `codex/d15-stream-j`.
+
+- **D1.** `validate_routes` checks `gain_db` with `validate_finite_range(.., -144, 24, ..)` and each
+  coefficient with `[-1, 1]`; non-finite keeps `numeric.non_finite` (the helper's own order).
+- **D2.** `route_values` refuses the same inclusive domain (`RangeInclusive::contains`, false for
+  NaN) before `route_transform`. Inside the domain no fold can overflow (largest product about
+  `15.85`), so the former open-fold finiteness check was unreachable and is removed; doc updated.
+  The bounds are literal constants in `session/src/validate.rs` and `graph-compiler/src/ids.rs`
+  (a shared constant would need `session/src/lib.rs`, outside the authorized paths); gate 2's test
+  is the structural guard that they agree.
+- **D3.** `gated_route_coefficients` folds through a `const fn fold` that returns `+0.0` for a
+  subnormal product of either sign. `f32::is_subnormal` is `const` at 1.97.1, so the function
+  stays `const fn`.
+- **D4.** SDK `route()` and normalisation use `routeNumber` (f32 then inclusive bound, code
+  `numeric.out_of_schema_range`) for `gainDb` and each matrix key; the now-unused `matrixRecord`
+  was removed (`routeMatrixRecord` replaces it). `enginectl` inherits it through the builder.
+- **D5.** `SESSION_SCHEMA_V1.md` route paragraph, APP-LIVE "Live sends", author-session skill route
+  bullet.
+
+Rescoped tests (each with an in-code reason):
+
+- `route_coefficients.rs` `Draw::coefficient`: `uniform(-4, 4)` -> `uniform(-1, 1)`.
+- `route_coefficients.rs` +700 dB overflow block: deleted; replaced by the gate-2 test (overflow is
+  unreachable in domain).
+- `host-web` `a_refused_send_batch_pushes_nothing_and_keeps_the_mirror`: both `3.0e38` matrix
+  cases -> `1.5` (outside `[-1, 1]`), doc bullet updated.
+
+New tests, test value and mutation runs (each mutation applied, red observed, reverted, green):
+
+| Test | Defect it catches | Mutation | Result |
+| --- | --- | --- | --- |
+| `session/tests/route_domain.rs::route_gain_and_matrix_values_are_bounded_at_their_own_path` (gate 1) | session gain or a coefficient left finite-only, wrong/exclusive bound, wrong path, or range pre-empting `non_finite` (typed and text paths) | M1 `gain_db` back to `validate_finite`; M1b coefficient bound widened to `f32::MAX` | red both (`route_domain.rs:83`) |
+| `graph-compiler/tests/route_coefficients.rs::a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it` (gate 2) | live path and session domains differ | M1, M1b (session wider); M2 `route_values` bound removed | red all three (`:389`) |
+| `hosts/host-web/src/tests.rs::a_live_send_edit_outside_the_route_domain_is_refused` (gate 3) | browser send admission bounds differ from the session's | M2 | red (`tests.rs:11069`) |
+| `route_coefficients.rs::a_subnormal_folded_coefficient_is_positive_zero` (gate 4, coefficients) | subnormal product reaches the bound/pushed constant, or flushes to `-0.0` | M3 flush removed; M3b flush to `-0.0` | red both (`:442`) |
+| `host-web tests.rs::a_subnormal_route_renders_as_a_zero_coefficient` (gate 4, render) | subnormal constant renders a nonzero subnormal sample | M3 (`6.25e-43 vs 0e0`); M3b | red both |
+| `sdk/test/builder-evals.mjs` "a route's gain and matrix are bounded ..." (gate 5) | builder checks f32 only, exclusive bound, or wrong code/path | not run (see below) | -- |
+
+Gates run at `d1a9daf30`:
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo test -p session --test route_domain`, `-p graph-compiler --test route_coefficients`,
+  `-p host-web --lib -- send` (15) and `-- subnormal`: all pass.
+- `bash scripts/check-sdk-types.sh`: exit 0.
+
+Not run -- **blocked by host disk**: free space on `/` fell from 9.3 GB to 3.8 GB during the
+attempt, mostly from other worktrees' concurrent builds (`wt-d15-g-1328`). `test-debug-a` was
+stopped mid-compile when free space crossed the 4 GB floor. Outstanding: gate 5's SDK legs
+(`check-sdk-headless.sh <A>`, `sdk-package.sh check <A>`, the new builder eval), gate 6
+(`graph_fixture -- --check`, `check-graph-determinism.sh`, `check-builtins-fixtures.sh`,
+`check-console-fixtures.sh`, `check-browser-expected-resources.py`), gate 7 (clippy, doc,
+test-debug-a/b, policy pairs) and gate 7a (worklet build/check/test, cross-targets). Hazard check
+(no checked-in digest moves under D3) therefore remains unproven by gate 6; by construction D3 only
+moves bits for a route whose folded product is subnormal, and no checked-in route has a coefficient
+below `1.9e-31`.
