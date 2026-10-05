@@ -169,7 +169,9 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
   there)
 - `scripts/check-capi-abi.sh` (the frozen symbol list only), `docs/C_ABI_V1_QUALIFICATION.md`
 - Amendment 1: `scripts/check-realtime-policy.sh` (its file and region floors only, raised to the
-  measured counts; the script's own rule requires the raise in the change that adds a marker).
+  measured counts; the script's own rule requires the raise in the change that adds a marker), and
+  `scripts/test-realtime-policy.sh` (its fixture padding and the three expected floor messages,
+  which sit exactly on the floors).
 
 ## Non-goals
 

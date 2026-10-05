@@ -137,7 +137,10 @@ session stores `ControlLimits` (D3).
   -p control-plane`. It never builds `capi`.
 - **D12. CI feature list.** The `test-debug-a` step in `.github/workflows/qualification.yml`
   (`:609-618`) adds `control-plane/test-support` to its `--features` list, as
-  `scripts/check-test-support-ci.py` requires.
+  `scripts/check-test-support-ci.py` requires. Amendment 3: `scripts/test-test-support-ci.py`
+  keeps a literal copy of that list as its mutation anchor (`DEBUG_A_FEATURES`); it gains
+  `control-plane/test-support`, and its "every test-support feature removed from test-debug-a"
+  case expects `control-plane` too, so the lint job's mutation suite stays green.
 
 ## Deliverables
 
@@ -251,6 +254,13 @@ than Amendment 1's exact shrink. Root ruled for one adapter type parameter:
 capi (D4, D5). Gate 1 is unchanged from Amendment 1. #1400's `RuntimePreparer` may later join
 this trait; it is not pre-built here. The stopped runs before this amendment had no verdict and
 are not attempts.
+
+## Amendment 3 (root, 2026-10-05)
+
+The stream-B batch-1 qualification found that the lint job's mutation suite
+(`scripts/test-test-support-ci.py`) anchors on a literal copy of the `test-debug-a` feature list
+that D12 changed. Root added the file to D12's paths: the copy gains `control-plane/test-support`
+and the removed-features case expects `control-plane`.
 
 ## Dependencies
 
