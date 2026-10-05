@@ -130,3 +130,35 @@ not edited; this body records the correct wiring.
 - A test that greps source or prose is refused. The self-test runs the analyser on synthetic
   disassembly, which is not source grepping.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, stream J batch 2, branch `codex/d15-stream-j2`)
+
+Changed only `scripts/check-web-audioworklet-callgraph.py`: `FORBIDDEN`'s C alternative is now
+`^(?!_R|_ZN).*(?:free|malloc|calloc|realloc)` (D1, grouped so the lookahead binds only to it); the
+docstring paragraph is rewritten to D1 and names `scripts/test-web-audioworklet.sh` as the
+self-test's runner (D3); `self_test()` (a1) carries D2's cases exactly.
+
+- **Gate 1.** `python3 -B scripts/check-web-audioworklet-callgraph.py --self-test`: exit 0.
+- **Gate 2 (red on revert).** With `main`'s `^(free|malloc|calloc|realloc)$`: exit 1, failing
+  `prefixed C allocator` dlfree, __libc_free, mi_free, mi_malloc_aligned, je_malloc, tlsf_free,
+  __libc_calloc, je_realloc, and `unmangled {free,malloc,calloc,realloc}_count fails`.
+- **Gate 3 (mutations, each alone on a copy, each exit 1).**
+  - drop the lookahead (`^.*(?:...)`): `out-of-line v0 accessor named` free, malloc, calloc,
+    realloc and `out-of-line legacy accessor named free passes`.
+  - drop `|_ZN`: `out-of-line legacy accessor named free passes` only.
+  - drop `.*`: all eight `prefixed C allocator` cases.
+  - drop `|__rust_realloc`: `Rust allocator _RNvCs0_7___rustc14___rust_realloc` only.
+  - (extra, the Python `re` hazard) ungroup the alternation (`^(?!_R|_ZN).*free|malloc|...`):
+    `out-of-line v0 accessor named` malloc, calloc, realloc.
+- **Gate 4.** `build-web-audioworklet.sh --named-twin` then `check-web-audioworklet.sh`: exit 0.
+  Over all 2741 defined functions of the named twin (`wasm-objdump -d` headers), `main`'s
+  `FORBIDDEN` refuses 236 and the new one refuses 236; the sets are equal (no new-only, no
+  old-only name). 110 names are unmangled (108 `miso_engine_web_v1_*` exports, `memcmp` and
+  `__multi3`); none contains a C allocator name. Shipped module
+  `e4d822a62e397b32283d3c6e0b06d3e3b4b5ffafbf74c2ddcb728c7301c21844` (named twin
+  `6a8f3ee25d5803fc77b8f362936f8fec92ff3cfd575873a29cab8447af266d61`); only the script changed,
+  so the module is unchanged.
+- **Gate 5.** `bash scripts/test-web-audioworklet.sh`: exit 0. `bash scripts/check-workspace-policy.sh`:
+  exit 0.
