@@ -136,3 +136,81 @@ None.
 *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
 (#1054) and *Crossfade the bypass switch over the session ramp* (#1341) depend on this issue.
 *Run the blinded listening session for the live ramp defaults* (#1388) follows #1054.
+
+## Attempt record
+
+### Attempt 1 (2026-10-05)
+
+**Done.** The decision-15 addition, questions 4-6 and D1-D4, in
+`docs/handoffs/control-smoothing-defaults/`: `FINDINGS.md` section 9 (one table, every row of the
+product outcome, then 9.2-9.8), the one-line D3 pointers in sections 1 and 6, the header updated in
+place, [REISS-COMP] added to section 8; four new CSVs in `data/` (`polarity_click.csv`,
+`law_transfer.csv`, `bypass_crossfade.csv`, `link_glide.csv`); `measure/` gains the input section
+in `src/strip.rs`, a `live` subcommand (`src/live_rows.rs`), the six shunted effects through their
+factories and the engine's `BypassShunt` (`src/effects.rs`), #1341's crossfade law
+(`src/crossfade.rs`), path dependencies only in `measure/Cargo.toml`, and the new tables in
+`summarise.py`; `measure/README.md` has the commands and columns. No file outside the authorized
+path changed except this record (D4). Evidence commit `d541cc11c` on `codex/d15-stream-e`.
+
+**Results.** Keys and defaults: fader, input trim, send gain, VCA offset, detector link glide
+`faderMs` 20 ms; mute, solo, send mute, send `follows_mute` toggle, VCA mute, bypass crossfade
+`muteMs` 10 ms; polarity invert `muteMs` doubled, 20 ms; pan, raw matrix, send matrix `panMs`
+20 ms. One length differs from #1054 D3 (and so from #1261 D2, #1364, #1394): polarity invert is
+`2 * mute_samples`, because a flip over `N` clicks 6 dB more than a mute over `N` and a flip over
+`2N` matches the mute over `N` within 0.8 dB on every measure and rate (`FINDINGS.md` 9.2, 9.8).
+#1341's `mute_ms` and #1370/#1371's `fader_ms` are confirmed. No listening contrast was added
+(9.6); `listening/` is unchanged.
+
+**Anchors.** No file named by this spec's anchors changed between `6fb211594` and `8be19c86e`; each
+anchor still reads as quoted (`crates/builtins/src/lib.rs:1434-1478`, `:1436-1439`,
+`crates/graph/src/runtime.rs:861`, `crates/lane/src/kernels.rs:1073-1168`,
+`crates/host-core/src/vca.rs:1-13`, `crates/effect-contract/src/live.rs:841-843`). `FINDINGS.md`
+lines 11-17 and 19-30, which #1054 cites, did not move; the "No human has listened" line this spec
+cites as `:257` is now `:260`.
+
+**Gates** (all run on the final tree):
+
+1. `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/claude-1002/r1055/target cargo test --release
+   --offline` from `measure/`: 16 passed (9 earlier, 7 new); `cargo clippy --release --offline
+   --all-targets` clean.
+2. `control_smoothing_measure live` run twice, all four rates, into two scratch directories: `cmp`
+   identical. SHA-256: `bypass_crossfade.csv` a5fe06ddb447c6e4825716466cfeca88f65fb5976948bcf4d62361653778e6f5,
+   `law_transfer.csv` 89eb4b73b6c9e8a6700da2240d4ec8b98e4d43c8ac5ed03e26a804014b14a52b,
+   `link_glide.csv` 98d30ca0e1299a1e870ec8f2776ec4d7da1f86b867f9c9e2bcb545662fdf6afc,
+   `polarity_click.csv` e22ff0d64baacb243e2478369972b2735de0266ef40188fb9878d839d513e2b6. Two
+   single-rate (48 kHz) runs, one before and one after the last source edit, match the committed
+   48 kHz rows. The seven earlier CSVs reproduce byte for byte both with the harness at `8be19c86e`
+   and with the extended harness (`measure`, all four rates).
+3. `bash scripts/check-workspace-policy.sh`: ok. `bash scripts/check-env-vocabulary.sh`: ok.
+   `bash scripts/check-dsp-research.sh`: ok.
+4. A script over `FINDINGS.md` 9.1: 15 rows, the product outcome's 15 in order, each with a
+   `path:line` anchor, a key, a default in ms and a CSV or source argument.
+5. `TMPDIR=/tmp/claude-1002/r1055/tmp python3 docs/handoffs/control-smoothing-defaults/listening/listening.py self-test`:
+   passed (68 trials; the packet is unchanged).
+
+**Mutation evidence** (each applied to `measure/src/crossfade.rs`, then reverted to identical bytes
+with `cmp`; `cargo test --release --offline crossfade`):
+
+- Accumulated mix (`m += step` per frame in place of `IndexedRamp::coefficients_at(k)`): red,
+  `the_mix_follows_the_indexed_law_from_the_first_frame_after_the_record` ("length 441, Dry, frame 1
+  (k = 2)") and `a_ramping_frame_is_dry_plus_the_scaled_difference`.
+- Settled end after the ramp computed (`dry + (wet - dry) * target` in place of the copy): red,
+  `both_ends_are_exact_copies_of_the_settled_planes` (the "after" assertion).
+- Settled end before the record computed (`dry + (wet - dry) * m_start` in place of the copy): red,
+  the same test (the "before" assertion).
+- Reverted: 3 passed.
+
+**Open items.**
+
+- #1054, #1261, #1364 and #1394 follow 9.8 (polarity `2 * mute_samples`). Root carries this in the
+  closing comment (D2).
+- Not verified (`FINDINGS.md` 9.7): the real #1341 crossfade and #1370 glide (emulated here; their
+  own gates test the kernels); the link bound below about 1 ms of compressor attack; whether a
+  polarity flip's brief level dip at its midpoint is audible as a dip (a question for any
+  polarity-kernel successor, not for #1388); effect settings beyond the representative ones; a
+  transient shaper switched during a kick's attack; banked, AArch64 and wasm renders.
+- [REISS-COMP] could not be opened in this session (the author link redirects, the AES page refused
+  the fetch); 9.5 rests on the kernel anchors and an inline derivation and cites it for context only.
+- #1388 remains owner-pending: no listening response or result exists or was simulated.
+- This spec's Status section ("`FINDINGS.md` has no section 9 yet") is stale after this attempt;
+  only this record was appended (D4).
