@@ -247,4 +247,80 @@ none
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (implementer, 2026-10-05)
+
+**Change.** Rules 1-4 in `InputStage::apply_prepared_filter` (`crates/builtins/src/lib.rs`) with
+its doc comment; gates 1-4 in `crates/builtins/tests/filter_liveness.rs`; the #808 paragraph of
+`docs/rulings/builtins-input-liveness-d2.md`. Kernels, `refresh_filter_plan`,
+`refresh_channel_symmetry`, `settle_filter`, validation, host-core and every sealed size are
+unchanged. Rule 2 restarts the countdown unconditionally (D2 "starts the 64-frame countdown"),
+so a disable always reaches the kernel's completion snap and integrator clear.
+
+**Gates 1-4** (`filter_liveness.rs`):
+- Gate 1 `a_disable_re_sent_every_frame_completes_clears_and_elides_on_time`: every launch rate,
+  LPF 15 Hz and HPF 1 kHz; on `InputBuiltins` the six current words, both integrators and the
+  elision plan read settled exactly from frame 64 through frame 128 and not before. On the
+  `Simd4` 4-member bank there is no per-lane coefficient reader, so the gate reads the member's
+  integrators and `bank_elision_plan` (an elided section is identity on every member with `+0.0`
+  integrators), and checks the member renders the dry input from frame A+64.
+- Gate 2 `a_disable_freezes_the_recursion_words_and_moves_only_the_mix`: frames 1-63 keep
+  `c1`, `a2`, `a3` bit-equal to the pre-disable words (settled design and frame-20 interior word),
+  the mix moves every frame, and frame 64 reads the identity with `+0.0` integrators.
+- Gate 3 `an_enable_from_rest_jumps_the_recursion_only_when_the_integrators_are_zero`: both cases
+  as specified.
+- Gate 4 `every_reachable_recursion_word_stays_inside_the_hull_of_the_designs`: as specified; a
+  q-frame block is rendered as q one-frame calls so the words are read after every frame (the
+  ramp is partition-invariant, `filter_ramp_endpoint_is_partition_invariant_and_reset_honors_kind`),
+  and commands land every q frames. Each block draws one command per section. One design draw in
+  eight takes an interval endpoint exactly (10 Hz or the maximum), because the maximum cutoff is
+  the design with the largest norm and a log-uniform draw rarely reaches it. A word with zero
+  recursion is excluded from the norm and instead must carry `+0.0` integrators. `||A(w)||_V` is
+  the spectral norm of `R A R^-1`, `R = [[1, 1/sqrt(2)], [0, 1/sqrt(2)]]`; for designs it equals
+  the spectral radius (checked off-line at 10 Hz to the maximum cutoff).
+
+**Gate-4 per-rate maxima (release, quanta 1-63, 16 histories x 512 blocks, both sections):**
+
+| Rate | max reached `||A(w)||_V - 1` | max design `q - 1` | max excess over the history's design | bound |
+|---|---|---|---|---|
+| 44.1 kHz | `-5.213e-5` | `-5.213e-5` | `0` | `8.633e-7` |
+| 48 kHz | `-5.241e-5` | `-5.241e-5` | `0` | `8.633e-7` |
+| 88.2 kHz | `-5.213e-5` | `-5.213e-5` | `0` | `8.633e-7` |
+| 96 kHz | `-5.241e-5` | `-5.241e-5` | `0` | `8.633e-7` |
+
+The largest reached norm is a design's own (the maximum-cutoff design); no interpolated `f32`
+word exceeded its history's largest design. Debug runs 48 kHz at quanta {1, 2, 7, 63}.
+
+**Mutation evidence** (each applied to `lib.rs`, run, reverted):
+- Full revert to today's law: gates 1, 2, 3, 4 red (gate 4: `rate 44100 quantum 1 history 0
+  section 1: reached -1.574e-5 over design -5.213e-5 by 3.639e-5`; gate 1: not settled at frame
+  64).
+- Rule 1 removed: gates 1 and 4 red.
+- Rule 2 removed (disable ramps all six words): gates 2 and 4 red.
+- Rule 3 removed: gates 3 (first case) and 4 red.
+- Rule 3 predicate ignoring the integrators: gate 3 (restored case) red.
+- Rule 1 extended to settled lanes: `tests::trim_refresh_preserves_asymmetric_settled_filter_steps`
+  red (the D1 hazard canary); green and unchanged with the implementation.
+
+**Rendered bits that move (before/after, one-off comparison, not committed).** From a prepared
+settled design (HPF 1 kHz, LPF 1 kHz, LPF 15 Hz; every launch rate; two-sine input):
+- Disable: frame A and every frame from A+64 are bit-identical before and after; frames A+1 to
+  A+63 move. After, the output equals `(1 - n/64) y_filtered + (n/64) x` within `3.8e-7`
+  (HPF) and `5.3e-8` (LPF) of an `f64` blend of a parallel filter left at its design; before, the
+  deviation from that blend was up to `1.24e-1` (1 kHz) and `1.2e-4` (15 Hz) -- the coefficient
+  sweep through near-identity words.
+- Enable from rest: frame A is bit-identical (dry); every later frame moves, because the filter now
+  starts at its design from zero state. After, the output equals `(1 - n/64) x + (n/64) y_design`
+  within `3.2e-7` of an `f64` blend with a prepared design filter; before, up to `1.94e-1`.
+- Design-to-design retarget from a prepared design (1 kHz to 2 kHz, 15 Hz to 30 Hz): 200 frames
+  bit-identical at every rate. Settled paths are untouched code.
+
+**Gate 5 commands and results (x86-64-v3 host):**
+- `cargo test --locked --all-targets -p lane -p builtins -p dsp-reference --features builtins/test-support,lane/test-support`: pass (223 passed, 0 failed).
+- `cargo test --locked --release -p builtins --features builtins/test-support --test filter_liveness`: pass (13 passed).
+- `test-debug-a` workspace command from `qualification.yml`: pass (1,426 passed, 0 failed).
+- `cargo build --locked --release -p audit && bash scripts/check-builtins-fixtures.sh . target/release/audit`: `builtins fixtures: ok (50 files)`; no pinned artifact moved.
+- Worklet chain (build `--named-twin`, `check-web-audioworklet.sh --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`, `test-web-audioworklet.sh`): pass.
+- `scripts/check-cross-targets.sh`: PASS (AArch64 rows check/lint only; AArch64 tests run in CI).
+- `check-builtins-policy.sh`, `check-workspace-policy.sh`: ok. `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean. `cargo fmt --all -- --check`: clean.
+
+**Open:** no listening run (spec: none required). AArch64 test execution is CI-only.

@@ -15,8 +15,20 @@ supersedes its requirement to deliver slope changes together with liveness.
 `refresh_filter_plan` now recomputes the exact coefficient/integrator predicate and
 forces in-flight sections non-elidable. Retarget, completion, reset, evidence state
 writes and integrator restoration use that authority. Sample A uses current words;
-sample A+64 uses the exact target. Disabled completion clears only the addressed
-integrators before the first identity sample. Settled all-disabled filters execute
+sample A+64 uses the exact target, under any re-send history. Disabled completion clears only the addressed
+integrators before the first identity sample.
+
+A retarget follows four rules (#1407, decision 15 D15-4(b)), each covered channel
+deciding from its own words: (1) a target bit-equal to the in-flight target of a lane
+whose countdown is non-zero leaves current, target, step and countdown untouched; a
+settled lane never takes this rule; (2) the identity target on a lane whose current
+words are not the identity freezes `c1`, `a2`, `a3` (step `+0.0`), ramps only the mix
+and restarts the countdown, so a disable is a 64-sample crossfade from the filtered
+output to the dry input; (3) a design target on a settled disabled lane -- countdown
+zero, all six current words bitwise the identity, both integrators `+0.0` -- writes the
+target's recursion words at once and ramps only the mix, the reverse crossfade; (4)
+every other retarget ramps all six words. Every recursion word the kernel can load is
+then a design, the identity at rest, or a linear mixture of designs. Settled all-disabled filters execute
 no SVF recurrences even during trim/polarity ramps; trim timing, sanitization and
 signed-zero normalization remain unchanged. Mixed banks keep the existing fallback.
 

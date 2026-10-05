@@ -1349,19 +1349,48 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Apply one already-validated fixed-size target to one section and one or both channels.
+    ///
+    /// The live retarget law (#1407, decision 15 D15-4(b)) keeps every recursion word
+    /// `[c1, a2, a3]` the kernel can load a designed filter, the disabled identity at rest, or a
+    /// linear mixture of designs. Each covered channel decides its rule from its own words, so a
+    /// lane whose channels hold equal words keeps equal words, steps included:
+    ///
+    /// 1. **In-flight re-send.** A target whose six words equal, bit for bit, the channel's
+    ///    in-flight target on a lane whose countdown is non-zero leaves the lane untouched:
+    ///    current, target, step and countdown keep their bits. A settled lane (countdown zero)
+    ///    never takes this rule.
+    /// 2. **Disable.** The identity target `[0, 0, 0, 1, 0, 0]` on a lane whose current words are
+    ///    not already the identity freezes `c1`, `a2`, `a3` (step `+0.0`), ramps only `m0`, `m1`,
+    ///    `m2` toward the identity mix and starts the 64-update countdown: a crossfade from the
+    ///    filtered output, the filter at its own words, to the dry input. The kernel's completion
+    ///    snap then writes the identity recursion and clears the integrators in the same step.
+    /// 3. **Enable from rest.** A design target on a *settled disabled* lane -- countdown zero,
+    ///    all six current words bitwise the identity and both integrators `+0.0` -- first writes
+    ///    the target's `c1`, `a2`, `a3` into the current words and then ramps only the mix: the
+    ///    reverse crossfade. An identity section holding restored non-zero integrators takes
+    ///    rule 4, so that state is never released through a jumped recursion.
+    /// 4. Every other retarget ramps all six words from the current words to the target over 64
+    ///    updates, as before.
+    ///
+    /// Under any re-send history, the first sample uses the current words and sample A+64 uses
+    /// the exact target. See `docs/rulings/builtins-input-liveness-d2.md`.
     fn apply_prepared_filter(&mut self, lane: usize, target: PreparedInputFilterTarget) {
+        const IDENTITY: [f32; 6] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         debug_assert!(target.section < 2);
         debug_assert!(lane < self.members);
         let section = target.section as usize;
         let target_words = target.coefficients;
+        let bit_equal = |left: &[f32; 6], right: &[f32; 6]| {
+            left.iter()
+                .zip(right)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        };
+        let target_is_identity = bit_equal(&target_words, &IDENTITY);
         for channel in 0..2 {
             if !target.lanes.covers(channel) {
                 continue;
             }
-            let current = self.coef.section[channel][section];
-            let current_values = [
-                current.c1, current.a2, current.a3, current.m0, current.m1, current.m2,
-            ];
+            let mut current = self.coef.section[channel][section];
             let mut target_values = [
                 lane_read::<L>(self.filter_target[channel][section].c1),
                 lane_read::<L>(self.filter_target[channel][section].a2),
@@ -1370,6 +1399,40 @@ impl<L: Lane> InputStage<L> {
                 lane_read::<L>(self.filter_target[channel][section].m1),
                 lane_read::<L>(self.filter_target[channel][section].m2),
             ];
+            let mut remaining = self.filter_remaining[channel][section];
+            let in_flight_target: [f32; 6] =
+                core::array::from_fn(|index| target_values[index][lane]);
+            // Rule 1: an identical re-send never restarts a ramp in flight.
+            if remaining[lane] != 0 && bit_equal(&in_flight_target, &target_words) {
+                continue;
+            }
+            let mut current_values = [
+                lane_read::<L>(current.c1),
+                lane_read::<L>(current.a2),
+                lane_read::<L>(current.a3),
+                lane_read::<L>(current.m0),
+                lane_read::<L>(current.m1),
+                lane_read::<L>(current.m2),
+            ];
+            let current_words: [f32; 6] = core::array::from_fn(|index| current_values[index][lane]);
+            let current_is_identity = bit_equal(&current_words, &IDENTITY);
+            let state = self.state.section[channel][section];
+            let settled_disabled = remaining[lane] == 0
+                && current_is_identity
+                && lane_read::<L>(state.ic1)[lane].to_bits() == 0
+                && lane_read::<L>(state.ic2)[lane].to_bits() == 0;
+            // Rule 3: an enable from rest jumps the recursion; only the mix ramps.
+            if !target_is_identity && settled_disabled {
+                for index in 0..3 {
+                    current_values[index][lane] = target_words[index];
+                }
+                current.c1 = lane_words::<L>(&current_values[0]);
+                current.a2 = lane_words::<L>(&current_values[1]);
+                current.a3 = lane_words::<L>(&current_values[2]);
+                self.coef.section[channel][section] = current;
+            }
+            // Rule 2: a disable freezes the recursion; only the mix ramps.
+            let freeze_recursion = target_is_identity && !current_is_identity;
             let mut step_values = [
                 lane_read::<L>(self.filter_step[channel][section].c1),
                 lane_read::<L>(self.filter_step[channel][section].a2),
@@ -1378,12 +1441,13 @@ impl<L: Lane> InputStage<L> {
                 lane_read::<L>(self.filter_step[channel][section].m1),
                 lane_read::<L>(self.filter_step[channel][section].m2),
             ];
-            let mut remaining = self.filter_remaining[channel][section];
-            let mut changed = false;
+            let mut changed = freeze_recursion;
             for index in 0..6 {
-                let current_word = lane_read::<L>(current_values[index])[lane];
+                let current_word = current_values[index][lane];
                 target_values[index][lane] = target_words[index];
-                if current_word.to_bits() != target_words[index].to_bits() {
+                if index < 3 && freeze_recursion {
+                    step_values[index][lane] = 0.0;
+                } else if current_word.to_bits() != target_words[index].to_bits() {
                     step_values[index][lane] = (target_words[index] - current_word) * (1.0 / 64.0);
                     changed = true;
                 } else {
