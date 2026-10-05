@@ -113,13 +113,14 @@ impl Draw {
         let unit = (self.next() >> 40) as f32 / (1_u64 << 24) as f32;
         lo + (hi - lo) * unit
     }
-    /// A matrix coefficient: mostly a signed level up to +12 dB, sometimes an exact signed zero,
-    /// so a gated `+0.0` is told apart from a product that was `-0.0` already.
+    /// A matrix coefficient: mostly a signed level in the route domain `[-1, 1]` (issue #1237;
+    /// this drew up to +12 dB before the domain existed), sometimes an exact signed zero, so a
+    /// gated `+0.0` is told apart from a product that was `-0.0` already.
     fn coefficient(&mut self) -> f32 {
         match self.next() % 8 {
             0 => 0.0,
             1 => -0.0,
-            _ => self.uniform(-4.0, 4.0),
+            _ => self.uniform(-1.0, 1.0),
         }
     }
 }
@@ -301,40 +302,153 @@ fn every_route_coefficient_comes_from_the_one_gated_function() {
     }
 
     assert_eq!(shapes.len(), 4, "the rounds draw every follow-zeroed shape");
+}
 
-    // A finite gain times a finite coefficient can overflow. The overflow is refused whatever the
-    // gate, so muting a route never admits values that would be infinite once it opens.
-    let overflow = [1.0e10, 0.0, 0.0, 1.0];
-    for &(mute, source_lane_muted) in &gates {
-        assert_eq!(
-            route_coefficients(700.0, overflow, mute, source_lane_muted),
-            Err(RouteValueError::Domain),
-            "mute {mute}, source lanes muted {source_lane_muted:?}"
-        );
+/// The compile request's session half: `compile_session`'s refusal codes at `path`, if any.
+fn session_refusal(model: &SessionModel, path: &str) -> Option<String> {
+    compile_session(
+        model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .err()
+    .map(|set| {
+        set.diagnostics()
+            .iter()
+            .filter(|item| item.path.to_string() == path)
+            .map(|item| item.code.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
+/// Issue #1237 gate 2: a route value is in domain on the live path (`route_coefficients`, which
+/// host-core's send producer and host-web's admission call) exactly when the session accepts it.
+/// The values are gate 1's boundaries, each one `f32` step either side of them, and the
+/// non-finite values; each is set on the gain or on one coefficient of an otherwise unity route,
+/// under every gate. This replaces #1215's +700 dB overflow case: inside the domain no fold can
+/// overflow (the largest product is about `15.85`).
+///
+/// Test value: red if the two paths' domains differ -- `route_values` left unbounded, bounded by
+/// other limits than `validate_routes`, exclusive where the session is inclusive, or checking
+/// only the open gate -- so a value the session refuses could still be pushed live, or one it
+/// accepts refused.
+#[test]
+fn a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it() {
+    let base = parse_session_json(SESSION).expect("fixture parses");
+    let id = base.routes[0].id.as_str().to_owned();
+    let steps = |value: f32| [value.next_down(), value, value.next_up()];
+    let finite = |bounds: [f32; 2]| {
+        let mut values: Vec<f32> = bounds.into_iter().flat_map(steps).collect();
+        values.extend([bounds[0] - 0.5, bounds[1] + 0.5, 0.0, -0.0]);
+        values.extend([f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+        values
+    };
+    let gates: Vec<(bool, [bool; 2])> = (0..8_u8)
+        .map(|g| (g & 1 != 0, [g & 2 != 0, g & 4 != 0]))
+        .collect();
+    let unity = [1.0, 0.0, 0.0, 1.0];
+    let mut refused = 0;
+    for position in 0..5 {
+        let (field, values) = if position == 0 {
+            ("gain_db".to_owned(), finite([-144.0, 24.0]))
+        } else {
+            let key = ["ll", "lr", "rl", "rr"][position - 1];
+            (format!("channel_matrix.{key}"), finite([-1.0, 1.0]))
+        };
+        let path = format!("$.routes[0].{field}");
+        for value in values {
+            let (mut gain_db, mut matrix) = (0.0, unity);
+            if position == 0 {
+                gain_db = value;
+            } else {
+                matrix[position - 1] = value;
+            }
+            let mut model = base.clone();
+            model.routes[0].gain_db = gain_db;
+            let channel = &mut model.routes[0].channel_matrix;
+            [channel.ll, channel.lr, channel.rl, channel.rr] = matrix;
+            let session = session_refusal(&model, &path);
+            let expected = if value.is_finite() {
+                "numeric.out_of_schema_range"
+            } else {
+                "numeric.non_finite"
+            };
+            if let Some(codes) = &session {
+                assert_eq!(codes, expected, "{path} = {value}");
+                refused += 1;
+            }
+            for &(mute, source_lane_muted) in &gates {
+                let live = route_coefficients(gain_db, matrix, mute, source_lane_muted);
+                assert_eq!(
+                    live.is_err(),
+                    session.is_some(),
+                    "{path} = {value}, mute {mute}, lanes {source_lane_muted:?}: live {live:?}, \
+                     session {session:?}"
+                );
+                if let Err(error) = live {
+                    assert_eq!(error, RouteValueError::Domain);
+                }
+            }
+            if session.is_none() {
+                // An accepted value compiles: the lowering's `route_values` is the live check.
+                compile(&model).unwrap_or_else(|codes| panic!("{id}: {path} = {value}: {codes:?}"));
+            }
+        }
     }
-    // The same gain with a unit matrix folds to a finite 1.0e35 and is not refused.
-    assert!(route_coefficients(700.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2]).is_ok());
-    // A muted route's values are refused exactly as an open one's (#1216 D2).
-    for mute in [false, true] {
-        let mut model = base.clone();
-        model.routes[0].gain_db = 700.0;
-        model.routes[0].channel_matrix.ll = 1.0e10;
-        model.routes[0].mute = mute;
-        let id = model.routes[0].id.as_str().to_owned();
-        assert_eq!(
-            compile(&model).err(),
-            Some(vec![(
-                "graph.gain.non_finite".to_owned(),
-                format!("$.routes[id={id}].gain_db")
-            )]),
-            "mute {mute}"
-        );
-        model.routes[0].channel_matrix.ll = 1.0;
-        assert!(
-            compile(&model).is_ok(),
-            "a finite 700 dB fold compiles, mute {mute}"
-        );
-    }
+    // Each field refuses its two outer steps, its two half-steps and the three non-finite values.
+    assert_eq!(refused, 5 * 7);
+}
+
+/// Issue #1237 gate 4 (the coefficients): a folded product that is subnormal, of either sign, is
+/// `+0.0` in that position, from the plan's bound constants and from the live path alike. At
+/// -144 dB (`6.31e-8`) a coefficient of `±1.0e-35` folds to about `±6.3e-43`.
+///
+/// Test value: red if `gated_route_coefficients` returns the subnormal product, or flushes a
+/// negative one to `-0.0`, or flushes the wrong position, or a normal product with it.
+#[test]
+fn a_subnormal_folded_coefficient_is_positive_zero() {
+    let base = parse_session_json(SESSION).expect("fixture parses");
+    let tiny = 1.0e-35_f32;
+    let matrix = [tiny, -tiny, 0.5, -tiny];
+    let gain = math::db_to_gain_f32(-144.0);
+    assert!(
+        (gain * tiny).is_subnormal() && (gain * -tiny).is_subnormal(),
+        "the draw folds to a subnormal of each sign"
+    );
+    let expected = [0.0_f32, 0.0, gain * 0.5, 0.0];
+    assert!(expected[2].is_normal());
+    let mut model = base.clone();
+    model.routes[0].gain_db = -144.0;
+    let channel = &mut model.routes[0].channel_matrix;
+    [channel.ll, channel.lr, channel.rl, channel.rr] = matrix;
+    let artifact = compile(&model).expect("an in-domain route compiles");
+    let id = model.routes[0].id.as_str().to_owned();
+    let prepared = artifact
+        .graph()
+        .routes()
+        .iter()
+        .find(|route| {
+            matches!(&route.node, graph::GraphNodeId::Route { route_id }
+                if route_id.as_str() == id)
+        })
+        .expect("the route is prepared");
+    assert_eq!(
+        bits(gated_route_coefficients(&prepared.transform, prepared.gate)),
+        bits(expected),
+        "the plan's bound constants"
+    );
+    assert_eq!(
+        bits(route_coefficients(-144.0, matrix, false, [false; 2]).expect("in domain")),
+        bits(expected),
+        "the live path"
+    );
 }
 
 /// #1216 gate 5: a route's mute is in the sealed graph text. The same session compiles twice, one

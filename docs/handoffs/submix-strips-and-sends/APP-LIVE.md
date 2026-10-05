@@ -67,7 +67,9 @@ await controls.submit(
 - `route(id)` returns `RouteEdits`: `gainDb(db, options?)`, `mute(on, options?)` (`true` silences
   the send) and `matrix({ ll, lr, rl, rr }, options?)`. `options` takes `smoothingSamples` only: a
   send has no lane, so an edit moves both of its lanes together. The engine holds the gain and the
-  matrix to the session's route domain and refuses a value outside it with `domain`.
+  matrix to the session's route domain -- `gainDb` in `[-144, 24]` dB, each matrix coefficient in
+  `[-1, 1]`, both inclusive (#1237) -- and refuses a value outside it with `domain`; the builder's
+  `route()` refuses the same values with `numeric.out_of_schema_range`.
 - `SessionMap.routes` (from `OfflineEngine.sessionMap()`, and the browser host's
   `miso.sessionmap.v1` reply) lists the live routes in canonical (sorted) route-ID order, as the
   engine enumerates them. The SDK takes a send's index from that list and never from the session.
