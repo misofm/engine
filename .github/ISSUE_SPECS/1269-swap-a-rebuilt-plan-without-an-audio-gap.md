@@ -376,7 +376,7 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1402 | *Carry source-claim lines across a plan swap and fill a grown line for a prime* | C | #1283, #1285, #1287 |
 | #1396 | *Give a plan a source-read clock that leads its render clock* | C | #1316, #1323 |
 | #1320 | *Let a source consumer check and replay its next blocks for a prime* | C | #1316, #1318, #1319 |
-| #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1287, #1324, #1396, #1402 |
+| #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1287, #1323, #1324, #1396, #1402 |
 | #1355 | *Adopt a warm successor with a raw-frame prime at the first ready block* | C | #1277, #1287, #1310, #1311, #1314, #1320, #1323, #1327, #1343, #1344, #1354, #1395, #1396, #1402 |
 | #1403 | *Classify a latency-growth edit and publish its warm successor from the control plane* | C | #1310, #1311, #1313, #1314, #1320, #1323, #1324, #1325, #1343, #1348, #1354, #1355, #1396, #1398 |
 | #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt* | C | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1354, #1355, #1396, #1398, #1403 |

@@ -94,10 +94,12 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      #1354 D2 step 3 makes), and step 4's duck set is computed from that compile's arrivals,
      before any carry join. It is then prepared from that compile as an ordinary successor, with
      the predecessor's source-read offset (#1396 D2) and with the duck set as
-     `SuccessorBase::forced_restart`, a new field (`&[String]`, strip IDs, sorted). #1354 D4's
-     `SuccessorBase::new` sets it empty, so every other successor leaves it empty and no
-     construction site changes; the transition sets it on the value `new` returns. Preparation applies #1324 D2-D3 to every strip in it, the same as to a
-     strip the carry join restarts: a whole pre-fader restart, armed. It adds those strips to
+     `SuccessorBase::forced_restart`, a new field (`&[String]`, strip IDs, sorted). This slice
+     extends `SuccessorBase::new` (*Reset latency floors at a host-declared discontinuity*, #1323
+     D3) to set it empty, so every other successor leaves it empty and no construction site
+     changes; the transition sets it on the value `new` returns. Preparation applies #1324 D2-D3
+     to every strip in it, the same as to a strip the carry join restarts: a whole pre-fader
+     restart, armed. It adds those strips to
      `restarted_strips()`, after which #1324 D1's sidechain rule runs again over the whole set.
      - With a donor, the donor's added rings are donated (*Prepare a successor across a withdrawn
        candidate plan*, #1344 D3). They pass #1344 D5's unconsumed check, because render never
@@ -109,10 +111,10 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      - With a donor, the base is #1344 D2's: `inventory` is the donor's `carried_base` (#1344
        D1), and `committed` is the running epoch's kept model (#1310 D3) with #1325 D6's duck
        overlay applied when the epoch has one (each overlay strip's channels and each overlay
-       route muted). A strip the donor
-       restarted whole is then fresh against that base and restarted again, so it is ducked and
-       armed; it never imports a ducked fader without a retarget. At submit there is no donor,
-       and the base is the one an ordinary successor of the running plan is prepared against.
+       route muted). A strip the donor restarted whole is then fresh against that base and
+       restarted again, so it is ducked and armed; it never imports a ducked fader without a
+       retarget. At submit there is no donor, and the base is the one an ordinary successor of
+       the running plan is prepared against.
      - At submit it is ordinary preparation, and a failure returns the error before the commit.
   2. Only after that preparation succeeds is the donation applied. Then the donor is dropped on the
      control thread. Every live edit written to its cells is also in the committed model, and the
@@ -306,11 +308,12 @@ warm edit would be `LeadBound`.
 - *Adopt a successor plan no earlier than a scheduled sample* (#1311).
 - *Let the control thread withdraw an unadopted candidate plan* (#1343), D5.
 - *Duck-swap a strip whose state cannot continue across a plan swap* (#1324).
-- *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325), D2, D3 and D7.
+- *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325), D2, D3, D6 and D7.
 - *Fade in a strip that a swap adds during playback* (#1288).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314): the outcome
   word D5 writes.
-- *Supersede an unadopted candidate plan by compare-and-swap* (#1310): the republish D5 relies on.
-- *Prepare a successor across a withdrawn candidate plan* (#1344), D3 and D5.
+- *Supersede an unadopted candidate plan by compare-and-swap* (#1310): D3's kept model, and the
+  republish (D4) that D5 relies on.
+- *Prepare a successor across a withdrawn candidate plan* (#1344), D1-D3 and D5.
 - *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398),
   D4.

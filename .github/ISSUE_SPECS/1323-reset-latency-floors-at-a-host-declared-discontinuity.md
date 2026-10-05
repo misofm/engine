@@ -79,6 +79,27 @@ with nothing to reset changes nothing.
   read position, so no frame is repeated or skipped, and the source-read clock steps back to the
   render clock at the adoption block. The inventory records
   natural arrivals beside floored ones, so D2's test is a comparison of two numbers.
+  - **The constructor.** This is the first slice that adds a field to `SuccessorBase`, so it also
+    adds `SuccessorBase::new(inventory, committed)`. `new` sets every other field to its neutral
+    value: `discontinuity: false` here. Each later slice that adds a field extends `new` with that
+    field's neutral value (*Prepare a warm successor whose carried nodes lead the predecessor by
+    P*, #1354 D4: `warm: None`; *Duck-swap the strips a latency growth restarts, and fall back to
+    the transition when a warm successor cannot adopt*, #1397 D2: `forced_restart` empty).
+  - Every literal construction site that exists when this slice lands moves to `new` in this
+    change:
+    - `crates/host-core/tests/successor_swap.rs:988` and
+      `crates/host-core/tests/support/successor.rs:101`;
+    - `crates/capi/tests/resource_lifecycle.rs:1591`;
+    - the control plane's sites in `crates/control-plane/src/`: the `prepare_runtime` call
+      (`crates/capi/src/runtime/control.rs:910` on `6fb211594`, moved by #1309 D2) and #1310 D2's
+      base across a withdrawn candidate;
+    - `crates/host-core/tests/withdrawn_successor.rs`, the gates of *Prepare a successor across a
+      withdrawn candidate plan* (#1344), which lands before this slice through #1310.
+
+    A site added by a slice that is not ordered against this one is in the list if that slice
+    lands first. The discontinuity successor is
+    `SuccessorBase { discontinuity: true, ..SuccessorBase::new(inventory, committed) }`. Every
+    later site is built through `new`, and a later field changes `new` and no construction site.
 - **D4. Acked-batch rule.** Preparation can fail (budgets, ceilings). On failure the call returns
   the preparation error and nothing changes. On success the plan is published with its retirement
   credit reserved, as a structural transaction is. The model and the revision do not change. No
@@ -100,13 +121,17 @@ with nothing to reset changes nothing.
    `crates/capi/src/abi.rs`, the header prototype and text, and `docs/C_ABI_V1_QUALIFICATION.md`.
 2. D2 and D4 in `crates/control-plane/src/` (package `control-plane`, lib `control_plane`, created
    by #1309).
-3. D3 in `crates/host-core/src/prepare.rs`.
+3. D3 in `crates/host-core/src/prepare.rs`, with the move of every literal `SuccessorBase` site
+   to `SuccessorBase::new`.
 4. Tests in `crates/host-core/tests/successor_swap.rs`, `crates/capi/src/runtime/tests.rs` and the
    control-plane crate's unit tests (gate 5).
 
 ## Authorized paths
 
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`
+- The `SuccessorBase` construction sites only (D3): `crates/host-core/tests/support/successor.rs`,
+  `crates/host-core/tests/withdrawn_successor.rs` (#1344's) and
+  `crates/capi/tests/resource_lifecycle.rs`
 - `crates/capi/src/ffi.rs`, `crates/capi/src/abi.rs`, `crates/capi/src/runtime/tests.rs`,
   `crates/capi/include/miso_engine_v1.h`, `docs/C_ABI_V1_QUALIFICATION.md`, and
   `crates/control-plane/src/` (#1309). These are stream B's files; root orders the merge after
