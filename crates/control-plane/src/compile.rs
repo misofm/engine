@@ -756,8 +756,11 @@ where
         control_catalog,
         capi,
     } = runtime;
-    let (publisher, owner, retirer) = plan_exchange(
+    // #1314 D1: the initial plan carries the store's initial revision, and the watermark starts
+    // there.
+    let (publisher, owner, retirer) = plan_exchange_at_revision(
         plan,
+        store.revision().0,
         PlanExchangeConfig {
             retirement_capacity: one,
         },
@@ -777,6 +780,7 @@ where
         render_peak_bits: AtomicU32::new(0),
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
+        watermark: publisher.watermark_reader(),
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(

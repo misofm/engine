@@ -815,6 +815,126 @@ fn a_live_edit_while_a_candidate_is_pending_reaches_the_candidate() {
     );
 }
 
+/// The plan's watermark as a host reads it: `(revision, first sample, flags, exact count)`.
+fn watermark(rig: &Rig) -> (u64, u64, u64, u64) {
+    let (result, watermark) = crate::ffi::test_plan_watermark(rig.plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (
+            watermark.transition_fallback_count,
+            watermark.superseded_count
+        ),
+        (0, 0),
+        "this slice completes every revision exactly"
+    );
+    (
+        watermark.revision,
+        watermark.first_sample,
+        watermark.outcome_flags,
+        watermark.exact_count,
+    )
+}
+
+/// #1314 gate 2: a rebuild (r1) and then a live fader edit (r2), committed before any render,
+/// both complete at the swap block and not one block earlier: the live edit went to the pending
+/// candidate's revision word, so the running plan never reports either revision.
+#[test]
+fn a_live_edit_on_a_pending_candidate_completes_at_the_swap() {
+    let document = long_session(1, 48_000);
+    let model = parse_session_json(&document).expect("model");
+    let mut rig = Rig::new(&document);
+    let initial = rig.summary().0;
+    for _ in 0..3 {
+        rig.step();
+        assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+    }
+    assert_eq!(rig.apply(&[content_edit(&model)]), crate::RESULT_OK);
+    let r1 = rig.summary().0;
+    assert_eq!(rig.summary().3, 1, "a candidate is pending");
+    let edit = fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -6.0,
+            right_db: -6.0,
+            left_mute: false,
+            right_mute: false,
+        },
+    );
+    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    let r2 = rig.summary().0;
+    assert_eq!((r1, r2), (initial + 1, initial + 2));
+    assert_eq!(
+        rig.summary().3,
+        1,
+        "the live edit went to the one candidate"
+    );
+    assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+
+    let k = rig.block;
+    rig.render();
+    assert_eq!(
+        watermark(&rig),
+        (r2, k * rig.quantum as u64, crate::OUTCOME_EXACT, 2)
+    );
+
+    // A rebuild alone carries its own revision to its swap.
+    rig.render();
+    let source = &model.sources[0];
+    let edit = SessionEdit::SetSourceContent {
+        source_id: source.id.clone(),
+        content: format!("blake3:{}", "cd".repeat(32)),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: source.frames,
+    };
+    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    let r3 = rig.summary().0;
+    assert_eq!(rig.summary().3, 1, "a second candidate is pending");
+    assert_eq!(
+        watermark(&rig),
+        (r2, k * rig.quantum as u64, crate::OUTCOME_EXACT, 2)
+    );
+    let swap = rig.block;
+    rig.render();
+    assert_eq!(
+        watermark(&rig),
+        (r3, swap * rig.quantum as u64, crate::OUTCOME_EXACT, 3)
+    );
+}
+
+/// #1314 gate 3: on one thread, a live edit committed between blocks 3 and 4 completes in block 4,
+/// from its first sample, and block 5 publishes nothing new.
+#[test]
+fn a_live_edit_completes_in_the_next_block() {
+    let document = long_session(1, 48_000);
+    let mut rig = Rig::new(&document);
+    let initial = rig.summary().0;
+    for _ in 0..4 {
+        rig.step();
+    }
+    assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+    let edit = fader_edit(
+        "eq0",
+        DualMonoFader {
+            left_db: -3.0,
+            right_db: -3.0,
+            left_mute: false,
+            right_mute: false,
+        },
+    );
+    assert_eq!(rig.apply(&[edit]), crate::RESULT_OK);
+    let r = rig.summary().0;
+    assert_eq!(rig.summary().3, 0, "the edit was live");
+    assert_eq!(watermark(&rig), (initial, 0, crate::OUTCOME_EXACT, 0));
+    assert_eq!(rig.block, 4);
+    rig.step();
+    let expected = (r, 4 * rig.quantum as u64, crate::OUTCOME_EXACT, 1);
+    assert_eq!(expected.1, 512);
+    assert_eq!(watermark(&rig), expected);
+    rig.step();
+    assert_eq!(watermark(&rig), expected);
+}
+
 /// A live fader edit beside a C ABI structural transaction whose successor carries the source
 /// ring (#1053 merged into #1269): one track of a stateless session at 0 dB goes to -6 dB live,
 /// and a muted track whose ID sorts first is added (`add_muted_track`), with no render between.

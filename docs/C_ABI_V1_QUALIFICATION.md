@@ -121,6 +121,34 @@ where the new symbol is only an undefined reference: its `nm` wrapper drops the 
 defined-only listing and shows it as `U` otherwise, so the case also fails if the checker stops
 asking for defined symbols alone).
 
+A host learns which committed revision is audible through `miso_engine_v1_plan_watermark`
+(#1314, decision 15 D15-17), an in-place V1 amendment: one new exported symbol and one new
+96-byte struct, `miso_engine_v1_watermark` (`MISO_ENGINE_V1_WATERMARK_SIZE`), announced by
+`MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK` in the capability report, whose feature mask grows to
+include it; no other struct, size or `ABI_VERSION` changes. Like `miso_engine_v1_plan_resources`
+it runs on any thread, concurrently with render, and is pure: it writes nothing through the plan
+handle, its diagnostic word included. It copies `(revision, first_sample, outcome_flags)` and
+saturating `exact`, `transition_fallback` and `superseded` counts: the highest committed revision
+in effect together with every revision before it, the render sample it took effect at, and the OR
+of `MISO_ENGINE_V1_OUTCOME_*` over the revisions the last advance covered. Submit stays
+synchronous only for what can fail (validate, classify, prepare a rebuild and reserve its
+credits, commit); every committed revision is pending until the watermark covers it, and a paused
+host's revisions stay pending until render resumes. Each revision travels with the plan that
+carries it (a revision word in each publication-mailbox cell), the control plane routes each
+commit's revision to the newest pending candidate as the commit's last write, and render reads
+only the word of the plan it runs, after the adoption decision and before any drain. The
+watermark is a level, not a queue: render overwrites it, never waits and drops no command, so an
+acknowledged edit cannot be dropped behind it. A wrong `struct_size` or a nonzero reserved word is
+`RESULT_INVALID_ARGUMENT`; a copy that keeps landing inside render's publication (bounded at 64
+attempts) is `RESULT_BACKPRESSURE` with `out` untouched, and the host retries. In this slice every
+revision completes as `exact`; the `superseded` and `transition_fallback` producers are #1310,
+#1397 and #1358. The frozen exported set is now 16 `miso_engine_v1_*` definitions;
+`abi_smoke.c` checks the bit against the queried mask and queries a compiled plan with a valid
+and a wrong-size struct, `header_smoke.cpp` pins the size and every field offset, and
+`./target/release/audit capi` stays at 0 allocations, 0 deallocations, 0 syscalls and
+`"total_violations":0` with watermark publication on (its live edits and its carrying swap
+advance the watermark during the audited calls).
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and

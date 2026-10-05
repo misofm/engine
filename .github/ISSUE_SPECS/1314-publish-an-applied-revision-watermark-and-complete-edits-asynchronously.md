@@ -258,3 +258,125 @@ covers it. Submit never waits for render or a swap: completion is observed, neve
   sites live in the control path it moves.
 - *Let the control thread withdraw an unadopted candidate plan* (#1343): the mailbox cells that
   carry the revision words.
+
+## Attempt record
+
+### Attempt 1 (implementer, on `codex/d15-stream-b` after #1343)
+
+**What landed.**
+
+- `crates/engine/src/realtime/watermark.rs` (new): the `observe.rs` seqlock in safe Rust, one
+  writer (render). `PlanWatermark`, `PlanWatermarkReader::read() -> Result<_, WatermarkBusy>` (64
+  attempts), `CandidateOutcome`, `OUTCOME_*`. Render-local `pending_superseded` and
+  `pending_outcome` are taken at a claim and consumed by the first advance (D5); claims between two
+  advances accumulate, so no outcome is lost to a block that errored.
+- `spsc.rs` (D1 only): each mailbox cell has a revision word (`revisions: [AtomicU64; 2]`,
+  invariant I7). `MailboxPermit::write_revision` (before the publishing `Release`),
+  `MailboxWriter::store_revision` (`Full` cell if any, else `Active`; `Release`),
+  `MailboxReader::active_revision` (`Acquire`, the reader's own `active` index, set by its last
+  claim), and `MailboxWithdrawal::Withdrawn(T, u64)`, which takes the cell's word with the payload.
+  #1343's tests changed only their `Withdrawn(value)` patterns to `Withdrawn(value, _)`.
+- `plan_exchange.rs`: `superseded` and `outcome` ride in the payload (written only before
+  publication); `RevisionTarget`, `PlanPublisher::{set_revision, watermark_reader}`,
+  `PlanReplacementReservation::{set_revision, set_superseded, set_outcome}`,
+  `UnadoptedCandidate::{revision, set_revision, superseded, outcome, set_outcome}`; `republish`
+  writes the candidate's words into whichever cell it lands in. Render loads the `Active` word
+  after `enter_block` and before `render_inner` and advances only after `render_inner` returns
+  `Ok`. `plan_exchange_resource_report` charges the larger mailbox and a new row for the watermark
+  record.
+- Control plane: `compile_children` uses `plan_exchange_at_revision(plan, store.revision().0, ..)`;
+  `SharedPlanState.watermark` and `PlanQueries::watermark()`; the rebuild sets the reservation's
+  revision after the protocol commit and before `reservation.commit()`; a live or model-only
+  commit calls `publish_committed_revision()` as its last write (after every push, target
+  publication, `commit_owner` and the readback).
+- C ABI: `miso_engine_v1_plan_watermark`, `miso_engine_v1_watermark` (96 bytes),
+  `MISO_ENGINE_V1_WATERMARK_SIZE`, `MISO_ENGINE_V1_OUTCOME_*`, `MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK`
+  (the next free bit, 64; mask 127); the thread-ownership text, the D7 "Completion" paragraph,
+  `abi_smoke.c`, `header_smoke.cpp`, the frozen symbol list and the qualification amendment.
+
+**Deviations from the spec's letter, for review.**
+
+1. `plan_exchange(initial, config)` keeps its signature as revision 0 ("a host that numbers no
+   revisions"), and `plan_exchange_at_revision(initial, revision, config)` is the D1 entry point the
+   control plane calls. Changing `plan_exchange` itself would edit eight callers outside the
+   authorized paths (`tools/audit`, `crates/source`, `crates/graph/tests`, `crates/host-core/tests`).
+2. D2's debug assertion is the sound direction only: a `Pending` write while the control plane
+   records no pending provider fails. The spec's direction ("never writes `Active` while it records
+   a pending candidate") is racy in the C ABI: render may adopt the candidate after the command's
+   `synchronize_plan_epochs` and before the commit's `set_revision`, and then the `Active` cell is
+   correctly the candidate's while `pending_providers` still lists it.
+3. A reservation without `set_revision` carries the newest revision the publisher stored or
+   published (so an engine-level publication adds no revision). The C ABI always sets it.
+4. `PlanReplacementReservation::set_superseded` is added because gate 4 publishes a candidate with
+   `superseded = 2`; #1310 is its producer.
+5. Gate 2 cannot tell "one session-wide word" from "one word per plan" in a single-threaded C ABI
+   run: render adopts the candidate at the first block after the commit, so no block of the old
+   plan runs in between. Gate 1 (engine) catches that defect (row `g1-session-wide-word`). Gate 3
+   likewise cannot see "load after `render_inner`" on one thread; the loom model holds the
+   store/load pairing, and gate 3 catches the timing defects listed below. Gate 2 also checks a
+   rebuild with no live edit after it.
+
+**Test value and mutation evidence.** Every row: the named defect applied, the named test red;
+reverted, green. No pre-existing test reads the watermark or a revision word, so none catches
+these defects.
+
+| Test | Defect applied | Result |
+|---|---|---|
+| gate 1 `a_revision_completes_at_adoption_not_at_publication` | render loads the non-`Active` cell | red (block 0 read 1, not 7) |
+| gate 1 | one session-wide word (all cell indices 0) | red (block 1 read 8 while A renders) |
+| gate 1 | a withdrawn candidate loses its revision (`revision: 0`) | red (block 3 read 7, not 8) |
+| gate 1 | publication also writes the `Active` cell (reported at publication) | red (block 1 read 8) |
+| gate 1 | `render` publishes the next block's sample as `first_sample` | red |
+| gate 4 `superseded_and_fallback_revisions_complete_once_per_adoption` | `superseded` added on every advance | red |
+| gate 4 | `exact` not reduced by `superseded` | red (exact 3, not 1) |
+| gate 4 | a withdrawn candidate's outcome reset to `Exact` | red (flags 1, not 2) |
+| gate 8 `a_revision_follows_a_held_or_published_candidate` | `store_revision` writes `Active` while a cell is `Full`, still reporting `Pending` | red (adoption read 9, not 10) |
+| gate 8 | the same, reporting `Active` | red (`RevisionTarget`) |
+| gate 8 | `UnadoptedCandidate::set_revision` drops the revision | red (block 3 read 7, not 8) |
+| gate 5 `a_watermark_read_is_one_whole_publication_or_busy` (release profile) | `superseded` stored after the closing counter | red (126191 of 236973 reads torn) |
+| gate 5 | reader skips the second counter check | red (1433 of 26585 reads torn) |
+| loom `spsc_loom_plan_mailbox_revision_follows_the_pending_candidate` | `store_revision` `Relaxed` | red ("revision 8 read without its record") |
+| loom | `active_revision` `Relaxed` | red (same) |
+| loom | pending revision written to the `Active` cell | red |
+| gate 2 `a_live_edit_on_a_pending_candidate_completes_at_the_swap` | pending revision written to the `Active` cell | red (swap read r1) |
+| gate 2 | counters count advances, not revisions | red (exact 1, not 2) |
+| gate 2 | the rebuild does not set the reservation's revision | red (second swap read r2, not r3) |
+| gate 3 `a_live_edit_completes_in_the_next_block` | the live commit stores no revision | red |
+| gate 3 | an advance publishes on every block (`<` for `<=`) | red (first_sample moved with no advance) |
+| gate 3 | `render_contiguous` publishes the next block's sample | red (640, not 512) |
+| `plan_watermark_refuses_reserved_words_and_is_pure` | no reserved-word check | red |
+| same | the query clears the plan's render diagnostic | red |
+| gate 7 (`check-capi-abi.sh`) | `FEATURE_PLAN_WATERMARK` left out of `FEATURE_MASK` | red (abi_smoke) |
+| gate 7 | the query refuses a valid struct | red (abi_smoke) |
+| gate 7 | header `reserved[4]` | red (header_smoke size) |
+| gate 7 | header swaps `exact_count` and `transition_fallback_count` | red (header_smoke offsets) |
+| gate 7 | symbol left out of the frozen list | red (symbol set differs) |
+
+Re-pins, each for one reason: `FEATURE_MASK` 0x3f -> 0x7f in `abi.rs`'s
+`masks_and_result_codes_are_frozen` and `ffi.rs`'s `version_and_capabilities_are_exact`, and
+`MISO_ENGINE_V1_FEATURE_MASK == 127` in `abi_smoke.c`, because the new bit joins the frozen mask.
+
+**Gates (x86_64 Linux).**
+
+- `cargo test --locked -p engine --features engine/realtime-audit`: ok (48 + 4 + 1).
+- loom (`RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom`): 5 passed.
+- `cargo test --locked -p capi`: ok (76 + 2 + 11); `cargo test --locked -p control-plane --features test-support`: ok.
+- `bash scripts/check-realtime-policy.sh`: ok (91 regions, 26 files); `bash scripts/test-realtime-policy.sh`: ok.
+- `bash scripts/check-capi-abi.sh`: ok (shared and static); `--self-test`: ok.
+- `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`: 0 allocations,
+  0 deallocations, 0 locks, 0 syscalls, `"total_violations":0` (the audit's live edits and its
+  carrying swap advance the watermark during the 100000 audited calls).
+- `bash scripts/check-cross-targets.sh`: PASS.
+- `bash scripts/check-workspace-policy.sh`: ok; `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean; `cargo fmt --all -- --check`: clean.
+- Worklet chain (the engine crate is browser-compiled, though host-web does not use the plan
+  exchange): `build-web-audioworklet.sh --named-twin` ok (module sha256 `87c03c64...28cf`),
+  `check-web-audioworklet.sh --without-metadata-regeneration` ok,
+  `check-browser-expected-resources.py --artifacts` ok, `test-web-audioworklet.sh` ok.
+- Neighbours of the exchange: `graph` `rt11_swap_carry_alloc`, `source` lib: ok.
+
+**D8 (acked-batch question).** No queue is added. The watermark is one overwritten record; render
+never waits on it and drops nothing. The revision store is each commit's last write, after every
+fallible step and every push; a withdrawn candidate takes its revision word with it; and a
+revision committed while a candidate is pending goes to that candidate. So no ack precedes a drop,
+and the running plan never reports a revision before the plan that carries it renders (gates 1,
+2 and 8, and the loom model).

@@ -1108,7 +1108,7 @@ where
                         return Err(CommandError::Backpressure);
                     }
                 };
-                let reservation = ObservedReservation::new(reservation);
+                let mut reservation = ObservedReservation::new(reservation);
                 #[cfg(feature = "test-support")]
                 {
                     if take_test_fault_state(TestStructuralFaultPhase::AfterPlanReservation) {
@@ -1158,6 +1158,9 @@ where
                     .replace_session_catalog(candidate_catalog);
                 self.pending_providers.push(candidate_provider);
                 reports.push((epoch, A::Row::from(resources)));
+                // #1314 D2: the candidate carries the revision just committed; render reports it
+                // when it adopts the candidate.
+                reservation.set_revision(self.controller.session().revision().0);
                 reservation.commit();
                 #[cfg(feature = "test-support")]
                 {
@@ -1485,9 +1488,32 @@ where
         for (handle, value) in readback {
             provider.set_parameter_value(handle, value);
         }
+        // 8. The revision, as the commit's last write (#1314 D2).
+        self.publish_committed_revision();
         LiveCommit::Done(Ok(committed.write_into(&mut self.response_scratch).expect(
             "prepared response capacity was admitted before the live commit",
         )))
+    }
+
+    /// Route the revision just committed by a live or model-only commit to the newest pending
+    /// candidate, or to the running plan when none is pending (#1314 D2). It is the commit's last
+    /// write: every record push, target publication and owner commit is before it, so render's
+    /// `Acquire` load of the revision word sees them all, and the watermark never reports the
+    /// revision before its records can apply.
+    ///
+    /// The control plane never holds a candidate outside the mailbox across commands, so the
+    /// publisher's routing is the whole rule. A candidate published into the mailbox is always
+    /// recorded as a pending provider until `synchronize_plan_epochs` learns of its adoption, so a
+    /// `Pending` write with no pending provider is a broken invariant. (The converse is not one:
+    /// render may adopt the candidate after this command synchronized, and then the `Active` cell
+    /// is the candidate's.)
+    fn publish_committed_revision(&mut self) {
+        let revision = self.controller.session().revision().0;
+        let target = self.publisher.set_revision(revision);
+        debug_assert!(
+            target == RevisionTarget::Active || !self.pending_providers.is_empty(),
+            "a revision went to a published candidate the control plane does not record"
+        );
     }
 
     /// The live admission's inputs, read from the report table and the epochs (#1053 D8).

@@ -254,6 +254,7 @@ printf '%s\n' \
     miso_engine_v1_last_error \
     miso_engine_v1_plan_destroy \
     miso_engine_v1_plan_resources \
+    miso_engine_v1_plan_watermark \
     miso_engine_v1_query_capabilities \
     miso_engine_v1_render_f32_planar \
     miso_engine_v1_session_destroy \

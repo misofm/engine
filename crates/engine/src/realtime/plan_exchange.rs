@@ -12,10 +12,21 @@
 //! it displaces) and returns when the retirer reclaims that plan, or when the control thread drops
 //! a reservation or an [`UnadoptedCandidate`]. So a claimed candidate always finds retirement room,
 //! and render never defers a swap.
+//!
+//! Every candidate also carries the newest committed revision whose content it holds, its
+//! `superseded` count and its outcome (#1314 D1). Render reads the revision word of the cell it
+//! runs at every block entry and advances the applied-revision watermark (`watermark.rs`) when a
+//! block renders a newer one; the control thread routes each committed revision to the newest
+//! pending candidate, wherever it is ([`PlanPublisher::set_revision`],
+//! [`PlanReplacementReservation::set_revision`], [`UnadoptedCandidate::set_revision`]).
 
 use super::spsc::{
     MailboxPermit, MailboxReader, MailboxWithdrawal, MailboxWriter, bounded_spsc_internal,
     bounded_spsc_retained_payload, plan_mailbox, plan_mailbox_retained_bytes,
+};
+use super::watermark::{
+    CandidateOutcome, PlanWatermarkReader, WatermarkWriter, plan_watermark,
+    watermark_retained_bytes,
 };
 use super::{Consumer, Producer, QueueEmpty, QueueGeneration, SpscError};
 
@@ -48,8 +59,9 @@ pub struct PlanExchangeConfig {
 /// Exact engine-owned heap payload budget for one prepared plan exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlanExchangeResourceReport {
-    /// Sum of the mailbox (its state word and two cells), the retirement SPSC header and backing,
-    /// and the shared credit-counter allocation.
+    /// Sum of the mailbox (its state word and two cells with their revision words), the
+    /// retirement SPSC header and backing, the shared credit-counter allocation and the
+    /// applied-revision watermark record.
     pub retained_payload_bytes: u64,
     /// Largest single requested heap payload allocation among those rows.
     pub largest_allocation_bytes: u64,
@@ -61,6 +73,16 @@ struct SharedCounterAllocation {
     weak: AtomicUsize,
     value: AtomicUsize,
 }
+/// Which cell [`PlanPublisher::set_revision`] wrote (#1314 D2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevisionTarget {
+    /// The published candidate's cell: render has not adopted it yet, or adopted it while the
+    /// store was in flight, which makes it the running plan's cell all the same.
+    Pending,
+    /// The running plan's cell: no candidate was published.
+    Active,
+}
+
 /// Result of one render-entry swap decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SwapOutcome {
@@ -100,10 +122,15 @@ impl Drop for RetirementCredit {
     }
 }
 
+/// A published candidate's payload. Its revision word is the cell's (`spsc.rs` I7), because the
+/// control thread may still store it while the candidate is published; `superseded` and
+/// `outcome` are written only before publication, so they travel in the payload.
 struct PublishedPlan {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    superseded: u64,
+    outcome: CandidateOutcome,
 }
 struct RetiredPlan {
     epoch: PlanEpoch,
@@ -117,6 +144,10 @@ pub struct PlanPublisher {
     next_epoch: u64,
     envelope: super::RenderEnvelope,
     retirement_credits: Arc<AtomicUsize>,
+    /// The newest revision this publisher stored or published: a new reservation's revision
+    /// until [`PlanReplacementReservation::set_revision`] names its own.
+    revision: u64,
+    watermark: PlanWatermarkReader,
 }
 /// Control-side retirement owner. Reclamation happens only by popping here.
 pub struct PlanRetirer {
@@ -129,6 +160,7 @@ pub struct RealtimePlanOwner {
     retirement: Producer<RetiredPlan>,
     carried: u64,
     carry_mismatched: u64,
+    watermark: WatermarkWriter,
     _not_sync: Cell<()>,
 }
 /// Fixed report proving which complete plan owned a rendered block.
@@ -196,9 +228,13 @@ impl fmt::Debug for PlanReplacementReservationError {
 pub struct PlanReplacementReservation<'a> {
     publication: MailboxPermit<'a, PublishedPlan>,
     next_epoch: &'a mut u64,
+    newest_revision: &'a mut u64,
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
+    superseded: u64,
+    outcome: CandidateOutcome,
 }
 
 /// A published candidate the control thread took back before render claimed it: whole,
@@ -209,9 +245,43 @@ pub struct UnadoptedCandidate {
     epoch: PlanEpoch,
     plan: PreparedRenderPlan,
     credit: RetirementCredit,
+    revision: u64,
+    superseded: u64,
+    outcome: CandidateOutcome,
 }
 
 impl UnadoptedCandidate {
+    /// The newest committed revision whose content the candidate carries.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Route a revision committed while the control thread holds this candidate to it (#1314 D2):
+    /// the candidate carries its content, so the revision completes when render adopts it.
+    /// [`PlanPublisher::set_revision`] is not called while a candidate is held.
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
+    /// Revisions this candidate folds in from candidates it replaced.
+    #[must_use]
+    pub const fn superseded(&self) -> u64 {
+        self.superseded
+    }
+
+    /// The outcome the candidate's own revisions complete with.
+    #[must_use]
+    pub const fn outcome(&self) -> CandidateOutcome {
+        self.outcome
+    }
+
+    /// Set the outcome the candidate's own revisions complete with (#1314 D1). Its only writer of
+    /// another value than `Exact` is the transition fallback (#1397).
+    pub fn set_outcome(&mut self, outcome: CandidateOutcome) {
+        self.outcome = outcome;
+    }
+
     /// The epoch the candidate was published with; republication keeps it.
     #[must_use]
     pub const fn epoch(&self) -> PlanEpoch {
@@ -272,6 +342,7 @@ pub fn plan_exchange_resource_report(
         retirement.ring_header_bytes,
         retirement.slot_payload_bytes,
         Layout::new::<SharedCounterAllocation>().size(),
+        watermark_retained_bytes(),
     ];
     let retained = rows.iter().try_fold(0_u64, |total, row| {
         total
@@ -290,9 +361,21 @@ pub fn plan_exchange_resource_report(
 }
 
 /// Prepare the publication mailbox and the bounded retirement queue for plans with one exact
-/// envelope.
+/// envelope, for a host that numbers no revisions: the initial plan is revision 0, and the
+/// watermark stays `(0, 0, EXACT)` until a revision is stored.
 pub fn plan_exchange(
     initial: PreparedRenderPlan,
+    config: PlanExchangeConfig,
+) -> Result<(PlanPublisher, RealtimePlanOwner, PlanRetirer), SpscError> {
+    plan_exchange_at_revision(initial, 0, config)
+}
+
+/// Prepare the exchange with `initial` at committed revision `initial_revision` (#1314 D1): the
+/// revision goes into the initial plan's cell, and the watermark starts at
+/// `(initial_revision, 0, EXACT)` with every counter 0.
+pub fn plan_exchange_at_revision(
+    initial: PreparedRenderPlan,
+    initial_revision: u64,
     config: PlanExchangeConfig,
 ) -> Result<(PlanPublisher, RealtimePlanOwner, PlanRetirer), SpscError> {
     let _resources = plan_exchange_resource_report(config)?;
@@ -300,13 +383,18 @@ pub fn plan_exchange(
     let retirement_credits = Arc::new(AtomicUsize::new(config.retirement_capacity.get()));
     let (retirement_producer, retirement_consumer) =
         bounded_spsc_internal(config.retirement_capacity, QueueGeneration(2))?;
-    let (mailbox_writer, mailbox_reader) = plan_mailbox();
+    let (mut mailbox_writer, mailbox_reader) = plan_mailbox();
+    // No cell is `Full`, so this is the initial plan's `Active` cell 0.
+    let _active = mailbox_writer.store_revision(initial_revision);
+    let (watermark_writer, watermark_reader) = plan_watermark(initial_revision);
     Ok((
         PlanPublisher {
             mailbox: mailbox_writer,
             next_epoch: 1,
             envelope,
             retirement_credits,
+            revision: initial_revision,
+            watermark: watermark_reader,
         },
         RealtimePlanOwner {
             active: (PlanEpoch(0), initial),
@@ -314,6 +402,7 @@ pub fn plan_exchange(
             retirement: retirement_producer,
             carried: 0,
             carry_mismatched: 0,
+            watermark: watermark_writer,
             _not_sync: Cell::new(()),
         },
         PlanRetirer {
@@ -322,9 +411,11 @@ pub fn plan_exchange(
     ))
 }
 
-/// Publish into the held `Empty` cell. Its compare-and-swap cannot fail (the mailbox's I5): the
-/// permit proves no cell was `Full`, and only this publisher publishes.
-fn publish_into(permit: MailboxPermit<'_, PublishedPlan>, item: PublishedPlan) {
+/// Publish into the held `Empty` cell, with `revision` in its revision word. Its compare-and-swap
+/// cannot fail (the mailbox's I5): the permit proves no cell was `Full`, and only this publisher
+/// publishes.
+fn publish_into(permit: MailboxPermit<'_, PublishedPlan>, item: PublishedPlan, revision: u64) {
+    permit.write_revision(revision);
     if permit.commit(item).is_err() {
         panic!("plan mailbox invariant broken: render changed the word while no cell was Full");
     }
@@ -371,13 +462,38 @@ impl PlanPublisher {
             return Err(PlanReplacementReservationError::RetirementFull(plan));
         };
         let epoch = PlanEpoch(self.next_epoch);
+        let revision = self.revision;
         Ok(PlanReplacementReservation {
             publication,
             next_epoch: &mut self.next_epoch,
+            newest_revision: &mut self.revision,
             epoch,
             plan,
             credit,
+            revision,
+            superseded: 0,
+            outcome: CandidateOutcome::Exact,
         })
+    }
+
+    /// Route a committed revision to the newest pending candidate (#1314 D2): the published one if
+    /// render has not adopted it, else the running plan. Call it as the last write of a commit,
+    /// after every record push and target publication, so render's `Acquire` load of the word sees
+    /// them all. It is not called while the control thread holds a candidate (a reservation or an
+    /// [`UnadoptedCandidate`]): that candidate takes the revision instead.
+    pub fn set_revision(&mut self, revision: u64) -> RevisionTarget {
+        self.revision = revision;
+        if self.mailbox.store_revision(revision) {
+            RevisionTarget::Pending
+        } else {
+            RevisionTarget::Active
+        }
+    }
+
+    /// A reader of the applied-revision watermark render publishes (#1314 D4).
+    #[must_use]
+    pub fn watermark_reader(&self) -> PlanWatermarkReader {
+        self.watermark.clone()
     }
 
     /// Take back the last published candidate if render has not claimed it.
@@ -386,14 +502,22 @@ impl PlanPublisher {
     /// claims a candidate at most once, so the one reload settles it. Never retried, never waits.
     pub fn withdraw(&mut self) -> Withdrawal {
         match self.mailbox.withdraw() {
-            MailboxWithdrawal::Withdrawn(PublishedPlan {
+            MailboxWithdrawal::Withdrawn(
+                PublishedPlan {
+                    epoch,
+                    plan,
+                    credit,
+                    superseded,
+                    outcome,
+                },
+                revision,
+            ) => Withdrawal::Withdrawn(UnadoptedCandidate {
                 epoch,
                 plan,
                 credit,
-            }) => Withdrawal::Withdrawn(UnadoptedCandidate {
-                epoch,
-                plan,
-                credit,
+                revision,
+                superseded,
+                outcome,
             }),
             MailboxWithdrawal::Taken => Withdrawal::Taken,
             MailboxWithdrawal::Nothing => Withdrawal::Nothing,
@@ -423,13 +547,17 @@ impl PlanPublisher {
             panic!("the mailbox holds a candidate while the newest one is withdrawn");
         };
         let epoch = candidate.epoch;
+        self.revision = candidate.revision;
         publish_into(
             permit,
             PublishedPlan {
                 epoch,
                 plan: candidate.plan,
                 credit: candidate.credit,
+                superseded: candidate.superseded,
+                outcome: candidate.outcome,
             },
+            candidate.revision,
         );
         epoch
     }
@@ -454,6 +582,24 @@ impl PlanReplacementReservation<'_> {
         self.epoch
     }
 
+    /// Set the newest committed revision whose content the candidate carries (#1314 D2), before
+    /// [`Self::commit`]. Unset, it is the newest revision the publisher stored or published.
+    pub fn set_revision(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
+    /// Set how many revisions the candidate folds in from candidates it replaced (#1314 D1,
+    /// #1310): its adoption completes them as `superseded`.
+    pub fn set_superseded(&mut self, superseded: u64) {
+        self.superseded = superseded;
+    }
+
+    /// Set the outcome the candidate's own revisions complete with (#1314 D1). Its only writer of
+    /// another value than `Exact` is the transition fallback (#1397).
+    pub fn set_outcome(&mut self, outcome: CandidateOutcome) {
+        self.outcome = outcome;
+    }
+
     /// Publish the bound complete candidate. All fallible checks and the credit were taken by the
     /// reservation, so this is a bounded move into the `Empty` cell plus one `Release`
     /// compare-and-swap that cannot fail.
@@ -461,18 +607,26 @@ impl PlanReplacementReservation<'_> {
         let Self {
             publication,
             next_epoch,
+            newest_revision,
             epoch,
             plan,
             credit,
+            revision,
+            superseded,
+            outcome,
         } = self;
         *next_epoch = epoch.0 + 1;
+        *newest_revision = revision;
         publish_into(
             publication,
             PublishedPlan {
                 epoch,
                 plan,
                 credit,
+                superseded,
+                outcome,
             },
+            revision,
         );
         epoch
     }
@@ -525,10 +679,13 @@ impl RealtimePlanOwner {
             epoch,
             plan,
             credit,
+            superseded,
+            outcome,
         }) = self.publication.claim(observed)
         else {
             return (SwapOutcome::None, CarryOutcome::NotRequested);
         };
+        self.watermark.note_claim(superseded, outcome);
         let old_epoch = self.active.0;
         let continuing = self.active.1.next_absolute_sample();
         let mut old = core::mem::replace(&mut self.active, (epoch, plan));
@@ -574,10 +731,13 @@ impl RealtimePlanOwner {
             if absolute_sample != expected {
                 return Err(RenderError::TimeDiscontinuity { expected });
             }
+            // #1314 D3: after the adoption decision and before any drain.
+            let revision = self.publication.active_revision();
             let render = self
                 .active
                 .1
                 .render_inner(io, RenderTime { absolute_sample })?;
+            self.watermark.advance(revision, absolute_sample);
             Ok(RealtimeRenderReport {
                 swap,
                 carry,
@@ -595,7 +755,10 @@ impl RealtimePlanOwner {
         super::audit::in_render_scope(|| {
             let (swap, carry) = self.enter_block();
             let active_epoch = self.active.0;
+            // #1314 D3: after the adoption decision and before any drain.
+            let revision = self.publication.active_revision();
             let render = self.active.1.render_inner(io, time)?;
+            self.watermark.advance(revision, time.absolute_sample);
             Ok(RealtimeRenderReport {
                 swap,
                 carry,

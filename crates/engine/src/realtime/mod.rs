@@ -11,6 +11,7 @@ mod observe;
 mod plan;
 mod plan_exchange;
 mod spsc;
+mod watermark;
 
 pub use buffer::{BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferSpec};
 pub use disjoint::{
@@ -30,12 +31,17 @@ pub use plan::{
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
     PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
-    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
-    UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_resource_report,
+    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, RevisionTarget, SwapOutcome,
+    UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_at_revision,
+    plan_exchange_resource_report,
 };
 pub use spsc::{
     Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, SpscRetainedPayload,
     bounded_spsc, bounded_spsc_move, bounded_spsc_retained_payload,
+};
+pub use watermark::{
+    CandidateOutcome, OUTCOME_EXACT, OUTCOME_SUPERSEDED, OUTCOME_TRANSITION_FALLBACK,
+    PlanWatermark, PlanWatermarkReader, WatermarkBusy,
 };
 
 #[cfg(test)]
@@ -574,6 +580,181 @@ mod tests {
             .expect("render");
         assert_eq!(output, [0.0, 0.0]);
         report
+    }
+
+    /// #1314: the applied-revision watermark, read the way any thread reads it.
+    mod watermark {
+        use super::*;
+
+        const QUANTUM: u64 = 2;
+
+        fn read(publisher: &PlanPublisher) -> PlanWatermark {
+            publisher
+                .watermark_reader()
+                .read()
+                .expect("a read with no render in flight is never busy")
+        }
+
+        /// `(revision, first sample, flags)`.
+        fn level(publisher: &PlanPublisher) -> (u64, u64, u64) {
+            let watermark = read(publisher);
+            (
+                watermark.revision,
+                watermark.first_sample,
+                watermark.outcome_flags,
+            )
+        }
+
+        fn block(owner: &mut RealtimePlanOwner, index: u64) -> RealtimeRenderReport {
+            render_once(owner, index * QUANTUM)
+        }
+
+        fn publish_at(publisher: &mut PlanPublisher, id: u64, revision: u64) {
+            let mut reservation = publisher.reserve_replacement(prepared(id)).expect("room");
+            reservation.set_revision(revision);
+            reservation.commit();
+        }
+
+        /// #1314 gate 1: a revision completes when render adopts the plan that carries it, never
+        /// at publication, and a withdrawn candidate takes its revision out of the cell it left.
+        #[test]
+        fn a_revision_completes_at_adoption_not_at_publication() {
+            let (mut publisher, mut realtime, mut retirer) =
+                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
+            assert_eq!(read(&publisher).exact, 0);
+
+            publish_at(&mut publisher, 2, 7);
+            assert_eq!(
+                publisher.mailbox_cell_states(),
+                [MailboxCellState::Active, MailboxCellState::Full]
+            );
+            assert_eq!(block(&mut realtime, 0).swap, SwapOutcome::Applied);
+            assert_eq!(level(&publisher), (7, 0, OUTCOME_EXACT));
+            let _ = retirer.try_reclaim().expect("plan one");
+
+            // B lands in cell 0, P0's old cell, and leaves it again with its revision.
+            publish_at(&mut publisher, 3, 8);
+            assert_eq!(
+                publisher.mailbox_cell_states(),
+                [MailboxCellState::Full, MailboxCellState::Active]
+            );
+            let candidate = withdrawn(&mut publisher);
+            for index in 1..=2 {
+                assert_eq!(block(&mut realtime, index).swap, SwapOutcome::None);
+                assert_eq!(level(&publisher), (7, 0, OUTCOME_EXACT), "block {index}");
+            }
+
+            assert_eq!(publisher.republish(candidate), PlanEpoch(2));
+            assert_eq!(block(&mut realtime, 3).swap, SwapOutcome::Applied);
+            assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
+            assert_eq!(read(&publisher).exact, 7);
+            let _ = retirer.try_reclaim().expect("plan A");
+
+            publish_at(&mut publisher, 4, 9);
+            assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
+        }
+
+        /// #1314 gate 4: a candidate's `superseded` count and its outcome complete once, at the
+        /// first advance after its claim, and a withdrawn candidate takes its outcome with it.
+        #[test]
+        fn superseded_and_fallback_revisions_complete_once_per_adoption() {
+            let (mut publisher, mut realtime, mut retirer) =
+                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            let a = read(&publisher).revision;
+            let mut reservation = publisher.reserve_replacement(prepared(2)).expect("room");
+            reservation.set_revision(a + 3);
+            reservation.set_superseded(2);
+            reservation.commit();
+            assert_eq!(block(&mut realtime, 0).swap, SwapOutcome::Applied);
+            let adopted = read(&publisher);
+            assert_eq!(
+                (adopted.revision, adopted.outcome_flags),
+                (a + 3, OUTCOME_EXACT | OUTCOME_SUPERSEDED)
+            );
+            assert_eq!(
+                (
+                    adopted.superseded,
+                    adopted.exact,
+                    adopted.transition_fallback
+                ),
+                (2, 1, 0)
+            );
+            let _ = retirer.try_reclaim().expect("plan one");
+
+            // A live edit on the adopted plan.
+            assert_eq!(publisher.set_revision(a + 4), RevisionTarget::Active);
+            let _ = block(&mut realtime, 1);
+            let live = read(&publisher);
+            assert_eq!((live.revision, live.outcome_flags), (a + 4, OUTCOME_EXACT));
+            assert_eq!(
+                (live.superseded, live.exact, live.transition_fallback),
+                (2, 2, 0)
+            );
+
+            let b = live.revision;
+            let mut reservation = publisher.reserve_replacement(prepared(3)).expect("room");
+            reservation.set_revision(b + 2);
+            reservation.set_outcome(CandidateOutcome::TransitionFallback);
+            reservation.commit();
+            let candidate = withdrawn(&mut publisher);
+            let _ = publisher.republish(candidate);
+            assert_eq!(block(&mut realtime, 2).swap, SwapOutcome::Applied);
+            let fallback = read(&publisher);
+            assert_eq!(
+                (
+                    fallback.revision,
+                    fallback.first_sample,
+                    fallback.outcome_flags
+                ),
+                (b + 2, 2 * QUANTUM, OUTCOME_TRANSITION_FALLBACK)
+            );
+            assert_eq!(
+                (
+                    fallback.superseded,
+                    fallback.exact,
+                    fallback.transition_fallback
+                ),
+                (2, 2, 2)
+            );
+
+            assert_eq!(publisher.set_revision(b + 3), RevisionTarget::Active);
+            let _ = block(&mut realtime, 3);
+            let live = read(&publisher);
+            assert_eq!((live.revision, live.outcome_flags), (b + 3, OUTCOME_EXACT));
+            assert_eq!(
+                (live.superseded, live.exact, live.transition_fallback),
+                (2, 3, 2)
+            );
+        }
+
+        /// #1314 gate 8: a revision committed while a candidate is pending, held by the control
+        /// thread or published, goes to that candidate and never to the running plan's cell.
+        #[test]
+        fn a_revision_follows_a_held_or_published_candidate() {
+            let (mut publisher, mut realtime, mut retirer) =
+                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            publish_at(&mut publisher, 2, 7);
+            let mut held = withdrawn(&mut publisher);
+            // A model-only commit while control holds A.
+            held.set_revision(8);
+            for index in 0..=2 {
+                assert_eq!(block(&mut realtime, index).swap, SwapOutcome::None);
+                assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT), "block {index}");
+            }
+            let _ = publisher.republish(held);
+            assert_eq!(block(&mut realtime, 3).swap, SwapOutcome::Applied);
+            assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
+            let _ = retirer.try_reclaim().expect("plan one");
+
+            publish_at(&mut publisher, 3, 9);
+            // A model-only commit while B is published.
+            assert_eq!(publisher.set_revision(10), RevisionTarget::Pending);
+            assert_eq!(level(&publisher), (8, 3 * QUANTUM, OUTCOME_EXACT));
+            assert_eq!(block(&mut realtime, 4).swap, SwapOutcome::Applied);
+            assert_eq!(level(&publisher), (10, 4 * QUANTUM, OUTCOME_EXACT));
+            assert_eq!(read(&publisher).exact, 9);
+        }
     }
 
     #[test]

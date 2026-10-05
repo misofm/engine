@@ -27,6 +27,8 @@ pub(crate) struct SharedPlanState<Row> {
     /// the `provider_features.meters` term, so it can only ever cause the scan to run when it was
     /// not strictly needed, never to be skipped when it was.
     pub(crate) render_peak_observed: AtomicBool,
+    /// The applied-revision watermark render publishes (#1314 D4): any thread reads it.
+    pub(crate) watermark: PlanWatermarkReader,
 }
 
 impl<Row: Send> host_core::PlanSampleSource for SharedPlanState<Row> {
@@ -91,6 +93,14 @@ impl<A: ControlAdapter> PlanQueries<A> {
     /// Copies the resource row of the currently active plan epoch.
     pub fn resources(&self) -> A::Row {
         active_resources(&self.shared)
+    }
+
+    /// The applied-revision watermark (#1314): which committed revision is in effect, since which
+    /// render sample, with its outcome flags and counters. Pure and bounded: a read that keeps
+    /// landing inside render's publication gives up with [`WatermarkBusy`], and the caller
+    /// retries.
+    pub fn watermark(&self) -> Result<PlanWatermark, WatermarkBusy> {
+        self.shared.watermark.read()
     }
 }
 
@@ -157,6 +167,14 @@ impl<'a> ObservedReservation<'a> {
 
     pub(crate) fn epoch(&self) -> u64 {
         self.inner.as_ref().expect("reservation is live").epoch().0
+    }
+
+    /// The newest committed revision whose content the candidate carries (#1314 D2).
+    pub(crate) fn set_revision(&mut self, revision: u64) {
+        self.inner
+            .as_mut()
+            .expect("reservation is live")
+            .set_revision(revision);
     }
 
     pub(crate) fn commit(mut self) {

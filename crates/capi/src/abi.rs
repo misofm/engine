@@ -62,13 +62,33 @@ pub const FEATURE_CAPABILITY_COMMAND: u64 = 1 << 4;
 /// Anchored source-seek capability: `miso_engine_v1_source_seek_at` (issue #1275), an in-place V1
 /// amendment. A host checks this bit before calling the symbol.
 pub const FEATURE_SOURCE_SEEK_AT: u64 = 1 << 5;
+/// Applied-revision watermark capability: `miso_engine_v1_plan_watermark` (#1314), an in-place V1
+/// amendment. A host checks this bit before calling the symbol.
+pub const FEATURE_PLAN_WATERMARK: u64 = 1 << 6;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
     | FEATURE_SOURCE_SEEK
     | FEATURE_PLANAR_STEREO_RENDER
     | FEATURE_CAPABILITY_COMMAND
-    | FEATURE_SOURCE_SEEK_AT;
+    | FEATURE_SOURCE_SEEK_AT
+    | FEATURE_PLAN_WATERMARK;
+
+/// Watermark outcome flag: the covered revisions completed exactly as committed.
+pub const OUTCOME_EXACT: u64 = 1;
+/// Watermark outcome flag: a warm successor could not adopt, and the covered revisions completed
+/// through the transition it fell back to.
+pub const OUTCOME_TRANSITION_FALLBACK: u64 = 2;
+/// Watermark outcome flag: the covered revisions include ones a newer candidate folded in when it
+/// replaced the candidate that carried them.
+pub const OUTCOME_SUPERSEDED: u64 = 4;
+
+// The ABI's flag words are the engine's, bit for bit, so the query copies them unchanged.
+const _: () = assert!(
+    OUTCOME_EXACT == engine::realtime::OUTCOME_EXACT
+        && OUTCOME_TRANSITION_FALLBACK == engine::realtime::OUTCOME_TRANSITION_FALLBACK
+        && OUTCOME_SUPERSEDED == engine::realtime::OUTCOME_SUPERSEDED
+);
 
 /// Engine creation configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,6 +323,30 @@ pub struct PlanResourceReport {
     pub reserved: [u64; 4],
 }
 
+/// The applied-revision watermark of a plan (#1314).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct Watermark {
+    /// Must equal [`WATERMARK_SIZE`].
+    pub struct_size: u32,
+    /// Must be zero in ABI V1.
+    pub reserved0: u32,
+    /// The highest committed revision in effect together with every revision before it.
+    pub revision: u64,
+    /// The absolute render sample of the first block in which `revision` was in effect.
+    pub first_sample: u64,
+    /// The OR of the `OUTCOME_*` flags over the revisions the last advance covered.
+    pub outcome_flags: u64,
+    /// Saturating count of revisions completed as [`OUTCOME_EXACT`].
+    pub exact_count: u64,
+    /// Saturating count of revisions completed as [`OUTCOME_TRANSITION_FALLBACK`].
+    pub transition_fallback_count: u64,
+    /// Saturating count of revisions completed as [`OUTCOME_SUPERSEDED`].
+    pub superseded_count: u64,
+    /// Must be zero in ABI V1.
+    pub reserved: [u64; 5],
+}
+
 /// Frozen size of [`EngineConfig`] on the pinned 64-bit ABI.
 pub const ENGINE_CONFIG_SIZE: u32 = 40;
 /// Frozen size of [`CompileLimits`] on the pinned 64-bit ABI.
@@ -319,6 +363,8 @@ pub const PLANAR_OUTPUT_SIZE: u32 = 48;
 pub const CAPABILITIES_SIZE: u32 = 56;
 /// Frozen size of [`PlanResourceReport`] on the pinned 64-bit ABI.
 pub const PLAN_RESOURCE_REPORT_SIZE: u32 = 240;
+/// Frozen size of [`Watermark`] on the pinned 64-bit ABI.
+pub const WATERMARK_SIZE: u32 = 96;
 
 const HANDLE_COOKIE: u64 = 0x4d49_534f_5632_4142;
 const HANDLE_KIND_ENGINE: u32 = 1;
@@ -452,6 +498,7 @@ mod tests {
             size_of::<PlanResourceReport>(),
             PLAN_RESOURCE_REPORT_SIZE as usize
         );
+        assert_eq!(size_of::<Watermark>(), WATERMARK_SIZE as usize);
 
         assert_eq!(align_of::<EngineConfig>(), 8);
         assert_eq!(align_of::<CompileLimits>(), 8);
@@ -461,6 +508,7 @@ mod tests {
         assert_eq!(align_of::<PlanarOutput>(), 8);
         assert_eq!(align_of::<Capabilities>(), 8);
         assert_eq!(align_of::<PlanResourceReport>(), 8);
+        assert_eq!(align_of::<Watermark>(), 8);
 
         assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
@@ -476,6 +524,13 @@ mod tests {
         assert_eq!(offset_of!(Capabilities, reserved), 24);
         assert_eq!(offset_of!(PlanResourceReport, source_count), 16);
         assert_eq!(offset_of!(PlanResourceReport, reserved), 208);
+        assert_eq!(offset_of!(Watermark, revision), 8);
+        assert_eq!(offset_of!(Watermark, first_sample), 16);
+        assert_eq!(offset_of!(Watermark, outcome_flags), 24);
+        assert_eq!(offset_of!(Watermark, exact_count), 32);
+        assert_eq!(offset_of!(Watermark, transition_fallback_count), 40);
+        assert_eq!(offset_of!(Watermark, superseded_count), 48);
+        assert_eq!(offset_of!(Watermark, reserved), 56);
     }
 
     #[test]
@@ -483,7 +538,19 @@ mod tests {
         assert_eq!(ABI_VERSION, 0x0001_0000);
         assert_eq!(EXACT_LAUNCH_RATE_MASK, 0x0f);
         assert_eq!(FEATURE_SOURCE_SEEK_AT, 32);
-        assert_eq!(FEATURE_MASK, 0x3f);
+        assert_eq!(
+            FEATURE_MASK & FEATURE_PLAN_WATERMARK,
+            FEATURE_PLAN_WATERMARK
+        );
+        assert_eq!(FEATURE_MASK, 0x7f);
+        assert_eq!(
+            [
+                OUTCOME_EXACT,
+                OUTCOME_TRANSITION_FALLBACK,
+                OUTCOME_SUPERSEDED
+            ],
+            [1, 2, 4]
+        );
         assert_eq!(
             [
                 RESULT_OK,

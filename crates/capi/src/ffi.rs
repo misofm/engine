@@ -8,7 +8,7 @@ use crate::{
     PlanResourceReport, PlanarOutput, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
     RESULT_BUFFER_TOO_SMALL, RESULT_COMPILE_REJECTED, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT,
     RESULT_OK, RESULT_RENDER_REJECTED, RESULT_UNSUPPORTED, RESULT_WRONG_HANDLE, Session,
-    SourceChunk, SubmitReport,
+    SourceChunk, SubmitReport, WATERMARK_SIZE, Watermark,
 };
 use core::ffi::c_void;
 use core::ptr;
@@ -961,6 +961,66 @@ pub unsafe extern "C" fn miso_engine_v1_plan_resources(
     })
 }
 
+/// Copy the plan's applied-revision watermark (#1314): the highest committed revision in effect
+/// together with every revision before it, the render sample it took effect at, the outcome flags
+/// of the last advance and the per-outcome counters.
+///
+/// The watermark is a level render overwrites; this copies it whole or not at all. A copy that
+/// keeps landing inside render's publication gives up after a bounded number of attempts with
+/// `RESULT_BACKPRESSURE`, leaves `out` untouched, and the host retries.
+///
+/// # Safety
+///
+/// `plan` must be live and `out` must satisfy the writable ABI V1 watermark contract.
+///
+/// Thread: any, concurrent with render.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_plan_watermark(
+    plan: *const Plan,
+    out: *mut Watermark,
+) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { plan_kind(plan) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        if out.is_null() {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `out` is nonnull and the caller promises readable watermark storage for these
+        // input-validation fields before the complete fixed-size write.
+        let (struct_size, reserved0, reserved) =
+            unsafe { ((*out).struct_size, (*out).reserved0, (*out).reserved) };
+        if struct_size != WATERMARK_SIZE || reserved0 != 0 || reserved != [0; 5] {
+            return RESULT_INVALID_ARGUMENT;
+        }
+        // SAFETY: `plan` passed the live-kind check. Only the any-thread `queries` field is
+        // projected, so this query never aliases a concurrent render's exclusive `PlanState`
+        // borrow. The call is pure: it writes nothing back through the plan handle, its
+        // diagnostic word included.
+        let queries = unsafe { &*plan_queries(plan) };
+        let Ok(watermark) = queries.watermark() else {
+            return RESULT_BACKPRESSURE;
+        };
+        // SAFETY: Exact struct size establishes writable ABI V1 watermark storage.
+        unsafe {
+            out.write(Watermark {
+                struct_size: WATERMARK_SIZE,
+                reserved0: 0,
+                revision: watermark.revision,
+                first_sample: watermark.first_sample,
+                outcome_flags: watermark.outcome_flags,
+                exact_count: watermark.exact,
+                transition_fallback_count: watermark.transition_fallback,
+                superseded_count: watermark.superseded,
+                reserved: [0; 5],
+            });
+        }
+        RESULT_OK
+    })
+}
+
 /// Copies the handle-local diagnostic. Checkpoint 1 engine handles have an empty diagnostic.
 ///
 /// # Safety
@@ -1114,6 +1174,25 @@ pub(crate) fn test_plan_snapshot(plan: *mut Plan) -> (u64, PlanResourceReport) {
     // SAFETY: Test callers retain the exclusively owned live plan for this inspection.
     let plan = unsafe { &(*plan).state };
     (plan.owner().next_absolute_sample(), plan.resources())
+}
+
+/// The plan's watermark through the exported entry point, with a valid zeroed struct.
+#[cfg(test)]
+pub(crate) fn test_plan_watermark(plan: *const Plan) -> (u32, Watermark) {
+    let mut out = Watermark {
+        struct_size: WATERMARK_SIZE,
+        reserved0: 0,
+        revision: 0,
+        first_sample: 0,
+        outcome_flags: 0,
+        exact_count: 0,
+        transition_fallback_count: 0,
+        superseded_count: 0,
+        reserved: [0; 5],
+    };
+    // SAFETY: Test callers pass a live plan; `out` is one complete local watermark.
+    let result = unsafe { miso_engine_v1_plan_watermark(plan, &mut out) };
+    (result, out)
 }
 
 #[cfg(test)]
@@ -1467,8 +1546,9 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x3f);
+        assert_eq!(capabilities.feature_mask, 0x7f);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 
@@ -2484,6 +2564,60 @@ mod tests {
             read_last_error(plan.cast()),
             plan_error::text(plan_error::OUTPUT_LAYOUT),
             "a const-plan query must not clear the render diagnostic"
+        );
+        destroy_fixture(engine, session, plan);
+    }
+
+    /// #1314 D6: `miso_engine_v1_plan_watermark` refuses a nonzero reserved word or a null `out`
+    /// with `RESULT_INVALID_ARGUMENT` and writes nothing, and, like `plan_resources`, it is pure:
+    /// a valid query leaves the plan's render diagnostic as the last render left it.
+    #[test]
+    fn plan_watermark_refuses_reserved_words_and_is_pure() {
+        let (engine, session, plan) = compiled_fixture();
+        let mut pcm = vec![0.0_f32; 256];
+        let output = PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: 255,
+            frames: 128,
+            plane_stride_samples: 128,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            // SAFETY: The plan is live; the short declared capacity is rejected before any write.
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
+            RESULT_RENDER_REJECTED
+        );
+        let (result, valid) = test_plan_watermark(plan);
+        assert_eq!(result, RESULT_OK);
+        assert_eq!(
+            read_last_error(plan.cast()),
+            plan_error::text(plan_error::OUTPUT_LAYOUT),
+            "a const-plan query must not clear the render diagnostic"
+        );
+        for poison in [0, 1] {
+            let mut out = Watermark {
+                revision: u64::MAX,
+                ..valid
+            };
+            if poison == 0 {
+                out.reserved0 = 1;
+            } else {
+                out.reserved[4] = 1;
+            }
+            let before = out;
+            assert_eq!(
+                // SAFETY: The plan is live and `out` is one complete local watermark.
+                unsafe { miso_engine_v1_plan_watermark(plan, &mut out) },
+                RESULT_INVALID_ARGUMENT
+            );
+            assert_eq!(out, before, "a refused query writes nothing");
+        }
+        assert_eq!(
+            // SAFETY: The plan is live; a null `out` is refused before any access.
+            unsafe { miso_engine_v1_plan_watermark(plan, ptr::null_mut()) },
+            RESULT_INVALID_ARGUMENT
         );
         destroy_fixture(engine, session, plan);
     }
