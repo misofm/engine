@@ -617,6 +617,19 @@ jobs:
             --exclude wasm-gates --exclude wasm-gate-guest \
             --exclude wasm-gate-corpus \
             --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
+      # --all-targets runs no doctest, and most doctests here are compile_fail type-level
+      # guarantees, each beside a plain twin (#1422). Same packages and features as the step above.
+      - name: Workspace doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --workspace --doc \
+            --exclude lane --exclude math --exclude effect-runtime --exclude delay \
+            --exclude compressor --exclude multiband-compressor --exclude gate-expander \
+            --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip \
+            --exclude parametric-eq --exclude builtins --exclude dsp-reference \
+            --exclude conformance --exclude audit --exclude bench --exclude console-workload \
+            --exclude wasm-gates --exclude wasm-gate-guest \
+            --exclude wasm-gate-corpus \
+            --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit
 
   test-debug-b:
     name: DSP crates debug tests
@@ -640,6 +653,14 @@ jobs:
       - name: DSP crates debug tests (lane feature unification pinned explicitly)
         run: |
           cargo test --locked --all-targets \
+            -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
+            -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
+            -p parametric-eq -p builtins -p dsp-reference -p conformance \
+            --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support
+      # --all-targets runs no doctest (#1422). Same packages and features as the step above.
+      - name: DSP crates doctests (same packages and features as the debug tests)
+        run: |
+          cargo test --locked --doc \
             -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor \
             -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip \
             -p parametric-eq -p builtins -p dsp-reference -p conformance \

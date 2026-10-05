@@ -157,3 +157,94 @@ of the three-attempt budget.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 under Amendment 1 (implementer, 2026-10-05)
+
+Status: implemented for 11 of the 12 pairs; the `crates/engine/src/realtime/plan.rs:539` pair is
+**pending** (stream B's area, sequenced after stream B's batch 1 is on `main`). Its
+`compile_fail` already runs under the new `test-debug-a` step; only its twin and its comment wait.
+
+**D1.** `test-debug-a` gains "Workspace doctests", `test-debug-b` gains "DSP crates doctests", each
+the job's whole-package command with `--all-targets` replaced by `--doc` (same `--exclude`/`-p`
+lists and `--features`). `scripts/run-aarch64-tests.sh` debug leg runs
+`cargo test --locked --doc "${packages[@]}" --features "$features"` after its main run. No new
+job: router and verdict table unchanged.
+
+**D2 pairs** (fence without code; the comment names rustc's error today and says stable rustdoc does
+not check it). Reasons were read by flipping every fence to a plain doctest once: each failed with
+exactly the stated error and no other, so no snippet needed a fix.
+
+| `compile_fail` | Forbidden construct | Twin | rustc today |
+|---|---|---|---|
+| graph-compiler `PreparedGraphBuiltinsArtifact` construct | body `PreparedGraphBuiltinsArtifact {}` | body `unimplemented!()` | no code (private fields) |
+| mutate | `artifact.graph = panic!(..)` | `let _ = artifact.graph();` | E0616 |
+| extract | pattern `{ graph, .. }` | pattern `{ .. }` | E0451 |
+| clone_back | `artifact.clone()` | `artifact` (move) | E0599 |
+| back_convert | owned `artifact.into()` to `graph::PreparedGraphPlan` | `&graph::PreparedGraphPlan = artifact.graph()` | E0277 |
+| generic_internal_attachment | `.attach_internal_bindings(..)` | `let _ = plan;` | E0599 (the method exists nowhere: the guarantee is its absence) |
+| host-core `PreparedHost` | bound `T: Sync` | bound `T: Send` (the existing plain doctest, reshaped: shared fn name `requires`) | E0277 |
+| host-core `StartedRenderSession` Send | bound `T: Send` | one shared twin, no bound | E0277 |
+| host-core `StartedRenderSession` Sync | bound `T: Sync` | same shared twin | E0277 |
+| lane `CanonicalFpEnv` Send | bound `T: Send` | one shared twin, no bound | E0277 |
+| lane `CanonicalFpEnv` Sync | bound `T: Sync` | same shared twin | E0277 |
+
+The Send and Sync fences of one type share one twin: each differs from it in its one bound only,
+so a second identical twin would add a doctest binary and no catch. The graph-compiler fences
+previously each used a different fn name; the pairs keep the original names. The wasm32-only
+fences (`fpenv.rs`, the portable `CanonicalFpEnv`) got one comment saying they are documentation
+only and never compiled by a native run.
+
+**D3.** No doctest failed on a new leg locally (x86-64; `test-debug-b`'s feature set ran lane's
+three). AArch64 runs only in CI; its result is gate 5's.
+
+**D4.** `check-test-support-ci.py` already treats `--doc` as narrowing; unchanged.
+`test-test-support-ci.py` needed its anchors scoped: the feature lists now occur twice (whole-package
+step and doctest step), so mutations target the whole-package step by its command line
+(`in_a`/`in_b`). New cases: "test-debug-a narrowed to --doc" and "test-debug-b narrowed to --doc"
+must leave the packages uncovered. Mutation: with `--doc` removed from `NARROWING_TARGET_FLAGS`
+the self-test is red ("mutation accepted: host-web/test-support removed from test-debug-a",
+because the doctest step then counted); reverted, green. `check-ci-path-routing.py` accepted the
+new steps unchanged.
+
+**Gate 1.** `test-debug-a` doctest command: exit 0, 18 doctests (plan.rs 1 `compile_fail`;
+graph-compiler 6 `compile_fail` + 6 twins; host-core 3 `compile_fail` + 2 twins), about 22 s wall on
+a warm `target/`. `test-debug-b` doctest command: exit 0, 3 doctests (lane 2 `compile_fail` + 1
+twin), 2.8 s warm. AArch64: pending the PR's `aarch64-debug` job.
+
+**Gate 2.** `#[allow(unsafe_code)] unsafe impl Sync for PreparedHost {}` appended to
+`prepare.rs`: `test-debug-a` doctest command exit 101, `prepare::PreparedHost (line 515) - compile
+fail ... FAILED`. (The gate's literal line without the `allow` does not compile: the workspace
+denies `unsafe_code`, so the lib fails before any doctest.) Reverted. `unsafe impl Sync for
+CanonicalFpEnv {}` (x86-64/aarch64 cfg) in `fpenv.rs`: `test-debug-b` doctest command exit 101,
+`fpenv::CanonicalFpEnv (line 285) - compile fail ... FAILED`. Reverted.
+
+**Gate 3** (per pair; each run is the job's doctest command filtered to the type; every run exit
+101 and reverted). Rename: a typo in the type path shared by the pair's snippets (only those two;
+for shared twins, the one `compile_fail` and the twin). Delete: the forbidden construct replaced as
+in the table's twin column (or removed).
+
+| Pair | Rename: red | Delete: red |
+|---|---|---|
+| GC construct (`PreparedGraphBuiltinArtifact` in `use`) | twin line 79 | `compile_fail` line 71 |
+| GC mutate | twin line 96 | `compile_fail` line 90 |
+| GC extract | twin line 110 | `compile_fail` line 104 |
+| GC clone_back | twin line 124 | `compile_fail` line 118 |
+| GC back_convert | twin line 139 | `compile_fail` line 133 |
+| GC attach (`graph::PreparedGraphPlam`) | twin line 154 | `compile_fail` line 148 |
+| PreparedHost Sync | twin line 524 | `compile_fail` line 515 |
+| StartedRenderSession Send | twin line 63 | `compile_fail` line 50 |
+| StartedRenderSession Sync | twin line 63 | `compile_fail` line 55 |
+| CanonicalFpEnv Send | twin line 293 | `compile_fail` line 280 |
+| CanonicalFpEnv Sync | twin line 293 | `compile_fail` line 285 |
+
+In every rename run the `compile_fail` itself stayed green, which is the wrong-reason defect the
+twin exists to catch. `plan.rs:539`: pending.
+
+**Gate 4.** `check-test-support-ci.py`, `test-test-support-ci.py`, `check-ci-path-routing.py`,
+`test-ci-path-routing.py`, `check-workspace-policy.sh`: all exit 0. Also `cargo fmt --all --check`
+and the lint job's `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`: exit 0.
+`shellcheck` is not installed here; `bash -n` passes.
+
+**Gate 5.** Pending the batch's single PR run (wall times of the new steps to be recorded there).

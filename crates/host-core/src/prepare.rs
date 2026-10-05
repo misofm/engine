@@ -509,18 +509,21 @@ pub fn strip_control_table_bytes(strip_count: usize, strip_id_bytes: usize) -> O
 /// `Send` and deliberately **not** `Sync` (crate-level `# Host callback contract (V1)`): the plan is
 /// rendered from exactly one thread and the sources are fed from exactly one thread, so a host that
 /// could share this across threads could render from two at once. A shared reference is refused at
-/// compile time:
+/// compile time. rustc reports E0277 (`Sync` is not implemented); the fence carries no code
+/// because stable rustdoc does not check one.
 ///
 /// ```compile_fail
-/// fn requires_sync<T: Sync>() {}
-/// requires_sync::<host_core::PreparedHost>();
+/// fn requires<T: Sync>() {}
+/// requires::<host_core::PreparedHost>();
 /// ```
 ///
-/// Moving it, on the other hand, is exactly how a host hands preparation to the render thread:
+/// Moving it, on the other hand, is exactly how a host hands preparation to the render thread.
+/// This twin differs from the doctest above in the bound only, so a renamed type turns it red
+/// (issue #1422 D2):
 ///
 /// ```
-/// fn requires_send<T: Send>() {}
-/// requires_send::<host_core::PreparedHost>();
+/// fn requires<T: Send>() {}
+/// requires::<host_core::PreparedHost>();
 /// ```
 pub struct PreparedHost {
     /// The exclusive render plan. Move it to the render thread once and render there only.

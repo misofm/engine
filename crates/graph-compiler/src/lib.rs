@@ -58,13 +58,34 @@ pub struct GraphBuiltinsCompileRequest {
 }
 /// The one-way, sealed builtin attachment result.
 ///
+/// Each seal below is a `compile_fail` doctest beside a plain twin that differs from it in the one
+/// forbidden construct only (issue #1422 D2). A rename or a typo in the shared code turns the twin
+/// red, so the `compile_fail` cannot stay green for the wrong reason. The fences carry no error
+/// code: stable rustdoc does not check one. Each comment names the error rustc reports today, for
+/// the reader only.
+///
+/// The compiler-owned graph and builtin parts are private: external bindings cannot create a value
+/// carrying internal-builtin provenance. rustc reports "cannot construct with struct literal
+/// syntax due to private fields", an error with no code.
+///
 /// ```compile_fail
 /// use graph_compiler::PreparedGraphBuiltinsArtifact;
 ///
-/// // The compiler-owned graph and builtin parts are private: external bindings cannot create
-/// // a value carrying internal-builtin provenance.
-/// let _ = PreparedGraphBuiltinsArtifact {};
+/// fn construct() -> PreparedGraphBuiltinsArtifact {
+///     PreparedGraphBuiltinsArtifact {}
+/// }
 /// ```
+///
+/// ```
+/// use graph_compiler::PreparedGraphBuiltinsArtifact;
+///
+/// fn construct() -> PreparedGraphBuiltinsArtifact {
+///     unimplemented!()
+/// }
+/// ```
+///
+/// The graph is private, so it cannot be replaced; it is readable by shared reference only.
+/// rustc reports E0616 (private field).
 ///
 /// ```compile_fail
 /// fn mutate(mut artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
@@ -72,11 +93,27 @@ pub struct GraphBuiltinsCompileRequest {
 /// }
 /// ```
 ///
+/// ```
+/// fn mutate(mut artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let _ = artifact.graph();
+/// }
+/// ```
+///
+/// A pattern cannot extract the graph either. rustc reports E0451 (private field).
+///
 /// ```compile_fail
 /// fn extract(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
 ///     let graph_compiler::PreparedGraphBuiltinsArtifact { graph, .. } = artifact;
 /// }
 /// ```
+///
+/// ```
+/// fn extract(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let graph_compiler::PreparedGraphBuiltinsArtifact { .. } = artifact;
+/// }
+/// ```
+///
+/// The artifact is not `Clone`; it can only move. rustc reports E0599 (no method `clone`).
 ///
 /// ```compile_fail
 /// fn clone_back(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
@@ -84,15 +121,39 @@ pub struct GraphBuiltinsCompileRequest {
 /// }
 /// ```
 ///
+/// ```
+/// fn clone_back(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let _ = artifact;
+/// }
+/// ```
+///
+/// There is no conversion back to an owned graph plan; the plan is reachable by shared reference
+/// only. rustc reports E0277 (`From` is not implemented).
+///
 /// ```compile_fail
 /// fn back_convert(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
 ///     let _: graph::PreparedGraphPlan = artifact.into();
 /// }
 /// ```
 ///
+/// ```
+/// fn back_convert(artifact: graph_compiler::PreparedGraphBuiltinsArtifact) {
+///     let _: &graph::PreparedGraphPlan = artifact.graph();
+/// }
+/// ```
+///
+/// A plain graph plan has no generic way to attach internal builtin bindings. rustc reports E0599
+/// (no method `attach_internal_bindings`).
+///
 /// ```compile_fail
 /// fn generic_internal_attachment(plan: graph::PreparedGraphPlan) {
 ///     let _ = plan.attach_internal_bindings(Vec::new(), Vec::new());
+/// }
+/// ```
+///
+/// ```
+/// fn generic_internal_attachment(plan: graph::PreparedGraphPlan) {
+///     let _ = plan;
 /// }
 /// ```
 pub type PreparedGraphBuiltinsArtifact = PreparedBuiltinsGraphArtifact<GraphCompileReport>;
