@@ -260,3 +260,36 @@ under `/tmp/claude-1002/w1057b/` (tree and target deleted after; output kept in
 - Correction found: route gain, mute and matrix already have setters, so P1 no longer lists them;
   `SetVcaFader` replaces `UpsertVca` in P1's list.
 - Gate: `bash scripts/check-workspace-policy.sh` ok.
+
+**Follow-ups after PASS** (the attempt-3 verdict: PASS, 6 MINOR, 4 NIT; all folded in one
+commit). Anchors read on `a1a3fe87c`, which has the same code as `8be19c86e`. The three #1057
+verdicts are copied to `docs/handoffs/decision-15-2026-10-05/verdicts/stream-k/`.
+
+- MINOR-1: section 4.3 states the single-mode snapshot bound in system audio callbacks: at most
+  S + 2 callbacks, (S + 2) × ceil(B / 128) quanta (8 callbacks, 32 quanta for the sends document
+  at 480-frame callbacks). P3's gate is (S + 2) × Q quanta, with Q measured in the same run by a
+  ping round trip; the evidence records Q and the observed B.
+- MINOR-2: P2b's length update counts the `revision` field, rewritten by every commit
+  (`model.rs:943`) and written as a decimal string (`visit.rs:220`); gate (1) crosses its digit
+  boundaries.
+- MINOR-3: P2b gate (4) uses a covering set of budgets: every budget on small documents; on large
+  documents 1 to 64, powers of two and ±1, and budgets at each kind of stop point; about 150
+  writes per large document.
+- MINOR-4: the typed commit takes the `miso.replace.v1` message's own `requestId` (non-zero, SDK
+  numbers from 1) as the `SESSION_COMMITTED` event's `origin_request_id`; P8's gate compares the
+  whole event at the same request ID. Amendments of #1294 D1 and #1386 updated.
+- MINOR-5: `CommandReply.removed_arm_tag_count` with `SessionState::removed_arm_tags()`; the
+  #1293 outcome record's reserved `u32` becomes `removed_arm_tag_count` (still 40 bytes) with a new
+  export `miso_engine_web_v1_removed_arm_tags_ptr`; `miso.edit.v1` gains `removedArmTags`. Solo
+  entries are not listed (no pending promise). P5 gains a gate; amendment rows #1293, #1294 and
+  #1382 updated.
+- MINOR-6: option C's cost in the owner question names the setters that exist (effect bypass,
+  route destination, route gain, mute and matrix, pan and matrix, effect parameters) and what P1
+  adds (no route setter). The question stays open.
+- NIT-1: P2c names the response buffers at `controller.rs:1916` and `:1934`, counts them in
+  `RESPONSE_STAGING_VECS`, and gates them.
+- NIT-2: the effect-parameter `smoothingSamples` option is removed, not renamed (section 3.1, P6).
+- NIT-3: the 64-call bound applies to new calls only; resent calls of a refused merged message
+  can raise `pendingCalls` above 64.
+- NIT-4: `currentFrame` is cited as Web Audio 1.1 §1.32.3 (new source [S8]).
+- Gate: `bash scripts/check-workspace-policy.sh` ok.

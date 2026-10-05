@@ -2,13 +2,16 @@
 
 Issue: *Design: one edit API on every host over the core's committed session model* (#1057),
 stream K of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`,
-D15-11, also D15-2, D15-3, D15-10 and D15-17). Attempt 3 (it answers the attempt-2 verdict).
+D15-11, also D15-2, D15-3, D15-10 and D15-17). Attempt 3 (it answers the attempt-2 verdict),
+with the follow-ups of the attempt-3 verdict (PASS) folded in.
 
 **Commit.** Every `path:line` in this note was checked on `8be19c86e`
 (`8be19c86e4c8d16530f422d430cfc211c71db5d3`, `main`). Attempt 3 works on `50fb23b5f`: between the
 two commits no file under `crates/`, `hosts/`, `sdk/`, `tools/` or `scripts/` changed
 (`git diff --stat 8be19c86e 50fb23b5f -- crates hosts sdk tools scripts` is empty), so every anchor
-holds on both; the anchors added in attempt 3 were read on `50fb23b5f`.
+holds on both; the anchors added in attempt 3 were read on `50fb23b5f`. The anchors added by the
+follow-ups were read on `a1a3fe87c`, which has the same code as `8be19c86e` (the same diff is
+empty).
 The spec's anchors were written on `6fb211594`. Between that commit and `8be19c86e` the only code
 change is `crates/capi/tests/resource_lifecycle.rs`, so every spec anchor is unchanged; each one
 was read again on `8be19c86e`.
@@ -164,6 +167,8 @@ in the ring, and a full ring returns `BACKPRESSURE` with nothing written (#1387 
 - [S7] W3C, *High Resolution Time*, §4: time is coarsened to 100 µs, or 5 µs when the context is
   cross-origin isolated; `timeOrigin + now()` puts a worker and a window on one timeline (§1.2).
   <https://www.w3.org/TR/hr-time-3/>
+- [S8] W3C, *Web Audio API 1.1*, §1.32.3, attribute `currentFrame` of `AudioWorkletGlobalScope`:
+  the current frame of the audio block being processed. <https://www.w3.org/TR/webaudio-1.1/>
 
 Consequences for this design: the Worker may block and wait; the main thread and the worklet may
 not [S2, S4]. So render polls cells at block entry and never waits (D15-10 gate 2). Shared memory
@@ -181,13 +186,13 @@ functions with the same bytes. The table is the contract #1309 and #1332 impleme
 |---|---|---|---|
 | Boot | the session document bytes; `ControlLimits` (#1309 D3); `Box<dyn RuntimePreparer>` (#1400 D1); the adapter's fixed allocation sizes (#1309 D5) | `SessionState` (control half) and `PlanState` (render half, `crates/capi/src/runtime/plan.rs:53`), or a typed `CompileFailure` (#1309 D6) | #1309, #1400 |
 | Command | one protocol request frame (any command; for an edit, `SESSION_TRANSACTION_APPLY`, the exact bytes the C ABI takes) | the response frame length, the frame in the crate's scratch; typed `CommandError` on refusal | #1309 (`command`, `crates/capi/src/runtime/control.rs:843`) |
-| Command with monitoring | an optional request frame plus a list of `MonitorOp` (section 8.2); at least one of the two | `CommandReply { response_len, applied: Option<Applied { revision, path }>, arm_tags: Option<ArmTags { first: u64, count: u32 }> }`; `applied` is `None` when no transaction was in the call; the tags of one call are consecutive, one per `Observe` operation in call order, so `first` and `count` name all of them; `arm_tags` is `None` when the call held no `Observe` operation (section 8.4) | #1382 D3, P7 |
+| Command with monitoring | an optional request frame plus a list of `MonitorOp` (section 8.2); at least one of the two | `CommandReply { response_len, applied: Option<Applied { revision, path }>, arm_tags: Option<ArmTags { first: u64, count: u32 }>, removed_arm_tag_count: u32 }`; `applied` is `None` when no transaction was in the call; the tags of one call are consecutive, one per `Observe` operation in call order, so `first` and `count` name all of them; `arm_tags` is `None` when the call held no `Observe` operation (section 8.4); `removed_arm_tag_count` is the number of overlay observation entries that the commit removed, and `SessionState::removed_arm_tags() -> &[u64]` gives their arm tags, in tag order, valid until the next call into the crate (section 8.4, "Rejects on owner removal") | #1382 D3, P5, P7 |
 | Service | nothing | `Ok` or an internal error; it commits and acks nothing | #1348 D1 |
 | Watermark | nothing | `PlanWatermark { revision, first_sample, outcome_flags, exact, transition_fallback, superseded }` or busy | #1314 D4, #1381 D5 |
 | Events | lane | one event frame or none | `SessionState::dequeue_event` (`crates/capi/src/runtime/control.rs:1392`) |
 | Snapshot, paged | `SessionSnapshotGet {offset, maximum_bytes}` through Command | pages; every page header carries the session revision (`crates/protocol/src/controller.rs:3108-3109`) | exists |
 | Snapshot, whole | nothing | `(revision, &str)` borrowed from `SessionStore::canonical_snapshot` (`crates/protocol/src/model.rs:900`), valid until the next commit | #1293 D4 |
-| Replace by document | document bytes | the same `CommandReply` as Command with monitoring, with `response_len` 0 (no response frame is built) and `arm_tags` `None` | #1386, in the crate (F7), over P8's typed commit in `protocol`; entry rule below |
+| Replace by document | document bytes and the message's request ID (a non-zero `RequestId`, for the `SESSION_COMMITTED` event only) | the same `CommandReply` as Command with monitoring, with `response_len` 0 (no response frame is built) and `arm_tags` `None`; `removed_arm_tag_count` counts the entries that the replace removed | #1386, in the crate (F7), over P8's typed commit in `protocol`; entry rule below |
 | Sources | submit, seek, `seek_at`, seek report | as today (`crates/capi/src/runtime/control.rs:1501-1552`) | #1309, #1316, #1387 |
 
 **How replace enters the controller.** Replace is a typed entry of the crate, not a protocol
@@ -195,8 +200,14 @@ frame. It decodes and validates the document, diffs it against the committed mod
 `SessionEdit`s (#1386, entity-level), and then runs the same steps as C3-C8 without the codec and
 without the replay cache: the edits apply at the committed revision (#1386), then the
 reliable-event room check and reservation, `SessionStore::prepare_transaction`, the classifier,
-the commit and the path. It takes no request ID and no replay entry: the internal port never
-resends a message, and the reply is matched by the message's own `requestId` (#1294 D1). The frame
+the commit and the path. It takes no replay entry: the internal port never resends a message, and
+the reply is matched by the message's own `requestId` (#1294 D1). It takes a request ID for one
+use only: the `SESSION_COMMITTED` event's `origin_request_id` is a `RequestId`, a non-zero `u64`
+(`crates/protocol/src/queue.rs:375-381`; the framed commit passes `prepared.request_id`,
+`crates/protocol/src/controller.rs:1999`). The adapter passes the `miso.replace.v1` message's
+own `requestId`, through the replace export's request-ID argument. The SDK numbers its requests
+from 1, and a message whose `requestId` is 0 is malformed, so the adapter refuses it before it
+calls an export (amendments of #1294 D1 and #1386, section 6.3). The frame
 limits do not apply, because no frame is built. The bounds are the document bounds that boot
 already checks (the compile caps and the browser's document budgets, #1381 D1 step 4), so a
 replace accepts every document that boot accepts. The edit count of the diff is not bounded by
@@ -286,7 +297,7 @@ export interface BrowserEngine {      // and the headless engine
 
 export class EngineLiveControls {
   readonly edit: LiveControlEdits;    // builders by stable ID; they never touch the engine
-  readonly pendingCalls: number;      // calls queued behind the message in flight, at most 64 (section 3.4)
+  readonly pendingCalls: number;      // calls queued behind the message in flight; 64 bounds new calls only (section 3.4)
   submit(...edits: readonly LiveEdit[]): Promise<LiveSubmitOutcome>; // rejects `backpressure` when 64 wait
 }
 // LiveEdit = SessionEditSpec (#1383, with P1's lane setters) | MonitorOpSpec (section 8.2)
@@ -338,9 +349,14 @@ Rules:
   `armed()` resolves or rejects exactly once, by the rules of section 8.4 (close, disposal,
   removal of the owner).
   A solo needs no sample: it is a level on mute cells, and its ramp starts at the next block.
-- The ramp option has one name in every builder: `rampSamples` (absent: the session default; 0: a
-  step; D15-1, #1394). `SmoothingOptions.smoothingSamples`
-  (`sdk/src/core/live-controls.ts:28-30`) is renamed.
+- The ramp option has one name in every builder that has a ramp: `rampSamples` (absent: the
+  session default; 0: a step; D15-1, #1394). `SmoothingOptions.smoothingSamples`
+  (`sdk/src/core/live-controls.ts:28-30`) is renamed in the strip, route, VCA and solo builders.
+  The effect parameter builder has no ramp option: it sends `smoothingSamples` today
+  (`sdk/src/core/live-controls.ts:926`, from `RuntimeParameterOptions` and `runtimeSmoothing`,
+  `:302-313`), but neither `UpsertEffectParam` (#1394 D1 leaves it out) nor `EffectControlRecord::Parameter`
+  (`crates/effect-contract/src/live.rs:63-70`) carries a ramp; an effect smooths a parameter by
+  its own declared smoothing. So P6 removes that option and does not rename it.
 
 ### 3.2 What the live-control handles become
 
@@ -419,6 +435,10 @@ bytes (section 3.4). #1382's monitor codec has the gate: its encoded `Observe` a
   `sdk.control.queue_full`. The refused call is not queued, not sent and never acked, and the
   queued calls do not change. So the SDK drops no call that it accepted, and the acked-batch
   answer of section 1.3 holds (an ack never precedes a drop, because nothing accepted is dropped).
+- The 64-call bound applies to new calls only. When the engine refuses a merged message, its calls
+  are resent ahead of the queue (below); they were accepted already, so the SDK does not refuse
+  them, and for that time `pendingCalls` can be more than 64 (at most 64 plus the calls of one
+  merged message). A new call is refused while 64 or more calls wait.
 - When the reply arrives, the SDK takes the longest prefix of the queue that obeys all of these
   cuts, sends it as one transaction (edits in call order, at the revision of that reply) plus its
   monitoring operations, and keeps the rest queued:
@@ -591,11 +611,20 @@ cached text; they do not include the write that P2b moves here. Commands are in 
     The SDK still checks that every reply carries the first reply's revision; if one does not, it
     starts again at offset 0. The handler resumes the writer only for the revision it started;
     a request for another revision starts the writer again.
-  - **Bound on the total.** A text of L bytes needs S = ceil(L / 65,536) handler calls. The
-    handler runs once in the rendering loop's task step after the continuation arrives [S1], so
-    with an idle main thread the snapshot takes at most 2S + 2 quanta: for the 379,298-byte sends
-    document, S = 6, at most 14 quanta (37 ms at 48 kHz). A busy main thread delays each
-    continuation by its own task length; that delay is the app's, and the bound counts it apart.
+  - **Bound on the total, in system audio callbacks.** A text of L bytes needs
+    S = ceil(L / 65,536) handler calls. The unit of the bound is the system-level audio callback,
+    not the quantum: each callback has "a varying number of sample-frames", and the rendering loop
+    renders quanta back to back until it fills that buffer [S1, §2.6]. A typical desktop callback
+    is 256-1,024 frames, that is 2-8 quanta. The reply of a slice and the main thread's
+    continuation cannot be relied on to come back inside one such burst, so each slice can cost
+    one callback. With an idle main thread the snapshot therefore takes at most **S + 2
+    callbacks**: one for the first request to arrive, one per slice, and one for the last reply.
+    For a callback of B frames that is at most (S + 2) × ceil(B / 128) quanta. Example, the
+    379,298-byte sends document (S = 6) with 480-frame callbacks (3.75 quanta, so 4 by the
+    ceiling): at most 8 callbacks (3,840 frames, 80 ms at 48 kHz), so at most 32 quanta by the
+    formula. A busy main thread delays
+    each continuation by its own task length; that delay is the app's, and the bound counts it
+    apart.
   - **Per-call time (inference, not measured).** The native canonical write of section 5.4 is
     3.5-3.8 ns per byte (0.997 ms for 264,762 bytes; 1.325 ms for 379,298 bytes). 65,536 bytes is
     about 0.25 ms natively, so about 0.3-0.7 ms in V8 with the ratio 1.2-2.7, next to a 64-track
@@ -945,21 +974,41 @@ not touch them (its non-goal). No rendered bit moves in any of the three.
   `prepare_transaction` applies the edits before it compiles (`crates/protocol/src/model.rs:936-942`),
   so it knows this for each edit (for example, an `UpsertEffectParam` whose key exists is a value
   setter; one that inserts a new key is not). A value-setter transaction moves no separator, so its
-  canonical length is exact from the old length and the canonical lengths of the named fields
-  before and after; the compile writes no text for it. Every other transaction writes the text at
+  canonical length is exact from the old length and the canonical lengths, before and after, of
+  the named fields and of the session's `revision`. Every commit rewrites `revision`
+  (`crates/protocol/src/model.rs:943`) although no edit names it, and the canonical text writes
+  it as a decimal string (`crates/session/src/visit.rs:220`; the fixtures show
+  `"revision": "1"`), so its length grows by one byte at 9 to 10, 99 to 100, and so on. The
+  length update counts it as a field that changes on every commit. The compile writes no text
+  for a value-setter transaction. Every other transaction writes the text at
   commit as today. A value-setter transaction can still be classified `rebuild` (for example a
   bypass on the delay); its length stays exact, so this is correct for every path. The text is
   written when a snapshot asks for it, then kept for that revision. The writer becomes resumable
   between any two values and inside a string (section 4.3). Gates: (1) differential: the
   incremental length equals the written text's length on the corpus and generated value-setter
-  transactions; (2) a value-setter commit calls the writer zero times; (3) the snapshot after any
+  transactions, and on commits that cross each of the revision's digit boundaries 9 to 10, 99 to
+  100 and 999 to 1,000 (from a document whose revision starts just below each); (2) a value-setter commit calls the writer zero times; (3) the snapshot after any
   edit sequence equals today's text, byte for byte, on the corpus; (4) the resumed writer's
-  output equals the one-call writer's output for every byte budget from 1 to the text length on
-  the corpus documents, and for a generated document with a 64 KiB `cid` string.
+  output equals the one-call writer's output for a covering set of byte budgets that reaches
+  every kind of stop point, in a normal `cargo test` run. On small documents (corpus documents
+  of at most 16 KiB, such as `parametric-eq-nine-track`): every budget from 1 to the text
+  length. On the large corpus documents and on a generated document with a 64 KiB `cid` string:
+  every budget from 1 to 64; every power of two up to the text length, and that power plus and
+  minus one; and, for each kind of stop point (inside a string, at the end of a string, inside a
+  number or literal, inside an escape sequence, between two values, inside a key, at an array or
+  object boundary), the budgets equal to the byte offset of the first, a middle and the last such
+  point in the one-call text (the first stop of budget b falls at offset b, or at the end of the
+  number or literal that holds it). One budget costs about one write of the text, so this is
+  about 150 writes per large document, not one write per byte.
 - **P2c. Stage the replay entry and the response without copies.** Every transaction clones the
   whole replay cache (`ReplayCache::try_clone_eager`, `crates/protocol/src/controller.rs:268-276`,
   called at `:1631`) to stage its entry, and allocates and zeroes a `max_response_bytes` response
-  buffer (`:1613` for a transaction; `:2278` for an outcome frame). With the browser's limits
+  buffer at four sites: `:1613` for a transaction; `:2278` for an outcome frame; and, for a
+  protocol-level refusal or another immediate reply, `:1916` (`prepare_planned_immediate`) and
+  `:1934` (`process_immediate_command`), each `vec![0_u8; min(output_capacity,
+  max_response_bytes)]`. `RESPONSE_STAGING_VECS` (`:16`) counts only the first two today, so a
+  refused single-mode edit still zeroes up to 524,288 bytes in the handler and no counter shows
+  it. With the browser's limits
   (section 3.4) that is 1,048,576 bytes cloned and 524,288 bytes zeroed per edit, 43-54 µs p50
   natively (section 5.6). `preflight` cannot be the staging step: it evicts and copies the request
   into the arena (`apply_preflight_plan`, `:402-415`), so a refused transaction would leave the
@@ -972,10 +1021,12 @@ not touch them (its non-goal). No rendered bit moves in any of the three.
     can run between prepare and commit: a prepared token holds the structural generation odd, and
     every other command that enters `prepare_command_frame` is refused with `PreparedCommandOutstanding` (`:1572-1574`).
   - The response is encoded into one controller-owned buffer of `max_response_bytes`, allocated at
-    boot, and only the measured bytes are written (no zeroing per call). Both sites (`:1613`,
-    `:2278`) use it.
+    boot, and only the measured bytes are written (no zeroing per call). All four sites (`:1613`,
+    `:2278`, `:1916`, `:1934`) use it. P2c first adds the `RESPONSE_STAGING_VECS` count at `:1916`
+    and `:1934`, so the counter sees every response allocation and the gate fails before the fix.
   Gates: the existing replay tests unchanged; across a transaction (accepted or refused) the
-  test counters `PROSPECTIVE_REPLAY_CLONES` and `RESPONSE_STAGING_VECS` (`:15-16`) stay 0; a
+  test counters `PROSPECTIVE_REPLAY_CLONES` and `RESPONSE_STAGING_VECS` (`:15-16`) stay 0, and so
+  does `RESPONSE_STAGING_VECS` across a protocol-level refusal that takes `:1916` or `:1934`; a
   refused or dropped prepared transaction leaves the cache (entries, arena bytes, reservation)
   byte-equal to before; with one entry, a sequence of accepted transactions keeps exactly the last
   one replayable.
@@ -1006,9 +1057,18 @@ back silently). So the time is measured on the same code, not in the worklet:
   it is the same V8, the same module and the same exports, and Chromium runs the AudioWorklet
   thread at a higher priority, not a lower one.
 - **Elapsed quanta in the worklet:** counted without a clock, from `currentFrame` (an attribute of
-  the `AudioWorkletGlobalScope` interface, Web Audio 1.1 [S1]): the handler records `currentFrame` at the
-  start and the end of a multi-call operation, and the difference divided by 128 is the number of
-  quanta. P3's latency gate uses this.
+  the `AudioWorkletGlobalScope` interface, Web Audio 1.1 §1.32.3 [S8]): the handler records
+  `currentFrame` at the start and the end of a multi-call operation, and the difference divided
+  by 128 is the number of quanta. P3's latency gate uses this.
+- **Quanta of one callback, measured in the same run:** the page cannot read the callback size B
+  directly, so the gate measures what one continuation costs. The worklet's handler posts a ping
+  with `currentFrame`; the main thread answers it at once from its message handler; the worklet's
+  handler records `currentFrame` when the answer arrives. Q is the largest difference over 100
+  pings, divided by 128 and rounded up, with an idle main thread. A slice continuation takes the
+  same path as a ping (a post from the handler, an answer from the main thread's message handler,
+  the handler again), so Q is the measured cost of one continuation on that browser and device,
+  whatever its callback size. The evidence records Q, Q × 128 as the observed B, the `AudioContext.baseLatency`, the browser and
+  the device.
 
 **P3. Snapshot the committed session from the SDK engines** (stream H). No spec owns the public
 save. Add `engine.snapshot(): Promise<SessionSnapshot>` on the browser and headless engines over
@@ -1019,9 +1079,11 @@ pending rebuild it is the committed model and its revision; the worklet calls no
 Worker mode; in single mode the text is written and sent in slices of at most 65,536 bytes plus
 one number or literal, never in `process()`; the p99 of one slice's work plus the p99 of one
 `process()` fits in one quantum on the three 64-track documents (measured as stated above); the
-whole single-mode snapshot completes within 2 × ceil(L / 65,536) + 2 quanta of `currentFrame`
-with an idle main thread, on the three 64-track documents, and in the same number of quanta with
-the single-mode service tick stopped (so no timer drives it).
+whole single-mode snapshot completes within (S + 2) × Q quanta of `currentFrame`, with
+S = ceil(L / 65,536) and Q the quanta of one callback measured in the same run (section 6.2, "How
+the single-mode budget gates are measured"), with an idle main thread, on the three 64-track
+documents, and within the same bound with the single-mode service tick stopped (so no timer drives
+it). The evidence records Q and the observed B.
 
 **P5. Key the monitoring overlay by stable ID and compose it into every plan the control plane
 publishes** (stream H, with B for the crate). `LiveControlSoloState` is indexed by strip index of
@@ -1035,10 +1097,14 @@ and its fade-in targets the effective mute; carried retargets compare effective 
 armed tap whose owner exists in the successor but did not carry (#1327 D1), the control plane
 pushes the arm record, with the tap's current arm tag (section 8.4), into the candidate's lane
 before publication; an ID that leaves the model
-leaves the overlay in the same commit, and the SDK learns it from the reply. The meter lease is not
+leaves the overlay in the same commit, and the reply lists the arm tags of the observation
+entries it removed (`CommandReply.removed_arm_tag_count` and `SessionState::removed_arm_tags`,
+section 2.1; the outcome record and `miso.edit.v1`, section 6.3). The meter lease is not
 part of the overlay (section 8). Gates: solo track 2, add a track, adopt: the added track is silent
 and equals a fresh plan of the committed model with the same overlay; remove the only soloed track:
-the others return over the solo ramp; an armed tap on a restarted effect keeps delivering; an
+the others return over the solo ramp; an armed tap on a restarted effect keeps delivering; a commit (and a replace) that removes the
+strip or the effect of an armed tap lists exactly that tap's arm tag in the reply, and a commit
+that removes none lists none; an
 `Observe` record still pending in the predecessor's lane at the swap is applied by the carry
 (#1280 D3) and is not pushed again into the successor, so its tag is published once.
 
@@ -1047,7 +1113,8 @@ the others return over the solo ramp; an armed tap on a restarted effect keeps d
 #1383 edit specs (with P1's setters) and monitoring operations by stable ID, and to submit through
 `miso.apply.v1` with the batching of section 3.4. Remove the 48-byte record path from the SDK and
 the shipped host (`sdk/src/browser/live-controls.ts:21-68`, `miso.command.v1`), rename
-`smoothingSamples` to `rampSamples`, and return `LiveSubmitOutcome`. Gates: every live-control
+`smoothingSamples` to `rampSamples` in the strip, route, VCA and solo builders, remove it (not
+rename it) from the effect parameter builder (section 3.1), and return `LiveSubmitOutcome`. Gates: every live-control
 method's frame equals the native codec's for the same edit; a merged batch that the engine refuses
 is resent call by call and each call gets its own result; two calls on one address are never in
 one transaction, and each is resolved with a revision whose model holds its value; no SDK message
@@ -1099,15 +1166,20 @@ re-arm of one tap in one call reports only the last tag; the read record round-t
 fields through the SDK reader; render allocates nothing.
 
 **P8. Commit a typed edit list without a frame in the protocol controller** (stream B, before
-#1386). Replace (section 2.1) needs a commit that takes `SessionEdit`s and an expected revision,
-with no request frame, no request ID and no replay entry. Scope, in `crates/protocol`: a typed
+#1386). Replace (section 2.1) needs a commit that takes `SessionEdit`s, an expected revision and a
+request ID, with no request frame and no replay entry. The request ID is used only as the
+`origin_request_id` of the `SESSION_COMMITTED` event, which is a non-zero `RequestId`
+(`crates/protocol/src/queue.rs:375-381`; the framed commit passes `prepared.request_id`,
+`crates/protocol/src/controller.rs:1999`). The adapter passes the `miso.replace.v1` message's own
+`requestId` (section 2.1). Scope, in `crates/protocol`: a typed
 prepare that runs the reliable-event room check and reservation, `SessionStore::prepare_transaction`
 and the response measurement without the codec, and returns the same prepared token kind as
 `prepare_structural_plan` (`crates/protocol/src/controller.rs:1595`) with no prospective replay
 entry; `commit_prepared_structural` (`:1974`) commits it and leaves the replay cache unchanged.
 The control-plane crate's replace entry (#1386) calls it. Gates: for the same edits at the same
-revision, the typed commit and the framed apply give the same committed model, revision,
-`SESSION_COMMITTED` event and classified path; the replay cache is byte-equal before and after a
+revision and the same request ID, the typed commit and the framed apply give the same committed
+model, revision, `SESSION_COMMITTED` event (every field, `origin_request_id` included) and
+classified path; the typed commit's event carries the request ID it was given; the replay cache is byte-equal before and after a
 typed commit and after a refused one; a typed transaction above `maximum_transaction_edits` is
 accepted (the frame limits do not apply, section 2.1).
 
@@ -1119,11 +1191,11 @@ in attempt 3.
 | Spec | Amendment | Finding |
 |---|---|---|
 | #1381 | D6 also drains the reliable event lane after every message and on every service tick (P4). D1 states the browser's `ControlLimits` (section 3.4): `maximum_transaction_edits` 1,024, `maximum_control_frame_bytes` 524,288, `max_response_bytes` 524,288, `maximum_replay_entries` 1, `maximum_replay_bytes` 1,048,576, with the rule and the measured sizes they come from; it returns the frame limit and `maximum_transaction_edits` in the boot reply. D3 drops `observation_armed` and `observation_arm_samples` from `RenderCompanions` and from the carry's swap (the arm state travels in the observation slot, P7). | F2, F10, F12 |
-| #1382 | D2: no record lowering; the Worker receives transaction frames and monitoring operations by stable ID; the adapter passes the crate only `SESSION_TRANSACTION_APPLY`. D3: the meter lease leaves the overlay; the crate's reply carries the arm tags as `ArmTags { first: u64, count: u32 }` (section 2.1). The monitor codec has the size gate of section 3.3. D5 also deletes the prepared-control path. The reply drops `appliedAtSample`. The single-mode leg depends on P2a-P2c and owns the single-mode budget gate, measured as section 6.2 states. | F1, F3, F4, F5, F6, F12 |
-| #1294 | D1: `miso.apply.v1` gains `monitor` (section 3.3, with its encoding). The reply `miso.edit.v1` gains `armTagFirst` (`bigint`) and `armTagCount` (`number`), read from the outcome record (0 and 0 when the call held no `Observe` operation). `miso.document.v1` gains `offset`, and its reply becomes `{ tag, requestId, revision, offset, totalBytes, bytes, done }`: one reply with `done` true in Worker mode, slices of at most 65,536 bytes in single mode, continued by the SDK at once (section 4.3). The boot reply carries the limits. | F12 |
-| #1293 | D3: the outcome record gains `arm_tag_first u64`, `arm_tag_count u32` and a reserved zero `u32` after `revision`, so it grows from 24 to 40 bytes; the adapter fills them from `CommandReply.arm_tags` (0 and 0 when `None`). | F12 |
+| #1382 | D2: no record lowering; the Worker receives transaction frames and monitoring operations by stable ID; the adapter passes the crate only `SESSION_TRANSACTION_APPLY`. D3: the meter lease leaves the overlay; the crate's reply carries the arm tags as `ArmTags { first: u64, count: u32 }` and the arm tags of the observation entries that the commit removed (`removed_arm_tag_count`, `SessionState::removed_arm_tags`, section 2.1). The monitor codec has the size gate of section 3.3. D5 also deletes the prepared-control path. The reply drops `appliedAtSample`. The single-mode leg depends on P2a-P2c and owns the single-mode budget gate, measured as section 6.2 states. | F1, F3, F4, F5, F6, F12 |
+| #1294 | D1: `miso.apply.v1` gains `monitor` (section 3.3, with its encoding). The reply `miso.edit.v1` gains `armTagFirst` (`bigint`) and `armTagCount` (`number`), read from the outcome record (0 and 0 when the call held no `Observe` operation), and `removedArmTags` (`readonly bigint[]`, empty when the commit removed no armed tap), read through `miso_engine_web_v1_removed_arm_tags_ptr` before the reply is posted. `miso.replace.v1`'s reply carries the same fields. `requestId` is a `u64` that the SDK numbers from 1; a message whose `requestId` is 0 is malformed and refused without calling an export. `miso.document.v1` gains `offset`, and its reply becomes `{ tag, requestId, revision, offset, totalBytes, bytes, done }`: one reply with `done` true in Worker mode, slices of at most 65,536 bytes in single mode, continued by the SDK at once (section 4.3). The boot reply carries the limits. | F12 |
+| #1293 | D3: the outcome record gains `arm_tag_first u64`, `arm_tag_count u32` and `removed_arm_tag_count u32` after `revision`, so it grows from 24 to 40 bytes; the adapter fills them from `CommandReply.arm_tags` (0 and 0 when `None`) and `CommandReply.removed_arm_tag_count`. A new export `miso_engine_web_v1_removed_arm_tags_ptr` returns the address of `removed_arm_tag_count` `u64` arm tags (`SessionState::removed_arm_tags`, section 2.1), valid until the next control call; the list is at most the number of armed taps in the overlay, and the crate reuses one control-half buffer for it. | F12 |
 | #1296 | D3: the map epoch and the stale-edit refusal are not needed with stable-ID addressing; the SDK still re-reads the session map after `rebuild` for client-side checks. The batching cuts of section 3.4, its 64-call queue bound and `backpressure` refusal. | F9 |
-| #1386 | The diff lives in `crates/control-plane`, not `hosts/host-web/src/document_diff.rs`. Replace is a typed entry of the crate that builds no frame and takes no replay entry (section 2.1), not a call of #1290's `apply`. It commits through P8's typed commit in `protocol`, which lands first. | F7 |
+| #1386 | The diff lives in `crates/control-plane`, not `hosts/host-web/src/document_diff.rs`. Replace is a typed entry of the crate that builds no frame and takes no replay entry (section 2.1), not a call of #1290's `apply`. It commits through P8's typed commit in `protocol`, which lands first. `miso_engine_web_v1_replace` takes the message's `requestId` as a non-zero `u64` argument, for the `SESSION_COMMITTED` event's `origin_request_id` only (section 2.1). | F7 |
 
 ### 6.4 Findings for the coordinator
 
@@ -1246,11 +1318,13 @@ transaction (`apply`), and the engine plays a full, resolved session in every ca
 >   and bounded by the number of controls. On load, the app (or the SDK) turns the list into one
 >   transaction. Cost: three pieces that do not exist yet. (1) A field-level diff to make the list
 >   from a snapshot: the diff that `replaceSession` uses (#1386) compares whole entities and never
->   emits a finer edit, so it cannot make this list. (2) A field-level edit for each kind of entry:
->   P1 adds them for the live values (faders, mutes, trims, filters, routes, VCAs) and effect
->   parameters already have them; any other field a fan may change (for example an effect's
->   bypass, or a route target) needs its own setter, or the list cannot hold it. (3) A rule for each
->   kind of field. Without (2), the app would have to write whole entities, which would overwrite
+>   emits a finer edit, so it cannot make this list. (2) A field-level edit for each kind of entry.
+>   Many exist today: effect parameters, an effect's bypass, a strip's pan or matrix, and a route's
+>   gain, mute, matrix and target (destination) each have their own setter. Proposed issue P1 adds
+>   per-lane setters for the strip faders and mutes, the input trim, polarity and filters, and the
+>   VCA faders and mutes, which today are set only as whole groups. Any other field that the owner
+>   lets a fan change, and that has no setter, needs its own setter, or the list cannot hold it.
+>   (3) A rule for each kind of field. Without (2), the app would have to write whole entities, which would overwrite
 >   fields that the producer changed in a new version (part 2).
 >
 > **Part 2. The producer publishes a new version.**
@@ -1271,9 +1345,9 @@ transaction (`apply`), and the engine plays a full, resolved session in every ca
 > **Recommendation (not a decision).** C with U2: an overlay of changed values by stable ID, moved
 > to each new version automatically, with dropped entries shown to the fan. It is small and
 > bounded, and the engine applies it as one transaction. Its cost is the field-level diff and the
-> field-level edits of C. P1 gives them for the live values, which are most of what a fan
-> changes; every other field that the owner lets a fan change needs its own setter before the mix
-> can hold it. Part 3
+> field-level edits of C. Today's setters and P1's together cover the live values, which are most
+> of what a fan changes; any other field that the owner lets a fan change, and that has no setter,
+> needs one before the mix can hold it. Part 3
 > follows the owner's answer to #1058 question 2.
 
 ## 8. Host-local monitoring state
@@ -1316,7 +1390,11 @@ D3.
   crate, not in a plan, so it does not move; successor preparation reads it (P5). Carried strips
   keep their lane state by the carry (D15-7), and their retargets compare effective mutes. A
   `replaceSession` is one transaction (D4), so it is the same case. An ID that the transaction
-  removes leaves the overlay in the same commit.
+  removes leaves the overlay in the same commit. The reply lists the arm tag of each observation
+  entry removed (section 2.1), so a pending `armed()` settles from the reply (section 8.4). The
+  reply does not list solo entries: a solo has no pending promise, and the SDK, which keeps its
+  solo state by track ID, drops a removed track's solo when it re-reads the session map after the
+  `rebuild` (#1296 D3, as amended). A removal is always structural.
 - **How are its submits refused or acknowledged?** Monitoring operations ride in the same message
   and the same call as the transaction. Every check of both runs before the first write; a refusal
   changes neither the model nor the overlay (#1382 D4). Solo writes cells, which cannot fail; a
@@ -1392,7 +1470,11 @@ selections and settles exactly once:
 - **Rejects on disposal.** When the engine is disposed or fails first: code `wrongState`,
   diagnostic `sdk.engine.disposed` (the same rule as `applied(revision)`, section 3.1).
 - **Rejects on owner removal.** When a commit removes the strip or the effect that owns the tap,
-  the overlay drops the entry in the same commit (P5) and the reply lists it; every subscription
+  the overlay drops the entry in the same commit (P5), and the reply lists the entry's arm tag
+  (`removedArmTags` of `miso.edit.v1`, from the outcome record's `removed_arm_tag_count` and the
+  removed-tag export, section 6.3). The SDK matches each listed tag to the binding that recorded
+  it. A removal is always structural, but the SDK does not wait for its re-read of the session
+  map: the reply settles it. Every subscription
   on it that has not resolved rejects with code `wrongState`, diagnostic
   `sdk.observation.owner_removed`. A resolved subscription reports `Unarmed` reads from then on.
 - **A newer tag.** By the reference rule, a newer `Observe` for the same tap is sent only after the
