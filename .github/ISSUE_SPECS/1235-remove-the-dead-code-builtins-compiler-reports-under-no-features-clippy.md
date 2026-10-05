@@ -1,5 +1,8 @@
 # Remove the dead code builtins-compiler reports under no-features clippy
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Code anchors verified on `main` at `6fb211594`.
+
 ## Mission
 
 `builtins-compiler`'s lib test target does not pass clippy without features: two test helpers are
@@ -9,8 +12,8 @@ crate's tests lint clean with and without `test-support`.
 
 ## The defect (found by the #1220 attempt 1 verdict, MINOR-3)
 
-Every anchor below is verified on the batch K3 follow-up tree (branch `codex/batch-submix-k3`); the
-failure is identical at `0268a1c74`, so it predates batch K3.
+The failure reproduces on `main` at `6fb211594` (it was first seen at `0268a1c74`, before batch
+K3): the command exits 101 with the two errors below.
 
 ```
 cargo clippy --locked -p graph -p builtins-compiler --all-targets -- -D warnings
@@ -18,12 +21,12 @@ cargo clippy --locked -p graph -p builtins-compiler --all-targets -- -D warnings
 
 fails with two `dead_code` errors in `builtins-compiler`'s lib test target:
 
-- `fn initial_matrix_state` (`crates/builtins-compiler/src/lib.rs:911`, `#[cfg(test)]`) is never
-  used. Its callers (`:7924`, `:8061`, `:8158`) sit in tests gated
-  `#[cfg(all(test, feature = "test-support"))]`. Its writer `record_initial_matrix_state` (`:888`)
-  and the thread-local `SCALAR_INITIAL_MATRIX_TRACE` (`:811-813`) share its `cfg(test)` gate.
-- `BoundaryVariant::{Nonadjacent, NonadjacentOutputConflict}` (`:5876-5878`) are never
-  constructed: their constructors (`:7518`, `:7545`, `:7704`, `:7738`, `:7765`, `:7826`, `:7850`)
+- `fn initial_matrix_state` (`crates/builtins-compiler/src/lib.rs:1004`, `#[cfg(test)]`) is never
+  used. Its callers (`:8243`, `:8380`, `:8477`) sit in tests gated
+  `#[cfg(all(test, feature = "test-support"))]`. Its writer `record_initial_matrix_state` (`:981`)
+  and the thread-local `SCALAR_INITIAL_MATRIX_TRACE` (`:904-906`) share its `cfg(test)` gate.
+- `BoundaryVariant::{Nonadjacent, NonadjacentOutputConflict}` (`:6075`, `:6077`) are never
+  constructed: their constructors (`:7837`, `:7864`, `:8023`, `:8057`, `:8084`, `:8145`, `:8169`)
   are in `test-support`-gated tests too.
 
 CI does not see it: `qualification.yml`'s lint job runs `cargo clippy --locked --workspace
@@ -39,8 +42,8 @@ CI does not see it: `qualification.yml`'s lint job runs `cargo clippy --locked -
 ## Deliverables
 
 1. Gate `initial_matrix_state`, `record_initial_matrix_state`, `SCALAR_INITIAL_MATRIX_TRACE` and
-   any type or constant used only by them (`TestOnlyInitialMatrixTrace`,
-   `EMPTY_INITIAL_MATRIX_TRACE`, if so) and their call site at `:2201` with
+   any type or constant used only by them (`TestOnlyInitialMatrixTrace`
+   at `:869-871`, `EMPTY_INITIAL_MATRIX_TRACE` at `:889-890`, if so) and their call site at `:2315-2317` with
    `cfg(all(test, feature = "test-support"))`, matching their users.
 2. Gate the two `BoundaryVariant` variants, or the match arms that name them, the same way, so the
    enum's variant set equals what the compiled tests construct. Prefer the smallest edit that keeps

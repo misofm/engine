@@ -1,5 +1,7 @@
 # Anchor the worklet callgraph checker's C allocator names
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Mission
 
 `scripts/check-web-audioworklet-callgraph.py` refuses any function in a guarded closure whose

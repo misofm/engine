@@ -246,6 +246,17 @@ transaction").
 
 ### Follow-ups: where `main` breaks the rule
 
+**Answered by decision 15** (`live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`,
+root decisions of 2026-10-05 under the owner's explicit delegation). #1053's Q3 (report the edit
+path) is answered by D15-3 and D15-17, and its Q4 (an infinite tail for live input filters) by
+D15-4: a bounded tail, never `Infinite`. The findings below are answered there: F1 by D15-13 E1, F2
+by E2, F3 by D15-6, F4 by E4 (a correctness reason may keep a value prepared, recorded with its
+reopening condition; the delay and multiband compressor gain live bypass shunts), F6 by D15-11, F7
+by D15-1 and E5, and F9 by D15-6 (VCA membership is live on the C ABI). The classification row "routes into the
+output stay prepared" is narrowed by D15-9: a route whose tap precedes its strip's fader gets a
+live lane on every plan (#1391). The text below is kept as
+the record of 2026-10-04.
+
 Each follow-up is root's finding, subject to owner review. None is filed by this record, and no
 code changed.
 

@@ -1,5 +1,8 @@
 # Bound route gain and matrix values
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Code anchors verified on `main` at `6fb211594`.
+
 ## Mission
 
 Give every route the bounded domain the owner agreed on 2026-10-03: `gain_db` in `[-144, 24]` dB,
@@ -16,32 +19,31 @@ non-goals). It is outside *Submix strips and live aux sends* (#1196), whose clos
 
 ## Today
 
-Every anchor below is verified on the batch K3 follow-up tree (branch `codex/batch-submix-k3`).
-
-- **Session.** `validate_routes` (`crates/session/src/validate.rs:548-585`) checks a route's
-  `gain_db` (`:564`) and its four matrix coefficients (`:575-584`) with `validate_finite` only. So
+- **Session.** `validate_routes` (`crates/session/src/validate.rs:688-726`) checks a route's
+  `gain_db` (`:704`) and its four matrix coefficients (`:716-724`) with `validate_finite` only. So
   a route gain is accepted wherever its linear gain is a normal finite `f32` (about -758 to +770
   dB, plus anything low enough to round to exactly 0), and a coefficient may be any finite value.
-  The bounded precedent is the pan's `validate_finite_range(.., -1.0, 1.0, ..)` (`:446-447`), which
-  refuses `numeric.out_of_schema_range` (`validate_finite_range`, `:925-944`).
+  The bounded precedent is the pan's `validate_finite_range(.., -1.0, 1.0, ..)` (`:464-465`), which
+  refuses `numeric.out_of_schema_range` (`validate_finite_range`, `:1065-1084`).
 - **Compiler and live producers.** `graph_compiler::route_values` (`crates/graph-compiler/src/ids.rs:309`)
   backs both `route_coefficients` (`:341`) and the lowering (`crates/graph-compiler/src/compile.rs`,
   the route loop): it refuses (`RouteValueError::Domain`) a value `route_transform` refuses or an
   open fold that overflows. host-core's send producer (`RouteControlProducer::record`,
   `crates/host-core/src/route_controls.rs:86`) and host-web's admission (`COMMAND_REASON_DOMAIN`,
-  `hosts/host-web/src/lib.rs:982`; doc at `:878-883`) refuse a live value through it.
-- **The fold.** `graph::gated_route_coefficients` (`crates/graph/src/lib.rs:784`) is the one
+  `hosts/host-web/src/lib.rs:1033`, refused at `:4970-4973`; doc at `:902-906`) refuse a live value through it.
+- **The fold.** `graph::gated_route_coefficients` (`crates/graph/src/lib.rs:785`) is the one
   derivation of a route's four constants, for the bound op, the fold lane and every live record.
   It accepts a subnormal product: `route_coefficients(-120.0, [1.2e-38, 0, 0, 1], ..)` returns a
   first coefficient near `1.3e-44` (#1215 verdict INFO). Under the new bounds a subnormal product
   is still reachable (a coefficient below about `1.9e-31` at -144 dB).
 - **SDK.** The builder checks a route's `gainDb` and matrix with `f32` only
-  (`sdk/src/core/session.ts:800-808`, normalised at `:1544-1545`); `enginectl` passes a route
+  (`sdk/src/core/session.ts:862-867`, normalised at `:1635-1636`); `enginectl` passes a route
   request's values to the builder (`sdk/src/cli/session-request.ts`). Live `RouteEdits`
-  (`sdk/src/core/live-controls.ts:738-772`) checks finiteness and leaves the domain to the engine's
-  `domain` refusal (`docs/handoffs/submix-strips-and-sends/APP-LIVE.md:66-70`).
-- **Migration.** All 312 routes in checked-in JSON documents (`git ls-files '*.json'`) are inside
-  the new domains, so no document changes. The writer corpus's `ll = 1.25` is a **track** matrix
+  (`sdk/src/core/live-controls.ts:759-793`) checks finiteness and leaves the domain to the engine's
+  `domain` refusal (`docs/handoffs/submix-strips-and-sends/APP-LIVE.md:66-69`).
+- **Migration.** All 514 routes in checked-in JSON documents (`git ls-files '*.json'`; objects with
+  `gain_db` and `channel_matrix` in a `routes` array, counted at `6fb211594`) are inside the new
+  domains, so no document changes. The writer corpus's `ll = 1.25` is a **track** matrix
   and is not a route.
 
 ## Decisions

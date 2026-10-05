@@ -1,202 +1,192 @@
 # Let C ABI sends follow their source strip's mute live
 
-Slice 28 of *Submix strips and live aux sends* (#1196). Batch C1, after *Deliver value-only send and
-submix-strip edits to the running C ABI plan* (#1225); the root pushes C1 once after this slice's verdict.
-**Re-verify every anchor after #1053's core (#1257, #1258) and slice 27 land.** (Amended
-2026-10-04, when #1053 became an umbrella of slices #1253-#1266; the references below follow its
-decision record and guards G1-G3.)
+Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-1, D15-2, D15-6, D15-13 E3).
+Code anchors verified on `main` at `6fb211594`.
 
-The design record cited below (`DESIGN`, `VERIFY-1` to `VERIFY-3`, `REVISION-1`, `REVISION-2` and
-`APPLIED-3`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
+Slice 28 of *Submix strips and live aux sends* (#1196). Rewritten 2026-10-05 for decision 15.
+Decision 14's follow-up F3 (`docs/rulings/live-update-versus-rebuild-2026-10-04.md`, "F3, rule 2")
+asked whether `follows_mute` itself should be live. Decision 15 answers yes (D15-6, D15-13 E3), on
+both hosts. This issue is the C ABI half, and *Make a send's follows_mute live in the browser*
+(#1342) is the browser half. Decision 15 supersedes the old capi-owned `LiveRouteState` mirror and
+the per-queue `BACKPRESSURE` gates (D15-2).
 
 ## Product outcome
 
-On a fan's phone, or any C ABI host, muting or unmuting a track or a bus is value-only even when a
-send follows that strip's mute. The strip's mute and every `follows_mute` send from it move together,
-through the same declicked ramp, in one all-or-nothing commit, with no plan rebuild.
+On a C ABI host, both of these are value-only, with no plan rebuild:
 
-Until this slice such a mute is a plan replacement (the P13 guard of `DESIGN.md`): a silent block, a
-source-ring reset and a re-seek, because #1053's live path would otherwise push the strip's mute and
-leave the follow-muted send's prepared coefficients behind, rendering something other than the
-committed model.
+- muting or unmuting a track or a bus whose mute a send follows;
+- turning a send's `follows_mute` on or off.
 
-## Context (re-verify after #1257 and slice 27 land)
+The strip's mute and every `follows_mute` send from it move together, over the same mute ramp, in
+one all-or-nothing commit.
 
-- **After *Deliver value-only send and submix-strip edits to the running C ABI plan*:**
-  - capi classifies a committed-model delta that touches only strip faders and pans (tracks and
-    submixes) and the gain, mute and matrix of routes into submixes as live, through host-core's
-    `classify_live_delta` (#1053 D1, #1255, behind the `control-provider` feature,
-    `crates/host-core/Cargo.toml:15`);
-  - it checks every domain, then room in every queue, then the protocol token, then pushes, then
-    commits, which cannot fail after the check (#1053 D6, #1257's `commit_live`);
-  - every live record uses the ramp length #1053 gives (its D3, `LiveRamps::for_session`; a step
-    until #1054);
-  - the **P13 follow guard** (#1053's G2) is still in `classify_live_delta`: a delta that changes
-    `left_mute` or
-    `right_mute` of a strip that, in the post-commit model, is the source of a route with
-    `follows_mute: true` is structural.
-- **The follow composition already exists in host-core** (*Let a send follow its source strip's mute
-  live in the browser*, #1224):
+## Context
 
-  ```rust
-  impl LiveRouteMuteFollow {
-      pub fn delta<'a>(routes: &'a LiveRouteState,
-                       effective_mute: &'a dyn Fn(usize /* strip */, usize /* lane */) -> bool)
-          -> impl Iterator<Item = (usize, [bool; 2])> + 'a;
-  }
-  ```
-
-  It yields `(live-route index, new source_lane_muted)` only for a `follows_mute` route whose
-  `source_lane_muted` changes, never a redundant one. It takes the effective mute as a function so
-  the C ABI can supply the committed model's mutes without host-web's solo state.
-- **`LiveRouteState`** (*Admit live send commands in the browser*, #1222) mirrors each live route's
-  `{gain_db, matrix, mute, follows_mute, source_lane_muted}` and its source strip index, with shadow,
-  commit and rollback.
-- **The C ABI has no solo.** A strip's effective mute on the C ABI is its committed
-  `[left_mute, right_mute]`.
-- **Follow mute is a send's property.** A route into the output never follows: `follows_mute: true`
-  on it is refused at validation (*Let a route into a submix follow its source strip's mute in the
-  session*, #1218), so every follow record targets a live route.
-- **The "never a redundant record" rule** (`crates/host-core/src/solo.rs:58-70`): re-entering the ramp
-  kernel on a settled lane can turn an exact `+0.0` into `-0.0`; it is digest-visible.
-- **#1053's spec carries the P13 note** as its "Guards (DESIGN P13)" section, bullets G1-G3, if the
-  spec is still in `.github/ISSUE_SPECS/`.
+- **After *Deliver value-only send edits to the running C ABI plan* (#1225):**
+  - the classifier (`crates/host-core/src/live_delta.rs`) pairs tracks and routes into submixes,
+    and pairs submixes after *Deliver value-only submix-strip fader, mute and pan edits to the
+    running C ABI plan* (#1390), which makes a bus's own mute live;
+  - it emits route records from `route_target(model, route)`, which computes `follow_zeroed` from
+    the source strip's `effective_strip_faders()` mute (#1225 D3), exactly as preparation does
+    (`crates/graph-compiler/src/compile.rs:323-358`);
+  - every live value is a latest-target cell (#1312; route lanes #1347).
+- **What is still guarded.** Two rules keep a follow edit structural:
+  - **Guard G2.** At `6fb211594` it is `LiveRebuild::FollowedMute`
+    (`crates/host-core/src/live_delta.rs:133-135`), raised at `:276-280` through
+    `follows_mute_from` (`:543-549`). A lane-mute change on a strip that a `follows_mute` route in
+    `next` reads is structural.
+  - **#1225 D1.** It keeps `follows_mute` itself structural.
+- **Why the guard can go.** The follow composition is a function of the post-commit model. A
+  following send's gated coefficients change only through `follow_zeroed`, which the existing
+  route ramp carries (decision 14, `follows_mute` row of the edit table, and F3). The route record
+  that #1225 D3 builds from `next` therefore already holds the right target. The C ABI has no
+  solo, so a strip's effective mute there is its `effective_strip_faders()` mute: its own mute, or
+  the mute of any VCA that reaches it.
+- **The browser's mirror is not used here.** `LiveRouteState` holds `follows_mute` "Fixed for the
+  plan" (`crates/host-core/src/live_route_state.rs:45-46`), and `LiveRouteMuteFollow::delta`
+  (`:242-257`) composes the browser's solo state. The C ABI diffs models instead (#1225 D3) and
+  never reads the mirror. The browser half (#1342) needs one mirror setter, which D7 adds here.
+- **A follow is a send's property.** Validation refuses `follows_mute: true` on a route into the
+  output (#1218), so every follow record targets a live route.
+- **Superseded tests.** These tests assert today's G2 behaviour:
+  - `a_followed_mute_change_needs_a_rebuild` (`crates/host-core/tests/live_delta.rs:412`);
+  - the G2 case ("a followed mute") of
+    `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing`
+    (`crates/capi/src/runtime/live_tests.rs:1015`);
+  - #1225's gate-2 cases for `0x0507` and for a follow-source mute;
+  - #1390's G2 cases for a bus source: its gate-3 case (a bus mute that a `follows_mute` send
+    reads) and its gate-4 `FollowedMute` unit test (#1390 D4 extends G2 to submix sources).
 
 ## Decisions frozen for this slice
 
-- **D1. Follow records.** A live delta that changes a strip's `left_mute` or `right_mute` also
-  composes its follow records: capi keeps one `LiveRouteState` per live plan (seeded from the
-  committed model at preparation), updates its shadow with the post-commit `gain_db`, `matrix` and
-  `mute` of every live route, and calls `LiveRouteMuteFollow::delta` with
-  `effective_mute(strip, lane) = ` the post-commit model's mute of that strip lane. For each yielded
-  `(route, source_lane_muted)` it builds the record with `RouteControlProducer::record` (the route's
-  current `gain_db`, `matrix` and `mute`, the new `source_lane_muted`, the mute ramp length of `LiveRamps::for_session`).
-- **D2. One commit.** Strip mute records, route value records and follow records are domain-checked
-  together, room-checked together across every queue, pushed, then committed infallibly, in #1053's
-  order. A full queue is typed `Backpressure`: model, revision, replay, queues and the route mirror
-  unchanged.
-- **D3. Ramps.** A follow record uses the same ramp length as the strip mute record it follows
-  (`LiveRamps::for_session(next).mute_samples`).
-- **D4. The guard goes.** Remove the P13 follow guard (G2) from `classify_live_delta`: a mute on a follow
-  source is now live. The submix-strip and VCA parts of P13 are not this slice's (slice 27 lifted the
-  first; the VCA umbrella owns the second).
-- **D5. #1053's spec note.** Mark G2 in #1053's spec as superseded by this slice, if the spec is
-  still in `.github/ISSUE_SPECS/`. G3, the VCA guard, stays until *Deliver value-only VCA edits to
-  the running C ABI plan* (#1247), and this slice keeps it in `classify_live_delta` (amended at
-  filing of *VCA groups*, #1239).
-- **D6. Resources.** The `LiveRouteState` mirror and its shadow are charged in `capi_resources`
-  (`crates/capi/src/runtime/compile.rs:109-213`), and the `resource_lifecycle` oracles change by
-  exactly those rows.
+- **D1. Remove guard G2.** Delete `LiveRebuild::FollowedMute` and `follows_mute_from`. A lane-mute
+  change on any strip is classified as today's mute rules say, whether or not a send follows it.
+- **D2. `follows_mute` is live.** On a route into a submix, the classifier masks `follows_mute`
+  out of the structural comparison, as it masks `gain_db`, `mute` and `channel_matrix`.
+- **D3. One composition.** The classifier adds no new record type. After D1 and D2, #1225 D3's
+  route diff already yields every follow record:
+  - a source strip's mute change moves `follow_zeroed` for each route that follows it;
+  - a `follows_mute` toggle moves `follow_zeroed` whenever the source has a muted lane.
+
+  The classifier yields one route record per changed target and none for an unchanged one.
+- **D4. One commit.** Strip mute records and route records, follow records included, are built and
+  checked together. Then they are written to their cells and committed, in #1225 D6's order. A
+  domain refusal on any record writes no cell.
+- **D5. Ramps (D15-1).** A follow record is a gate change, so it uses the session's mute length,
+  the same length as the strip mute record it follows (#1225 D4), including a per-edit length the
+  strip's mute edit carries: its `Mute` entry, read through `LiveRamps::resolve` (*Carry an
+  optional per-edit ramp length on live session edits*, #1394 D6). The strip and its sends
+  therefore ramp together.
+- **D6. Stored automation.** No host renders stored mute automation yet. When *Research: render
+  stored session automation in the engine, identically on every platform* (#1058) designs mute
+  automation, a following send must follow the automated mute through this same `route_target`
+  composition. This issue adds nothing for it.
+- **D7. The shared mirror setter.** Add `LiveRouteState::set_follows_mute(route, follows_mute) ->
+  bool` beside `set_mute` (`crates/host-core/src/live_route_state.rs:181`): it goes through
+  `update`, so the shadow and `rollback` cover it, and it returns `false`, changing nothing, for
+  an unknown index. When it turns the flag off it also sets `source_lane_muted` to `[false; 2]`,
+  so the mirror keeps the invariant of `LiveRoute::source_lane_muted` (`:51-53`). Replace "Fixed
+  for the plan" in the field's doc (`:45`) with a pointer to the setter. The C ABI does not call
+  it; *Make a send's follows_mute live in the browser* (#1342) does. A host-core unit test covers
+  set, rollback and the unknown index.
 
 ## Deliverables
 
-- D1-D3 in capi's live commit path.
-- D4 in host-core's `classify_live_delta`.
-- D5 and D6.
-- `docs/C_ABI_V1_QUALIFICATION.md`: a mute on a strip that sends follow is value-only, and its sends
-  follow in the same commit.
+- D1-D5 in the classifier and in `crates/control-plane`'s live commit path; D7 in host-core.
+- `docs/C_ABI_V1_QUALIFICATION.md`: a mute on a strip that sends follow is value-only, its sends
+  follow in the same commit, and `follows_mute` is value-only.
+- The superseded tests in Context, deleted or inverted in the same PR.
+- In `.github/ISSUE_SPECS/1053-*.md`, if that spec is still in the directory: mark guard G2's
+  bullet as superseded by this issue.
 
 ## Authorized paths
 
-- `crates/capi/src/runtime/{control.rs,compile.rs}`, and any capi runtime module #1053 or slice 27
-  added for the live commit path
-- `crates/capi/tests/resource_lifecycle.rs` and the capi test file slice 27 added
-- `crates/host-core/src/` (`classify_live_delta` only; `LiveRouteMuteFollow` and `LiveRouteState` are
-  reused, not changed) and `crates/host-core/tests/`
-- `docs/C_ABI_V1_QUALIFICATION.md`
-- `.github/ISSUE_SPECS/1053-*.md` (guard G2's bullet only), if the spec is still in the directory
-- this spec
+- `crates/host-core/src/live_delta.rs` (the classifier).
+- `crates/control-plane/src/control.rs`: the live commit path (moved there by #1309).
+- `crates/host-core/tests/live_delta.rs`, `crates/capi/src/runtime/live_tests.rs` and
+  `crates/capi/tests/resource_lifecycle.rs`.
+- `crates/host-core/src/live_route_state.rs`: D7's setter, the field doc and its unit test only.
+- `docs/C_ABI_V1_QUALIFICATION.md`.
+- `.github/ISSUE_SPECS/1053-*.md`: guard G2's bullet only.
+- This spec.
 
 ## Non-goals
 
-- No solo on the C ABI.
-- No change to `LiveRouteMuteFollow` or to the browser path.
-- No live output routes, and no follow on them (they never follow).
-- No VCA mute composition (*Deliver value-only VCA edits to the running C ABI plan*).
-- No new symbol, opcode, field or struct layout change.
+- No browser change (#1342). No change to `LiveRouteMuteFollow`, and none to `LiveRouteState`
+  beyond D7's setter.
+- No solo on the C ABI. No follow on a route into the output, which validation refuses.
+- No VCA work: #1247 removes guard G3. This slice reads the effective mute through
+  `effective_strip_faders()`, which is correct once G3 goes.
+- No new C symbol, opcode or field, and no struct layout change.
 
 ## Hazards
 
-- **A redundant record moves bits.** A strip mute that changes no follow route's
-  `source_lane_muted`, or a strip that is the source of no `follows_mute` route, pushes no route
-  record.
-- **Ordering inside one transaction.** A transaction that both mutes a source and edits one of its
-  sends must compose from the post-commit values of both, so the route record carries the edited gain
-  and the new `source_lane_muted` together.
-- **Delayed sends.** A follow-muted delayed send stays active and mixes zeros (`DESIGN.md` P4); its
-  settled comparison point includes its compensation delay.
-- **#1053's L0 window.** A live edit during a plan swap lands in the candidate, never the retiring
-  plan; the candidate's `LiveRouteState` is the one updated.
+- **A redundant record moves bits.** A strip mute that changes no follower's `follow_zeroed` must
+  emit no route record. Neither must a toggle of `follows_mute` while the source is unmuted.
+- **One transaction, both edits.** When one transaction mutes a source and edits one of its sends,
+  the route record must carry the edited gain and the new `follow_zeroed` together. D3 gets this
+  right only because it reads `next` alone.
+- **Delayed sends.** A follow-muted delayed send stays active and mixes zeros (`DESIGN.md` P4,
+  `docs/handoffs/submix-sends-2026-10-02/DESIGN.md`). Its settled comparison point includes its
+  compensation delay.
 
 ## Objective gates
 
-1. **PCM through the C ABI.** In the capi test file slice 27 added: a session where track `t` sends
-   `pre_fader` with `follows_mute: true` into bus `b`, and `b` routes to the output. Through the
-   exported entry points, `020f` mutes `t`'s left lane, then both lanes, then unmutes it.
-   - Each edit changes the **same** plan: no new epoch, no re-seek, no silent block.
-   - After `latency_samples` plus the mute ramp (plus the send's compensation delay where it has
-     one), the output is bit-identical to a plan compiled from the committed model and fed the same
-     sources from sample 0.
-   - `t` and a second track feed distinct, non-constant signals on each lane, and the send's matrix
-     is asymmetric, so a wrong column or lane differs.
-   - Run with 1 and 10 tracks at each of the four launch rates (44.1, 48, 88.2 and 96 kHz).
+1. **PCM through the C ABI.**
+   - Fixture: track `t` sends `pre_fader` with `follows_mute: true` into bus `b`, and `b` routes
+     to the output. `t` and a second track feed distinct, non-constant signals on each lane, and
+     the send's matrix is asymmetric.
+   - Through `SESSION_TRANSACTION_APPLY`: `0x020f` mutes `t`'s left lane, then both lanes, then
+     unmutes it. Then `0x0507` turns `follows_mute` off while `t` is muted, and back on.
+   - Each edit keeps the same plan: no new epoch, no re-seek and no silent block.
+   - The comparison point is `latency_samples`, plus the mute ramp, plus the send's compensation
+     delay. From there the output is bit-identical to a plan compiled from the committed model.
+   - Run with 1 and 10 tracks at 44.1, 48, 88.2 and 96 kHz.
+2. **No redundant record** (classifier unit tests).
+   - Muting a track that no route follows yields no route record.
+   - Re-muting a muted source yields none.
+   - Toggling `follows_mute` on an unmuted source yields none.
+   - Flipping only the right lane yields one record, with only the right column zeroed.
+3. **All or nothing.** In a transaction that mutes `t` and sets an out-of-domain gain on its send,
+   the gain fails the domain check. No cell is written, and the model, revision and replay cache
+   are unchanged.
+4. **Realtime.** The race test
+   `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
+   (`crates/capi/tests/resource_lifecycle.rs:2900`) also races follow-source mutes and `0x0507`
+   toggles, over 20 runs:
+   - `allocations == 0` and `frees == 0` around every render call after warm-up;
+   - zero `INTERNAL` results;
+   - a final block bit-identical to a fresh plan of the final committed model.
+5. **Unchanged behaviour and policy.** The same commands as gate 6 of #1225:
+   - `audit capi`;
+   - `check-capi-abi.sh` and its self-test;
+   - the workspace test step;
+   - fmt and clippy;
+   - the host-core, realtime and workspace policy scripts;
+   - `check-cross-targets.sh`;
+   - `run-aarch64-tests.sh debug`.
 
-   *Test value: it turns red if the follow records are not pushed with the strip mute, zero the wrong
-   column, or carry a stale gain, or if the follow-source mute is still classified structural.*
-2. **No redundant record.**
-   - Muting a track that is the source of no `follows_mute` route pushes no route record (each
-     route queue's `free()` is unchanged).
-   - Re-muting an already muted source pushes none.
-   - A mute that flips only the right lane pushes one record, with only the right column zeroed.
+## Test value
 
-   *Test value: it turns red if the composition re-emits unchanged targets, which re-enters the ramp
-   kernel and moves a settled lane's zero sign.*
-3. **All or nothing.** A transaction whose follow record would overfill its route queue returns
-   `Backpressure`; no strip record and no route record is pushed, and the model, revision, replay
-   and route mirror are unchanged.
-   *Test value: it turns red if the strip mute is pushed or committed while its follow record is
-   refused.*
-4. **Realtime.** The two-thread race in `crates/capi/tests/resource_lifecycle.rs` (*Qualify live C
-   ABI edits against a concurrently rendering plan*, #1258) races follow-source mutes against render and a structural swap over 20 runs:
-   `allocations == 0` and `frees == 0` around every render call after warm-up; zero `INTERNAL`
-   results; the final block bit-identical to a fresh plan of the final committed model.
-   *Test value: it turns red if the follow composition allocates on the render thread or a racing
-   mute lands in the retiring plan.*
-5. **Unchanged behaviour.**
-   - Every existing capi test passes, including slice 27's, except its gate-2 case that expected a
-     follow-source mute to be structural, which this slice inverts in the same PR.
-   - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test` pass.
-   - `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
-     `./target/release/audit capi`, reports zero allocations, locks and syscalls.
-   - The `resource_lifecycle` oracles change only by the D6 rows.
-6. **4-lane.** `bash scripts/run-aarch64-tests.sh debug` on an arm64 host, or CI's `aarch64-debug`
-   job at the C1 push.
-7. **Workspace and policy.**
-   - the workspace test command (`DESIGN.md` section 7)
-   - `cargo fmt --all -- --check`
-   - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
-   - `bash scripts/check-realtime-policy.sh` and `bash scripts/test-realtime-policy.sh`
-   - `bash scripts/check-host-core-policy.sh` and `bash scripts/test-host-core-policy.sh`
-
-## Evidence
-
-- The output of every gate command above, from the PR's head commit.
-- Each new test's name with its one-sentence test-value answer.
-- The `resource_lifecycle` row changes, each with its reason.
-- The diff of #1053's spec note, if the spec was still in the directory.
+- Gate 1 turns red if the follow records are not written with the strip mute, zero the wrong
+  column or carry a stale gain, or if a follow-source mute or a `follows_mute` toggle is still
+  structural.
+- Gate 2 turns red if the composition re-emits unchanged targets. That re-enters the ramp kernel
+  and moves a settled lane's zero sign.
+- Gate 3 turns red if the strip mute is written while a record in its transaction is refused.
+- Gate 4 turns red if the follow composition allocates on render, or if a racing mute lands in the
+  retiring plan.
+- D7's unit test turns red if the setter bypasses the shadow (a refused browser transaction would
+  keep the flipped flag) or leaves stale `source_lane_muted` lanes after turning the flag off.
 
 ## Dependencies
 
-- *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225)
-
-## Standing rules for the implementer
-
-- Work from this body and the merged code of #1053's slices and slice 27. Extend their paths; do not fork
-  them.
-- The commit after the first push is infallible by construction. No ack precedes a drop.
-- Never emit a redundant record.
-- "Bit-identical" gates are hard stops. NaNs are folded (decision 10).
-- A test that greps source or prose is refused. A superseded test is deleted, or inverted, in the
-  same PR.
-- Commit on the C1 batch branch. The root pushes C1 once after this slice's verdict.
-- Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+- *Deliver value-only send edits to the running C ABI plan* (#1225)
+- *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390),
+  for a bus whose mute a send follows
+- *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
+- *Hold live values in latest-target cells on both hosts* (#1312)
+- *Hold route-lane values in latest-target cells* (#1347)
+- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
+  (#1054)
+- *Carry an optional per-edit ramp length on live session edits* (#1394), for D5

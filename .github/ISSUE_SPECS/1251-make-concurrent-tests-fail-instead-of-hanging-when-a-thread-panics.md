@@ -1,5 +1,8 @@
 # Make concurrent tests fail instead of hanging when a thread panics
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+Code anchors verified on `main` at `6fb211594`.
+
 Tooling issue, the follow-up that *Make the live-route allocation gates wait on the queue and fail
 instead of hanging* (#1250, closed by PR #1249) left out of scope. Its verdict (Sol, MINOR-1)
 listed the sites below. No production code changes.
@@ -29,9 +32,9 @@ A channel whose sender is dropped when its thread unwinds (`recv_timeout` return
 `Disconnected`) is an equally good release for a lockstep handshake, except inside an armed audit
 scope (see Hazards).
 
-## Sites (verified on `main` at `1cb677a76`)
+## Sites
 
-1. **`crates/capi/src/ffi.rs:2295` `plan_queries_are_pure_and_concurrent_with_render`.** The scoped
+1. **`crates/capi/src/ffi.rs:2496` `plan_queries_are_pure_and_concurrent_with_render`.** The scoped
    render thread runs `assert_eq!` in a loop and clears `rendering` only after it; the query thread
    spins on `while rendering || queries == 0`. A render failure hangs the scope. This is #1250's
    exact shape.
@@ -52,12 +55,12 @@ scope (see Hazards).
    `scoped_allocator_attribution_controls_are_live_and_isolated`.** A three-`Barrier` lockstep
    (`:60-80`): a worker assertion failure leaves the main thread blocked in `done.wait()`, inside
    `audit::in_render_scope`.
-6. **`crates/capi/src/runtime/tests.rs:2001`
+6. **`crates/capi/src/runtime/tests.rs:2949`
    `barrier_schedule_separates_one_source_producer_from_exclusive_render`.** A two-`Barrier`
-   lockstep (`:2012-2013`) between a source producer and a renderer: either side's failed
+   lockstep (`:2960-2961`) between a source producer and a renderer: either side's failed
    assertion leaves the other blocked at a barrier.
 
-**NIT (#1250 verdict, NIT-1).** `crates/capi/tests/resource_lifecycle.rs:1505` defines its own
+**NIT (#1250 verdict, NIT-1).** `crates/capi/tests/resource_lifecycle.rs:2030` defines its own
 `StopOnDrop`, identical to the helper's private one (`tools/bench-support/src/producer.rs:28`).
 
 ## Decisions
@@ -74,18 +77,32 @@ scope (see Hazards).
   becomes `pub` (documented). Sites in crates that already depend on `bench-support` (`tools/audit`,
   `crates/compressor`) use it. `crates/engine` cannot (`bench-support` depends on `engine`) and fixes
   its two sites locally.
-- **D4. The capi copy (NIT).** `crates/capi` does not depend on `bench-support` today, and
-  `bench-support` installs its audited `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169`)
-  in any binary that links it. Add `bench-support` as a capi **dev-dependency** and use its
-  `StopOnDrop` in `resource_lifecycle.rs` and in sites 1 and 6 only if `cargo test --locked -p capi`
-  stays green with it; otherwise keep capi's own copy, use it for sites 1 and 6 within the same test
-  target where possible, and record in the evidence why the dedupe was declined.
+- **D4. The capi copy (NIT).** `crates/capi` has `bench-support` as a dev-dependency
+  (`crates/capi/Cargo.toml:25-26`), but nothing in capi's library test binary names a
+  `bench_support` symbol today (`crates/capi/src` never does). An rlib whose symbols are never named
+  is not linked, and its `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169-170`) then
+  installs nothing (`:223-226`). So that binary does not run under the audited allocator today.
+  - `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`),
+    from which its allocation counts come. That test binary cannot link `bench_support`, so its
+    `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason.
+  - Sites 1 and 6 sit in capi's library test binary. Naming `bench_support::producer::StopOnDrop`
+    there links `bench-support` into it for the first time. The audited allocator becomes its
+    global allocator, and every engine render in it, already inside `in_render_scope`
+    (`crates/engine/src/realtime/audit.rs:174-204`, compiled in because `bench-support` enables
+    `engine/realtime-audit`, `tools/bench-support/Cargo.toml:14`), is then audited under the
+    default `Mode::Abort`. That is a real change, not a no-op.
+  - Decision: sites 1 and 6 use `bench_support::producer::StopOnDrop` (D3), and capi's whole
+    library test suite must pass under the audited allocator; site 1's test calls
+    `bench_support::alloc::assert_installed()` once, so the gate cannot pass with the allocator
+    silently absent. A library test that fails only under it is a render-path defect the audit
+    exists to catch: it is recorded in the evidence and filed as its own issue, and sites 1 and 6
+    then use a local guard like `resource_lifecycle.rs`'s, so this tooling slice installs no
+    allocator.
 
 ## Authorized paths
 
 - `crates/capi/src/ffi.rs` (site 1's test only), `crates/capi/src/runtime/tests.rs` (site 6's test
-  only), `crates/capi/tests/resource_lifecycle.rs` (its `StopOnDrop` only), `crates/capi/Cargo.toml`
-  (the `[dev-dependencies]` entry of D4 only)
+  only)
 - `tools/audit/src/builtins_graph.rs` (site 2's thread handling only)
 - `crates/engine/src/realtime/spsc.rs` (site 3's test only), `crates/engine/tests/observation_transport.rs`
   (site 4's test only)
@@ -123,7 +140,8 @@ scope (see Hazards).
    or binary exits with a failure well inside the bound and prints the planted panic or the
    deadline message. Record both exit codes and the message per site.
 2. **Nothing else moved.**
-   - `cargo test --locked -p capi`, `cargo test --locked -p engine`,
+   - `cargo test --locked -p capi` (its library suite under the audited allocator, D4),
+     `cargo test --locked -p engine`,
      `cargo test --locked -p compressor --test conformance`, `cargo test --locked -p audit` and
      `cargo test --locked -p bench-support` pass;
    - `cargo build --locked --release -p audit`, then
@@ -145,7 +163,6 @@ planted panics show once, as PR evidence.
 ## Evidence
 
 - Gate 1's table: site, planted panic, exit code and message before and after.
-- D4's outcome: deduped, or declined and why.
 
 ## Dependencies
 

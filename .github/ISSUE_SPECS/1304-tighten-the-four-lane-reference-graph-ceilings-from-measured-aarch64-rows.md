@@ -1,5 +1,7 @@
 # Tighten the four-lane reference graph ceilings from measured AArch64 rows
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Test-budget follow-up of *Prepare C ABI plans with live effect lanes* (#1263, slice of #1053),
 from its verdict's NIT 2 (`docs/handoffs/live-updates-1053/1263-attempt1.md`, recorded as "#1263
 N2" in that directory's `README.md`). No production code changes.
@@ -87,8 +89,8 @@ both are width-independent and out of scope here.)
 
 - Production code, any eight-lane ceiling, the width-independent rows, `REFERENCE_MODEL_BUDGET`.
 - Changing the 10 % rule or the budget test's assertions.
-- The C ABI's live-window cost itself (the owner question *Bound C ABI live effect windows by lane
-  depth*).
+- The C ABI's live-window cost itself (*Size each effect's automation span window from the
+  producers its plan has*, #1306).
 
 ## Hazards
 

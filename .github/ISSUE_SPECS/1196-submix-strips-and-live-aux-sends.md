@@ -111,7 +111,7 @@ Dependency lines in the slices name the exact published titles.
 | 24 | #1222 | Admit live send commands in the browser | #1221, #1214 |
 | 25 | #1223 | Enumerate sends and drive them from the SDK | #1222 |
 | 26 | #1224 | Let a send follow its source strip's mute live in the browser | #1223 |
-| 27 | #1225 | Deliver value-only send and submix-strip edits to the running C ABI plan | #1224, #1053 |
+| 27 | #1225 | Deliver value-only send edits to the running C ABI plan | #1224, #1053 |
 | 28 | #1226 | Let C ABI sends follow their source strip's mute live | #1225 |
 
 **This umbrella closes on shipped product**, when slices 00-28 (18a and 18b included) have closed.

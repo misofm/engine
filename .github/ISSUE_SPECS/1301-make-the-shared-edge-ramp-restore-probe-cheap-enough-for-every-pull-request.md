@@ -1,5 +1,7 @@
 # Make the shared edge-ramp restore probe cheap enough for every pull request
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Tooling follow-up to *Make every banked effect's state restore allocation-free* (#1278, closed by
 PR #1299). Its delay follow-up verdict left MINOR-3 open: "The shared edge probe costs about 70 s
 in debug per PR, because all four rates are probed and the delay's rings are large. A rate filter

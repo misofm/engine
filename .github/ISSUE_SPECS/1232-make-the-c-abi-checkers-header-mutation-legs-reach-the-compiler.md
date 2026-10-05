@@ -1,5 +1,7 @@
 # Make the C ABI checker's header mutation legs reach the compiler
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Mission
 
 `scripts/check-capi-abi.sh --self-test` claims to prove that the C ABI gate refuses a drifted

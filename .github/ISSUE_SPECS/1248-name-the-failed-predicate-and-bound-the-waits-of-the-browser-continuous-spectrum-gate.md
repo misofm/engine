@@ -1,5 +1,7 @@
 # Name the failed predicate and bound the waits of the browser continuous-spectrum gate by a deadline
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Problem
 
 The browser qualification's `sdk-spectrum-continuous` gate failed once in Firefox and passed when
@@ -55,8 +57,17 @@ anchor is verified on `8c6268967`.
 
 ## Objective gates
 
-1. `npm run qualify -- --check-matrix --self-test-mutations` in `hosts/host-web/qualification`
-   (SDK source-bundle mode, CI's) passes in Chromium, Firefox and WebKit.
+1. Build the shipped artifact as the `artifact` job does (`rm -rf target/ci/qualification-artifacts
+   target/ci/qualification-named-twin && mkdir -p target/ci/qualification-artifacts
+   target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin
+   target/ci/qualification-named-twin target/ci/qualification-artifacts`), run
+   `npm ci --no-audit --no-fund` in `sdk/` and `npm ci` in `hosts/host-web/qualification`, then
+   from `hosts/host-web/qualification` run, for each of `chromium`, `firefox` and `webkit`,
+   `npm run qualify -- --artifacts "$PWD/../../../target/ci/qualification-artifacts" --sdk-root
+   "$PWD/../../../sdk" --browser <name> --check-matrix --self-test-mutations` (the `browser` job's
+   invocation in `.github/workflows/qualification.yml`; `--sdk-root` selects the SDK source-bundle
+   mode CI runs; a headless machine needs an audio sink, which CI provides with a PulseAudio null
+   sink). All three pass.
 2. A planted slow automatic delivery (a 500 ms delay before the first `onUpdate`) still passes,
    while the same delay against the old 100 ms race fails. Record both as PR evidence, not as a
    committed test.

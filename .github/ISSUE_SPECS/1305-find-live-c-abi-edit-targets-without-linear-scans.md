@@ -1,12 +1,15 @@
 # Find live C ABI edit targets without linear scans
 
+Stream B of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-11, D15-2).
+Code anchors verified on `main` at `6fb211594`.
+
 Control-thread performance follow-up of *Apply value-only effect parameter edits to the running
 C ABI plan* (#1264, slice of #1053), from its verdict's NIT 2 and NIT 3
 (`docs/handoffs/live-updates-1053/1264-attempt1.md`, recorded as "#1264 N2 and N3" in that
 directory's `README.md`). Weekly-performance-pass class: no render-thread change and no rendered
 bit may move.
 
-## Problem (verified on `main` at `d2fe0555a`)
+## Problem
 
 A live C ABI edit (`commit_live`, `crates/capi/src/runtime/control.rs:1065`) does three kinds of
 control-thread work whose cost grows with the session, not with the edit.
@@ -16,9 +19,9 @@ control-thread work whose cost grows with the session, not with the edit.
    (`:321`) for every track. `effect_records` lowers the track before and after
    (`current.lower_track(before)`, `next.lower_track(after)`, `:340-341`). Lowering builds a
    `Vec<Effect>` per console section and clones each slot's ID, identity and `params`
-   (`crates/session/src/model.rs:440-460`). Only then does it skip instances whose `bypass` and
-   `params` are equal (`:370-373`, `same_params` at `:505`). A fader-only edit on one track of a
-   200-track session lowers all 200 tracks twice.
+   (`lower_track`, `crates/session/src/model.rs:430`, through `lower_section`, `:452-466`). Only
+   then does it skip instances whose `bypass` and `params` are equal (`:370-373`, `same_params`
+   at `:505`). A fader-only edit on one track of a 200-track session lowers all 200 tracks twice.
 2. **Each effect instance's producer is found by a linear scan (N3).** `commit_live` finds it
    with `effects.iter().position(..)` over the whole producer table, per instance in the delta
    (`control.rs:1123-1128`).
@@ -39,13 +42,21 @@ delta and the strip table share canonical track order (`control.rs:1094-1107`).
   (`crates/host-core/src/prepare.rs:1382-1383`), whose builder appends each entry's rows
   contiguously, in entry order (`build_parameter_catalog`, `control_provider.rs:461`, loop at
   `:490-500`);
-- the producers: `attach_effect_live_controls(&mut effects, depth)` (`prepare.rs:1390-1395`;
+- the producers: `attach_effect_live_controls(&mut effects, depth)` (`crates/host-core/src/prepare.rs:1390-1395`;
   `crates/effect-compiler/src/prepare.rs:1372`), which pushes one producer per entry in entry
   order, and returns an error, not a partial table, if any entry fails; capi keeps that order
   (`effect_controls.into_boxed_slice()`, `crates/capi/src/runtime/compile.rs:619`).
 
 So both tables are sorted by `track_id` (byte order of the ID string). This is *not* the canonical
 track order: `"t10"` sorts before `"t2"`. A strip's rows and producers form one contiguous run.
+
+**Where the code lives after decision 15.** *Extract the C ABI control plane into a portable
+crate both hosts call* (#1309) moves `commit_live` and `prepare_runtime` unchanged from
+`crates/capi/src/runtime/{control,compile}.rs` into `crates/control-plane/src/`; this issue edits
+them there, so the browser gets the same lookups when it adopts the control plane. *Hold live
+values in latest-target cells on both hosts* (#1312) changes only the strip lanes, whose lookup is
+already fine; the effect lanes stay one producer per instance in entry order, and the slice that
+puts them in cells keeps that table and its order, so D2 applies to it unchanged.
 
 The verdict found all of this correct and fine at launch sizes. The classifier's whole-session
 mask, clone and two canonical JSON strings (`live_delta.rs:228-262`) stay O(session) per
@@ -60,17 +71,18 @@ transaction; that is out of scope here.
   equal. The per-instance check at `:370-373` stays.
 - **D2. Producer lookup by strip run (N3).** Find a producer with `partition_point` on
   `track_id` over the producer table, then scan only that strip's run for the `address`. Put this
-  in one small function in capi with a doc comment that names the sort it relies on (D4).
+  in one small function in the control plane with a doc comment that names the sort it relies on
+  (D4).
 - **D3. Catalog lookup by strip run (N3).** Change `parameter_handle`'s body the same way:
   `partition_point` on `row.track_id`, then scan only that strip's rows for `rack`, `effect_id`,
   `parameter_id` and `channel`. Its signature, result and doc contract stay; update its doc
   comment ("A linear search over the catalog").
 - **D4. State the order where it is made.** Add one sentence to the doc comments of
-  `EffectPreparedSession::entries` (or the sort at `prepare.rs:527`), of
+  `EffectPreparedSession::entries` (or the sort at `crates/effect-compiler/src/prepare.rs:527`), of
   `attach_effect_live_controls` and of `build_parameter_catalog`: the producer table and the
-  catalog are in entry order, sorted by `track_id` first, and capi's lookups rely on it. Add a
-  `debug_assert!` that the producer table is sorted by `track_id` where capi stores it (control
-  thread, no allocation).
+  catalog are in entry order, sorted by `track_id` first, and the control plane's lookups rely on
+  it. Add a `debug_assert!` that the producer table is sorted by `track_id` where the control plane
+  stores it (control thread, no allocation).
 - **D5. No new retained memory.** No index, map or side table is added, so no resource row moves.
   If D2 or D3 cannot be done without one, stop and report; do not change resource rows here.
 
@@ -79,8 +91,8 @@ transaction; that is out of scope here.
 - `crates/host-core/src/live_delta.rs`: `effect_records` (D1) only.
 - `crates/host-core/src/control_provider.rs`: `parameter_handle` and the `build_parameter_catalog`
   doc comment only.
-- `crates/capi/src/runtime/control.rs`: the producer lookup in `commit_live` and its helper only.
-- `crates/capi/src/runtime/compile.rs`: the D4 `debug_assert!` only.
+- `crates/control-plane/src/control.rs`: the producer lookup in `commit_live` and its helper only.
+- `crates/control-plane/src/compile.rs`: the D4 `debug_assert!` only.
 - `crates/effect-compiler/src/prepare.rs`: D4 doc comments only.
 - Tests: `crates/host-core/tests/live_delta.rs`, the `control_provider.rs` test module,
   `crates/capi/src/runtime/live_tests.rs`.
@@ -140,11 +152,12 @@ transaction; that is out of scope here.
    its budget test's printed rows (`-- --nocapture`) equal the base's.
 6. **Everything else.**
    - `cargo test --locked -p capi`
+   - `cargo test --locked -p control-plane --features test-support`
    - `cargo test --locked -p host-core --features control-provider,test-support`
    - `cargo test --locked -p effect-compiler --features test-support`
    - `cargo fmt --all -- --check`
-   - `cargo clippy --locked -p host-core -p capi -p effect-compiler --all-targets --all-features
-     -- -D warnings`
+   - `cargo clippy --locked -p host-core -p control-plane -p capi -p effect-compiler
+     --all-targets --all-features -- -D warnings`
    - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `bash scripts/check-capi-abi.sh` (no header change expected).
@@ -161,7 +174,8 @@ transaction; that is out of scope here.
 
 ## Dependencies
 
-- None. #1264, #1265 and #1266 are on `main`.
+- *Extract the C ABI control plane into a portable crate both hosts call* (#1309). #1264, #1265
+  and #1266 are on `main`.
 
 ## Standing rules for the implementer
 
