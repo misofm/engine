@@ -561,6 +561,22 @@ Filed under the no-shortcuts principle (stream B), outside D15-1 to D15-17:
 - #1352 *Report each configured meter handle's own meter in the C ABI meter batch*: the batch reports
   the master output peak for every configured handle (`control.rs:552`).
 
+### Root decisions after S0
+
+Made by root under the owner's no-shortcuts delegation while stream G implemented D15-4. Each
+decision lives in its issue's GitHub body (the issue's own branch carries the spec file):
+
+- **#1328** *Flush the SVF jointly so builtin and EQ filters reach exact rest*, Amendment 1
+  (A1-A6): the V8 spill gate's select classifier is corrected, not weakened; the EQ's per-frame
+  output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
+  mono depth-2 pair's `ic1` spill is eliminated, or kept only under an evidence-based exception;
+  D6 (class B) is restated by change size.
+- **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
+  the live filter retarget law, is *Retarget a live input filter only through its designs and their
+  mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its
+  endpoints* (#1408); the effect-parameter counterpart is *Keep every effect parameter ramp inside
+  its endpoints* (#1409). #1407 and #1408 are prerequisites of #1261 and #1262 (#1053 D13).
+
 ### Relation to earlier rulings
 
 - **`AGENTS.md`.** Amended with this record: the WIP rule (D15-0), the supersession sentence

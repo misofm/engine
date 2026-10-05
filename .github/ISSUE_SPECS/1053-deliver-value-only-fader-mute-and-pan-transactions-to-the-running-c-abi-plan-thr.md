@@ -137,8 +137,11 @@ effect (D15-17, #1314).
   LPF ride it as prepared filter targets that host-core's `InputFilterPreparer` designs on the
   control thread. The tail is bounded (D15-4): the joint SVF flush (#1328) and the engine-wide tail
   contract (#1329) give every strip a finite tail and an exact-rest bound, and #1261 and #1262
-  report it, never `Infinite`. `delay_samples` stays a rebuild (decision 14, rule 1), with a D15-9
-  transition.
+  report it, never `Infinite`. A live HPF or LPF retarget moves only through the filter's designs
+  and their mixtures (*Retarget a live input filter only through its designs and their mixtures*,
+  #1407), and every trim, fader and matrix ramp stays inside its endpoints (*Keep every trim, fader
+  and matrix ramp inside its endpoints*, #1408); both are prerequisites of #1261 and #1262.
+  `delay_samples` stays a rebuild (decision 14, rule 1), with a D15-9 transition.
 - **D14. Effects** (#1263-#1266, closed). A parameter is live when its descriptor's
   `automation_rate` is `Block`. Bypass rides the latency-preserving shunt, except for the delay and
   the multiband compressor, whose session bypass is prepared until *Give the delay a live bypass
@@ -199,7 +202,9 @@ Prerequisites owned elsewhere: *Extract the C ABI control plane into a portable 
 call* (#1309, stream B); *Session `controlSmoothing`: configurable ramp lengths for live mute,
 fader and pan changes* (#1054, stream E, after #1055); *Flush the SVF jointly so builtin and EQ
 filters reach exact rest* (#1328) and *State a bounded tail and an exact-rest bound for every node*
-(#1329), stream G; *Research: render stored session automation in the engine, identically on every
+(#1329), stream G; *Retarget a live input filter only through its designs and their mixtures*
+(#1407) and *Keep every trim, fader and matrix ramp inside its endpoints* (#1408), stream G;
+*Research: render stored session automation in the engine, identically on every
 platform* (#1058, stream K); the carry slices #1277 and #1280 (#1269, stream A). The browser
 halves are under #1269: *Admit browser live edits in the Worker through the committed model*
 (#1382), *Publish the applied-revision watermark in the browser status* (#1349), and *Make a send's
