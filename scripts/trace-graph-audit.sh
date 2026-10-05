@@ -74,7 +74,10 @@ jq -e --argjson blocks "$blocks" '
   .blocks == $blocks and
   .quantum_frames == 1 and
   .swaps_accepted == 2 and
-  .swaps_deferred == 1 and
+  .reservations_refused == 1 and
+  .prior_plan_renders_while_refused == 1 and
+  .withdrawals == 1 and
+  .republished_adoptions == 1 and
   .displaced_plans_destroyed_off_render == 2 and
   .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null

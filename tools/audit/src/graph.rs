@@ -17,8 +17,9 @@ use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use effect_compiler::EffectPreparedSession;
 use engine::realtime::audit;
 use engine::realtime::{
-    PlanExchangeConfig, PlanarBufferMut, PublishError, RealtimePlanOwner, RealtimeRenderReport,
-    RenderError, RenderIo, RenderTime, SwapOutcome, plan_exchange,
+    PlanEpoch, PlanExchangeConfig, PlanReplacementReservationError, PlanarBufferMut,
+    RealtimePlanOwner, RealtimeRenderReport, RenderError, RenderIo, RenderTime, SwapOutcome,
+    Withdrawal, plan_exchange,
 };
 use graph::{
     GraphBindingBlock, GraphCompileCaps, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings,
@@ -61,14 +62,13 @@ pub(crate) fn main() {
     bench_alloc::assert_installed();
     let blocks = parse_blocks();
     assert!(
-        blocks >= 3,
-        "graph lifecycle audit requires at least 3 blocks"
+        blocks >= 4,
+        "graph lifecycle audit requires at least 4 blocks"
     );
     let drops = Arc::new(Mutex::new(Vec::with_capacity(2)));
     let (mut publisher, mut owner, mut retirer) = plan_exchange(
         prepared_graph(6, Some(Arc::clone(&drops))),
         PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
         },
     )
@@ -99,7 +99,10 @@ pub(crate) fn main() {
     let mut output = [1.0_f32; 2 * QUANTUM as usize];
     let output_address = output.as_ptr() as usize;
     let mut swaps_accepted = 0_u64;
-    let mut swaps_deferred = 0_u64;
+    let mut reservations_refused = 0_u64;
+    let mut prior_plan_renders_while_refused = 0_u64;
+    let mut withdrawals = 0_u64;
+    let mut republished_adoptions = 0_u64;
     audit::warm_up();
     audit::reset();
 
@@ -107,22 +110,28 @@ pub(crate) fn main() {
     let first = render_graph_block(&mut owner, &mut output, 0);
     eprintln!("MISO_ENGINE_GRAPH_RT_END");
     assert_eq!(first.swap, SwapOutcome::Applied);
-    assert_eq!(first.render.plan_id, 7);
+    assert_eq!(
+        (first.active_epoch, first.render.plan_id),
+        (PlanEpoch(1), 7)
+    );
     swaps_accepted += 1;
 
-    publisher
-        .publish(prepared_graph(8, None))
-        .unwrap_or_else(|error| match error {
-            PublishError::Full(_) => panic!("publication queue unexpectedly full"),
-            PublishError::Incompatible(_) => panic!("replacement envelope mismatch"),
-            PublishError::EpochExhausted(_) => panic!("replacement epoch exhausted"),
-        });
+    // Refused reservation: plan 6 fills the one-plan retirement queue, so the control side
+    // refuses plan 8 and render keeps rendering plan 7.
+    let candidate = match publisher.reserve_replacement(prepared_graph(8, None)) {
+        Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
+        _ => panic!("a reservation must be refused while the retirement queue is full"),
+    };
+    reservations_refused += 1;
     eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
-    let deferred = render_graph_block(&mut owner, &mut output, 1);
+    let refused = render_graph_block(&mut owner, &mut output, 1);
     eprintln!("MISO_ENGINE_GRAPH_RT_END");
-    assert_eq!(deferred.swap, SwapOutcome::DeferredRetirementFull);
-    assert_eq!(deferred.render.plan_id, 7);
-    swaps_deferred += 1;
+    assert_eq!(refused.swap, SwapOutcome::None);
+    assert_eq!(
+        (refused.active_epoch, refused.render.plan_id),
+        (PlanEpoch(1), 7)
+    );
+    prior_plan_renders_while_refused += 1;
 
     command_sender
         .send(RetirementCommand::ReclaimOne)
@@ -132,12 +141,35 @@ pub(crate) fn main() {
         0
     );
 
+    // Withdraw and republish: plan 8 is published, taken back before any render, and adopted
+    // with its own epoch once it is published again.
+    assert_eq!(
+        publisher
+            .publish(candidate)
+            .unwrap_or_else(|_| panic!("plan 8 must publish after reclamation")),
+        PlanEpoch(2)
+    );
+    let candidate = match publisher.withdraw() {
+        Withdrawal::Withdrawn(candidate) => candidate,
+        other => panic!("an unclaimed candidate must withdraw, got {other:?}"),
+    };
+    assert_eq!((candidate.epoch(), candidate.plan_id()), (PlanEpoch(2), 8));
+    withdrawals += 1;
     eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
-    for block in 2..blocks {
+    let withdrawn = render_graph_block(&mut owner, &mut output, 2);
+    eprintln!("MISO_ENGINE_GRAPH_RT_END");
+    assert_eq!(withdrawn.swap, SwapOutcome::None);
+    assert_eq!(withdrawn.render.plan_id, 7);
+    assert_eq!(publisher.republish(candidate), PlanEpoch(2));
+
+    eprintln!("MISO_ENGINE_GRAPH_RT_BEGIN");
+    for block in 3..blocks {
         let report = render_graph_block(&mut owner, &mut output, block);
-        if block == 2 {
+        if block == 3 {
             assert_eq!(report.swap, SwapOutcome::Applied);
+            assert_eq!(report.active_epoch, PlanEpoch(2));
             swaps_accepted += 1;
+            republished_adoptions += 1;
         } else {
             assert_eq!(report.swap, SwapOutcome::None);
         }
@@ -162,7 +194,11 @@ pub(crate) fn main() {
     assert_eq!(drop_records[0], (6, retirement_thread_id));
     assert_eq!(drop_records[1], (7, retirement_thread_id));
     assert_eq!(swaps_accepted, 2);
-    assert_eq!(swaps_deferred, 1);
+    assert_eq!(
+        (reservations_refused, prior_plan_renders_while_refused),
+        (1, 1)
+    );
+    assert_eq!((withdrawals, republished_adoptions), (1, 1));
     assert_eq!(output, [0.0; 2 * QUANTUM as usize]);
     assert_eq!(output.as_ptr() as usize, output_address);
     assert_eq!(snapshot.total(), 0);
@@ -170,7 +206,9 @@ pub(crate) fn main() {
         concat!(
             "{{\"schema_version\":1,\"kind\":\"graph_realtime_audit\",",
             "\"blocks\":{},\"quantum_frames\":{},",
-            "\"swaps_accepted\":{},\"swaps_deferred\":{},",
+            "\"swaps_accepted\":{},\"reservations_refused\":{},",
+            "\"prior_plan_renders_while_refused\":{},\"withdrawals\":{},",
+            "\"republished_adoptions\":{},",
             "\"displaced_plans_destroyed_off_render\":{},\"output_address\":{},",
             "\"allocations\":{},\"deallocations\":{},\"locks\":{},",
             "\"logs\":{},\"file_io\":{},\"network_io\":{},",
@@ -179,7 +217,10 @@ pub(crate) fn main() {
         blocks,
         QUANTUM,
         swaps_accepted,
-        swaps_deferred,
+        reservations_refused,
+        prior_plan_renders_while_refused,
+        withdrawals,
+        republished_adoptions,
         drop_records.len(),
         output_address,
         snapshot.allocations,

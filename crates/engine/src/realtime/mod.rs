@@ -30,8 +30,8 @@ pub use plan::{
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,
     PlanReplacementReservation, PlanReplacementReservationError, PlanRetirer, PublishError,
-    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome, plan_exchange,
-    plan_exchange_resource_report,
+    RealtimePlanOwner, RealtimeRenderReport, RealtimeResponseSnapshot, SwapOutcome,
+    UnadoptedCandidate, Withdrawal, plan_exchange, plan_exchange_resource_report,
 };
 pub use spsc::{
     Consumer, Producer, QueueEmpty, QueueFull, QueueGeneration, SpscError, SpscRetainedPayload,
@@ -40,6 +40,7 @@ pub use spsc::{
 
 #[cfg(test)]
 mod tests {
+    use super::spsc::MailboxCellState;
     use super::*;
     use crate::{QuantumFrames, SampleRateHz};
     use core::num::NonZeroUsize;
@@ -223,9 +224,8 @@ mod tests {
     }
 
     #[test]
-    fn plan_exchange_resource_projection_covers_both_queues_and_checks_overflow() {
+    fn plan_exchange_resource_projection_covers_mailbox_and_retirement_and_checks_overflow() {
         let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
         };
         let report = plan_exchange_resource_report(config).expect("projection");
@@ -233,8 +233,7 @@ mod tests {
         assert!(report.largest_allocation_bytes > 0);
         assert_eq!(
             plan_exchange_resource_report(PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
-                ..config
+                retirement_capacity: NonZeroUsize::new(usize::MAX).expect("maximum is nonzero"),
             }),
             Err(SpscError::CapacityOverflow)
         );
@@ -300,32 +299,8 @@ mod tests {
         .expect("plan")
     }
     #[test]
-    fn exchange_defers_without_retirement_capacity_then_applies() {
-        let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
-            retirement_capacity: NonZeroUsize::new(1).expect("one"),
-        };
-        let (mut publisher, mut realtime, mut retirer) =
-            plan_exchange(prepared(1), config).expect("exchange");
-        assert!(publisher.publish(prepared(2)).is_ok());
-        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
-        assert!(publisher.publish(prepared(3)).is_ok());
-        assert_eq!(
-            render_once(&mut realtime, 2).swap,
-            SwapOutcome::DeferredRetirementFull
-        );
-        assert_eq!(realtime.active_plan_id(), 2);
-        let _old = retirer.try_reclaim().expect("control reclamation");
-        let report = render_once(&mut realtime, 4);
-        assert_eq!(report.swap, SwapOutcome::Applied);
-        assert_eq!(report.active_epoch, PlanEpoch(2));
-        assert_eq!(report.render.plan_id, 3);
-    }
-
-    #[test]
     fn reserved_replacement_preowns_publication_epoch_and_retirement_credit() {
         let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
         };
         let (mut publisher, mut realtime, mut retirer) =
@@ -357,7 +332,6 @@ mod tests {
     #[test]
     fn replacement_cancel_releases_both_credits_without_consuming_epoch() {
         let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
         };
         let (mut publisher, mut realtime, _retirer) =
@@ -384,7 +358,6 @@ mod tests {
     #[test]
     fn replacement_reservation_freezes_failure_precedence_and_serial_order() {
         let config = PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(2).expect("two"),
             retirement_capacity: NonZeroUsize::new(2).expect("two"),
         };
         let (mut publisher, mut realtime, mut retirer) =
@@ -409,87 +382,181 @@ mod tests {
             .reserve_replacement(prepared(2))
             .expect("first")
             .commit();
+        // The mailbox holds one published candidate: a second waits for render's claim, even
+        // with a retirement credit free.
+        assert!(matches!(
+            publisher.reserve_replacement(prepared(3)),
+            Err(PlanReplacementReservationError::PublicationFull(returned))
+                if returned.program().plan_id() == 3
+        ));
+        assert_eq!(publisher.free_retirement_credits(), 1);
+        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
         publisher
             .reserve_replacement(prepared(3))
             .expect("second")
             .commit();
-        assert!(matches!(
-            publisher.reserve_replacement(prepared(4)),
-            Err(PlanReplacementReservationError::PublicationFull(returned))
-                if returned.program().plan_id() == 4
-        ));
-        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
         assert_eq!(render_once(&mut realtime, 2).render.plan_id, 3);
         assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
         assert_eq!(retirer.try_reclaim().expect("second").0, PlanEpoch(1));
     }
 
-    #[test]
-    fn reservation_never_strands_a_queued_legacy_predecessor() {
-        let (mut publisher, mut realtime, mut retirer) = plan_exchange(
-            prepared(1),
-            PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(2).expect("two"),
-                retirement_capacity: NonZeroUsize::new(1).expect("one"),
-            },
-        )
-        .expect("exchange");
-        assert!(matches!(publisher.publish(prepared(2)), Ok(PlanEpoch(1))));
-        let candidate = match publisher.reserve_replacement(prepared(3)) {
-            Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
-            _ => panic!("queued legacy predecessor must retain the retirement credit"),
-        };
-        assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
-        assert!(matches!(
-            publisher.reserve_replacement(candidate),
-            Err(PlanReplacementReservationError::RetirementFull(_))
-        ));
-        assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
-        publisher
-            .reserve_replacement(prepared(3))
-            .expect("credit after predecessor reclaim")
-            .commit();
-        assert_eq!(render_once(&mut realtime, 2).render.plan_id, 3);
+    fn one_retirement() -> PlanExchangeConfig {
+        PlanExchangeConfig {
+            retirement_capacity: NonZeroUsize::new(1).expect("one"),
+        }
     }
 
+    fn withdrawn(publisher: &mut PlanPublisher) -> UnadoptedCandidate {
+        match publisher.withdraw() {
+            Withdrawal::Withdrawn(candidate) => candidate,
+            other => panic!("expected a withdrawn candidate, got {other:?}"),
+        }
+    }
+
+    /// #1343 gate 1: a candidate withdrawn before any render comes back whole, render then applies
+    /// nothing, and republished it is adopted at the next block with its own epoch and credit.
     #[test]
-    fn reservation_never_strands_a_pending_legacy_predecessor() {
+    fn withdrawn_candidate_returns_whole_and_republishes_with_its_epoch() {
+        let (mut publisher, mut realtime, mut retirer) =
+            plan_exchange(prepared(1), one_retirement()).expect("exchange");
+        assert_eq!(publisher.free_retirement_credits(), 1);
+        assert!(matches!(publisher.publish(prepared(2)), Ok(PlanEpoch(1))));
+        assert_eq!(publisher.free_retirement_credits(), 0);
+
+        let candidate = withdrawn(&mut publisher);
+        assert_eq!((candidate.epoch(), candidate.plan_id()), (PlanEpoch(1), 2));
+        assert_eq!(
+            publisher.mailbox_cell_states(),
+            [MailboxCellState::Active, MailboxCellState::Empty]
+        );
+        // The withdrawn candidate keeps its credit.
+        assert_eq!(publisher.free_retirement_credits(), 0);
+        for sample in [0, 2] {
+            let report = render_once(&mut realtime, sample);
+            assert_eq!(
+                (report.swap, report.active_epoch, report.render.plan_id),
+                (SwapOutcome::None, PlanEpoch(0), 1)
+            );
+        }
+
+        assert_eq!(publisher.republish(candidate), PlanEpoch(1));
+        let report = render_once(&mut realtime, 4);
+        assert_eq!(
+            (report.swap, report.active_epoch, report.render.plan_id),
+            (SwapOutcome::Applied, PlanEpoch(1), 2)
+        );
+        assert!(matches!(publisher.withdraw(), Withdrawal::Taken));
+        // The credit moved with the displaced plan into retirement and returns at reclamation.
+        assert_eq!(publisher.free_retirement_credits(), 0);
+        assert_eq!(retirer.try_reclaim().expect("plan one").0, PlanEpoch(0));
+        assert_eq!(publisher.free_retirement_credits(), 1);
+        // The next publication takes the next epoch: republication consumed none.
+        assert!(matches!(publisher.publish(prepared(3)), Ok(PlanEpoch(2))));
+    }
+
+    /// #1343 gate 1: once render has claimed the candidate, withdrawal reports `Taken` and the
+    /// candidate is the active plan.
+    #[test]
+    fn withdrawal_after_render_claimed_reports_taken() {
+        let (mut publisher, mut realtime, mut retirer) =
+            plan_exchange(prepared(1), one_retirement()).expect("exchange");
+        assert!(publisher.publish(prepared(2)).is_ok());
+        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
+        assert!(matches!(publisher.withdraw(), Withdrawal::Taken));
+        assert_eq!(
+            (realtime.active_epoch(), realtime.active_plan_id()),
+            (PlanEpoch(1), 2)
+        );
+        assert!(matches!(publisher.withdraw(), Withdrawal::Nothing));
+        assert_eq!(render_once(&mut realtime, 2).swap, SwapOutcome::None);
+        assert_eq!(publisher.free_retirement_credits(), 0);
+        let _ = retirer.try_reclaim().expect("plan one");
+        assert_eq!(publisher.free_retirement_credits(), 1);
+    }
+
+    /// #1343 gate 1: with nothing published, withdrawal reports `Nothing`; a withdrawn candidate
+    /// dropped on the control thread returns its credit and is never adopted.
+    #[test]
+    fn withdrawal_with_nothing_published_reports_nothing() {
+        let (mut publisher, mut realtime, _retirer) =
+            plan_exchange(prepared(1), one_retirement()).expect("exchange");
+        assert!(matches!(publisher.withdraw(), Withdrawal::Nothing));
+        assert!(publisher.publish(prepared(2)).is_ok());
+        let candidate = withdrawn(&mut publisher);
+        assert!(matches!(publisher.withdraw(), Withdrawal::Nothing));
+        drop(candidate);
+        assert_eq!(publisher.free_retirement_credits(), 1);
+        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::None);
+        assert_eq!(realtime.active_plan_id(), 1);
+        let plan = withdrawn_then_given_up(&mut publisher);
+        assert_eq!(plan.program().plan_id(), 3);
+        assert_eq!(publisher.free_retirement_credits(), 1);
+    }
+
+    fn withdrawn_then_given_up(publisher: &mut PlanPublisher) -> PreparedRenderPlan {
+        assert!(matches!(publisher.publish(prepared(3)), Ok(PlanEpoch(2))));
+        withdrawn(publisher).into_plan()
+    }
+
+    /// #1343 gate 1: a second publication lands in the cell the first claim left `Empty`, never in
+    /// the `Active` one.
+    #[test]
+    fn second_publication_lands_in_the_cell_the_claim_left_empty() {
+        use MailboxCellState::{Active, Empty, Full};
         let (mut publisher, mut realtime, mut retirer) = plan_exchange(
             prepared(1),
             PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(2).expect("two"),
-                retirement_capacity: NonZeroUsize::new(1).expect("one"),
+                retirement_capacity: NonZeroUsize::new(2).expect("two"),
             },
         )
         .expect("exchange");
+        assert_eq!(publisher.mailbox_cell_states(), [Active, Empty]);
         assert!(publisher.publish(prepared(2)).is_ok());
+        assert_eq!(publisher.mailbox_cell_states(), [Active, Full]);
         assert_eq!(render_once(&mut realtime, 0).render.plan_id, 2);
+        assert_eq!(publisher.mailbox_cell_states(), [Empty, Active]);
         assert!(publisher.publish(prepared(3)).is_ok());
+        assert_eq!(publisher.mailbox_cell_states(), [Full, Active]);
+        let report = render_once(&mut realtime, 2);
         assert_eq!(
-            render_once(&mut realtime, 2).swap,
-            SwapOutcome::DeferredRetirementFull
+            (report.swap, report.active_epoch, report.render.plan_id),
+            (SwapOutcome::Applied, PlanEpoch(2), 3)
         );
-        let candidate = match publisher.reserve_replacement(prepared(4)) {
-            Err(PlanReplacementReservationError::RetirementFull(candidate)) => candidate,
-            _ => panic!("pending legacy predecessor must retain FIFO progress"),
-        };
-        assert_eq!(retirer.try_reclaim().expect("initial").0, PlanEpoch(0));
-        assert_eq!(render_once(&mut realtime, 4).render.plan_id, 3);
-        assert!(matches!(
-            publisher.reserve_replacement(candidate),
-            Err(PlanReplacementReservationError::RetirementFull(_))
-        ));
+        assert_eq!(publisher.mailbox_cell_states(), [Active, Empty]);
+        assert_eq!(publisher.free_retirement_credits(), 0);
+        assert_eq!(retirer.try_reclaim().expect("plan one").0, PlanEpoch(0));
         assert_eq!(retirer.try_reclaim().expect("plan two").0, PlanEpoch(1));
-        publisher
-            .reserve_replacement(prepared(4))
-            .expect("credit after pending predecessor")
-            .commit();
-        assert_eq!(render_once(&mut realtime, 6).render.plan_id, 4);
-        assert_eq!(retirer.try_reclaim().expect("plan three").0, PlanEpoch(2));
-        let canceled = publisher
-            .reserve_replacement(prepared(5))
-            .expect("no leaked predecessor or retirement credit");
-        drop(canceled);
+        assert_eq!(publisher.free_retirement_credits(), 2);
+    }
+
+    /// #1343 gate 1 and gate 4's replacement: a publication without a free retirement credit fails
+    /// `Full` on the control side and publishes nothing, so render never holds a candidate it
+    /// cannot retire for.
+    #[test]
+    fn publication_without_a_credit_fails_full() {
+        use MailboxCellState::{Active, Empty};
+        let (mut publisher, mut realtime, mut retirer) =
+            plan_exchange(prepared(1), one_retirement()).expect("exchange");
+        assert!(publisher.publish(prepared(2)).is_ok());
+        assert_eq!(render_once(&mut realtime, 0).swap, SwapOutcome::Applied);
+        assert_eq!(publisher.free_retirement_credits(), 0);
+        let returned = match publisher.publish(prepared(3)) {
+            Err(PublishError::Full(returned)) => returned,
+            _ => panic!("a credit-less publication must fail Full"),
+        };
+        assert_eq!(returned.program().plan_id(), 3);
+        assert_eq!(publisher.mailbox_cell_states(), [Empty, Active]);
+        assert_eq!(render_once(&mut realtime, 2).swap, SwapOutcome::None);
+        assert!(matches!(publisher.withdraw(), Withdrawal::Taken));
+
+        let _ = retirer.try_reclaim().expect("plan one");
+        assert_eq!(publisher.free_retirement_credits(), 1);
+        assert!(matches!(publisher.publish(returned), Ok(PlanEpoch(2))));
+        let report = render_once(&mut realtime, 4);
+        assert_eq!(
+            (report.swap, report.active_epoch, report.render.plan_id),
+            (SwapOutcome::Applied, PlanEpoch(2), 3)
+        );
     }
 
     fn render_once(owner: &mut RealtimePlanOwner, sample: u64) -> RealtimeRenderReport {
@@ -564,7 +631,6 @@ mod tests {
         let (mut publisher, mut owner, mut retirer) = plan_exchange(
             initial,
             PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(4).expect("publication"),
                 retirement_capacity: NonZeroUsize::new(2).expect("retirement"),
             },
         )
@@ -771,7 +837,6 @@ mod tests {
 
         fn config(retirement: usize) -> PlanExchangeConfig {
             PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(2).expect("two"),
                 retirement_capacity: NonZeroUsize::new(retirement).expect("retirement"),
             }
         }
@@ -900,44 +965,6 @@ mod tests {
         }
 
         #[test]
-        fn hand_over_runs_only_on_the_applied_block() {
-            let reference = reference();
-            let hooks = Arc::new(AtomicUsize::new(0));
-            let (mut publisher, mut owner, mut retirer) =
-                plan_exchange(oscillator(0, true, &hooks), config(1)).expect("exchange");
-            let mut blocks = Vec::new();
-            for block in 0..BLOCKS {
-                match block {
-                    1 => assert!(publisher.publish(oscillator(1, true, &hooks)).is_ok()),
-                    2 => assert!(publisher.publish(oscillator(2, true, &hooks)).is_ok()),
-                    5 => assert_eq!(retirer.try_reclaim().expect("plan zero").0, PlanEpoch(0)),
-                    _ => {}
-                }
-                let before = hooks.load(Ordering::Relaxed);
-                let (output, report) = owner_block(&mut owner);
-                blocks.push(output);
-                let (swap, carry, calls) = match block {
-                    1 | 5 => (SwapOutcome::Applied, CarryOutcome::Carried, 1),
-                    2..=4 => (
-                        SwapOutcome::DeferredRetirementFull,
-                        CarryOutcome::NotRequested,
-                        0,
-                    ),
-                    _ => (SwapOutcome::None, CarryOutcome::NotRequested, 0),
-                };
-                assert_eq!((report.swap, report.carry), (swap, carry), "block {block}");
-                assert_eq!(
-                    hooks.load(Ordering::Relaxed) - before,
-                    calls,
-                    "block {block}"
-                );
-            }
-            assert_eq!(blocks, reference);
-            assert_eq!(owner.active_epoch(), PlanEpoch(2));
-            assert_eq!((owner.carried_count(), owner.deferred_count()), (2, 3));
-        }
-
-        #[test]
         fn dropping_the_owner_never_hands_over_to_an_unapplied_candidate() {
             let hooks = Arc::new(AtomicUsize::new(0));
             let (mut publisher, mut owner, _retirer) =
@@ -949,21 +976,6 @@ mod tests {
                 .commit();
             drop(owner);
             assert_eq!(hooks.load(Ordering::Relaxed), 0);
-
-            // A legacy candidate deferred behind a full retirement queue waits in `pending`;
-            // dropping the owner must not hand over to it either.
-            let (mut publisher, mut owner, _retirer) =
-                plan_exchange(oscillator(0, true, &hooks), config(1)).expect("exchange");
-            assert!(publisher.publish(oscillator(1, true, &hooks)).is_ok());
-            assert_eq!(owner_block(&mut owner).1.swap, SwapOutcome::Applied);
-            assert!(publisher.publish(oscillator(2, true, &hooks)).is_ok());
-            assert_eq!(
-                owner_block(&mut owner).1.swap,
-                SwapOutcome::DeferredRetirementFull
-            );
-            let before = hooks.load(Ordering::Relaxed);
-            drop(owner);
-            assert_eq!(hooks.load(Ordering::Relaxed), before);
         }
 
         #[test]

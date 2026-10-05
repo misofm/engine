@@ -3720,7 +3720,6 @@ mod tests {
 
         fn exchange_config() -> PlanExchangeConfig {
             PlanExchangeConfig {
-                publication_capacity: NonZeroUsize::new(1).expect("one"),
                 retirement_capacity: NonZeroUsize::new(1).expect("one"),
             }
         }

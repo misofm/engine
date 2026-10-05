@@ -242,7 +242,6 @@ fn the_swap_block_carry_allocates_and_frees_nothing() {
     let (mut publisher, mut owner, _retirer) = plan_exchange(
         predecessor,
         PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::new(1).expect("one"),
             retirement_capacity: NonZeroUsize::new(1).expect("one"),
         },
     )

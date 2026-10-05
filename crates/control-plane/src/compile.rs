@@ -195,7 +195,6 @@ pub(crate) fn capi_resources<A: ControlAdapter>(
     let replay = ReplayCache::resource_report_for_config(replay_config)
         .map_err(|_| failure(ResourceFault::Arithmetic))?;
     let exchange = plan_exchange_resource_report(PlanExchangeConfig {
-        publication_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
         retirement_capacity: NonZeroUsize::new(1).expect("one is nonzero"),
     })
     .map_err(|_| failure(ResourceFault::Arithmetic))?;
@@ -760,7 +759,6 @@ where
     let (publisher, owner, retirer) = plan_exchange(
         plan,
         PlanExchangeConfig {
-            publication_capacity: one,
             retirement_capacity: one,
         },
     )

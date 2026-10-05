@@ -185,3 +185,127 @@ attempt.
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309), for the call
   site's path.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+**What changed.**
+- `crates/engine/src/realtime/spsc.rs`: the loom shim gains `AtomicU64`. New generic mailbox
+  `plan_mailbox::<T>() -> (MailboxWriter<T>, MailboxReader<T>)` (D1, D2): one `AtomicU64` word
+  (generation in bits 4..64; 2-bit state per cell), two `UnsafeCell<Option<T>>` cells, invariants
+  I1-I6 in the doc comment. Writer: `try_reserve` -> `MailboxPermit::commit` (write, then one
+  `Release` CAS; a failed CAS returns `MailboxInvariantBroken(T)` with the value, never retried,
+  D3) and `withdraw` -> `Withdrawn(T)` / `Taken` / `Nothing` (one CAS; on failure the CAS's
+  current value is the one reload, D5). Reader (inside a `REALTIME_POLICY` region): `observe` (one
+  `Acquire` load) and `claim` (exactly one `AcqRel` CAS of the whole word, `Full -> Active` plus
+  `Active -> Empty`, then the move out; a lost CAS returns `None`, D4). Retained bytes:
+  `plan_mailbox_retained_bytes::<T>()`.
+- `crates/engine/src/realtime/plan_exchange.rs`: the publication SPSC, `publication_capacity`,
+  `legacy_outstanding`, `SwapOutcome::DeferredRetirementFull`, `deferred_count` and the owner's
+  `pending` slot are gone (D2, D6). A retirement credit is now an RAII value
+  (`RetirementCredit`) carried by every candidate; render moves it, never drops it: at adoption
+  it travels with the displaced plan into the retirement queue and returns at `try_reclaim` (after
+  the pop). `publish` is reserve-then-commit and fails `Full` without a credit. New
+  `PlanPublisher::withdraw() -> Withdrawal::{Withdrawn(UnadoptedCandidate), Taken, Nothing}` and
+  `PlanPublisher::republish(UnadoptedCandidate) -> PlanEpoch` (keeps epoch and credit).
+  `UnadoptedCandidate`: `epoch`, `plan_id`, `plan`, `into_plan` (returns the credit); dropping it
+  returns the credit. Render's `enter_block`: one load; only if a cell is `Full`, it reserves the
+  retirement slot (guaranteed by the credit) **before** the claim CAS, so a claimed candidate is
+  always adopted; then the one CAS. The resource report charges the mailbox allocation, the
+  retirement ring and one counter (D2). `PlanRetirer` keeps draining unreclaimed plans on its own
+  thread at drop.
+- `crates/engine/src/realtime/mod.rs`: exports `UnadoptedCandidate`, `Withdrawal`; tests below.
+- Mechanical (Amendment 1): `crates/control-plane/src/compile.rs` (two configs),
+  `crates/host-core/tests/successor_swap.rs`, `crates/host-core/tests/support/successor.rs`,
+  `crates/graph/tests/rt11_swap_carry_alloc.rs`, `crates/source/src/lib.rs` (`exchange_config`;
+  its `publish` call compiles unchanged). `crates/control-plane/src/control.rs` needed no change.
+- D8: `tools/audit/src/{realtime,graph,builtins_graph}.rs` and the three trace scripts, below.
+
+**Decisions taken inside the spec's text (for the verifier and root).**
+- D3 vs "commit is infallible" / D5 "republish, infallibly" (and #1310 D4 "republishing cannot
+  fail"): the typed error lives at the mailbox (`MailboxPermit::commit -> Result<(),
+  MailboxInvariantBroken<T>>`). `PlanReplacementReservation::commit` and `republish` stay
+  infallible in signature, because the control plane commits after its protocol commit and
+  dependents rely on it; they `panic!` on the typed error (unreachable: the permit proves no cell
+  was `Full`, and only this publisher publishes). Release builds abort on panic.
+- `republish` precondition: the candidate must hold the newest issued epoch and come from this
+  exchange (asserted, documented under `# Panics`). That proves the mailbox has an `Empty` cell
+  and keeps adopted epochs monotone. It fits #1310 D4 (A withdrawn, B reserved then refused,
+  A republished).
+- The generation counter (D2) is implemented, but no test here can turn red on its removal: with
+  the payload moved out after the claim CAS, a withdraw-then-republish ABA is benign today. The
+  generation exists for #1311, which loads fields before the claim.
+
+**Tests (each new or rewritten test, with its mutation run: defect applied -> red, reverted -> green).**
+Gate 1 (`crates/engine/src/realtime/mod.rs`):
+- `withdrawn_candidate_returns_whole_and_republishes_with_its_epoch`: U1 republish takes a new
+  epoch -> red; U7 withdrawal moves the payload but leaves the cell `Full` -> red (only this test);
+  A3 republish publishes nothing -> red.
+- `withdrawal_after_render_claimed_reports_taken`: U2 a claimed publication reported `Nothing` ->
+  red; U3 nothing-published reported `Taken` -> red.
+- `withdrawal_with_nothing_published_reports_nothing`: U3 -> red; U3b `into_plan` leaks the
+  credit -> red (only this test).
+- `second_publication_lands_in_the_cell_the_claim_left_empty`: U4 publication into the `Active`
+  cell -> red.
+- `publication_without_a_credit_fails_full`: U5 reservation without a credit -> red.
+- Rewritten `replacement_reservation_freezes_failure_precedence_and_serial_order` (the mailbox
+  holds one candidate): U6 publication over a `Full` cell -> red.
+- Edited only for the config: `plan_exchange_resource_projection_covers_mailbox_and_retirement_and_checks_overflow`
+  (renamed; overflow now through `retirement_capacity`), the concurrent stress, the reservation
+  tests.
+
+Gate 2 (`spsc.rs`, `spsc_loom_plan_mailbox_*`, real mailbox on loom types):
+- `spsc_loom_plan_mailbox_claim_races_withdrawal` and
+  `spsc_loom_plan_mailbox_withdraw_republish_and_next_publication`. M1 claim by plain store, not
+  CAS -> both red. M2 claim retries on a failed CAS -> `withdraw_republish...` red ("one CAS per
+  block"). M3 publish marks `Full` before writing the payload -> both red. M4 withdrawal by plain
+  swap, not CAS -> both red. Reverted -> all green.
+
+Gate 4 (deleted in this commit): `exchange_defers_without_retirement_capacity_then_applies`,
+`reservation_never_strands_a_queued_legacy_predecessor`,
+`reservation_never_strands_a_pending_legacy_predecessor`, the deferred second half of
+`carry::dropping_the_owner_never_hands_over_to_an_unapplied_candidate`, and
+`carry::hand_over_runs_only_on_the_applied_block`. A rewrite of the last one, with refused and
+withdrawn candidates, caught no defect that no other test catches: none of U1-U7 turned only it
+red, and `successor_continues_the_predecessor_state_gap_free` already pins one hand-over per
+applied block. So it was deleted. `publication_without_a_credit_fails_full` replaces their reason.
+
+D8 audit rounds (release `audit` binary, run directly, then reverted and rerun green):
+- U1 republish takes a new epoch -> `realtime`, `graph`, `builtins-graph` all abort (epoch assert).
+- U5 reservation without a credit -> all three abort ("a reservation must be refused while the
+  retirement queue is full").
+- A3 republish publishes nothing -> all three abort (adoption assert).
+- Counts: `realtime` (1,000,000 blocks): `swaps_accepted 2`, `reservations_refused 999997`,
+  `prior_plan_renders_while_refused 999997`, `withdrawals 1`, `republished_adoptions 1`
+  (the script checks `blocks - 3` exactly). `graph`: `2, 1, 1, 1, 1`,
+  `displaced_plans_destroyed_off_render 2`. `builtins-graph`: `render_count_by_plan
+  {"A":1,"B":999998,"C":1}`, `swaps_applied 2`, `reservations_refused 999996`,
+  `prior_plan_renders_while_refused 999996`, `withdrawals 1`, `republished_adoptions 1`,
+  `retirement_owner_destroyed 2`, `control_owner_destroyed 1`, 5 traced intervals. C's adopted
+  block equals the PCM fixture and its meter rows equal A's.
+
+**D7, the acked-batch question: can an ack ever precede a drop? No.** Evidence: a candidate
+leaves the mailbox only through a won CAS. The claim's win adopts it in the same block, because
+the retirement slot is reserved before the claim (`enter_block`). The withdrawal's win returns it
+whole (`Withdrawn`). The loom models check, under every interleaving, that each value ends
+exactly once and is never both adopted and withdrawn. A refused publication returns the plan
+(`Full`/`RetirementFull`). An `UnadoptedCandidate` drops only by the control thread's choice. No
+render path drops a candidate or a credit.
+
+**Gates.**
+1. Unit: `cargo test --locked -p engine --features realtime-audit`: 42 + 4 + 1 passed.
+2. Loom: `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom`: 3 passed.
+3. `target/release/audit capi`: allocations, deallocations, locks, syscalls, `total_violations`
+   0. `trace-realtime-audit.sh`, `trace-graph-audit.sh`, `trace-builtins-graph-audit.sh`: PASS with
+   D8's counts. `check-realtime-policy.sh` (script unchanged; 90 regions in 25 files) and
+   `test-realtime-policy.sh`: ok.
+4. Superseded tests deleted (above).
+5. `cargo test -p capi` (72+2+11), `-p host-core --features control-provider,test-support --test
+   successor_swap` (32), `-p graph --features test-support --test rt11_swap_carry_alloc` (1),
+   `-p source` (37+1+1), `-p control-plane --features test-support`, `-p audit --release` (33):
+   all pass. `check-cross-targets.sh`: PASS. `cargo fmt --all -- --check`: ok. `cargo clippy
+   --locked --workspace --all-targets --all-features -- -D warnings`: ok.
+   `check-workspace-policy.sh`: ok. Worklet chain (`build-web-audioworklet.sh --named-twin`,
+   `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
+   `test-web-audioworklet.sh`): pass.

@@ -1,24 +1,25 @@
-//! Bounded single-producer/single-consumer rings.
+//! Bounded single-producer/single-consumer rings, and the two-cell plan mailbox.
 //!
 //! Queue storage is shared by two non-cloneable endpoints. Reference-count operations occur only
 //! when endpoints are created, moved, or destroyed; `try_push` and `try_pop` touch only the fixed
-//! slots and cursor atomics.
+//! slots and cursor atomics. The plan mailbox ([`plan_mailbox`], #1343) lives here too, because
+//! this file is the realtime root's approved owner of `unsafe` slot access.
 
 #![allow(unsafe_code)]
 
 use core::{alloc::Layout, cell::Cell, marker::PhantomData, mem::MaybeUninit, num::NonZeroUsize};
-use sync::{Arc, AtomicUsize, Ordering, UnsafeCell};
+use sync::{Arc, AtomicU64, AtomicUsize, Ordering, UnsafeCell};
 
 /// The concurrency primitives the ring is built from.
 ///
-/// Under `--cfg loom` the real ring is instantiated on loom's `Arc`, `AtomicUsize` and
-/// `UnsafeCell`, so `spsc_loom` explores *this* code rather than a hand-written model of it
+/// Under `--cfg loom` the real ring and the real plan mailbox are instantiated on loom's `Arc`,
+/// `AtomicUsize`, `AtomicU64` and `UnsafeCell`, so `spsc_loom` explores *this* code rather than a hand-written model of it
 /// (#84 phase B). `cfg(loom)` is only a supported configuration for `cargo test`; a non-test
 /// loom build is not a shape this crate promises to link.
 #[cfg(not(loom))]
 mod sync {
     pub(super) use core::cell::UnsafeCell;
-    pub(super) use core::sync::atomic::{AtomicUsize, Ordering};
+    pub(super) use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     pub(super) use std::sync::Arc;
 
     /// Exclusive access to a slot's storage, spelled the way loom's `UnsafeCell` spells it.
@@ -37,7 +38,7 @@ mod sync {
 mod sync {
     pub(super) use loom::cell::UnsafeCell;
     pub(super) use loom::sync::Arc;
-    pub(super) use loom::sync::atomic::{AtomicUsize, Ordering};
+    pub(super) use loom::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     pub(super) fn with_mut<T, R>(cell: &UnsafeCell<T>, body: impl FnOnce(*mut T) -> R) -> R {
         cell.with_mut(body)
@@ -458,10 +459,361 @@ impl<T: Send + 'static> Consumer<T> {
 }
 // REALTIME_POLICY_END
 
+// ---------------------------------------------------------------------------------------------
+// The two-cell plan mailbox (#1343, decision 15 D15-9).
+//
+// One `AtomicU64` word holds a 60-bit generation counter (bits 4..64) and, per cell, a 2-bit
+// state (cell 0 in bits 0..2, cell 1 in bits 2..4): `Empty`, `Full` or `Active`.
+//
+// Invariants, under every interleaving:
+// - I1. Exactly one cell is `Active`. It stands for the value the reader runs; the reader moved
+//   its payload out when it claimed it, so an `Active` cell's payload is `None`. Cell 0 starts
+//   `Active` for the value the reader is created with.
+// - I2. At most one cell is `Full`, so the other cell is `Empty` or `Active`.
+// - I3. Only the writer changes a cell `Empty -> Full` (publish) and `Full -> Empty` (withdraw).
+//   Only the reader changes the word otherwise: one compare-and-swap that makes the `Full` cell
+//   `Active` and the previously `Active` cell `Empty` (claim). Every successful transition adds
+//   one to the generation, so a compare-and-swap with a stale word always fails.
+// - I4. Payload ownership follows the state: the writer owns an `Empty` cell's payload, nobody
+//   touches a `Full` cell's payload until a compare-and-swap moves it out of `Full` (the winner
+//   then owns it), and the reader owns the `Active` cell's payload.
+// - I5. The reader changes the word only when a cell is `Full`, and the writer publishes only when
+//   none is. So the writer's publication compare-and-swap cannot fail (a failure is a broken
+//   invariant, returned as [`MailboxInvariantBroken`] and never retried), and a failed withdrawal
+//   compare-and-swap means the reader claimed the cell, which it does at most once per
+//   publication.
+// - I6. The reader makes at most one compare-and-swap per claim and never retries: a lost claim
+//   means the writer withdrew the candidate after the reader's load.
+// ---------------------------------------------------------------------------------------------
+
+const CELL_EMPTY: u64 = 0;
+const CELL_FULL: u64 = 1;
+const CELL_ACTIVE: u64 = 2;
+const CELL_STATE_MASK: u64 = 0b11;
+const CELL_STATE_BITS: u32 = 2;
+const MAILBOX_GENERATION_ONE: u64 = 1 << (2 * CELL_STATE_BITS);
+/// Cell 0 `Active`, cell 1 `Empty`, generation 0.
+const MAILBOX_INITIAL_WORD: u64 = CELL_ACTIVE;
+
+/// One snapshot of the mailbox state word.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MailboxWord(u64);
+
+impl MailboxWord {
+    #[inline(always)]
+    const fn shift(cell: usize) -> u32 {
+        if cell == 0 { 0 } else { CELL_STATE_BITS }
+    }
+
+    #[inline(always)]
+    const fn state(self, cell: usize) -> u64 {
+        (self.0 >> Self::shift(cell)) & CELL_STATE_MASK
+    }
+
+    #[inline(always)]
+    const fn with(self, cell: usize, state: u64) -> Self {
+        let shift = Self::shift(cell);
+        Self((self.0 & !(CELL_STATE_MASK << shift)) | (state << shift))
+    }
+
+    /// The same states one generation later; the generation wraps in its 60 bits.
+    #[inline(always)]
+    const fn advanced(self) -> Self {
+        Self(self.0.wrapping_add(MAILBOX_GENERATION_ONE))
+    }
+
+    /// The cell in `state`, preferring cell 0; `None` if neither cell is in it.
+    #[inline(always)]
+    const fn cell_in(self, state: u64) -> Option<usize> {
+        if self.state(0) == state {
+            Some(0)
+        } else if self.state(1) == state {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
+/// The state of one mailbox cell, for tests that assert where a publication landed.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MailboxCellState {
+    /// The writer owns the cell and may publish into it.
+    Empty,
+    /// A published candidate that the reader has not claimed and the writer has not withdrawn.
+    Full,
+    /// The cell standing for the value the reader runs.
+    Active,
+}
+
+struct Mailbox<T> {
+    word: AtomicU64,
+    cells: [UnsafeCell<Option<T>>; 2],
+}
+
+// SAFETY: the cells are accessed only under the ownership rules I1-I6 above, which the state
+// word's acquire/release transitions enforce; `T: Send` lets a payload cross threads.
+unsafe impl<T: Send> Sync for Mailbox<T> {}
+
+// The mailbox is retained behind an `Arc`, so its engine-owned allocation is `ArcInner`'s
+// `{ strong, weak, data }`, mirrored here as `SharedRingAllocation` mirrors it for the ring.
+#[repr(C)]
+struct SharedMailboxAllocation<T> {
+    strong: AtomicUsize,
+    weak: AtomicUsize,
+    mailbox: Mailbox<T>,
+}
+
+/// Exact engine-owned bytes [`plan_mailbox`] retains: the state word and the two cells, with the
+/// shared-owner header. It is one allocation.
+pub(crate) fn plan_mailbox_retained_bytes<T>() -> usize {
+    Layout::new::<SharedMailboxAllocation<T>>().size()
+}
+
+/// Writer endpoint: publishes into the `Empty` cell and withdraws a `Full` one. `!Sync`.
+pub(crate) struct MailboxWriter<T: Send + 'static> {
+    shared: Arc<Mailbox<T>>,
+    /// The cell of the last publication whose fate the writer has not learned yet.
+    published: Option<usize>,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+/// Reader endpoint: claims a `Full` cell with one compare-and-swap. `!Sync`.
+pub(crate) struct MailboxReader<T: Send + 'static> {
+    shared: Arc<Mailbox<T>>,
+    /// Claim compare-and-swaps made, so the loom model can hold I6 to account.
+    #[cfg(all(test, loom))]
+    claim_attempts: u64,
+    _not_sync: PhantomData<Cell<()>>,
+}
+
+/// The writer's hold on the `Empty` cell while no cell is `Full`. Committing it publishes.
+pub(crate) struct MailboxPermit<'a, T: Send + 'static> {
+    writer: &'a mut MailboxWriter<T>,
+    cell: usize,
+    observed: MailboxWord,
+}
+
+/// The publication compare-and-swap failed: invariant I5 is broken. The value comes back whole
+/// and nothing was published. Never retried.
+pub(crate) struct MailboxInvariantBroken<T>(pub(crate) T);
+
+/// The result of [`MailboxWriter::withdraw`].
+pub(crate) enum MailboxWithdrawal<T> {
+    /// The cell was `Full`; the writer marked it `Empty` and moved the value out.
+    Withdrawn(T),
+    /// The reader's claim won: the value is the reader's, and that cannot change.
+    Taken,
+    /// Nothing was published since the last claim the writer learned of or the last withdrawal.
+    Nothing,
+}
+
+/// A reader's load that found a `Full` cell; [`MailboxReader::claim`] consumes it.
+#[derive(Clone, Copy)]
+pub(crate) struct MailboxObservation {
+    word: MailboxWord,
+    full: usize,
+}
+
+/// Create a mailbox whose cell 0 stands for the value the reader already runs.
+pub(crate) fn plan_mailbox<T: Send + 'static>() -> (MailboxWriter<T>, MailboxReader<T>) {
+    let shared = Arc::new(Mailbox {
+        word: AtomicU64::new(MAILBOX_INITIAL_WORD),
+        cells: [UnsafeCell::new(None), UnsafeCell::new(None)],
+    });
+    (
+        MailboxWriter {
+            shared: Arc::clone(&shared),
+            published: None,
+            _not_sync: PhantomData,
+        },
+        MailboxReader {
+            shared,
+            #[cfg(all(test, loom))]
+            claim_attempts: 0,
+            _not_sync: PhantomData,
+        },
+    )
+}
+
+impl<T: Send + 'static> MailboxWriter<T> {
+    /// Hold the `Empty` cell for one publication, or `None` while a cell is `Full`.
+    ///
+    /// The `Acquire` load synchronizes with the reader's claim that made the cell `Empty`, so the
+    /// reader's last access to that cell happens before the writer's write into it.
+    pub(crate) fn try_reserve(&mut self) -> Option<MailboxPermit<'_, T>> {
+        let observed = MailboxWord(self.shared.word.load(Ordering::Acquire));
+        if observed.cell_in(CELL_FULL).is_some() {
+            return None;
+        }
+        let cell = observed.cell_in(CELL_EMPTY)?;
+        Some(MailboxPermit {
+            writer: self,
+            cell,
+            observed,
+        })
+    }
+
+    /// Take back the last publication if the reader has not claimed it.
+    ///
+    /// One compare-and-swap marks the `Full` cell `Empty`. If it fails, the reader changed the
+    /// word, which it does only by claiming the `Full` cell (I5); the failed compare-and-swap's
+    /// current value is the one reload, and the result is reported from it. Never retried.
+    pub(crate) fn withdraw(&mut self) -> MailboxWithdrawal<T> {
+        let Some(cell) = self.published.take() else {
+            return MailboxWithdrawal::Nothing;
+        };
+        let observed = MailboxWord(self.shared.word.load(Ordering::Acquire));
+        if observed.state(cell) != CELL_FULL {
+            return MailboxWithdrawal::Taken;
+        }
+        let next = observed.with(cell, CELL_EMPTY).advanced();
+        match self.shared.word.compare_exchange(
+            observed.0,
+            next.0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                // SAFETY: the compare-and-swap moved the cell from `Full` to `Empty`, so the writer
+                // owns its payload (I4); the reader touches a cell's payload only after its own
+                // claim of that cell won, and it lost this one.
+                let value =
+                    sync::with_mut(&self.shared.cells[cell], |slot| unsafe { (*slot).take() });
+                match value {
+                    Some(value) => MailboxWithdrawal::Withdrawn(value),
+                    // A `Full` cell always holds its payload: the writer stores it before the
+                    // `Release` that marks the cell `Full`.
+                    None => panic!("plan mailbox invariant broken: a Full cell held no payload"),
+                }
+            }
+            Err(current) => {
+                debug_assert_eq!(MailboxWord(current).state(cell), CELL_ACTIVE);
+                MailboxWithdrawal::Taken
+            }
+        }
+    }
+
+    /// The states of both cells, for tests.
+    #[cfg(test)]
+    pub(crate) fn cell_states(&self) -> [MailboxCellState; 2] {
+        let word = MailboxWord(self.shared.word.load(Ordering::Acquire));
+        [0, 1].map(|cell| match word.state(cell) {
+            CELL_EMPTY => MailboxCellState::Empty,
+            CELL_FULL => MailboxCellState::Full,
+            _ => MailboxCellState::Active,
+        })
+    }
+}
+
+impl<T: Send + 'static> MailboxPermit<'_, T> {
+    /// Write `value` into the held `Empty` cell, then mark it `Full` with one `Release`
+    /// compare-and-swap.
+    ///
+    /// No cell was `Full` at reservation and only this writer publishes, so the reader cannot
+    /// have changed the word since (I5) and the compare-and-swap cannot fail. A failure is a
+    /// broken invariant: the value is taken back and returned, never retried.
+    pub(crate) fn commit(self, value: T) -> Result<(), MailboxInvariantBroken<T>> {
+        let shared = &*self.writer.shared;
+        // SAFETY: the cell is `Empty`, so the writer owns its payload (I4); the reader touches a
+        // cell's payload only after its claim of a `Full` cell, and this cell is not `Full`.
+        let previous = sync::with_mut(&shared.cells[self.cell], |slot| unsafe {
+            (*slot).replace(value)
+        });
+        debug_assert!(previous.is_none(), "an Empty cell holds no payload");
+        drop(previous);
+        let next = self.observed.with(self.cell, CELL_FULL).advanced();
+        match shared.word.compare_exchange(
+            self.observed.0,
+            next.0,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                self.writer.published = Some(self.cell);
+                Ok(())
+            }
+            Err(_) => {
+                // SAFETY: the cell was never marked `Full`, so no reader can own it; the writer
+                // still does (I4).
+                let value =
+                    sync::with_mut(&shared.cells[self.cell], |slot| unsafe { (*slot).take() });
+                match value {
+                    Some(value) => Err(MailboxInvariantBroken(value)),
+                    None => {
+                        panic!("plan mailbox invariant broken: a written cell lost its payload")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl<T: Send + 'static> MailboxReader<T> {
+    /// Claim compare-and-swaps this reader has made.
+    #[cfg(all(test, loom))]
+    #[must_use]
+    pub(crate) const fn claim_attempts(&self) -> u64 {
+        self.claim_attempts
+    }
+
+    /// One `Acquire` load: the `Full` cell, if any. It synchronizes with the writer's `Release`
+    /// that marked the cell `Full`.
+    #[inline]
+    pub(crate) fn observe(&self) -> Option<MailboxObservation> {
+        let word = MailboxWord(self.shared.word.load(Ordering::Acquire));
+        let full = word.cell_in(CELL_FULL)?;
+        Some(MailboxObservation { word, full })
+    }
+
+    /// Claim the observed `Full` cell with exactly one compare-and-swap of the whole word: the
+    /// `Full` cell becomes `Active` and the previously `Active` cell `Empty`. That transition is
+    /// the adoption decision. On success the value is moved out of its cell; on failure (the
+    /// writer withdrew it after the observation) this returns `None` and does nothing else. It
+    /// never retries or spins.
+    #[inline]
+    pub(crate) fn claim(&mut self, observed: MailboxObservation) -> Option<T> {
+        #[cfg(all(test, loom))]
+        {
+            self.claim_attempts += 1;
+        }
+        // I1 and I2: with one cell `Full`, the other is the `Active` one.
+        let active = 1 - observed.full;
+        let next = observed
+            .word
+            .with(observed.full, CELL_ACTIVE)
+            .with(active, CELL_EMPTY)
+            .advanced();
+        // `Acquire` sees the writer's payload; `Release` hands the old `Active` cell, whose payload
+        // this reader moved out at its own claim, to the writer.
+        if self
+            .shared
+            .word
+            .compare_exchange(observed.word.0, next.0, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+        // SAFETY: the compare-and-swap made this cell `Active`, so the reader owns its payload
+        // (I4); the writer never touches an `Active` cell.
+        sync::with_mut(&self.shared.cells[observed.full], |slot| unsafe {
+            (*slot).take()
+        })
+    }
+}
+// REALTIME_POLICY_END
+
 #[cfg(all(test, loom))]
 mod loom_tests {
-    use super::{QueueGeneration, bounded_spsc};
+    use super::{
+        MailboxReader, MailboxWithdrawal, MailboxWriter, QueueGeneration, bounded_spsc,
+        plan_mailbox,
+    };
     use core::num::NonZeroUsize;
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicUsize, Ordering};
 
     /// #84 phase B: the model is the **real** ring, instantiated on loom's atomics and cells by
     /// the `sync` shim at the top of this module. Three items through a two-slot queue force one
@@ -495,6 +847,143 @@ mod loom_tests {
             });
             writer.join().expect("producer");
             reader.join().expect("consumer");
+        });
+    }
+
+    /// A mailbox payload that counts its drops, so every model can prove that each published
+    /// value ends exactly once: adopted by render, held by control, or dropped with the mailbox.
+    /// Its drop stands for the return of the candidate's retirement credit.
+    struct Candidate {
+        id: usize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Candidate {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn candidate(id: usize, drops: &Arc<AtomicUsize>) -> Candidate {
+        Candidate {
+            id,
+            drops: Arc::clone(drops),
+        }
+    }
+
+    fn publish(writer: &mut MailboxWriter<Candidate>, value: Candidate) {
+        let permit = writer
+            .try_reserve()
+            .expect("an Empty cell while none is Full");
+        assert!(permit.commit(value).is_ok(), "publication cannot fail (I5)");
+    }
+
+    /// Render's blocks: one load per block and, only if a cell is `Full`, one claim. Returns the
+    /// adopted IDs in adoption order. Each block makes at most one compare-and-swap (I6).
+    fn render_blocks(reader: &mut MailboxReader<Candidate>, blocks: usize) -> Vec<usize> {
+        let mut adopted = Vec::new();
+        for _ in 0..blocks {
+            let before = reader.claim_attempts();
+            if let Some(observed) = reader.observe() {
+                if let Some(value) = reader.claim(observed) {
+                    adopted.push(value.id);
+                }
+            }
+            assert!(reader.claim_attempts() - before <= 1, "one CAS per block");
+        }
+        adopted
+    }
+
+    /// #1343 gate 2: render claims while control withdraws the same candidate. Exactly one side
+    /// wins: render adopts it and control reads `Taken`, or control holds it whole and render
+    /// adopted nothing. Loom's cells fail the model if render reads the cell control writes.
+    #[test]
+    fn spsc_loom_plan_mailbox_claim_races_withdrawal() {
+        loom::model(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut writer, mut reader) = plan_mailbox::<Candidate>();
+            let render = loom::thread::spawn(move || {
+                let adopted = render_blocks(&mut reader, 1);
+                (adopted, reader)
+            });
+            publish(&mut writer, candidate(1, &drops));
+            let outcome = writer.withdraw();
+            let (adopted, reader) = render.join().expect("render");
+            match outcome {
+                MailboxWithdrawal::Withdrawn(value) => {
+                    assert_eq!(value.id, 1);
+                    assert!(adopted.is_empty(), "adopted and withdrawn both");
+                }
+                MailboxWithdrawal::Taken => assert_eq!(adopted, [1]),
+                MailboxWithdrawal::Nothing => panic!("a publication is never Nothing"),
+            }
+            drop((writer, reader));
+            assert_eq!(
+                drops.load(Ordering::Relaxed),
+                1,
+                "each value ends exactly once"
+            );
+        });
+    }
+
+    /// #1343 gate 2: control publishes A, withdraws it, republishes it if it came back, then
+    /// tries B; render runs two blocks. A is adopted at most once and never both adopted and
+    /// withdrawn-and-kept, B only after A, B lands only while no cell is `Full`, and every value
+    /// ends exactly once.
+    #[test]
+    fn spsc_loom_plan_mailbox_withdraw_republish_and_next_publication() {
+        loom::model(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut writer, mut reader) = plan_mailbox::<Candidate>();
+            let render = loom::thread::spawn(move || {
+                let adopted = render_blocks(&mut reader, 2);
+                (adopted, reader)
+            });
+            publish(&mut writer, candidate(1, &drops));
+            let first = writer.withdraw();
+            let withdrawn_first = matches!(first, MailboxWithdrawal::Withdrawn(_));
+            if let MailboxWithdrawal::Withdrawn(value) = first {
+                assert_eq!(value.id, 1);
+                publish(&mut writer, value);
+            }
+            let mut created = 1;
+            let published_second = match writer.try_reserve() {
+                Some(permit) => {
+                    created += 1;
+                    assert!(permit.commit(candidate(2, &drops)).is_ok());
+                    true
+                }
+                None => false,
+            };
+            let last = writer.withdraw();
+            let (adopted, reader) = render.join().expect("render");
+
+            assert!(adopted.len() <= 2);
+            assert!(adopted.iter().filter(|id| **id == 1).count() <= 1);
+            if adopted.contains(&2) {
+                assert_eq!(adopted, [1, 2], "B adopts only after A");
+            }
+            match last {
+                MailboxWithdrawal::Withdrawn(value) => {
+                    assert!(!adopted.contains(&value.id), "adopted and withdrawn both");
+                    let expected = if published_second { 2 } else { 1 };
+                    assert_eq!(value.id, expected);
+                }
+                MailboxWithdrawal::Taken => {
+                    let expected = if published_second { 2 } else { 1 };
+                    assert_eq!(adopted.last(), Some(&expected));
+                }
+                MailboxWithdrawal::Nothing => panic!("a publication is never Nothing"),
+            }
+            if !withdrawn_first {
+                assert_eq!(adopted.first(), Some(&1), "Taken means render adopted A");
+            }
+            drop((writer, reader));
+            assert_eq!(
+                drops.load(Ordering::Relaxed),
+                created,
+                "each value ends exactly once"
+            );
         });
     }
 }

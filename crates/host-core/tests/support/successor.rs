@@ -203,7 +203,6 @@ fn exchange(plan: engine::realtime::PreparedRenderPlan) -> ExchangeParts {
     plan_exchange(
         plan,
         PlanExchangeConfig {
-            publication_capacity: NonZeroUsize::MIN,
             retirement_capacity: NonZeroUsize::MIN,
         },
     )
