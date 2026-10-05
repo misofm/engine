@@ -11,9 +11,11 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use builtins::ChannelParameters;
+
 use crate::analysis::{Analyzer, Splatter, Tally, db, ms_to_samples, taper};
 use crate::material::{self, SplitMix64, Stereo};
-use crate::strip::{Control, Event, QUANTUM, Strip, probe};
+use crate::strip::{Control, Event, QUANTUM, Strip, probe, probe_with};
 
 pub const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 pub const MUTE_RAMPS_MS: [f32; 8] = [0.0, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0];
@@ -26,22 +28,22 @@ pub const FADER_LOW_DB: f64 = -24.0;
 /// Pan moves go from this position to its negation and back.
 pub const PAN_FROM: f64 = -0.5;
 
-const BASS_OOB_HZ: f64 = 1500.0;
+pub(crate) const BASS_OOB_HZ: f64 = 1500.0;
 const KICK_OOB_HZ: f64 = 1000.0;
 /// Analysis frames around a mute: centres from 40 ms before the change to 90 ms after it.
-const MUTE_BEFORE_S: f64 = 0.040;
-const MUTE_AFTER_S: f64 = 0.090;
+pub(crate) const MUTE_BEFORE_S: f64 = 0.040;
+pub(crate) const MUTE_AFTER_S: f64 = 0.090;
 /// Excerpt around a mute: the change sits `MUTE_PRE_S` in.
-const MUTE_PRE_S: f64 = 0.20;
-const MUTE_POST_S: f64 = 0.30;
+pub(crate) const MUTE_PRE_S: f64 = 0.20;
+pub(crate) const MUTE_POST_S: f64 = 0.30;
 /// Taper at both excerpt ends, far from every analysis frame.
-const TAPER_S: f64 = 0.02;
+pub(crate) const TAPER_S: f64 = 0.02;
 
-fn align_up(sample: usize) -> usize {
+pub(crate) fn align_up(sample: usize) -> usize {
     sample.div_ceil(QUANTUM) * QUANTUM
 }
 
-fn fmt(v: f64) -> String {
+pub(crate) fn fmt(v: f64) -> String {
     if v.is_finite() {
         format!("{v:.2}")
     } else if v.is_sign_negative() {
@@ -51,7 +53,7 @@ fn fmt(v: f64) -> String {
     }
 }
 
-fn widen(v: &[f32]) -> Vec<f64> {
+pub(crate) fn widen(v: &[f32]) -> Vec<f64> {
     v.iter().map(|&s| f64::from(s)).collect()
 }
 
@@ -68,14 +70,14 @@ fn assert_engine_is_gain(x: &[f32], g: &[f32], y: &[f32]) {
 }
 
 pub struct Material {
-    name: &'static str,
-    source: Stereo,
+    pub(crate) name: &'static str,
+    pub(crate) source: Stereo,
     /// Transition sample positions (block-aligned) for the mute measurement.
-    events: Vec<usize>,
-    oob_hz: Option<f64>,
+    pub(crate) events: Vec<usize>,
+    pub(crate) oob_hz: Option<f64>,
 }
 
-fn materials(rate: u32) -> Vec<Material> {
+pub(crate) fn materials(rate: u32) -> Vec<Material> {
     let r = f64::from(rate);
     let at = |seconds: f64| align_up((seconds * r).round() as usize);
     let bass = Stereo::dual_mono(&material::bass(rate, (6.0 * r) as usize));
@@ -125,7 +127,46 @@ fn lanes(x: &Stereo) -> Vec<&[f32]> {
     }
 }
 
+/// One transition of a click measurement: its CSV name, the state both lanes of the strip are
+/// prepared in, and the record that changes it.
+pub(crate) struct Transition {
+    pub(crate) name: &'static str,
+    pub(crate) initial: ChannelParameters,
+    pub(crate) control: Control,
+}
+
 fn mute_click(rate: u32, m: &Material) -> String {
+    let lane = |muted| ChannelParameters {
+        muted,
+        ..ChannelParameters::default()
+    };
+    click_rows(
+        rate,
+        m,
+        &[
+            Transition {
+                name: "mute",
+                initial: lane(false),
+                control: Control::Mute(true),
+            },
+            Transition {
+                name: "unmute",
+                initial: lane(true),
+                control: Control::Mute(false),
+            },
+        ],
+        &MUTE_RAMPS_MS,
+    )
+}
+
+/// The click of one gain switch per transition and ramp length, over every event of `m`: the
+/// `mute_click.csv` row format, also used for the polarity flip (`polarity_click.csv`).
+pub(crate) fn click_rows(
+    rate: u32,
+    m: &Material,
+    transitions: &[Transition],
+    ramps: &[f32],
+) -> String {
     let mut out = String::new();
     let a = Analyzer::new(rate);
     let pre = align_up(a.samples(MUTE_PRE_S));
@@ -150,22 +191,22 @@ fn mute_click(rate: u32, m: &Material) -> String {
             (x, parts)
         })
         .collect();
-    for (transition, starts_muted) in [("mute", false), ("unmute", true)] {
-        for &ms in &MUTE_RAMPS_MS {
+    for transition in transitions {
+        for &ms in ramps {
             let n = ms_to_samples(ms, rate);
             let events = [Event {
                 at: pre,
-                control: Control::Mute(!starts_muted),
+                control: transition.control,
                 smoothing_samples: n,
             }];
-            let (gain, _) = probe(rate, starts_muted, len, &events);
+            let (gain, _) = probe_with(rate, transition.initial, len, &events);
             let g = widen(&gain);
             let mut sum = Tally::default();
             let mut worst_oob = f64::NEG_INFINITY;
             let mut above = 0_u32;
             for (x, parts) in &prepared {
                 let mut y = x.clone();
-                Strip::new(rate, starts_muted).render(&mut y.left, &mut y.right, &events);
+                Strip::with(rate, transition.initial).render(&mut y.left, &mut y.right, &events);
                 assert_engine_is_gain(&x.left, &gain, &y.left);
                 assert_engine_is_gain(&x.right, &gain, &y.right);
                 let mut t = Tally::default();
@@ -191,9 +232,9 @@ fn mute_click(rate: u32, m: &Material) -> String {
             };
             let _ = writeln!(
                 out,
-                "{rate},{},{transition},{ms},{n},{},{},{},{oob},{oob_worst},{floor},{edge_hz},{ctr},\
-                 {above}",
+                "{rate},{},{},{ms},{n},{},{},{},{oob},{oob_worst},{floor},{edge_hz},{ctr},{above}",
                 m.name,
+                transition.name,
                 prepared.len(),
                 fmt(sum.splatter_db()),
                 fmt(sum.hf_db()),
@@ -293,7 +334,7 @@ fn mute_timing(rate: u32) -> String {
 
 /// A there-and-back move: `from` -> `to` over `duration`, hold, `to` -> `from` over `duration`.
 #[derive(Clone, Copy)]
-struct Move {
+pub(crate) struct Move {
     from: f64,
     to: f64,
     t0: f64,
@@ -302,7 +343,7 @@ struct Move {
 }
 
 impl Move {
-    fn new(from: f64, to: f64, duration: f64) -> Self {
+    pub(crate) fn new(from: f64, to: f64, duration: f64) -> Self {
         Self {
             from,
             to,
@@ -311,7 +352,7 @@ impl Move {
             hold: 0.2,
         }
     }
-    fn value(&self, t: f64) -> f64 {
+    pub(crate) fn value(&self, t: f64) -> f64 {
         let (t0, d, h) = (self.t0, self.duration, self.hold);
         let shape = if t <= t0 {
             0.0
@@ -337,12 +378,18 @@ impl Move {
         self.t0 + 2.0 * self.duration + self.hold
     }
     /// Excerpt length: the move plus 300 ms of tail.
-    fn frames(&self, rate: u32) -> usize {
+    pub(crate) fn frames(&self, rate: u32) -> usize {
         ((self.end() + 0.3) * f64::from(rate)).round() as usize
     }
     /// The UI's updates: the hand position sampled every `1 / hz` from `t0` until the first
     /// sample at or after the end, each admitted at the next whole sample.
-    fn updates(&self, rate: u32, hz: f64, n: u32, control: impl Fn(f64) -> Control) -> Vec<Event> {
+    pub(crate) fn updates(
+        &self,
+        rate: u32,
+        hz: f64,
+        n: u32,
+        control: impl Fn(f64) -> Control,
+    ) -> Vec<Event> {
         let mut events = Vec::new();
         let mut k = 0_u32;
         loop {
@@ -359,7 +406,7 @@ impl Move {
         }
     }
     /// Analysis frame centres: each move plus 60 ms for a lagging ramp to finish.
-    fn frame_spans(&self, a: &Analyzer) -> Vec<(usize, usize)> {
+    pub(crate) fn frame_spans(&self, a: &Analyzer) -> Vec<(usize, usize)> {
         self.segments()
             .iter()
             .map(|&(s, e)| (a.samples(s), a.samples(e + 0.06)))
@@ -719,13 +766,53 @@ const FILES: [(&str, &str); 7] = [
 ];
 
 /// One unit of work: which file, its position in that file, and the rows it writes.
-type Job<'a> = (usize, usize, Box<dyn Fn() -> String + Send + Sync + 'a>);
+pub(crate) type Job<'a> = (usize, usize, Box<dyn Fn() -> String + Send + Sync + 'a>);
 
-pub fn run(out_dir: &Path, rates: &[u32]) {
-    fs::create_dir_all(out_dir).expect("output directory");
+/// Runs `jobs` on up to twelve threads, in list order, and returns `(file, order, rows)` sorted by
+/// file and order, so the output does not depend on which thread finished first.
+pub(crate) fn execute(jobs: &[Job<'_>]) -> Vec<(usize, usize, String)> {
     let workers = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(12);
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::new());
+    eprintln!("{} jobs on {workers} threads", jobs.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((file, order, job)) = jobs.get(i) else {
+                        break;
+                    };
+                    let rows = job();
+                    results
+                        .lock()
+                        .expect("results")
+                        .push((*file, *order, rows));
+                    eprintln!("done {}/{}", i + 1, jobs.len());
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().expect("results");
+    results.sort_by_key(|r| (r.0, r.1));
+    results
+}
+
+/// Writes each file of `files` (name, header) with the rows `execute` returned for its index.
+pub(crate) fn write_files(out_dir: &Path, files: &[(&str, &str)], results: &[(usize, usize, String)]) {
+    for (index, (name, header)) in files.iter().enumerate() {
+        let mut body = format!("{header}\n");
+        for (_, _, rows) in results.iter().filter(|r| r.0 == index) {
+            body.push_str(rows);
+        }
+        fs::write(out_dir.join(name), body).expect("write csv");
+    }
+}
+
+pub fn run(out_dir: &Path, rates: &[u32]) {
+    fs::create_dir_all(out_dir).expect("output directory");
     eprintln!("synthesising material at {rates:?}");
     let per_rate: Vec<Vec<Material>> = std::thread::scope(|scope| {
         let handles: Vec<_> = rates
@@ -753,36 +840,8 @@ pub fn run(out_dir: &Path, rates: &[u32]) {
         }
         jobs.push((5, order(0), Box::new(move || pan_jump(rate))));
     }
-    // Longest jobs first keeps the pool busy; the output order is restored below.
+    // Longest jobs first keeps the pool busy; `execute` restores the output order.
     jobs.sort_by_key(|job| std::cmp::Reverse(usize::from(job.0 == 3)));
-    let next = AtomicUsize::new(0);
-    let results = Mutex::new(Vec::new());
-    eprintln!("{} jobs on {workers} threads", jobs.len());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((file, order, job)) = jobs.get(i) else {
-                        break;
-                    };
-                    let rows = job();
-                    results
-                        .lock()
-                        .expect("results")
-                        .push((*file, *order, rows));
-                    eprintln!("done {}/{}", i + 1, jobs.len());
-                }
-            });
-        }
-    });
-    let mut results = results.into_inner().expect("results");
-    results.sort_by_key(|r| (r.0, r.1));
-    for (index, (name, header)) in FILES.iter().enumerate() {
-        let mut body = format!("{header}\n");
-        for (_, _, rows) in results.iter().filter(|r| r.0 == index) {
-            body.push_str(rows);
-        }
-        fs::write(out_dir.join(name), body).expect("write csv");
-    }
+    let results = execute(&jobs);
+    write_files(out_dir, &FILES, &results);
 }

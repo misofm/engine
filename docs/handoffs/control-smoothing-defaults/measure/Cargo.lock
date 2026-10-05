@@ -19,10 +19,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
+name = "compressor"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
 name = "control-smoothing-measure"
 version = "0.0.0"
 dependencies = [
  "builtins",
+ "compressor",
+ "effect-contract",
+ "gate-expander",
+ "lane",
+ "parametric-eq",
+ "soft-clip",
+ "transient-shaper",
+ "true-peak-limiter",
 ]
 
 [[package]]
@@ -35,8 +53,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "effect-runtime"
+version = "0.1.0"
+dependencies = [
+ "lane",
+ "math",
+]
+
+[[package]]
 name = "engine"
 version = "0.1.0"
+
+[[package]]
+name = "gate-expander"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
 
 [[package]]
 name = "lane"
@@ -48,6 +84,20 @@ dependencies = [
 [[package]]
 name = "math"
 version = "0.1.0"
+dependencies = [
+ "lane",
+]
+
+[[package]]
+name = "parametric-eq"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "engine",
+ "lane",
+ "math",
+]
 
 [[package]]
 name = "safe_arch"
@@ -56,6 +106,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "soft-clip"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "transient-shaper"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "true-peak-limiter"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "effect-runtime",
+ "lane",
+ "math",
 ]
 
 [[package]]
