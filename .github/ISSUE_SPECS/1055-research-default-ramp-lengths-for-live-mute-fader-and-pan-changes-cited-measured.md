@@ -322,3 +322,107 @@ the commit that adds this entry; no CSV, harness or `listening/` file changed.
 - NIT-3: the matrix-through-zero paragraph notes that the #1388 outcome `muteMs` 20 ms with
   `panMs` 20 or 35 ms puts `panMs` below twice `muteMs` at the defaults, with a pointer to 9.2 and
   9.8 and no new rule.
+
+### Follow-up: #1388 polarity trials (root, 2026-10-05)
+
+**Why.** Root's ruling on #1055 (2026-10-05): the polarity row's derived rule (`2 x muteMs`, no
+fourth key) is confirmed, and #1388's blinded packet gains polarity-invert trials before anyone
+runs it, to answer the open question of `FINDINGS.md` 9.7: at the shipped rule, is the flip heard
+as a click or as a level dip? A listening result changes default values only. D3 allows a contrast
+added before any trial as a dated amendment; no packet, trial, response or reveal existed.
+
+**Done.** Evidence commit `8eacefa34` on `codex/d15-stream-e`; only
+`docs/handoffs/control-smoothing-defaults/` and this record changed (D4). No listening response,
+answer or result was written or simulated outside the self-test's temporary directory.
+
+- `listening/PREREGISTRATION.md`: "Amendment 1, 2026-10-05, before any trial" (reason, source,
+  question, counts and power, statistics, decision rule, stimulus identity, training) before the
+  sign-off, and one pointer line under "Identity and status". The diff adds lines only; status stays
+  `preregistered`.
+- **Block P, 36 trials** (session 104): positive controls P-bass-0-oob (a hard flip's out-of-band
+  change on the unflipped note: a click) and P-bass-200-inband (a 200 ms flip's in-band change: a
+  dip), 2 trials each; primaries P-bass-20 (the shipped 20 ms flip), P-bass-20-inband (its in-band
+  change only: the dip) and P-bass-20-oob (its out-of-band change only: the click), 8 trials each;
+  P-kick-20 and P-mix-20, 4 each, descriptive. The reference of every contrast is the same note
+  through the same strip with no record. The flip's change `d = y - x` is split at the measures'
+  own edge (bass partials stop at 1 kHz, section 1's out-of-band measures read from 1.5 kHz) by a
+  zero-phase Kaiser FIR, so each primary carries one cue; a length contrast cannot, because a
+  longer flip has both a longer dip and a weaker click. Counts: 8 is the smallest count that allows
+  one lapse at p <= 0.05 (7/8, p = 0.0352); power 0.94 / 0.81 / 0.50 at 95 / 90 / 80 % hit rates.
+- **Rule (block P, changes no value).** Each cue at the shipped flip is heard (detected), not
+  heard (not detected, both P controls 2/2) or inconclusive. Outcome: not heard (all three not
+  heard: answers 9.7 for that listener, chain and level), heard (as a dip, a click, both, or with
+  the cue not separated), or inconclusive. A heard outcome is a finding for root; every outcome
+  leaves the defaults unchanged, because any value change for polarity's sake moves `muteMs` off
+  what blocks M and R decide on the mute itself, and the trade (a shorter flip clicks more, a longer
+  one dips longer) is not measured. The result is carried to `2 x` the decided `muteMs` only where
+  length decides it (40 ms: a heard dip stays heard, an unheard click stays unheard; 10 ms: the
+  reverse); otherwise "not assessed". P controls gate only block P; the M, F and R controls gate
+  only M, F and R (unchanged rules).
+- Harness: `measure/src/split.rs` (new: the band split), `measure/src/stimuli.rs` (14 block-P
+  conditions through `InputBuiltins::set_polarity_invert`; `render` split into render and edge
+  fade with the same arithmetic; a comment corrected: the kick transitions fall 200 ms, not 150 ms,
+  into a body), `measure/src/analysis.rs` (`Fft` crate-visible for a test), `measure/src/main.rs`,
+  `measure/README.md`. The 37 earlier stimulus WAVs are byte-identical to `17f0bf18c`'s; the
+  manifest gains 14 rows at its end. Levels: RMS differences 0.00-0.06 dB for every block-P contrast
+  but the 200 ms dip control (0.63 dB); peaks at or below -1.894 dBFS.
+- `listening/listening.py`: block P in the design, training (three files), `run --block P`,
+  validate, scoring and `reveal` (`decisions.polarity`); `listening/README.md` for the new block.
+- `FINDINGS.md`: section 6's and 9.6's "no contrast" statements now point to Amendment 1; 9.7's
+  dip bullet and "Awaits #1388" name block P.
+
+**New tests and their value.**
+
+- `stimuli::tests::the_shipped_polarity_stimulus_flips_over_twice_the_mute_length` turns red if
+  block P's stimulus is built from a mute record, at the mute's own length, or with a halved
+  window; no test checks a stimulus builder today.
+- `stimuli::tests::the_split_stimuli_hold_the_dip_and_the_click_apart` turns red if the split is
+  wired to the wrong signal (the out-of-band stimulus without the note's band, a sign error on
+  `d`), so a "dip only" stimulus would carry the click or a "click only" one the dip.
+- `split::tests::the_split_passes_the_bass_band_and_stops_the_out_of_band_region` turns red on a
+  wrong cutoff or a short kernel (passband within 2e-5 dB to 1 kHz, stopband below -115 dB from
+  1.5 kHz; measured 1.12e-5 dB and -119.4 dB).
+- `split::tests::the_low_part_is_centred_on_its_input` turns red if the split is applied causally,
+  which would misalign the in-band change with the note.
+- The listening self-test's block-P section turns red if P controls gate M, F and R (or the
+  reverse), if block P is missing from prepare, validate or reveal, if the dip and click contrasts
+  are swapped, if the carry to the decided flip runs the wrong way, if a non-detection is read
+  without the P controls, or if a P result moves a value.
+
+**Mutation evidence** (each applied, the tests run, then the file restored and checked by
+SHA-256; harness `cargo test --release --offline -- polarity split low_part`, listening
+`self-test`):
+
+- Harness, red each time and only in the named test(s): H1 the stimulus built from a mute record
+  (`Control::Mute`) and H2 the shipped flip at the mute's own length (480 samples) and H3 the
+  records' window halved: `the_shipped_polarity_stimulus_flips_over_twice_the_mute_length`; H4 the
+  split applied causally: `the_low_part_is_centred_on_its_input` and
+  `the_split_stimuli_hold_the_dip_and_the_click_apart`; H5 the cutoff at the passband edge:
+  `the_split_passes_the_bass_band_and_stops_the_out_of_band_region` and the split-stimuli test; H6
+  the out-of-band stimulus as `y - L y` (no note band) and H7 a sign error on `d`: the split-stimuli
+  test. Restored: 21 passed.
+- Listening self-test, red each time: L1 P controls also gating M, F and R; L2 block P missing from
+  `BLOCKS` (prepare refuses: "balanced schedule: P-bass-0-oob"); L3 the dip and click contrasts
+  swapped; L4 the carry to a longer flip reversed; L5 a non-detection read as "not heard" without
+  the P controls; L6 `reveal` dropping `decisions.polarity` (the record check); L7 a heard dip moving
+  `muteMs`. Restored: passed.
+
+**Gates** (on the final tree):
+
+1. `CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/claude-1002/r1388/target cargo test --release
+   --offline` from `measure/`: 21 passed (17 earlier, 4 new); `cargo clippy --release --offline
+   --all-targets` clean.
+2. All 11 CSVs regenerated twice (`measure` and `live`, all four rates, into two scratch
+   directories) with the final build: 22 of 22 files `cmp` identical to the committed `data/`.
+3. `stimuli` run three times: 52 files identical across runs; the 37 earlier WAVs identical to
+   those `17f0bf18c` renders (SHA-256), the manifest's first 38 lines unchanged.
+4. `prepare --commit 8eacefa34` from those stimuli into a private scratch directory: 104 trials,
+   nine training files; `validate`: packet valid (the private key was not opened).
+5. `TMPDIR=/tmp/claude-1002/r1388/tmp python3 docs/handoffs/control-smoothing-defaults/listening/listening.py self-test`:
+   passed (104 trials).
+6. `bash scripts/check-workspace-policy.sh`: ok. `bash scripts/check-env-vocabulary.sh`: ok
+   (59 names). `bash scripts/check-dsp-research.sh`: ok.
+
+**For #1388's spec** (not edited here; root or the next worker applies it): the packet is now
+104 trials in blocks M, F, R and P; block P changes no value and records a finding; its controls
+gate only block P. See this worker's report for the exact text.
