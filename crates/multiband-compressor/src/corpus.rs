@@ -147,7 +147,15 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                             ic2: values[4],
                         },
                     };
-                    let (low, band) = lr4_step(values[0], &coefficients, &mut state);
+                    // A one-frame split whose input has no history: a fresh silence counter, so
+                    // the joint flush is never armed here (issue #1328, amendment A9).
+                    let mut run = L::zero();
+                    let rest = lane::silence_step(
+                        values[0],
+                        &mut run,
+                        L::splat(lane::silence_frames(48_000) as f32),
+                    );
+                    let (low, band) = lr4_step(values[0], rest, &coefficients, &mut state);
                     if high { band } else { low }
                 },
             );

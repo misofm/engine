@@ -16,7 +16,8 @@
 //! chain they replace (master plan D3: fusion exists only where `fma` is written).
 
 use crate::Lane;
-use crate::kernels::{SvfCoef, SvfState, svf_step};
+use crate::kernels::{SvfCoef, SvfState, silence_skip_block, svf_step_when};
+use crate::{REST_EPS, silence_armable, silence_step_hoisted};
 
 /// Magnitude at or above which a sample is treated as non-finite by the D7 boundary policy.
 ///
@@ -513,14 +514,66 @@ pub struct InputChainCoef<L: Lane> {
     pub trim: [L; 2],
     /// `[channel][section]`, section `0` applied first.
     pub section: [[SvfCoef<L>; 2]; 2],
+    /// `N_SILENCE` at the chain's rate on every lane ([`crate::silence_frames`], issue #1328
+    /// amendment A9): the input's run of zero frames that arms both sections' joint flush.
+    pub silence: L,
+    /// The bodies' vector constants, carried as words ([`InputChainConstants`]).
+    pub constants: InputChainConstants<L>,
 }
 
-/// The retained integrator state of one dual-mono input chain, indexed like
-/// [`InputChainCoef::section`].
+/// The vector constants of the input chain bodies: [`NONFINITE_LIMIT`], `1.0` (the sanitise and
+/// silence counters' step), [`crate::FLUSH_EPS`] and [`crate::REST_EPS`] on every lane.
+///
+/// Carried in the prepared coefficients and loaded once per block rather than splatted in the
+/// bodies, as the filter-ramp countdown is ([`INPUT_FILTER_LEADING_UPDATES`]): on Apple targets
+/// LLVM stores a splatted constant through a `memset_pattern16` call inside the render function
+/// (known defect #1018, whose per-crate ceilings `check-cross-targets.sh` holds), and each chain
+/// body runs in two copies, one for blocks in which some lane's silence counter can arm the joint
+/// flush and one for every other block (issue #1328, amendment A9). The words are the constants;
+/// [`InputChainConstants::new`] is the only constructor a caller should use.
+#[derive(Clone, Copy)]
+pub struct InputChainConstants<L: Lane> {
+    /// [`NONFINITE_LIMIT`].
+    pub limit: L,
+    /// `1.0`.
+    pub one: L,
+    /// [`crate::FLUSH_EPS`].
+    pub flush_eps: L,
+    /// [`crate::REST_EPS`].
+    pub rest_eps: L,
+}
+
+impl<L: Lane> InputChainConstants<L> {
+    /// The four constants on every lane.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            limit: L::splat(NONFINITE_LIMIT),
+            one: L::splat(1.0),
+            flush_eps: L::splat(crate::FLUSH_EPS),
+            rest_eps: L::splat(REST_EPS),
+        }
+    }
+}
+
+impl<L: Lane> Default for InputChainConstants<L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The retained state of one dual-mono input chain: the integrators, indexed like
+/// [`InputChainCoef::section`], and the input's silence counter per channel.
 #[derive(Clone, Copy)]
 pub struct InputChainState<L: Lane> {
     /// `[channel][section]`.
     pub section: [[SvfState<L>; 2]; 2],
+    /// `[channel]`: the run of exactly-zero input frames per lane, [`crate::silence_step`]'s
+    /// counter (issue #1328, amendment A9). The chain's input -- the sample each body loads,
+    /// before sanitising and trim -- is the effect input both sections' joint flush is armed by.
+    /// Every body advances it, the all-identity ones included, so it is the same word whichever
+    /// shape the elision plan chose.
+    pub silence: [L; 2],
 }
 
 impl<L: Lane> Default for InputChainState<L> {
@@ -528,6 +581,7 @@ impl<L: Lane> Default for InputChainState<L> {
     fn default() -> Self {
         Self {
             section: [[SvfState::default(); 2]; 2],
+            silence: [L::zero(); 2],
         }
     }
 }
@@ -562,10 +616,11 @@ pub struct InputChainReport<L: Lane> {
 /// This is a scheduling change, not a numeric one (master plan §8 class A).
 ///
 /// Frozen operation order, per frame and per channel `ch`:
-/// 1. `x = load(frame)`
+/// 1. `x = load(frame)`; `rest = silence_step(x, silence[ch], c.silence)` -- the chain input's silence
+///    counter and the frame's rest threshold (issue #1328, amendment A9)
 /// 2. `bad = !(|x| < NONFINITE_LIMIT)`; `sanitized[ch] = sanitized[ch] + select(bad, 1.0, 0.0)`
 /// 3. `v = andnot(x, bad) * trim[ch]`
-/// 4. `v = svf_step(v, section[ch][0])`, then `v = svf_step(v, section[ch][1])`
+/// 4. `v = svf_step(v, section[ch][0], rest)`, then `v = svf_step(v, section[ch][1], rest)`
 /// 5. `nonfinite[ch] = nonfinite[ch] | !(|v| < NONFINITE_LIMIT)`
 /// 6. `store(frame, v)`
 ///
@@ -579,11 +634,38 @@ pub fn input_chain_block<L: Lane>(
     c: &InputChainCoef<L>,
     s: &mut InputChainState<L>,
 ) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence)
+        || silence_armable(s.silence[1], frames, c.silence)
+    {
+        input_chain_block_body::<L>(true, left, right, frames, c, s)
+    } else {
+        silence_skip_block(left, frames, &mut s.silence[0]);
+        silence_skip_block(right, frames, &mut s.silence[1]);
+        input_chain_block_body::<L>(false, left, right, frames, c, s)
+    }
+}
+
+/// The body of [`input_chain_block`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_block_body<L: Lane>(
+    armable: bool,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
 
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
@@ -591,6 +673,7 @@ pub fn input_chain_block<L: Lane>(
     // whole block; `svf_step` documents that its state must be a local copy for exactly this
     // reason, or it would be reloaded from memory every frame (D10).
     let mut state = s.section;
+    let mut silence = s.silence;
     let mut nc1 = [[zero; 2]; 2];
     for (channel, coefficients) in c.section.iter().enumerate() {
         for (section, coefficient) in coefficients.iter().enumerate() {
@@ -604,17 +687,25 @@ pub fn input_chain_block<L: Lane>(
     {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
+            let rest = if armable {
+                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+            } else {
+                zero
+            };
             let bad = L::mask_not(x.abs().lt(limit));
             count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(c.trim[channel]);
             for section in 0..2 {
                 let coefficient = &c.section[channel][section];
                 let v0 = v;
-                let (v1, v2) = svf_step(
+                let (v1, v2) = svf_step_when::<L>(
+                    armable,
+                    flush_eps,
                     v0,
                     nc1[channel][section],
                     coefficient.a2,
                     coefficient.a3,
+                    rest,
                     &mut state[channel][section],
                 );
                 v = coefficient
@@ -627,6 +718,7 @@ pub fn input_chain_block<L: Lane>(
     }
 
     s.section = state;
+    s.silence = silence;
     InputChainReport {
         sanitized: count,
         nonfinite,
@@ -677,10 +769,10 @@ pub struct InputTrimRamp<L: Lane> {
 /// 2. `done = remaining[ch] <= 0`
 /// 3. `trim = select(done, target[ch], ramp_toward(current[ch], step[ch], target[ch]))`;
 ///    `current[ch] = trim` -- the trim never passes its target ([`ramp_toward`])
-/// 4. `x = load(frame)`
+/// 4. `x = load(frame)`; `rest = silence_step(x, silence[ch], c.silence)`
 /// 5. `bad = !(|x| < NONFINITE_LIMIT)`; `sanitized[ch] = sanitized[ch] + (1.0 & bad)`
 /// 6. `v = andnot(x, bad) * trim`
-/// 7. `v = svf_step(v, section[ch][0])`, then `v = svf_step(v, section[ch][1])`
+/// 7. `v = svf_step(v, section[ch][0], rest)`, then `v = svf_step(v, section[ch][1], rest)`
 /// 8. `nonfinite[ch] = nonfinite[ch] | !(|v| < NONFINITE_LIMIT)`
 /// 9. `store(frame, v)`
 ///
@@ -700,15 +792,44 @@ pub fn input_chain_ramp_block<L: Lane>(
     s: &mut InputChainState<L>,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence)
+        || silence_armable(s.silence[1], frames, c.silence)
+    {
+        input_chain_ramp_block_body::<L>(true, left, right, frames, c, s, r)
+    } else {
+        silence_skip_block(left, frames, &mut s.silence[0]);
+        silence_skip_block(right, frames, &mut s.silence[1]);
+        input_chain_ramp_block_body::<L>(false, left, right, frames, c, s, r)
+    }
+}
+
+/// The body of [`input_chain_ramp_block`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_ramp_block_body<L: Lane>(
+    armable: bool,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
 
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
     let mut state = s.section;
+    let mut silence = s.silence;
     let mut remaining = r.remaining;
     let mut current = r.current;
     let mut nc1 = [[zero; 2]; 2];
@@ -732,17 +853,25 @@ pub fn input_chain_ramp_block<L: Lane>(
             );
             current[channel] = trim;
             let x = L::load(frame);
+            let rest = if armable {
+                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+            } else {
+                zero
+            };
             let bad = L::mask_not(x.abs().lt(limit));
             count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(trim);
             for section in 0..2 {
                 let coefficient = &c.section[channel][section];
                 let v0 = v;
-                let (v1, v2) = svf_step(
+                let (v1, v2) = svf_step_when::<L>(
+                    armable,
+                    flush_eps,
                     v0,
                     nc1[channel][section],
                     coefficient.a2,
                     coefficient.a3,
+                    rest,
                     &mut state[channel][section],
                 );
                 v = coefficient
@@ -755,6 +884,7 @@ pub fn input_chain_ramp_block<L: Lane>(
     }
 
     s.section = state;
+    s.silence = silence;
     r.remaining = remaining;
     r.current = current;
     InputChainReport {
@@ -778,14 +908,39 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     s: &mut InputChainState<L>,
     r: &mut InputTrimRamp<L>,
 ) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence) {
+        input_chain_ramp_block_mono_body::<L>(true, io, frames, c, s, r)
+    } else {
+        silence_skip_block(io, frames, &mut s.silence[0]);
+        input_chain_ramp_block_mono_body::<L>(false, io, frames, c, s, r)
+    }
+}
+
+/// The body of [`input_chain_ramp_block_mono`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_ramp_block_mono_body<L: Lane>(
+    armable: bool,
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
 
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
+    let mut silence = s.silence[0];
     let mut remaining = r.remaining[0];
     let mut current = r.current[0];
     let mut nc1 = [zero; 2];
@@ -803,17 +958,25 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
         );
         current = trim;
         let x = L::load(frame);
+        let rest = if armable {
+            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+        } else {
+            zero
+        };
         let bad = L::mask_not(x.abs().lt(limit));
         count = count.add(one.andnot(L::mask_not(bad)));
         let mut v = x.andnot(bad).mul(trim);
         for section in 0..2 {
             let coefficient = &c.section[0][section];
             let v0 = v;
-            let (v1, v2) = svf_step(
+            let (v1, v2) = svf_step_when::<L>(
+                armable,
+                flush_eps,
                 v0,
                 nc1[section],
                 coefficient.a2,
                 coefficient.a3,
+                rest,
                 &mut state[section],
             );
             v = coefficient
@@ -825,6 +988,7 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     }
 
     s.section[0] = state;
+    s.silence[0] = silence;
     r.remaining[0] = remaining;
     r.current[0] = current;
     InputChainReport {
@@ -851,16 +1015,76 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
+    filter_leading: [[L; 2]; 2],
+) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence)
+        || silence_armable(s.silence[1], frames, c.silence)
+    {
+        input_chain_ramp_block_filter_body::<L>(
+            true,
+            left,
+            right,
+            frames,
+            c,
+            s,
+            trim,
+            trim_ramping,
+            filter_target,
+            filter_step,
+            filter_remaining,
+            filter_leading,
+        )
+    } else {
+        silence_skip_block(left, frames, &mut s.silence[0]);
+        silence_skip_block(right, frames, &mut s.silence[1]);
+        input_chain_ramp_block_filter_body::<L>(
+            false,
+            left,
+            right,
+            frames,
+            c,
+            s,
+            trim,
+            trim_ramping,
+            filter_target,
+            filter_step,
+            filter_remaining,
+            filter_leading,
+        )
+    }
+}
+
+/// The body of [`input_chain_ramp_block_filter`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_ramp_block_filter_body<L: Lane>(
+    armable: bool,
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &mut InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    trim: &mut InputTrimRamp<L>,
+    trim_ramping: bool,
+    filter_target: &[[SvfCoef<L>; 2]; 2],
+    filter_step: &[[SvfCoef<L>; 2]; 2],
+    filter_remaining: &mut [[L; 2]; 2],
     mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
     let mut count = [zero; 2];
     let mut nonfinite = [no_lanes::<L>(); 2];
     let mut state = s.section;
+    let mut silence = s.silence;
     let mut coefficients = c.section;
     let mut trim_current = trim.current;
     let mut trim_remaining = trim.remaining;
@@ -887,17 +1111,25 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
                 c.trim[channel]
             };
             let x = L::load(frame);
+            let rest = if armable {
+                silence_step_hoisted(x, &mut silence[channel], armed_after, one, rest_on)
+            } else {
+                zero
+            };
             let bad = L::mask_not(x.abs().lt(limit));
             count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(trim_value);
             for section in 0..2 {
                 let coefficient = &coefficients[channel][section];
                 let v0 = v;
-                let (v1, v2) = svf_step(
+                let (v1, v2) = svf_step_when::<L>(
+                    armable,
+                    flush_eps,
                     v0,
                     coefficient.c1.neg(),
                     coefficient.a2,
                     coefficient.a3,
+                    rest,
                     &mut state[channel][section],
                 );
                 v = coefficient
@@ -937,6 +1169,7 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
     }
     c.section = coefficients;
     s.section = state;
+    s.silence = silence;
     trim.current = trim_current;
     trim.remaining = trim_remaining;
     InputChainReport {
@@ -1040,15 +1273,69 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     filter_target: &[[SvfCoef<L>; 2]; 2],
     filter_step: &[[SvfCoef<L>; 2]; 2],
     filter_remaining: &mut [[L; 2]; 2],
+    filter_leading: [[L; 2]; 2],
+) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence) {
+        input_chain_ramp_block_filter_mono_body::<L>(
+            true,
+            io,
+            frames,
+            c,
+            s,
+            trim,
+            trim_ramping,
+            filter_target,
+            filter_step,
+            filter_remaining,
+            filter_leading,
+        )
+    } else {
+        silence_skip_block(io, frames, &mut s.silence[0]);
+        input_chain_ramp_block_filter_mono_body::<L>(
+            false,
+            io,
+            frames,
+            c,
+            s,
+            trim,
+            trim_ramping,
+            filter_target,
+            filter_step,
+            filter_remaining,
+            filter_leading,
+        )
+    }
+}
+
+/// The body of [`input_chain_ramp_block_filter_mono`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_ramp_block_filter_mono_body<L: Lane>(
+    armable: bool,
+    io: &mut [f32],
+    frames: usize,
+    c: &mut InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    trim: &mut InputTrimRamp<L>,
+    trim_ramping: bool,
+    filter_target: &[[SvfCoef<L>; 2]; 2],
+    filter_step: &[[SvfCoef<L>; 2]; 2],
+    filter_remaining: &mut [[L; 2]; 2],
     mut filter_leading: [[L; 2]; 2],
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
+    let mut silence = s.silence[0];
     let mut coefficients = c.section[0];
     let mut trim_current = trim.current[0];
     let mut trim_remaining = trim.remaining[0];
@@ -1067,17 +1354,25 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
             c.trim[0]
         };
         let x = L::load(frame);
+        let rest = if armable {
+            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+        } else {
+            zero
+        };
         let bad = L::mask_not(x.abs().lt(limit));
         count = count.add(one.andnot(L::mask_not(bad)));
         let mut v = x.andnot(bad).mul(trim_value);
         for section in 0..2 {
             let coefficient = &coefficients[section];
             let v0 = v;
-            let (v1, v2) = svf_step(
+            let (v1, v2) = svf_step_when::<L>(
+                armable,
+                flush_eps,
                 v0,
                 coefficient.c1.neg(),
                 coefficient.a2,
                 coefficient.a3,
+                rest,
                 &mut state[section],
             );
             v = coefficient
@@ -1110,6 +1405,7 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
     }
     c.section[0] = coefficients;
     s.section[0] = state;
+    s.silence[0] = silence;
     trim.current[0] = trim_current;
     trim.remaining[0] = trim_remaining;
     InputChainReport {
@@ -1131,6 +1427,9 @@ pub fn input_chain_ramp_block_elided<L: Lane>(
     plan: &InputChainPlan,
 ) -> InputChainReport<L> {
     if plan.elided == [[true, true], [true, true]] {
+        // No section runs: the input's silence counter advances without a rest plane.
+        silence_skip_block(left, frames, &mut s.silence[0]);
+        silence_skip_block(right, frames, &mut s.silence[1]);
         identity_chain_ramp_block(left, right, frames, r)
     } else {
         input_chain_ramp_block(left, right, frames, c, s, r)
@@ -1195,6 +1494,7 @@ pub fn input_chain_ramp_block_mono_elided<L: Lane>(
     plan: &InputChainPlan,
 ) -> InputChainReport<L> {
     if plan.elided[0] == [true, true] {
+        silence_skip_block(io, frames, &mut s.silence[0]);
         identity_chain_ramp_block_mono(io, frames, r)
     } else {
         input_chain_ramp_block_mono(io, frames, c, s, r)
@@ -1383,15 +1683,22 @@ pub fn input_chain_block_elided<L: Lane>(
 ) -> InputChainReport<L> {
     match plan.elided {
         [[false, false], [false, false]] => input_chain_block(left, right, frames, c, s),
-        [[true, true], [true, true]] => identity_chain_block(left, right, frames, c),
+        [[true, true], [true, true]] => {
+            // No section runs: the input's silence counter advances without a rest plane.
+            silence_skip_block(left, frames, &mut s.silence[0]);
+            silence_skip_block(right, frames, &mut s.silence[1]);
+            identity_chain_block(left, right, frames, c)
+        }
         _ => mixed_chain_block(left, right, frames, c, s, plan),
     }
 }
 
 /// The chain of a bank whose four sections are all the identity: no recurrence, no state.
 ///
-/// Frozen operation order, per frame and per channel `ch`: steps 1-3 of [`input_chain_block`],
-/// then `v = v + 0.0` for the run of two identity sections, then its steps 5 and 6.
+/// Frozen operation order, per frame and per channel `ch`: steps 1-3 of [`input_chain_block`]
+/// (step 1's silence counter included: no section consumes the threshold here, but the counter is
+/// the chain input's and advances whichever body runs), then `v = v + 0.0` for the run of two
+/// identity sections, then its steps 5 and 6.
 #[inline(always)]
 fn identity_chain_block<L: Lane>(
     left: &mut [f32],
@@ -1448,11 +1755,15 @@ fn mixed_chain_block<L: Lane>(
     // one channel first therefore preserves every per-channel operation; caller state is still
     // published once, after both channels finish, exactly as in the interleaved mixed body.
     let mut state = s.section;
+    let mut silence = s.silence;
     let (left_count, left_nonfinite) = dispatch_mixed_channel(
         left,
         c.trim[0],
         &c.section[0],
         &mut state[0],
+        &mut silence[0],
+        c.silence,
+        &c.constants,
         plan.elided[0],
     );
     let (right_count, right_nonfinite) = dispatch_mixed_channel(
@@ -1460,9 +1771,13 @@ fn mixed_chain_block<L: Lane>(
         c.trim[1],
         &c.section[1],
         &mut state[1],
+        &mut silence[1],
+        c.silence,
+        &c.constants,
         plan.elided[1],
     );
     s.section = state;
+    s.silence = silence;
     InputChainReport {
         sanitized: [left_count, right_count],
         nonfinite: [left_nonfinite, right_nonfinite],
@@ -1470,41 +1785,138 @@ fn mixed_chain_block<L: Lane>(
 }
 
 /// Select one of the four immutable two-section shapes before its channel's frame loop.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn dispatch_mixed_channel<L: Lane>(
     io: &mut [f32],
     trim: L,
     coefficients: &[SvfCoef<L>; 2],
     state: &mut [SvfState<L>; 2],
+    silence: &mut L,
+    armed_after: L,
+    constants: &InputChainConstants<L>,
     shape: [bool; 2],
 ) -> (L, L::Mask) {
     #[cfg(test)]
     MIXED_PLAN_SELECTIONS.with(|count| count.set(count.get() + 1));
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    let frames = io.len() / L::WIDTH;
+    if silence_armable(*silence, frames, armed_after) {
+        dispatch_mixed_shape::<L>(
+            true,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+            shape,
+        )
+    } else {
+        silence_skip_block(io, frames, silence);
+        dispatch_mixed_shape::<L>(
+            false,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+            shape,
+        )
+    }
+}
+
+/// [`dispatch_mixed_channel`]'s shape choice, at a known `ARMABLE`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn dispatch_mixed_shape<L: Lane>(
+    armable: bool,
+    io: &mut [f32],
+    trim: L,
+    coefficients: &[SvfCoef<L>; 2],
+    state: &mut [SvfState<L>; 2],
+    silence: &mut L,
+    armed_after: L,
+    constants: &InputChainConstants<L>,
+    shape: [bool; 2],
+) -> (L, L::Mask) {
     match shape {
-        [false, false] => mixed_channel_block::<L, false, false>(io, trim, coefficients, state),
-        [true, false] => mixed_channel_block::<L, true, false>(io, trim, coefficients, state),
-        [false, true] => mixed_channel_block::<L, false, true>(io, trim, coefficients, state),
-        [true, true] => mixed_channel_block::<L, true, true>(io, trim, coefficients, state),
+        [false, false] => mixed_channel_block::<L, false, false>(
+            armable,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+        ),
+        [true, false] => mixed_channel_block::<L, true, false>(
+            armable,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+        ),
+        [false, true] => mixed_channel_block::<L, false, true>(
+            armable,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+        ),
+        [true, true] => mixed_channel_block::<L, true, true>(
+            armable,
+            io,
+            trim,
+            coefficients,
+            state,
+            silence,
+            armed_after,
+            constants,
+        ),
     }
 }
 
 /// No runtime plan reaches this body. The const arms place one add at an identity run's
 /// original position; the both-elided instantiation adds once and touches no integrator.
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
+    armable: bool,
     io: &mut [f32],
     trim: L,
     coefficients: &[SvfCoef<L>; 2],
     state: &mut [SvfState<L>; 2],
+    silence: &mut L,
+    armed_after: L,
+    constants: &InputChainConstants<L>,
 ) -> (L, L::Mask) {
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = constants.limit;
+    let one = constants.one;
+    let rest_on = constants.rest_eps;
+    let flush_eps = constants.flush_eps;
     let zero = L::zero();
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let nc1 = [coefficients[0].c1.neg(), coefficients[1].c1.neg()];
+    let mut counted = *silence;
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
+        let rest = if armable {
+            silence_step_hoisted(x, &mut counted, armed_after, one, rest_on)
+        } else {
+            zero
+        };
         let bad = L::mask_not(x.abs().lt(limit));
         count = count.add(one.andnot(L::mask_not(bad)));
         let mut v = x.andnot(bad).mul(trim);
@@ -1513,7 +1925,16 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
         } else {
             let coefficient = &coefficients[0];
             let v0 = v;
-            let (v1, v2) = svf_step(v0, nc1[0], coefficient.a2, coefficient.a3, &mut state[0]);
+            let (v1, v2) = svf_step_when::<L>(
+                armable,
+                flush_eps,
+                v0,
+                nc1[0],
+                coefficient.a2,
+                coefficient.a3,
+                rest,
+                &mut state[0],
+            );
             v = coefficient
                 .m2
                 .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
@@ -1521,7 +1942,16 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
         if !ELIDE_LPF {
             let coefficient = &coefficients[1];
             let v0 = v;
-            let (v1, v2) = svf_step(v0, nc1[1], coefficient.a2, coefficient.a3, &mut state[1]);
+            let (v1, v2) = svf_step_when::<L>(
+                armable,
+                flush_eps,
+                v0,
+                nc1[1],
+                coefficient.a2,
+                coefficient.a3,
+                rest,
+                &mut state[1],
+            );
             v = coefficient
                 .m2
                 .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
@@ -1531,6 +1961,7 @@ fn mixed_channel_block<L: Lane, const ELIDE_HPF: bool, const ELIDE_LPF: bool>(
         nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
         v.store(frame);
     }
+    *silence = counted;
     (count, nonfinite)
 }
 
@@ -1559,14 +1990,38 @@ pub fn input_chain_block_mono<L: Lane>(
     c: &InputChainCoef<L>,
     s: &mut InputChainState<L>,
 ) -> InputChainReport<L> {
+    // Issue #1328 amendment A9: the joint rule's arithmetic runs only on a block it can act on.
+    if silence_armable(s.silence[0], frames, c.silence) {
+        input_chain_block_mono_body::<L>(true, io, frames, c, s)
+    } else {
+        silence_skip_block(io, frames, &mut s.silence[0]);
+        input_chain_block_mono_body::<L>(false, io, frames, c, s)
+    }
+}
+
+/// The body of [`input_chain_block_mono`]; `ARMABLE = false` runs no silence counter and the per-word
+/// flush ([`super::svf_step_armable`]), for a block in which no lane's counter can arm.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn input_chain_block_mono_body<L: Lane>(
+    armable: bool,
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
-    let limit = L::splat(NONFINITE_LIMIT);
-    let one = L::splat(1.0);
+    let limit = c.constants.limit;
+    let one = c.constants.one;
     let zero = L::zero();
+    let armed_after = c.silence;
+    let rest_on = c.constants.rest_eps;
+    let flush_eps = c.constants.flush_eps;
 
     let mut count = zero;
     let mut nonfinite = no_lanes::<L>();
     let mut state = s.section[0];
+    let mut silence = s.silence[0];
     let mut nc1 = [zero; 2];
     for (section, coefficient) in c.section[0].iter().enumerate() {
         nc1[section] = coefficient.c1.neg();
@@ -1574,17 +2029,25 @@ pub fn input_chain_block_mono<L: Lane>(
 
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
+        let rest = if armable {
+            silence_step_hoisted(x, &mut silence, armed_after, one, rest_on)
+        } else {
+            zero
+        };
         let bad = L::mask_not(x.abs().lt(limit));
         count = count.add(one.andnot(L::mask_not(bad)));
         let mut v = x.andnot(bad).mul(c.trim[0]);
         for section in 0..2 {
             let coefficient = &c.section[0][section];
             let v0 = v;
-            let (v1, v2) = svf_step(
+            let (v1, v2) = svf_step_when::<L>(
+                armable,
+                flush_eps,
                 v0,
                 nc1[section],
                 coefficient.a2,
                 coefficient.a3,
+                rest,
                 &mut state[section],
             );
             v = coefficient
@@ -1596,6 +2059,7 @@ pub fn input_chain_block_mono<L: Lane>(
     }
 
     s.section[0] = state;
+    s.silence[0] = silence;
     InputChainReport {
         sanitized: [count; 2],
         nonfinite: [nonfinite; 2],
@@ -1642,9 +2106,19 @@ fn mixed_chain_block_mono<L: Lane>(
 ) -> InputChainReport<L> {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let mut state = s.section[0];
-    let (count, nonfinite) =
-        dispatch_mixed_channel(io, c.trim[0], &c.section[0], &mut state, plan.elided[0]);
+    let mut silence = s.silence[0];
+    let (count, nonfinite) = dispatch_mixed_channel(
+        io,
+        c.trim[0],
+        &c.section[0],
+        &mut state,
+        &mut silence,
+        c.silence,
+        &c.constants,
+        plan.elided[0],
+    );
     s.section[0] = state;
+    s.silence[0] = silence;
     InputChainReport {
         sanitized: [count; 2],
         nonfinite: [nonfinite; 2],
@@ -1669,7 +2143,10 @@ pub fn input_chain_block_mono_elided<L: Lane>(
 ) -> InputChainReport<L> {
     match plan.elided[0] {
         [false, false] => input_chain_block_mono(io, frames, c, s),
-        [true, true] => identity_chain_block_mono(io, frames, c),
+        [true, true] => {
+            silence_skip_block(io, frames, &mut s.silence[0]);
+            identity_chain_block_mono(io, frames, c)
+        }
         _ => mixed_chain_block_mono(io, frames, c, s, plan),
     }
 }
@@ -1827,6 +2304,8 @@ mod mixed_elision_tests {
         let c = InputChainCoef {
             trim: [L::splat(1.0); 2],
             section: [[coefficient; 2]; 2],
+            silence: L::splat(crate::silence_frames(48_000) as f32),
+            constants: InputChainConstants::new(),
         };
         for frames in [0, 1, 17] {
             for pairing in 0..16 {
@@ -1868,6 +2347,8 @@ mod mixed_elision_tests {
         let c = InputChainCoef {
             trim: [f32::splat(1.0); 2],
             section: [[identity; 2]; 2],
+            silence: crate::silence_frames(48_000) as f32,
+            constants: InputChainConstants::new(),
         };
         let plan = InputChainPlan {
             elided: [[true, true], [true, true]],

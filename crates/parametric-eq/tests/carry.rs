@@ -324,3 +324,167 @@ fn bank_lane_snapshot(bank: &dyn PreparedNativeEffectBank, lane: usize) -> Paylo
     .expect("snapshot");
     out
 }
+
+/// Issue #1328, amendment A9: the payload carries the input's silence counter, so a lane restored
+/// mid-silence arms its joint flush on the frame the lane it was taken from does.
+///
+/// A 10 Hz +24 dB low shelf at 48 kHz takes a `1e-11` impulse; its state then sits inside the joint
+/// band (both words below `REST_EPS`, one above `FLUSH_EPS`) for longer than `N_SILENCE` (4,096
+/// frames), so the frame the counter arms is the frame the band's words reach `+0.0`. The payload
+/// is taken after eight blocks (counter 1,023) and restored into a fresh instance that has rendered
+/// nothing; both render to
+/// past the arming frame. Asserted: the band's words are in the joint band before the arming frame
+/// and `+0.0` from it on, and the restored instance renders the continuing one's bits on every block.
+/// A restore that dropped or reset the counter would arm 1,023 frames late.
+#[test]
+fn a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame() {
+    const FRAMES: usize = 128;
+    const ARMED_AT: usize = 4_096;
+    let values = support::single_section_values(
+        parametric_eq::EqBandKind::LowShelf,
+        10.0,
+        24.0,
+        core::f32::consts::FRAC_1_SQRT_2,
+        1.0,
+    );
+    let mut continuing = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    let mut restored = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    for block in 0..ARMED_AT / FRAMES + 8 {
+        let mut left = [0.0_f32; FRAMES];
+        if block == 0 {
+            left[0] = 1.0e-11;
+        }
+        let mut right = left;
+        let (mut restored_left, mut restored_right) = (left, right);
+        if block == 8 {
+            let payload = snapshot(continuing.as_ref());
+            assert_eq!(
+                support::word(&payload.1, support::SILENCE_WORD),
+                1_023.0_f32.to_bits(),
+                "the snapshot carries the left counter"
+            );
+            let sizes = restored.metadata().state_sizes;
+            restored
+                .restore_state_payload(
+                    1,
+                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                        .expect("input"),
+                )
+                .expect("a mid-silence payload restores");
+        }
+        let first = (block * FRAMES) as u64;
+        continuing.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, first, &[], 128).expect("block"),
+        );
+        // The restored instance renders nothing before the restore: everything it holds then is
+        // what the payload wrote.
+        if block >= 8 {
+            restored.process(
+                EffectProcessBlock::new(
+                    &mut restored_left,
+                    &mut restored_right,
+                    None,
+                    first,
+                    &[],
+                    128,
+                )
+                .expect("block"),
+            );
+        }
+        if block >= 8 {
+            assert!(
+                same_bits(&left, &restored_left) && same_bits(&right, &restored_right),
+                "block {block}: the restored instance must render the continuing one's bits"
+            );
+        }
+        let payload = snapshot(continuing.as_ref());
+        let band = [0, 1].map(|word| f32::from_bits(support::band_word(&payload.1, 0, word)));
+        let end = (block + 1) * FRAMES;
+        if end == ARMED_AT {
+            assert!(
+                band.iter().all(|w| w.abs() < lane::REST_EPS)
+                    && band.iter().any(|w| w.abs() >= lane::FLUSH_EPS),
+                "the band must sit in the joint band before the counter arms: {band:?}"
+            );
+        }
+        if end > ARMED_AT {
+            assert_eq!(
+                band.map(f32::to_bits),
+                [0, 0],
+                "block {block}: the joint flush must fire once the counter arms"
+            );
+        }
+    }
+}
+
+/// The silence word is admitted only as the counter writes it: `+0.0`, or an integer in
+/// `[1, 2^24]`. Each malformed word is refused and changes nothing (issue #1328, amendment A9).
+#[test]
+fn a_malformed_silence_word_is_refused() {
+    let values = support::values();
+    let source = ParametricEqFactory
+        .prepare(request(&values, false))
+        .expect("prepare");
+    let good = snapshot(source.as_ref());
+    for bad in [
+        (-0.0_f32).to_bits(),
+        0.5_f32.to_bits(),
+        1_023.5_f32.to_bits(),
+        (-1.0_f32).to_bits(),
+        16_777_218.0_f32.to_bits(),
+        f32::INFINITY.to_bits(),
+        f32::NAN.to_bits(),
+        1,
+    ] {
+        for channel in 0..2 {
+            let mut payload = good;
+            let section = if channel == 0 {
+                &mut payload.1
+            } else {
+                &mut payload.2
+            };
+            section[support::SILENCE_WORD * 4..].copy_from_slice(&bad.to_le_bytes());
+            let mut target = ParametricEqFactory
+                .prepare(request(&values, false))
+                .expect("prepare");
+            let before = snapshot(target.as_ref());
+            let sizes = target.metadata().state_sizes;
+            assert!(
+                target
+                    .restore_state_payload(
+                        1,
+                        StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                            .expect("input"),
+                    )
+                    .is_err(),
+                "silence word {bad:#010x} on channel {channel} must be refused"
+            );
+            assert!(
+                snapshot(target.as_ref()) == before,
+                "a refusal changes nothing"
+            );
+        }
+    }
+    for counted in [0.0_f32, 1.0, 4_096.0, 16_777_216.0] {
+        let mut payload = good;
+        payload.1[support::SILENCE_WORD * 4..].copy_from_slice(&counted.to_bits().to_le_bytes());
+        let mut target = ParametricEqFactory
+            .prepare(request(&values, false))
+            .expect("prepare");
+        let sizes = target.metadata().state_sizes;
+        target
+            .restore_state_payload(
+                1,
+                StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
+            )
+            .expect("a counted word restores");
+        assert_eq!(
+            support::word(&snapshot(target.as_ref()).1, support::SILENCE_WORD),
+            counted.to_bits()
+        );
+    }
+}

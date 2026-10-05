@@ -60,15 +60,18 @@ TEST_ROWS: dict[str, list[tuple[str, str, str, str, str]]] = {
 # parametric-eq 146, transient-shaper 534): it removed the eight-lane instantiations from the
 # AArch64 builds, and their two-half `f32x8` splats made the same calls. #1328 lowered two more
 # (builtins 194 -> 186, parametric-eq 132 -> 122), as `check-cross-targets.sh` asked after the
-# joint SVF flush and the EQ's dry masks held in channel state.
+# joint SVF flush and the EQ's dry masks held in channel state, and its amendment A9 two more
+# (builtins 186 -> 71, parametric-eq 122 -> 88), as the check asked: the builtin input chain now
+# loads its bodies' vector constants from its prepared coefficients (`InputChainConstants`) and the
+# EQ reads its rest thresholds from memory, in place of splatted compares.
 IOS_MEMSET_CEILINGS: dict[str, tuple[str, int]] = {
-    "builtins": ("1018", 186),
+    "builtins": ("1018", 71),
     "compressor": ("1018", 970),
     "gate-expander": ("1018", 91),
     "graph": ("1018", 10),
     "host-core": ("1018", 4),
     "multiband-compressor": ("1018", 566),
-    "parametric-eq": ("1018", 122),
+    "parametric-eq": ("1018", 88),
     "soft-clip": ("1018", 22),
     "transient-shaper": ("1018", 268),
     "true-peak-limiter": ("1018", 104),

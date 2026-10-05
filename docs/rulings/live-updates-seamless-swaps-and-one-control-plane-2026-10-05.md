@@ -586,12 +586,22 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
   mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
   each section's dry mask is kept in state); D6 (class B) is restated by change size.
-- **#1328 A8 (supersedes the A4/A7 rest threshold):** the joint flush fires only on a sample whose
-  section input is exactly zero, so an EQ applies its whole response to any non-zero input and
-  the joint rule moves bits only on exact-zero input samples, in tails (measured at most −254 dBFS at one
-  section's output and −189 dBFS at four cascaded +24 dB shelves' output). A4/A7's acceptance of a
-  dead zone was withdrawn: four shelves lost about 96 dB of response below −210 dBFS. Details: #1328
-  Amendment 1 A8 and `dsp-research/filters.md`.
+- **#1328 A8 (supersedes the A4/A7 rest threshold), itself superseded by A9:** A8 armed the joint
+  flush on a sample whose section input is exactly zero. The attempt-4 verdict showed that this
+  still loses a sparse signal's boost (non-zero samples below the rest limit with exact zeros
+  between them: about −120 dBFS at four +24 dB shelves) and moves bits inside a live EQ where a
+  section's own input cancels to zero.
+- **#1328 A9 (supersedes A8):** silence is a time property. Each effect input channel (the builtin
+  input stage, the parametric EQ, the multiband compressor) keeps one counter word per lane, the
+  run of exactly-zero input samples, and a section may apply the joint flush only once its effect
+  input has been zero for `N_SILENCE` samples, a time of `4096 / 48000` s (3,764 to 8,192 samples
+  by rate; 1,024 samples left a sparse-input residual above one tail's worth at every rate). While
+  the effect input is live, sparse or tiny, no bit moves; in tails the change is at most one tail's
+  worth (analytic bound `1.95e-13` at one +24 dB shelf, largest found `3.5e-10` at four, −189 dBFS),
+  and a block of live audio pays nothing for the rule in the builtin chain and the EQ (the
+  multiband compressor runs it on every frame). The counter rides the state payload, the
+  carry and the mono-collapse disengage copy. Details: #1328 Amendment 1 A9 and
+  `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its

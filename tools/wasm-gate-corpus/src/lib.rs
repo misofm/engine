@@ -48,8 +48,8 @@ use effect_runtime::corpus as runtime_corpus;
 use gate_expander::corpus as gate_expander_corpus;
 use lane::kernels::{
     OnePoleCoef, OnePoleState, RampSegment, SvfCoef, SvfCoefStep, SvfState, gain_block,
-    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, sum_into_block, sum2_block,
-    svf_block, svf_block_ramped,
+    gain_mix_block, mix2x2_block, one_pole_block, ramp_block, silence_block, sum_into_block,
+    sum2_block, svf_block, svf_block_ramped,
 };
 use lane::{Lane, LaneF64, Widen};
 use math::corpus as math_corpus;
@@ -1338,9 +1338,20 @@ fn run_kernel<L: Lane>(kernel: Kernel, block: &mut [f32], state_seed: f32) {
         ic2: L::splat(state_seed),
     };
 
+    // The section's effect input is the block itself, with no history: a fresh silence counter
+    // and the rest plane it writes before the section runs (issue #1328, amendment A9).
+    let mut silence = L::zero();
+    let mut rest = vec![0.0_f32; block.len()];
+    silence_block::<L>(
+        block,
+        FRAMES,
+        &mut silence,
+        &mut rest,
+        L::splat(lane::silence_frames(48_000) as f32),
+    );
     match kernel {
         Kernel::SvfLow | Kernel::SvfHigh | Kernel::SvfBand | Kernel::SvfBell => {
-            svf_block::<L>(block, FRAMES, &svf_coef, &mut svf_state);
+            svf_block::<L>(block, FRAMES, &svf_coef, &mut svf_state, &rest);
         }
         Kernel::SvfRamped | Kernel::SvfRampedIdle => {
             let window = if ramping { RAMP_WINDOW } else { 0 };
@@ -1351,6 +1362,7 @@ fn run_kernel<L: Lane>(kernel: Kernel, block: &mut [f32], state_seed: f32) {
                 &svf_step,
                 window,
                 &mut svf_state,
+                &rest,
             );
         }
         Kernel::OnePole => {

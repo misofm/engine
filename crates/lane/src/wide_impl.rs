@@ -270,6 +270,14 @@ macro_rules! impl_lane_for_wide {
             }
 
             #[inline(always)]
+            fn max_u32(self, b: Self) -> Self {
+                // LANE-OP-OK(u32 max): `wide`'s unsigned integer maximum, one instruction on every
+                // admitted target (`vpmaxud`, `i32x4.max_u`, `umax`); a bit-pattern operation with
+                // no float rule to diverge, held to the scalar oracle by gate G1.
+                <$simd>::from_bits(self.to_bits().max(b.to_bits()))
+            }
+
+            #[inline(always)]
             fn max(self, b: Self) -> Self {
                 // x86: `maxps`/`vmaxps` is `SRC1 > SRC2 ? SRC1 : SRC2`, which is D8 exactly.
                 // The crate refuses to compile on x86 without `+avx2,+fma`, so both widths reach

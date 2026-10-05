@@ -183,7 +183,17 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
                 block[frame * W + offset] = lanes[group * W + offset][frame];
             }
         }
-        channel.process_block(&mut block, FRAMES);
+        // The EQ's own input arms the joint flush (issue #1328, amendment A9): the rest plane is
+        // the channel's, written before the first section runs.
+        let mut rest = vec![0.0_f32; FRAMES * W];
+        lane::kernels::silence_block::<L>(
+            &block,
+            FRAMES,
+            &mut channel.silence,
+            &mut rest,
+            L::splat(lane::silence_frames(CORPUS_RATE.0) as f32),
+        );
+        channel.process_block(&mut block, FRAMES, &rest);
         for frame in 0..FRAMES {
             for offset in 0..W {
                 lanes[group * W + offset][frame] = block[frame * W + offset];

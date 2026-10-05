@@ -793,6 +793,9 @@ pub(crate) struct PreparedInputTrack {
     pub left: InputLane,
     /// Right channel.
     pub right: InputLane,
+    /// `N_SILENCE` at the track's rate, `lane::silence_frames` (issue #1328, amendment A9): the
+    /// input's run of zero frames that arms the joint flush. One rate per bank, so one value.
+    pub silence_frames: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1052,12 +1055,20 @@ impl<L: Lane> InputStage<L> {
                 sections[channel * 2 + 1][lane] = input.lpf;
             }
         }
+        debug_assert!(
+            tracks
+                .iter()
+                .all(|track| track.silence_frames == tracks[0].silence_frames),
+            "a bank runs at one rate"
+        );
         let coef = InputChainCoef {
             trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
             section: [
                 [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
                 [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
             ],
+            silence: L::splat(tracks[0].silence_frames as f32),
+            constants: lane::kernels::builtins::InputChainConstants::new(),
         };
         let state = InputChainState::default();
         // `InputChainState::default()` is `+0.0` in every word, so a bank whose designs are all
@@ -2070,6 +2081,9 @@ impl<L: Lane> InputStage<L> {
     /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
         self.state.section[1] = self.state.section[0];
+        // The input's silence counter is per-channel state the one-plane body froze with the
+        // integrators (issue #1328, amendment A9): channel `0`'s is the live one.
+        self.state.silence[1] = self.state.silence[0];
         self.collapsed = false;
         self.refresh_filter_plan();
     }
@@ -2127,8 +2141,9 @@ impl<L: Lane> InputStage<L> {
     /// Whether this stage can **prove**, right now, that its two channels' state is bit-equal.
     ///
     /// The mono collapse's way back (M3). The proof is a walk over exactly the words
-    /// [`InputStage::desymmetrize`] copies -- the four integrators per channel and the trim ramp
-    /// record -- because those are the whole of this kernel's per-channel state, and a `true` that
+    /// [`InputStage::desymmetrize`] copies -- the four integrators per channel, the input's silence
+    /// counter (issue #1328, amendment A9) and the trim ramp record -- because those are the whole
+    /// of this kernel's per-channel state, and a `true` that
     /// covered less would re-engage a collapse onto a right channel that is not the left one.
     ///
     /// It is asked only inside a recovery window (`rack::BankChain::run`), so a
@@ -2149,6 +2164,17 @@ impl<L: Lane> InputStage<L> {
         }
         if !self.trim_ramp_channels_agree() {
             return false;
+        }
+        // The input's silence counters (issue #1328, amendment A9): a collapsed block advances
+        // channel `0`'s for both, so the two must already be equal.
+        let (left_run, right_run) = (
+            lane_read::<L>(self.state.silence[0]),
+            lane_read::<L>(self.state.silence[1]),
+        );
+        for lane in 0..L::WIDTH {
+            if left_run[lane].to_bits() != right_run[lane].to_bits() {
+                return false;
+            }
         }
         for section in 0..2 {
             for (left_word, right_word) in [
@@ -2341,6 +2367,7 @@ impl<L: Lane> InputStage<L> {
                 hpf: section(1, 0),
                 lpf: section(1, 1),
             },
+            silence_frames: lane_read::<L>(self.coef.silence)[lane] as u32,
         }
     }
 
@@ -2601,6 +2628,7 @@ impl<L: Lane> InputStage<L> {
                     read(self.ramp.remaining[channel]),
                 ],
                 remaining: self.remaining[channel][lane],
+                silence: read(self.state.silence[channel]),
                 sections: core::array::from_fn(|section| InputSectionState {
                     coef: words(&self.coef.section[channel][section]),
                     target: words(&self.filter_target[channel][section]),
@@ -2643,6 +2671,7 @@ impl<L: Lane> InputStage<L> {
             put(&mut self.ramp.step[channel], lane, carried.ramp[2]);
             put(&mut self.ramp.remaining[channel], lane, carried.ramp[3]);
             self.remaining[channel][lane] = carried.remaining;
+            put(&mut self.state.silence[channel], lane, carried.silence);
             for (section, words) in carried.sections.iter().enumerate() {
                 put_coef(&mut self.coef.section[channel][section], lane, &words.coef);
                 put_coef(
@@ -2685,8 +2714,9 @@ impl<L: Lane> InputStage<L> {
 /// predecessor's lane to the successor's (issue #1276 D2).
 ///
 /// Plain data, fixed size, no heap: the filter integrators, the coefficients in use, any
-/// coefficient ramp in flight (target, per-sample step and countdown), and the trim ramp
-/// (current, target, step, the kernel's countdown word and the authoritative countdown). The
+/// coefficient ramp in flight (target, per-sample step and countdown), the trim ramp
+/// (current, target, step, the kernel's countdown word and the authoritative countdown), and the
+/// input's silence counter (issue #1328, amendment A9). The
 /// polarity is the trim's sign. In-memory state handed across a plan replacement, never persisted
 /// (AGENTS.md, R6b).
 #[derive(Clone, Copy, Debug)]
@@ -2702,6 +2732,9 @@ struct InputChannelState {
     ramp: [f32; 4],
     /// The authoritative trim countdown.
     remaining: u32,
+    /// `state.silence`: the input's run of exactly-zero frames (issue #1328, amendment A9), so the
+    /// successor arms the joint flush on the frame the predecessor would have.
+    silence: f32,
     /// High-pass, then low-pass.
     sections: [InputSectionState; 2],
 }
@@ -3451,6 +3484,7 @@ fn prepare_sections(
     let track = PreparedInputTrack {
         left: lane(parameters.left)?,
         right: lane(parameters.right)?,
+        silence_frames: lane::silence_frames(sample_rate),
     };
     let faders = [(fader(parameters.left)?, fader(parameters.right)?)];
     Ok((
@@ -3785,7 +3819,7 @@ impl BuiltinInputBank {
     }
 
     /// Copies every lane's left-channel per-channel state onto the right channel (the disengage
-    /// copy): the integrators and the trim ramp record.
+    /// copy): the integrators, the input's silence counter and the trim ramp record.
     pub fn desymmetrize(&mut self) {
         per_width!(InputStageKernel(stage) in &mut self.stage => stage.desymmetrize())
     }
@@ -5532,7 +5566,7 @@ pub mod test_support {
     use super::{
         BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinMatrixBank, BuiltinParameterError,
         FaderMuteRampBuiltins, FaderStageKernel, InputBuiltins, InputStageKernel, Matrix2x2,
-        MatrixBuiltins, MatrixStageKernel, SvfSection,
+        MatrixBuiltins, MatrixStageKernel, SvfSection, lane_read,
     };
 
     /// The seven words `[c1, a2, a3, k, m0, m1, m2]` of one designed section.
@@ -5640,6 +5674,18 @@ pub mod test_support {
     #[must_use]
     pub fn bank_lifetime_recovered(bank: &BuiltinInputBank) -> [u64; 2] {
         per_width!(InputStageKernel(stage) in &bank.stage => stage.lifetime_recovered)
+    }
+
+    /// The input's silence counter of one bank lane, `[left, right]`, as `f32` bits (issue #1328,
+    /// amendment A9).
+    #[must_use]
+    pub fn bank_lane_silence_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 2] {
+        per_width!(InputStageKernel(stage) in &bank.stage => {
+            stage
+                .state
+                .silence
+                .map(|run| lane_read(run)[lane].to_bits())
+        })
     }
 
     /// Overwrites the retained state words of one bank lane.

@@ -449,3 +449,19 @@ run, and the edit reverted (#1328 attempt 4; the attempt records are in the issu
 | 1328-M1 | `lane::flush_pair` without its input term (attempt 3's law: `rest = abs(n1) < REST_EPS && abs(n2) < REST_EPS`) | `exact_rest::a_tiny_input_through_four_boosting_shelves_gets_every_boost` (`10 Hz, input 2.7939677e-11 … misses the ordinary run by 1.5091782e3`), dev and release; `the_low_shelf_fixed_point_reaches_exact_rest` stays green | RED |
 | 1328-M2 | `self.right.identity = self.left.identity;` dropped from `desymmetrize` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks`: dev through `identity_flags_agree` (`lib.rs`), release on the right plane at block 27 after the left-only retarget | RED |
 | 1328-M3 | `self.right.dry = self.left.dry;` dropped from `desymmetrize` | the same test, dev only (`identity_flags_agree`); release renders the same bits (a stale dry lane runs the identity section wet, which moves at most `-0.0` to `+0.0`, and this input moves none) | RED (dev) |
+
+### #1328 amendment A9: the silence counter
+
+Host and method as above (#1328 attempt 5, release). Each row's mutant was applied in the source
+it names, the named tests run, and the source restored.
+
+| # | mutation | gate that goes red | result |
+|---|---|---|---|
+| 1328-M4 | the rest threshold always armed (attempt 3's law: `silence_step` returns `REST_EPS`, `silence_armable` always true) | `exact_rest::a_sparse_input_through_four_boosting_shelves_gets_every_boost_at_every_rate` (`44100 Hz, 10 Hz shelves, period 2 … misses the ordinary run by 1.102885e3`), `a_tiny_input_through_four_boosting_shelves_gets_every_boost`, `an_exact_zero_inside_the_cascade_moves_nothing_while_the_input_is_live` | RED |
+| 1328-M5 | A8's law: armed by a zero *section* input (thresholds from `v0 == 0` in `svf_step_when`, every block armable) | the sparse gate (`… misses the ordinary run by 1.0375549e3`) and the cancellation gate (`DC at 1e-6 … misses the ordinary run by 6.996817e-5 … (peak 7.826055e3)`); the chain gate stays green | RED |
+| 1328-M6 | `Channel::commit_track` drops the restored silence word | `carry::a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame`, `carry::a_malformed_silence_word_is_refused` | RED |
+| 1328-M7 | `desymmetrize` drops `self.right.silence = self.left.silence` | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter` | RED |
+| 1328-M8 | the silent fast path earned without every lane armed (`quiet && (armed \|\| true)`) | `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
+| 1328-M9 | the silent fast path skips without `silence_advance` | the same test (`the silence counter after 68 silent blocks`) | RED |
+| 1328-M10 | `rest_plane`'s unarmed branch returns the last written plane instead of the unarmed one | the sparse gate (its train starts after armed silence) | RED |
+| 1328-M11 | `lane_is_inert` without its pair term | `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |

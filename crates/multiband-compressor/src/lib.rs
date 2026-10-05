@@ -59,6 +59,7 @@ use effect_runtime::state_payload::{
     write_u32,
 };
 use lane::kernels::{SvfState, svf_step};
+use lane::silence_step;
 use lane::{Lane, flush};
 use math::fast_db::{fast_gain_from_db, fast_level_db};
 
@@ -79,7 +80,7 @@ const RAMP_COUNT: usize = 10;
 const RAMP_WORDS: usize = 4;
 
 /// Fixed scalar words of one channel's state payload.
-const LANE_HEADER_WORDS: usize = 47;
+const LANE_HEADER_WORDS: usize = 48;
 
 /// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
 /// the audit's F1, F4 and D11 corrections.
@@ -491,19 +492,24 @@ impl<L: Lane> Default for Lr4State<L> {
 /// One frame of the split: returns `(low, high)`.
 ///
 /// Frozen operation order:
-/// 1. `(v1, lp1) = svf_step(x)` — the first stage, both taps of one state
+/// 1. `(v1, lp1) = svf_step(x, rest)` — the first stage, both taps of one state
 /// 2. `ap = fma(-2k, v1, x)` — unfused (#163 phase 2); this is `svf_block`'s all-pass mix
 ///    `(1, -2k, 0)`
-/// 3. `(_, low) = svf_step(lp1)` — the second stage
+/// 3. `(_, low) = svf_step(lp1, rest)` — the second stage
 /// 4. `high = ap - low`
 ///
 /// Step 4 is what makes the band sum the all-pass by construction rather than by accident: the
 /// only rounding between `ap` and `low + high` is the one subtraction.
+///
+/// `rest` is the frame's rest threshold from the compressor's own input,
+/// `lane::silence_step(x, run)` (issue #1328, amendment A9): both stages' joint flush is armed by
+/// the effect input `x`, so the second stage, whose input is the first stage's low-pass tap, is
+/// never armed by that tap.
 #[inline(always)]
-pub fn lr4_step<L: Lane>(x: L, c: &Lr4Coef<L>, s: &mut Lr4State<L>) -> (L, L) {
-    let (v1, lp1) = svf_step(x, c.nc1, c.a2, c.a3, &mut s.a);
+pub fn lr4_step<L: Lane>(x: L, rest: L, c: &Lr4Coef<L>, s: &mut Lr4State<L>) -> (L, L) {
+    let (v1, lp1) = svf_step(x, c.nc1, c.a2, c.a3, rest, &mut s.a);
     let ap = c.nk2.fma(v1, x);
-    let (_, low) = svf_step(lp1, c.nc1, c.a2, c.a3, &mut s.b);
+    let (_, low) = svf_step(lp1, c.nc1, c.a2, c.a3, rest, &mut s.b);
     (low, ap.sub(low))
 }
 
@@ -670,6 +676,10 @@ struct Side<L: Lane, const W: usize> {
     coefficients: Lr4Coef<L>,
     prepared_coefficients: Lr4Coef<L>,
     filter: Lr4State<L>,
+    /// The run of exactly-zero input frames per lane: this channel's silence counter, which arms
+    /// both crossover stages' joint flush (issue #1328, amendment A9). Advanced on every frame the
+    /// crossover runs; a bypassed instance runs no crossover and freezes it with the filter.
+    silence: L,
     /// The branching smoother's state, in dB, per band.
     gain_db: [L; 2],
     ramps: [[LinearRamp; RAMP_COUNT]; W],
@@ -698,6 +708,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
             coefficients: prepared_coefficients,
             prepared_coefficients,
             filter: Lr4State::default(),
+            silence: L::zero(),
             gain_db: [L::zero(); 2],
             ramps,
             cache: [[BandCache::empty(); 2]; W],
@@ -711,6 +722,7 @@ impl<L: Lane, const W: usize> Side<L, W> {
     /// Clears history. Coefficients and parameters are deliberately untouched.
     fn discontinuity_reset(&mut self) {
         self.filter = Lr4State::default();
+        self.silence = L::zero();
         self.gain_db = [L::zero(); 2];
         for track in 0..W {
             for ramp in &mut self.ramps[track] {
@@ -893,12 +905,15 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     frames: usize,
     segments: &mut [Segment<L>; 2],
     coefficients: &[[BandCoef<L>; 2]; 2],
+    armed_after: L,
 ) {
     let (head, tail) = sides.split_at_mut(1);
     let near = &mut head[0];
     let far = &mut tail[0];
     let mut filter_near = near.filter;
     let mut filter_far = far.filter;
+    let mut silence_near = near.silence;
+    let mut silence_far = far.silence;
     let mut gain_near = near.gain_db;
     let mut gain_far = far.gain_db;
     for frame in 0..frames {
@@ -917,8 +932,11 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
             input_far.store(&mut right[frame * W..]);
             continue;
         }
-        let (low_near, high_near) = lr4_step(input_near, &near.coefficients, &mut filter_near);
-        let (low_far, high_far) = lr4_step(input_far, &far.coefficients, &mut filter_far);
+        let rest_near = silence_step(input_near, &mut silence_near, armed_after);
+        let rest_far = silence_step(input_far, &mut silence_far, armed_after);
+        let (low_near, high_near) =
+            lr4_step(input_near, rest_near, &near.coefficients, &mut filter_near);
+        let (low_far, high_far) = lr4_step(input_far, rest_far, &far.coefficients, &mut filter_far);
         let (linked_near_low, linked_far_low) = link_levels::<L, LINK>(low_near, low_far);
         let (linked_near_high, linked_far_high) = link_levels::<L, LINK>(high_near, high_far);
 
@@ -962,6 +980,8 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, cons
     }
     near.filter = filter_near;
     far.filter = filter_far;
+    near.silence = silence_near;
+    far.silence = silence_far;
     near.gain_db = gain_near;
     far.gain_db = gain_far;
 }
@@ -986,6 +1006,8 @@ fn process_block<
     frames: usize,
 ) {
     let sample_rate = instance.sample_rate;
+    // `N_SILENCE` at the instance's rate (issue #1328, amendment A9).
+    let armed_after = L::splat(lane::silence_frames(sample_rate) as f32);
     let mut position = 0;
     while position < frames {
         let plan = instance.plan_segment(frames - position);
@@ -995,29 +1017,30 @@ fn process_block<
             instance.sides[0].band_coefficients(sample_rate),
             instance.sides[1].band_coefficients(sample_rate),
         ];
+        // A bypassed instance runs no crossover and freezes the silence counters with the filter
+        // (issue #1328, amendment A9).
+        macro_rules! segment {
+            ($ramping:literal) => {
+                run_segment::<L, W, LINK, BYPASS, $ramping>(
+                    &mut instance.sides,
+                    &mut left[position * W..(position + length) * W],
+                    &mut right[position * W..(position + length) * W],
+                    length,
+                    &mut segments,
+                    &coefficients,
+                    armed_after,
+                )
+            };
+        }
         if plan.ramping || FORCE_RAMPING {
-            run_segment::<L, W, LINK, BYPASS, true>(
-                &mut instance.sides,
-                &mut left[position * W..(position + length) * W],
-                &mut right[position * W..(position + length) * W],
-                length,
-                &mut segments,
-                &coefficients,
-            );
+            segment!(true);
             let advanced = length as u32;
             instance.sides[0].store_segment(&segments[0], advanced);
             instance.sides[1].store_segment(&segments[1], advanced);
         } else {
             #[cfg(debug_assertions)]
             assert!(instance.flat_path_is_identity());
-            run_segment::<L, W, LINK, BYPASS, false>(
-                &mut instance.sides,
-                &mut left[position * W..(position + length) * W],
-                &mut right[position * W..(position + length) * W],
-                length,
-                &mut segments,
-                &coefficients,
-            );
+            segment!(false);
             // The write-back is skipped rather than performed and discarded, and that is sound
             // for the same reason the additions are: `store_segment` would write `current` back
             // unchanged, because no lane of it moved, and would apply `saturating_sub` to a
@@ -1303,6 +1326,10 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 
 /// Word offset of the first filter word.
 const FILTER_WORD: usize = 3 + RAMP_COUNT * RAMP_WORDS;
+/// The input's silence counter, after the four crossover words (issue #1328, amendment A9).
+const SILENCE_WORD: usize = FILTER_WORD + 4;
+/// The silence counter's saturation, `2^24`.
+const SILENCE_SATURATION: f32 = 16_777_216.0;
 
 // REALTIME_POLICY_BEGIN: #1278 D3, the payload codec runs in the plan-swap block.
 /// One lane of a lane-wide value.
@@ -1329,6 +1356,7 @@ struct StagedSide {
     gains: [f32; 2],
     ramps: [LinearRamp; RAMP_COUNT],
     filter: [f32; 4],
+    silence: f32,
 }
 
 fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, track: usize) {
@@ -1352,6 +1380,7 @@ fn write_side<L: Lane, const W: usize>(bytes: &mut [u8], side: &Side<L, W>, trac
     for (index, value) in filter.into_iter().enumerate() {
         write_f32(bytes, FILTER_WORD + index, lane_value(value, track));
     }
+    write_f32(bytes, SILENCE_WORD, lane_value(side.silence, track));
 }
 
 /// Validates one channel's fixed words.
@@ -1413,12 +1442,21 @@ fn stage_side(bytes: &[u8], sample_rate: u32) -> Result<StagedSide, StatePayload
             return Err(state_error("effect.state.filter"));
         }
     }
+    // The silence counter is `+0.0` or an `f32` integer in `[1, 2^24]`: exactly the words
+    // `lane::silence_step` writes (issue #1328, amendment A9).
+    let silence = read_f32(bytes, SILENCE_WORD);
+    let counted =
+        (1.0..=SILENCE_SATURATION).contains(&silence) && (silence as u32) as f32 == silence;
+    if silence.to_bits() != 0 && !counted {
+        return Err(state_error("effect.state.filter"));
+    }
     Ok(StagedSide {
         crossover_hz,
         designed,
         gains: [normalize_zero(gains[0]), normalize_zero(gains[1])],
         ramps,
         filter,
+        silence,
     })
 }
 
@@ -1436,6 +1474,7 @@ fn commit_side<L: Lane, const W: usize>(side: &mut Side<L, W>, staged: &StagedSi
     side.filter.a.ic2 = set_lane_value(side.filter.a.ic2, track, staged.filter[1]);
     side.filter.b.ic1 = set_lane_value(side.filter.b.ic1, track, staged.filter[2]);
     side.filter.b.ic2 = set_lane_value(side.filter.b.ic2, track, staged.filter[3]);
+    side.silence = set_lane_value(side.silence, track, staged.silence);
 }
 
 fn state_error(code: &'static str) -> StatePayloadError {

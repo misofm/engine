@@ -126,7 +126,7 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   implementer proves with evidence that no correct encoding avoids it does the slice measure the
   browser cost (V8, the existing timing method) and record it here as an explicit accepted
   exception with that evidence; the gate then holds that row with its reason.
-- **A4. D6 restated (class B, re-accepted; premises corrected by A7; acceptance withdrawn and restated by A8 below).** The joint flush moves
+- **A4. D6 restated (class B, re-accepted; premises corrected by A7; acceptance withdrawn and restated by A8 below; A8's law superseded by A9).** The joint flush moves
   output bits by a bounded amount, at any input level. While every input sample satisfies
   |x| < L* = REST_EPS/(2·max(a2,a3)), the section stays at rest and outputs only its direct term
   (m0 + m1·a2 + m2·a3)·x; the change at the section's output is at most ‖h − g_direct·δ‖₁·L*. L* is
@@ -206,7 +206,7 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   6. Do NOT edit decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`);
      the root relayed A4 to S0. A7 stays in this spec and the note in `dsp-research/filters.md` only.
 
-- **A8. Root decisions for attempt 4 (2026-10-05; supersedes A4/A7's acceptance of the dead zone).**
+- **A8. Root decisions for attempt 4 (2026-10-05; supersedes A4/A7's acceptance of the dead zone; its law is superseded by A9 below).**
   Decided by the decision-15 root coordinator under the owner's delegation
   (`no-shortcuts-correctness-first`), after attempt 3's verdict
   (`/home/bl/misofm/submix-verdicts/1328-attempt3.md`, FAIL: M1 chain bound, M2 prose). Root
@@ -256,10 +256,63 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   bits only after an exact-zero input; largest change measured -189 dBFS at a four-shelf chain's
   output (-254 dBFS at one section's); no listening run".
 
+- **A9. Root decisions for attempt 5 (2026-10-05, the last attempt; supersedes A8's law).** Decided
+  by the decision-15 root coordinator under the owner's delegation (`no-shortcuts-correctness-first`),
+  after attempt 4's verdict (`/home/bl/misofm/submix-verdicts/1328-attempt4.md`, FAIL): A8 still lost
+  a sparse signal's boost (non-zero samples below `L*` with exact zeros between them) and moved bits
+  inside a live EQ whose own high-pass cancels to an exact zero (M1). Option (b2), with the
+  `max_u32` saving; not option (a), which would land a -113 dBFS sparse dead zone to fix later.
+  1. **Silence is a time property.** Per effect input and channel, `z' = (x == ±0.0) ? z + 1 : 0`
+     (saturating); a section may apply the `REST_EPS` joint rule only when `z' >= N_SILENCE` and
+     both words are below `REST_EPS`. The per-word `FLUSH_EPS` law is unchanged. "Effect input" is
+     the builtin input stage's input, the parametric EQ's input and the multiband compressor's
+     input, per channel; every SVF user reads its own effect input's counter. Whether A8's section
+     input `x == 0` term is also kept is decided by evidence (kept if needed for correctness,
+     dropped otherwise, the reason recorded). This supersedes D1's and A8's `rest` term and D2's call.
+  2. **`N_SILENCE`** is a stated constant, not a knob: 1,024 frames at every launch rate unless a
+     rate's measured residual exceeds A8's tail level, in which case it is stated in time and
+     derived in frames per rate; the choice and its residual at all four launch rates are recorded.
+  3. **Gates.** `[a, 0, a, 0, ...]` and `[a, 0, 0, 0, ...]` with `a < L*` through four +24 dB
+     shelves (10 Hz and 100 Hz, every launch rate) get every boost (red on A8 and on attempt 3's
+     law); the HPF-cancellation case moves nothing while the effect input is live (red on A8);
+     continuous-then-silence tails stated as reachable bounds (analytic or worst-case search), not
+     sampled maxima (m2); gates 1-2 still hold with their rest samples updated.
+  4. **Subnormals.** Show that no section state goes subnormal inside the window on the wasm path
+     (no FTZ there), or add a per-word `|w| < f32::MIN_POSITIVE` flush with its reason.
+  5. **`max_u32`**: a new `Lane` op (`vpmaxud` / `i32x4.max_u` / `umax`), NaN-exact, with its own
+     lane test at every width; `flush_pair`'s joint test is one compare of the larger magnitude.
+  6. **Spill gate**: the four held rows stay clean; report the codegen op counts per SVF step (V8
+     and AVX2) and the descriptive p50 (one warmup, two rounds).
+  7. **State**: one word per channel per effect input; every sealed size or payload change is
+     recorded with its reason, and the counter carries across plan swaps and restores consistently
+     (or resets with a stated, safe semantics).
+  8. Floors and op counts follow (`docs/rulings/effect-floor-accounting.md`,
+     `tools/bench/src/floor.rs`, `scripts/console-benchmark-record-lib.jq`,
+     `scripts/test-console-benchmark.sh`); the twin, the g2 oracle and the audit's `unfused_fma`
+     model follow the law; G5 re-pins only for cases that move, individually with reasons.
+  9. Fold m2, n1 (dropping the audit model's silence term must turn something red) and n3 (document
+     or fix `lane_is_inert`'s refusal of elision under continuous input). Amend A4/A7/A8's text here,
+     in `dsp-research/filters.md`, `docs/BUILTINS_AND_METERING_V1.md`, `crates/lane/src/lib.rs` and
+     decision 15's "Root decisions after S0" #1328 entry (authorized), and sync GitHub #1328's body.
+
+  **A4 restated under A9 (measured in attempt 5; class B).** The joint flush moves output bits only
+  after the effect's input has been exactly zero for `N_SILENCE` samples, `4096 / 48000` s
+  (85 1/3 ms: 3,764 / 4,096 / 7,527 / 8,192 samples at 44.1 / 48 / 88.2 / 96 kHz). While the effect
+  input is live -- any non-zero sample in the last `N_SILENCE`, however small or sparse -- every
+  section runs the per-word law bit for bit, and a section fed an exact zero by the section before
+  it is not armed by that zero. In tails, one section's change is at most `1.95e-13` (-254.2 dBFS)
+  analytically at a +24 dB 10 Hz or 100 Hz low shelf, S 1 (`3.37e-13` at S 0.1); the largest found
+  at four cascaded shelves is `3.47e-10` (-189.2 dBFS), and the analytic chain bound for one tail is
+  `3.1e-7` (four 10 Hz shelves, 96 kHz). The per-word law's own dead zone (about `3e-17`,
+  -330 dBFS) is unchanged. Listening line: "the joint flush moves bits only after `N_SILENCE` of
+  exact-zero effect input; largest change found -189 dBFS at a four-shelf chain's output (-254 dBFS
+  at one section's, analytic); no listening run".
+
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** TPT SVF in stored A1 form, `v3 = v0 - ic2`, `d1 = -c1·ic1 + a2·v3`,
-  `d2 = a3·v3 + a2·ic1`, `n1 = ic1 + 2d1`, `n2 = ic2 + 2d2`, then `flush_pair(n1, n2, v0)` (A8) [SIMPER-SVF]
+  `d2 = a3·v3 + a2·ic1`, `n1 = ic1 + 2d1`, `n2 = ic2 + 2d2`, then `flush_pair(n1, n2, rest)`, with
+  `rest = silence_step(x, run, N_SILENCE)` from the effect input `x` (A9) [SIMPER-SVF]
   [ZAVALISHIN-TPT]. Coefficient and update rules unchanged.
 - **Numerical limits:** D3. Ramps in flight are safe: the rule only zeroes state, and each step
   matrix stays non-expansive.
@@ -271,11 +324,12 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   limit cycles in recursive filters), all in `dsp-research/BIBLIOGRAPHY.md`.
 - **Fixtures and objective tests:** gates 1-4 below. **Benchmarks:** descriptive only; round-2
   scratch measured +10 % on one isolated section (latency-bound) and no measurable change on four
-  interleaved sections; the floor-accounting rows record the +7 ops (two of them A8's input gate).
-  **Listening:** the joint flush moves bits only after an exact-zero input; largest change measured
-  -189 dBFS at a four-shelf chain's output (-254 dBFS at one section's); no listening run (A4 as
-  restated under A8; the rest rule and its bound are in `dsp-research/filters.md`, numerical
-  limits).
+  interleaved sections; the floor-accounting rows record +4 ops per section (`flush_pair` 10
+  against 6) and 5 per channel sample for the silence counter (A9).
+  **Listening:** the joint flush moves bits only after `N_SILENCE` of exact-zero effect input;
+  largest change found -189 dBFS at a four-shelf chain's output (-254 dBFS at one section's,
+  analytic); no listening run (A4 as restated under A9; the rest rule and its bounds are in
+  `dsp-research/filters.md`, numerical limits).
 
 ## Deliverables
 
@@ -330,9 +384,12 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
    and the output is exactly `+0.0` within 9,600,000 samples (100 s; round-2 measured the EQ's
    worst rest at about 89 s). Red on revert (stuck at `ic2 = 6.01e-20`).
 3. **Pair law** (`crates/lane/tests/g4_flush.rs`, at every width the build has): both words below
-   `REST_EPS` on an input of exactly `±0.0` → both `+0.0`; on any non-zero input (subnormal, NaN
-   and infinity included, A8) or with one word at or above `REST_EPS` → each word follows the
-   per-word law, bit for bit; NaN in either word passes through; `-0.0` → `+0.0`.
+   `REST_EPS` on an armed threshold (`REST_EPS`) → both `+0.0`; on an unarmed threshold (`+0.0`)
+   or with one word at or above `REST_EPS` → each word follows the per-word law, bit for bit; NaN
+   in either word passes through; `-0.0` → `+0.0` (A9). The counter law (`run' = (x == 0) ? run + 1
+   : 0`, saturating at `2^24`; the threshold armed from `N_SILENCE`), `silence_frames` per rate,
+   `silence_armable` exactness and `silence_advance` are held at every width beside it, and
+   `max_u32` in `g1_op_identity.rs`.
 4. Every existing gate green, re-pins limited to D7:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`
@@ -347,6 +404,13 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
    10 Hz and at 100 Hz, 96 kHz, fed a 3.84 Hz square at `0.03 * 2^-k` (`k` = 30, 34, 36, below one
    section's old rest limit), scaled back by `2^k`, match the same square at `0.03` within `1e-4`
    of its peak. Red on attempt 3's law.
+6. **Sparse boost (A9)** (same file): the same shelves at every launch rate, fed `[a, 0, a, 0, ...]`
+   and `[a, 0, 0, 0, ...]` (`a` the square at `0.03 * 2^-36`, below `L*` everywhere), after a lead
+   of armed silence, scaled back by `2^36`, match the ordinary run within `1e-6` of its peak. Red on
+   A8's law and attempt 3's.
+7. **Cancellation (A9)** (same file): the EQ's 40 Hz high-pass ahead of four +24 dB 100 Hz shelves
+   on a DC and a slow-square input; the tiny run scaled back matches the ordinary run within
+   `1e-9` of its peak on every sample. Red on A8's law.
 
 ## Test value
 
@@ -359,6 +423,14 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
 - Gate 5 (A8): a joint flush that ignores the section input (attempt 3's law) zeroes a tiny
   signal's state in each boosting section and loses the cascade's boost; red here (misses by the
   whole peak), while gates 1-2 stay green on it.
+- Gate 6 (A9): a joint flush armed by a zero section input (A8's) zeroes the first shelf's state
+  between a sparse signal's samples and loses its boost; red here, while gates 1-2 and 5 stay green
+  on A8's law. It also catches an EQ block that reads a stale armed rest plane after silence.
+- Gate 7 (A9): a joint flush armed by a section's own input (A8's) moves bits inside a live EQ whose
+  high-pass cancels a DC input to exact zero; red here, while every other EQ test stays green on it.
+- The counter law, `silence_armable` and `max_u32` tests (gate 3): a counter that does not reset, an
+  off-by-one arming, a late block-level arming decision, or a `max_u32` built from the float `max`
+  (drops a NaN, misorders `-0.0`) is red there and nowhere cheaper.
 - The generator values (D5) extend an existing randomized differential; judged by reach: they make
   it reach the joint band, where a per-word EQ predicate would elide a section the kernel changes.
 
@@ -883,3 +955,320 @@ section's words are both below `REST_EPS` on a non-zero input, which no pinned c
   the joint rule, up to `1.6e-10` (-196 dBFS) at four shelves; recorded, not gated.
 - The builtin HPF/LPF and the LR4 crossover were not re-measured at chain level (A8 asked for the
   shelves); their tails follow the same rule.
+
+### Attempt 5 (2026-10-05, branch `codex/d15-stream-g`; applies A9; the last attempt)
+
+Host: AMD EPYC 7313P (x86-64-v3), Node v22.23.2 (V8 12.4.254.21-node.56), rustc 1.97.1.
+
+**The law (A9 items 1, 5).** `lane::silence_step(x, run, armed_after)` advances one counter word per
+lane, `run = (x == 0) ? run + 1 : 0` (an `f32` add: exact to `2^24`, where it saturates by itself),
+and returns the frame's rest threshold, `REST_EPS` once `run >= N_SILENCE` and `+0.0` otherwise
+(5 lane-ops: `eq`, `add`, `select`, `lt`, `andnot`). `lane::flush_pair(n1, n2, rest)` is the
+per-word law plus `joint = max_u32(|n1|, |n2|) < rest` (10 lane-ops, against 13 under A8 and 6 for
+two `flush`). `Lane::max_u32` is new: `vpmaxud` / `i32x4.max_u` / `umax`, implemented through the
+bit pattern at every width (`LANE-OPS-OK` reviewed); the unsigned maximum of two magnitudes' bits is
+the larger magnitude bit for bit and every NaN magnitude sorts above `+inf`, so a NaN in either word
+fails the compare. `svf_step(v0, nc1, a2, a3, rest, s)` takes the threshold; every caller passes the
+threshold of its **effect input**, never its section input.
+
+**Where the counters live (A9 item 7).**
+- Builtin input stage: `InputChainState::silence: [L; 2]` (`crates/lane/src/kernels/builtins.rs`),
+  advanced by every body from the sample it loads (before sanitising and trim), the all-identity
+  bodies included (`silence_skip_block`); `InputChainCoef::silence` holds `N_SILENCE` at the
+  stage's rate (`PreparedInputTrack::silence_frames`).
+- Parametric EQ: `Channel::silence` per channel and two heap rest planes per prepared EQ
+  (`quantum * W` words each, allocated at preparation) plus one shared all-`+0.0` plane:
+  `silence_block` writes a channel's plane from the EQ's input before the first section runs, only
+  on a block in which some lane can arm (`silence_armable`, exact: one compare and one `mask_any`
+  per block); every other block reads the zero plane and advances the counter with
+  `silence_skip_block` (one load and one `mask_any` when the block's last frame is non-zero on every
+  lane). The silent fixed point advances the counter without a frame loop (`silence_advance`) and
+  is earned only when every lane is armed throughout the block. The cascades load one threshold per
+  stream-frame (skewed cascades load frame `i - k`).
+- Multiband compressor: `Side::silence` per channel; `run_segment` steps both counters per frame
+  and both `lr4_step` stages read that frame's threshold.
+- The twin (`dsp_reference::ReferenceSilenceRun`, `reference_silence_frames`), the g2 oracle and the
+  audit's `unfused_fma` model restate the counter independently.
+
+**Two forms per builtin chain body; carried constants (`check-cross-targets.sh`).** Each builtin
+input-chain kernel tests once per block whether some lane's counter can arm (`silence_armable`) and
+runs its body in one of two forms through `lane::kernels::svf_step_when(armable, flush_eps, ...)`:
+the armed form (counter per frame, joint flush) or, on every other block -- every block of live
+audio -- the unarmed form (per-word flush, no counter in the loop; the counter advances once per
+block through `silence_skip_block`). The two forms are the same bits (`flush_pair(n1, n2, +0.0)` is
+`(flush(n1), flush(n2))`). The first cut of this split doubled the bodies' vector constants, and on
+`aarch64-apple-ios` every splatted constant is a `memset_pattern16` call (#1018): the builtins'
+count rose from 186 to 397 and the multiband compressor's from 566 to 1128 against those ceilings.
+A run-time flag instead of a const generic changed nothing (LLVM unswitches the loop: 397). The
+builtin chain bodies now load their four constants (`NONFINITE_LIMIT`, `1.0`, `FLUSH_EPS`,
+`REST_EPS`) from `InputChainCoef::constants` (`InputChainConstants`, the precedent being the #1407
+filter-ramp countdown carried as a word), and `lane::flush_with` / `flush_pair_with` take
+`FLUSH_EPS` as a word: the builtins' count falls to 71 (ceiling lowered from 186, as the check
+asks). A one-body alternative (counter and joint flush on every frame) gave 182 but cost about
+3 points more p50 than the two forms on the 64-track documents (measured with one warmup and two
+rounds against A8: app shape +12.9 % / +10.6 %, console +7.6 % / +5.4 %), so it was not kept. The
+multiband compressor runs the counter and the joint flush on every frame in one body: its dynamics
+carry dozens of constants, a second form would double its count (1128), and the multiband is not
+in the browser documents measured here. The EQ keeps its zero-plane path (88, ceiling lowered from
+122). `lane::silence_step_hoisted` takes the counter's `1.0` and `REST_EPS` from the caller.
+
+**Section input term (A9 item 1): dropped.** It can only matter on a frame whose effect input has
+been silent for `N_SILENCE` samples, where a later section's non-zero input is an upstream tail.
+Measured at 1,024 samples, with and without it ANDed in, on every EQ case of the search below
+(every rate and configuration): the largest change against the per-word law and its position were
+the same. Dropping it saves two lane-ops per section.
+
+**`N_SILENCE` (A9 item 2): a time, `4096 / 48000` s.** `lane::silence_frames(rate)` =
+`ceil(rate * 4096 / 48000)`: 3,764 / 4,096 / 7,527 / 8,192 samples at 44.1 / 48 / 88.2 / 96 kHz.
+One-time scratch search on the real EQ (not committed), A9 against the per-word law, left output bit
+for bit: four +24 dB low shelves (10 Hz and 100 Hz, S 1) and one (10 Hz at S 1 and S 0.1, 100 Hz at
+S 1); continuous inputs (the 3.84 Hz-at-96-kHz square, DC, an impulse) then silence, a ternary
+random input, and sparse impulse trains with gaps on both sides of the window, at levels from 1 down
+to `1e-14` and fractions of `L*`. Changes of relative size below `1e-4` on a live sample (rounding-
+scale flips, up to `4.66e-10` at a relative `1e-7`) are classified apart.
+
+| largest change found | 44.1 kHz | 48 kHz | 88.2 kHz | 96 kHz |
+|---|---:|---:|---:|---:|
+| 1,024 samples, four 10 Hz shelves | `1.10e-9` | `1.18e-9` | `1.31e-9` | `1.33e-9` |
+| 1,024 samples, one 10 Hz shelf, S 1 | `4.2e-13` | | | `4.6e-13` |
+| 1,024 samples, one 10 Hz shelf, S 0.1 | up to `6.6e-13` | | | |
+| 42.7 ms (4,096 samples at 96 kHz) | `4.19e-10` | `3.85e-10` | | |
+| 85 1/3 ms, four 10 Hz shelves | `3.414e-10` | `3.411e-10` | `3.405e-10` | `3.471e-10` |
+| 85 1/3 ms, four 100 Hz shelves | `3.40e-10` | | | |
+| 85 1/3 ms, one 10 Hz shelf, S 1 | `1.904e-13` | `1.904e-13` | `1.903e-13` | `1.947e-13` |
+| 85 1/3 ms, one 10 Hz shelf, S 0.1 | `1.52e-13` | `1.37e-13` | `1.22e-13` | `1.39e-13` |
+| 85 1/3 ms, one 100 Hz shelf, S 1 | `1.90e-13` | | | |
+
+At 1,024 samples a train whose gaps just exceed the window ends a tail in every gap, and the lost
+tails add up beyond one tail's worth (A8's tail level was `3.4e-10` at four shelves); at 85 1/3 ms
+every case is back to one tail's worth. Blank cells were not searched separately at that size.
+
+**Reachable bounds (m2; analytic, `f64` from the cast words, ignoring `f32` rounding).** The rule
+zeroes a pair only when both words are below `REST_EPS` and the effect input is silent, so the
+output change is a sum of zero-input responses to injected states of at most `REST_EPS` per word.
+- One tail of one section (it flushes once): `REST_EPS * max_m ||C A^m||_1` = `1.953e-13`
+  (-254.2 dBFS) for a +24 dB low shelf at 10 Hz or 100 Hz, S 1, and `3.37e-13` at S 0.1, at every
+  rate. Attempt 4's measured `2.41e-13` at S 0.1 sits under it.
+- One tail through a chain (the first section flushes once; a later one may flush repeatedly while
+  an upstream tail feeds it): `REST_EPS * (max_m ||G_1(m)||_1 + sum_{k>=2} ||G_k||_1)`: `3.1e-7`
+  (-130.2 dBFS) at four 10 Hz shelves and `3.1e-8` at four 100 Hz shelves at 96 kHz (`1.43e-7` and
+  `1.46e-8` at 44.1 kHz). The first section's share alone is `3.479e-10`, which is what the search
+  reaches.
+- Any input, repeated tails included: `REST_EPS * sum_k ||G_k||_1`, `5.0e-6` at four 10 Hz shelves,
+  96 kHz.
+- Builtin chain (one tail): HPF 10 Hz into the LPF at the cutoff maximum `3.6e-14`, into a 12 Hz LPF
+  `3.4e-11`. Largest found through the bit-identical twin at every rate: `2.8e-14`, except one
+  rounding-scale `2.27e-13` on a live sample at 48 kHz (LPF maximum). LR4 (`lr4_step`): 80 Hz at most
+  `2.84e-14`, 8 kHz nothing.
+
+**Subnormals (A9 item 4): no per-word `f32::MIN_POSITIVE` flush is needed.** The per-word law runs
+on every state word on every sample whatever the counter says, so each word is `+0.0` or at least
+`FLUSH_EPS = 1e-20` in magnitude, `2^60` above the subnormal range, on wasm (no FTZ) as on native.
+The window delays only the joint rule. A subnormal input sample is live to the counter (`x == 0` is
+false) and gives no response through the per-word law (it adds at most `2 * max(a2, a3) * 2^-126`
+to a word). G4/G6 hold.
+
+**Gates 1-2 (A9 item 3).** Green. Gate 1 (input LPF at the cutoff maximum, 44.1 kHz) rests in block
+6,045 (sample 773,888 at the block's end), gate 2 (EQ shelf, 96 kHz) in block 3,295 (421,888); both
+inside their bounds (2,400,000 and 9,600,000).
+
+**New gates (A9 item 3)** in `crates/parametric-eq/tests/exact_rest.rs`:
+- `a_sparse_input_through_four_boosting_shelves_gets_every_boost_at_every_rate` (gate 6):
+  `[a, 0, a, 0, ...]` and `[a, 0, 0, 0, ...]`, `a` the 3.84 Hz square at `0.03 * 2^-36`
+  (`4.4e-13`, below `L*` at both frequencies and every rate), after a lead of armed silence, through
+  four +24 dB shelves at 10 Hz and 100 Hz, at 44.1, 48, 88.2 and 96 kHz: the tiny run scaled back by
+  `2^36` misses the ordinary run by exactly 0 in every case (tolerance `1e-6` of the peak).
+  A8's law: red (`… misses the ordinary run by 1.0375549e3`); attempt 3's: red.
+- `an_exact_zero_inside_the_cascade_moves_nothing_while_the_input_is_live` (gate 7): the EQ's 40 Hz
+  high-pass ahead of four +24 dB shelves at 100 Hz, DC and slow-square inputs, tiny run `2^-20`
+  scaled back: within `1e-9` of the peak on every sample. A8's law: red (`DC at 1e-6 … misses the
+  ordinary run by 6.996817e-5 … (peak 7.826055e3)`).
+- `a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms`: every band disabled and
+  band one's integrators restored to `(1e-15, -1e-15)`, a pair an identity section holds unchanged
+  on a zero input with an output of exactly `+0.0`; the EQ's silent fast path must not be earned
+  before the counter arms (8,192 frames at 96 kHz), and the joint flush must then clear the pair and
+  the counter advance on skipped blocks.
+
+**State and sizes (A9 item 7), each with its reason (one counter word per channel per effect
+input).**
+- EQ state payload: one `f32` word per channel per lane (`STATE_SILENCE_WORD`), 936 → 944 bytes for
+  the standing payload (`LANE_BYTES` 468 per lane in the test support); decode accepts `+0.0` or an
+  integer in `1..=2^24` and refuses anything else (`a_malformed_silence_word_is_refused`).
+- Multiband state payload: the lane header grows by one word per side (`LANE_HEADER_WORDS` 48,
+  `SILENCE_WORD = FILTER_WORD + 4`), 188 → 192 bytes per channel, 376 → 384 per lane; same validation
+  (`the_silence_counter_is_carried_and_validated`).
+- Builtins: `InputChannelState::silence` rides the carry export/import and the mono collapse's
+  disengage copy; `channels_agree` compares the counters. Prepared sizes: `InputBuiltins` 688 → 712
+  (+8 the two counters, +16 the four carried constants; the `N_SILENCE` word lands in padding), the
+  boxed input entry 704 → 728, the strip preparation 1,072 → 1,096 bytes
+  (`tools/audit/src/fixture_builtins.rs`); `PreparedInputTrack::silence_frames`,
+  `InputChainCoef::silence` and `InputChainCoef::constants`.
+- Resource fixtures, each regenerated by its own generator: `fixtures/builtins/v1/resources.jsonl`
+  (+24 bytes per input stage: processor and retained payload 1,957 → 2,005 per two-track row,
+  largest allocation 1,072 → 1,096; manifest re-pinned), `fixtures/graph/v1/direct-route.resources.json`
+  (builtin bank bytes 6,503 → 6,727, +224: the per-channel counters and the four eight-lane
+  constant words; graph `MANIFEST.tsv` re-pinned), `crates/graph-compiler/tests/track_delay.rs`
+  (digest re-pinned with its derivation: +72 bytes, 8,424 → 8,496 and 150,559 → 150,631),
+  `tools/audit/src/builtins_graph.rs` and `fixture_builtins.rs` `ACCEPTED_MANIFEST_SHA256` (the
+  joined manifest).
+
+**Counter semantics across swap, restore and reset.** Carried: the EQ and multiband payloads, the
+builtins carry and the mono-collapse disengage copies move the counter with the integrators, so a
+plan swap or restore mid-silence arms on the same frame the continuing lane would
+(`carry::a_restore_mid_silence_arms_the_joint_flush_on_the_continuing_lanes_frame`,
+`exact_rest::a_carried_lane_arms_its_joint_flush_on_the_frame_the_exported_lane_would`). Reset to
+`+0.0` by a discontinuity reset and at preparation (safe: the rule then waits a full `N_SILENCE`).
+Frozen while an EQ or multiband instance is bypassed at preparation (no crossover runs, as the
+filter state is frozen). The D7 recovery path (a non-finite lane block) zeroes the sections and
+leaves the counter, which counts the input, not the state.
+
+**V8 spill gate (A9 item 6).** `run-wasm-gates.sh` exits 0; the four held rows are clean.
+
+| loop (V8, simd128) | A8 | A9 |
+|---|---:|---:|
+| mono depth-1 tail, select-free (H) | 0 (63 instr.) | 0 (58) |
+| mono depth-2 pair, select-free (H) | 0 (99) | 0 (97) |
+| mono depth-2 pair, masked (H) | 0 (109) | 0 (101) |
+| dual depth-1 tail, select-free (H) | 0 (132) | 0 (127) |
+| dual depth-2 pair (reported, not held) | 17 slots (240) | no select-free loop of its shape: 15 slots (226 instr.) in the listing, read as masked |
+
+The dual depth-2 pair now spills its select-free compare mask, so the classifier reads it as
+masked and the reported row finds no select-free loop. The gate's tail anchor is corrected to find a held tail by its shape (steps and streams)
+whatever the select classification of the loop beside it (`scripts/check-web-audioworklet-v8-spill.py`,
+docstring and a new self-test case; the A1 select rule is unchanged). Mutation: anchoring on
+select-free loops only turns the self-test red (exit 1).
+
+**Codegen per SVF step.** AVX2 (`svf_block`, one frame): the flush is 10 instructions (`vandps` x2,
+`vpmaxud`, three `vcmpltps`, one from memory for the threshold, `vorps` x2, `vandnps` x2) beside 7
+`vmulps`, 10 `vaddps` and 1 `vsubps`; `silence_block` is 6 per frame (`vcmpeqps`, `vaddps`,
+`vpcmpgtd` + `vpand` for the select, `vcmpltps`, `vandnps`). V8: `silence_block`'s loop is 5 ops per
+frame (unrolled twice); the held loops are in the table above.
+
+**Measured cost (A9 item 6; descriptive).** `web-mixing-automation-benchmark.mjs run` on the shipped
+module of this tree (`target/ci/qualification-artifacts`) against A8 (the tree before this attempt),
+one warmup and two measured rounds each, interleaved, pinned to cpu 31, **uncontrolled host** (load
+average 2-3 on 32 threads); not retried. Every output digest is equal between the two modules for
+these documents (their inputs never sit silent for `N_SILENCE`).
+
+| p50, ns per render (round 1 / round 2) | A8 | A9 | change |
+|---|---|---|---|
+| mono console, quiet | 150,075 / 150,847 | 155,044 / 154,894 | +3.3 % / +2.7 % |
+| mono console, restated | 153,372 / 153,351 | 158,501 / 158,892 | +3.3 % / +3.6 % |
+| mono console, automated | 157,348 / 157,359 | 162,298 / 162,168 | +3.1 % / +3.1 % |
+| sixty-four-track console | 234,255 / 234,746 | 239,865 / 243,563 | +2.4 % / +3.8 % |
+| app shape | 146,198 / 146,338 | 154,624 / 158,852 | +5.8 % / +8.6 % |
+| bus-and-send console | 337,250 / 338,783 | 349,734 / 353,251 | +3.7 % / +4.3 % |
+
+The change is above the owner's 2 % allowance on every document; it is reported, not attributed
+further (no per-part timing was made) and not worked around further (A9 item 6). For scale, the
+one-body builtin chain (counter and joint flush on every frame, no unarmed form) measured +5.4 % to
++12.9 % on the same documents and host, and the two-form chain with splatted constants (the form
+the iOS ratchet refused) about +1.6 % to +4.5 %.
+
+**Floors (A9 item 8).** `docs/rulings/effect-floor-accounting.md`: `flush_pair` 10, `silence_step` 5,
+`max_u32` 1, `svf_step` 23, EQ section 28 / 29, standing EQ 31 (1.047 cycles), the `active` table
+`28 * active + 3` (3 / 31 / 59 / 87 / 115 / 143, 177 for six), builtins sections 28 and the counter
+5 on a block that can arm (82), and on live audio the per-word flush as before #1328: chain 69
+(2.331), `builtins_only - gain_pan_only` 69 - 22 = 47, strip 311 (10.507).
+`tools/bench/src/floor.rs` (`EQ_LANE_OPS` 31, `BUILTINS_LANE_OPS` 69, the strip test),
+`scripts/console-benchmark-record-lib.jq` (69, 31), `scripts/test-console-benchmark.sh` (69, 47,
+311, `69 + 31 + 81.5`).
+
+**Bits moved and re-pins (A9 item 8), individually.**
+- G5 (`tools/wasm-gate-corpus/src/lane_digests.in`): six cases move back to their pins before #1328
+  (byte-identical to the file at `1975fc44f`): `svf_block/low/impulse`, `svf_block/high/impulse`,
+  `svf_block/band/impulse`, `svf_block/bell/impulse`, `svf_block_ramped/impulse`,
+  `svf_block_ramped/idle/impulse`. Reason: their impulse tails are shorter than `N_SILENCE`, so the
+  joint rule no longer acts and the per-word bits return. Every other G5 pin and every delegated pin
+  (`BUILTINS_DIGESTS`, `E9_DIGESTS`, multiband `DIGESTS`) is unchanged.
+- `fixtures/builtins/v1/reference/filter-response.csv`: `impulse_dft_magnitude_db` only, 565 of
+  1,630 rows, at most `3.2e-5` dB at about -187 dB (the joint rule now ends the impulse tails after
+  `N_SILENCE`); `MANIFEST.tsv` re-pinned. Generated by the audit's own generator.
+- The resource fixtures and digests listed under "State and sizes" (sizes only, no rendered bit).
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh` and `check-graph-determinism.sh` pass.
+
+**Folds.** m2: the tails above are stated as analytic bounds and the search's largest found, not
+sampled maxima. n1: the audit's `unfused_fma` model runs the counter, and a slow 10 Hz silence pass
+("F1/F2 svf_block silence") reaches an armed frame; dropping the model's silence term turns the
+conformance run red (`F1/F2 svf_block … NEITHER`, exit 134). n3: documented, not changed:
+`lane_is_inert`'s pair term refuses elision of a dead section holding a both-below-`REST_EPS` pair
+until an executed block reaches an armed frame; under input that is never silent for `N_SILENCE`
+that refusal lasts as long as the input does. It costs only the elision, never a bit; admitting the
+pair on unarmed blocks would need the rest plane before every stationary elision decision for a
+state only a band switched off at a tiny level, or a restore, holds.
+
+**Docs (A9 item 9).** A4/A7/A8 here, `dsp-research/filters.md` (rest rule, bounds, adopted law),
+`docs/BUILTINS_AND_METERING_V1.md`, the `crates/lane/src/lib.rs` docs and decision 15's #1328 entry
+are amended to A9.
+
+**Mutations** (each introduced, run, reverted; `scratchpad/mut/run.sh`):
+
+| id | mutant (final code unless noted) | red | verdict |
+|---|---|---|---|
+| M1 | attempt 3's law: every threshold armed, `silence_armable` always true | builtins `exact_rest` carry test, twin (`stage`), `g2_svf_step_yields_both_taps_of_one_state`, multiband arming test, EQ fixed point, tiny, sparse and cancellation gates | RED |
+| M2 | A8's law: armed by the section input `v0 == 0` (in `svf_step_when`), `silence_armable` always true | builtins carry, twin, g2, multiband arming, EQ fixed point; sparse gate (`… misses the ordinary run by 1.0375549e3 … (ordinary peak 1.102915e3)`) and cancellation gate (`DC at 1e-6 … misses … by 6.996817e-5 … (peak 7.826055e3 …)`); the tiny gate (A8 item 3) stays green | RED |
+| M3 | counter never resets on a live sample | `g4_silence_counter_law_at_every_width`, twin, `input_chain_elision` (4) | RED |
+| M4 | arms one frame late (`le`) | g4 counter law, builtins carry, twin, multiband arming | RED |
+| M5 | `silence_armable` one frame late (`gt`) | `g4_silence_armable_is_exact`, builtins carry, EQ fixed point | RED |
+| M6 | `silence_skip_block` fast path inverted | builtins `exact_rest` (3), `input_chain_elision` (4) | RED |
+| M7 | `silence_skip_block` never resets | builtins carry, `input_chain_elision` (4) | RED |
+| M8 | builtins carry import drops the counter (attempt-5 run before the final restructure; code unchanged) | builtins carry test | RED |
+| M9 | builtins disengage copy drops the counter (same) | `the_disengage_copy_and_the_agreement_proof_carry_the_silence_counter` | RED |
+| M10 | `channels_agree` ignores the counter (same) | the same test | RED |
+| M11 | EQ commit drops the counter (same) | `carry::a_malformed_silence_word_is_refused`, `carry::a_restore_mid_silence_arms_…` | RED |
+| M12 | EQ desymmetrize drops the counter (same) | `mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter` | RED |
+| M13 | multiband commit drops the counter (same) | `the_silence_counter_is_carried_and_validated` | RED |
+| M14 | EQ silent fast path earned unarmed (same) | `exact_rest::a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms` | RED |
+| M14b | EQ skipped block does not advance the counter (same) | the same test | RED |
+| M15 | audit model always armed / armed on `v0 == 0` / never armed (n1) | `audit unfused-fma conformance`: `F1/F2 svf_block … NEITHER` (exit 134) for the first two; the reach assertion (`armed (0)`) for the third | RED |
+| M16 | twin always armed (same as M8) | builtins `stage` twin | RED |
+| M17 | `flush_pair` joint test with `Lane::max` (same) | `g4_pair_law_cases_at_every_width`, `g4_pair_law_holds_at_every_width` | RED |
+| M18 | `max_u32` implemented as the float `max` (same) | `g1_max_u32_is_the_unsigned_maximum_of_the_bits` and the two g1 sweeps | RED |
+| M19 | `lane_is_inert` pair term dropped (same) | EQ `elision::a_non_inert_state_in_a_dead_section_refuses_elision`, fixed point | RED |
+| M20 | EQ unarmed block reads the last armed plane (same) | sparse gate | RED |
+| M21 | spill gate anchors the held tail on select-free loops only (same) | `check-web-audioworklet-v8-spill.py --self-test` (exit 1) | RED |
+| M22 | builtins `rest_eps` constant `+0.0` (never armed) | builtins `stage` twin | RED |
+| M23 | multiband: the right channel counts the left input, and the reverse | `each_channel_counts_its_own_input` | RED |
+| M24 | builtins counter steps from the sanitised, trimmed sample | `input_chain_elision::mixed_elision_matches_frozen_bodies_*` (3) | RED |
+| M25 | multiband right crossover never armed | `the_crossover_joint_flush_arms_after_its_inputs_silence` | RED |
+| M26 | multiband second LR4 stage never armed | the same test | RED |
+| M27 | multiband arms one frame early | the same test (its `N_SILENCE - 2` case) | RED |
+| M28 | builtins unarmed form does not advance the counter | `input_chain_elision::mixed_elision_matches_frozen_bodies_*` (3) | RED |
+| M29 | builtins carried `flush_eps` word `1e-21` | `stage::scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires`, twin | RED |
+| M30 | builtins unarmed form runs the joint flush with its `+0.0` threshold | none: equivalent by construction (`flush_pair(n1, n2, +0.0)` is the per-word law); the split is a cost saving only | equivalent |
+
+Every new or rewritten test answers the test-value question: the counter law, `silence_armable`,
+`silence_advance` and `silence_frames` (g4) catch a counter that does not reset, arms early or late
+or saturates wrongly; `max_u32` (g1) catches a float-`max` implementation; the sparse and
+cancellation gates catch A8's law and a stale rest plane; the carry, disengage, restore, mono
+collapse and multiband payload tests catch a dropped or mixed-up counter; the multiband arming test
+catches a crossover that never arms or arms early; the fixed-point test catches a silent fast path
+earned before the rule arms.
+
+**Gates (this tree).**
+
+- gate-4 `cargo test --all-targets` set (14 packages, spec features, `--no-fail-fast`): 853 passed,
+  0 failed;
+- `cargo test -p audit -p graph-compiler -p builtins-compiler -p graph -p host-core -p host-web`: ok;
+- `cargo test --release -p lane -p math -p wasm-gates --features math/lane`: ok (G5 green with the
+  six pins above); release `parametric-eq` `exact_rest` and `mono_collapse`: ok;
+- `run-wasm-gates.sh`: exit 0 (native, simd128, V8 spill gate with the rows above; self-test 28 ok);
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh` (50 files), `graph_fixture --check`,
+  `audit unfused-fma conformance` (SVF `unfused`, 0 mismatches, the silence pass included),
+  `check-graph-determinism.sh` (100/100), `check-cross-targets.sh` (builtins 71, parametric-eq 88,
+  multiband 566 `memset_pattern16` calls), `check-lane-policy.sh`, `check-dsp-research.sh`,
+  `check-workspace-policy.sh`: ok;
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` (and with the test-support
+  features), `cargo fmt --all -- --check`: ok;
+- `cargo test -p bench floor`, `test-console-benchmark.sh`: ok;
+- worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`: ok.
+
+**Open items.**
+- Browser cost above the owner's 2 % allowance on every measured document (see the p50 table); root
+  decides.
+- The multiband compressor pays the counter and the joint flush on every frame (one body, #1018).
+- The dual depth-2 pair (reported, not held) reads masked because its compare mask spills: 15
+  slots, two fewer than A8.
+- n3 is documented, not fixed (above).

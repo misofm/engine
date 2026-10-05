@@ -73,6 +73,7 @@ fn input_chain_block_select<L: Lane>(
     let zero = L::zero();
     let mut count = [zero; 2];
     let mut state = s.section;
+    let mut silence = s.silence;
     let mut nc1 = [[zero; 2]; 2];
     for (channel, coefficients) in c.section.iter().enumerate() {
         for (section, coefficient) in coefficients.iter().enumerate() {
@@ -85,6 +86,7 @@ fn input_chain_block_select<L: Lane>(
     {
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
+            let rest = lane::silence_step(x, &mut silence[channel], c.silence);
             let bad = L::mask_not(x.abs().lt(limit));
             count[channel] = count[channel].add(L::select(bad, one, zero));
             let mut v = x.andnot(bad).mul(c.trim[channel]);
@@ -96,6 +98,7 @@ fn input_chain_block_select<L: Lane>(
                     nc1[channel][section],
                     coefficient.a2,
                     coefficient.a3,
+                    rest,
                     &mut state[channel][section],
                 );
                 v = coefficient
@@ -106,6 +109,7 @@ fn input_chain_block_select<L: Lane>(
         }
     }
     s.section = state;
+    s.silence = silence;
     count
 }
 
@@ -218,6 +222,8 @@ fn chain_coef<L: Lane>() -> InputChainCoef<L> {
             [section::<L>(45.0, true), section::<L>(17_800.0, false)],
             [section::<L>(52.0, true), section::<L>(18_200.0, false)],
         ],
+        silence: L::splat(lane::silence_frames(48_000) as f32),
+        constants: lane::kernels::builtins::InputChainConstants::new(),
     }
 }
 
@@ -373,6 +379,8 @@ fn every_copy_of_the_sanitise_prologue_counts_what_the_policy_counts() {
         let identity = InputChainCoef::<L> {
             trim: c.trim,
             section: [[identity_section::<L>(); 2]; 2],
+            silence: c.silence,
+            constants: c.constants,
         };
         let mut mixed = identity;
         mixed.section[0][1] = section::<L>(17_800.0, false);

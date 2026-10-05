@@ -13,7 +13,7 @@
 //! * random ramps started and discontinuity resets, and random legal input, subnormal and
 //!   signed-zero words included;
 //! * every block rendered twice: the shipped decision (`stationary` when no ramp is in flight)
-//!   and the full per-section cascade (`process_channels(.., false)`), dual and collapsed, at
+//!   and the full per-section cascade (`process_channels_from_input(.., false)`), dual and collapsed, at
 //!   `f32`, `Simd4` and `Simd8`. Output words and integrator words are compared by bits, signed
 //!   zeros included: that sign is the whole of #1015.
 //!
@@ -41,7 +41,7 @@ fn integrator_word(draw: &mut Draw) -> f32 {
         7 => draw.noise(0.5),
         8 => f32::from_bits(0x8000_0001),
         // Either side of `REST_EPS` (issue #1328): a pair with both magnitudes below it is zeroed
-        // by the joint flush on a `+0.0` input word (amendment A8), so a word here, beside a `+0.0`
+        // by the joint flush on an armed frame (amendment A9), so a word here, beside a `+0.0`
         // or another such word, is a state an executed section can move and an elided one would
         // keep.
         9 => draw.pick(&[
@@ -316,12 +316,12 @@ fn scenario<L: Lane, const W: usize>(seed: u64, mono: bool, reach: &mut Reach) {
             if mono {
                 let stationary = index == 0 && arm.0.no_ramp_in_flight();
                 stationary_now |= stationary;
-                process_channels_mono::<L, W>(&mut arm.0, &mut l, frames, stationary);
+                process_channels_mono_from_input::<L, W>(&mut arm.0, &mut l, frames, stationary);
             } else {
                 let stationary =
                     index == 0 && arm.0.no_ramp_in_flight() && arm.1.no_ramp_in_flight();
                 stationary_now |= stationary;
-                process_channels::<L, W>(
+                process_channels_from_input::<L, W>(
                     (&mut arm.0, &mut arm.1),
                     &mut l,
                     &mut r,
@@ -453,11 +453,11 @@ fn tiny_state_cases<L: Lane, const W: usize>(seed: u64, mono: bool, reach: &mut 
             let (mut l, mut r) = (left.clone(), right.clone());
             if mono {
                 let stationary = index == 0 && arm.0.no_ramp_in_flight();
-                process_channels_mono::<L, W>(&mut arm.0, &mut l, frames, stationary);
+                process_channels_mono_from_input::<L, W>(&mut arm.0, &mut l, frames, stationary);
             } else {
                 let stationary =
                     index == 0 && arm.0.no_ramp_in_flight() && arm.1.no_ramp_in_flight();
-                process_channels::<L, W>(
+                process_channels_from_input::<L, W>(
                     (&mut arm.0, &mut arm.1),
                     &mut l,
                     &mut r,

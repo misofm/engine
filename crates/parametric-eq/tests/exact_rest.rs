@@ -4,12 +4,14 @@
 //! `ic1 = +0.0`, `ic2 = 6.01e-20` under the per-word flush: `2 * d2` is below half an ulp of `ic2`,
 //! so the word never moves again and the output stays near -361 dBFS forever, which also keeps the
 //! EQ's silent fast path from ever engaging. The joint SVF flush (`lane::flush_pair`) zeroes the
-//! pair once both words are below `REST_EPS` on a silent input, so the band's integrators reach
-//! `+0.0` and the output reaches exactly `+0.0`.
+//! pair once both words are below `REST_EPS` and the EQ's input has been silent for `N_SILENCE`
+//! frames, so the band's integrators reach `+0.0` and the output reaches exactly `+0.0`.
 //!
-//! Amendment A8 gate: the same rule must leave a tiny but non-zero input alone. Four boosting low
-//! shelves fed a square far below any rest threshold must apply all four boosts, exactly as they
-//! do to the same square at an ordinary level.
+//! Amendment A8 and A9 gates: the same rule must leave a live input alone, however small, and a
+//! sparse one too (silence is a time property, A9). Four boosting low shelves fed a square, or a
+//! sparse train, far below any rest threshold must apply all four boosts, exactly as they do to
+//! the same input at an ordinary level; and a section fed an exact zero by the section before it
+//! must not end its decay while the EQ's own input is live.
 
 mod support;
 
@@ -222,5 +224,258 @@ fn a_tiny_input_through_four_boosting_shelves_gets_every_boost() {
                  the shelves must apply every boost to a tiny non-zero input"
             );
         }
+    }
+}
+
+/// The four launch rates (`LAUNCH_SAMPLE_RATES`).
+const LAUNCH_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// Renders `input` through a fresh EQ prepared at `rate` and returns the left output.
+fn render_at(configured: &[InitialParameterValue], rate: u32, input: &[f32]) -> Vec<f32> {
+    let mut effect = ParametricEqFactory
+        .prepare(request_at_rate(configured, false, rate))
+        .expect("the EQ prepares");
+    let mut output = Vec::with_capacity(input.len());
+    for (index, chunk) in input.chunks(FRAMES).enumerate() {
+        let mut left = [0.0_f32; FRAMES];
+        left[..chunk.len()].copy_from_slice(chunk);
+        let mut right = left;
+        effect.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                (index * FRAMES) as u64,
+                &[],
+                FRAMES as u32,
+            )
+            .expect("block"),
+        );
+        output.extend_from_slice(&left[..chunk.len()]);
+    }
+    output
+}
+
+/// The largest `|tiny * 2^k - ordinary|`, and where.
+fn scaled_miss(tiny: &[f32], ordinary: &[f32], k: i32) -> (f32, usize) {
+    let scale = power_of_two(k);
+    tiny.iter()
+        .zip(ordinary)
+        .enumerate()
+        .map(|(index, (small, big))| ((small * scale - big).abs(), index))
+        .fold(
+            (0.0_f32, 0),
+            |best, next| if next.0 > best.0 { next } else { best },
+        )
+}
+
+/// A sparse train: every `period`-th sample carries the 3.84 Hz square at `level`, the rest are
+/// exactly `+0.0` (at 96 kHz; the same sample pattern at every rate).
+///
+/// The train starts after `lead` samples of exact silence: long enough that the joint flush has
+/// armed and the EQ's rest planes hold armed thresholds when the train begins, so a block of the
+/// train that read the last armed plane instead of the unarmed one is caught.
+fn sparse_square(period: usize, level: f32, samples: usize, lead: usize) -> Vec<f32> {
+    (0..lead)
+        .map(|_| 0.0)
+        .chain((0..samples).map(|index| {
+            if index % period != 0 {
+                0.0
+            } else if (index / SQUARE_HALF_PERIOD).is_multiple_of(2) {
+                level
+            } else {
+                -level
+            }
+        }))
+        .collect()
+}
+
+/// Amendment A9: a sparse input -- non-zero samples separated by exact zeros, each far below one
+/// section's old rest limit -- through four +24 dB low shelves gets every boost, at every launch
+/// rate.
+///
+/// `[a, 0, a, 0, ...]` and `[a, 0, 0, 0, ...]`, with `a` the 3.84 Hz square at
+/// `REFERENCE_LEVEL * 2^-k`, at 10 Hz and 100 Hz: `k = 36` puts `a` (`4.4e-13`) below one section's
+/// `L* = REST_EPS / (2 max(a2, a3))` at both frequencies and all four rates (the smallest, 100 Hz at
+/// 44.1 kHz, is about `1.4e-12`). Its zeros are never `N_SILENCE` frames long, so the silence
+/// counter never arms the joint rule and the tiny run, scaled back by `2^k`, is the ordinary run
+/// up to the per-word law's own `FLUSH_EPS` crossings (the tolerance, `1e-6` of the peak;
+/// measured exactly `0` at every rate, frequency and period). Amendment A8's rule (armed by any zero section input) zeroes the first shelf's state at
+/// every zero and loses its boost (`[a, 0, a, 0]`) or all four (`[a, 0, 0, 0]`); attempt 3's rule
+/// loses all four. Both miss by about the whole peak.
+#[test]
+fn a_sparse_input_through_four_boosting_shelves_gets_every_boost_at_every_rate() {
+    const K: i32 = 36;
+    for rate in LAUNCH_RATES {
+        // Silence until the joint flush is armed, and two blocks more.
+        let lead = lane::silence_frames(rate) as usize + 2 * FRAMES;
+        for frequency in [10.0_f32, 100.0] {
+            let configured = four_boosting_shelves(frequency);
+            for period in [2_usize, 4] {
+                let ordinary = render_at(
+                    &configured,
+                    rate,
+                    &sparse_square(period, REFERENCE_LEVEL, CHAIN_SAMPLES, lead),
+                );
+                let peak = ordinary.iter().fold(0.0_f32, |peak, y| peak.max(y.abs()));
+                assert!(
+                    peak > 1_000.0 * REFERENCE_LEVEL / period as f32,
+                    "{rate} Hz, {frequency} Hz, period {period}: the shelves must boost the \
+                     ordinary train (peak {peak:e})"
+                );
+                let level = REFERENCE_LEVEL * power_of_two(-K);
+                let tiny = render_at(
+                    &configured,
+                    rate,
+                    &sparse_square(period, level, CHAIN_SAMPLES, lead),
+                );
+                let (worst, at) = scaled_miss(&tiny, &ordinary, K);
+                assert!(
+                    worst <= SPARSE_TOLERANCE * peak,
+                    "{rate} Hz, {frequency} Hz shelves, period {period}, input {level:e}: the tiny \
+                     run, scaled by 2^{K}, misses the ordinary run by {worst:e} at sample {at} \
+                     (ordinary peak {peak:e}); a sparse input must get every boost"
+                );
+            }
+        }
+    }
+}
+
+/// The sparse gate's tolerance, as a fraction of the ordinary run's peak.
+const SPARSE_TOLERANCE: f32 = 1.0e-6;
+
+/// Amendment A9: while the EQ's input is live, the joint flush moves nothing, even where a section
+/// inside the cascade is fed exact zeros.
+///
+/// The EQ's own high-pass at 40 Hz blocks a DC input and, once its integrator has converged on the
+/// DC word, outputs exactly `+0.0`, so the four +24 dB shelves after it see silence while the EQ's
+/// input never is (and a slow square makes the same happen on every flat half period). A rule armed
+/// by a section's own input (amendment A8's) then zeroes the shelves' small decaying states while
+/// the effect is live; the A9 rule is armed by the EQ's input only, which here is never zero. The
+/// tiny run (`2^-K` of the ordinary one) scaled back by `2^K` must therefore be the ordinary run up
+/// to `FLUSH_EPS` crossings, on every sample.
+#[test]
+fn an_exact_zero_inside_the_cascade_moves_nothing_while_the_input_is_live() {
+    const K: i32 = 20;
+    const RATE_HZ: u32 = 96_000;
+    const SAMPLES: usize = 192_000;
+    let mut configured = four_boosting_shelves(100.0);
+    for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+        set_initial(&mut configured, HPF_ENABLED, channel, 1.0);
+        set_initial(&mut configured, HPF_ENABLED + 1, channel, 40.0);
+        set_initial(&mut configured, HPF_ENABLED + 2, channel, 0.7);
+    }
+    for (name, input) in [
+        ("DC", vec![1.0_f32; SAMPLES]),
+        (
+            "square",
+            (0..SAMPLES)
+                .map(|index| {
+                    if (index / SQUARE_HALF_PERIOD).is_multiple_of(2) {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                })
+                .collect(),
+        ),
+    ] {
+        let ordinary_level = 1.0e-6 * power_of_two(K);
+        let ordinary_input: Vec<f32> = input.iter().map(|x| x * ordinary_level).collect();
+        let tiny_input: Vec<f32> = input.iter().map(|x| x * 1.0e-6).collect();
+        let ordinary = render_at(&configured, RATE_HZ, &ordinary_input);
+        let tiny = render_at(&configured, RATE_HZ, &tiny_input);
+        let zeros = tiny.iter().filter(|y| y.to_bits() == 0).count();
+        let peak = ordinary.iter().fold(0.0_f32, |peak, y| peak.max(y.abs()));
+        let (worst, at) = scaled_miss(&tiny, &ordinary, K);
+        assert!(
+            worst <= CANCELLATION_TOLERANCE * peak,
+            "{name} at 1e-6: the tiny run, scaled by 2^{K}, misses the ordinary run by {worst:e} \
+             at sample {at} (peak {peak:e}, {zeros} exact-zero outputs); a section fed an exact \
+             zero inside a live EQ must not end its decay"
+        );
+    }
+}
+
+/// The cancellation gate's tolerance, as a fraction of the ordinary run's peak.
+const CANCELLATION_TOLERANCE: f32 = 1.0e-9;
+
+/// The HPF's enable parameter index; its frequency and Q follow it.
+const HPF_ENABLED: usize = 24;
+
+/// Issue #1328 amendment A9: the EQ's silent fast path skips a block only once the joint flush is
+/// armed on every lane, so a state the joint rule must clear is still cleared.
+///
+/// Every band disabled, and band one's integrators restored to `(1e-15, -1e-15)`: a pair inside
+/// the joint band that an identity section holds unchanged on a zero input, with an output of
+/// exactly `+0.0`. That is a fixed point the fast path's induction would accept, but the joint
+/// flush zeroes it once the input has been silent for `N_SILENCE` (8,192 frames at 96 kHz); a
+/// flag earned before the counter arms would skip every later block and keep the pair forever.
+#[test]
+fn a_fixed_point_inside_the_joint_band_is_cleared_once_the_flush_arms() {
+    use effect_contract::StatePayloadInput;
+    use support::{SILENCE_WORD, WORDS_PER_BAND};
+    const N_SILENCE_96K: usize = 8_192;
+    let configured = values();
+    let mut effect = ParametricEqFactory
+        .prepare(request_at_rate(&configured, false, RATE))
+        .expect("the EQ prepares");
+    let mut payload = snapshot(effect.as_ref());
+    for section in [&mut payload.1, &mut payload.2] {
+        let at = WORDS_PER_BAND * 4;
+        section[at..at + 4].copy_from_slice(&1.0e-15_f32.to_bits().to_le_bytes());
+        section[at + 4..at + 8].copy_from_slice(&(-1.0e-15_f32).to_bits().to_le_bytes());
+        assert_eq!(support::word(section, SILENCE_WORD), 0, "a fresh counter");
+    }
+    let sizes = effect.metadata().state_sizes;
+    effect
+        .restore_state_payload(
+            1,
+            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes).expect("input"),
+        )
+        .expect("the payload restores");
+    let blocks = N_SILENCE_96K / FRAMES + 4;
+    for block in 0..blocks {
+        let mut left = [0.0_f32; FRAMES];
+        let mut right = [0.0_f32; FRAMES];
+        effect.process(
+            EffectProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                (block * FRAMES) as u64,
+                &[],
+                FRAMES as u32,
+            )
+            .expect("block"),
+        );
+        assert!(
+            left.iter().chain(&right).all(|y| y.to_bits() == 0),
+            "block {block}: an identity cascade on silence outputs +0.0"
+        );
+        let (_, left_state, _) = snapshot(effect.as_ref());
+        let pair = [band_word(&left_state, 0, 0), band_word(&left_state, 0, 1)];
+        if (block + 1) * FRAMES < N_SILENCE_96K {
+            assert_ne!(
+                pair,
+                [0, 0],
+                "block {block}: the pair is held before the flush arms"
+            );
+        } else {
+            assert_eq!(
+                pair,
+                [0, 0],
+                "block {block}: the armed joint flush clears the pair"
+            );
+        }
+    }
+    // The blocks the fast path skips still count: the counter is the input's, rendered or not.
+    let (_, left_state, right_state) = snapshot(effect.as_ref());
+    for state in [&left_state, &right_state] {
+        assert_eq!(
+            support::word(state, SILENCE_WORD),
+            ((blocks * FRAMES) as f32).to_bits(),
+            "the silence counter after {blocks} silent blocks"
+        );
     }
 }

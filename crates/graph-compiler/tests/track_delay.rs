@@ -246,6 +246,13 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// nodes, eighteen tokens, and no other byte -- gives the hash below; the builtins-less compile
 /// hashed the unchanged text to `eb3ca776...cb18e0ea10`. The #964 spec records the diff.
 ///
+/// Issue #1328 amendment A9 carries each channel input's silence counter in the EQ's state
+/// payload: one word per channel, so each EQ's serialized state grows from 936 to 944 bytes and
+/// nine instances add exactly 72. Applying only that change to the #964 canonical text --
+/// `declared_effect_bytes` 8,424 -> 8,496 and both plan-byte totals 150,559 -> 150,631, three
+/// tokens of the `estimate` row and no other byte -- reproduces the compiler's new hash below;
+/// reversing the three tokens in the compiled text hashes back to the #964 pin `957e97ca...7640e42`.
+///
 /// The structural off-delay gate above still proves that no zero-length delay node or ring was
 /// introduced. Emitting a zero-length entry contributes no `delay_bytes` and leaves this digest
 /// unchanged; `a_zero_delay_session_lowers_no_delay_node` catches that program mutation.
@@ -262,7 +269,7 @@ fn the_zero_delay_plan_digest_is_the_current_semantic_plan() {
 /// the numbered #805 and #807 specs preserve their subsequent state-size derivations, and the
 /// #964 spec the builtin-tail re-pin.
 const ZERO_DELAY_CANONICAL_SHA256: &str =
-    "957e97ca86f8af87ff8c0ea6adc35ec26b903046c73541613f6abb8ce7640e42";
+    "bb25028730eb702d827953f28534f549eadf6b09c04e84bccdd2a80ffbfc40bf";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]

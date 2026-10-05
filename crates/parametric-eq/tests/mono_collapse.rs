@@ -510,3 +510,60 @@ fn the_last_lpf_is_reached_when_the_bank_collapses_to_mono() {
         "the collapsed final LPF must remain finite"
     );
 }
+
+/// The disengage copy carries the input's silence counter (issue #1328, amendment A9).
+///
+/// Collapsed blocks advance the left channel's counter alone; after `desymmetrize_channels` every
+/// lane's right payload section must equal its left one, word for word, the counter included. A
+/// copy list without it leaves the right channel's counter where the collapse froze it, so its
+/// joint flush would arm late on a dual block after the disengage.
+#[test]
+fn a_desymmetrized_bank_carries_the_collapsed_channels_silence_counter() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let mut bank = bind(width, backend, lanes);
+    let mut first = 0_u64;
+    for step in 0..6 {
+        let mut left = vec![0.0_f32; FRAMES * lanes];
+        let mut right = left.clone();
+        run_block(
+            bank.as_mut(),
+            &mut left,
+            &mut right,
+            width,
+            first,
+            step,
+            false,
+            step >= 2,
+        );
+        first += FRAMES as u64;
+    }
+    bank.desymmetrize_channels();
+    for lane in 0..lanes {
+        let mut common = vec![0_u8; support::COMMON_BYTES];
+        let mut left = vec![0_u8; support::LANE_BYTES];
+        let mut right = vec![0_u8; support::LANE_BYTES];
+        bank.snapshot_track_state_payload(
+            lane as u32,
+            effect_contract::StatePayloadOutput::new(
+                &mut common,
+                &mut left,
+                &mut right,
+                bank.metadata().program_key.state_sizes,
+            )
+            .expect("state output"),
+        )
+        .expect("snapshot");
+        assert_eq!(
+            support::word(&left, support::SILENCE_WORD),
+            (6.0 * FRAMES as f32).to_bits(),
+            "lane {lane}: the left counter counts every zero frame"
+        );
+        assert_eq!(
+            left, right,
+            "lane {lane}: the right channel after the disengage copy"
+        );
+    }
+}

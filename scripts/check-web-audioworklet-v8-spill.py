@@ -73,7 +73,13 @@ where it sits in the listing:
   tail, so the tail is reachable from a pair loop. The ramp path's per-section `svf_block` loop
   computes exactly a mono tail's arithmetic (one section, one stream); today only V8's unrolling of
   it by three gives it another shape. It is not reachable from the stationary passes, so this
-  tells the two apart with or without unrolling (issue #1009).
+  tells the two apart with or without unrolling (issue #1009). The pair loops anchor the tail by
+  their shape alone, steps and streams, select-free or masked: either pair kernel is a
+  stationary pass the tail follows, and which one a loop is says nothing about where the tail is.
+  The anchor used to be the select-free pair only, which tied a held row to a reported row's
+  classification: at #1328 attempt 5 V8 spilled one of the dual pair's compare masks inside its
+  iteration, the rule cannot see through a spilled mask, so the starved dual pair read as masked
+  and the held dual tail lost its anchor and failed closed with nothing checked.
 
 | function | loop | streams | steps | |
 |---|---|---:|---:|---|
@@ -678,7 +684,12 @@ def shaped(loops: list[Loop], row: Row, rows: tuple[Row, ...]) -> list[Loop]:
     ]
     if row.after is not None:
         (before,) = [r for r in rows if r.function == row.function and r.label == row.after]
-        sources = shaped(loops, before, rows)
+        # The anchor is the source row's shape, select-free or masked (see "After the pairs").
+        sources = [
+            loop
+            for loop in loops
+            if loop.steps == before.steps and loop.streams == before.streams
+        ]
         matched = [
             loop
             for loop in matched
@@ -1004,6 +1015,13 @@ def self_test() -> int:
             rows = (Row("t", "pair", streams=2, steps=2, held=False),
                     Row("t", "tail", streams=1, steps=1, after="pair"))
             verdicts.append(check_function("t", assemble(layout), rows))
+            # A pair that reads masked (a data `or`, or a spilled mask the rule cannot see
+            # through) anchors the tail just the same (#1328 attempt 5).
+            masked_pair = list(layout)
+            at = masked_pair.index("subl rax,0x1")
+            masked_pair[at:at] = ["vpand xmm1,xmm1,xmm3", "vpandn xmm3,xmm3,xmm4",
+                                  "vpor xmm1,xmm1,xmm3"]
+            verdicts.append(check_function("t", assemble(masked_pair), rows))
             layout[layout.index("jnz <+TAIL>") + 1] = "jmp <+RAMP>"
             verdicts.append(check_function("t", assemble(layout), rows))
             # A masked row holds the masked loop: a carry there fails it, a clean one passes, and
@@ -1014,9 +1032,9 @@ def self_test() -> int:
                 verdicts.append(check_function("t", synthetic(listing), masked_row))
         finally:
             sys.stdout, sys.stderr = stdout, stderr
-    if verdicts != [1, 0, 1, 0, 0, 1, 1, 0, 1]:
+    if verdicts != [1, 0, 1, 0, 0, 0, 1, 1, 0, 1]:
         failures += 1
-        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 1, 1, 0, 1]",
+        print(f"self-test FAIL verdicts: {verdicts}, want [1, 0, 1, 0, 0, 0, 1, 1, 0, 1]",
               file=sys.stderr)
     if failures:
         return 1

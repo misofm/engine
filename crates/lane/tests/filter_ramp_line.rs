@@ -160,6 +160,8 @@ fn check_body<L: Lane>(rng: &mut Xorshift64Star, mono: bool) {
         section: core::array::from_fn(|channel| {
             core::array::from_fn(|section| coef::<L>(&ramps[channel][section], |ramp| ramp.current))
         }),
+        silence: L::splat(lane::silence_frames(48_000) as f32),
+        constants: lane::kernels::builtins::InputChainConstants::new(),
     };
     let target: [[SvfCoef<L>; 2]; 2] = core::array::from_fn(|channel| {
         core::array::from_fn(|section| coef::<L>(&ramps[channel][section], |ramp| ramp.target))

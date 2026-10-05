@@ -63,32 +63,42 @@ const OPS_PER_CYCLE: f64 = 3.7;
 /// `docs/rulings/effect-floor-accounting.md`, "Compressor inventory".
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
 /// Required arithmetic per lane-sample, parametric-EQ stationary cascade, at the standing fixture's
-/// one live section: a select-free depth-one pass (`svf_step` 26 + output mix 5) and the 4.4
+/// one live section: a select-free depth-one pass (`svf_step` 23 + output mix 5) and the 4.4
 /// boundary scan (3). Issue #976 dropped the identity padding section the depth-two pass used to
-/// run beside it; issue #1328's joint SVF flush (`flush_pair`, 13 lane-ops for the two state words
-/// with its input gate of amendment A8, against 6 for two `flush`) raised `svf_step` from 19 to 26
-/// and this from 27 to 34.
+/// run beside it; issue #1328's joint SVF flush (`flush_pair`, 10 lane-ops for the two state words
+/// under amendment A9, its threshold loaded from the rest plane, against 6 for two `flush`) raised
+/// `svf_step` from 19 to 23, so this is 31 (27 before #1328, 34 under amendment A8). The input's
+/// silence counter costs nothing per lane-sample on live audio: no counter can arm within a block
+/// of it, so the counter advances with one load and one `mask_any` per block
+/// (`lane::kernels::silence_skip_block`); on a block that can arm it is 5 more.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
-const EQ_LANE_OPS: f64 = 34.0;
+const EQ_LANE_OPS: f64 = 31.0;
 /// Required arithmetic per lane-sample, true-peak limiter, post-round-1 uniform-cohort shape.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
 const LIMITER_LANE_OPS: f64 = 129.5;
 /// Required arithmetic per lane-sample, the builtins chain and the fixture's routing, with both
-/// SVF sections per channel carrying a real design. Each section is 31 since issue #1328's joint
-/// SVF flush with its input gate (24 before it), so the chain is 83 (69 before it).
+/// SVF sections per channel carrying a real design: 69. Under issue #1328's amendment A9 a block of
+/// live audio can arm no section's joint flush, so the chain runs the per-word flush
+/// (`lane::kernels::svf_step_when` with `armable = false`, 24 per section) and advances the input's
+/// silence counter once per block; that is the inventory of the standing workload, and the value
+/// before #1328 (83 under amendment A8). A block that can arm runs 82: 28 per section and 5 for the
+/// counter.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
-const BUILTINS_LANE_OPS: f64 = 83.0;
+const BUILTINS_LANE_OPS: f64 = 69.0;
 
 /// Required arithmetic per lane-sample when every builtin section is the prepared identity.
 ///
 /// The two rack-free rows no longer share a floor. A section whose prepared design is the exact
 /// identity is not a recurrence the spec requires: it is the map `v |-> v + 0.0`, and a run of them
 /// is one `add(+0.0)` (`input_chain_block_elided`, and the appendix to the ruling). So the class-A
-/// arithmetic of the `dispatch_only` row is the 83 with both 31-op sections replaced by that single
+/// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
 /// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
+/// The identity body has no section to arm, so the input's silence counter advances once per block
+/// (`lane::kernels::silence_skip_block`, issue #1328 amendment A9) and adds no lane-op per
+/// lane-sample.
 ///
 /// The fader and the pan matrix stay at their full cost: a 0 dB fader is still a multiply and a
 /// mask clear, and the row's pan (hard right on both inputs, not the identity; see the workload's
@@ -638,9 +648,9 @@ input as $rust |
         // compressor inventory. The limiter's shared link has the same accounting shape.
         assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
         assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 34.0);
+        assert_eq!(EQ_LANE_OPS, 31.0);
         let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (83.0 + 34.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
+        let expected = (69.0 + 31.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
         assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
         let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
         let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");

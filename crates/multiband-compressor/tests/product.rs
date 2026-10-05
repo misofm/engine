@@ -60,15 +60,15 @@ fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     );
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
-        (44_100u32, 188u32),
-        (48_000, 188),
-        (88_200, 188),
-        (96_000, 188),
+        (44_100u32, 192u32),
+        (48_000, 192),
+        (88_200, 192),
+        (96_000, 192),
     ] {
         let initial = values();
         let mut prepared = request(&initial);
         prepared.sample_rate = rate;
-        prepared.limits.maximum_total_state_bytes = 376;
+        prepared.limits.maximum_total_state_bytes = 384;
         // The contract requires a positive capacity limit even when the prepared effect needs no
         // scratch; one byte is the smallest admissible declaration for the exact zero-byte row.
         prepared.limits.maximum_scratch_bytes = 1;
@@ -1121,9 +1121,9 @@ fn bank_requests_are_validated_before_any_fallback() {
         .expect("state bytes")
         .checked_add(quality.scratch_fixed_bytes)
         .expect("prepared bytes");
-    assert_eq!(per_track, 376);
-    assert_eq!(per_track * 4, 1_504);
-    assert_eq!(per_track * 8, 3_008);
+    assert_eq!(per_track, 384);
+    assert_eq!(per_track * 4, 1_536);
+    assert_eq!(per_track * 8, 3_072);
 }
 
 /// Issue #1088 (console strip P2a), gate 3: the multiband compressor has not opted into padding (it is not padded until #1069 closes), so
@@ -1177,4 +1177,219 @@ fn a_padded_request_is_declined_until_the_multiband_compressor_opts_in() {
         Some(refusal),
         "a padded request still validates its members"
     );
+}
+
+/// Issue #1328, amendment A9: the payload's last word per channel is the input's silence counter,
+/// carried by a snapshot and a restore and admitted only as the counter writes it (`+0.0`, or an
+/// integer in `[1, 2^24]`).
+///
+/// Ten blocks of silence after a block of signal leave the counter at 1,280 on both channels; the
+/// snapshot carries it, a fresh instance restored from the snapshot snapshots the same bytes and
+/// renders the same bits from there on, and each malformed word is refused without a trace.
+#[test]
+fn the_silence_counter_is_carried_and_validated() {
+    const COUNTER_WORD: usize = 47;
+    let initial = values();
+    let mut effect = MultibandCompressorFactory
+        .prepare(request(&initial))
+        .expect("prepare");
+    let sizes = effect.metadata().state_sizes;
+    let mut left = support::signal(128, 0x1328_0001);
+    let mut right = support::signal(128, 0x1328_0002);
+    process(effect.as_mut(), &mut left, &mut right, 0, &[], 128);
+    for block in 1..=10_u64 {
+        let (mut left, mut right) = (vec![0.0_f32; 128], vec![0.0_f32; 128]);
+        process(
+            effect.as_mut(),
+            &mut left,
+            &mut right,
+            block * 128,
+            &[],
+            128,
+        );
+    }
+    let saved = snapshot(effect.as_ref());
+    for section in [&saved.1, &saved.2] {
+        assert_eq!(
+            &section[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4],
+            &1_280.0_f32.to_bits().to_le_bytes(),
+            "the snapshot carries the counter"
+        );
+    }
+    let mut restored = MultibandCompressorFactory
+        .prepare(request(&initial))
+        .expect("prepare");
+    restore(restored.as_mut(), 1, &saved, sizes).expect("a counted payload restores");
+    assert_eq!(
+        snapshot(restored.as_ref()),
+        saved,
+        "the restore keeps the counter"
+    );
+    let (mut a_left, mut a_right) = (support::signal(128, 3), support::signal(128, 4));
+    let (mut b_left, mut b_right) = (a_left.clone(), a_right.clone());
+    process(
+        effect.as_mut(),
+        &mut a_left,
+        &mut a_right,
+        11 * 128,
+        &[],
+        128,
+    );
+    process(
+        restored.as_mut(),
+        &mut b_left,
+        &mut b_right,
+        11 * 128,
+        &[],
+        128,
+    );
+    assert_eq!(
+        (
+            a_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            a_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        ),
+        (
+            b_left.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            b_right.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        ),
+        "the restored instance renders the continuing one's bits"
+    );
+    let mut target = MultibandCompressorFactory
+        .prepare(request(&initial))
+        .expect("prepare");
+    let before = snapshot(target.as_ref());
+    for bad in [
+        (-0.0_f32).to_bits(),
+        0.5_f32.to_bits(),
+        (-1.0_f32).to_bits(),
+        16_777_218.0_f32.to_bits(),
+        f32::NAN.to_bits(),
+        1,
+    ] {
+        let mut corrupted = saved.clone();
+        corrupted.2[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4].copy_from_slice(&bad.to_le_bytes());
+        assert_eq!(
+            restore(target.as_mut(), 1, &corrupted, sizes)
+                .expect_err("a malformed counter")
+                .code,
+            "effect.state.filter",
+            "counter word {bad:#010x}"
+        );
+        assert_eq!(
+            snapshot(target.as_ref()),
+            before,
+            "word {bad:#010x} left a trace"
+        );
+    }
+}
+
+/// Issue #1328 amendment A9: each channel's silence counter counts that channel's own input.
+///
+/// One channel silent for ten blocks and the other live: the silent channel's counter reads the
+/// 1,280 frames and the live one's reads `+0.0`, in both orders. A counter stepped from the other
+/// channel's input would arm the live channel's joint flush on the silent one's run.
+#[test]
+fn each_channel_counts_its_own_input() {
+    const COUNTER_WORD: usize = 47;
+    let counter = |section: &[u8]| {
+        f32::from_le_bytes(
+            section[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4]
+                .try_into()
+                .expect("word"),
+        )
+    };
+    for silent_left in [true, false] {
+        let mut effect = MultibandCompressorFactory
+            .prepare(request(&values()))
+            .expect("prepare");
+        for block in 0..10_u64 {
+            let live = support::signal(128, 0x1328_0100 + block);
+            let silent = vec![0.0_f32; 128];
+            let (mut left, mut right) = if silent_left {
+                (silent, live)
+            } else {
+                (live, silent)
+            };
+            process(
+                effect.as_mut(),
+                &mut left,
+                &mut right,
+                block * 128,
+                &[],
+                128,
+            );
+        }
+        let saved = snapshot(effect.as_ref());
+        let (left, right) = (counter(&saved.1), counter(&saved.2));
+        let (expected_left, expected_right) = if silent_left {
+            (1_280.0, 0.0)
+        } else {
+            (0.0, 1_280.0)
+        };
+        assert_eq!(
+            (left.to_bits(), right.to_bits()),
+            (f32::to_bits(expected_left), f32::to_bits(expected_right)),
+            "silent left {silent_left}: the counters are ({left}, {right})"
+        );
+    }
+}
+
+/// Issue #1328 amendment A9: the crossover's joint flush arms on the frame its channel's input has
+/// been silent for `N_SILENCE` frames (4,096 at 48 kHz), and not before.
+///
+/// Both channels restored with every crossover state word at `±1e-15`, inside the joint band (both
+/// words of each pair below `REST_EPS`, above `FLUSH_EPS`), then one frame of zeros (one frame,
+/// because the crossover's own decay takes such a word below `FLUSH_EPS` within a block). With the
+/// counter restored at `N_SILENCE - 1` that frame arms the rule and every word is `+0.0` after it;
+/// restored at `N_SILENCE - 2` (one frame short) or at `+0.0` the frame does not arm and the
+/// per-word law keeps every word non-zero.
+#[test]
+fn the_crossover_joint_flush_arms_after_its_inputs_silence() {
+    const FILTER_WORD: usize = 43;
+    const COUNTER_WORD: usize = 47;
+    const N_SILENCE_48K: f32 = 4_096.0;
+    let word = |section: &[u8], index: usize| {
+        f32::from_le_bytes(section[index * 4..index * 4 + 4].try_into().expect("word"))
+    };
+    for (counter, armed) in [
+        (N_SILENCE_48K - 1.0, true),
+        (N_SILENCE_48K - 2.0, false),
+        (0.0, false),
+    ] {
+        let mut effect = MultibandCompressorFactory
+            .prepare(request(&values()))
+            .expect("prepare");
+        let sizes = effect.metadata().state_sizes;
+        let mut saved = snapshot(effect.as_ref());
+        for section in [&mut saved.1, &mut saved.2] {
+            for (index, value) in [1.0e-15_f32, -1.0e-15, 1.0e-15, -1.0e-15]
+                .into_iter()
+                .enumerate()
+            {
+                section[(FILTER_WORD + index) * 4..(FILTER_WORD + index) * 4 + 4]
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+            section[COUNTER_WORD * 4..COUNTER_WORD * 4 + 4].copy_from_slice(&counter.to_le_bytes());
+        }
+        restore(effect.as_mut(), 1, &saved, sizes).expect("a banded payload restores");
+        let (mut left, mut right) = (vec![0.0_f32; 1], vec![0.0_f32; 1]);
+        process(effect.as_mut(), &mut left, &mut right, 0, &[], 1);
+        let after = snapshot(effect.as_ref());
+        for (channel, section) in [&after.1, &after.2].into_iter().enumerate() {
+            let words: Vec<f32> = (0..4)
+                .map(|index| word(section, FILTER_WORD + index))
+                .collect();
+            if armed {
+                assert!(
+                    words.iter().all(|w| w.to_bits() == 0),
+                    "channel {channel}: an armed block leaves {words:?}"
+                );
+            } else {
+                assert!(
+                    words.iter().all(|w| *w != 0.0),
+                    "channel {channel}: an unarmed block zeroed a word: {words:?}"
+                );
+            }
+        }
+    }
 }

@@ -497,7 +497,7 @@ pub const BUILTINS_DIGESTS: [[u8; 32]; CASE_COUNT] = [
 mod elision_tests {
     use super::*;
     use core::cell::Cell;
-    use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
+    use dsp_reference::{ReferenceRetainedTptF32, ReferenceSilenceRun, ReferenceTptOutput};
     use sha2::{Digest, Sha256};
 
     fn digest(values: &[f32]) -> [u8; 32] {
@@ -528,7 +528,10 @@ mod elision_tests {
                 };
                 let mut filter =
                     ReferenceRetainedTptF32::conditioned_butterworth(48_000, cutoff, kind).unwrap();
+                // The chain input's silence run arms the section (issue #1328, amendment A9).
+                let mut run = ReferenceSilenceRun::for_rate(48_000);
                 for x in lane_signal(case, lane, channel) {
+                    let armed = run.observe(x);
                     let clean = if !x.is_finite() || x.abs() >= 1.0e30 {
                         sanitized += 1;
                         0.0
@@ -540,7 +543,7 @@ mod elision_tests {
                         y += 0.0;
                     }
                     if case == 9 && !bypass_real {
-                        y = f32::from_bits(filter.process(y).output_bits);
+                        y = f32::from_bits(filter.process(y, armed).output_bits);
                     }
                     if !omit_identity_add && case == 9 && channel == 1 {
                         y += 0.0;
@@ -621,7 +624,7 @@ mod elision_tests {
             self.0.store_bits(dst);
         }
         unary!(sqrt, neg, abs, floor);
-        binary!(add, sub, mul, div);
+        binary!(add, sub, mul, div, max_u32);
         comparison!(lt, le, gt, ge, eq);
         fn fma(self, b: Self, c: Self) -> Self {
             FMAS.with(|count| count.set(count.get() + 1));

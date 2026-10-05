@@ -15,9 +15,17 @@
 mod support;
 
 use lane::kernels::{
-    SvfState, mix2x2_block, ordered_accumulate_block, sum_into_block, sum2_block, svf_step,
+    SvfState, mix2x2_block, ordered_accumulate_block, silence_block, sum_into_block, sum2_block,
+    svf_step,
 };
-use lane::{CanonicalFpEnv, FLUSH_EPS, Lane, REST_EPS};
+use lane::{CanonicalFpEnv, FLUSH_EPS, Lane, REST_EPS, silence_step};
+
+/// `N_SILENCE` for the gates below: the launch value at 48 kHz for the cascades, which only need
+/// some thresholds armed and some not, and a short window for the step oracle, whose 100 Hz state
+/// must still sit in the joint band when the window ends (issue #1328, amendment A9).
+const N_SILENCE: f32 = lane::silence_frames(48_000) as f32;
+/// The step oracle's window.
+const STEP_WINDOW: u32 = 1_024;
 use support::{ALL_KERNELS, ALL_SIGNALS, Kernel, MAX_WIDTH, Signal, interleave, run_kernel};
 
 /// Frames per case. The `--release` count is the gate; a debug run keeps the workspace suite quick.
@@ -582,29 +590,42 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
 ///
 /// The input is noise for the first quarter, the same noise scaled down to about `1e-13` for the
 /// second, and silence for the second half. The tiny quarter holds both words below `REST_EPS`
-/// while the input is not zero, where the joint rule must *not* fire (amendment A8); the silent
-/// half decays through the joint flush's band -- both words below `REST_EPS`, one at or above
-/// `FLUSH_EPS`, input exactly zero -- where it must (issue #1328). The oracle restates that rule
-/// from its definition, and reaching both cases is asserted.
+/// while the input is not zero, where the joint rule must *not* fire; the first `N_SILENCE` frames
+/// of the silent half hold them there on an input that is zero but not yet silent for a window
+/// (`STEP_WINDOW` frames here; `N_SILENCE` is the window at the effect's rate), where it must not fire either (amendment A9: silence is a time property);
+/// after that the decay passes through the joint flush's band -- both words below `REST_EPS`, one
+/// at or above `FLUSH_EPS`, input silent for `N_SILENCE` frames -- where it must (issue #1328).
+/// The oracle restates that rule from its definition, with its own integer run counter, and
+/// reaching all three cases is asserted.
 ///
 /// Red mutation: return `(v2, v1)` from `svf_step`; swap `a2` and `a3` in its `d2`; flush each word
-/// alone (`flush` per word instead of `flush_pair`); drop the input term from `flush_pair`.
+/// alone (`flush` per word instead of `flush_pair`); arm the joint rule on any zero input
+/// (amendment A8's law) or on any input (attempt 3's).
 #[test]
 fn g2_svf_step_yields_both_taps_of_one_state() {
-    // A 1 kHz Butterworth low-pass at 48 kHz: g = tan(pi * 1000 / 48000), k = sqrt(2),
-    // t = g * (g + k), c1 = t / (1 + t), a2 = g * (1 - c1), a3 = g * a2.
-    const C1: f32 = 0.086_269_25;
-    const A2: f32 = 0.059_915_63;
-    const A3: f32 = 0.003_927_913_5;
-    const FRAMES: usize = 4_096;
+    // A 100 Hz Butterworth low-pass at 48 kHz: g = tan(pi * 100 / 48000), k = sqrt(2),
+    // t = g * (g + k), c1 = t / (1 + t), a2 = g * (1 - c1), a3 = g * a2. Slow enough (a time
+    // constant of about 108 frames) that a state below `REST_EPS` is still above `FLUSH_EPS` once
+    // the input has been silent for `N_SILENCE` frames, which the armed case needs (amendment A9).
+    const C1: f32 = 0.009_213_302;
+    const A2: f32 = 0.006_484_776;
+    const A3: f32 = 4.244_336_7e-5;
+    const FRAMES: usize = 16_384;
 
     /// Simper's recurrence, transcribed from the equations, one scalar lane at a time. Also counts
-    /// the frames where the joint rule zeroed a word the per-word law would have kept, and the
-    /// frames where only the non-zero input kept it from doing so.
-    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>, usize, usize) {
+    /// the frames where the joint rule zeroed a word the per-word law would have kept, the frames
+    /// where only the non-zero input kept it from doing so, and the frames where only a zero run
+    /// shorter than `N_SILENCE` did.
+    fn oracle(
+        input: &[f32],
+        stride: usize,
+        lane: usize,
+    ) -> (Vec<u32>, Vec<u32>, usize, usize, usize) {
         let (mut ic1, mut ic2) = (0.0f32, 0.0f32);
+        let mut run = 0u32;
         let mut joint = 0usize;
         let mut gated = 0usize;
+        let mut waiting = 0usize;
         let mut band = Vec::with_capacity(FRAMES);
         let mut low = Vec::with_capacity(FRAMES);
         for frame in 0..FRAMES {
@@ -616,15 +637,20 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             let v2 = ic2 + d2;
             let (n1, n2) = (ic1 + (d1 + d1), ic2 + (d2 + d2));
             // Each word below `FLUSH_EPS` is zeroed; both below `REST_EPS` are zeroed together,
-            // but only on a frame whose input is exactly zero.
+            // but only once the input has been exactly zero for `N_SILENCE` frames in a row.
+            run = if v0 == 0.0 { run + 1 } else { 0 };
+            let armed = run >= STEP_WINDOW;
             let small = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
             let kept = n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS;
-            let rest = small && v0 == 0.0;
+            let rest = small && armed;
             if rest && kept {
                 joint += 1;
             }
             if small && kept && v0 != 0.0 {
                 gated += 1;
+            }
+            if small && kept && v0 == 0.0 && !armed {
+                waiting += 1;
             }
             ic1 = if rest || n1.abs() < FLUSH_EPS {
                 0.0
@@ -639,7 +665,7 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             band.push(v1.to_bits());
             low.push(v2.to_bits());
         }
-        (band, low, joint, gated)
+        (band, low, joint, gated, waiting)
     }
 
     fn check<L: Lane>() {
@@ -650,18 +676,21 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
         }
         input[FRAMES / 2 * L::WIDTH..].fill(0.0);
         let mut state = SvfState::<L>::default();
+        let mut silence = L::zero();
         let nc1 = L::splat(C1).neg();
         let (a2, a3) = (L::splat(A2), L::splat(A3));
         let mut band = vec![0u32; FRAMES * L::WIDTH];
         let mut low = vec![0u32; FRAMES * L::WIDTH];
         for frame in 0..FRAMES {
-            let (v1, v2) =
-                svf_step::<L>(L::load(&input[frame * L::WIDTH..]), nc1, a2, a3, &mut state);
+            let v0 = L::load(&input[frame * L::WIDTH..]);
+            let rest = silence_step(v0, &mut silence, L::splat(STEP_WINDOW as f32));
+            let (v1, v2) = svf_step::<L>(v0, nc1, a2, a3, rest, &mut state);
             v1.store_bits(&mut band[frame * L::WIDTH..]);
             v2.store_bits(&mut low[frame * L::WIDTH..]);
         }
         for lane in 0..L::WIDTH {
-            let (expected_band, expected_low, joint, gated) = oracle(&input, L::WIDTH, lane);
+            let (expected_band, expected_low, joint, gated, waiting) =
+                oracle(&input, L::WIDTH, lane);
             assert!(
                 joint > 0,
                 "lane {lane}: the decay must reach the joint flush's band (both words below \
@@ -671,6 +700,11 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
                 gated > 0,
                 "lane {lane}: the tiny quarter must hold both words below REST_EPS on a non-zero \
                  input, where the joint rule must not fire"
+            );
+            assert!(
+                waiting > 0,
+                "lane {lane}: the silent half must hold both words below REST_EPS on a zero input \
+                 before N_SILENCE zero frames, where the joint rule must not fire"
             );
             let mut differing = 0usize;
             for frame in 0..FRAMES {
@@ -770,6 +804,23 @@ fn check_cascade<L: Lane>(width: &str, signal: Signal, lanes: &[Vec<f32>]) {
         interleave(&rotated, L::WIDTH, FRAMES),
     ];
 
+    // The rest planes come from each channel's input, before any section runs (issue #1328,
+    // amendment A9), and every section reads them -- in the reference too. The counters start
+    // one frame short of arming, so a zero at the start of a signal arms the joint rule at once
+    // and a section deep in the cascade, whose own input is not zero, still reads it.
+    let planes: [Vec<f32>; 2] = core::array::from_fn(|channel| {
+        let mut run = L::splat(N_SILENCE - 1.0);
+        let mut plane = vec![0.0_f32; FRAMES * L::WIDTH];
+        silence_block::<L>(
+            &blocks[channel],
+            FRAMES,
+            &mut run,
+            &mut plane,
+            L::splat(N_SILENCE),
+        );
+        plane
+    });
+
     // Reference: four serial whole-block passes per channel, exactly as the EQ ran before #163
     // phase 3.
     let mut reference = blocks.clone();
@@ -784,6 +835,7 @@ fn check_cascade<L: Lane>(width: &str, signal: Signal, lanes: &[Vec<f32>]) {
                 FRAMES,
                 &coefficients[channel][section],
                 &mut reference_state[channel][section],
+                &planes[channel],
             );
         }
     }
@@ -794,9 +846,9 @@ fn check_cascade<L: Lane>(width: &str, signal: Signal, lanes: &[Vec<f32>]) {
             core::array::from_fn(|section| cascade_state(channel * CASCADE_SECTIONS + section))
         });
         match depth {
-            1 => run_cascade::<L, 1>(&mut audio, &coefficients, &mut state),
-            2 => run_cascade::<L, 2>(&mut audio, &coefficients, &mut state),
-            _ => run_cascade::<L, 4>(&mut audio, &coefficients, &mut state),
+            1 => run_cascade::<L, 1>(&mut audio, &coefficients, &mut state, &planes),
+            2 => run_cascade::<L, 2>(&mut audio, &coefficients, &mut state, &planes),
+            _ => run_cascade::<L, 4>(&mut audio, &coefficients, &mut state, &planes),
         }
         for channel in 0..2 {
             assert_eq!(
@@ -825,6 +877,7 @@ fn run_cascade<L: Lane, const DEPTH: usize>(
     audio: &mut [Vec<f32>; 2],
     coefficients: &[[lane::kernels::SvfCoef<L>; CASCADE_SECTIONS]; 2],
     state: &mut [[SvfState<L>; CASCADE_SECTIONS]; 2],
+    planes: &[Vec<f32>; 2],
 ) {
     use lane::kernels::{SvfCoef, svf_cascade_interleaved};
 
@@ -844,6 +897,7 @@ fn run_cascade<L: Lane, const DEPTH: usize>(
             FRAMES,
             &pass_coefficients,
             &mut pass_state,
+            [&planes[0], &planes[1]],
         );
         for k in 0..DEPTH {
             state[0][base + k] = pass_state[0][k];
@@ -892,6 +946,10 @@ const SKEW_GUARD_WORD: u32 = 0x7fa5_a5a5;
 fn g2_skewed_cascade_equals_the_interleaved_cascade() {
     let _canonical = CanonicalFpEnv::enter();
     lane::each_lane!(|L| check_skew_width::<L>(core::any::type_name::<L>()));
+    assert!(
+        ARMED_SKEW_PLANES.load(core::sync::atomic::Ordering::Relaxed) > 0,
+        "some skew block must carry an armed rest threshold (issue #1328, amendment A9)"
+    );
 }
 
 fn check_skew_width<L: Lane>(width: &str) {
@@ -929,6 +987,10 @@ fn skew_hostile(block: usize, frame: usize, lane: usize, stream: usize) -> f32 {
         }
     }
 }
+
+/// Skew-gate blocks whose rest plane armed the joint rule on some lane-frame: the reach of the
+/// skewed cascade's threshold indexing (issue #1328, amendment A9).
+static ARMED_SKEW_PLANES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
     use lane::kernels::{
@@ -997,6 +1059,10 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                 });
                 let mut oracle_state = initial;
                 let mut skew_state = initial;
+                // One silence counter per stream across the blocks, one frame short of arming at
+                // the start (issue #1328, amendment A9), so the thresholds change inside blocks and
+                // a section that read frame `i`'s threshold instead of frame `i - k`'s is caught.
+                let mut silence: [L; S] = [L::splat(N_SILENCE - 1.0); S];
                 for block in 0..SKEW_BLOCKS {
                     let span = frames * L::WIDTH;
                     let fresh: [Vec<f32>; S] = core::array::from_fn(|stream| {
@@ -1010,6 +1076,22 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                         }
                         buffer
                     });
+                    let planes: [Vec<f32>; S] = core::array::from_fn(|stream| {
+                        let mut plane = vec![0.0_f32; span];
+                        silence_block::<L>(
+                            &fresh[stream][SKEW_GUARD..SKEW_GUARD + span],
+                            frames,
+                            &mut silence[stream],
+                            &mut plane,
+                            L::splat(N_SILENCE),
+                        );
+                        if plane.iter().any(|word| *word != 0.0) {
+                            ARMED_SKEW_PLANES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        plane
+                    });
+                    let rest: [&[f32]; S] =
+                        core::array::from_fn(|stream| planes[stream].as_slice());
                     let mut oracle = fresh.clone();
                     let mut skewed = fresh;
                     {
@@ -1023,6 +1105,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 &coefficients,
                                 &mut oracle_state,
                                 &masks,
+                                rest,
                             );
                         } else {
                             svf_cascade_interleaved::<L, S, D>(
@@ -1030,6 +1113,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 frames,
                                 &coefficients,
                                 &mut oracle_state,
+                                rest,
                             );
                         }
                     }
@@ -1044,6 +1128,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 &coefficients,
                                 &mut skew_state,
                                 &masks,
+                                rest,
                             );
                         } else {
                             svf_cascade_skewed::<L, S, D>(
@@ -1051,6 +1136,7 @@ fn check_skew<L: Lane, const S: usize, const D: usize>(width: &str) {
                                 frames,
                                 &coefficients,
                                 &mut skew_state,
+                                rest,
                             );
                         }
                     }
@@ -1207,6 +1293,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                     });
                     let mut oracle_state = initial;
                     let mut bounded_state = initial;
+                    let mut silence: [L; S] = [L::splat(N_SILENCE - 1.0); S];
                     for block in 0..BOUNDED_BLOCKS {
                         let span = frames * L::WIDTH;
                         let fresh: [Vec<f32>; S] = core::array::from_fn(|stream| {
@@ -1216,6 +1303,19 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 })
                                 .collect()
                         });
+                        let planes: [Vec<f32>; S] = core::array::from_fn(|stream| {
+                            let mut plane = vec![0.0_f32; span];
+                            silence_block::<L>(
+                                &fresh[stream],
+                                frames,
+                                &mut silence[stream],
+                                &mut plane,
+                                L::splat(N_SILENCE),
+                            );
+                            plane
+                        });
+                        let rest: [&[f32]; S] =
+                            core::array::from_fn(|stream| planes[stream].as_slice());
                         let mut oracle = fresh.clone();
                         let mut bounded = fresh;
                         let io = oracle.each_mut().map(Vec::as_mut_slice);
@@ -1226,6 +1326,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 &coefficients,
                                 &mut oracle_state,
                                 &masks,
+                                rest,
                             );
                         } else {
                             svf_cascade_interleaved::<L, S, D>(
@@ -1233,6 +1334,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 frames,
                                 &coefficients,
                                 &mut oracle_state,
+                                rest,
                             );
                         }
                         let io = bounded.each_mut().map(Vec::as_mut_slice);
@@ -1243,6 +1345,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 &coefficients,
                                 &mut bounded_state,
                                 &masks,
+                                rest,
                                 limit,
                             )
                         } else {
@@ -1251,6 +1354,7 @@ fn check_bounded<L: Lane, const S: usize, const D: usize>(width: &str, seen: &mu
                                 frames,
                                 &coefficients,
                                 &mut bounded_state,
+                                rest,
                                 limit,
                             )
                         };

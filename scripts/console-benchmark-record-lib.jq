@@ -64,11 +64,12 @@ def session_floor_keys: (session_keys + floor_keys) | sort;
 # makes a subject which quietly re-tuned a floor fail here rather than publish. The same discipline
 # `session_kind_shape` applies to a workload's track count is applied to its floor.
 def lane_ops_per_cycle: 8 * 3.7;
-# Both SVF sections are 31 lane-ops since #1328's joint flush with its input gate (24 before), so
-# the chain is 83 (69).
-def builtins_lane_ops: 83;
+# Both SVF sections run the per-word flush (24) on live audio under #1328's amendment A9 -- no
+# section's joint flush can arm within a block of it, and the silence counter advances once per
+# block -- so the chain is 69, as before #1328 (83 under amendment A8; 82 on a block that can arm).
+def builtins_lane_ops: 69;
 # The rack-free rows do not share a floor. A builtin section prepared as the exact identity is
-# elided, not executed, so the identity row's arithmetic is the 83 with both 31-op SVF sections
+# elided, not executed, so the identity row's arithmetic is the 69 with both 24-op SVF sections
 # replaced by the single `add(+0.0)` a run of identity sections composes to:
 # 7 sanitise + 1 identity add + 4 boundary + 2 fader + 4 pan + 3 route + 1 reduction.
 # It is the floor of the whole table (#956). Its last two lines, the route's `mix2x2` (3) and the
@@ -76,10 +77,10 @@ def builtins_lane_ops: 83;
 # reach the master; no row is costed at them alone, because the builtins-less plumbing row that was
 # measured a plan no host compiles and was retired.
 def builtins_identity_lane_ops: 22;
-# The EQ at the standing fixture's one live section: a select-free depth-one pass (31 since #1328's
-# joint SVF flush with its input gate, 24 before) and the 4.4 boundary scan (3). #976 dropped the
-# identity padding section that used to run beside it.
-def eq_lane_ops: 34;
+# The EQ at the standing fixture's one live section: a select-free depth-one pass (28 since #1328's
+# joint SVF flush under amendment A9, 24 before) and the 4.4 boundary scan (3): 31 (34 under A8).
+# #976 dropped the identity padding section that used to run beside it.
+def eq_lane_ops: 31;
 # Current-lowering recount (#368): max/min are one lane-op on x86 and wasm; the shared stereo
 # link contributes a fractional half-op per channel sample. exp2_int_in_range is two operations
 # after #367. These are inventories, not runtime measurements.

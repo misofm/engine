@@ -11,7 +11,7 @@
 //! instantiation, which is the same body at `WIDTH = 1` (D4).
 
 use builtins::*;
-use dsp_reference::{ReferenceRetainedTptF32, ReferenceTptOutput};
+use dsp_reference::{ReferenceRetainedTptF32, ReferenceSilenceRun, ReferenceTptOutput};
 use effect_contract::BankWidth;
 use engine::LAUNCH_SAMPLE_RATES;
 use lane::Backend;
@@ -177,9 +177,12 @@ fn scalar_stage_is_bit_identical_to_reference_recurrence() {
                 ReferenceTptOutput::LowPass,
             )
             .expect("reference low");
+            // One silence run on the chain's input arms both sections (issue #1328, amendment A9).
+            let mut run = ReferenceSilenceRun::for_rate(rate);
             for (index, sample) in input.iter().copied().enumerate() {
-                let high_bits = high.process(sample).output_bits;
-                let expected = low.process(f32::from_bits(high_bits)).output_bits;
+                let armed = run.observe(sample);
+                let high_bits = high.process(sample, armed).output_bits;
+                let expected = low.process(f32::from_bits(high_bits), armed).output_bits;
                 assert_eq!(
                     left[index].to_bits(),
                     expected,
@@ -246,6 +249,7 @@ fn scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires() {
             [ic1 + (d1 + d1), ic2 + (d2 + d2)]
         };
         let in_band = |word: f32| word.abs() < lane::FLUSH_EPS && word.to_bits() != 0;
+        let mut run = ReferenceSilenceRun::for_rate(rate);
         let mut fired = [None; 2];
         let mut index = 0_usize;
         while fired.contains(&None) {
@@ -284,7 +288,7 @@ fn scalar_stage_is_the_reference_recurrence_where_the_per_word_flush_fires() {
             let mut left = [sample];
             let mut right = [sample];
             input_builtins.process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
-            let step = high.process(sample);
+            let step = high.process(sample, run.observe(sample));
             assert_eq!(
                 left[0].to_bits(),
                 step.output_bits,

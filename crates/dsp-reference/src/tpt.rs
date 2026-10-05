@@ -17,17 +17,18 @@ pub enum ReferenceTptOutput {
 /// state is flushed once per sample inside the kernel, and nothing else looks at it. There is no
 /// per-sample recovery any more -- non-finite output is caught once per block, by the caller. The
 /// flush is the joint pair rule of issue #1328: each word follows the per-word [`FLUSH_EPS`] law,
-/// and both words are zeroed together when the step's input is exactly zero (`+0.0` or `-0.0`)
-/// and both magnitudes are below `REST_EPS` (`1.0e-14`; amendment A8).
+/// and both words are zeroed together when the *effect input* has been exactly zero (`+0.0` or
+/// `-0.0`) for at least the silence time ([`reference_silence_frames`], [`ReferenceSilenceRun`])
+/// and both magnitudes are below `REST_EPS` (`1.0e-14`; amendment A9).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceTptRetainedAction {
     /// Neither rule zeroed a word: each was at or above [`FLUSH_EPS`] in magnitude (or
-    /// non-finite), and the input was not exactly zero or at least one word was at or above
-    /// `REST_EPS` (or non-finite).
+    /// non-finite), and the effect input had not been silent for the silence time or at
+    /// least one word was at or above `REST_EPS` (or non-finite).
     FiniteNormal,
     /// At least one retained word was zeroed by either rule: it was below [`FLUSH_EPS`], or the
-    /// input was exactly zero and both words were below `REST_EPS`; every zeroed word became
-    /// positive zero.
+    /// effect input had been silent for the silence time and both words were below
+    /// `REST_EPS`; every zeroed word became positive zero.
     Flushed,
 }
 
@@ -42,6 +43,70 @@ pub const FLUSH_EPS: f32 = 1.0e-20;
 /// The same constant as `lane::REST_EPS`, written out here because this twin is deliberately
 /// independent of the lane crate.
 const REST_EPS: f32 = 1.0e-14;
+
+/// The silence time, `4096 / 48000` s, in frames at `sample_rate_hz`, rounded up: how long the
+/// effect input must have been exactly zero before the joint rule may fire (issue #1328,
+/// amendment A9).
+///
+/// The same rule as `lane::silence_frames`, written out here because this twin is deliberately
+/// independent of the lane crate.
+#[must_use]
+pub const fn reference_silence_frames(sample_rate_hz: u32) -> u32 {
+    let samples = sample_rate_hz as u64 * 4_096;
+    samples.div_ceil(48_000) as u32
+}
+
+/// Saturation of the silence run: `2^24`, where the production `f32` counter stops (its
+/// `2^24 + 1` rounds back to `2^24`).
+const SILENCE_SATURATION: u32 = 1 << 24;
+
+/// Twin of the production silence counter: the run of exactly-zero samples of one effect input
+/// channel (issue #1328, amendment A9).
+///
+/// Written in integers, not as the production `f32` select: `run` is the number of consecutive
+/// samples equal to zero (IEEE `==`, so `+0.0` and `-0.0` count and a NaN does not), saturating at
+/// `2^24`. [`observe`](Self::observe) answers whether the joint rule is armed for this sample.
+/// One run per effect input channel feeds every section of that channel, whatever its position in
+/// the chain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReferenceSilenceRun {
+    run: u32,
+    armed_after: u32,
+}
+
+impl ReferenceSilenceRun {
+    /// A run with no history, for an effect at `sample_rate_hz`.
+    #[must_use]
+    pub const fn for_rate(sample_rate_hz: u32) -> Self {
+        Self::with_window(reference_silence_frames(sample_rate_hz))
+    }
+
+    /// A run with no history that arms after `armed_after` zero samples.
+    #[must_use]
+    pub const fn with_window(armed_after: u32) -> Self {
+        Self {
+            run: 0,
+            armed_after,
+        }
+    }
+
+    /// Counts one effect input sample and returns `true` when the run has reached the window: the
+    /// joint rule is armed for the sections this sample feeds.
+    pub fn observe(&mut self, input: f32) -> bool {
+        self.run = if input == 0.0 {
+            (self.run + 1).min(SILENCE_SATURATION)
+        } else {
+            0
+        };
+        self.run >= self.armed_after
+    }
+
+    /// The current run, in samples.
+    #[must_use]
+    pub const fn run(self) -> u32 {
+        self.run
+    }
+}
 
 /// One conditioned TPT recurrence step evaluated by the twin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,13 +241,14 @@ impl ReferenceRetainedTptF32 {
     /// v1 = ic1 + d1
     /// d2 = (a3 * v3) + (a2 * ic1)
     /// v2 = ic2 + d2
-    /// (ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), v0)
+    /// (ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), armed)
     /// y  = (m2 * v2) + ((m1 * v1) + (m0 * v0))
     /// ```
     ///
-    /// `flush_pair(n1, n2, v0)` zeroes a word below `FLUSH_EPS`, and zeroes both when `v0 == 0.0`
-    /// (either sign) and both are below `REST_EPS` (issue #1328, amendment A8); a NaN passes both
-    /// ordered compares untouched.
+    /// `flush_pair(n1, n2, armed)` zeroes a word below `FLUSH_EPS`, and zeroes both when `armed`
+    /// -- the effect input's [`ReferenceSilenceRun::observe`] for this sample, never this
+    /// section's own input -- and both are below `REST_EPS` (issue #1328, amendment A9); a NaN
+    /// passes both ordered compares untouched.
     ///
     /// `-c1` is a sign-bit flip and `d + d` is exact. Every multiply-add is **unfused**: the
     /// multiply rounds, then the add rounds (issue #163 phase 2). This twin is written in the same
@@ -193,7 +259,7 @@ impl ReferenceRetainedTptF32 {
     /// the order is reproducible, not that it is correct. Correctness comes from the `f64` oracles
     /// ([`crate::ReferenceSvf`] and friends), which use no multiply-add primitive at all and are
     /// therefore unaffected by the contract.
-    pub fn process(&mut self, input: f32) -> ReferenceTptRetainedStep {
+    pub fn process(&mut self, input: f32, armed: bool) -> ReferenceTptRetainedStep {
         let pre_state_bits = self.state_bits();
 
         let v0 = input;
@@ -204,7 +270,7 @@ impl ReferenceRetainedTptF32 {
         let v2 = self.s2 + d2;
         let n1 = self.s1 + (d1 + d1);
         let n2 = self.s2 + (d2 + d2);
-        let rest = v0 == 0.0 && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+        let rest = armed && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
         let flushed = rest | below_flush_epsilon(n1) | below_flush_epsilon(n2);
         self.s1 = if rest { 0.0 } else { flush(n1) };
         self.s2 = if rest { 0.0 } else { flush(n2) };
