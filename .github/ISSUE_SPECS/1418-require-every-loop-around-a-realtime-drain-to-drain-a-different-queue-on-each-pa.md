@@ -173,3 +173,84 @@ outer loop. The gate passes the real tree as `realtime policy: ok (89 marked reg
 - A test that greps source or prose is refused. The self-test runs the gate on synthetic regions,
   which is the gate's own input, not a grep of the repository.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+**What changed.**
+- `scripts/check-realtime-policy.sh`: D1 to D3 and D6. `classify` now keeps each loop's pattern
+  (`lpat`) and the collection its iterable names (`itrecv`). `counted` records the count's
+  receiver and where it is read. A new walk (`selwalk`, `selects`, `resolve`, `binder`,
+  `macro_named`) marks `sel[drain, loop]` for each enclosing loop that selects the queue, and the
+  per-pop judgement accepts an outer loop only when it is finite **and** marked. A name the walk
+  cannot read is refused: a `mut` binding, a struct or tuple `let` pattern (read from the raw
+  text, because braces collapse to one `{}` token), a closure, a `match` arm or another header
+  that names it (a pure `if` condition does not), a macro call other than `debug_assert!`, and a
+  `static`/`const`/`use` that can name it. A method call ends the receiver forms, so shared
+  handles behind a method are refused. The comment headline, the finite-is-not-small paragraph,
+  the `&mut rounds` note and `classify`'s comment now state the D1 rule. The region floor is now
+  90, with the floor comment updated.
+- `crates/builtins-compiler/src/lib.rs`: D5. There is one `// REALTIME_POLICY_BEGIN` /
+  `// REALTIME_POLICY_END` pair around `drain_controls` (inside `impl BuiltinBankProcessor`).
+  Nothing else changed. The region passes every other rule of the gate.
+- `scripts/test-realtime-policy.sh`: D4. `drain_lane_pairs` now drains `controls[lane]`. The
+  valid fixture adds `BankSet::drain_banks` (two levels) and a third builtins-compiler region in
+  the shape of `drain_controls` (`let Self {..} = self`,
+  `for (lane, control) in controls.iter_mut().enumerate()`,
+  `let Some(control) = control.as_mut() else`). That region also raises the fixture to 90
+  regions. Seven new expected failures: `outer_usize_max`, `outer_capacity`,
+  `outer_unit_array_parameter`, `outer_borrowed_open_range`, `outer_index_expression` (written
+  as `let control = &mut controls[lane % 2];`, because a direct `controls[lane % 2]` receiver is
+  already outside the count's receiver forms and the old gate refuses it), `outer_counted_loop`
+  and `same_queue_lane_pairs` (the old `drain_lane_pairs`). The region-floor message is now
+  "ninety".
+
+**Gates.**
+1. `bash scripts/check-realtime-policy.sh` prints `realtime policy: ok (90 marked regions in 25 files)`
+   under gawk, mawk and busybox awk (a `PATH` shim directory for each).
+2. `bash scripts/test-realtime-policy.sh` prints `realtime policy mutation tests: ok` under the same
+   three awks.
+3. Red on revert: with `HEAD`'s `check-realtime-policy.sh` and the new test script (the
+   unexpected-pass exit turned into a listing), exactly these cases pass the old gate:
+   `drain-outer-usize-max`, `drain-outer-capacity`, `drain-outer-unit-array-parameter`,
+   `drain-outer-borrowed-open-range`, `drain-outer-index-expression`,
+   `drain-outer-counted-loop` and `drain-same-queue-lane-pairs`. All seven are D4 cases, and no
+   other case passes. The old gate also accepts the new valid fixture.
+4. Mutations, each applied alone to the new gate:
+   - The index form accepts `[ <pattern ident> <anything> ]` (`[[] " ident "[^]]* []]`). The
+     self-test fails with `unexpectedly passed: drain-outer-index-expression`. The real tree
+     still passes.
+   - A receiver with no binding in the loop is accepted (`return patbound(x, kg)` becomes
+     `return 1`). The self-test fails at `drain-outer-usize-max`. A listing run shows that
+     `drain-outer-capacity`, `-unit-array-parameter`, `-borrowed-open-range`, `-counted-loop`
+     and `drain-same-queue-lane-pairs` then pass as well.
+   - The `let` / `let .. else` step is dropped (`if (r ~ /^L/) return 0`). The valid fixture
+     fails at `crates/builtins/src/lib.rs:44` (`drain_lane_fields`). Run alone on the fixture,
+     it also fails at builtins-compiler `:10` (`drain_fader_records`) and `:39` (the
+     `drain_controls`-shaped `as_mut()` case). Gate 1 on the real tree fails at
+     `crates/builtins-compiler/src/lib.rs:475` (`drain_controls`), `:1078` and `:1122`.
+5. `bash scripts/check-workspace-policy.sh`: `workspace policy: ok`.
+
+Extra probes, run by hand and not committed. The gate refuses these drains in a pattern loop:
+the receiver rebound by a struct `let`, by a closure parameter, by a `match` arm, by
+`let control = &mut *fixed`, by `for mut control` with reassignment, by `rebind!(control)`, by
+`controls[0]`, and through a base rebound inside the loop. The gate accepts
+`if let Some(control) = control.as_mut()`, `let control = &mut controls[lane]` and a pure
+`if control.ready()` around the drain.
+
+**Notes for root.**
+- A correction to the spec's Problem text: the marked fader and matrix drains
+  (`crates/builtins-compiler/src/lib.rs:1070` and `:1114`) do have an outer loop, the same
+  `for (lane, control) in controls.iter_mut().enumerate()` with `let Some(control) = control.as_mut() else`.
+  They pass D1 through that shape.
+- An open item that existed before this change and is outside this spec: the gate does not
+  check that the pop's receiver is the count's receiver. A drain such as
+  `let available = a.available_at_entry(); for _ in 0..available { b.try_pop() }` is still
+  bounded by a's count. Inside a selecting outer loop, it is bounded by the sum of the selected
+  queues' counts, but not "per queue".
+- During development, one bug sent awk into unbounded recursion: an `if let` header was found
+  again at its own offset. It is fixed (`binder` only considers headers that start before
+  `pos`). The spec's fixture would not have caught this bug, because no valid `if let` case
+  exists.
+- I did not meet any other unmarked render-thread `try_pop`. I did not survey for them.
