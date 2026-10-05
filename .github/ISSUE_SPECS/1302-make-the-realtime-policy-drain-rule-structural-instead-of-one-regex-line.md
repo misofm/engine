@@ -575,3 +575,112 @@ drain case) red.
 value, or in a closure a loop calls or hands to a repeating adapter; a loop around the drain
 outside the marked region; a macro that expands to a loop; and `available_at_entry`, `.len()`,
 `.iter()`, `.iter_mut()` taken at their word.
+
+### Batch follow-ups (implementer, 2026-10-05)
+
+Folds the MINORs and NITs of verdict `1302-attempt3.md` (PASS). Same two scripts; no Rust source;
+floors unchanged.
+
+**Folds.**
+- *J3-1 (lexer).* A raw string opens with `r`, `br` or `cr` and closes at a `"` followed by the
+  same run of `#` it opened with, of any length (the 16-`#` cap is gone). A region that ends
+  inside a literal or a block comment is refused (fail closed). Byte and C strings (`b".."`,
+  `c".."`) and byte chars were already blanked by the `"` and `'` rules. New case
+  `raw-c-string-literals`: `(r#################"x"#################, cr#"a"b"#, cr"\")` before
+  an unbounded `loop` drain, with a later `// "################`. The attempt-3 pass gives it 0
+  hits (it passes) and the new pass 1 hit, under all three awks. New case
+  `region-ends-in-comment`: a block comment that runs past the `END` marker. The self-test's
+  `replace_line` now passes its text through `ENVIRON`, because `awk -v` turned the case's `\"`
+  into `"` (no earlier case text holds a `\`).
+- *J3-2.* The gate comment now lists `&<fields>` and `&mut <fields>` among the forms taken at
+  their word, with the infinite `&mut rounds` example and the reason the form stays
+  (`for control in &mut self.controls`). Not made fail-closed: no token-level test separates
+  a collection field from an iterator field.
+- *J3-3 (over-refusals).* Accepted, each with a valid-fixture shape (`crates/builtins` region 1)
+  and a mutant that reds it:
+  - an indexed receiver in the count binding, `controls[lane].available_at_entry()` (index: a
+    literal or a field path) - `drain_two_lanes` now drains `controls[lane]`, and
+    `drain_lane_constant`;
+  - an outer `for P in 0..<bound>`, `<bound>` an integer literal or any path (`self.lanes`,
+    `LANES`, `usize::MAX`, `self.controls.len()`) - `drain_lane_fields`, `drain_lane_constant`;
+  - a count capped with `.min(<literal or path>)` - `drain_lane_fields`;
+  - a read of the count before its loop: the left operand of `==`, `!=`, `<`, `<=`, `>` or
+    `>=` (a pattern, assignment, compound assignment, shift or method call cannot precede a
+    comparison operator), outside any macro call but `debug_assert!` (a macro can expand its
+    tokens into a new binding of the count) - `drain_lane_fields` (`if available == 0`,
+    `debug_assert!(available <= ..)`);
+  - attributes before a loop header, stripped as for a `let` - `drain_lane_fields`;
+  - a `.zip(<literal or path>)` adapter (beside `.enumerate()`) on a finite outer form -
+    `drain_zipped_lanes`;
+  - a bare slice or array parameter (`&[T]`, `&mut [T]`, `[T; N]`) of the innermost enclosing
+    `fn` that nothing names between the `fn`'s `{` and the loop - `drain_lane_slice`.
+
+  Their soundness boundaries are new refusal cases: `count-in-user-macro`
+  (`rebind!(available == 0);`), `count-raised-by-max` (`.max(..)`),
+  `outer-over-iterator-parameter` (`rounds: RangeFrom<u32>`),
+  `outer-over-rebound-slice-parameter` (a `&[u32]` parameter rebound to `0_u32..`) and
+  `outer-zip-then-cycle` (`.zip(gains).cycle()`). Left refused and listed in the gate comment
+  as known over-refusals: a read other than as the left operand of a comparison (`0 == n`,
+  `apply(n)`, `n as u32`); a cap other than `.min(..)`; outer ranges with a non-zero start or
+  `..=`, other adapters (`.rev()`, `.take(n)`); a bare local or field iterated by value; and a
+  pop per pass of a collection loop with no count (D2 refuses it too).
+- *J3-4.* The comment says the outer forms are finite, not small: the gate bounds each pass, not
+  the product of passes, and names `0..usize::MAX` and `array::from_fn` into
+  `[(); usize::MAX]`. Consequence, stated plainly: attempt 2's `n03` (`for _ in 0..usize::MAX`
+  around a drain that re-reads its count) was refused by attempt 3 and passes now, on the same
+  terms as the `0..<literal>` form attempt 3 already accepted.
+- *J3-5 (both fixed).* No `static`, `const` or `use` (with the name, or a glob) anywhere in the
+  region may name the count (a block item shadows an enclosing block's `let`, even when declared
+  after the loop): case `count-shadowed-by-block-static` (`s10`). A `}` that closes a block opened
+  before the region ends the scope of the region's outermost `let`s: case
+  `count-from-closed-region-function` (a region that starts inside `prepare_matrix`, then a loop
+  in `drain_matrix` over an unmarked `const available`).
+- *J3-6.* The headline now states the bound the rule proves: every pop runs at most once per
+  record counted at block entry, per pass of the finite loops around its drain.
+
+**Mutation evidence** (scratch copies of the gate; each run through a reporting copy of the
+self-test, and each red confirmed under gawk, mawk and busybox awk; unmutated: no red).
+
+| Mutant of the gate | Red |
+|---|---|
+| K1: `cr` not a raw-string prefix | `raw-c-string-literals` only |
+| K2: raw-string closer capped at 16 `#` | `raw-c-string-literals` only |
+| K3: no refusal of a region ending in a literal or comment | `region-ends-in-comment` only |
+| K4: a comparison read in any macro call accepted | `count-in-user-macro` only |
+| K5: any method accepted as the cap | `count-raised-by-max` only |
+| K6: any bare name accepted as a finite outer loop | `outer-over-iterator-parameter`, `outer-over-rebound-slice-parameter` |
+| K7: a slice parameter accepted though named before the loop | `outer-over-rebound-slice-parameter` only |
+| K8: any tokens after `.zip(` accepted | `outer-zip-then-cycle` only |
+| K9: no `static`/`const`/`use` check | `count-shadowed-by-block-static` only |
+| K10: outermost-level `let`s stay in scope past the region's closing `}` | `count-from-closed-region-function` only |
+| V1: no index step in the binding's receiver | valid fixture (`drain_two_lanes`, `drain_lane_constant`) |
+| V2: `0..<path>` not a finite outer loop | valid fixture (`drain_lane_fields`) |
+| V3: no `.min(..)` cap | valid fixture (`drain_lane_fields`) |
+| V4: any mention between binding and loop refused (attempt 3) | valid fixture (`drain_lane_fields`) |
+| V5: no `debug_assert!` exception | valid fixture (`drain_lane_fields`) |
+| V6: loop attributes not stripped | valid fixture (`drain_lane_fields`) |
+| V7: `0..<ident>` finite only as a count (attempt 3) | valid fixture (`drain_lane_constant`) |
+| V8: no `.zip(..)` adapter | valid fixture (`drain_zipped_lanes`) |
+| V9: no slice parameter | valid fixture (`drain_lane_slice`) |
+
+Per new case, the defect it alone catches: `raw-c-string-literals` a raw C string or a raw
+string with more than 16 `#` read as code; `region-ends-in-comment` a lexer state left open at
+the region end; `count-in-user-macro` a count passed to a user macro; `count-raised-by-max` a
+cap method that raises the count; `outer-over-iterator-parameter` an iterator parameter taken as
+finite; `outer-over-rebound-slice-parameter` a rebound slice parameter; `outer-zip-then-cycle` an
+adapter after `.zip(..)`; `count-shadowed-by-block-static` a block item shadowing the count;
+`count-from-closed-region-function` a `let` read past its function.
+
+**Shapes.** The verifier's sets give: `s01`-`s03`, `s08`, `s10` refused (fixed); `s04` (J3-2),
+`s05`, `s06` (J3-4) pass as listed limits; `s07` passes (within the claim); `v01`-`v04b`, `v13`,
+`v15`, `v16`, `v19`, `v20` now pass; `v18` stays refused. The 3,767 fuzzed unbounded loops are
+all refused and the 800 fuzzed bounded drains all pass, under the three awks. Across all 828
+scratch shapes of attempts 1-3 the only other change from attempt 3 is `n03` (above), and the
+three awks agree on every shape.
+
+**Gates.** `bash scripts/check-realtime-policy.sh`: `realtime policy: ok (89 marked regions in
+25 files)` under gawk, mawk and busybox awk. `bash scripts/test-realtime-policy.sh`: `realtime
+policy mutation tests: ok` under all three. `check-workspace-policy.sh` and
+`test-workspace-policy.sh`: ok. Every fixture file the new cases and the valid fixture write is
+`rustfmt --edition 2024 --check` clean. (The fixture's `crates/capi/src/ffi.rs` test-module line
+is not clean; that line predates #1302.) `shellcheck` is not installed and was not run.

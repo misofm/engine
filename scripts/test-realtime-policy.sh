@@ -236,8 +236,10 @@ create_fixture() {
         '// REALTIME_POLICY_END' \
         >"$root/crates/rack/src/lib.rs"
     # Five regions, mirroring the real crates/builtins/src/lib.rs after #371. The first also holds
-    # two bounded drains inside finite outer loops (an `array::from_fn` closure, `for lane in 0..2`)
-    # and a comment naming the count between its binding and its loop (#1302 attempt 3).
+    # bounded drains inside finite outer loops (#1302): an `array::from_fn` closure, with a comment
+    # naming the count between its binding and its loop; `0..2` over an indexed receiver;
+    # `0..self.lanes` with a count capped by `.min(..)`, read by a comparison and a
+    # `debug_assert!` before an attributed loop; `0..LANES`; a `.zip(..)`; and a slice parameter.
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn input_process() {}' \
@@ -260,14 +262,66 @@ create_fixture() {
         '        applied' \
         '    })' \
         '}' \
-        'fn drain_two_lanes(control: &mut Consumer<Record>) {' \
+        'fn drain_two_lanes(controls: &mut [Consumer<Record>; 2]) {' \
         '    for lane in 0..2 {' \
+        '        let available = controls[lane].available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = controls[lane].try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(lane, record);' \
+        '        }' \
+        '    }' \
+        '}' \
+        'impl LaneBank {' \
+        '    fn drain_lane_fields(&mut self) {' \
+        '        for lane in 0..self.lanes {' \
+        '            let control = &mut self.controls[lane];' \
+        '            let available = control.available_at_entry().min(MAX_RECORDS_PER_BLOCK);' \
+        '            if available == 0 {' \
+        '                continue;' \
+        '            }' \
+        '            debug_assert!(available <= MAX_RECORDS_PER_BLOCK);' \
+        '            #[allow(clippy::needless_range_loop)]' \
+        '            for _ in 0..available {' \
+        '                let Ok(record) = control.try_pop() else {' \
+        '                    break;' \
+        '                };' \
+        '                apply(lane, record);' \
+        '            }' \
+        '        }' \
+        '    }' \
+        '}' \
+        'fn drain_lane_constant(controls: &mut [Consumer<Record>; LANES]) {' \
+        '    for lane in 0..LANES {' \
+        '        let available = controls[lane].available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = controls[lane].try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(lane, record);' \
+        '        }' \
+        '    }' \
+        '}' \
+        'fn drain_zipped_lanes(controls: &mut [Consumer<Record>], gains: &[f32]) {' \
+        '    for (control, gain) in controls.iter_mut().zip(gains) {' \
         '        let available = control.available_at_entry();' \
         '        for _ in 0..available {' \
         '            let Ok(record) = control.try_pop() else {' \
         '                break;' \
         '            };' \
-        '            apply(lane, record);' \
+        '            apply_scaled(*gain, record);' \
+        '        }' \
+        '    }' \
+        '}' \
+        'fn drain_lane_slice(controls: &mut [Consumer<Record>]) {' \
+        '    for control in controls {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(0, record);' \
         '        }' \
         '    }' \
         '}' \
@@ -552,8 +606,9 @@ replace_line() {
     local file="$1" anchor="$2" text
     shift 2
     text="$(printf '%s\n' "$@")"
-    awk -v anchor="$anchor" -v text="$text" '
-        $0 == anchor { print text; found = 1; next }
+    # The text goes through the environment, which awk reads verbatim (`-v` would expand a `\`).
+    REPLACE_TEXT="$text" awk -v anchor="$anchor" '
+        $0 == anchor { print ENVIRON["REPLACE_TEXT"]; found = 1; next }
         { print }
         END { if (!found) exit 3 }
     ' "$file" >"$file.tmp" || { printf 'fixture anchor missing in %s: %s\n' "$file" "$anchor" >&2; exit 1; }
@@ -1137,6 +1192,141 @@ append_open_tail() {
 mutate_open_tail_last_file() {
     append_open_tail "$root/hosts/host-web/src/lib.rs"
 }
+# Raw C strings and raw strings with more than sixteen `#` are literals too (J3-1): read as code,
+# each would blank the drain below it up to the comment's quote.
+mutate_raw_c_string_literals() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let _tags = (r#################"x"#################, cr#"a"b"#, cr"\");' \
+        '    loop {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '    // "################' \
+        '}'
+}
+# A region that ends inside a block comment or a literal was not read as code.
+mutate_region_ends_in_comment() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls() {}' \
+        '/* A note that runs past the marker:' \
+        '// REALTIME_POLICY_END' \
+        '// REALTIME_POLICY_BEGIN' \
+        '*/'
+}
+# A read of the count before its loop is a comparison outside any macro call but `debug_assert!`:
+# a macro may expand its tokens into a new binding of the count.
+mutate_count_in_user_macro() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry();' \
+        '    rebind!(available == 0);' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A count may be capped by `.min(..)`, never raised by another method.
+mutate_count_raised_by_max() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry().max(MAX_RECORDS_PER_BLOCK);' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# A bare parameter is a finite outer loop only as a slice or an array.
+mutate_outer_over_iterator_parameter() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, rounds: RangeFrom<u32>) {' \
+        '    for _ in rounds {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# ... and only while nothing rebinds it before the loop.
+mutate_outer_over_rebound_slice_parameter() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>, rounds: &[u32]) {' \
+        '    let rounds = 0_u32..;' \
+        '    for _ in rounds {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# A `.zip(..)` ends with its receiver; an adapter after it may not repeat it.
+mutate_outer_zip_then_cycle() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(controls: &[Consumer<Record>], gains: &[f32]) {' \
+        '    for (control, gain) in controls.iter().zip(gains).cycle() {' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply_scaled(*gain, record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# A block item shadows the `let` of an enclosing block, even when declared after the loop (J3-5).
+mutate_count_shadowed_by_block_static() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry();' \
+        '    {' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '        static available: usize = usize::MAX;' \
+        '    }' \
+        '}'
+}
+# A `let` made at the outermost level of a region that starts inside a function body leaves
+# scope when that function closes (J3-5); here the loop reads an unmarked constant instead.
+mutate_count_from_closed_region_function() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls() {}' \
+        '// REALTIME_POLICY_END' \
+        '#[allow(non_upper_case_globals)]' \
+        'const available: usize = usize::MAX;' \
+        'fn prepare_matrix(control: &mut Consumer<Record>) {' \
+        '    // REALTIME_POLICY_BEGIN' \
+        '    let available = control.available_at_entry();' \
+        '}' \
+        'fn drain_matrix(control: &mut Consumer<Record>) {' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
 for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
     second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
     bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
@@ -1148,7 +1338,9 @@ for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_
     struct_pattern_for if_else_condition as_cast_condition block_operand_condition \
     brace_in_string_header brace_in_char_header brace_in_raw_string_header brace_in_block_comment \
     count_rebound_by_for_pattern inflated_count while_count_raised_in_body outer_repeat \
-    open_tail_last_file; do
+    open_tail_last_file raw_c_string_literals region_ends_in_comment count_in_user_macro \
+    count_raised_by_max outer_over_iterator_parameter outer_over_rebound_slice_parameter \
+    outer_zip_then_cycle count_shadowed_by_block_static count_from_closed_region_function; do
     expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
