@@ -147,6 +147,24 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   194 → 186, as `check-cross-targets.sh` asks); stale prose in `docs/rulings/effect-floor-accounting.md`
   (appendix and "inert" definition), `crates/parametric-eq/src/lib.rs` (leg-(c) description) and
   `crates/builtins/tests/MUTATIONS.md`.
+- **A6. Root decisions for attempt 2 (2026-10-05, no-shortcuts delegation).** Attempt 2 found
+  that A2's integer spill is the EQ's two-channel output-limit flag and that A3's `ic1` spill is
+  not caused by the flush encoding but by V8 rebuilding section 0's dry mask
+  (`Channel::dry_mask`) inside the loop.
+  - **A2, authorized.** The bounded lane kernel (`StoreBound`, `crates/lane/src/kernels.rs`)
+    returns one folded `bool`; the EQ rescans with `check_block` only when it fails, so each
+    channel's verdict is still the scan's. The required edits to
+    `crates/lane/tests/g2_kernel_identity.rs` and the `interleave` adapter in
+    `crates/parametric-eq` are authorized. Condition: a fix that unrelated edits can silently undo
+    is acceptable only if a gate guards it. (1) The evidence identifies what makes the allocation
+    stable, or states honestly that it is not structurally stable. (2) The V8 spill gate holds an
+    explicit row for the dual depth-1 tail that goes red if the `[rbp-0xc8]`-class spill returns,
+    proven by a mutation that re-introduces the spill. A structurally stable encoding, if found,
+    is preferred.
+  - **A3, authorized (not the timing fallback).** Each section's dry mask is kept in `Channel`
+    state, updated alongside the identity flags (payload code in
+    `crates/parametric-eq/src/lib.rs`), so the loop never rebuilds it. Output is bit-identical,
+    and the spill gate's row for the masked mono depth-2 pair holds clean.
 
 ## DSP evidence (AGENTS.md)
 
