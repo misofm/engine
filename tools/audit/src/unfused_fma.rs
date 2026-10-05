@@ -81,6 +81,23 @@ fn flush(x: f32) -> f32 {
     if x.abs() < FLUSH_EPS { 0.0 } else { x }
 }
 
+/// The joint rest threshold of the SVF state (issue #1328), restated like [`FLUSH_EPS`].
+const REST_EPS: f32 = 1.0e-14;
+
+/// The SVF's joint flush (issue #1328), restated: each word follows [`flush`], and when both
+/// magnitudes are below [`REST_EPS`] both are zeroed. Ordered compares, so a NaN word passes.
+/// The third value is `true` when the joint rule zeroed a word the per-word law would have kept.
+#[inline(always)]
+fn flush_pair(n1: f32, n2: f32) -> (f32, f32, bool) {
+    let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+    let joint = rest && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS);
+    if rest {
+        (0.0, 0.0, joint)
+    } else {
+        (flush(n1), flush(n2), false)
+    }
+}
+
 /// dBFS of an absolute error, floored so an exact match prints as a finite sentinel.
 fn dbfs(x: f64) -> f64 {
     if x <= 0.0 {
@@ -162,6 +179,8 @@ struct SvfF32 {
     m2: f32,
     ic1: f32,
     ic2: f32,
+    /// Steps where the joint flush zeroed a word the per-word law would have kept.
+    joint: usize,
 }
 
 impl SvfF32 {
@@ -175,6 +194,7 @@ impl SvfF32 {
             m2: c.m2 as f32,
             ic1: 0.0,
             ic2: 0.0,
+            joint: 0,
         }
     }
 
@@ -190,8 +210,9 @@ impl SvfF32 {
         // UNFUSED-SEAL-EXEMPT
         let d2 = self.a3.mul_add(v3, self.a2 * self.ic1);
         let v2 = self.ic2 + d2;
-        self.ic1 = flush(self.ic1 + (d1 + d1));
-        self.ic2 = flush(self.ic2 + (d2 + d2));
+        let joint;
+        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2));
+        self.joint += usize::from(joint);
         // UNFUSED-SEAL-EXEMPT (two calls)
         self.m2.mul_add(v2, self.m1.mul_add(v1, self.m0 * v0))
     }
@@ -203,8 +224,9 @@ impl SvfF32 {
         let v1 = self.ic1 + d1;
         let d2 = mutate(M_SVF_D2, (self.a3 * v3) + (self.a2 * self.ic1));
         let v2 = self.ic2 + d2;
-        self.ic1 = flush(self.ic1 + (d1 + d1));
-        self.ic2 = flush(self.ic2 + (d2 + d2));
+        let joint;
+        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2));
+        self.joint += usize::from(joint);
         mutate(
             M_SVF_MIX,
             (self.m2 * v2) + ((self.m1 * v1) + (self.m0 * v0)),
@@ -1340,6 +1362,9 @@ fn model_conformance(frames: usize) {
     let noise = deterministic_bipolar_noise(1, frames, 0x0163_0006)
         .expect("deterministic noise for the conformance pass");
     let input: Vec<f32> = noise.samples().iter().map(|&x| x as f32).collect();
+    // The SVF pass appends silence, so its state decays through the joint flush's band (issue
+    // #1328) and the models' `flush_pair` is compared with the kernel's where it decides the bits.
+    let svf_input: Vec<f32> = input.iter().copied().chain([0.0; 4_096]).collect();
 
     /// Names the arm a kernel matched, or fails the audit.
     fn verdict(label: &str, fused_mismatches: usize, unfused_mismatches: usize) -> &'static str {
@@ -1374,13 +1399,13 @@ fn model_conformance(frames: usize) {
         m1: design.m1 as f32,
         m2: design.m2 as f32,
     };
-    let mut buffer = input.clone();
+    let mut buffer = svf_input.clone();
     let mut state = SvfState::<f32>::default();
-    svf_block(&mut buffer, frames, &coefficients, &mut state);
+    svf_block(&mut buffer, svf_input.len(), &coefficients, &mut state);
     let mut fused_model = SvfF32::new(&design);
     let mut unfused_model = SvfF32::new(&design);
     let (mut fused_bad, mut unfused_bad) = (0usize, 0usize);
-    for (kernel, &x) in buffer.iter().zip(input.iter()) {
+    for (kernel, &x) in buffer.iter().zip(svf_input.iter()) {
         if kernel.to_bits() != fused_model.step_fused(x).to_bits() {
             fused_bad += 1;
         }
@@ -1388,6 +1413,10 @@ fn model_conformance(frames: usize) {
             unfused_bad += 1;
         }
     }
+    assert!(
+        unfused_model.joint > 0,
+        "F1/F2: the silent tail must reach the joint flush's band, or `flush_pair` is untested"
+    );
     arms.push(verdict("F1/F2 svf_block", fused_bad, unfused_bad));
 
     // F3 -- one_pole_block.

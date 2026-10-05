@@ -10,7 +10,7 @@ Command form: `cargo test -p builtins --test <file> <name> -- --exact`.
 | # | mutation | file | gate it must break | observed |
 | --- | --- | --- | --- | --- |
 | M1 | `let denominator = 1.0 + t1;` → `1.0 - t1` | `builtins/src/lib.rs` (`SvfSection::design`) | T1 `prepared_sections_match_reference_coefficients` | FAILED, `rate=44100, cutoff=10, high_pass=true` |
-| M2 | drop the D7 flush: `self.s1 = flush(n1)` → `self.s1 = n1` | `dsp-reference/src/tpt.rs` | T2 `scalar_stage_is_bit_identical_to_reference_recurrence` | FAILED, `rate=44100, signal=1, index=3670` |
+| M2 | drop the D7 flush of `s1`, joint arm included: `self.s1 = if rest { 0.0 } else { flush(n1) }` → `self.s1 = n1` (#1328; before it, `self.s1 = flush(n1)` → `n1`, red at `index=3670`). Dropping only the per-word arm (`else { n1 }`) stays green: this signal never leaves `n1` below `FLUSH_EPS` beside an `n2` at or above `REST_EPS` | `dsp-reference/src/tpt.rs` | T2 `scalar_stage_is_bit_identical_to_reference_recurrence` | FAILED, `rate=44100, signal=1, index=2645` (re-run for #1328) |
 | M3a | every bank lane takes lane 0's coefficients (`zip(sections)` → `sections[0]`) | `builtins/src/lib.rs` (`svf_coef`) | T3 `bank_is_bit_identical_to_scalar_stage_at_every_width` | FAILED, `width=4, members=3, lane=1, frame=0` |
 | M3c | report counters sum every lane, not only the members (`take(self.members)` → `take(L::WIDTH)`) | `builtins/src/lib.rs` (`InputStage::members_sum`) | T3, padding-lane arm | FAILED, `width=4, members=1` |
 | M4 | high-pass mix `m1 = -k` → `-k * 1.001` | `builtins/src/lib.rs` (`SvfSection::design`) | T1, T2 **and** the determinism corpus | all three FAILED |

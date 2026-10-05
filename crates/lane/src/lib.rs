@@ -282,7 +282,10 @@ pub trait Lane: Copy + Send + Sync + 'static {
     const SVF_CASCADE_DEPTH: usize;
 
     /// Result of a comparison: per lane either all zero bits or all one bits.
-    type Mask: Copy;
+    ///
+    /// `Send`, like the lane itself, so a derived mask can be held in an effect's state (the EQ's
+    /// per-section dry masks, issue #1328).
+    type Mask: Copy + Send;
 
     /// Broadcasts one value to every lane.
     fn splat(x: f32) -> Self;

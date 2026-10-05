@@ -1259,6 +1259,20 @@ struct Channel<L: Lane, const W: usize> {
     /// words and is asserted in debug builds on every stationary block, so a coefficient-change
     /// site added later without a refresh is a test failure rather than a silent wrong render.
     identity: [bool; EQ_SECTION_COUNT],
+    /// Per section: [`dry_mask`](Self::dry_mask) as of the last
+    /// [`refresh_identity`](Self::refresh_identity), held in channel state so that the stationary
+    /// cascades read it from memory before their frame loop (issue #1328, amendment A6).
+    ///
+    /// Built in place, from four scalar decisions and a compare, the mask is a pure value, and
+    /// V8's scheduler sank that construction into the masked mono depth-two loop of the shipped
+    /// module, where it rebuilt it every frame and the extra live values pushed one integrator
+    /// through a stack slot across iterations. A load from channel state cannot be sunk. The mask
+    /// is a function of the coefficient bits and `remaining`, and every site that changes either
+    /// in a way the mask can see refreshes `identity`, which refreshes this too; a ramp in flight
+    /// keeps its lanes off the mask whatever its words do, and the stationary cascades that read
+    /// this run only with no ramp in flight. [`identity_flags_agree`](Self::identity_flags_agree)
+    /// re-derives it as well.
+    dry: [L::Mask; EQ_SECTION_COUNT],
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
@@ -1307,6 +1321,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             targets,
             // Every `(section, track)` pair is settled below, and `settle` refreshes the flag.
             identity: [false; EQ_SECTION_COUNT],
+            dry: [empty_mask::<L>(); EQ_SECTION_COUNT],
         };
         for (track, sections) in words.iter().enumerate() {
             for (section, words) in sections.iter().enumerate() {
@@ -1332,12 +1347,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         self.refresh_identity(section);
     }
 
-    /// Re-derives `identity[section]` from the section's coefficient words.
+    /// Re-derives `identity[section]` and `dry[section]` from the section's coefficient words and
+    /// `remaining`.
     ///
     /// Control plane only: it runs where a coefficient changes, never per block and never per
     /// frame. Six lane compares, and it reads the words rather than tracking which lane was
     /// written, so it cannot drift out of step with a partially updated section.
     fn refresh_identity(&mut self, section: usize) {
+        self.dry[section] = self.dry_mask(section);
         let identity = {
             let coef = &self.sections[section].coef;
             (0..6)
@@ -1346,7 +1363,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         self.identity[section] = identity;
     }
 
-    /// `true` when every `identity` flag equals what the coefficient words say right now.
+    /// `true` when every `identity` flag and every `dry` mask equals what the coefficient words and
+    /// `remaining` say right now.
     ///
     /// Asserted in debug builds on every stationary block. It is the standing check that the list
     /// of coefficient-change sites is complete.
@@ -1355,7 +1373,11 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let coef = &self.sections[section].coef;
             let observed = (0..6)
                 .all(|index| lane_bits_all::<L>(coef_word(coef, index), IDENTITY_WORD_BITS[index]));
-            observed == self.identity[section]
+            let dry = self.dry_mask(section);
+            let cached = self.dry[section];
+            let same_mask = !L::mask_any(L::mask_and(dry, L::mask_not(cached)))
+                && !L::mask_any(L::mask_and(cached, L::mask_not(dry)));
+            observed == self.identity[section] && same_mask
         })
     }
 
@@ -1933,8 +1955,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         } else {
             #[cfg(any(test, feature = "test-support"))]
             count_masked_pair_pass();
-            let dry_masks: [[L::Mask; DEPTH]; 1] =
-                [core::array::from_fn(|k| channel.dry_mask(at[k]))];
+            let dry_masks: [[L::Mask; DEPTH]; 1] = [core::array::from_fn(|k| channel.dry[at[k]])];
             svf_cascade_skewed_with_dry_masks::<L, 1, DEPTH>(
                 [&mut *io],
                 frames,
@@ -1953,7 +1974,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
         let coefficients: [[SvfCoef<L>; 1]; 1] = [[channel.sections[at].coef]];
         let mut state: [[SvfState<L>; 1]; 1] = [[channel.sections[at].state]];
         // #976's rule, unchanged by #977: see `interleave`.
-        let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry_mask(at)]];
+        let dry_masks: [[L::Mask; 1]; 1] = [[channel.dry[at]]];
         let [verdict] = if L::mask_any(dry_masks[0][0]) {
             svf_cascade_interleaved_with_dry_masks_bounded::<L, 1, 1>(
                 [&mut *io],
@@ -1991,8 +2012,9 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///
 /// * **The gate is [`cascade_sections`]', leg for leg**: (a) neither input plane carries `-0.0`, a
 ///   non-finite word or a magnitude above the ceiling; (b) every dead section's state is inert on
-///   both channels; (c) every other section's state is a word `flush` can leave -- `+0.0`, or
-///   finite with a magnitude of at least `FLUSH_EPS` ([`section_state_is_flush_shaped`]). Any
+///   both channels; (c) every other section's state is a pair `flush_pair` can leave -- each word
+///   `+0.0` or finite with a magnitude of at least `FLUSH_EPS`, and the two not both below
+///   `REST_EPS` with one non-zero (issue #1328; [`section_state_is_flush_shaped`]). Any
 ///   refusal returns all six, and the block renders as it did before this function existed.
 /// * **Freshness.** `identity[s]` is only read for a section with no lane in flight on either
 ///   channel, and that flag is fresh: every ramp ends in a snap followed by `refresh_identity`, and
@@ -2482,7 +2504,12 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// reduces each stored vector to a per-channel `bool` at once (attempt 2): folded into a vector mask
 /// instead, the two accumulators went through stack slots across the loop's back edge in V8, which
 /// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
-/// tail's integrators stay in vector registers (no carried stack slot).
+/// tail's integrators stay in vector registers (no carried stack slot). Those two flags went through
+/// a stack slot once again after issue #1328's joint SVF flush, while V8 also rebuilt the dry masks
+/// inside the masked loops of the same function; with the masks read from channel state
+/// (`Channel::dry`) the tail is clean again. Folding both channels into one flag did not help
+/// (the flag moved to another slot), so the per-channel fold stands; the V8 spill gate's dual-tail
+/// row is what holds the allocation (issue #1328, A2 and A6).
 ///
 /// [`svf_cascade_interleaved`]: lane::kernels::svf_cascade_interleaved
 #[inline(always)]
@@ -2525,8 +2552,8 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
             #[cfg(any(test, feature = "test-support"))]
             count_masked_pair_pass();
             let dry_masks: [[L::Mask; DEPTH]; 2] = [
-                core::array::from_fn(|k| channels.0.dry_mask(at[k])),
-                core::array::from_fn(|k| channels.1.dry_mask(at[k])),
+                core::array::from_fn(|k| channels.0.dry[at[k]]),
+                core::array::from_fn(|k| channels.1.dry[at[k]]),
             ];
             svf_cascade_skewed_with_dry_masks::<L, 2, DEPTH>(
                 [&mut *left, &mut *right],
@@ -2557,7 +2584,7 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
         // #976's rule, unchanged by #977: the tail selects dry lanes only when a lane of either
         // channel is dry there. See "The tail keeps #976's rule" above for why the admitted plan's
         // tail is not made select-free as well.
-        let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry_mask(at)], [channels.1.dry_mask(at)]];
+        let dry_masks: [[L::Mask; 1]; 2] = [[channels.0.dry[at]], [channels.1.dry[at]]];
         let verdict = if L::mask_any(dry_masks[0][0]) || L::mask_any(dry_masks[1][0]) {
             svf_cascade_interleaved_with_dry_masks_bounded::<L, 2, 1>(
                 [&mut *left, &mut *right],
@@ -3037,6 +3064,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// | `sections[s].step`, `sections[s].target` | the rest of the ramp: where the words are going and by how much per sample. |
     /// | `remaining[s][lane]` | the per-lane ramp countdown, which is what `no_ramp_in_flight` and the block-splitting rule read. |
     /// | `identity[s]` | the derived per-section identity flag the elision gate reads. It is a function of `coef`, so it must travel with it. |
+    /// | `dry[s]` | the derived per-section dry mask the stationary cascades read (issue #1328). It is a function of `coef` and `remaining`, so it travels with them. |
     ///
     /// `targets` is deliberately **not** copied: it is the control-plane band table, no rendered
     /// block writes it, and the counterfactual dual run never moved it either.
@@ -3049,11 +3077,17 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     /// and this crate's own gates prove all three schedules render the same bits. So a stale copy
     /// of either leaves the two channels taking different schedules to the same words. They are
     /// copied because "the two channels are in the same state" is the invariant, not "the two
-    /// channels happen to agree on their output".
+    /// channels happen to agree on their output". `dry` is different: the masked cascades select
+    /// with it, so a stale copy could move rendered bits on a dedicated cut at the identity. It is
+    /// not individually gated either (dropping its copy turns no test red, issue #1328): a stale
+    /// copy needs a ramp to end on the left channel while the bank is collapsed, and then
+    /// `identity_flags_agree`, which re-derives `dry` from the copied `coef` and `remaining`, fails
+    /// on the next stationary block of a debug build.
     fn desymmetrize(&mut self) {
         self.right.sections = self.left.sections;
         self.right.remaining = self.left.remaining;
         self.right.identity = self.left.identity;
+        self.right.dry = self.left.dry;
     }
 
     fn reset_state(&mut self, kind: ResetKind) {
@@ -3445,10 +3479,11 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// * `sections[s].state` (`ic1`, `ic2`) -- running filter state, not a designed word. It is what
 ///   the *state* half of the collapse argument is about, and it converges by induction rather
 ///   than by comparison.
-/// * `identity[s]` -- a per-**channel** flag over *every* lane of the bank, refreshed from the
-///   same `coef` words this already compares. Reading it would make one lane's witness depend on
-///   its neighbours' parameters, which is precisely the cross-lane coupling the witness must not
-///   have; and it carries no information the coefficient comparison does not.
+/// * `identity[s]` and `dry[s]` -- per-**channel** values over *every* lane of the bank, refreshed
+///   from the same `coef` words this already compares (and `remaining`). Reading them would make
+///   one lane's witness depend on its neighbours' parameters, which is precisely the cross-lane
+///   coupling the witness must not have; and they carry no information the coefficient comparison
+///   does not.
 /// * `targets[l][s]` (`BandTarget`) -- the control-plane band description. The kernel never reads
 ///   it, and it is the design *input*, not the designed word: two different band descriptions
 ///   that design to the same six words are symmetric, and the words are what decides that.

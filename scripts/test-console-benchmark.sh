@@ -498,12 +498,12 @@ session_floor_mutation '.floor_control_row = "sixty_four_track_builtins_only"' '
 session_floor_mutation '.floor_control_row = "none"' 'a row that claims an isolate and names no control'
 session_floor_mutation '.isolated_cycles_per_lane_sample = -1' 'an isolate that costs less than nothing'
 session_floor_mutation '.isolated_percent_of_floor = -1' 'an isolate percentage below zero'
-# The rack-free split. A `dispatch_only` record that restates the 69-op builtins inventory --
+# The rack-free split. A `dispatch_only` record that restates the 79-op builtins inventory --
 # self-consistently, floor and percentage together, so the only thing wrong with it is the
 # inventory itself -- is a row that claims to execute sections the render path elides.
 expect_reject "$(printf '%s' "$session_floor_dispatch" | jq -c \
-    '.floor_cycles_per_lane_sample = (69 / (8 * 3.7))
-     | .percent_of_floor = (100 * (69 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = (79 / (8 * 3.7))
+     | .percent_of_floor = (100 * (79 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'an identity row costed as if it executed its filters'
 expect_reject "$(printf '%s' "$session_floor_dispatch" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"')" \
@@ -514,7 +514,7 @@ expect_reject "$(printf '%s' "$session_floor" | jq -c \
     'a row citing the identity inventory it does not qualify for'
 # The gain-and-pan row is costed at the identity inventory, the floor of the whole table (#956).
 # Costed at the retired four-lane-op routing inventory, or citing it, is the same defect as the
-# identity row costed at 69 -- self-consistent, floor and percentage together, and wrong about which
+# identity row costed at 79 -- self-consistent, floor and percentage together, and wrong about which
 # arithmetic it executes.
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
     '.floor_cycles_per_lane_sample = (4 / (8 * 3.7))
@@ -526,7 +526,7 @@ expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"')" \
     'a gain-and-pan row citing the executed-filter inventory'
-# It claims no isolate. `builtins_only` against it would subtract cleanly (69 - 22 = 47) but is not
+# It claims no isolate. `builtins_only` against it would subtract cleanly (79 - 22 = 57) but is not
 # declared, so a record claiming it is claiming a control the table does not name.
 expect_reject "$(printf '%s' "$session_floor_gain_pan" | jq -c \
     '.floor_control_row = "sixty_four_track_builtins_only" | .isolated_cycles_per_lane_sample = 0.5 | .isolated_percent_of_floor = 20.0')" \
@@ -671,8 +671,8 @@ expect_accept "$(printf '%s' "$session_metered" | jq -c '.bank_scatter_redirects
 # Its floor group states none: no ruling has inventoried a metered strip, and the standing strip's
 # inventory would publish the meters' cost as a gap in the strip's.
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
-    '.floor_cycles_per_lane_sample = (307 / (8 * 3.7))
-     | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = (322 / (8 * 3.7))
+     | .percent_of_floor = (100 * (322 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'a metered row costed at the unmetered strip inventory'
 expect_reject "$(printf '%s' "$session_floor_metered" | jq -c \
     '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter"')" \
@@ -773,8 +773,8 @@ for count in 10 13 16; do
     strip_mutation '.source_feed = "played_planes"' 'a strip-at-N row claiming the driver-fed feed'
     strip_mutation '. + {bypass_pattern: "none", bypassed_tracks: 0}' 'a strip-at-N row carrying the bypass group'
     expect_reject "$(printf '%s' "$strip_n" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"' with_floor(5480000000; $s)
-        | .floor_cycles_per_lane_sample = (307 / (8 * 3.7))
-        | .percent_of_floor = (100 * (307 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+        | .floor_cycles_per_lane_sample = (322 / (8 * 3.7))
+        | .percent_of_floor = (100 * (322 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
         "$kind costed at the full-bank strip inventory"
     expect_reject "$(printf '%s' "$strip_n" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"' with_floor(5480000000; $s)
         | .floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq+compressor+limiter, ragged"')" \
@@ -802,8 +802,8 @@ app_mutation '.synthetic_fixture = true' 'the committed app fixture reported as 
 app_mutation '.input_signal = "odd_tracks_silent"' 'an app-shape row claiming sparse input'
 app_mutation '.tracks = 16' 'an app-shape row that is not the sixty-four-track console'
 expect_reject "$(printf '%s' "$session_floor_app" | jq -c \
-    '.floor_cycles_per_lane_sample = ((69 + 27 + 81.5) / (8 * 3.7))
-     | .percent_of_floor = (100 * ((69 + 27 + 81.5) / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    '.floor_cycles_per_lane_sample = ((79 + 32 + 81.5) / (8 * 3.7))
+     | .percent_of_floor = (100 * ((79 + 32 + 81.5) / (8 * 3.7)) / .cycles_per_lane_sample)')" \
     'an app-shape row costed as though no lane were bypassed'
 # The group is the app shape's alone, and the app layout is too.
 session_mutation '. + {bypass_pattern: "index_mod_3_is_2", bypassed_tracks: 21}' \

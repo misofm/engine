@@ -63,28 +63,30 @@ const OPS_PER_CYCLE: f64 = 3.7;
 /// `docs/rulings/effect-floor-accounting.md`, "Compressor inventory".
 const COMPRESSOR_LANE_OPS: f64 = 81.5;
 /// Required arithmetic per lane-sample, parametric-EQ stationary cascade, at the standing fixture's
-/// one live section: a select-free depth-one pass (`svf_step` 19 + output mix 5) and the 4.4
+/// one live section: a select-free depth-one pass (`svf_step` 24 + output mix 5) and the 4.4
 /// boundary scan (3). Issue #976 dropped the identity padding section the depth-two pass used to
-/// run beside it.
+/// run beside it; issue #1328's joint SVF flush (`flush_pair`, 11 lane-ops for the two state words
+/// against 6 for two `flush`) raised `svf_step` from 19 to 24 and this from 27 to 32.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "EQ inventory".
-const EQ_LANE_OPS: f64 = 27.0;
+const EQ_LANE_OPS: f64 = 32.0;
 /// Required arithmetic per lane-sample, true-peak limiter, post-round-1 uniform-cohort shape.
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
 const LIMITER_LANE_OPS: f64 = 129.5;
 /// Required arithmetic per lane-sample, the builtins chain and the fixture's routing, with both
-/// SVF sections per channel carrying a real design.
+/// SVF sections per channel carrying a real design. Each section is 29 since issue #1328's joint
+/// SVF flush (24 before it), so the chain is 79 (69 before it).
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
-const BUILTINS_LANE_OPS: f64 = 69.0;
+const BUILTINS_LANE_OPS: f64 = 79.0;
 
 /// Required arithmetic per lane-sample when every builtin section is the prepared identity.
 ///
 /// The two rack-free rows no longer share a floor. A section whose prepared design is the exact
 /// identity is not a recurrence the spec requires: it is the map `v |-> v + 0.0`, and a run of them
 /// is one `add(+0.0)` (`input_chain_block_elided`, and the appendix to the ruling). So the class-A
-/// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
+/// arithmetic of the `dispatch_only` row is the 79 with both 29-op sections replaced by that single
 /// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
 ///
 /// The fader and the pan matrix stay at their full cost: a 0 dB fader is still a multiply and a
@@ -635,9 +637,9 @@ input as $rust |
         // compressor inventory. The limiter's shared link has the same accounting shape.
         assert_eq!(COMPRESSOR_LANE_OPS, 81.5);
         assert_eq!(LIMITER_LANE_OPS, 129.5);
-        assert_eq!(EQ_LANE_OPS, 27.0);
+        assert_eq!(EQ_LANE_OPS, 32.0);
         let console = floor_row(Workload::SixtyFourTrackConsole).expect("derived console row");
-        let expected = (69.0 + 27.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
+        let expected = (79.0 + 32.0 + 81.5 + 129.5) / (BANK_WIDTH * OPS_PER_CYCLE);
         assert!((console.cycles_per_lane_sample() - expected).abs() < 1.0e-12);
         let compressor = floor_row(Workload::SixtyFourTrackCompressorOnly).expect("compressor");
         let builtins = floor_row(Workload::SixtyFourTrackBuiltinsOnly).expect("builtins");

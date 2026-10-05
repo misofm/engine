@@ -219,7 +219,8 @@ for the shipped browser build (see `interleave`), not an arithmetic one. Since #
 gate holds it, on the shipped artifact in CI (`artifact-gates`, #1009) and in
 `scripts/run-wasm-gates.sh` locally: the pinned Node's TurboFan must carry no value of the
 select-free dual tail, or of the mono pair and tail, from one iteration to the next through a stack
-slot. The dual pair already does, and is only reported. That is a register-allocation check, not
+slot; since #1328 it also holds the masked mono pair. The dual pair already does, and is only
+reported. That is a register-allocation check, not
 a timing (`tools/wasm-gates/MUTATIONS.md` says what it proves). Only a refused or all-live plan
 runs masked pairs. Per lane-sample:
 
@@ -251,7 +252,9 @@ A **refused** block (a `-0.0`, a non-finite word or a word above the bound in ei
 non-inert state in a dead section, a `-0.0` or non-finite state in a live one), and every block
 with all six sections live, runs all six in three masked depth-2 passes: **183**. Since #979 a
 dead section's state is inert when every word is `+0.0` or has a magnitude between the flush floor
-and the elision bound; `-0.0` and smaller or larger magnitudes refuse.
+and the elision bound, and (since #1328) the pair is not both below `REST_EPS` with a word
+non-zero, which the joint flush would zero; `-0.0`, smaller or larger magnitudes and such a pair
+refuse.
 
 This is a source operation count for the stationary cascade, not a timing measurement. Mask
 construction from coefficient words and remaining counters is a bounded block/segment control cost
@@ -273,9 +276,9 @@ inventory must follow that implementation.
 bank lane/channel; it is not a user-enabled-control count. Mono counts the selected channel. At
 the standing fixture's one active general band, `kept = 1`, the tail is select-free, and the floor
 is 32. A full six-section pass is 183. Issue #1328's joint flush added five lane-ops per section
-(27 and 153 before it); `tools/bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq`
-still pin the pre-#1328 27 for the standing workload until their follow-up re-pins them. These
-values move with the source inventory and do not claim a new timing result.
+(27 and 153 before it), and `tools/bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq`
+compose 32 for the standing workload. These values move with the source inventory and do not
+claim a new timing result.
 
 ### Prepared state accounting
 
@@ -618,8 +621,7 @@ independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 `console_session` record of a run whose runner could measure the core clock.
 
 The table states the inventories after issue #1328's joint SVF flush (builtins 79, EQ 32, strip
-322). Until their follow-up re-pins them, `floor.rs` and the `jq` restatement still compose the
-pre-#1328 69, 27 and 307 (2.331, 0.912 and 10.372 cycles).
+322; 69, 27 and 307 before it), as `floor.rs` and the `jq` restatement compose them.
 
 | kernel | lane-ops | derived floor, cycles/lane-sample |
 |---|---:|---:|
@@ -1041,14 +1043,14 @@ Take such a section whose two integrators are also `+0.0`, and run one frame of
 3. `v1 = ic1 + d1 = (+0.0) + d1`
 4. `d2 = fma(a3, v3, a2 * ic1) = fma(+0.0, v3, +0.0 * (+0.0)) = (±0.0) + (+0.0) = +0.0`
 5. `v2 = ic2 + d2 = (+0.0) + (+0.0) = +0.0`
-6. `ic1' = flush(ic1 + (d1 + d1)) = flush((+0.0) + (d1 + d1))`
-7. `ic2' = flush(ic2 + (+0.0 + +0.0)) = +0.0`
+6. `(ic1', ic2') = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2)) = flush_pair((+0.0) + (d1 + d1), +0.0)`
+   (the joint flush of issue #1328; with both words `+0.0` it is the per-word `flush` of each)
 
 **Correction to the first draft of this derivation, which claimed every intermediate is `+0.0`.**
 Step 2 is `-0.0` whenever `v3` is negative or `-0.0`, because `a2 * v3` is then `-0.0` and
 `(-0.0) + (-0.0) = -0.0`. The conclusion survives it, and it survives it for a reason that must be
 written down rather than assumed: `+0` **absorbs** `-0` under round-to-nearest. So step 3 is
-`(+0.0) + (-0.0) = +0.0` and step 6 is `flush((+0.0) + (-0.0)) = +0.0`. Both integrators are `+0.0`
+`(+0.0) + (-0.0) = +0.0` and step 6 is `flush_pair(+0.0, +0.0) = (+0.0, +0.0)`. Both integrators are `+0.0`
 after the frame, so the section is a fixed point of its own state and the argument runs for every
 frame of every block, forever.
 
