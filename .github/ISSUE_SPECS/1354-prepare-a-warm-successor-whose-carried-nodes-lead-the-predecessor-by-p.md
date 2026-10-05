@@ -49,7 +49,7 @@ a block and no return path: render adopts the warm successor in move mode (#1355
   - `WarmDecision { Ordinary, Warm(WarmLead), Unavailable(WarmUnavailable) }`.
   - `WarmConfig { p_max: u64, prime_bytes_max: u64 }`. It has no default: every caller passes
     both bounds. *Check the warm-successor deadline in miso_engine_v1_service and report its
-    outcome* (#1360) builds it from `P_MAX_SAMPLES(fs, q)` (written by #1406 D1) and
+    outcome* (#1360) builds it from `p_max_samples(fs, q)` (written by #1406 D1) and
     `PRIME_BYTES_MAX` (written by #1360), both derived by *Record the swap block's cost on the
     64-track console* (#1286) D3. No formula is restated here. Gates set it directly.
   - `pub const fn stall_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32`: the ring
@@ -71,8 +71,8 @@ a block and no return path: render adopts the warm successor in move mode (#1355
      fills a track's `input`-tap line, and a `post_fader` or `post_pan` tap is exact `+0.0` from
      the duck's end to the fire. A restarted submix's `input` tap keeps the consumer in C if every
      line into that submix's `Input` stage comes from a strip in R or an added strip (those lines
-     are exact `+0.0` from the duck's end to the fire, and #1397 D1 step 3's `C` counts the
-     sidechain line plus the longest line into the stage), and otherwise only if the stage arrives
+     are exact `+0.0` from the duck's end to the fire, and #1324 D4's `C` counts the sidechain
+     line plus the longest line into the stage), and otherwise only if the stage arrives
      at exactly `a(n) + P`; step 6 checks it (with `P = 0` in step 4).
   3. **`Δ` over C.** Compile with #1285's floors and no lead. `Δ` is the largest
      `arrival(n) - a(n)` over C. Nodes in R or N do not count, so a growth that the restarts
@@ -98,25 +98,43 @@ a block and no return path: render adopts the warm successor in move mode (#1355
        `crates/graph-compiler/src/pdc.rs:61-65`). From each R or N node the walk follows the inputs
        that hold its arrival (an input whose arrival plus latency equals it). Each C node the walk
        reaches that way holds the late path at its lead; a route node counts as its source strip.
-       Restart whole the strip of every such C node, and, through every one that is a submix,
-       that submix's own carried feeders (recursively). Restart `n`'s own strip (track or submix)
-       whole only when the walk reaches no C node. Every node of a restarted strip joins R and
-       the strip joins `restart_whole` (restarted and ducked as #1324 D2 states for such a strip).
-     - **The output.** The output is a C node of no strip. If it is `n` and the walk reaches no C
-       node, return `Unavailable(Misaligned)`.
-     - **Misaligned.** After a pass, return `Unavailable(Misaligned)` if every strip that reaches
-       the output is in `restart_whole`; that is the transition's audio. Otherwise go to step 2.
+       Restart whole the strip of every such C node, and no other strip: a restarted submix's
+       other feeders stay carried, and a feeder that really holds the stage late is found by
+       the next pass's walk. Every node of a restarted strip joins R and the strip joins
+       `restart_whole` (restarted and ducked as #1324 D2 states for such a strip).
+     - **Invariant: the walk always reaches a C node.** If it reaches none (whether `n` belongs
+       to a strip or is the output, a C node of no strip), that is an invariant error: a debug
+       assertion fires and `warm_lead` returns a `PrepareDiagnostics` invariant error. It never
+       restarts `n`'s own strip and never guesses. Proof sketch: steps 3 and 5 compile one graph
+       with the same R floors and no N floors, and arrivals are monotone in the floors. A path
+       into a late C node `n` whose tight inputs reach no C node has the same value in both
+       compiles, so it is at most `a(n) + Δ <= a(n) + P`, which contradicts `n` being late. This
+       needs every carried node to keep its latency, which holds because a latency change is a
+       prepared difference, so that node's strip is in R. No gate can reach this branch.
+     - **Misaligned.** After a pass, return `Unavailable(Misaligned)` if every predecessor strip
+       that reaches the output is in `restart_whole`; that is the transition's audio. (An added
+       strip never joins `restart_whole`, so it is not counted.) Otherwise go to step 2.
 
      So a latent insert on a submix ("a limiter on a bus") restarts the submix's carried
-     feeders; a kick that keys a bass compressor, when the edit adds a limiter to the bass,
-     restarts the kick (its key holds the bass's chain late); and every path neither restarts,
-     the output included, stays exact. Each pass adds a strip to `restart_whole` that was not in
-     it (a C node's strip is not in it), so the loop ends within the strip count. The walk and
-     the first-node rule make the result independent of the order in which late nodes are found.
-     In the round-6 review's structural model (design evidence, not a gate; about 4,500 random
-     sessions) the result was order-independent, and the own-strip and output branches never
-     fired: a late path is always held by a carried node, because step 5's compile differs from
-     step 3's only in C's floors.
+     feeders (the walk reaches them through the submix's restarted nodes); a parallel bus with a
+     latent insert, fed from a bus's `post_pan` tap, restarts that bus and only those of its
+     feeders that hold it late (gate 9); a kick that keys a bass compressor, when the edit adds a
+     limiter to the bass, restarts the kick (its key holds the bass's chain late); and every path
+     neither restarts, the output included, stays exact. Each pass adds a strip to R (the
+     submix `input`-tap rule, step 4 or 6) or to `restart_whole` (the walk), no strip leaves
+     either, and a strip can enter each once, so the loop ends within twice the strip count. The
+     walk and the first-node rule make the result independent of the order in which late nodes
+     are found. In the round-7 review's structural model (design evidence, not a gate; 4,650
+     random sessions, with removals and added latent buses) this walk terminated, met C1, the
+     sidechain closure and the submix rule, was order-independent across random schedules, and
+     never reached the invariant branch.
+
+     **Known behaviour: the walk is exact but not minimal.** In that model about 5% of random
+     sessions duck 1-4 more strips than the smallest restart set that meets C1 (a brute-force
+     search). One cause: a partly restarted strip's dead-end `post_pan` stage counts in `Δ`. The
+     result is still exact, the model found no `Misaligned` result where a warm answer existed,
+     and the extra strips duck and fade in as #1324 states. The walk does not search for the
+     minimum set; this is recorded design behaviour, not a gap in C1.
   7. **C3, lead.** Return `Unavailable(LeadBound)` if `ΣP + P > p_max`, or if any carried ring's
      capacity above `stall_ring_frames(fs, q)` for the session's rate and quantum is below
      `P + q` frames. A ring without that headroom (the round-4 "hold cap 0" case) cannot hold the
@@ -145,7 +163,7 @@ a block and no return path: render adopts the warm successor in move mode (#1355
 ## Deliverables
 
 1. D1-D4 in `crates/host-core/src/prepare.rs`, re-exported from `crates/host-core/src/lib.rs`.
-2. `crates/host-core/tests/warm_successor.rs` (new) with gates 1-8.
+2. `crates/host-core/tests/warm_successor.rs` (new) with gates 1-9.
 
 ## Authorized paths
 
@@ -234,7 +252,14 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
      a true-peak limiter to B. `warm_lead` returns `Warm(WarmLead { lead_samples: 512,
      restart_whole: [B2, T4, T5, T6] })`; preparing it gives `restarted_strips() == [B, B2, T4,
      T5, T6]`, and T3's nodes, B's nodes after its fader and the output at exactly `a(n) + 512`.
-9. Commands:
+9. **A parallel bus on a bus restarts only the feeder that holds it late.** Tracks T0 (no
+   insert) and T1 (a true-peak limiter insert) route from their `post_fader` taps to submix Bu,
+   and Bu routes to the output. The edit adds submix NB, holding a true-peak limiter insert, fed
+   by a route from Bu's `post_pan` tap, and routes NB to the output. `warm_lead` returns
+   `Warm(WarmLead { lead_samples: 512, restart_whole: [Bu, T1] })`; preparing it gives
+   `restarted_strips() == [Bu, T1]`, and T0's nodes (its route into Bu included) and the output
+   at exactly `a(n) + 512`. T0's slack into Bu (486 samples) absorbs the lead.
+10. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
@@ -265,6 +290,9 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
 - Gate 8: an iteration that restarts feeders only through a held-late `Input` stage restarts Bs
   whole, walks the lateness to the output and has no rule there (round-6 M1); a walk that ignores
   sidechain edges never finds K or T6. Red.
+- Gate 9: a walk that also restarts a restarted submix's carried feeders restarts T0 as well,
+  so every predecessor strip is restarted whole and it returns `Misaligned` for an edit with an
+  exact warm answer (round-7 M1). Red.
 
 ## Dependencies
 

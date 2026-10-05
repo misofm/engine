@@ -30,7 +30,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   Classification with an injected `WarmConfig`, the `Primed` publication and the `PrimedCandidate`
   record are *Classify a latency-growth edit and publish its warm successor from the control
   plane* (#1403). Render's prime adoption is #1311's and #1355's. The deadline
-  (`PRIME_DEADLINE_SAMPLES`, in render samples) is #1358's. `fall_back_to_transition` and the
+  (`prime_deadline_samples`, in render samples) is #1358's. `fall_back_to_transition` and the
   session counter `transition_reprepare_refusals` are #1397's. The watermark, its flags and
   `miso_engine_v1_plan_watermark` are #1314's.
 - The C header's live-edit paragraph is `crates/capi/include/miso_engine_v1.h:35-62`; its session
@@ -44,8 +44,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 ## Decisions frozen for this slice
 
 - **D1. The production `WarmConfig`.** The C ABI creates every session with
-  `warm: Some(WarmConfig { p_max: P_MAX_SAMPLES(fs, q), prime_bytes_max: PRIME_BYTES_MAX })` for
-  the session's rate and quantum (#1403 D1; `P_MAX_SAMPLES` is *Grow the default source ring by the
+  `warm: Some(WarmConfig { p_max: p_max_samples(fs, q), prime_bytes_max: PRIME_BYTES_MAX })` for
+  the session's rate and quantum (#1403 D1; `p_max_samples` is *Grow the default source ring by the
   warm-prime headroom*, #1406 D1), so its rebuilds are classified by #1403 D2 and routed by #1397
   D1-D2. Before this slice only `test-support` sessions hold a `WarmConfig`; every arm of #1403 D2
   exists
@@ -81,7 +81,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
     (`source_ring_frames = 0`), whose headroom covers `P_MAX` (#1406).
   - A host that passes a nonzero `source_ring_frames` needs at least `stall + P_MAX + q` frames
     for warm growth: `stall` is the stall body of the default rule (#1354 D1's
-    `stall_ring_frames`) and `P_MAX` is #1406's `P_MAX_SAMPLES` for the session's rate and
+    `stall_ring_frames`) and `P_MAX` is #1406's `p_max_samples` for the session's rate and
     quantum. With
     less, a growth whose `P + q` exceeds the ring's frames above `stall` takes the transition
     (`WarmUnavailable::LeadBound`, #1354 D2), which still completes the edit.
@@ -194,7 +194,7 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
   adoption.
 - *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): the
   deadline D2 checks, and the republished donor on a refused re-preparation.
-- *Grow the default source ring by the warm-prime headroom* (#1406): `P_MAX_SAMPLES` and the
+- *Grow the default source ring by the warm-prime headroom* (#1406): `p_max_samples` and the
   default ring D4 describes.
 - *Record the swap block's cost on the 64-track console* (#1286): the `PRIME_BYTES_MAX` value D1
   writes.

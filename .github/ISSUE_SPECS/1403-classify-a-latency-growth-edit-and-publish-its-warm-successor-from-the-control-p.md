@@ -114,6 +114,10 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
     record, passing the withdrawn candidate's set as `withdrawn_sources`.
   - **#1323's declared stop (D2):** the withdrawn candidate's record is dropped with it. The
     discontinuity successor is published `Next`, so it leaves no record.
+  - **A refused supersession or stop keeps the record.** When #1310 D4 refuses B, it republishes
+    W unchanged; when #1323 D4 refuses the discontinuity successor, nothing changes. Either way the
+    record stays as it was, naming W's epoch, so W stays a pending candidate with its record and
+    #1358's deadline step still acts on it. Only the drops above remove a record.
   - **#1358's deadline step** (*Fall back to the transition when a warm successor is not ready by
     its deadline*, #1358 D3): it drops the record on `Taken`, `Nothing` or a successful
     transition. When the transition's re-preparation is refused, it republishes the withdrawn
@@ -155,7 +159,7 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
 All gates are control-plane unit tests with `test-support`, at 48 kHz and quantum 128. A is the
 two-track fixture of `crates/host-core/tests/successor_swap.rs`. Every source ring is set
 explicitly to 7,296 frames: `stall_ring_frames(48 kHz, 128)` (#1354 D1, 5,120), plus
-*Record the swap block's cost on the 64-track console* (#1286) D3's `P_MAX_SAMPLES(48 kHz, 128)`
+*Record the swap block's cost on the 64-track console* (#1286) D3's `p_max_samples(48 kHz, 128)`
 (2,048), plus one quantum. So #1354 D2's headroom check passes whether or not *Grow the default
 source ring by the warm-prime headroom* (#1406) has changed the default ring. Every carried source
 is kept queued at least `P + q` frames ahead unless a gate withholds frames. "Equals A continued"
@@ -181,7 +185,8 @@ no swap and the same host commands, timed on the source-read clock.
    so D3's arm does not take it. Until #1397 it takes today's path, a two-phase removal
    (*Remove a strip in two phases: ramp out, then a scheduled swap*, #1325) published
    `NoEarlierThan(S)`; no record exists, and no block before `S` differs from A continued with
-   track 2 live-muted by the same ramped mute at the same block.
+   track 2 live-muted by the same ramped mute at the same block. #1397 rewrites this test when
+   its D1 lands (its deliverable 5): the edit is then published `Primed` with a record.
 3. **Edits while pending (moved from #1355 gate 5).** W is gate 1's growth, published with frames
    withheld.
    - A live fader edit on track 2 applies at S. The output equals A continued with the same value
@@ -197,6 +202,10 @@ no swap and the same host commands, timed on the source-read clock.
    - W is superseded by a `Next` candidate B: no record. W is superseded by a warm B: the record
      names B's epoch, never W's.
    - A declared stop over W: no record.
+   - A structural edit B whose supersession is refused (one D4 cap of #1398 set one below the
+     value B's admission needs, as in gate 1's cap case): W is back in the mailbox `Full`, and the
+     record still equals `{ W's epoch, not_before, lead_blocks }`. #1358 gate 4 shows that W's
+     deadline then still fires.
 5. Commands:
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `cargo test --locked -p host-core --features host-core/test-support`
@@ -216,7 +225,8 @@ no swap and the same host commands, timed on the source-read clock.
   submits are refused and A underruns; a stop reported `SUPERSEDED` for a candidate that folded in
   nothing miscounts it. Red.
 - Gate 4: a record kept after W's adoption or supersession names W's epoch; #1358's deadline step
-  would then withdraw B, report it `TRANSITION_FALLBACK` and lose its `S`. Red.
+  would then withdraw B, report it `TRANSITION_FALLBACK` and lose its `S`. A record dropped on a
+  refused supersession leaves W pending with no deadline step, so the edit never completes. Red.
 
 ## Dependencies
 

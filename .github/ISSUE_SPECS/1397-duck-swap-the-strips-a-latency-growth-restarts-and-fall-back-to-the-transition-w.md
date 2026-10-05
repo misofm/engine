@@ -62,12 +62,11 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      the running plan (#1325 D2) and reads `p`.
   3. It publishes through `publish_primed` (#1403 D3), admitted with `AdmissionPeak::WithReprepare`
      as #1403 D2 admits every warm candidate, with `not_before` = #1325 D3's `S` instead of
-     `NoEarlierThan(S)`. For this edit, #1325 D3's `C` counts, in the running plan, every route
-     line out of a ducked strip (removed or restarted, #1324 D4); every `EffectSidechain` line
-     from a restarted strip's `post_fader` or `post_pan` tap into a carried node (#1354 D2 step 2
-     keeps that consumer carried); and, for a restarted submix whose `input` tap feeds a carried
-     node under #1354 D2 step 2's exemption (every line into its `Input` stage comes from a ducked
-     or added strip), that sidechain line plus the longest line into the stage. So by
+     `NoEarlierThan(S)`. `S` uses #1324 D4's `C`, the one every duck-swap uses: every route line
+     out of a ducked strip (removed or restarted); every `EffectSidechain` line from a restarted
+     strip's `post_fader` or `post_pan` tap into a carried node (#1354 D2 step 2 keeps that
+     consumer carried); and, for a restarted submix whose `input` tap feeds a carried node under
+     #1354 D2 step 2's exemption, that sidechain line plus the longest line into the stage. So by
      `not_before` every ducked strip and every line out of it holds only exact `+0.0`, and a line
      that W shortens drops only `+0.0`. That is the isolation the lemma needs.
   4. Render adopts at the first ready block at or after `not_before` (#1355 D4). The armed strips
@@ -80,7 +79,7 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
   `Δ = 0` over C), there is no lead and no prime. The successor is prepared with that
   `WarmLead` (#1354 D4), so its `restart_whole` strips join `restarted_strips()`, and it is
   published as #1324 D4 publishes an ordinary duck-swap (`NoEarlierThan(S)`, not `Primed`), with
-  `AdmissionPeak::Single`, and with `S` counted with step 3's `C`, not #1325's route lines alone: a
+  `AdmissionPeak::Single`, and with `S` counted with #1324 D4's `C`, as every duck-swap is: a
   `restart_whole` strip whose arrival grows can shorten a `post_fader` sidechain line into a
   carried consumer. It completes `EXACT`; it is not a transition fallback.
 - **D2. The transition fallback.** One host-core entry point, `fall_back_to_transition(..)` in
@@ -141,6 +140,12 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 3. A `test-support` hook that makes the next re-preparation refuse. It marks the refusal as
    injected, so D2's debug assertion does not fire for it.
 4. Gates in `crates/host-core/tests/warm_successor.rs` and the control-plane unit tests.
+5. The rewrite of #1403 gate 2's control-plane test, in the same change as D1. That test pins
+   today's path for gate 1's growth plus the removal of track 2 (`NoEarlierThan(S)`, no record).
+   D1 routes that edit to its arm, so the test now asserts that it is published `Primed` with
+   `not_before = S` and that the record names its epoch, and keeps its check that no block before
+   `S` differs from A continued with track 2 live-muted by the same ramped mute. The old
+   assertions are deleted, not left beside the new ones.
 
 ## Authorized paths
 
@@ -158,7 +163,7 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 ## Objective gates
 
 Every source ring is set explicitly, as in #1355's gates, to `stall_ring_frames(fs, q) +
-P_MAX_SAMPLES(fs, q) + q` (7,296 frames at 48 kHz and quantum 128). The fixture's own 4,096 frames
+p_max_samples(fs, q) + q` (7,296 frames at 48 kHz and quantum 128). The fixture's own 4,096 frames
 (`crates/host-core/tests/support/successor.rs:33`) are below the stall body, so with them every
 warm edit would be `LeadBound`.
 

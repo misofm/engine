@@ -78,7 +78,7 @@ calls the same engine-side step.
   part of this step takes a pending candidate: it stays in its cell with its plan, epoch, revision
   word and retirement credit until render adopts it or the control plane withdraws it (#1311 D2,
   D6). The only service work on a pending candidate is the warm successor's deadline check: when a
-  `Primed` candidate is still pending `PRIME_DEADLINE_SAMPLES` of render after its `not_before`
+  `Primed` candidate is still pending `prime_deadline_samples` of render after its `not_before`
   (#1358 D1), the step withdraws it and publishes the transition instead (`Taken` means it was
   adopted exactly). The check and the fallback belong to *Fall back to the transition when a warm
   successor is not ready by its deadline* (#1358) and *Check the warm-successor deadline in

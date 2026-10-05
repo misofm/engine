@@ -170,15 +170,17 @@ when a dependency forces the order, and then sequence the correct solution.
      late, preparation takes the first late carried node in schedule order and walks back from
      its late inputs through restarted and added nodes, along every edge kind (route, added
      route, sidechain; PDC takes its maximum over sidechain edges too). It restarts whole every
-     carried strip that holds that path at its lead (a route counts as its source strip),
-     recursively through submix feeders, and only when the walk finds none, the late node's own
-     strip (#1324 D2). The output belongs to no strip: there a walk that finds none returns
-     `WarmUnavailable::Misaligned`. `Δ` is recomputed and the check repeats (#1354 D2 step 6).
-     Otherwise preparation returns `WarmUnavailable::Misaligned` only when every strip that
-     reaches the output is restarted whole, and the edit takes the transition, which gives the
-     same audio. So a latent insert on a bus restarts the bus's carried feeders, a kick that keys
-     a bass compressor restarts the kick when the bass gains a limiter, and every other path,
-     the output included, stays exact. If the restarts leave `Δ = 0`, the edit is an ordinary
+     carried strip that holds that path at its lead (a route counts as its source strip), and
+     no other strip (#1324 D2). The walk always reaches a carried node, since the two compiles
+     differ only in the carried nodes' floors; reaching none is an invariant error. `Δ` is
+     recomputed and the check repeats (#1354 D2 step 6). Preparation returns
+     `WarmUnavailable::Misaligned` only when every predecessor strip that reaches the output is
+     restarted whole, and the edit takes the transition, which gives the same audio. The walk is
+     exact but not minimal: in the round-7 review's model about 5% of random sessions duck 1-4
+     more strips than the smallest exact set, recorded as known behaviour (#1354 D2 step 6). So
+     a latent insert on a bus restarts the bus's carried feeders, a kick that keys a bass
+     compressor restarts the kick when the bass gains a limiter, and every other path, the
+     output included, stays exact. If the restarts leave `Δ = 0`, the edit is an ordinary
      rebuild that duck-swaps those strips.
   3. Submit publishes the candidate as `Primed { not_before, lead_blocks }` (#1311).
   4. Render checks readiness (C4 below) on the **active** plan's consumers before it claims the
@@ -194,7 +196,7 @@ when a dependency forces the order, and then sequence the correct solution.
   content timing moves (#1397 D2's `grown_strips`: a strip with a node whose arrival grows, or with
   an outgoing edge whose compensation line changes length, unedited strips included), joined with
   #1324's restarted strips, counted `TRANSITION_FALLBACK`. It applies when preparation returns
-  `WarmUnavailable`, or when readiness is still unmet `PRIME_DEADLINE_SAMPLES` of render after
+  `WarmUnavailable`, or when readiness is still unmet `prime_deadline_samples` of render after
   `not_before` (counted in render samples: one stall tolerance plus `P_MAX` plus one quantum,
   #1358 D1). There is no render-thread pre-roll. While render waits for readiness, the
   predecessor keeps playing exactly. A host that never queues `P + q` frames ahead gets the
@@ -223,9 +225,10 @@ when a dependency forces the order, and then sequence the correct solution.
        restarted submix's `input` tap (the sum of its incoming routes) keeps it in C if every line
        into that submix's `Input` stage comes from a restarted or added strip (exact `+0.0` from
        the duck's end to the fire, with `S` counting the sidechain line and the longest line into
-       the stage, #1397 D1), and otherwise only if that stage arrives at exactly `a(n) + P`,
-       checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354 D2 step 4); otherwise
-       the lines into that stage and out of it change length and the consuming strip joins R.
+       the stage, #1324 D4, for every duck-swap), and otherwise only if that stage arrives at
+       exactly `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354
+       D2 step 4); otherwise the lines into that stage and out of it change length and the
+       consuming strip joins R.
     3. C3, bounds: `ΣP + P ≤ P_MAX` and prime bytes `≤ PRIME_BYTES_MAX`.
     4. C4, readiness, checked by render on the active plan before it claims: S is at or after
        `not_before`; every source W carries has its next `P/q + 1` blocks queued and playable; no
@@ -446,7 +449,7 @@ automation mask and `AUTOMATION_ENQUEUE`.
   - A pending edit progresses only while the host calls control functions, the same duty as
     draining events today.
   - The browser's Worker runs the same service loop continuously.
-- **Deadline and fallback.** The warm-successor deadline (`PRIME_DEADLINE_SAMPLES`, #1358 D1) is
+- **Deadline and fallback.** The warm-successor deadline (`prime_deadline_samples`, #1358 D1) is
   counted in render samples from the candidate's `not_before`, so a paused host never triggers a
   fallback; its edit stays pending until render resumes. When the deadline passes, the next control
   call withdraws the `Primed` candidate (a `Taken` result means render adopted it exactly),
@@ -634,7 +637,7 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
   2), an unpassable `g < P` gate (M2), a warm growth that also removes a strip published without
   the ramp-out (M3; now routed on #1324 D4's duck set), a refused deadline re-preparation with no
   holder (M4; now republished, #1358 D3), and a default ring that missed quanta other than 128 and
-  pins outside its slice (M5; `P_MAX_SAMPLES(fs, q)`, split to #1406), plus minors. All were folded
+  pins outside its slice (M5; `p_max_samples(fs, q)`, split to #1406), plus minors. All were folded
   in before merge.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles

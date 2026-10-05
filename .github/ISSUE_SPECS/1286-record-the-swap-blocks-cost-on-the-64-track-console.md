@@ -14,12 +14,12 @@ derivation** of every warm-successor constant. It measures, against an ordinary 
 - the call that adopts a primed warm successor (*Adopt a warm successor with a raw-frame prime at
   the first ready block*, #1355): the first growth, and the growth that brings `ΣP` to `P_MAX`.
 
-D3 below is the only place where `P_MAX_SAMPLES`, the ring headroom and `PRIME_BYTES_MAX` are
-defined. *Grow the default source ring by the warm-prime headroom* (#1406) writes `P_MAX_SAMPLES`
+D3 below is the only place where `p_max_samples`, the ring headroom and `PRIME_BYTES_MAX` are
+defined. *Grow the default source ring by the warm-prime headroom* (#1406) writes `p_max_samples`
 and the ring headroom into code, and *Check the warm-successor deadline in
 miso_engine_v1_service and report its outcome* (#1360) writes `PRIME_BYTES_MAX` and passes both
 bounds to *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354)'s
-`WarmConfig`. None restates a formula. `P_MAX_SAMPLES` and the ring headroom are formulas
+`WarmConfig`. None restates a formula. `p_max_samples` and the ring headroom are formulas
 that need no timed run; only `PRIME_BYTES_MAX` needs this record. The record also says whether a
 whole-bank move (#1269, Deferred) earns a brief.
 
@@ -43,13 +43,13 @@ whole-bank move (#1269, Deferred) earns a brief.
   (`default_source_ring_frames`, `crates/host-core/src/prepare.rs:65-77`;
   `SOURCE_STALL_TOLERANCE_MS`, `:57`). *Prepare a warm successor whose carried nodes lead the
   predecessor by P* (#1354) D1 names that body `stall_ring_frames(fs, q)`, and #1406 D2 makes the
-  default `stall_ring_frames(fs, q) + P_MAX_SAMPLES(fs, q) + q`. A host sets the ring itself with
+  default `stall_ring_frames(fs, q) + p_max_samples(fs, q) + q`. A host sets the ring itself with
   `HostPrepareCaps::source_ring_frames` (`crates/host-core/src/prepare.rs:106`).
 - **Rounding slack carries.** `Δ` is taken against the floored arrivals `a(n)` of the previous
   growth, so `ΣP` after `j` growths is `ceil_q` of track 1's natural arrival, not the sum of each
   growth's `ceil_q`. With the true-peak limiter alone (`L = 966` at 96 kHz), four limiters arrive at
   3,864 and the growths are 1,024, 1,024, 896 and 1,024: `ΣP = 3,968`, short of
-  `P_MAX_SAMPLES = 4,096` (at 44.1 kHz the same chain gives 1,792 against 2,048). The soft clipper
+  `p_max_samples = 4,096` (at 44.1 kHz the same chain gives 1,792 against 2,048). The soft clipper
   (`miso.soft-clip`) declares 31 samples at every rate (`crates/soft-clip/src/lib.rs:178`), and
   its latency counts in PDC. A track's `delay_samples` does not
   (`crates/graph-compiler/src/pdc.rs:12-17`), so it cannot pad an arrival.
@@ -83,7 +83,7 @@ whole-bank move (#1269, Deferred) earns a brief.
     `ceil_q(j · u) = j · K` for `j = 1..4`, that is when `K − q/4 < u <= K`. `c(fs)` is the
     smallest count that meets it:
 
-    | fs | `L` | `K` | `c` | `u` | `j · u` (j = 1..4) | `ceil_q` | `ΣP` after 4 = `P_MAX_SAMPLES` |
+    | fs | `L` | `K` | `c` | `u` | `j · u` (j = 1..4) | `ceil_q` | `ΣP` after 4 = `p_max_samples` |
     |---|---|---|---|---|---|---|---|
     | 44.1 kHz | 447 | 512 | 2 | 509 | 509, 1,018, 1,527, 2,036 | 512, 1,024, 1,536, 2,048 | 2,048 |
     | 48 kHz | 486 | 512 | 0 | 486 | 486, 972, 1,458, 1,944 | 512, 1,024, 1,536, 2,048 | 2,048 |
@@ -100,9 +100,9 @@ whole-bank move (#1269, Deferred) earns a brief.
   - Sessions `C_1` to `C_4`: `C_j` is A after growths 1 to `j` of the chain at 96 kHz (one limiter
     and one soft clipper each). Each step `C_(j-1) -> C_j` restarts track 1 and carries every
     other node at `a(n) + P` (C1 holds, because the floor dominates every other node's arrival),
-    and `C_4` reaches `P_MAX_SAMPLES(96 kHz, 128) = 4,096`.
+    and `C_4` reaches `p_max_samples(96 kHz, 128) = 4,096`.
   - Every source ring is set explicitly through `HostPrepareCaps::source_ring_frames` to
-    `stall_ring_frames(96 kHz, 128) + P_MAX_SAMPLES(96 kHz, 128) + 128 = 9,856 + 4,096 + 128 =
+    `stall_ring_frames(96 kHz, 128) + p_max_samples(96 kHz, 128) + 128 = 9,856 + 4,096 + 128 =
     14,080` frames, so each growth has #1354 D2 step 7's headroom whether or not #1406 has changed
     the default; a default ring before #1406 would make every growth `LeadBound`.
   - All sessions are prepared through host-core as the C ABI prepares them, with live lanes; each
@@ -123,18 +123,18 @@ whole-bank move (#1269, Deferred) earns a brief.
 - **D3. The derivation (the only one).** Notation: `q = 128`, `fs = 96 kHz` (session A's rate),
   `D = q / fs`, `ceil_q(x)` rounds `x` samples up to whole quanta. From phase 1: `o`, the ordinary
   block's p99. From phase 2: `b_P`, the `prime_bytes()` of the growth `C_3 -> C_4` (at
-  `ΣP = P_MAX_SAMPLES`), and `a_P`, its adoption block's p99. #1331 D7's headroom `h` is measured
+  `ΣP = p_max_samples`), and `a_P`, its adoption block's p99. #1331 D7's headroom `h` is measured
   on the browser's 64-track app session at its own rate `fs_h` (48 kHz, as every browser
   qualification session runs, e.g. `hosts/host-web/qualification/live-control-session.json:5`);
   the record states `fs_h` beside `h`.
-  1. `P_MAX_SAMPLES(fs, q) = 4 · ceil_q(L_max(fs))` at the session's quantum `q` (the notation's
+  1. `p_max_samples(fs, q) = 4 · ceil_q(L_max(fs))` at the session's quantum `q` (the notation's
      `q = 128` gives this record's values; at 96 kHz and `q = 127` it is `4 · 1,016 = 4,064`), so it
      is a whole number of quanta at every quantum, where `L_max(fs)` is the largest declared latency
      of any launch native effect at `fs` over its quality modes (the true-peak limiter's
      `Fs/100 + 6`, `crates/true-peak-limiter/src/lib.rs:236-242`, unless the record finds a larger
      one). That is four of the largest growths between host-declared discontinuities.
-  2. **Ring headroom.** `default_source_ring_frames` grows by `P_MAX_SAMPLES(fs, q) + q`: a source
-     whose read position leads render by `ΣP <= P_MAX_SAMPLES`, and whose next prime needs `P + q`
+  2. **Ring headroom.** `default_source_ring_frames` grows by `p_max_samples(fs, q) + q`: a source
+     whose read position leads render by `ΣP <= p_max_samples`, and whose next prime needs `P + q`
      frames queued, still leaves the producer the full stall tolerance. There is no deadline term:
      render reads nothing ahead while it waits for readiness. The record reports the ring bytes of
      session A before and after, at each launch rate.
@@ -157,9 +157,9 @@ whole-bank move (#1269, Deferred) earns a brief.
        no value, and the slice that writes it stops for an owner ruling. (Scaling down from `b_P`
        would charge the fixed costs too little.)
      - The estimate for the 64-track console at 96 kHz is about 512 KiB for the first growth and up
-       to 2 MiB at `ΣP = P_MAX_SAMPLES`. The record confirms or corrects it; it is not a gate.
+       to 2 MiB at `ΣP = p_max_samples`. The record confirms or corrects it; it is not a gate.
 
-  `P_MAX_SAMPLES` and the headroom at 44.1, 48 and 88.2 kHz, and at every other quantum, come from
+  `p_max_samples` and the headroom at 44.1, 48 and 88.2 kHz, and at every other quantum, come from
   the same formulas.
   `PRIME_BYTES_MAX` is one byte count for every rate: 96 kHz has the largest primes and the
   largest `o / D`. Quanta other than 128 are outside its timed measurement, and the record says so.
@@ -172,7 +172,7 @@ whole-bank move (#1269, Deferred) earns a brief.
   - Second commit: one operator run (`run-console-benchmark.sh` with the swap mode and
     `--step swap-carry-base`), its record, and a short report. The report states the per-lane
     overhead of the move block and of the adoption block at the first growth and at
-    `ΣP = P_MAX_SAMPLES`, the measured `prime_bytes()` against the estimate, and every D3 value at
+    `ΣP = p_max_samples`, the measured `prime_bytes()` against the estimate, and every D3 value at
     each launch rate.
   - No tuning between them.
 
@@ -203,14 +203,14 @@ whole-bank move (#1269, Deferred) earns a brief.
 1. The preflight passes. The self-test, without timing, renders A and B through one move swap,
    and one cycle A → `C_1` → … → `C_4` through four primed adoptions: each adoption happens at its
    `not_before` block with `carry == Carried` and `P == ceil_q(L_max)`, `C_4`'s `ΣP` equals
-   `P_MAX_SAMPLES(96 kHz, 128)`, and
+   `p_max_samples(96 kHz, 128)`, and
    every block has a nonzero output peak.
 2. The validator refuses:
    - a record with a missing distribution or a missing D3 value;
    - a swap or adoption count different from the frozen one;
    - a run with no carrying swap (`carry != Carried`), or an adoption with `prime_bytes() == 0`;
    - an adoption later than its `not_before` block (the prime was not ready, so the run timed
-     something else), or a `C_4` whose `ΣP` is not `P_MAX_SAMPLES(96 kHz, 128)`;
+     something else), or a `C_4` whose `ΣP` is not `p_max_samples(96 kHz, 128)`;
    - a run with any silent timed block, or an input other than the tone.
 3. Exactly one timed invocation, recorded with its warmup and its two rounds.
 4. Commands:

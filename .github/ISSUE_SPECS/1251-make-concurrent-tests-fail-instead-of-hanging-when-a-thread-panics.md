@@ -80,7 +80,7 @@ scope (see Hazards).
 - **D4. The capi copy (NIT).** `crates/capi` has `bench-support` as a dev-dependency
   (`crates/capi/Cargo.toml:25-26`), but nothing in capi's library test binary names a
   `bench_support` symbol today (`crates/capi/src` never does). An rlib whose symbols are never named
-  is not linked, and its `#[global_allocator]` (`tools/bench-support/src/alloc.rs:168-169`) then
+  is not linked, and its `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169-170`) then
   installs nothing (`:223-226`). So that binary does not run under the audited allocator today.
   - `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`),
     from which its allocation counts come. That test binary cannot link `bench_support`, so its

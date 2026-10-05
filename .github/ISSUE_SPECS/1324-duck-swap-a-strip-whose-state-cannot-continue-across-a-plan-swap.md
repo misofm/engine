@@ -80,9 +80,8 @@ never leaves it muted.
     `a + P` (#1285 D2) and holds the stage there. The submix's `input` tap also adds nothing,
     whatever the stage's arrival, when every line into the stage comes from a ducked or an added
     strip: those lines hold exact `+0.0` from the end of the duck until the fire, and the
-    scheduled `S` counts the sidechain line plus the longest line into the stage (*Duck-swap the
-    strips a latency growth restarts, and fall back to the transition when a warm successor cannot
-    adopt*, #1397 D1 step 3). A `post_fader` or `post_pan` tap is exact `+0.0`
+    scheduled `S` counts the sidechain line plus the longest line into the stage (D4's `C`, on
+    every duck-swap, warm or not). A `post_fader` or `post_pan` tap is exact `+0.0`
     from the end of the duck until the fire (the fader is ducked to a settled `+0.0`, then armed
     muted), so it adds nothing either.
 - **D2. Whole pre-fader restart.** For a duck-swapped strip, preparation marks not carried, after
@@ -101,10 +100,9 @@ never leaves it muted.
     fader too (matrix/pan, post-fader and post-pan sends, their compensation lines), except its
     claim lines. It is ducked (D4) and armed (D3) like any duck-swapped strip. Nothing is lost by
     restarting its post-fader owners at rest: by `S` its fader output and every line out of it
-    hold exact `+0.0` (D4's duck, with `S` counted with #1397 D1 step 3's `C`: #1325 D3's route
-    lines, plus each `EffectSidechain` line from its `post_fader` or `post_pan` tap into a carried
-    node, which its grown arrival can shorten), and its armed fader keeps them at `+0.0` until the
-    fire.
+    hold exact `+0.0` (D4's duck, with `S` counted with D4's `C`, which includes each
+    `EffectSidechain` line from its `post_fader` or `post_pan` tap into a carried node, which its
+    grown arrival can shorten), and its armed fader keeps them at `+0.0` until the fire.
 - **D3. Arm.** Each duck-swapped strip is armed through #1288's arm entry point (its D1 strip-set
   argument; channels the model leaves unmuted), with `D` per #1288 D4 (its pre-fader latency; for a
   submix plus the longest compensation delay of an input route whose line starts at rest). Its
@@ -119,6 +117,18 @@ never leaves it muted.
   schedules `S` exactly as #1325 D2-D3, in the same transaction, with one `S`; #1325 D3's `C`
   covers every route out of a duck-swapped strip as well as out of a removed one, since a restarted
   pre-fader route's line must empty before `S`.
+  - **`C` for every duck-swap.** On every duck-swap, warm or not (a rebuild that `warm_lead`
+    calls `Ordinary`, a lead-0 or `Primed` warm edit, and every rebuild of a session without a
+    `WarmConfig`), `plan_strip_transition` computes `C` as the largest of these lengths, all in
+    the running plan: each route line out of a ducked strip (#1325 D3); each `EffectSidechain`
+    line from a restarted strip's `post_fader` or `post_pan` tap into a carried node (D2: a
+    grown arrival can shorten it); and, for each restarted submix whose `input` tap feeds a
+    carried node's sidechain under D1's exemption (every line into its `Input` stage comes from
+    a ducked or an added strip), that sidechain line plus the longest line into the stage. A
+    ducked strip's last nonzero frame then leaves every such path by `p + q + N + C <= S`, so a
+    line that the successor shortens drops only exact `+0.0` at `S`. *Duck-swap the strips a
+    latency growth restarts, and fall back to the transition when a warm successor cannot adopt*
+    (#1397) D1 uses this `C` unchanged.
 - **D5. Edits during the window.**
   - A live edit to a ducked strip goes to the newest candidate's cells and applies at adoption
     (D15-17). A mute disarms the strip (#1288 D2), so the user's mute wins; a fader edit sets the
@@ -226,7 +236,22 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    with no transaction. Bit-identical, at `Backend::Simd8` and `Backend::Simd4` in
    `successor_swap.rs` and through the C entries.
 8. **Realtime.** As #1325's realtime gate, over the fade blocks too.
-9. Commands:
+9. **A shortened sidechain line from a restarted submix's `input` tap drops no fade sample.** In
+   A, track T2 routes from its `post_fader` tap to submix Bu; Bu holds a true-peak limiter insert
+   and routes to the output; track T3 holds a true-peak limiter insert, then a compressor insert
+   whose routed sidechain reads Bu's `input` tap, and routes to the output. All are audible. One
+   transaction removes T2, adds track T1 with a true-peak limiter insert routed from its
+   `post_fader` tap to Bu, and removes Bu's limiter. No node's arrival grows, so it is a plain
+   duck-swap (with a `WarmConfig`, #1354 D2 step 4 returns `Ordinary`). Bu is restarted, T3 stays
+   carried under D1's exemption (the only line into Bu's `Input` stage comes from added T1), and
+   T3's sidechain line shrinks from the limiter's latency `L` to 0.
+   (a) `plan_strip_transition` returns `C = L` (T3's sidechain line in A, plus T2's line into
+   Bu's `Input` stage, which is 0), and the watermark's first sample is `S = ceil_q(p + q + N +
+   L)`.
+   (b) Every block before T1's fire block (the first block at or after `S + L`) equals a
+   reference that makes no structural edit and live-mutes T2 and Bu with `N` at the same point.
+   Bit-identical.
+10. Commands:
    - `cargo test --locked -p capi --test strip_transitions`
    - `cargo test --locked -p host-core -p capi --features host-core/test-support`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
@@ -256,6 +281,9 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
   writes a second mute to the ducked strip or its send (the ramp restarts at `k + 4`, the blocks
   before `S` differ and `S` moves) turns it red. Gate 6(b): a `C` that counts only removed strips'
   routes (the send's line cut at `S`) turns it red.
+- Gate 9: a `C` that counts route lines only (round-7 M3) schedules `S` before A's sidechain line
+  has emptied, so W drops the last `L` samples of T2's fade from T3's detector and T3's gain
+  differs from the reference after `S`; it turns red.
 
 ## Dependencies
 

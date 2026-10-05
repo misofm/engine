@@ -85,15 +85,17 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
     sidechain edges too, `crates/graph-compiler/src/pdc.rs:61-65`), following the inputs that hold
     each arrival;
   - it restarts whole the strip of every C node that holds that path at its lead (a route node
-    counts as its source strip), recursively through every one that is a submix;
-  - only when the walk finds no such node does it restart the late node's own strip whole; the
-    output belongs to no strip, so there the walk finding none returns
-    `WarmUnavailable::Misaligned`.
+    counts as its source strip), and no other strip;
+  - the walk always reaches a C node (a carried node holds every late path, since the two
+    compiles differ only in C's floors); reaching none is an invariant error, never a restart of
+    the late node's own strip.
 
-  It iterates until C1 holds. Only if every strip that reaches the output is restarted whole does
-  preparation return `WarmUnavailable::Misaligned`, and the edit takes the transition, which gives
-  that same audio. So a latent insert added on a submix (a limiter on a bus) is warm-exact: its
-  carried feeders restart with it and duck-swap (W9). A kick that keys the bass's compressor, when
+  It iterates until C1 holds. Only if every predecessor strip that reaches the output is
+  restarted whole does preparation return `WarmUnavailable::Misaligned`, and the edit takes the
+  transition, which gives that same audio. The walk is exact but not minimal: in the round-7
+  review's model about 5% of random sessions duck 1-4 more strips than the smallest exact set
+  (#1354 D2 step 6, known behaviour). So a latent insert added on a submix (a limiter on a bus)
+  is warm-exact: its carried feeders restart with it and duck-swap (W9). A kick that keys the bass's compressor, when
   the edit adds a limiter to the bass, restarts the kick, whose key holds the bass's chain late.
   Every other path, the output included, stays exact. A
   growth that the restarts confine to R leaves `Δ = 0`: the edit is then an ordinary rebuild that
@@ -107,7 +109,7 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
   the fire) keep the consumer in C. A restarted submix's `input` tap (the sum of its incoming
   routes) keeps the consumer in C if every line into that submix's `Input` stage comes from an R
   or added strip (exact `+0.0` from the duck's end to the fire, with `S` counting the sidechain
-  line plus the longest line into the stage, #1397 D1 step 3), and otherwise only if the stage
+  line plus the longest line into the stage, #1324 D4), and otherwise only if the stage
   arrives at exactly `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing,
   #1354 D2 step 4). If it arrives at `a(n) + g` with `g ≠ P`, every carried line into that stage
   and the sidechain line out of it change length by `P - g` samples, so the consuming strip joins
@@ -184,7 +186,7 @@ during the adoption callback is observed at block S on the new clock.
   observers carry by #1327 D1's keys, in a warm adoption as at any swap.
 - **W6. Fallback.** The transition is the only fallback, counted `TRANSITION_FALLBACK` and
   reported through the watermark's `transition_fallback` flag (#1314). It runs on
-  `WarmUnavailable` at submit, or when C4 is still unmet `PRIME_DEADLINE_SAMPLES` of render after
+  `WarmUnavailable` at submit, or when C4 is still unmet `prime_deadline_samples` of render after
   `not_before` (#1358 D1). Then the next control call withdraws the candidate (`Taken` means it
   was adopted exactly), re-prepares with the withdrawn candidate as donor, and publishes
   (`fall_back_to_transition`, #1397). While render waits, the predecessor keeps playing exactly. A
@@ -195,7 +197,7 @@ during the adoption callback is observed at block S on the new clock.
   cost on the 64-track console* (#1286) owns their single derivation (the prime adoption block
   measured at `ΣP = P_MAX`), with *Prove two Wasm instances on one shared memory in three browser
   engines and on iOS* (#1331) for the browser rows. *Grow the default source ring by the
-  warm-prime headroom* (#1406) writes `P_MAX_SAMPLES(fs, q)` and the ring headroom (`P_MAX` plus
+  warm-prime headroom* (#1406) writes `p_max_samples(fs, q)` and the ring headroom (`P_MAX` plus
   one quantum) into code, and #1360 writes `PRIME_BYTES_MAX`. No other spec
   restates a formula.
 - **W9. Edits that duck strips.** An edit that both grows latency and ducks strips, restarting
@@ -310,10 +312,10 @@ Every slice must also keep zero allocations, frees and syscalls on render.
    `PrimedCandidate` record.
 7. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
    successor cannot adopt* (#1397): W9 and W6's `fall_back_to_transition`.
-8. *Grow the default source ring by the warm-prime headroom* (#1406): `P_MAX_SAMPLES` and the
+8. *Grow the default source ring by the warm-prime headroom* (#1406): `p_max_samples` and the
    ring headroom, with every pin of the ring rule.
 9. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7
-   and `PRIME_DEADLINE_SAMPLES`.
+   and `prime_deadline_samples`.
 10. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
 11. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
     (#1361).

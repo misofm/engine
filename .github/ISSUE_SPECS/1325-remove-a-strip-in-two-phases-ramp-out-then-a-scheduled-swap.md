@@ -65,6 +65,8 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   `S = ceil_q(p + q + N + C)` (#1311), where `q` is the quantum, `ceil_q` rounds up to a multiple
   of it, and `C` is the largest `compensation_delay`, in the displaced plan, of a route out of any
   strip this transaction ducks: a removed strip, or a duck-swapped one (#1324 D4) (0 if none).
+  When the transaction also restarts strips, #1324 D4 extends this `C` with the sidechain lines
+  that a restarted strip's taps feed into carried nodes; every duck-swap uses that `C`.
   Proof: the writes precede the read of `p`, so render drains them no later than the block that
   starts at `p + q`; every ramp ends by `p + q + N`, and every route line
   has emptied its last nonzero frame by `p + q + N + C <= S`. Between then and `S` the strip and

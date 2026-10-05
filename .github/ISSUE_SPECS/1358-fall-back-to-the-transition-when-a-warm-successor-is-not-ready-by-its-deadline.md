@@ -8,7 +8,7 @@ warm-prime headroom* (#1406) in round 6. Code anchors verified on `main` at `6fb
 ## Product outcome
 
 A latency-growing edit always completes, and the host always learns how.
-- A warm successor that render has not adopted within `PRIME_DEADLINE_SAMPLES` of render is
+- A warm successor that render has not adopted within `prime_deadline_samples` of render is
   withdrawn by the next control call and replaced by the transition: `TRANSITION_FALLBACK`. That
   happens when a source is never fed far enough ahead, a producer stalls past its tolerance, or
   seeks keep landing in the prime window.
@@ -17,8 +17,8 @@ A latency-growing edit always completes, and the host always learns how.
 
 ## Context
 
-- *Grow the default source ring by the warm-prime headroom* (#1406) D1-D2: `P_MAX_SAMPLES(fs, q)`
-  and a default ring of `stall_ring_frames(fs, q) + P_MAX_SAMPLES(fs, q) + q`, so a host that
+- *Grow the default source ring by the warm-prime headroom* (#1406) D1-D2: `p_max_samples(fs, q)`
+  and a default ring of `stall_ring_frames(fs, q) + p_max_samples(fs, q) + q`, so a host that
   keeps its rings full holds `P_MAX + q` frames past each consumer through any producer stall up
   to the tolerance.
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): render adopts
@@ -35,16 +35,16 @@ A latency-growing edit always completes, and the host always learns how.
   candidate as its donor.
 - `P_MAX` is the bound on `ΣP + P` that warm preparation checks
   (`WarmUnavailable::LeadBound`, *Prepare a warm successor whose carried nodes lead the
-  predecessor by P*, #1354), with the value of #1406 D1's `P_MAX_SAMPLES(fs, q)` (*Record the swap
+  predecessor by P*, #1354), with the value of #1406 D1's `p_max_samples(fs, q)` (*Record the swap
   block's cost on the 64-track console*, #1286 D3).
 - D15-8 once listed "a host that renders nothing" as a fallback trigger. D15-17 supersedes that:
   the deadline is counted in render samples.
 
 ## Decisions frozen for this slice
 
-- **D1. Deadline.** `PRIME_DEADLINE_SAMPLES(fs, q)`, a `const fn` in
+- **D1. Deadline.** `prime_deadline_samples(fs, q)`, a `const fn` in
   `crates/host-core/src/warm.rs`:
-  `T(fs, q) + P_MAX_SAMPLES(fs, q) + q`, where `T(fs, q) = ceil_q(fs * SOURCE_STALL_TOLERANCE_MS /
+  `T(fs, q) + p_max_samples(fs, q) + q`, where `T(fs, q) = ceil_q(fs * SOURCE_STALL_TOLERANCE_MS /
   1000)` is one stall tolerance in whole quanta. It is counted in render samples from
   `not_before`, which is never earlier than the render clock read at publication.
   - Why this value. With #1406 D2's headroom, a host that keeps its rings full holds at least
@@ -66,7 +66,7 @@ A latency-growing edit always completes, and the host always learns how.
   - If `pending.epoch` is not the newest epoch the control plane has published, the record is
     stale: the step drops it and does nothing else. #1403 D4 makes this unreachable; the check
     keeps a stale record from ever withdrawing another candidate.
-  - If `render_clock() < not_before + PRIME_DEADLINE_SAMPLES`, it returns `Pending` and does
+  - If `render_clock() < not_before + prime_deadline_samples`, it returns `Pending` and does
     nothing. A render clock that does not move never passes it.
   - Otherwise it calls `withdraw()` (#1343 D5):
     - `Taken`: render adopted the candidate exactly. The step drops the record and returns
@@ -99,7 +99,7 @@ A latency-growing edit always completes, and the host always learns how.
   path takes it as it takes a pending candidate (#1310 D8, #1323). While render waits
   for readiness, the predecessor keeps playing every queued frame. An ack can never precede a
   drop.
-- **D5. `P_MAX_SAMPLES`.** Moved to #1406 D1 in round 6. D1 reads it.
+- **D5. `p_max_samples`.** Moved to #1406 D1 in round 6. D1 reads it.
 
 ## Deliverables
 
@@ -117,14 +117,14 @@ A latency-growing edit always completes, and the host always learns how.
 ## Non-goals
 
 - The transition itself (#1397). C ABI and browser wiring and their docs (#1360, #1361).
-- The ring headroom and its pins (#1406). No tuning of `P_MAX_SAMPLES` (#1286).
+- The ring headroom and its pins (#1406). No tuning of `p_max_samples` (#1286).
 
 ## Objective gates
 
 1. **Never fed.** In #1355 gate 1's setup, the added growth's carried sources are fed no frame
    past what A needs for its next block. Render runs on. The control call at render clock
-   `not_before + PRIME_DEADLINE_SAMPLES - q` publishes nothing. The first control call at or after
-   `not_before + PRIME_DEADLINE_SAMPLES` withdraws the candidate and publishes the transition.
+   `not_before + prime_deadline_samples - q` publishes nothing. The first control call at or after
+   `not_before + prime_deadline_samples` withdraws the candidate and publishes the transition.
    Its adoption reports `TRANSITION_FALLBACK`, and `transition_fallback_count` grows by 1. Until
    that adoption, the output equals A continued.
 2. **Render adopts first.** In gate 1's setup, the deadline passes with frames withheld. Then the
@@ -140,10 +140,15 @@ A latency-growing edit always completes, and the host always learns how.
    supersedes W by #1310. B grows nothing over the running plan, so it is a two-phase removal
    (*Remove a strip in two phases: ramp out, then a scheduled swap*, #1325) published
    `NoEarlierThan(S)` with `S = ceil_q(p + q + N + C)`, past W's `not_before +
-   PRIME_DEADLINE_SAMPLES` (7,040 at 48 kHz and quantum 128). Control calls run past W's deadline
+   prime_deadline_samples` (7,040 at 48 kHz and quantum 128). Control calls run past W's deadline
    and before `S`: they publish nothing, B stays `Full`, and `transition_fallback_count` is
    unchanged. Render adopts B at `S`. Repeat with W adopted by render and the same B submitted
-   after that adoption and before W's deadline: the same.
+   after that adoption and before W's deadline: the same. Then, with frames still withheld, B's
+   supersession is refused instead (one D4 cap of *Size the C ABI's plan capacities and resource
+   admission for a superseding candidate* (#1398) set one below the value B's admission needs):
+   #1310 D4 republishes W, and #1403 D4 keeps its record. The first control call at or after W's
+   `not_before + prime_deadline_samples` withdraws W and publishes the transition, whose adoption
+   reports `TRANSITION_FALLBACK`.
 5. **Refused re-preparation.** Gate 1's setup with #1397's injected refusal (its deliverable 3).
    The step at the deadline withdraws W, the re-preparation is refused, and W is back in the
    mailbox `Full` with its words; the record names W's epoch, `transition_reprepare_refusals` is
@@ -170,7 +175,8 @@ A latency-growing edit always completes, and the host always learns how.
   swap over an adopted plan. Red.
 - Gate 3: a deadline counted in wall time falls back on a paused host. Red.
 - Gate 4: an unkeyed step, or a record kept across the supersession, withdraws B with W's
-  deadline, reports it `TRANSITION_FALLBACK` and loses its `S`. Red.
+  deadline, reports it `TRANSITION_FALLBACK` and loses its `S`; a record dropped on the refused
+  supersession leaves W pending forever, since the step runs only while a record exists. Red.
 - Gate 5: a refusal that keeps the donor outside the mailbox and drops the record leaves the
   revision pending forever, since the step runs only while a record exists; a superseding edit
   then never takes the donor, and the added source's acked chunks are lost. A republish that resets
@@ -186,10 +192,12 @@ A latency-growing edit always completes, and the host always learns how.
 - *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354): `P_MAX`.
 - *Give a plan a source-read clock that leads its render clock* (#1396): `render_clock()`.
 - *Let the control thread withdraw an unadopted candidate plan* (#1343), D5: `withdraw()`.
+- *Size the C ABI's plan capacities and resource admission for a superseding candidate* (#1398):
+  the cap that refuses gate 4's supersession.
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310): the D4 republish D3 uses.
 - *Reset latency floors at a host-declared discontinuity* (#1323): the stop that takes a
   republished donor.
 - *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325): gate 4's `S`.
-- *Grow the default source ring by the warm-prime headroom* (#1406): `P_MAX_SAMPLES` and the
+- *Grow the default source ring by the warm-prime headroom* (#1406): `p_max_samples` and the
   ring headroom D1 relies on.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

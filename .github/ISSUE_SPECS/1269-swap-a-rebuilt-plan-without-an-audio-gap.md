@@ -200,12 +200,13 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
      source-read offset is the predecessor's plus `P` (*Give a plan a source-read clock that leads
      its render clock*, #1396). Preparation checks that every carried node arrives at exactly
      `a(n) + P`. For the first late one it walks back through restarted and added nodes along
-     every edge kind and restarts whole each carried strip that holds that path at its lead (only
-     if it finds none, the late node's own strip; #1324 D2), then recomputes `Δ`. Only when every
-     strip that reaches the output is restarted whole does it return
-     `WarmUnavailable::Misaligned`, and the edit takes the transition (*Prepare a warm successor
-     whose carried nodes lead the predecessor by P*, #1354 D2 step 6). A sidechain from a restarted
-     strip's tap after its input and before its fader restarts the consuming strip too (#1324 D1).
+     every edge kind and restarts whole each carried strip that holds that path at its lead, and
+     no other strip (#1324 D2; reaching no carried node is an invariant error), then recomputes
+     `Δ`. Only when every predecessor strip that reaches the output is restarted whole does it
+     return `WarmUnavailable::Misaligned`, and the edit takes the transition (*Prepare a warm
+     successor whose carried nodes lead the predecessor by P*, #1354 D2 step 6). A sidechain from
+     a restarted strip's tap after its input and before its fader restarts the consuming strip
+     too (#1324 D1).
   2. Submit classifies the edit and publishes it as `Primed { not_before, lead_blocks }` (#1311;
      *Classify a latency-growth edit and publish its warm successor from the control plane*,
      #1403).
@@ -229,7 +230,7 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
   outgoing edge whose compensation line changes length) and of #1324's restarted strips
   (*Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
   successor cannot adopt*, #1397 D2), counted `TRANSITION_FALLBACK`. It applies on
-  `WarmUnavailable` at submit, or when readiness is still unmet `PRIME_DEADLINE_SAMPLES` of render
+  `WarmUnavailable` at submit, or when readiness is still unmet `prime_deadline_samples` of render
   after `not_before` (one stall tolerance plus `P_MAX` plus one quantum; *Fall back to the
   transition when a warm successor is not ready by its deadline*, #1358 D1). The deadline is counted
   in render samples, so a paused host never falls back (D15-17). There is no render-thread pre-roll.
