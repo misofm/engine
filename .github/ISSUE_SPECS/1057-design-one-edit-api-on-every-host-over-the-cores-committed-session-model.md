@@ -164,3 +164,132 @@ No test is added. The note is design evidence; the implementing issues' gates ch
 - None to start. It reads the specs of *Extract the C ABI control plane into a portable crate both
   hosts call* (#1309) and *Run the browser control plane in a Worker and keep the AudioWorklet
   render-only* (#1332), and should land before #1332 starts implementation.
+
+## Attempt record
+
+**Attempt 1** (stream K research worker). The note is
+`docs/handoffs/one-edit-api/1057-design-note.md`; every anchor in it is checked on `8be19c86e`.
+Host: `Linux devbox 6.8.0-139-generic x86_64`, AMD EPYC 7313P, loaded (load average 18-48), so
+every number is uncontrolled and descriptive. Scratch builds and probes stay in
+`/tmp/claude-1002/w1057/` and are not committed.
+
+- Module size: scratch tree from `git archive HEAD`; the cargo line of
+  `scripts/build-web-audioworklet.sh:113-114` with `CARGO_TARGET_DIR=/tmp/claude-1002/w1057/target`,
+  then `scripts/strip-wasm-names.py strip`. Baseline 2,894,202 bytes (digest equal to the official
+  script's); with `capi` and `protocol` linked and reachable, 3,222,313 bytes (+328,111, +11.3 %);
+  gzip -9 926,483 → 1,039,871.
+- `cargo tree -p host-web -e normal`: 66 distinct crates; the proxy adds exactly `capi` and
+  `protocol`.
+- Structural edit (#1289 base moved): `run-web-mixing-automation-benchmark.sh prepare`,
+  `rebuild-preflight`, `rebuild-run --step w1057-rebuild-head` with
+  `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1`; round 2 p50 23.851 ms (64-track console), 39.366 ms
+  (sends), as at the base.
+- Live-edit hop: Chromium 151 (Playwright 1.62.1), COOP/COEP, a Worker running the C ABI control
+  plane in Wasm, 500 edits per round, one warmup and two rounds: hop to cell p50 2.715-7.460 ms,
+  max 5.560-14.975 ms on the 64-track documents; the post is 0.020-0.045 ms (p50).
+- Gates: `bash scripts/check-workspace-policy.sh` ok; `bash scripts/check-dsp-research.sh` ok (it
+  checks the DSP research corpus, which this issue does not change).
+
+**Attempt 2** (answers the attempt-1 verdict: 3 MAJOR, 8 MINOR, 5 NIT). Anchors still on
+`8be19c86e`, the new ones included. No new build or timing; every number comes from the attempt-1
+evidence in `/tmp/claude-1002/w1057/evidence/`.
+
+- MAJOR-1: new section 8.4 and F12. Only render writes an observation tap's arm state, in both
+  modes: the `Observe` record carries an arm tag from the control plane; `ObservationLane::arm`
+  writes `armed`, `arm_sample` and `arm_tag` into the tap's observation slot in the drain; host-web's
+  `observation_armed` and `observation_arm_samples` are deleted. The SDK's `appliedAtSample` on
+  subscriptions becomes `armed(): Promise<bigint>`, resolved from the reported tag. New proposed
+  issue P7; amendments of #1381 D3 and #1382.
+- MAJOR-2: section 5.4 decomposes the apply: three whole canonical writes per value-only edit
+  (one in the compile, two in the classifier, `live_delta.rs:228`, `:257-263`), about 97 % of the
+  phase run; #1305 excludes the comparison (its non-goal). P2 becomes P2a (edit-bounded typed
+  classification, canonical comparison kept only as test oracle), P2b (canonical text at the first
+  snapshot of a revision, exact incremental length, resumable writer) and P2c (replay entry
+  staged in place). The single-mode budget gate moves to #1382's single-mode leg. Section 4.3
+  decides the single-mode snapshot: written in entity slices across handler calls and service
+  ticks.
+- MAJOR-3: section 3.4 never merges two calls that write the same address, so every acked value
+  is committed and every supersession is a later commit counted by `live_values_superseded`; the
+  W1 row of section 1.3 states it; P6 gains the gate.
+- MINORs: section 5.5 lists every command (scratch tree, proxy edit, module builds, twiggy and
+  grouping, native example builds and runs, Chromium probe); the uncited second `probe_phases`
+  run is removed, not re-run. Option C states the field-level diff and setters it needs, and the
+  snapshot claim names P3. Section 3.3 defines the `monitor` encoding; 3.4 states the cuts (edit
+  count, frame bytes, repeated address, `apply`/`replaceSession`/`snapshot` barrier). F2/P4: the
+  browser adapter passes only `SESSION_TRANSACTION_APPLY`, so no `transport_state` or
+  `automation_canceled` event exists there. F11 and section 3.1: single-mode calls stay pending
+  while the context is suspended. Section 5.4 limit (6): service tick and source drain not
+  measured. Section 3.4 gives the browser's `ControlLimits` rule and values; section 2.1 states how
+  replace enters the controller (typed entry, no frame, no replay entry; amends #1386).
+- NITs: commit count and `prepare.rs` +597/-39; "a track" (a submix is solo-safe); the telemetry
+  lease mention removed; worst-case latency includes resends; "approximate size", stable
+  non-atomic build, not the nightly atomics artifact.
+- Gate: `bash scripts/check-workspace-policy.sh` ok.
+
+**Attempt 3** (answers the attempt-2 verdict: 2 MAJOR, 6 MINOR, 5 NIT). Work on `50fb23b5f`; no
+file under `crates/`, `hosts/`, `sdk/`, `tools/` or `scripts/` changed since `8be19c86e`, so every
+anchor holds on both. New measurement (note section 5.6): a scratch test of
+`ProtocolCodec::encoded_session_transaction_len` and of record layouts, in a `git archive` export
+under `/tmp/claude-1002/w1057b/` (tree and target deleted after; output kept in
+`/tmp/claude-1002/w1057b/evidence/sizes.txt`, not committed).
+
+- MAJOR-1: the browser `ControlLimits` are derived now, from the encoder. Largest live edit:
+  `UpsertEffectParam`, 176 bytes at 3-byte IDs and 416 bytes at the 127-byte ID; 1,024 of them are
+  426,032 bytes. Rule: 1,024 × the largest live edit at the 127-byte ID, rounded up to a power of
+  two. Values: frame 524,288, response 524,288, one replay entry of 1,048,576. P1 gains the gate
+  "every setter encodes to at most 416 bytes at the 127-byte ID", so no later issue rechecks the
+  values. The pre-P2c staging cost at these limits is measured (43-54 µs p50 natively per edit).
+- MAJOR-2: P2a has no exact-0 allocation gate, by the realtime rules: AGENTS.md allows counted
+  control allocations in the single-mode message handler and keeps the render-locked count at 0
+  (D15-10); the model clone in `prepare_transaction` allocates anyway, so a classifier-only 0 would
+  not make the handler allocation-free. P2a's gate is now "allocation count and bytes are equal
+  with and without 63 unnamed tracks" plus the time gate; the launch registry is built once. The
+  audio-thread protection is #1382's single-mode time gate.
+- MINORs: the single-mode snapshot writes at most 65,536 bytes per handler call with a writer
+  resumable inside strings, continued by the SDK's message, not by a timer; bound 2S + 2 quanta,
+  gated in P3 with `currentFrame`. The single-mode budget is measured in a cross-origin-isolated
+  Chromium Worker on the same module and exports (5 µs clock). Arm tags are `u64` (no wrap
+  refusal), carried as first and count in `CommandReply`, #1293's outcome record and #1294's
+  reply; P7 changes the read record (96 to 104 bytes) and the SDK layout; `armed()` settlement is
+  decided; #1280 D3 is cited. P2b keys on a value-setter predicate the compile can decide; P2c
+  plans the eviction read-only and applies it at commit, and stages the response in one boot-time
+  buffer. The SDK queue holds 64 calls and refuses with `backpressure`. New proposed issue P8 owns
+  the typed commit path in `protocol`.
+- NITs: per-call time is labelled an inference with its basis; the input-rate reliance is removed;
+  cut 1 defines lane-set overlap; a merged call reports `rebuild`; P7 lists the resource rows.
+- Correction found: route gain, mute and matrix already have setters, so P1 no longer lists them;
+  `SetVcaFader` replaces `UpsertVca` in P1's list.
+- Gate: `bash scripts/check-workspace-policy.sh` ok.
+
+**Follow-ups after PASS** (the attempt-3 verdict: PASS, 6 MINOR, 4 NIT; all folded in one
+commit). Anchors read on `a1a3fe87c`, which has the same code as `8be19c86e`. The three #1057
+verdicts are copied to `docs/handoffs/decision-15-2026-10-05/verdicts/stream-k/`.
+
+- MINOR-1: section 4.3 states the single-mode snapshot bound in system audio callbacks: at most
+  S + 2 callbacks, (S + 2) × ceil(B / 128) quanta (8 callbacks, 32 quanta for the sends document
+  at 480-frame callbacks). P3's gate is (S + 2) × Q quanta, with Q measured in the same run by a
+  ping round trip; the evidence records Q and the observed B.
+- MINOR-2: P2b's length update counts the `revision` field, rewritten by every commit
+  (`model.rs:943`) and written as a decimal string (`visit.rs:220`); gate (1) crosses its digit
+  boundaries.
+- MINOR-3: P2b gate (4) uses a covering set of budgets: every budget on small documents; on large
+  documents 1 to 64, powers of two and ±1, and budgets at each kind of stop point; about 150
+  writes per large document.
+- MINOR-4: the typed commit takes the `miso.replace.v1` message's own `requestId` (non-zero, SDK
+  numbers from 1) as the `SESSION_COMMITTED` event's `origin_request_id`; P8's gate compares the
+  whole event at the same request ID. Amendments of #1294 D1 and #1386 updated.
+- MINOR-5: `CommandReply.removed_arm_tag_count` with `SessionState::removed_arm_tags()`; the
+  #1293 outcome record's reserved `u32` becomes `removed_arm_tag_count` (still 40 bytes) with a new
+  export `miso_engine_web_v1_removed_arm_tags_ptr`; `miso.edit.v1` gains `removedArmTags`. Solo
+  entries are not listed (no pending promise). P5 gains a gate; amendment rows #1293, #1294 and
+  #1382 updated.
+- MINOR-6: option C's cost in the owner question names the setters that exist (effect bypass,
+  route destination, route gain, mute and matrix, pan and matrix, effect parameters) and what P1
+  adds (no route setter). The question stays open.
+- NIT-1: P2c names the response buffers at `controller.rs:1916` and `:1934`, counts them in
+  `RESPONSE_STAGING_VECS`, and gates them.
+- NIT-2: the effect-parameter `smoothingSamples` option is removed, not renamed (section 3.1, P6).
+- NIT-3: the 64-call bound applies to new calls only; resent calls of a refused merged message
+  can raise `pendingCalls` above 64.
+- NIT-4: `currentFrame` is cited as Web Audio 1.1 §1.32.3 (new source [S8]).
+- Gate: `bash scripts/check-workspace-policy.sh` ok.
