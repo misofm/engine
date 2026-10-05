@@ -23,3 +23,7 @@ static_assert(offsetof(miso_engine_v1_watermark, superseded_count) == 48);
 static_assert(offsetof(miso_engine_v1_watermark, reserved) == 56);
 static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) ==
               MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK);
+static_assert((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SERVICE) ==
+              MISO_ENGINE_V1_FEATURE_SERVICE);
+static_assert(std::is_same<decltype(&miso_engine_v1_service),
+                           uint32_t (*)(miso_engine_v1_session *)>::value);

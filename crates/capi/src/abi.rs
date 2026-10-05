@@ -65,6 +65,9 @@ pub const FEATURE_SOURCE_SEEK_AT: u64 = 1 << 5;
 /// Applied-revision watermark capability: `miso_engine_v1_plan_watermark` (#1314), an in-place V1
 /// amendment. A host checks this bit before calling the symbol.
 pub const FEATURE_PLAN_WATERMARK: u64 = 1 << 6;
+/// Control-service capability: `miso_engine_v1_service` (#1348), an in-place V1 amendment. A host
+/// checks this bit before calling the symbol.
+pub const FEATURE_SERVICE: u64 = 1 << 7;
 /// All ABI V1 feature capability bits.
 pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_HOST_PLANAR_SOURCE
@@ -72,7 +75,8 @@ pub const FEATURE_MASK: u64 = FEATURE_IMMUTABLE_SESSION
     | FEATURE_PLANAR_STEREO_RENDER
     | FEATURE_CAPABILITY_COMMAND
     | FEATURE_SOURCE_SEEK_AT
-    | FEATURE_PLAN_WATERMARK;
+    | FEATURE_PLAN_WATERMARK
+    | FEATURE_SERVICE;
 
 /// Watermark outcome flag: the covered revisions completed exactly as committed.
 pub const OUTCOME_EXACT: u64 = 1;
@@ -542,7 +546,8 @@ mod tests {
             FEATURE_MASK & FEATURE_PLAN_WATERMARK,
             FEATURE_PLAN_WATERMARK
         );
-        assert_eq!(FEATURE_MASK, 0x7f);
+        assert_eq!(FEATURE_MASK & FEATURE_SERVICE, FEATURE_SERVICE);
+        assert_eq!(FEATURE_MASK, 0xff);
         assert_eq!(
             [
                 OUTCOME_EXACT,

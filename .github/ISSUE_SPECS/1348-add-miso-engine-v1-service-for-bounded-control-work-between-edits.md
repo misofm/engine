@@ -158,3 +158,92 @@ calls the same engine-side step.
   text's reference to the watermark.
 - *Adopt a successor plan no earlier than a scheduled sample* (#1311): the scheduled candidate
   that D7 and gate 4 rely on.
+
+## Attempt record
+
+### Attempt 1 (implementer, branch `codex/d15-stream-b`, base `efad0080a`)
+
+**What changed.**
+
+- `crates/control-plane/src/control.rs`: `pub fn SessionState::service(&mut self) -> Result<(),
+  CommandError>` runs `synchronize_plan_epochs`, the counter refresh, `collect_render_activity`
+  and the counter refresh again (D1). `refresh_provider_counters` is `command`'s former
+  `set_telemetry_counters` block, moved (D8). `command`, `dequeue_event`, `submit`, `seek` and
+  `seek_at` call `service()` first in place of their individual calls; each services exactly once
+  (D2). `command`'s and `commit_live`'s fallible-check order is unchanged: `service()?` replaces
+  the same leading lines. `dequeue_event` keeps its error mapping and the source calls keep
+  `SourceFailure::Internal`. `synchronize_plan_epochs` itself is unchanged: it promotes a provider
+  only on `active_epoch` or a reclaimed plan, so it never takes a pending candidate (D7).
+  `test-support` gains `test_set_next_adoption` (the gate-4 publication hook: the next structural
+  publication reserves with that `PlanAdoption` instead of `Next`, taken once, cleared by
+  `test_reset_lifecycle_observer`) and `test_provider_counters` (the provider's counter snapshot
+  read without a control call). The superseded `test_synchronize_plan_epochs` hook is deleted; its
+  two call sites now call `service()`.
+- `crates/capi`: `miso_engine_v1_service(session)` (`ffi.rs`), `FEATURE_SERVICE = 1 << 7` (the
+  next free bit; mask `0xff`) in `abi.rs`, the header's prototype, define, session thread list and
+  "Control service" duty paragraph (D4, D5), `abi_smoke.c` (bit tested with `&`, `service(NULL)`
+  -> `INVALID_ARGUMENT`, exit 6), `header_smoke.cpp` (bit in mask, signature), five runtime tests.
+- `scripts/check-capi-abi.sh`: frozen list grows by one (17 symbols).
+- `docs/C_ABI_V1_QUALIFICATION.md`: the amendment, bound, D6 answer and duty text.
+
+**D3 bound, by construction.** The reclaim loop drains the retirement queue. Each retired plan
+holds one retirement credit (#1343), the credits number the queue's capacity, and only a
+publication (never `service`) reserves one, so one call reclaims at most that capacity of plans
+with no explicit cap. `collect_render_activity` stages at most one observation (it compares one
+render sequence word). Nothing loops on render progress or waits.
+
+**D6, acked-batch question: can an ack ever precede a drop? No.** `service` commits nothing,
+writes no response, acknowledges nothing and adds no queue. The only things it frees are plans
+render already displaced (retirement queue) and nothing else: no `withdraw`, no
+`reserve_replacement`, no mailbox call. Gate 4 is the evidence: a committed (acked) scheduled
+candidate survives 1,000 service calls and render still adopts it at its sample.
+
+**Gate 4 location.** Gate 4 is a control-plane test run under `test-support`, but the
+control-plane crate has no adapter of its own and the authorized paths name no test file in it, so
+it lives in `crates/capi/src/runtime/tests.rs` with the other control-plane tests, through the new
+`test-support` hook. It renders through the C ABI entry point, because only that path publishes the
+render observation (`render_sequence`) a plausible early-promotion defect would key on.
+
+**Gate 3 deviation (spec's red claim).** Read literally, gate 3 cannot turn red when the refresh
+stays in `command` only: `COUNTERS_GET` is itself a `command`, and its own service step refreshes
+before it answers. The test therefore checks the provider's counter snapshot through the
+`test-support` observer right after each submit, with no control call between (red under that
+defect), and then checks `COUNTERS_GET` end to end.
+
+**Tests and mutation runs** (`cargo test --locked -p capi --lib`, 81 tests; each defect applied
+alone, then reverted; reverted runs all green):
+
+| Test | Named defect | Red under it | Existing tests red |
+|---|---|---|---|
+| `service_alone_reclaims_the_retired_plan_and_promotes_its_successor` (gate 1) | M1: the export returns `OK` without running the step | gate 1, gate 4, gate 5 tests | none |
+| `a_source_submit_services_the_session_first` (gate 2) | M2: `submit` runs only `synchronize_plan_epochs` (the pre-#1348 shape) | gate 2, gate 3 tests | none |
+| `every_control_call_refreshes_the_provider_counters` (gate 3) | M3a: the refresh stays in `command` only | gate 3 test only | none |
+| same | M3b: the step refreshes only before it stages (second refresh removed) | gate 3 test only | none |
+| `a_scheduled_candidate_survives_service_until_render_adopts_it` (gate 4) | M4b: `synchronize_plan_epochs` promotes the pending provider once any block rendered since the last observation (the pre-#1311 "next block adopts" assumption) | gate 4 test only | none |
+| same | M4: promote any pending provider unconditionally | gate 4 test | 18 existing tests |
+| `service_with_nothing_pending_changes_nothing` (gate 5) | M5: `collect_render_activity` restages the last observation on every call | gate 5, gate 2, gate 3 tests | `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes` |
+| same, and `abi_smoke.c` (gate 6) | M6: the export returns `OK` for a null session | gate 5 test; `check-capi-abi.sh` fails (abi-smoke exit 6) | none |
+
+Test-value sentences: gate 1 is red if `service` does not reclaim or promote, which no other test
+reaches through the step alone; gate 2 is red if a control call skips the telemetry half (M2);
+gate 3 is red if a call other than `command` leaves the provider counters stale or the step does
+not refresh after staging (M3a, M3b); gate 4 is red if an unadopted scheduled candidate is treated
+as stale (M4b, which every existing reclaim test, all publishing `Next`, misses); gate 5 is red if
+the step mutates state with nothing new (M5; also caught by the existing exact-event oracle test,
+on the command/dequeue path) or the new export accepts a null session (M6).
+
+**Gates.**
+
+- `cargo test --locked -p capi`: ok (81 lib + 2 + 11 integration).
+- `cargo test --locked -p control-plane --features test-support`: ok (the crate has no own tests).
+- `bash scripts/check-capi-abi.sh`: ok (shared and static); `--self-test`: ok.
+- `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`: 0
+  allocations, 0 deallocations, 0 syscalls, `total_violations` 0.
+- `bash scripts/check-workspace-policy.sh`: ok. `bash scripts/check-realtime-policy.sh`: ok.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: ok. `cargo fmt --all --
+  --check`: ok.
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked -p control-plane -p capi --no-deps`: no new
+  failure (only the known capi `limits_are_valid` link). The workspace run stops first in
+  `engine` on two pre-existing failures: the known `watermark.rs` `MAXIMUM_READ_ATTEMPTS` link and
+  a third one not on the known list, `spsc.rs:521` linking private `Self::admits` (from #1311,
+  `efad0080a`); this change touches neither.

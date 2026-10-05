@@ -257,6 +257,8 @@ pub type TestOwnerState = (u64, Box<str>, Box<str>, u64, String, Vec<u32>, Vec<u
 thread_local! {
     static TEST_FAULT_STATE: core::cell::Cell<([Option<TestStructuralFaultPhase>; 2], usize)> =
         const { core::cell::Cell::new(([None; 2], 0)) };
+    static TEST_NEXT_ADOPTION: core::cell::Cell<Option<PlanAdoption>> =
+        const { core::cell::Cell::new(None) };
     static TEST_OWNER_STATE: core::cell::Cell<TestOwnerCounters> =
         const { core::cell::Cell::new(TestOwnerCounters {
             current_provider_constructed: 0,
@@ -308,6 +310,7 @@ pub(crate) fn take_test_fault_state(phase: TestStructuralFaultPhase) -> bool {
 pub fn test_reset_lifecycle_observer() {
     TEST_FAULT_STATE.with(|state| state.set(([None; 2], 0)));
     TEST_OWNER_STATE.with(|state| state.set(TestOwnerCounters::default()));
+    TEST_NEXT_ADOPTION.with(|state| state.set(None));
 }
 
 /// The thread's lifecycle counters.
@@ -881,10 +884,28 @@ where
         &self.retired_providers
     }
 
-    /// Runs [`Self::synchronize_plan_epochs`].
+    /// Schedules the next structural publication's adoption (#1348 gate 4): `command` reserves
+    /// that one candidate with `adoption` instead of [`PlanAdoption::Next`]. Taken once, by the
+    /// next structural publication on this thread.
     #[cfg(feature = "test-support")]
-    pub fn test_synchronize_plan_epochs(&mut self) -> Result<(), CommandError> {
-        self.synchronize_plan_epochs()
+    pub fn test_set_next_adoption(&mut self, adoption: PlanAdoption) {
+        let _ = self;
+        TEST_NEXT_ADOPTION.with(|state| state.set(Some(adoption)));
+    }
+
+    /// The provider's counter snapshot, every counter, as `COUNTERS_GET` would read it now, without
+    /// running a control call (and so without the service step's refresh).
+    #[cfg(feature = "test-support")]
+    pub fn test_provider_counters(&mut self) -> Vec<protocol::CounterValue> {
+        use protocol::ControlProvider as _;
+        self.controller
+            .provider_mut()
+            .counters(&protocol::CountersRequest {
+                all: true,
+                ids: Vec::new(),
+            })
+            .expect("every counter")
+            .values
     }
 
     /// The resource row a structural candidate must fit beside (issue #1042).
@@ -977,16 +998,54 @@ where
         Ok(())
     }
 
-    /// Runs one control command frame. A success returns the response's length in the response
-    /// scratch ([`Self::command_response`]); a structural command either rides the newest plan's
-    /// live lanes or prepares, admits and publishes a replacement plan.
-    pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+    /// One bounded step of control work between edits (#1348 D1): the engine owns no thread, so
+    /// the host drives it, through `miso_engine_v1_service` or any other session call, each of
+    /// which runs it first (D2). In order, it
+    ///
+    /// 1. brings the provider epochs up to render and reclaims retired plans
+    ///    (`synchronize_plan_epochs`);
+    /// 2. refreshes the provider's counters that a source outside it serves (D8);
+    /// 3. stages the render observation (`collect_render_activity`);
+    /// 4. refreshes those counters again, so a record that staging coalesced or dropped is
+    ///    counted in this same call.
+    ///
+    /// **Bounded (D3).** Every retired plan holds one retirement credit, the credits number the
+    /// retirement queue's capacity, and only a publication -- never this step -- reserves one, so
+    /// one call reclaims at most that capacity of plans. It stages at most one render observation,
+    /// never loops on render progress and never waits, so its cost does not grow with the time
+    /// since the last call.
+    ///
+    /// **Pending candidates (D7).** Nothing here takes a pending candidate: it stays in its
+    /// mailbox cell, with its plan, epoch, revision word and retirement credit, until render adopts
+    /// it or a publication withdraws it. A provider is promoted only once render has adopted its
+    /// plan.
+    ///
+    /// **Acked-batch question (D6): can an ack ever precede a drop? No.** The step commits and
+    /// acknowledges nothing and adds no queue. The only things it discards are plans render has
+    /// already displaced; a committed revision's plan is never among them.
+    pub fn service(&mut self) -> Result<(), CommandError> {
         self.synchronize_plan_epochs()?;
+        self.refresh_provider_counters();
         self.collect_render_activity();
+        self.refresh_provider_counters();
+        Ok(())
+    }
+
+    /// Sets every counter the provider serves from a source outside it (#1348 D8): today the
+    /// controller's telemetry counters. A counter added later joins this refresh, never a single
+    /// control call.
+    fn refresh_provider_counters(&mut self) {
         let telemetry_counters = self.controller.queues().telemetry_counters();
         self.controller
             .provider_mut()
             .set_telemetry_counters(telemetry_counters);
+    }
+
+    /// Runs one control command frame. A success returns the response's length in the response
+    /// scratch ([`Self::command_response`]); a structural command either rides the newest plan's
+    /// live lanes or prepares, admits and publishes a replacement plan.
+    pub fn command(&mut self, request: &[u8], output_capacity: u64) -> Result<usize, CommandError> {
+        self.service()?;
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
         let prepared = self
             .controller
@@ -1095,9 +1154,15 @@ where
                 if !self.pending_providers.is_empty() {
                     return Err(CommandError::Backpressure);
                 }
+                #[cfg(feature = "test-support")]
+                let adoption = TEST_NEXT_ADOPTION
+                    .with(core::cell::Cell::take)
+                    .unwrap_or(PlanAdoption::Next);
+                #[cfg(not(feature = "test-support"))]
+                let adoption = PlanAdoption::Next;
                 let reservation = match self
                     .publisher
-                    .reserve_replacement(candidate_plan.take(), PlanAdoption::Next)
+                    .reserve_replacement(candidate_plan.take(), adoption)
                 {
                     Ok(reservation) => reservation,
                     Err(error) => {
@@ -1562,12 +1627,10 @@ where
         lane: EventLane,
         output_capacity: u64,
     ) -> Result<Option<usize>, EventError> {
-        self.synchronize_plan_epochs()
-            .map_err(|error| match error {
-                CommandError::Backpressure => EventError::Backpressure,
-                _ => EventError::Internal,
-            })?;
-        self.collect_render_activity();
+        self.service().map_err(|error| match error {
+            CommandError::Backpressure => EventError::Backpressure,
+            _ => EventError::Internal,
+        })?;
         let capacity = usize::try_from(output_capacity)
             .unwrap_or(usize::MAX)
             .min(self.response_scratch.len());
@@ -1672,8 +1735,7 @@ where
         id: &[u8],
         submission: SourceSubmission<'_>,
     ) -> Result<source::SubmitReport, SourceFailure> {
-        self.synchronize_plan_epochs()
-            .map_err(|_| SourceFailure::Internal)?;
+        self.service().map_err(|_| SourceFailure::Internal)?;
         self.newest_providers_mut()
             .sources
             .submit(id, submission)
@@ -1687,8 +1749,7 @@ where
         generation: u64,
         source_frame: u64,
     ) -> Result<(), SourceFailure> {
-        self.synchronize_plan_epochs()
-            .map_err(|_| SourceFailure::Internal)?;
+        self.service().map_err(|_| SourceFailure::Internal)?;
         self.newest_providers_mut()
             .sources
             .seek(id, generation, source_frame)
@@ -1704,8 +1765,7 @@ where
         source_frame: u64,
         anchor_sample: u64,
     ) -> Result<(), SourceFailure> {
-        self.synchronize_plan_epochs()
-            .map_err(|_| SourceFailure::Internal)?;
+        self.service().map_err(|_| SourceFailure::Internal)?;
         self.newest_providers_mut()
             .sources
             .seek_at(id, generation, source_frame, anchor_sample)

@@ -20,7 +20,9 @@ ABI_ASSERT(MISO_ENGINE_V1_TAIL_FINITE == 0);
 ABI_ASSERT(MISO_ENGINE_V1_TAIL_INFINITE == 1);
 ABI_ASSERT(MISO_ENGINE_V1_EXACT_LAUNCH_RATE_MASK == 15);
 ABI_ASSERT(MISO_ENGINE_V1_FEATURE_SOURCE_SEEK_AT == 32);
-ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 127);
+ABI_ASSERT(MISO_ENGINE_V1_FEATURE_MASK == 255);
+ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_SERVICE) ==
+           MISO_ENGINE_V1_FEATURE_SERVICE);
 ABI_ASSERT((MISO_ENGINE_V1_FEATURE_MASK & MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK) ==
            MISO_ENGINE_V1_FEATURE_PLAN_WATERMARK);
 ABI_ASSERT(MISO_ENGINE_V1_OUTCOME_EXACT == 1);
@@ -118,6 +120,7 @@ static uint32_t (*const resources_signature)(const miso_engine_v1_plan *,
 static uint32_t (*const watermark_signature)(const miso_engine_v1_plan *,
                                              miso_engine_v1_watermark *) =
     miso_engine_v1_plan_watermark;
+static uint32_t (*const service_signature)(miso_engine_v1_session *) = miso_engine_v1_service;
 static uint32_t (*const last_error_signature)(const void *, miso_engine_v1_bytes_out *) =
     miso_engine_v1_last_error;
 static void (*const session_destroy_signature)(miso_engine_v1_session *) =
@@ -240,11 +243,18 @@ int main(void) {
         return 4;
     }
 
+    /* A host checks the service bit before calling the symbol (issue 1348); a null session is
+     * refused. */
+    if ((capabilities.feature_mask & MISO_ENGINE_V1_FEATURE_SERVICE) == 0 ||
+        service_signature(NULL) != MISO_ENGINE_V1_INVALID_ARGUMENT) {
+        return 6;
+    }
+
     return compile_session_signature == NULL || source_submit_signature == NULL ||
                    source_seek_signature == NULL || submit_command_signature == NULL ||
                    dequeue_event_signature == NULL ||
                    render_signature == NULL || resources_signature == NULL ||
-                   watermark_signature == NULL ||
+                   watermark_signature == NULL || service_signature == NULL ||
                    last_error_signature == NULL || session_destroy_signature == NULL ||
                    plan_destroy_signature == NULL
                ? 3

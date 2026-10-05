@@ -17,8 +17,9 @@ use lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
-    CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailureReport,
-    compile_children, failure_bytes, limits_are_valid, plan_error, render_error_code,
+    CommandError, EventError, EventLane, PlanQueries, PlanState, SourceFailure,
+    SourceFailureReport, compile_children, failure_bytes, limits_are_valid, plan_error,
+    render_error_code,
 };
 
 fn catch_result(operation: impl FnOnce() -> u32) -> u32 {
@@ -624,6 +625,50 @@ unsafe fn source_seek_entry(
     })
 }
 
+/// Run one bounded step of control work between edits (#1348): reclaim retired plans, bring the
+/// provider epochs up to render, refresh the session counters and stage render telemetry. Every
+/// other session control call runs the same step first; this entry point runs only the step.
+///
+/// It commits and acknowledges nothing, never takes or drops a pending candidate, never waits for
+/// render, and does a bounded amount of work however long the host went without calling. A pending
+/// edit progresses only while the host makes session calls, so a host with edits pending calls
+/// this at least once per render-buffer period.
+///
+/// Returns `RESULT_OK`; a null or wrong handle as every session call; and `RESULT_INTERNAL` with
+/// the session diagnostic `capi.source.epoch` when the session's plan epochs cannot be
+/// synchronized.
+///
+/// # Safety
+///
+/// `session` must be a live session handle.
+///
+/// Thread: session, serialized with the other session calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn miso_engine_v1_service(session: *mut Session) -> u32 {
+    catch_result(|| {
+        // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
+        let kind = unsafe { session_kind(session) };
+        if kind != RESULT_OK {
+            return kind;
+        }
+        // SAFETY: `session` passed the live-kind check and the ABI serializes session calls.
+        let session = unsafe { &mut *session };
+        match session.state.service() {
+            Ok(()) => {
+                session.last_error.borrow_mut().clear();
+                RESULT_OK
+            }
+            Err(_) => {
+                // The step's only failure is the epoch synchronization's, reported with the
+                // diagnostic the source calls already set for it.
+                let (code, diagnostic) = SourceFailure::Internal.report();
+                session.last_error.borrow_mut().set(diagnostic);
+                code
+            }
+        }
+    })
+}
+
 /// Process one bounded Issue-005 capability command with exact-byte replay.
 ///
 /// # Safety
@@ -1140,6 +1185,12 @@ pub(crate) fn test_submit_command(
 }
 
 #[cfg(test)]
+pub(crate) fn test_service(session: *mut Session) -> u32 {
+    // SAFETY: Test callers pass a live session handle, or a null or wrong one to test refusal.
+    unsafe { miso_engine_v1_service(session) }
+}
+
+#[cfg(test)]
 pub(crate) fn test_dequeue_event(session: *mut Session, lane: u32, output: &mut BytesOut) -> u32 {
     // SAFETY: Test callers retain the live session and ABI output for this call.
     unsafe { miso_engine_v1_dequeue_event(session, lane, output) }
@@ -1201,6 +1252,13 @@ pub(crate) fn test_telemetry_counters(session: *mut Session) -> protocol::Teleme
     unsafe { &(*session).state }.test_telemetry_counters()
 }
 
+/// The provider's counter snapshot as it stands, read without a control call (#1348 gate 3).
+#[cfg(test)]
+pub(crate) fn test_provider_counters(session: *mut Session) -> Vec<protocol::CounterValue> {
+    // SAFETY: Test callers retain the exclusively owned live session for this inspection.
+    unsafe { &mut (*session).state }.test_provider_counters()
+}
+
 /// How many applied plan swaps carried state from their predecessor, and how many found a
 /// predecessor whose shape could not supply it (`RealtimePlanOwner::carried_count` and
 /// `carry_mismatch_count`). Not part of the C ABI: no symbol is exported, and the header does not
@@ -1253,6 +1311,15 @@ pub(crate) fn test_set_structural_faults(
 ) {
     // SAFETY: Test callers retain the exclusively owned live session for deterministic faults.
     unsafe { &mut (*session).state }.test_set_structural_faults(faults);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_next_adoption(
+    session: *mut Session,
+    adoption: engine::realtime::PlanAdoption,
+) {
+    // SAFETY: Test callers retain the exclusively owned live session for this schedule.
+    unsafe { &mut (*session).state }.test_set_next_adoption(adoption);
 }
 
 #[cfg(test)]
@@ -1546,9 +1613,10 @@ mod tests {
         assert_eq!(query(&mut capabilities), RESULT_OK);
         assert_eq!(capabilities.abi_version, ABI_VERSION);
         assert_eq!(capabilities.exact_launch_rate_mask, 0x0f);
-        assert_eq!(capabilities.feature_mask, 0x7f);
+        assert_eq!(capabilities.feature_mask, 0xff);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_SOURCE_SEEK_AT, 0);
         assert_ne!(capabilities.feature_mask & crate::FEATURE_PLAN_WATERMARK, 0);
+        assert_ne!(capabilities.feature_mask & crate::FEATURE_SERVICE, 0);
         assert_eq!(capabilities.reserved, [0; 4]);
     }
 

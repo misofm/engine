@@ -788,7 +788,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     assert_eq!(children.session.test_providers().test_epoch(), 0);
     children
         .session
-        .test_synchronize_plan_epochs()
+        .service()
         .expect("control promotion and retirement");
     assert_eq!(children.session.test_providers().test_epoch(), 1);
     assert!(children.session.test_pending_providers().is_empty());
@@ -820,7 +820,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         .expect("second replacement boundary");
     children
         .session
-        .test_synchronize_plan_epochs()
+        .service()
         .expect("second provider promotion and retirement");
     // #1273 D1: the successor is diffed against the committed model before the transaction, so
     // the source whose declaration changed (frames 512) restarts in a new ring at generation 1,
@@ -3325,4 +3325,348 @@ mod fp_environment {
         crate::ffi::test_plan_destroy(c_plan);
         crate::ffi::test_session_destroy(c_session);
     }
+}
+
+/// A `SESSION_TRANSACTION_APPLY` at `revision` that rebuilds the plan ([`rebuild_edit`] with
+/// `tag`).
+fn rebuild_command(request_id: u64, revision: u64, tag: u8) -> Vec<u8> {
+    let edit = rebuild_edit(SESSION, tag);
+    command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(revision)),
+        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+    )
+}
+
+/// Telemetry that stages one render-peak meter record per meter handle per observed render,
+/// configured at the fixture's initial revision.
+fn meter_telemetry(request_id: u64, meter_handles: Vec<u32>) -> Vec<u8> {
+    let configuration = protocol::TelemetryConfiguration {
+        meter_handles,
+        meter_period_blocks: 1,
+        counter_ids: Vec::new(),
+        counter_period_blocks: 0,
+        diagnostics_enabled: false,
+        minimum_diagnostic_severity: protocol::DiagnosticSeverity::Info,
+    };
+    command_bytes_at_revision(
+        request_id,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::TelemetryConfigure(&configuration),
+    )
+}
+
+/// One 128-frame block of silence for `fixture-source` through the exported submit entry point.
+fn submit_silence_c(session: *mut crate::Session, generation: u64, start_frame: u64) {
+    let silence = [0.0_f32; 128];
+    submit_c(
+        session,
+        generation,
+        start_frame,
+        48_000,
+        &silence,
+        &silence,
+        false,
+    );
+}
+
+/// Issue #1348 gate 1: after a committed rebuild and its swap block, `miso_engine_v1_service`
+/// alone disposes of the retired plan and promotes the successor's provider, and a second rebuild
+/// then reserves.
+///
+/// Test value: red if `service` does not reclaim or does not promote; no other call does only this
+/// step, and every existing reclaim test reaches it through a command or a dequeue.
+#[test]
+fn service_alone_reclaims_the_retired_plan_and_promotes_its_successor() {
+    crate::ffi::test_reset_lifecycle_observer();
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    assert_eq!(
+        command_c(c_session, &rebuild_command(1, 42, 0x01)).0,
+        crate::RESULT_OK
+    );
+    render_c(c_plan, 0);
+    let before = crate::ffi::test_lifecycle_counters();
+    // (revision, replay entries, current provider epoch, pending providers)
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (43, 1, 0, 1)
+    );
+
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let after = crate::ffi::test_lifecycle_counters();
+    assert_eq!(
+        after.current_plan_disposed,
+        before.current_plan_disposed + 1,
+        "service disposes of the retired plan"
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (43, 1, 1, 0),
+        "service promotes the adopted successor's provider"
+    );
+    assert!(crate::ffi::test_last_error(c_session).is_empty());
+
+    assert_eq!(
+        command_c(c_session, &rebuild_command(2, 43, 0x02)).0,
+        crate::RESULT_OK,
+        "the reclaimed credit lets the next rebuild reserve"
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (44, 2, 1, 1)
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1348 gate 2: a source submission runs the whole service step first: with a meter handle
+/// configured, it disposes of the retired plan and stages the swap block's render-peak record.
+///
+/// Test value: red if a control call skips the telemetry half of the step, as the source submit
+/// did before #1348 (only `command` and `dequeue_event` staged render telemetry).
+#[test]
+fn a_source_submit_services_the_session_first() {
+    crate::ffi::test_reset_lifecycle_observer();
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    assert_eq!(
+        command_c(c_session, &meter_telemetry(1, vec![1])).0,
+        crate::RESULT_OK
+    );
+    assert_eq!(
+        command_c(c_session, &rebuild_command(2, 42, 0x01)).0,
+        crate::RESULT_OK
+    );
+    render_c(c_plan, 0);
+    let before = crate::ffi::test_lifecycle_counters();
+    let telemetry_before = crate::ffi::test_transaction_snapshot(c_session).telemetry;
+
+    // The rebuild changed the source's content, so it restarts at generation 1, frame 0.
+    submit_silence_c(c_session, 1, 0);
+    let after = crate::ffi::test_lifecycle_counters();
+    assert_eq!(
+        after.current_plan_disposed,
+        before.current_plan_disposed + 1,
+        "the submit's service step disposes of the retired plan"
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (43, 2, 1, 0)
+    );
+    let telemetry_after = crate::ffi::test_transaction_snapshot(c_session).telemetry;
+    assert_eq!(
+        telemetry_after.occupancy,
+        telemetry_before.occupancy + 1,
+        "the submit's service step stages the swap block's render-peak record"
+    );
+    let (result, event) = event_c(c_session, crate::EVENT_LANE_LOSSY);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    assert!(matches!(
+        ProtocolCodec::default()
+            .decode_typed_event(&event, &mut DecodeScratch::new(&mut fields))
+            .expect("lossy event"),
+        protocol::DecodedTypedEventFrame {
+            payload: protocol::DecodedEventPayload::MeterBatch(_),
+            ..
+        }
+    ));
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1348 gate 3: the provider's telemetry counters are refreshed by every control call's
+/// service step, after its staging. Drops staged by a source submission are in the provider's
+/// counter snapshot as soon as the submit returns, equal to the controller's own count, and
+/// `COUNTERS_GET` reports them.
+///
+/// Test value: red if a control call other than `command` leaves the provider's counters stale
+/// (the refresh kept in `command` only), or if the step refreshes only before it stages, either of
+/// which #1312 and #1351's snapshot readers would then report wrongly.
+#[test]
+fn every_control_call_refreshes_the_provider_counters() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    // Two meter records per observed render overflow the lossy lane's room for one stream.
+    assert_eq!(
+        command_c(c_session, &meter_telemetry(1, vec![1, 2])).0,
+        crate::RESULT_OK
+    );
+    // Arm the render-peak gate the configuration enabled.
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let provider_dropped = |session: *mut crate::Session| {
+        crate::ffi::test_provider_counters(session)
+            .iter()
+            .find(|value| value.id == protocol::CounterId::TelemetryDropped)
+            .expect("telemetry-dropped counter")
+            .value
+    };
+    for block in 0..4 {
+        render_c(c_plan, block);
+        submit_silence_c(c_session, 1, block * 128);
+        let controller = crate::ffi::test_telemetry_counters(c_session);
+        assert_eq!(
+            provider_dropped(c_session),
+            controller.telemetry_dropped,
+            "block {block}: the submit's own service step counted its drops"
+        );
+    }
+    let dropped = crate::ffi::test_telemetry_counters(c_session).telemetry_dropped;
+    assert!(dropped > 0, "the telemetry lane dropped records");
+
+    let request = command_bytes(
+        2,
+        protocol::CommandPayload::CountersGet(&protocol::CountersRequest {
+            all: false,
+            ids: vec![protocol::CounterId::TelemetryDropped as u32],
+        }),
+    );
+    let (result, response) = command_c(c_session, &request);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::CounterSnapshot(snapshot),
+        ..
+    } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("counters response")
+    else {
+        panic!("expected a counter snapshot")
+    };
+    assert_eq!(
+        snapshot.values,
+        vec![protocol::CounterValue {
+            id: protocol::CounterId::TelemetryDropped,
+            value: dropped,
+        }]
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1348 gate 4 (D7): a published candidate scheduled `NoEarlierThan` 64 blocks ahead
+/// survives 1,000 service steps after a rendered block: render still adopts it, exactly at the
+/// block that starts at its sample, its provider stays pending until then, no plan or provider is
+/// disposed, and the retirement credit it holds comes back only through the adoption's reclaim.
+///
+/// Test value: red if `synchronize_plan_epochs` treats an unadopted scheduled candidate as stale
+/// and disposes of it or promotes its provider early -- for example on the pre-#1311 assumption
+/// that any block rendered after a publication adopted it (an acked revision's plan lost, or the
+/// control plane addressing a plan render does not run). Every other reclaim test publishes for
+/// the next block, where that assumption holds.
+#[test]
+fn a_scheduled_candidate_survives_service_until_render_adopts_it() {
+    const ADOPTION_BLOCK: u64 = 64;
+    crate::ffi::test_reset_lifecycle_observer();
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    crate::ffi::test_set_next_adoption(
+        c_session,
+        engine::realtime::PlanAdoption::NoEarlierThan(ADOPTION_BLOCK * 128),
+    );
+    assert_eq!(
+        command_c(c_session, &rebuild_command(1, 42, 0x01)).0,
+        crate::RESULT_OK
+    );
+    render_c(c_plan, 0);
+    let published = crate::ffi::test_lifecycle_counters();
+    // (revision, replay entries, current provider epoch, pending providers)
+    let summary = crate::ffi::test_session_state_summary(c_session);
+    assert_eq!(summary, (43, 1, 0, 1));
+
+    for _ in 0..1_000 {
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    }
+    assert_eq!(
+        crate::ffi::test_lifecycle_counters(),
+        published,
+        "service disposes of no plan and no provider"
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        summary,
+        "the candidate's provider stays pending"
+    );
+
+    for block in 1..ADOPTION_BLOCK {
+        render_c(c_plan, block);
+    }
+    let (result, watermark) = crate::ffi::test_plan_watermark(c_plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(watermark.revision, 42, "not adopted before its block");
+    render_c(c_plan, ADOPTION_BLOCK);
+    let (result, watermark) = crate::ffi::test_plan_watermark(c_plan);
+    assert_eq!(result, crate::RESULT_OK);
+    assert_eq!(
+        (watermark.revision, watermark.first_sample),
+        (43, ADOPTION_BLOCK * 128),
+        "render adopts the candidate service kept, at the block that starts at its sample"
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        summary,
+        "no control call yet"
+    );
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (43, 1, 1, 0)
+    );
+    let mut reclaimed = published;
+    reclaimed.current_plan_disposed += 1;
+    reclaimed.current_provider_disposed += 1;
+    assert_eq!(crate::ffi::test_lifecycle_counters(), reclaimed);
+    // The reclaim returned the candidate's retirement credit: the next rebuild reserves.
+    assert_eq!(
+        command_c(c_session, &rebuild_command(2, 43, 0x02)).0,
+        crate::RESULT_OK
+    );
+    assert_eq!(
+        crate::ffi::test_session_state_summary(c_session),
+        (44, 2, 1, 1)
+    );
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+/// Issue #1348 gate 5: `miso_engine_v1_service` with nothing pending returns `OK` and changes
+/// nothing, and 1,000 consecutive calls with no render change nothing either, even with telemetry
+/// configured and one render observation already staged. A null or wrong handle is refused as on
+/// every session call.
+///
+/// Test value: red if the step does work that grows with idle time or mutates state with nothing
+/// pending (for example, staging the same render observation again on every call).
+#[test]
+fn service_with_nothing_pending_changes_nothing() {
+    crate::ffi::test_reset_lifecycle_observer();
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    assert_eq!(
+        crate::ffi::test_service(core::ptr::null_mut()),
+        crate::RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        crate::ffi::test_service(c_plan.cast()),
+        crate::RESULT_WRONG_HANDLE
+    );
+
+    let fresh = crate::ffi::test_transaction_snapshot(c_session);
+    let lifecycle = crate::ffi::test_lifecycle_counters();
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    assert_eq!(crate::ffi::test_transaction_snapshot(c_session), fresh);
+    assert_eq!(crate::ffi::test_lifecycle_counters(), lifecycle);
+
+    assert_eq!(
+        command_c(c_session, &meter_telemetry(1, vec![1])).0,
+        crate::RESULT_OK
+    );
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    render_c(c_plan, 0);
+    assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    let settled = crate::ffi::test_transaction_snapshot(c_session);
+    assert_eq!(settled.telemetry.occupancy, 1, "one observation staged");
+    let counters = crate::ffi::test_owner_counters(c_session);
+    for _ in 0..1_000 {
+        assert_eq!(crate::ffi::test_service(c_session), crate::RESULT_OK);
+    }
+    assert_eq!(crate::ffi::test_transaction_snapshot(c_session), settled);
+    assert_eq!(crate::ffi::test_owner_counters(c_session), counters);
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
 }

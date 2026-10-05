@@ -149,6 +149,38 @@ and a wrong-size struct, `header_smoke.cpp` pins the size and every field offset
 `"total_violations":0` with watermark publication on (its live edits and its carrying swap
 advance the watermark during the audited calls).
 
+The engine owns no thread, so the host drives the control work between edits through
+`miso_engine_v1_service(session)` (#1348, decision 15 D15-17), an in-place V1 amendment: one new
+exported symbol, announced by `MISO_ENGINE_V1_FEATURE_SERVICE` (the next free bit, 128) in the
+capability report, whose feature mask grows to include it; no struct, size or `ABI_VERSION`
+changes. It is a session call, serialized with the others. One call runs one bounded step: it
+reclaims the plans render has retired and brings the provider epochs up to render, refreshes the
+provider's counters (the controller's telemetry counters today), stages the render observation,
+and refreshes the counters again so a record that staging coalesced or dropped is counted in the
+same call. Every other session control call (`source_submit_planar_f32`, `source_seek`,
+`source_seek_at`, `submit_command`, `dequeue_event`) runs the same step first, in place of the
+parts each ran before; before #1348 only `submit_command` refreshed the counters and the source
+calls staged no telemetry. The step reclaims at most the retirement queue's capacity of plans,
+because each retired plan holds one of that many retirement credits and only a publication
+reserves one; it stages at most one render observation, never waits for render and never loops on
+its progress, so its cost does not grow with the time since the last call. It commits and
+acknowledges nothing, adds no queue, and never takes or drops a pending candidate: a scheduled
+candidate stays in its mailbox cell until render adopts it, and its provider is promoted only
+after. So an ack cannot precede a drop through it. Results: `OK`; a null session
+`INVALID_ARGUMENT` and another handle `WRONG_HANDLE`, as every session call; an epoch
+synchronization failure `INTERNAL` with the session diagnostic `capi.source.epoch`, the one the
+source calls already set for it. The host's duty, in the header: a pending edit progresses only
+while the host makes session calls, the same duty as draining events. A host that renders but
+never calls keeps retired plans allocated, and its next structural edit waits for that reclaim; a
+warm successor that misses its deadline falls back only at the host's next session call (#1358,
+#1360); the watermark shows when each edit took effect. While edits are pending, the host calls
+`service` (or another session call) at least once per render-buffer period. The frozen exported
+set is now 17 `miso_engine_v1_*` definitions; `abi_smoke.c` checks the bit against the queried
+mask and calls `service(NULL)` for `INVALID_ARGUMENT`, `header_smoke.cpp` pins the bit inside the
+mask and the signature, and the capi runtime tests cover reclaim by `service` alone, the step
+inside a source submit, the counter refresh, a scheduled candidate kept across 1,000 calls, and
+idle calls that change nothing.
+
 The first C11-static launch found one qualification-fixture error: it attempted generation-1 seek
 before the initial generation-1 submission and exited 13. No product byte or staged library was
 changed or rebuilt. The new consumer was corrected to submit generation 1 first, then seek and
