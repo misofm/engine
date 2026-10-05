@@ -126,7 +126,7 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   implementer proves with evidence that no correct encoding avoids it does the slice measure the
   browser cost (V8, the existing timing method) and record it here as an explicit accepted
   exception with that evidence; the gate then holds that row with its reason.
-- **A4. D6 restated (class B, re-accepted; premises corrected by A7).** The joint flush moves
+- **A4. D6 restated (class B, re-accepted; premises corrected by A7; acceptance withdrawn and restated by A8 below).** The joint flush moves
   output bits by a bounded amount, at any input level. While every input sample satisfies
   |x| < L* = REST_EPS/(2·max(a2,a3)), the section stays at rest and outputs only its direct term
   (m0 + m1·a2 + m2·a3)·x; the change at the section's output is at most ‖h − g_direct·δ‖₁·L*. L* is
@@ -206,10 +206,60 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   6. Do NOT edit decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`);
      the root relayed A4 to S0. A7 stays in this spec and the note in `dsp-research/filters.md` only.
 
+- **A8. Root decisions for attempt 4 (2026-10-05; supersedes A4/A7's acceptance of the dead zone).**
+  Decided by the decision-15 root coordinator under the owner's delegation
+  (`no-shortcuts-correctness-first`), after attempt 3's verdict
+  (`/home/bl/misofm/submix-verdicts/1328-attempt3.md`, FAIL: M1 chain bound, M2 prose). Root
+  withdraws A4/A7's acceptance: "below the arithmetic noise the engine already accepts" is disproved
+  by the chain measurement (four +24 dB shelves at 10 Hz, input `3e-11`, change about `1.5e-6`,
+  -116 dBFS, above a 24-bit LSB and growing with every boosting section). An EQ must apply its
+  response to whatever it is given; silence is exact zero, and "skip work on silence" needs only
+  that.
+  1. The joint flush (the `REST_EPS` pair rule) fires only when the section's input is exactly zero
+     (`+0.0` or `-0.0`) for the sample, together with the existing `REST_EPS` state condition. The
+     per-word `FLUSH_EPS` law is unchanged. If denormal inputs reach the section and must also be
+     gated, the threshold may be `|x| < f32::MIN_POSITIVE`, with the reason recorded; nothing
+     larger. This supersedes D1's `rest` term and D2's call (`flush_pair` takes the section input).
+  2. Re-measure and restate the class-B bound (A4) for the new law at section and chain level (four
+     +24 dB shelves at 10 Hz and at 100 Hz, 96 kHz, inputs down to `1e-30`), and replace the
+     dead-zone text in `dsp-research/filters.md`. Gates 1-2 must still hold.
+  3. New gate: a chain test where tiny non-zero input through boosting shelves gets its full boost,
+     red on attempt 3's law.
+  4. The V8 spill gate stays clean on all held rows. If the extra lane compare causes a spill,
+     report it with the measured cost before working around it; do not weaken the gate. Up to 2 %
+     render cost is acceptable (owner allowance).
+  5. Every `svf_step` call site threads its section input to the flush (builtins, EQ, LR4
+     crossover), and so do the twin, the g2 oracle, the audit's `unfused_fma` model and the EQ
+     elision predicates and proof where affected. Op counts in the floor ruling and the floors
+     (`tools/bench/src/floor.rs`, `scripts/console-benchmark-record-lib.jq`,
+     `scripts/test-console-benchmark.sh`) follow; G5 re-pins only for cases that move,
+     individually with reasons.
+  6. Fold M2: a stale identity flag *can* elide a live section; correct the test doc and the
+     attempt-3 record, and add a left-only phase without `-0.0` input so the EQ test is red in
+     release too (record red/green in debug and release).
+  7. Fold the NITs: `filters.md` "5 Hz square" -> 3.84 Hz; qualify "V8 sank their construction into
+     it" as unmeasured; add a parametric-eq `MUTATIONS.md` row for the new test.
+  8. Amend decision 15's "Root decisions after S0" entry for #1328 to point at A8 (authorized), and
+     sync GitHub #1328's body to this spec.
+
+  **A4 restated under A8 (measured in attempt 4; class B, the bound the root asked for).** The joint
+  flush moves output bits only on samples whose section input is exactly zero: while the input is
+  not zero every section runs the per-word law bit for bit, so no output sample moves while a
+  signal is present, at any level (measured on the real EQ, 96 kHz, inputs from 1 down to `1e-30`,
+  section and four-shelf chain). In tails it ends a decay below `REST_EPS`: at most `1.9e-13`
+  (-254.5 dBFS) at one +24 dB low shelf's output, and at most `3.4e-10` (-189.4 dBFS) at the output
+  of four cascaded +24 dB low shelves (10 Hz and 100 Hz), where every downstream section boosts
+  the tail an upstream one drops. A non-zero sample followed by exact zeros is such a tail: an
+  isolated impulse below `L*` (`3.05e-11` at the 10 Hz +24 dB shelf) loses its tail after the first
+  zero sample, at most `1.6e-10` (-195.8 dBFS) through four shelves. The per-word law's own dead
+  zone (inputs below about `3e-17`, -330 dBFS) is unchanged. Listening line: "the joint flush moves
+  bits only after an exact-zero input; largest change measured -189 dBFS at a four-shelf chain's
+  output (-254 dBFS at one section's); no listening run".
+
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** TPT SVF in stored A1 form, `v3 = v0 - ic2`, `d1 = -c1·ic1 + a2·v3`,
-  `d2 = a3·v3 + a2·ic1`, `n1 = ic1 + 2d1`, `n2 = ic2 + 2d2`, then `flush_pair` [SIMPER-SVF]
+  `d2 = a3·v3 + a2·ic1`, `n1 = ic1 + 2d1`, `n2 = ic2 + 2d2`, then `flush_pair(n1, n2, v0)` (A8) [SIMPER-SVF]
   [ZAVALISHIN-TPT]. Coefficient and update rules unchanged.
 - **Numerical limits:** D3. Ramps in flight are safe: the rule only zeroes state, and each step
   matrix stays non-expansive.
@@ -221,9 +271,11 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   limit cycles in recursive filters), all in `dsp-research/BIBLIOGRAPHY.md`.
 - **Fixtures and objective tests:** gates 1-4 below. **Benchmarks:** descriptive only; round-2
   scratch measured +10 % on one isolated section (latency-bound) and no measurable change on four
-  interleaved sections; the floor-accounting rows record the +5 ops. **Listening:** every change is
-  below −186 dBFS at the section's output; no listening run (A4 as corrected by A7; the dead zone is
-  in `dsp-research/filters.md`, numerical limits).
+  interleaved sections; the floor-accounting rows record the +7 ops (two of them A8's input gate).
+  **Listening:** the joint flush moves bits only after an exact-zero input; largest change measured
+  -189 dBFS at a four-shelf chain's output (-254 dBFS at one section's); no listening run (A4 as
+  restated under A8; the rest rule and its bound are in `dsp-research/filters.md`, numerical
+  limits).
 
 ## Deliverables
 
@@ -278,8 +330,9 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
    and the output is exactly `+0.0` within 9,600,000 samples (100 s; round-2 measured the EQ's
    worst rest at about 89 s). Red on revert (stuck at `ic2 = 6.01e-20`).
 3. **Pair law** (`crates/lane/tests/g4_flush.rs`, at every width the build has): both words below
-   `REST_EPS` → both `+0.0`; one word at or above `REST_EPS` → each word follows the per-word law,
-   bit for bit; NaN in either word passes through; `-0.0` → `+0.0`.
+   `REST_EPS` on an input of exactly `±0.0` → both `+0.0`; on any non-zero input (subnormal, NaN
+   and infinity included, A8) or with one word at or above `REST_EPS` → each word follows the
+   per-word law, bit for bit; NaN in either word passes through; `-0.0` → `+0.0`.
 4. Every existing gate green, re-pins limited to D7:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`
@@ -290,6 +343,10 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
    - `bash scripts/check-lane-policy.sh`, `bash scripts/check-dsp-research.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
+5. **Chain boost (A8)** (`crates/parametric-eq/tests/exact_rest.rs`): four +24 dB low shelves at
+   10 Hz and at 100 Hz, 96 kHz, fed a 3.84 Hz square at `0.03 * 2^-k` (`k` = 30, 34, 36, below one
+   section's old rest limit), scaled back by `2^k`, match the same square at `0.03` within `1e-4`
+   of its peak. Red on attempt 3's law.
 
 ## Test value
 
@@ -299,6 +356,9 @@ Hazards line "report it; do not weaken the gate" and the D6 premises below; ever
   red here; `silent_fixed_point.rs` only checks the fast path is bit-neutral, not that it is reached.
 - Gate 3: a pair rule built from OR instead of AND (zeroes an audible partner word: the click the
   plan rejected), or from `Lane::max` (hides a NaN), is red here; gates 1-2 stay green on both.
+- Gate 5 (A8): a joint flush that ignores the section input (attempt 3's law) zeroes a tiny
+  signal's state in each boosting section and loses the cascade's boost; red here (misses by the
+  whole peak), while gates 1-2 stay green on it.
 - The generator values (D5) extend an existing randomized differential; judged by reach: they make
   it reach the joint band, where a per-word EQ predicate would elide a section the kernel changes.
 
@@ -597,7 +657,13 @@ general band's gain, which changes neither cache). Release stays green, as the t
 stale `identity` only chooses a schedule (the crate's gates prove the schedules render the same
 bits), and
 a stale `dry` runs the HPF wet at the identity words, which can move at most `-0.0` -> `+0.0`; four
-HPF cutoffs (30, 500, 2,000, 9,000 Hz) all left the bits equal. The defence is the debug
+HPF cutoffs (30, 500, 2,000, 9,000 Hz) all left the bits equal. *(Corrected in attempt 4, A8
+item 6: the stale-`identity` reason is false. The dual elision gate drops a section when both
+channels' flags say identity, so a stale right flag beside a fresh left one skips a section that
+is live on the right, in release. Release stayed green here only because every block of the input
+carries `-0.0`, which refuses elision, and because directly after `desymmetrize` the left
+channel's correct flag guards the AND. Attempt 4 adds a left-only phase on a `-0.0`-free input,
+where the identity mutant is red in release too.)* The defence is the debug
 re-derivation, which is what this test reaches and nothing did before. The `desymmetrize` doc now
 names this test as the gate for `identity` and `dry`. **Test value:** a disengage copy that drops
 or stales the identity flags or the dry masks turns this test red; no existing test reaches a
@@ -639,3 +705,181 @@ stale copy of either.
 
 **Open items.** None from the attempt-2 verdict. The dual-tail and masked-mono-pair allocations
 stay observed, not structural; the gate rows hold them.
+
+### Attempt 4 (2026-10-05, branch `codex/d15-stream-g`; applies A8)
+
+Host: AMD EPYC 7313P (x86-64-v3), Node v22.23.2 (V8 12.4.254.21-node.56), rustc 1.97.1.
+
+**The law (A8 item 1).** `lane::flush_pair(n1, n2, x)`: `rest = (|n1| < REST_EPS) & (|n2| < REST_EPS)
+& (x == 0)`, then the per-word law as before. `svf_step` passes its section input `v0`, so every
+caller (`svf_block`, the ramped and masked blocks, the interleaved and skewed cascades, the builtin
+fused chains, the multiband `lr4_step`) threads its own section's input with no call-site change.
+The twin (`ReferenceRetainedTptF32::process`), the g2 oracle and the audit's `unfused_fma` model
+restate the gate. 13 lane-ops for the pair (an `eq` and a second `mask_and`), so `svf_step` 26 and a
+section 31 (select-free) / 32 (masked).
+
+**Threshold: exactly zero (`x == 0`, IEEE: `+0.0` and `-0.0`), not `|x| < f32::MIN_POSITIVE`.**
+Subnormal inputs can reach a section (wasm and the canonical native environment keep IEEE
+subnormals; trim, fader and section outputs can underflow), but they need no gate: a subnormal sample
+adds at most `2·max(a2, a3)·2^-126` to a state word, far below `FLUSH_EPS`, so the per-word law
+already gives it no response; and a silent source reaches every downstream section as an exact
+`±0.0` once the upstream sections rest (gates 1-2, the chain measurement below: every tail rests).
+The gate also costs one op fewer than `abs` + `lt`.
+
+**EQ predicates (A8 item 5).** `lane_is_inert` keeps its pair term: gate (a) admits `+0.0` input
+words, on which an executed identity section zeroes a both-below-`REST_EPS` pair; its doc now says
+the kernel can write such a pair under a tiny non-zero input, which then refuses elision (never a
+bit) until a zero input word of an executed block zeroes it. `lane_is_flush_shaped` **drops** its
+pair term: the kernel now writes such pairs, and the `-0.0` induction leg (c) serves needs only the
+per-word shape, so refusing them refused kernel-written states. The proof text names `v0`. Unit tests
+follow: `leg_c_refuses_below_flush_eps_admits_it_and_re_engages` admits `±FLUSH_EPS`, `1.5e-20`,
+`-1.25e-20` and the words either side of `REST_EPS` again (as before attempt 1), and the elision
+seeds return to `(1.5e-20, -1.25e-20)`.
+
+**Section and chain re-measure (A8 item 2; one-time scratch harness on the real EQ, not committed).**
+96 kHz, A8 against the per-word law (and attempt 3's law for comparison), left output compared bit
+for bit. Inputs: a 3.84 Hz square (half period 12,488) for 96,000 samples then 384,000 of silence,
+and a single impulse; amplitudes 1, 1e-3, 1e-6, 1e-9, 3e-11, 1e-11, 3e-12, 1e-12, 1e-14, 1e-15,
+1e-17, 1e-20, 1e-25, 1e-30. "Live" is while the input is non-zero.
+
+| +24 dB low shelf | A8 live, max change | A8 tail, max change | attempt-3 law live, max change |
+|---|---|---|---|
+| 1 section, 10 Hz, S 1 | 0 (every input) | `1.89e-13` (-254.5 dBFS, impulse 1e-6) | `4.88e-10` (-186.2, square 3e-11) |
+| 1 section, 10 Hz, S 0.1 | 0 | `1.85e-13` (-254.7, impulse 3e-11) | `2.58e-10` (-191.8, square 3e-11) |
+| 1 section, 100 Hz, S 1 | 0 | `1.90e-13` (-254.4, square 1e-3) | `4.86e-11` (-206.3, square 3e-12) |
+| 4 sections, 10 Hz, S 1 | 0 | `3.39e-10` (-189.4, impulse 1e-6); square `3.16e-10` (-190.0, at 1e-3) | `1.51e-6` (-116.4, square 3e-11) |
+| 4 sections, 100 Hz, S 1 | 0 | `3.41e-10` (-189.4, square 1e-3) | `2.21e-7` (-133.1, square 3e-12) |
+
+- No sample moves while the input is non-zero, in any case, at section or chain level.
+- For inputs at or above 1e-9 the A8 and attempt-3 tails are identical: A8 removes only the live
+  moves. The chain's tail change is larger than one section's because downstream shelves, still
+  decaying, boost the tail an upstream section drops; the first moved sample can sit on a loud tail
+  (four shelves at 10 Hz, 0 dBFS square: sample 236,920, output -116.0 dBFS, change `6.7e-11`,
+  -203.5 dBFS).
+- Sparse input: a lone impulse below `L*` is a tail after its first zero sample, so the joint rule
+  ends its response; through four 10 Hz shelves a `3e-11` impulse loses all of it (`1.63e-10`,
+  -195.8 dBFS, equal to the per-word run's peak). This is the residual of the rule, not a dead zone
+  for continuous signal; recorded in `filters.md`.
+- Inputs `1e-17` (10 Hz) / `1e-20` (100 Hz) and below move nothing under either law: the per-word
+  law's own dead zone (about `3e-17`, -330 dBFS), unchanged by #1328.
+- Gates 1-2: green (rest unchanged: the traps are impulse tails on a zero input).
+
+A4 is restated on these numbers under A8 (above); `dsp-research/filters.md`'s dead-zone paragraph is
+replaced by the rest rule, these numbers, the sparse-input residual, the per-word dead zone, the
+threshold reason and the superseded rule (3.84 Hz, n1 folded); the law paragraph says 13 ops.
+`docs/BUILTINS_AND_METERING_V1.md` states the input gate.
+
+**The chain gate (A8 item 3).** `exact_rest::a_tiny_input_through_four_boosting_shelves_gets_every_boost`
+(gate 5). Tolerance chosen from measurement: with the A8 law the scaled tiny runs miss the ordinary
+run by 0 (10 Hz, k 30/34/36) and at most `1.3e-6` of the peak (100 Hz, k 36; per-word `FLUSH_EPS`
+crossings); at k 38-45 the per-word law's own crossings reach `4e-7` to `1.6e-3`, so those levels are
+not used. Mutation: attempt 3's law (`flush_pair` without its input term) -> red in debug and release,
+`10 Hz, input 2.7939677e-11 … misses the ordinary run by 1.5091782e3 (ordinary peak 1.5091482e3)`;
+gate 2 stays green on it. Reverted: green. **Test value:** a joint flush that ignores the section
+input, and so drops a tiny signal's boost in each section of a cascade, is red here; gates 1-2 and
+every other EQ test stay green on it.
+
+**Other new or changed tests, with mutations** (each introduced, run, reverted):
+- `g4_flush` pair law (gate 3) now takes the input: the edge sweep crosses nine inputs (both zeros,
+  the smallest subnormal, `-f32::MIN_POSITIVE`, `1e-30`, `-0.5`, an infinity, a NaN, `3e-11`) and the
+  random sweep draws zero inputs half the time; the cases test asserts the small pairs rest on `±0.0`
+  and keep the per-word law on seven non-zero inputs. Mutants: no input term -> both pair tests red
+  (`flush_pair(9.999999e-15, -9.999999e-15) on input 1e-45 must follow the per-word law`); the gate
+  widened to `|x| < f32::MIN_POSITIVE` -> both red at the same subnormal input. **Test value:** a pair
+  rule that fires on a non-zero (including subnormal) input is red here.
+- `g2_svf_step_yields_both_taps_of_one_state`: a quarter of noise scaled by `1e-13` holds both words
+  below `REST_EPS` on a non-zero input (asserted reached); mutant without the input term -> red
+  (`g2_kernel_identity.rs:677`). **Test value:** an `svf_step` whose flush ignores its input is red in
+  the lane crate's own identity gate, independent of the EQ.
+- Predicates: `lane_is_inert` pair term dropped -> `a_non_inert_state_in_a_dead_section_refuses_elision`,
+  the randomized restore differential and `ramping_elision::a_ramping_list_matches_the_full_section_path_scalar`
+  red (the generator still reaches the band under A8). `lane_is_flush_shaped` pair term re-added ->
+  `leg_c_refuses_below_flush_eps_admits_it_and_re_engages` and `an_elided_cascade_is_the_full_cascade_bit_for_bit` red.
+
+**M2 (A8 item 6).** The test doc of
+`mono_collapse::a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks` and
+the attempt-3 record are corrected (a stale `identity` can skip a live section in release; release
+stayed green only because every block carried `-0.0`). The test gains blocks 24-47 on a `-0.0`-free
+input (`clean_block`) with a left-only HPF retarget in block 26:
+
+| mutant in `desymmetrize` | debug | release |
+|---|---|---|
+| `self.right.identity = self.left.identity;` dropped | red (`identity_flags_agree`, `lib.rs:1818`) | **red**: `HPF false -> true, block 27 word 0: right plane` |
+| `self.right.dry = self.left.dry;` dropped | red (same assertion) | green (a stale dry lane moves no bit here) |
+| none | green | green |
+
+Rows 1328-M1..M3 in `crates/parametric-eq/tests/MUTATIONS.md` (n4).
+
+**NITs (A8 item 7).** `filters.md` now says 3.84 Hz (the paragraph was rewritten). The dual tail's
+"V8 sank their construction into it" is qualified as an inference from the two reverts, not a
+measured listing, in `interleave`'s doc and the spill gate's docstring (the masked mono pair's
+sinking, in `Channel::dry`'s doc, was read from a listing in attempt 2 and stays). Decision 15's
+"Root decisions after S0" entry now points at A8 (item 8).
+
+**V8 spill gate (A8 item 4): held rows clean; the reported row carries more slots.**
+
+| loop | attempt 3 | attempt 4 |
+|---|---:|---|
+| dual depth-1 tail, select-free (H) | 0 (123 instr.) | 0 (132 instr.) |
+| mono depth-2 pair, select-free (H) | 0 (93) | 0 (99) |
+| mono depth-1 tail, select-free (H) | 0 (60) | 0 (63) |
+| mono depth-2 pair, masked (H) | 0 (103) | 0 (109) |
+| dual depth-2 pair, select-free (reported, not held) | 13 slots | **17 slots** (240 instr.) |
+
+`run-wasm-gates.sh` exits 0. The dual depth-2 pair was already starved (10 slots at base, 13 since
+attempt 1) and the gate reports it by design; the input compare adds four. **Measured cost**
+(descriptive; `web-mixing-automation-benchmark.mjs run` on two `--module-only` builds of this tree,
+A8 and A8 with the input term removed (attempt 3's law), one warmup and two measured rounds each,
+interleaved, pinned to cpu 31, **uncontrolled host**: load average 12-13 on 32 threads; not retried):
+
+| p50, ns per render (round 1 / round 2) | attempt-3 law | A8 | change |
+|---|---|---|---|
+| mono console, quiet | 158,392 / 158,723 | 161,859 / 159,764 | +2.2 % / +0.7 % |
+| mono console, restated | 161,327 / 161,338 | 162,991 / 162,650 | +1.0 % / +0.8 % |
+| mono console, automated | 165,135 / 165,235 | 166,597 / 166,527 | +0.9 % / +0.8 % |
+| sixty-four-track console | 242,943 / 241,981 | 248,925 / 248,964 | +2.5 % / +2.9 % |
+| app shape | 157,440 / 156,628 | 162,549 / 162,600 | +3.2 % / +3.8 % |
+| bus-and-send console | 347,993 / 345,658 | 354,816 / 353,414 | +2.0 % / +2.2 % |
+
+Every output digest is equal between the two modules for these documents (their inputs never sit in
+the band). The three documents exceed the owner's 2 % allowance by up to 1.8 points on this host;
+per A8 item 4 this is reported, and **no workaround was attempted** (the floors record +2 ops per
+section, 29 -> 31). Open for root.
+
+**Floors and op counts.** `docs/rulings/effect-floor-accounting.md`: `flush_pair` 13, `svf_step` 26,
+section 31 / 32, EQ standing 34 (1.149 cycles), the `active` table `31·active + 3` (195 for six),
+builtins sections 31 and chain 83 (2.804), `builtins_only − gain_pan_only` 83 − 22 = 61, strip 328
+(11.081), appendix step 6 with `v0`. `tools/bench/src/floor.rs` (`EQ_LANE_OPS` 34,
+`BUILTINS_LANE_OPS` 83, the strip test), `scripts/console-benchmark-record-lib.jq` (83, 34),
+`scripts/test-console-benchmark.sh` (83, 61, 328, `83 + 34 + 81.5`): reason, A8's input gate adds
+two lane-ops per SVF section. `check-cross-targets.sh` asked for no ratchet change.
+
+**Bits moved and re-pins.** None. `g5_native_digests_match_pins` and every delegated pin
+(`BUILTINS_DIGESTS`, `E9_DIGESTS`, multiband `DIGESTS`), `conformance_fixtures --check`,
+`check-builtins-fixtures.sh` and `check-graph-determinism.sh` pass unchanged: their only joint-flush
+moves are tails on zero input, which A8 keeps. Against attempt 3 the law moves bits only where a
+section's words are both below `REST_EPS` on a non-zero input, which no pinned corpus reaches.
+
+**Gates (this tree).**
+- gate-4 `cargo test --all-targets` set (14 packages, spec features, `--no-fail-fast`): 836 passed,
+  0 failed;
+- `cargo test --release -p lane -p math -p wasm-gates --features math/lane`: all ok;
+- release `parametric-eq` `exact_rest` and `mono_collapse`: ok;
+- `run-wasm-gates.sh`: exit 0 (native, simd128, V8 spill gate with the rows above; self-test 27 ok);
+- `conformance_fixtures --check`, `check-builtins-fixtures.sh` (50 files), `audit unfused-fma
+  conformance` (SVF `unfused`, 0 mismatches), `check-graph-determinism.sh` (100/100),
+  `check-cross-targets.sh`, `check-lane-policy.sh`, `check-dsp-research.sh`,
+  `check-workspace-policy.sh`: ok;
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`: ok;
+- `cargo test -p bench floor`, `test-console-benchmark.sh`: ok;
+- worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`: ok.
+
+**Open items.**
+- The browser cost above (+2.0 % to +3.8 % p50 on the three console documents, uncontrolled host)
+  exceeds the 2 % allowance; root decides (accept, a controlled re-measure, or an encoding issue).
+- Sparse tiny input (non-zero samples separated by exact zeros, below `L*`) loses its tail through
+  the joint rule, up to `1.6e-10` (-196 dBFS) at four shelves; recorded, not gated.
+- The builtin HPF/LPF and the LR4 crossover were not re-measured at chain level (A8 asked for the
+  shelves); their tails follow the same rule.

@@ -94,8 +94,9 @@ out of scope: the masked depth-one tails carried a slot before #977.
 **The dual tail's row also holds the EQ's block-limit fold** (issue #1328, A2 and A6). After the
 joint flush, V8 kept the fold's two per-channel flags (one packed word) in a stack slot across the
 tail's back edge (`[rbp-0xc8]`). The slot follows the tail site's own dry masks: built in place
-there (`dry_mask(at)`), they also feed the masked tail loop, and V8 sank their construction into
-it. It stopped once the tail read them from channel state. Reverting only the tail's mask build
+there (`dry_mask(at)`), they also feed the masked tail loop (that V8 sank their construction into
+it is inferred from the reverts below, not measured). It stopped once the tail read them from
+channel state. Reverting only the tail's mask build
 brings `[rbp-0xc8]` back; reverting only the dual masked pair's leaves the tail clean (#1328
 attempt 2's verifier). Folding both channels into one flag instead moved the slot rather than
 removing it. A general-purpose value's slot follows the whole function's register use, so the

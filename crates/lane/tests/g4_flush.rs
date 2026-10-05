@@ -8,10 +8,12 @@
 //! Red-mutation proven for this gate (see `tests/MUTATIONS.md`): `lt` becomes `le` in `flush`,
 //! which fails at `x = +-FLUSH_EPS`.
 //!
-//! The pair law (issue #1328): `flush_pair(n1, n2)` applies the per-word law to each word and, when
-//! *both* magnitudes are below `REST_EPS`, zeroes the pair together. One word at or above
-//! `REST_EPS` leaves both words on the per-word law bit for bit; a NaN in either word passes
-//! through; `-0.0` becomes `+0.0`. Mutation evidence is in the issue's attempt record.
+//! The pair law (issue #1328, amendment A8): `flush_pair(n1, n2, x)` applies the per-word law to
+//! each word and, when the input `x` is exactly zero (either sign) *and* both magnitudes are below
+//! `REST_EPS`, zeroes the pair together. A non-zero input -- a subnormal, a NaN or an infinity
+//! included -- or one word at or above `REST_EPS` leaves both words on the per-word law bit for
+//! bit; a NaN in either word passes through; `-0.0` becomes `+0.0`. Mutation evidence is in the
+//! issue's attempt record.
 
 mod support;
 
@@ -145,8 +147,8 @@ fn g4_flush_is_lane_wise() {
 
 /// The pair law restated on plain `f32` comparisons, independent of `Lane`: the oracle the vector
 /// widths are held to bit for bit.
-fn pair_oracle(n1: f32, n2: f32) -> (u32, u32) {
-    let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+fn pair_oracle(n1: f32, n2: f32, x: f32) -> (u32, u32) {
+    let rest = x == 0.0 && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
     let word = |n: f32| {
         if rest || n.abs() < FLUSH_EPS {
             0
@@ -157,17 +159,19 @@ fn pair_oracle(n1: f32, n2: f32) -> (u32, u32) {
     (word(n1), word(n2))
 }
 
-/// Runs `flush_pair` lane-wise at one width over `pairs`, `L::WIDTH` pairs per vector.
-fn pair_bits<L: Lane>(pairs: &[(f32, f32)]) -> Vec<(u32, u32)> {
+/// Runs `flush_pair` lane-wise at one width over `(n1, n2, x)` triples, `L::WIDTH` per vector.
+fn pair_bits<L: Lane>(pairs: &[(f32, f32, f32)]) -> Vec<(u32, u32)> {
     let mut out = Vec::with_capacity(pairs.len());
     for chunk in pairs.chunks(L::WIDTH) {
         let mut first = vec![0.0f32; L::WIDTH];
         let mut second = vec![0.0f32; L::WIDTH];
-        for (lane, &(n1, n2)) in chunk.iter().enumerate() {
+        let mut input = vec![0.0f32; L::WIDTH];
+        for (lane, &(n1, n2, x)) in chunk.iter().enumerate() {
             first[lane] = n1;
             second[lane] = n2;
+            input[lane] = x;
         }
-        let (ic1, ic2) = flush_pair(L::load(&first), L::load(&second));
+        let (ic1, ic2) = flush_pair(L::load(&first), L::load(&second), L::load(&input));
         let (mut bits1, mut bits2) = ([0u32; 8], [0u32; 8]);
         ic1.store_bits(&mut bits1);
         ic2.store_bits(&mut bits2);
@@ -213,20 +217,51 @@ fn pair_word(random: &mut Xorshift64Star) -> f32 {
     f32::from_bits((bits & 0x8000_0000) | (exponent << 23) | (random.next_u32() & 0x007F_FFFF))
 }
 
+/// Inputs around the one that opens the pair rule: both zeros, the smallest subnormal, the
+/// smallest normal, a tiny and an ordinary normal, an infinity and a NaN.
+const PAIR_INPUTS: [f32; 9] = [
+    0.0,
+    -0.0,
+    f32::from_bits(1),
+    -f32::MIN_POSITIVE,
+    1.0e-30,
+    -0.5,
+    f32::INFINITY,
+    f32::NAN,
+    3.0e-11,
+];
+
+/// One random input: zero of either sign half the time (so the pair rule is reached), otherwise
+/// a word from [`pair_word`].
+fn pair_input(random: &mut Xorshift64Star) -> f32 {
+    match random.next_u32() & 3 {
+        0 => 0.0,
+        1 => -0.0,
+        _ => pair_word(random),
+    }
+}
+
 fn pair_sweep<L: Lane>(width_name: &str) {
     let edges = pair_edges();
-    let mut pairs: Vec<(f32, f32)> = edges
+    let mut pairs: Vec<(f32, f32, f32)> = edges
         .iter()
         .flat_map(|&n1| edges.iter().map(move |&n2| (n1, n2)))
+        .flat_map(|(n1, n2)| PAIR_INPUTS.iter().map(move |&x| (n1, n2, x)))
         .collect();
     let mut random = Xorshift64Star::new(0x1328_FA17_0000_0001);
-    pairs.extend((0..RANDOM_NORMALS).map(|_| (pair_word(&mut random), pair_word(&mut random))));
+    pairs.extend((0..RANDOM_NORMALS).map(|_| {
+        (
+            pair_word(&mut random),
+            pair_word(&mut random),
+            pair_input(&mut random),
+        )
+    }));
     let actual = pair_bits::<L>(&pairs);
-    for (&(n1, n2), &(ic1, ic2)) in pairs.iter().zip(&actual) {
+    for (&(n1, n2, x), &(ic1, ic2)) in pairs.iter().zip(&actual) {
         assert_eq!(
             (ic1, ic2),
-            pair_oracle(n1, n2),
-            "{width_name}: flush_pair({n1:e}, {n2:e}) breaks the pair law"
+            pair_oracle(n1, n2, x),
+            "{width_name}: flush_pair({n1:e}, {n2:e}, {x:e}) breaks the pair law"
         );
     }
 }
@@ -238,17 +273,42 @@ fn g4_pair_law_holds_at_every_width() {
 
 fn pair_cases<L: Lane>(width_name: &str) {
     let below = f32::from_bits(REST_EPS.to_bits() - 1);
-    // Both words below `REST_EPS`, each above `FLUSH_EPS`: the per-word law alone keeps them, the
-    // pair rule zeroes both.
-    for (n1, n2) in [(below, -below), (-5.0e-15, 2.0e-20), (1.35e-16, -2.0e-21)] {
-        assert_eq!(
-            pair_bits::<L>(&[(n1, n2)]),
-            [(0, 0)],
-            "{width_name}: both below REST_EPS must both become +0.0"
-        );
+    let small_pairs = [(below, -below), (-5.0e-15, 2.0e-20), (1.35e-16, -2.0e-21)];
+    // Both words below `REST_EPS`, each above `FLUSH_EPS`, on a silent input (either zero): the
+    // per-word law alone keeps them, the pair rule zeroes both.
+    for x in [0.0f32, -0.0] {
+        for (n1, n2) in small_pairs {
+            assert_eq!(
+                pair_bits::<L>(&[(n1, n2, x)]),
+                [(0, 0)],
+                "{width_name}: both below REST_EPS on input {x:e} must both become +0.0"
+            );
+        }
     }
-    // One word at or above `REST_EPS`: each word keeps the per-word law, so a small partner word
-    // is kept and a word below `FLUSH_EPS` is still flushed.
+    // The same pairs on a non-zero input -- the smallest subnormal of either sign, the smallest
+    // normal, a tiny and an ordinary normal, an infinity, a NaN -- keep the per-word law bit for
+    // bit (amendment A8): a section driven by any non-zero input applies its whole response.
+    for x in [
+        f32::from_bits(1),
+        f32::from_bits(0x8000_0001),
+        f32::MIN_POSITIVE,
+        3.0e-11,
+        -1.0,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ] {
+        for (n1, n2) in small_pairs {
+            let expected = (flush(n1).to_bits(), flush(n2).to_bits());
+            assert_eq!(
+                pair_bits::<L>(&[(n1, n2, x)]),
+                [expected],
+                "{width_name}: flush_pair({n1:e}, {n2:e}) on input {x:e} must follow the \
+                 per-word law"
+            );
+        }
+    }
+    // One word at or above `REST_EPS`, on a silent input: each word keeps the per-word law, so a
+    // small partner word is kept and a word below `FLUSH_EPS` is still flushed.
     for (n1, n2) in [
         (REST_EPS, below),
         (-below, -REST_EPS),
@@ -258,15 +318,15 @@ fn pair_cases<L: Lane>(width_name: &str) {
     ] {
         let expected = (flush(n1).to_bits(), flush(n2).to_bits());
         assert_eq!(
-            pair_bits::<L>(&[(n1, n2)]),
+            pair_bits::<L>(&[(n1, n2, 0.0)]),
             [expected],
-            "{width_name}: flush_pair({n1:e}, {n2:e}) must follow the per-word law"
+            "{width_name}: flush_pair({n1:e}, {n2:e}, 0) must follow the per-word law"
         );
     }
     // NaN in either word passes through both rules, and its partner follows the per-word law.
     for nan in [f32::NAN, f32::from_bits(0xFFC0_0001)] {
         for partner in [0.0f32, 1.0e-21, 5.0e-15, 0.5] {
-            let [(ic1, ic2)] = pair_bits::<L>(&[(nan, partner)])[..] else {
+            let [(ic1, ic2)] = pair_bits::<L>(&[(nan, partner, 0.0)])[..] else {
                 unreachable!()
             };
             assert_eq!(
@@ -275,7 +335,7 @@ fn pair_cases<L: Lane>(width_name: &str) {
                 "{width_name}: a NaN first word must pass"
             );
             assert_eq!(ic2, flush(partner).to_bits(), "{width_name}: NaN's partner");
-            let [(ic1, ic2)] = pair_bits::<L>(&[(partner, nan)])[..] else {
+            let [(ic1, ic2)] = pair_bits::<L>(&[(partner, nan, 0.0)])[..] else {
                 unreachable!()
             };
             assert_eq!(
@@ -286,21 +346,23 @@ fn pair_cases<L: Lane>(width_name: &str) {
             assert_eq!(ic1, flush(partner).to_bits(), "{width_name}: NaN's partner");
         }
     }
-    // `-0.0` becomes `+0.0` in either position, alone or beside a kept word.
-    for (n1, n2) in [(-0.0f32, -0.0f32), (-0.0, 0.5), (0.5, -0.0)] {
-        let [(ic1, ic2)] = pair_bits::<L>(&[(n1, n2)])[..] else {
-            unreachable!()
-        };
-        assert_eq!(
-            ic1,
-            if n1 == 0.5 { n1.to_bits() } else { 0 },
-            "{width_name}: -0.0"
-        );
-        assert_eq!(
-            ic2,
-            if n2 == 0.5 { n2.to_bits() } else { 0 },
-            "{width_name}: -0.0"
-        );
+    // `-0.0` becomes `+0.0` in either position, alone or beside a kept word, on either input.
+    for x in [0.0f32, 0.25] {
+        for (n1, n2) in [(-0.0f32, -0.0f32), (-0.0, 0.5), (0.5, -0.0)] {
+            let [(ic1, ic2)] = pair_bits::<L>(&[(n1, n2, x)])[..] else {
+                unreachable!()
+            };
+            assert_eq!(
+                ic1,
+                if n1 == 0.5 { n1.to_bits() } else { 0 },
+                "{width_name}: -0.0"
+            );
+            assert_eq!(
+                ic2,
+                if n2 == 0.5 { n2.to_bits() } else { 0 },
+                "{width_name}: -0.0"
+            );
+        }
     }
 }
 

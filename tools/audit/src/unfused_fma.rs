@@ -84,12 +84,13 @@ fn flush(x: f32) -> f32 {
 /// The joint rest threshold of the SVF state (issue #1328), restated like [`FLUSH_EPS`].
 const REST_EPS: f32 = 1.0e-14;
 
-/// The SVF's joint flush (issue #1328), restated: each word follows [`flush`], and when both
-/// magnitudes are below [`REST_EPS`] both are zeroed. Ordered compares, so a NaN word passes.
-/// The third value is `true` when the joint rule zeroed a word the per-word law would have kept.
+/// The SVF's joint flush (issue #1328), restated: each word follows [`flush`], and when the
+/// section's input `v0` is exactly zero (either sign) and both magnitudes are below [`REST_EPS`]
+/// both are zeroed (amendment A8). Ordered compares, so a NaN word passes. The third value is
+/// `true` when the joint rule zeroed a word the per-word law would have kept.
 #[inline(always)]
-fn flush_pair(n1: f32, n2: f32) -> (f32, f32, bool) {
-    let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+fn flush_pair(n1: f32, n2: f32, v0: f32) -> (f32, f32, bool) {
+    let rest = v0 == 0.0 && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
     let joint = rest && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS);
     if rest {
         (0.0, 0.0, joint)
@@ -211,7 +212,7 @@ impl SvfF32 {
         let d2 = self.a3.mul_add(v3, self.a2 * self.ic1);
         let v2 = self.ic2 + d2;
         let joint;
-        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2));
+        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2), v0);
         self.joint += usize::from(joint);
         // UNFUSED-SEAL-EXEMPT (two calls)
         self.m2.mul_add(v2, self.m1.mul_add(v1, self.m0 * v0))
@@ -225,7 +226,7 @@ impl SvfF32 {
         let d2 = mutate(M_SVF_D2, (self.a3 * v3) + (self.a2 * self.ic1));
         let v2 = self.ic2 + d2;
         let joint;
-        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2));
+        (self.ic1, self.ic2, joint) = flush_pair(self.ic1 + (d1 + d1), self.ic2 + (d2 + d2), v0);
         self.joint += usize::from(joint);
         mutate(
             M_SVF_MIX,

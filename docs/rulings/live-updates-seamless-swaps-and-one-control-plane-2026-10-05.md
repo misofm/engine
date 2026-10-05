@@ -586,13 +586,12 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
   output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
   mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
   each section's dry mask is kept in state); D6 (class B) is restated by change size.
-- **#1328 A4 corrected:** the SVF joint flush has a defined rest threshold. While every input
-  sample satisfies `|x| < L* = REST_EPS / (2 · max(a2, a3))`, a section stays at rest and outputs
-  only its direct term; the worst output change is about 5.0e-10 (−186 dBFS; `L*` ≤ −210.3 dBFS,
-  EQ low shelf 10 Hz +24 dB at 96 kHz). Accepted under D15-4(a) by root under the owner's
-  delegation of math decisions: it is below the f32 rounding error of any signal above about
-  −30 dBFS through the same section. Gating the flush on `x == 0` was rejected (spill risk, no
-  measurable gain). Details: #1328 Amendment 1 A7 and `dsp-research/filters.md`.
+- **#1328 A8 (supersedes the A4/A7 rest threshold):** the joint flush fires only on a sample whose
+  section input is exactly zero, so an EQ applies its whole response to any non-zero input and
+  the joint rule moves bits only on exact-zero input samples, in tails (measured at most −254 dBFS at one
+  section's output and −189 dBFS at four cascaded +24 dB shelves' output). A4/A7's acceptance of a
+  dead zone was withdrawn: four shelves lost about 96 dB of response below −210 dBFS. Details: #1328
+  Amendment 1 A8 and `dsp-research/filters.md`.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its

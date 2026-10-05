@@ -580,12 +580,15 @@ fn g2_subnormal_state_is_flushed_at_every_width() {
 /// the width. Non-vacuity is asserted too: the two taps must actually differ, or a body that
 /// returned the same value twice would pass.
 ///
-/// The input is noise for the first half and silence for the second, so the state decays through
-/// the joint flush's band -- both words below `REST_EPS`, one at or above `FLUSH_EPS` -- and the
-/// oracle restates that rule from its definition (issue #1328). Reaching the band is asserted.
+/// The input is noise for the first quarter, the same noise scaled down to about `1e-13` for the
+/// second, and silence for the second half. The tiny quarter holds both words below `REST_EPS`
+/// while the input is not zero, where the joint rule must *not* fire (amendment A8); the silent
+/// half decays through the joint flush's band -- both words below `REST_EPS`, one at or above
+/// `FLUSH_EPS`, input exactly zero -- where it must (issue #1328). The oracle restates that rule
+/// from its definition, and reaching both cases is asserted.
 ///
 /// Red mutation: return `(v2, v1)` from `svf_step`; swap `a2` and `a3` in its `d2`; flush each word
-/// alone (`flush` per word instead of `flush_pair`).
+/// alone (`flush` per word instead of `flush_pair`); drop the input term from `flush_pair`.
 #[test]
 fn g2_svf_step_yields_both_taps_of_one_state() {
     // A 1 kHz Butterworth low-pass at 48 kHz: g = tan(pi * 1000 / 48000), k = sqrt(2),
@@ -596,10 +599,12 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
     const FRAMES: usize = 4_096;
 
     /// Simper's recurrence, transcribed from the equations, one scalar lane at a time. Also counts
-    /// the frames where the joint rule zeroed a word the per-word law would have kept.
-    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>, usize) {
+    /// the frames where the joint rule zeroed a word the per-word law would have kept, and the
+    /// frames where only the non-zero input kept it from doing so.
+    fn oracle(input: &[f32], stride: usize, lane: usize) -> (Vec<u32>, Vec<u32>, usize, usize) {
         let (mut ic1, mut ic2) = (0.0f32, 0.0f32);
         let mut joint = 0usize;
+        let mut gated = 0usize;
         let mut band = Vec::with_capacity(FRAMES);
         let mut low = Vec::with_capacity(FRAMES);
         for frame in 0..FRAMES {
@@ -610,10 +615,16 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             let d2 = <f32 as Lane>::fma(A3, v3, A2 * ic1);
             let v2 = ic2 + d2;
             let (n1, n2) = (ic1 + (d1 + d1), ic2 + (d2 + d2));
-            // Each word below `FLUSH_EPS` is zeroed; both below `REST_EPS` are zeroed together.
-            let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
-            if rest && (n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS) {
+            // Each word below `FLUSH_EPS` is zeroed; both below `REST_EPS` are zeroed together,
+            // but only on a frame whose input is exactly zero.
+            let small = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+            let kept = n1.abs() >= FLUSH_EPS || n2.abs() >= FLUSH_EPS;
+            let rest = small && v0 == 0.0;
+            if rest && kept {
                 joint += 1;
+            }
+            if small && kept && v0 != 0.0 {
+                gated += 1;
             }
             ic1 = if rest || n1.abs() < FLUSH_EPS {
                 0.0
@@ -628,12 +639,15 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             band.push(v1.to_bits());
             low.push(v2.to_bits());
         }
-        (band, low, joint)
+        (band, low, joint, gated)
     }
 
     fn check<L: Lane>() {
         let mut input = vec![0.0f32; FRAMES * L::WIDTH];
         Signal::Noise.fill(&mut input, 0x5F5F_0001);
+        for word in &mut input[FRAMES / 4 * L::WIDTH..FRAMES / 2 * L::WIDTH] {
+            *word *= 1.0e-13;
+        }
         input[FRAMES / 2 * L::WIDTH..].fill(0.0);
         let mut state = SvfState::<L>::default();
         let nc1 = L::splat(C1).neg();
@@ -647,11 +661,16 @@ fn g2_svf_step_yields_both_taps_of_one_state() {
             v2.store_bits(&mut low[frame * L::WIDTH..]);
         }
         for lane in 0..L::WIDTH {
-            let (expected_band, expected_low, joint) = oracle(&input, L::WIDTH, lane);
+            let (expected_band, expected_low, joint, gated) = oracle(&input, L::WIDTH, lane);
             assert!(
                 joint > 0,
                 "lane {lane}: the decay must reach the joint flush's band (both words below \
                  REST_EPS, one at or above FLUSH_EPS)"
+            );
+            assert!(
+                gated > 0,
+                "lane {lane}: the tiny quarter must hold both words below REST_EPS on a non-zero \
+                 input, where the joint rule must not fire"
             );
             let mut differing = 0usize;
             for frame in 0..FRAMES {

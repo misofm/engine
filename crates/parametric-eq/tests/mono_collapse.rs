@@ -83,6 +83,19 @@ fn block(base: usize, lanes: usize) -> Vec<f32> {
         .collect()
 }
 
+/// [`block`] without its `-0.0` frames: `+0.0` and ordinary signal, repeating every four frames, so
+/// the elision gate can admit the block.
+fn clean_block(base: usize, lanes: usize) -> Vec<f32> {
+    (0..FRAMES * lanes)
+        .map(|word| match (base + word / lanes) % 4 {
+            0 => 0.0,
+            1 => 0.6,
+            2 => -0.35,
+            _ => 0.125,
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_block(
     bank: &mut dyn PreparedNativeEffectBank,
@@ -322,10 +335,20 @@ fn configured_with_hpf(track: usize, enabled: bool) -> Vec<effect_contract::Init
 /// are compared bit for bit with a bank that never collapsed. Dropping `identity`'s copy from
 /// `desymmetrize`, or `dry`'s, turns this test red in a debug build, through that assertion on the
 /// first dual block (issue #1328). `a_desymmetrized_bank_is_a_never_collapsed_bank` stays green on
-/// both, since its ramp moves a general band's gain and changes neither. In a release build both
-/// mutants render the same bits here: the stale `identity` only chooses a schedule, and the stale
-/// `dry` runs the HPF's lanes wet at the identity words, which can move at most a `-0.0` to `+0.0`
-/// and, for this input and state, moves none.
+/// both, since its ramp moves a general band's gain and changes neither.
+///
+/// A stale `identity` flag is not only a schedule choice: the dual elision gate drops a section
+/// when *both* channels' flags say identity, so a stale right flag beside a fresh left one can
+/// skip a section that is live on the right. Up to block 24 the input carries `-0.0` in every
+/// block, which refuses elision on every block, and directly after `desymmetrize` the left
+/// channel's correct flag also guards the AND, so release builds stay green there. From block 24
+/// the input carries no `-0.0` ([`clean_block`]), and in block 26 a **left-only** retarget switches
+/// the left HPF back to where it started. In the off -> on case the left channel's section 0 is
+/// then the identity again while the right one is live, and a right channel still holding the flag
+/// from before the collapsed ramp makes the gate skip it: the identity mutant is red in a release
+/// build too (from block 27). A stale `dry` runs the HPF's lanes wet at the identity words, which
+/// can move at most a `-0.0` to `+0.0` and, for this input and state, moves none, so only the debug
+/// assertion catches that one.
 #[test]
 fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_masks() {
     let Some((width, backend)) = native_bank() else {
@@ -353,23 +376,30 @@ fn a_desymmetrized_bank_carries_the_collapsed_channels_identity_flags_and_dry_ma
         };
         let mut mixed = bind_hpf(before);
         let mut never = bind_hpf(before);
-        for step in 0..BLOCKS {
+        for step in 0..2 * BLOCKS {
             let collapsed_half = step < BLOCKS / 2;
             if step == BLOCKS / 2 {
                 mixed.desymmetrize_channels();
             }
-            if step == 2 {
+            // Both channels in block 2 (collapsed); the left channel alone in block 26 (dual).
+            if step == 2 || step == BLOCKS + 2 {
+                let both = step == 2;
+                let enabled = if both { after } else { before };
                 for bank in [mixed.as_mut(), never.as_mut()] {
                     for lane in 0..lanes {
-                        let target_values = configured_with_hpf(lane, after);
+                        let target_values = configured_with_hpf(lane, enabled);
                         let mut changed = vec![false; target_values.len()];
                         changed[HPF_ENABLED * 2] = true;
-                        changed[HPF_ENABLED * 2 + 1] = true;
+                        changed[HPF_ENABLED * 2 + 1] = both;
                         apply_prepared_targets_lane(bank, lane, 48_000, &target_values, &changed);
                     }
                 }
             }
-            let mut never_left = block(step * FRAMES, lanes);
+            let mut never_left = if step < BLOCKS {
+                block(step * FRAMES, lanes)
+            } else {
+                clean_block(step * FRAMES, lanes)
+            };
             let mut never_right = never_left.clone();
             let mut mixed_left = never_left.clone();
             let mut mixed_right = if collapsed_half {

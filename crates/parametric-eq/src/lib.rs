@@ -1147,9 +1147,12 @@ const INERT_MAGNITUDE_FLOOR: u32 = lane::FLUSH_EPS.to_bits();
 ///
 /// Bits, not float compares: `-0.0` (magnitude bits `0`) and every magnitude below `FLUSH_EPS`
 /// fall under the floor, and every infinity and NaN above the ceiling, so all three refuse. The
-/// pair term refuses what `lane::flush_pair` would move: an executed identity section maps a pair
-/// with both magnitudes below `REST_EPS` to `(+0.0, +0.0)`, an elided one keeps it. The kernel never
-/// writes such a pair (it is the pair it zeroes), so only a restored payload can hold one. The
+/// pair term refuses what `lane::flush_pair` can move: on a frame whose input is exactly zero
+/// (gate (a) admits `+0.0`) an executed identity section maps a pair with both magnitudes below
+/// `REST_EPS` to `(+0.0, +0.0)`, an elided one keeps it. Since amendment A8 the kernel can leave
+/// such a pair behind -- the rule fires only on a zero input, so a tiny non-zero input can hold
+/// both words in `[FLUSH_EPS, REST_EPS)` -- and a dead section holding one is then refused until a
+/// silent frame of an executed block zeroes it: a refusal costs only the elision, never a bit. The
 /// lanes are folded with non-short-circuiting `&`/`|` into one branch-free reduction, like the
 /// `+0.0` test it replaced, because it runs for every dead section on every stationary block.
 fn lane_is_inert<L: Lane>(ic1: L, ic2: L) -> bool {
@@ -2013,9 +2016,8 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 /// * **The gate is [`cascade_sections`]', leg for leg**: (a) neither input plane carries `-0.0`, a
 ///   non-finite word or a magnitude above the ceiling; (b) every dead section's state is inert on
 ///   both channels; (c) every other section's state is a pair `flush_pair` can leave -- each word
-///   `+0.0` or finite with a magnitude of at least `FLUSH_EPS`, and the two not both below
-///   `REST_EPS` with one non-zero (issue #1328; [`section_state_is_flush_shaped`]). Any
-///   refusal returns all six, and the block renders as it did before this function existed.
+///   `+0.0` or finite with a magnitude of at least `FLUSH_EPS` ([`section_state_is_flush_shaped`]).
+///   Any refusal returns all six, and the block renders as it did before this function existed.
 /// * **Freshness.** `identity[s]` is only read for a section with no lane in flight on either
 ///   channel, and that flag is fresh: every ramp ends in a snap followed by `refresh_identity`, and
 ///   `settle`, `start_ramp`, the resets and a restore refresh too. A ramping section's flag can be
@@ -2144,12 +2146,16 @@ fn ramp_keeps_unit_m0<L: Lane>(section: &Section<L>) -> bool {
 
 /// `true` when every lane of the integrator pair `(ic1, ic2)` is a pair `flush_pair` can leave
 /// behind: each word exactly `+0.0`, or finite with a magnitude of at least [`lane::FLUSH_EPS`]
-/// (no `-0.0`, no subnormal, no tiny normal), and the pair not both below [`lane::REST_EPS`] in
-/// magnitude with a word non-zero, since `lane::flush_pair` zeroes exactly those (issue #1328).
+/// (no `-0.0`, no subnormal, no tiny normal).
+///
+/// There is no pair term. `lane::flush_pair` zeroes a pair with both magnitudes below
+/// [`lane::REST_EPS`] only on a frame whose input is exactly zero (issue #1328, amendment A8), so
+/// a tiny non-zero input leaves such a pair behind and the kernel writes it; refusing it would
+/// refuse kernel-written states. The `-0.0` induction this leg serves needs only the per-word
+/// shape. (Attempts 1-3 refused the pair, when the rule ignored the input and the kernel never
+/// wrote one.)
 #[inline(always)]
 fn lane_is_flush_shaped<L: Lane>(ic1: L, ic2: L) -> bool {
-    /// Magnitude bits of [`lane::REST_EPS`].
-    const REST_MAGNITUDE: u32 = lane::REST_EPS.to_bits();
     debug_assert!(L::WIDTH <= MAX_LANES);
     let mut first = [0_u32; MAX_LANES];
     let mut second = [0_u32; MAX_LANES];
@@ -2162,20 +2168,14 @@ fn lane_is_flush_shaped<L: Lane>(ic1: L, ic2: L) -> bool {
     first[..L::WIDTH]
         .iter()
         .zip(&second[..L::WIDTH])
-        .all(|(&a, &b)| {
-            let jointly_flushed = (a & MAGNITUDE_MASK) < REST_MAGNITUDE
-                && (b & MAGNITUDE_MASK) < REST_MAGNITUDE
-                && (a | b) != 0;
-            word_is_flush_shaped(a) && word_is_flush_shaped(b) && !jointly_flushed
-        })
+        .all(|(&a, &b)| word_is_flush_shaped(a) && word_is_flush_shaped(b))
 }
 
 /// Leg (c) of [`cascade_sections`] and [`ramping_sections`]: the integrator pair of a kept section
 /// is a pair the kernel can have written ([`lane_is_flush_shaped`]) on every lane.
 ///
 /// That is finite and free of `-0.0`, which is what the leg asked before issue #1015, and also
-/// free of the tiny words only a restore can put there, and (issue #1328) free of a pair the joint
-/// flush would zero, which the kernel likewise never leaves behind. The `-0.0` induction on
+/// free of the tiny words only a restore can put there. The `-0.0` induction on
 /// [`cascade_sections`] argues its high-shelf case from kernel-written states (`v1 = ic1 + d1` is
 /// `+0.0` or at least `FLUSH_EPS * 2^-24`), and a restored payload was the one way around that: a
 /// live high shelf whose `m0` and `m2` are both exactly `0.5` (gain `-6.0206` dB as an `f32`, the
@@ -2216,7 +2216,7 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 /// words, elided sections included — not approximate agreement. Take an identity section whose
 /// integrator pair is *inert* -- each word exactly `+0.0`, or finite with a magnitude in
 /// `[FLUSH_EPS, BLOCK_LIMIT]` (issue #979), and the pair not both below `REST_EPS` in magnitude
-/// unless both are `+0.0` (issue #1328) -- and one finite input word `v0`.
+/// unless both are `+0.0` (issue #1328) -- and one finite input word `v0`, zero or not.
 ///
 /// * `v3 = v0 - ic2`. For `ic2 = +0.0` that is `v0` bit for bit, including `v0 = -0.0` (IEEE-754
 ///   gives `(-0) - (+0) = -0` under round-to-nearest). Otherwise `|ic2| <= 1e30`, below `2^103`,
@@ -2226,10 +2226,12 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 ///   finite, so both products are zeros of some sign and `d1` is a zero. `v1 = ic1 + d1` is `ic1`
 ///   for a non-zero `ic1`, and `+0.0` for `ic1 = +0.0` (`(+0.0) + (±0.0) = +0.0`).
 /// * `d2 = a3 * v3 + a2 * ic1` is a zero the same way, and `v2 = ic2 + d2` is `ic2` or `+0.0`.
-/// * `(ic1', ic2') = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2)) = flush_pair(ic1, ic2) =
-///   (ic1, ic2)`: a zero addend leaves a non-zero word exactly and maps a zero to `+0.0`; the
+/// * `(ic1', ic2') = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), v0) = flush_pair(ic1, ic2, v0)
+///   = (ic1, ic2)`: a zero addend leaves a non-zero word exactly and maps a zero to `+0.0`; the
 ///   per-word rule keeps every magnitude of at least `FLUSH_EPS`; and the joint rule zeroes only a
-///   pair with both magnitudes below `REST_EPS`, which for an inert pair is `(+0.0, +0.0)` already.
+///   pair with both magnitudes below `REST_EPS`, and only on a zero `v0` (amendment A8), which for
+///   an inert pair is `(+0.0, +0.0)` already. Gate (a) admits a `+0.0` input word, so the pair
+///   term must hold whatever the input.
 ///   **The state does not move, by induction over the block.** That is what
 ///   happens to every identity section, whatever it held when it became the identity -- a
 ///   dedicated cut switched on and off again through prepared targets freezes a non-zero state
@@ -2245,15 +2247,18 @@ fn section_state_is_flush_shaped<L: Lane>(section: &Section<L>) -> bool {
 ///
 /// Each bound of "inert" is load-bearing. A magnitude below `FLUSH_EPS` (a restored subnormal, say)
 /// is flushed to `+0.0` by the executed section and kept by the elided one, and a `-0.0` is flushed
-/// to `+0.0` the same way; so is a restored pair with both magnitudes in `[FLUSH_EPS, REST_EPS)`,
-/// or one such word beside a `+0.0`, by the joint rule (issue #1328). A magnitude above [`BLOCK_LIMIT`] can overflow `v3`: a disabled band
+/// to `+0.0` the same way; so is a pair with both magnitudes in `[FLUSH_EPS, REST_EPS)`, or one
+/// such word beside a `+0.0`, by the joint rule on a `+0.0` input word (issue #1328). A magnitude
+/// above [`BLOCK_LIMIT`] can overflow `v3`: a disabled band
 /// restored with `ic2 = -f32::MAX` behind a live +24 dB bell that turns an admitted `9e29` into
 /// `1.4e31` computes `v3 = inf`, then `d1 = 0.0 * inf = NaN`, and the executed section writes `NaN`
 /// where the elided one passes `v0` on (VERIFY-EQ, finding 1). `flush` keeps every state the kernel
-/// writes at `+0.0` or at least `FLUSH_EPS` in magnitude, and never leaves a pair the joint rule
-/// zeroes, so the floor and the pair term refuse only restored payloads (admitted on finiteness
-/// alone); the cap refuses those too, and the rare huge state a section can be left with when it
-/// is switched off after a spike.
+/// writes at `+0.0` or at least `FLUSH_EPS` in magnitude, so the floor refuses only restored
+/// payloads (admitted on finiteness alone). The pair term also refuses a pair the kernel wrote
+/// under a tiny non-zero input (the joint rule ignores a non-zero input, amendment A8) until a
+/// zero input word of an executed block zeroes it; that costs elision, never a bit. The cap
+/// refuses restored payloads too, and the rare huge state a section can be left with when it is
+/// switched off after a spike.
 ///
 /// The argument is per dead section and never counted how many were dropped, so it covers dropping
 /// every one of them. Until issue #976 the list was padded back up to a whole number of depth-two
@@ -2506,9 +2511,10 @@ fn cascade_sections<L: Lane, const W: usize>(
 /// the spill gate (issue #1000) refuses; as `bool`s they stay in general-purpose registers, and the
 /// tail's integrators stay in vector registers (no carried stack slot). Those two flags went through
 /// a stack slot once again after issue #1328's joint SVF flush, while the tail site below built its
-/// two dry masks in place (`dry_mask(at)`); those masks also feed the masked tail loop, and V8 sank
-/// their construction into it. With the tail's masks read from channel state (`Channel::dry`) the
-/// tail is clean again. The slot follows that site and not the dual masked pair's: with only the
+/// two dry masks in place (`dry_mask(at)`); those masks also feed the masked tail loop (that V8
+/// sank their construction into that loop, as it did in the masked mono pair, is an inference from
+/// the two reverts below, not a measured listing). With the tail's masks read from channel state
+/// (`Channel::dry`) the tail is clean again. The slot follows that site and not the dual masked pair's: with only the
 /// tail's mask build reverted it comes back (`[rbp-0xc8]`), and with only the pair's reverted the
 /// tail stays clean (#1328 attempt 2's verifier). Folding both channels into one flag did not help
 /// (the flag moved to another slot), so the per-channel fold stands. The allocation is observed,
@@ -4778,14 +4784,12 @@ mod elision {
                 for section in 0..EQ_SECTION_COUNT {
                     // Only *live* sections are seeded: a non-inert state in a dead section is a
                     // refusal leg with its own test, and seeding it here would silently disable
-                    // the very engagement this function is asserting. The seeds are a pair the
-                    // kernel can write: `ic2` just above `FLUSH_EPS`, beside an `ic1` above
-                    // `REST_EPS` so the joint flush keeps the pair (issue #1328). Since issue
-                    // #1015 a restored subnormal in a live section refuses too
-                    // (`stationary_subnormal`), and since #1328 so does a pair both below
-                    // `REST_EPS`.
+                    // the very engagement this function is asserting. The seeds are words the
+                    // kernel can write, just above `FLUSH_EPS` (under a tiny non-zero input the
+                    // joint flush keeps such a pair, issue #1328 amendment A8): since issue #1015
+                    // a restored subnormal in a live section refuses too (`stationary_subnormal`).
                     if left_live & (1 << section) != 0 {
-                        left_channel.sections[section].state.ic1 = L::splat(2.0e-14);
+                        left_channel.sections[section].state.ic1 = L::splat(1.5e-20);
                         left_channel.sections[section].state.ic2 = L::splat(-1.25e-20);
                     }
                     if right_live & (1 << section) != 0 {
@@ -4852,7 +4856,7 @@ mod elision {
             if seed_state {
                 for section in 0..EQ_SECTION_COUNT {
                     if live & (1 << section) != 0 {
-                        channel.sections[section].state.ic1 = L::splat(2.0e-14);
+                        channel.sections[section].state.ic1 = L::splat(1.5e-20);
                         channel.sections[section].state.ic2 = L::splat(-1.25e-20);
                     }
                 }
@@ -7873,10 +7877,11 @@ mod stationary_subnormal {
     /// [`Channel::restore_track`] (dual: the left channel; collapsed: the one channel), every other
     /// section dead. Refused: every non-zero magnitude below `FLUSH_EPS` -- `+-1e-30`, the word
     /// just under the floor at either sign, `+-2^-149`, and the elision test's old seeds `1e-40`
-    /// and `-1e-41` -- and `-0.0`; and, since the joint flush (issue #1328), every lone word below
-    /// `REST_EPS` beside the other integrator's `+0.0`: `+-FLUSH_EPS` exactly, the old seeds
-    /// `1.5e-20` and `-1.25e-20`, and the word just under `REST_EPS`. Admitted: `+-REST_EPS`
-    /// exactly, `+0.0` and `+-1.0`. A refused block runs every section, which flushes the word, so
+    /// and `-1e-41` -- and `-0.0`. Admitted: `+-FLUSH_EPS` exactly, `+0.0`, `+-1.0`, the seeds
+    /// that replaced the old ones, and a lone word on either side of `REST_EPS` beside the other
+    /// integrator's `+0.0`: the joint flush zeroes such a pair only on a zero input (issue #1328,
+    /// amendment A8), so the kernel writes it under a tiny input and leg (c) must admit it. A
+    /// refused block runs every section, which flushes the word, so
     /// the next block elides again. Every block renders the full cascade's bits and integrators.
     fn flush_eps_boundary<L: Lane, const W: usize>(width: &str) {
         let floor = f32::from_bits(INERT_MAGNITUDE_FLOOR);
@@ -7892,13 +7897,20 @@ mod stationary_subnormal {
             1.0e-40,
             -1.0e-41,
             -0.0,
+        ];
+        let admitted = [
             floor,
             -floor,
+            0.0_f32,
+            1.0,
+            -1.0,
             1.5e-20,
             -1.25e-20,
             under_rest,
+            -under_rest,
+            lane::REST_EPS,
+            -lane::REST_EPS,
         ];
-        let admitted = [lane::REST_EPS, -lane::REST_EPS, 0.0_f32, 1.0, -1.0];
         let lane = W - 1;
         let base = BAND_SECTION_OFFSET * STATE_WORDS_PER_BAND;
         let input = |block: usize| -> Vec<f32> {

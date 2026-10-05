@@ -41,8 +41,9 @@ fn integrator_word(draw: &mut Draw) -> f32 {
         7 => draw.noise(0.5),
         8 => f32::from_bits(0x8000_0001),
         // Either side of `REST_EPS` (issue #1328): a pair with both magnitudes below it is zeroed
-        // by the joint flush, so a word here, beside a `+0.0` or another such word, is a state an
-        // executed section moves and an elided one would keep.
+        // by the joint flush on a `+0.0` input word (amendment A8), so a word here, beside a `+0.0`
+        // or another such word, is a state an executed section can move and an elided one would
+        // keep.
         9 => draw.pick(&[
             f32::from_bits(lane::REST_EPS.to_bits() - 1),
             lane::REST_EPS,

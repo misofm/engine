@@ -17,14 +17,17 @@ pub enum ReferenceTptOutput {
 /// state is flushed once per sample inside the kernel, and nothing else looks at it. There is no
 /// per-sample recovery any more -- non-finite output is caught once per block, by the caller. The
 /// flush is the joint pair rule of issue #1328: each word follows the per-word [`FLUSH_EPS`] law,
-/// and both words are zeroed together when both magnitudes are below `REST_EPS` (`1.0e-14`).
+/// and both words are zeroed together when the step's input is exactly zero (`+0.0` or `-0.0`)
+/// and both magnitudes are below `REST_EPS` (`1.0e-14`; amendment A8).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceTptRetainedAction {
     /// Neither rule zeroed a word: each was at or above [`FLUSH_EPS`] in magnitude (or
-    /// non-finite), and at least one was at or above `REST_EPS` (or non-finite).
+    /// non-finite), and the input was not exactly zero or at least one word was at or above
+    /// `REST_EPS` (or non-finite).
     FiniteNormal,
-    /// At least one retained word was zeroed by either rule: it was below [`FLUSH_EPS`], or both
-    /// words were below `REST_EPS`; every zeroed word became positive zero.
+    /// At least one retained word was zeroed by either rule: it was below [`FLUSH_EPS`], or the
+    /// input was exactly zero and both words were below `REST_EPS`; every zeroed word became
+    /// positive zero.
     Flushed,
 }
 
@@ -173,12 +176,13 @@ impl ReferenceRetainedTptF32 {
     /// v1 = ic1 + d1
     /// d2 = (a3 * v3) + (a2 * ic1)
     /// v2 = ic2 + d2
-    /// (ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))
+    /// (ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), v0)
     /// y  = (m2 * v2) + ((m1 * v1) + (m0 * v0))
     /// ```
     ///
-    /// `flush_pair(n1, n2)` zeroes a word below `FLUSH_EPS`, and zeroes both when both are below
-    /// `REST_EPS` (issue #1328); a NaN passes both ordered compares untouched.
+    /// `flush_pair(n1, n2, v0)` zeroes a word below `FLUSH_EPS`, and zeroes both when `v0 == 0.0`
+    /// (either sign) and both are below `REST_EPS` (issue #1328, amendment A8); a NaN passes both
+    /// ordered compares untouched.
     ///
     /// `-c1` is a sign-bit flip and `d + d` is exact. Every multiply-add is **unfused**: the
     /// multiply rounds, then the add rounds (issue #163 phase 2). This twin is written in the same
@@ -200,7 +204,7 @@ impl ReferenceRetainedTptF32 {
         let v2 = self.s2 + d2;
         let n1 = self.s1 + (d1 + d1);
         let n2 = self.s2 + (d2 + d2);
-        let rest = n1.abs() < REST_EPS && n2.abs() < REST_EPS;
+        let rest = v0 == 0.0 && n1.abs() < REST_EPS && n2.abs() < REST_EPS;
         let flushed = rest | below_flush_epsilon(n1) | below_flush_epsilon(n2);
         self.s1 = if rest { 0.0 } else { flush(n1) };
         self.s2 = if rest { 0.0 } else { flush(n2) };

@@ -188,7 +188,8 @@ pub fn flush<L: Lane>(x: L) -> L {
 }
 
 /// Magnitude below which *both* words of a two-word recursive state are flushed together by
-/// [`flush_pair`] (issue #1328, decision 15 D15-4(a)).
+/// [`flush_pair`] on a sample whose input is exactly zero (issue #1328, decision 15 D15-4(a),
+/// amendment A8).
 ///
 /// The per-word law alone perturbs each word by at most [`FLUSH_EPS`] per step, and that is enough
 /// to stall a decaying second-order state short of rest: a period-2 limit cycle where the input
@@ -200,30 +201,45 @@ pub fn flush<L: Lane>(x: L) -> L {
 /// recomputed per-domain radii are in `dsp-research/filters.md`.
 pub const REST_EPS: f32 = 1.0e-14;
 
-/// The joint flush of a two-word recursive state `(n1, n2)` (issue #1328).
+/// The joint flush of a two-word recursive state `(n1, n2)` (issue #1328), gated on the
+/// section's input `x` for the same sample (amendment A8).
 ///
-/// Each word follows [`flush`]'s per-word law and, in addition, when *both* magnitudes are below
-/// [`REST_EPS`] the pair is zeroed together:
+/// Each word follows [`flush`]'s per-word law and, in addition, when the input sample is exactly
+/// zero (`+0.0` or `-0.0`) *and* both magnitudes are below [`REST_EPS`], the pair is zeroed
+/// together:
 ///
 /// ```text
-/// rest = (|n1| < REST_EPS) & (|n2| < REST_EPS)
+/// rest = (x == 0) & (|n1| < REST_EPS) & (|n2| < REST_EPS)
 /// ic1  = andnot(n1, (|n1| < FLUSH_EPS) | rest)
 /// ic2  = andnot(n2, (|n2| < FLUSH_EPS) | rest)
 /// ```
 ///
-/// Eleven operations for the two words (two `abs`, four compares, one mask `and`, two mask `or`,
-/// two `andnot`), against six for two [`flush`] calls. The rest test is an `and`: one word at or
-/// above `REST_EPS` keeps the pair on the per-word law bit for bit, so an audible partner word is
-/// never zeroed. It is two ordered compares, never [`Lane::max`] (which is `select(gt)` and would
-/// drop a NaN), so a NaN in either word passes through both rules and reaches the once-per-block
-/// boundary check; `-0.0` becomes `+0.0`. Branch-free, one generic body at every width.
+/// Thirteen operations for the two words (two `abs`, five compares, two mask `and`, two mask `or`,
+/// two `andnot`), against six for two [`flush`] calls.
+///
+/// The input term is what keeps the rule a *rest* rule: on a sample whose input is not exactly
+/// zero the pair follows the per-word law bit for bit, so a section driven by a tiny non-zero
+/// signal applies its whole response to it (and a chain of boosting sections applies every
+/// boost), whatever its state's magnitude. Only silence -- an input that is exactly zero -- lets
+/// the pair rule end a decay. `x == 0` is the IEEE ordered equality, which calls `-0.0` equal to
+/// `+0.0` and a NaN unequal to everything; a subnormal input is not zero, and why it is not also
+/// gated is in `dsp-research/filters.md` (numerical limits).
+///
+/// The rest test is an `and` of the two magnitudes: one word at or above `REST_EPS` keeps the
+/// pair on the per-word law bit for bit, so an audible partner word is never zeroed. It is two
+/// ordered compares, never [`Lane::max`] (which is `select(gt)` and would drop a NaN), so a NaN in
+/// either word passes through both rules and reaches the once-per-block boundary check; `-0.0`
+/// becomes `+0.0`. Branch-free, one generic body at every width.
 #[inline(always)]
-pub fn flush_pair<L: Lane>(n1: L, n2: L) -> (L, L) {
+pub fn flush_pair<L: Lane>(n1: L, n2: L, x: L) -> (L, L) {
     let a1 = n1.abs();
     let a2 = n2.abs();
     let rest_eps = L::splat(REST_EPS);
     let flush_eps = L::splat(FLUSH_EPS);
-    let rest = L::mask_and(a1.lt(rest_eps), a2.lt(rest_eps));
+    let rest = L::mask_and(
+        L::mask_and(a1.lt(rest_eps), a2.lt(rest_eps)),
+        x.eq(L::zero()),
+    );
     (
         n1.andnot(L::mask_or(a1.lt(flush_eps), rest)),
         n2.andnot(L::mask_or(a2.lt(flush_eps), rest)),

@@ -5,8 +5,9 @@
 //! domain maximum), a per-word flush of the two integrators leaves a period-2 limit cycle: `ic1`
 //! alternates in sign between about `1e-20` and `1.35e-16` and the output rings near `±2e-21`
 //! forever, from sample 858,748 for this exact impulse. The joint SVF flush (`lane::flush_pair`)
-//! zeroes the pair once both words are below `REST_EPS`, so every integrator reaches `+0.0` and the
-//! output reaches exactly `+0.0`.
+//! zeroes the pair once both words are below `REST_EPS` on a sample whose section input is exactly
+//! zero (amendment A8), so after the impulse every integrator reaches `+0.0` and the output reaches
+//! exactly `+0.0`.
 
 use builtins::test_support::{chain_input, input_state_words};
 use builtins::{BuiltinChain, BuiltinParameters, DualMonoBlock, builtin_filter_cutoff_maximum_hz};

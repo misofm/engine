@@ -120,8 +120,9 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 /// 4. `v1 = ic1 + d1`
 /// 5. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
 /// 6. `v2 = ic2 + d2`
-/// 7. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))` — `d1 + d1` and `d2 + d2` are
-///    exact; the joint flush of [`crate::flush_pair`] (issue #1328)
+/// 7. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), v0)` — `d1 + d1` and `d2 + d2`
+///    are exact; the joint flush of [`crate::flush_pair`] (issue #1328), which zeroes the pair
+///    only on a frame whose input `v0` is exactly zero (amendment A8)
 /// 8. `y = fma(m2, v2, fma(m1, v1, m0 * v0))`
 /// 9. `store(frame, y)`
 ///
@@ -637,8 +638,9 @@ fn svf_cascade_interleaved_impl<
 /// 3. `v1 = ic1 + d1`
 /// 4. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
 /// 5. `v2 = ic2 + d2`
-/// 6. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2))` — `d1 + d1` and `d2 + d2` are
-///    exact; the joint flush of [`crate::flush_pair`] (issue #1328)
+/// 6. `(ic1, ic2) = flush_pair(ic1 + (d1 + d1), ic2 + (d2 + d2), v0)` — `d1 + d1` and `d2 + d2`
+///    are exact; the joint flush of [`crate::flush_pair`] (issue #1328), gated on this section's
+///    input `v0` being exactly zero (amendment A8)
 #[inline(always)]
 pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, s: &mut SvfState<L>) -> (L, L) {
     let v3 = v0.sub(s.ic2);
@@ -646,7 +648,7 @@ pub fn svf_step<L: Lane>(v0: L, nc1: L, a2: L, a3: L, s: &mut SvfState<L>) -> (L
     let v1 = s.ic1.add(d1);
     let d2 = a3.fma(v3, a2.mul(s.ic1));
     let v2 = s.ic2.add(d2);
-    (s.ic1, s.ic2) = flush_pair(s.ic1.add(d1.add(d1)), s.ic2.add(d2.add(d2)));
+    (s.ic1, s.ic2) = flush_pair(s.ic1.add(d1.add(d1)), s.ic2.add(d2.add(d2)), v0);
     (v1, v2)
 }
 
