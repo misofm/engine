@@ -11038,11 +11038,123 @@ fn assert_send_refusal(
     assert_eq!(send_mirror(host), SEND_SEEDS, "{what}: mirror unchanged");
 }
 
+/// Issue #1237 gate 3: a live send edit outside the route domain -- a gain past `[-144, 24]` dB
+/// or a matrix coefficient past `[-1, 1]` -- is refused `DOMAIN` and moves nothing; the bounds
+/// themselves, and subnormal coefficients of both signs (`±1.0e-45`, `±2^-127`), are admitted
+/// and land in the mirror with their exact bits.
+///
+/// Test value: red if the browser's send admission bounds a live value other than as the session
+/// does (no bound, an exclusive one, another limit, or a refusal of a subnormal coefficient the
+/// session accepts), so a value no session may hold could be pushed live, or a value a session
+/// holds refused.
+#[test]
+fn a_live_send_edit_outside_the_route_domain_is_refused() {
+    const DEPTH: u64 = 4;
+    let room = vec![DEPTH as usize; SEND_ROUTES.len()];
+    let fader_room = vec![DEPTH as usize; SEND_STRIPS as usize];
+    let gain = |value: f32| (COMMAND_ROUTE_GAIN_DB, [value, 0.0, 0.0, 0.0]);
+    let matrix = |position: usize, value: f32| {
+        let mut values = SEND_SEEDS[0].matrix;
+        values[position] = value;
+        (COMMAND_ROUTE_MATRIX, values)
+    };
+    let mut refused = vec![gain(24.5), gain(-144.5)];
+    let mut admitted = vec![gain(24.0), gain(-144.0)];
+    for position in 0..4 {
+        refused.extend([matrix(position, 1.5), matrix(position, -1.5)]);
+        admitted.extend([matrix(position, 1.0), matrix(position, -1.0)]);
+        // Subnormal coefficients of both signs are in the session's domain (#1237 attempt 2).
+        for subnormal in [1.0e-45, f32::MIN_POSITIVE / 2.0] {
+            admitted.extend([matrix(position, subnormal), matrix(position, -subnormal)]);
+        }
+    }
+    for (kind, values) in refused {
+        let mut host = send_host(&SEND_SEEDS, DEPTH);
+        send_render(&mut host, 0);
+        stage_send(&mut host, 0, kind, 0, 0, values);
+        assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+        let what = format!("kind {kind}, {values:?}");
+        assert_send_refusal(&host, COMMAND_REASON_DOMAIN, 0, &room, &fader_room, &what);
+    }
+    for (kind, values) in admitted {
+        let mut host = send_host(&SEND_SEEDS, DEPTH);
+        send_render(&mut host, 0);
+        stage_send(&mut host, 0, kind, 0, 0, values);
+        let what = format!("kind {kind}, {values:?}");
+        assert_eq!(host.submit_commands(1), RESULT_OK, "{what}");
+        let mut expected = SEND_SEEDS;
+        if kind == COMMAND_ROUTE_GAIN_DB {
+            expected[0].gain_db = values[0];
+        } else {
+            expected[0].matrix = values;
+        }
+        assert_eq!(send_mirror(&host), expected, "{what}");
+    }
+}
+
+/// One track `t0` routed to the output at -144 dB through `matrix`, and nothing else audible.
+fn subnormal_route_document(matrix: [f32; 4]) -> String {
+    let (mut model, source, track, _, route) = strip_base();
+    let output = route.destination.clone();
+    strip_add_track(&mut model, &source, &track, "t0");
+    let mut main = strip_route(
+        &route,
+        "t0-main",
+        strip_post_pan("t0", false),
+        output,
+        matrix,
+    );
+    main.gain_db = -144.0;
+    model.routes.push(main);
+    canonical_session_json(&model).expect("subnormal-route session canonicalizes")
+}
+
+/// Issue #1237 gate 4 (the render): a route whose folded products are subnormal (`±1.0e-35` at
+/// -144 dB, about `±6.3e-43`) renders bit-identical to the same route with those coefficients
+/// `0.0`, through the browser host. The route is the output's only input, so a subnormal
+/// constant would surface as a nonzero subnormal sample.
+///
+/// Test value: red if a subnormal folded product reaches the bound route constant (the flush
+/// removed from `gated_route_coefficients`), since the output would then carry `x * 6.3e-43`
+/// instead of a signed zero.
+#[test]
+fn a_subnormal_route_renders_as_a_zero_coefficient() {
+    let tiny = 1.0e-35_f32;
+    let mut subnormal = strip_boot(
+        &subnormal_route_document([tiny, -tiny, 0.5, -tiny]),
+        strip_options(4, 0, 0),
+    );
+    let mut zero = strip_boot(
+        &subnormal_route_document([0.0, 0.0, 0.5, 0.0]),
+        strip_options(4, 0, 0),
+    );
+    let mut nonzero = 0;
+    for block in 0..4 {
+        let render = |host: &mut AudioWorkletEngineHost| {
+            submit_strip_source(host, "t0", block, &strip_planes(0, block));
+            assert_eq!(host.render_next(), RESULT_OK, "block {block}");
+            host.output_pcm().expect("output").to_vec()
+        };
+        let left = render(&mut subnormal);
+        let right = render(&mut zero);
+        for (sample, (x, y)) in left.iter().zip(&right).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "block {block} sample {sample}: subnormal route {x:e} vs zero {y:e}"
+            );
+            nonzero += usize::from(*y != 0.0);
+        }
+    }
+    // The `rl = 0.5` column is audible, so the comparison is of a rendering route.
+    assert!(nonzero > 0, "the route renders something");
+}
+
 /// Issue #1222 gate 2: a send batch is all or nothing.
 ///
-/// * A valid `routeGainDb` and a `routeMatrix` whose folded coefficient overflows (finite on the
-///   wire, so decode admits it, and refused by the route's own domain rule) stage nothing and
-///   refuse `DOMAIN` at the second record.
+/// * A valid `routeGainDb` and a `routeMatrix` with a coefficient outside `[-1, 1]` (finite on
+///   the wire, so decode admits it, and refused by the route's own domain rule, issue #1237)
+///   stage nothing and refuse `DOMAIN` at the second record.
 /// * A batch that overfills one send queue is typed backpressure at its first record on that
 ///   queue, behind a valid fader record, and pushes nothing.
 /// * A valid send record and a valid fader record, with that fader queue already full, push
@@ -11063,7 +11175,8 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
     let fader_room = vec![depth; SEND_STRIPS as usize];
     let room = vec![depth; SEND_ROUTES.len()];
 
-    // `send-b` is at +2 dB: `ll = 3e38` folds past `f32::MAX`.
+    // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237; before the
+    // domain this drew `3e38`, which folded past `f32::MAX` at +2 dB).
     let mut host = send_host(&SEND_SEEDS, DEPTH);
     send_render(&mut host, 0);
     stage_send(
@@ -11080,7 +11193,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
         COMMAND_ROUTE_MATRIX,
         1,
         0,
-        [3.0e38, 0.1, 0.2, 0.3],
+        [1.5, 0.1, 0.2, 0.3],
     );
     assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
     assert_send_refusal(
@@ -11254,7 +11367,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
     );
     assert_eq!(host.submit_commands(1), RESULT_OK);
     send_render(&mut host, 1);
-    // `send-b` is at +2 dB: `ll = 3e38` folds past `f32::MAX`.
+    // `ll = 1.5` is outside the route coefficient domain `[-1, 1]` (issue #1237; it was `3e38`).
     stage_send(
         &mut host,
         0,
@@ -11269,7 +11382,7 @@ fn a_refused_send_batch_pushes_nothing_and_keeps_the_mirror() {
         COMMAND_ROUTE_MATRIX,
         1,
         0,
-        [3.0e38, 0.1, 0.2, 0.3],
+        [1.5, 0.1, 0.2, 0.3],
     );
     assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
     let mut admitted = SEND_SEEDS;

@@ -310,7 +310,14 @@ else `+0.0` -- and each later contributing route is added to it in order. A lone
 `-0.0` therefore keeps its sign only as the first route, and a destination whose every route is
 muted and uncompensated sums to exact `+0.0`. A zero coefficient times a non-finite `input`-tap
 sample is NaN, so a muted compensated route can carry NaN into a bus input; the bus's input section
-sanitizes it, but a meter at the bus's `input` boundary sees it. Routed sidechains reuse the tagged source shape,
+sanitizes it, but a meter at the bus's `input` boundary sees it. A route's `gain_db` lies in
+`[-144, 24]` dB and each `channel_matrix` coefficient in `[-1, 1]`, both inclusive (#1237): a
+finite value outside refuses `numeric.out_of_schema_range` at `$.routes[<i>].gain_db` or
+`$.routes[<i>].channel_matrix.<ll|lr|rl|rr>`, and a non-finite one keeps `numeric.non_finite`. The
+compiler's lowering and every live send record check the same domain (a live value outside it is
+refused `domain`). A route applies `gain * coefficient` per matrix position; a product that is
+subnormal (a coefficient below about `1.9e-31` at -144 dB) is flushed to `+0.0` before it is
+bound or pushed. Routed sidechains reuse the tagged source shape,
 taps included, and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with

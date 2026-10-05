@@ -123,3 +123,78 @@ a `NativeEffectRegistry`. No rendered bit and no diagnostic a host can observe c
 ## Dependencies
 
 - None. File-disjoint from stream A; it may merge at any time.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Base `3ade8e969` (branch `codex/d15-stream-j`); implementation commit `a9f09e29a`.
+
+- **D1/D2.** `validate_prepare_request` (`crates/effect-contract/src/lib.rs`) no longer calls
+  `validate_descriptor`; it opens with `debug_assert!(validate_descriptor(d).is_ok(), ...)` naming
+  the descriptor id, and its new doc comment states the precondition (registry-admitted, or
+  validated by the caller) and lists the codes it still raises. No signature changed.
+- **D4.** One paragraph under "Stable diagnostics" in `docs/EFFECT_CONTRACT_V1.md`.
+- **Test.** `registry_refuses_an_invalid_main_descriptor` (`crates/effect-contract/tests/registry.rs`).
+  The fixture also asserts its `contract_major: 1` twin validates and registers, so the refusal is
+  the main-descriptor check and not a fixture defect. *Defect it catches:* the registry's
+  `validate_descriptor` call deleted or weakened, which after D1 would let an invalid main
+  descriptor prepare in release builds. *Mutation:* `if validate_descriptor(d).is_err()` in
+  `NativeEffectRegistry::new` became `if false && validate_descriptor(d).is_err()`;
+  `cargo test --locked --no-fail-fast -p effect-contract` was RED on exactly this test (panic
+  "a descriptor with contract_major 2 must not enter the registry") and every other effect-contract
+  test, `response_analysis.rs` included, stayed green; reverted, GREEN.
+- **Gate 1.** `cargo test --locked -p effect-contract`: pass.
+- **Gate 2.** `test-debug-b` line: pass (812 tests). `test-debug-a` line: the first run failed one
+  test, `crates/capi/tests/resource_lifecycle.rs`
+  `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free` (run 5: raced
+  final block `[0.0, 0.0]` against the fresh plan's `[-0.1212493, 0.039765462]`), on a host at
+  load average ~98 on 32 CPUs. That race test prepares only registry-admitted descriptors, so the
+  removed check could not have refused or changed anything there (with the debug assertion active,
+  an invalid descriptor would have panicked, not rendered zeros). Five isolated reruns of it passed
+  and a full rerun of the `test-debug-a` line passed (1427 tests, 0 failed). Recorded as a
+  pre-existing load-sensitive intermittent outside this issue's paths, for the coordinator to file.
+- **Gate 3.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings`, `bash scripts/check-workspace-policy.sh`: pass.
+- **Gate 4 (no bit moved; PR evidence).** `sdk_render_oracle -- 64`, identical on base and branch:
+
+  | fixture | digest |
+  |---|---|
+  | `parametric-eq-nine-track.json` | `2938bb7859ebb8ab57edc9bbdd5e2ee368a590078787df29c6da095fa8e1f5c8` |
+  | `console-sixty-four-track.json` | `24607288d129370f1aa1d617c7d7ac69ff4cb6122520fb26a3873116accffce8` |
+  | `console-sixty-four-track-app.json` | `ac23bd045e27fda2095937e70b78a8df62ff6d3fd301815d82f2807b888430cf` |
+  | `console-sixty-four-track-sends.json` | `58c54351ab7e89bf3afe3bad3b33c075d628fad429359a22da37f85581d5f883` |
+
+- **Gate 5 (descriptive).** `prepare`, `rebuild-preflight`, `rebuild-run` once each, fresh empty
+  workdirs, one warmup and two measured rounds, no retry or tuning. The host was above the load
+  ceiling for both, so both ran with `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` and both records say
+  `uncontrolled`; both pinned to CPU 31; both validators accepted. Records:
+  `artifacts/steps/d15-15-descriptor-before/` (module `a9a51862...` at `3ade8e969`, loadavg 95.49)
+  and `artifacts/steps/d15-15-descriptor-after/` (module `b723ff9f...` at `a9f09e29a`, loadavg
+  39.22). Boot p50, mean of the two rounds:
+
+  | document | before ms | after ms | observed (confounded: loadavg 95 -> 39) |
+  |---|---|---|---|
+  | nine_track_eq | 4.892 | 3.531 | -27.8 % |
+  | sixty_four_track_console | 48.498 | 33.206 | -31.5 % |
+  | sixty_four_track_app_shape | 45.311 | 32.550 | -28.2 % |
+  | sixty_four_track_console_sends | 77.748 | 54.380 | -30.1 % |
+
+  The host load fell from ~95 to ~39 between the two runs, so the two committed records are
+  confounded by host load and cannot measure the change; the observed ~30 % is not attributed. Per
+  the benchmark rules the run was not repeated.
+
+  Verifier evidence (uncommitted, attempt-1 verdict): one back-to-back pair of the same frozen
+  workload at nearly the same load (loadavg 23.2 then 24.8), modules reproducing the record digests,
+  pinned to CPU 31, both `uncontrolled`, both validators accepted. Records:
+  `/tmp/claude-1002/v1330/clone-base/artifacts/steps/v1330-verifier-before/` and
+  `/tmp/claude-1002/v1330/clone-branch/artifacts/steps/v1330-verifier-after/`. Boot p50, mean of
+  the two rounds: nine_track_eq 4.193 -> 3.454 ms (-17.6 %), sixty_four_track_console
+  39.078 -> 32.506 ms (-16.8 %), sixty_four_track_app_shape 38.281 -> 30.804 ms (-19.5 %),
+  sixty_four_track_console_sends 60.920 -> 53.564 ms (-12.1 %). One uncontrolled pair, so
+  descriptive too, but it puts the change at roughly 12-20 % p50 faster.
+
+  Peak Wasm memory for `sixty_four_track_console` moves 5,701,632 -> 5,767,168 B (one 64 KiB
+  page), deterministically (in both committed records and the verifier's rerun). The removed
+  per-instance `validate_descriptor` calls allocated `BTreeSet`/`BTreeMap` scratch, so the
+  allocator's layout changed. No diagnostic and no rendered bit moves.

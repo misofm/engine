@@ -2658,10 +2658,17 @@ impl EffectDifferential<'_> {
     /// once, so a ramp that ends on a domain edge can round a few ulps past the edge on its way.
     /// For each smoothed continuous parameter, each edge and each quality row, this finds a start
     /// value a few hundred ulps inside the edge whose `f32` walk leaves the domain, prepares a
-    /// scalar instance there on both channels, sends a `Point` to the edge, and after every
-    /// rendered sample of the ramp restores the instance's snapshot into a freshly prepared twin.
-    /// It returns each refusal. (An associated function of this exported type, so an effect
-    /// crate's tests reach it.)
+    /// scalar instance there on both channels, sends a `Point` to the edge, and renders every
+    /// sample of the ramp. After each sample in a fixed position set it restores the instance's
+    /// snapshot into a freshly prepared twin (#1301): for a ramp of `n` samples on quality row
+    /// `r`, with `k` the first step of the probe's own `f32` walk that leaves the domain, the set
+    /// is `{0, n - 2, n - 1} U {k - 2, k - 1, k} U {s : s mod 16 == 4r mod 16}`. Sample 0 reaches
+    /// a refusal of the whole path, `k - 2 ..= k` the first sample past the edge with one sample
+    /// of slack each way, `n - 2 ..= n - 1` the last moving sample and the snap, and the rotating
+    /// stride positions the model does not predict. When
+    /// [`dsp_reference::randomized::overridden`] is true (the nightly's scaled run, or a seed
+    /// replay), it restores after every sample instead. It returns each refusal. (An associated
+    /// function of this exported type, so an effect crate's tests reach it.)
     #[must_use]
     pub fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String> {
         edge_ramp_restore_violations(factory)
@@ -2702,8 +2709,9 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
             }
         });
     let connected = matches!(sidechain, PreparedSidechainPort::Connected { .. });
+    let every_sample = dsp_reference::randomized::overridden();
     let mut violations = Vec::new();
-    for quality in descriptor.qualities {
+    for (row, quality) in descriptor.qualities.iter().enumerate() {
         let shape = Shape {
             quality: *quality,
             quantum: 64,
@@ -2729,9 +2737,10 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
             }
             let samples = parameter.smoothing_samples;
             for edge in [low, high] {
-                let Some(start) = overshooting_start(edge, low, high, samples) else {
+                let Some((start, first_out)) = overshooting_start(edge, low, high, samples) else {
                     continue;
                 };
+                let positions = edge_restore_positions(samples, first_out, row, every_sample);
                 let mut values: Vec<InitialParameterValue> =
                     default_initial_values(descriptor).collect();
                 for value in &mut values {
@@ -2774,6 +2783,9 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
                     )
                     .expect("a well-shaped block");
                     let _ = effect.process(block);
+                    if positions.binary_search(&sample).is_err() {
+                        continue;
+                    }
                     let payload = snapshot_scalar(effect.as_ref(), sizes, false);
                     let mut twin = factory
                         .prepare(request(shape, &values))
@@ -2808,8 +2820,9 @@ fn edge_ramp_restore_violations(factory: &dyn NativeEffectFactory) -> Vec<String
 
 /// A start a few hundred ulps inside `edge` whose `f32` ramp of `samples` steps to `edge`
 /// (`step = (edge - start) / samples`, then `current += step` before the snap) leaves
-/// `[low, high]`, if one is found.
-fn overshooting_start(edge: f32, low: f32, high: f32, samples: u32) -> Option<f32> {
+/// `[low, high]`, if one is found, with the first step `k` (`1 <= k < samples`) whose `current`
+/// is outside.
+fn overshooting_start(edge: f32, low: f32, high: f32, samples: u32) -> Option<(f32, u32)> {
     let inward = |value: f32| {
         if edge == high {
             value.next_down()
@@ -2825,14 +2838,49 @@ fn overshooting_start(edge: f32, low: f32, high: f32, samples: u32) -> Option<f3
         }
         let step = (edge - start) / samples as f32;
         let mut current = start;
-        for _ in 1..samples {
+        for first_out in 1..samples {
             current += step;
             if !(low..=high).contains(&current) {
-                return Some(start);
+                return Some((start, first_out));
             }
         }
     }
     None
+}
+
+/// The ascending, distinct samples after which the edge-ramp probe restores a snapshot (#1301):
+/// for a ramp of `samples` (`n`) on quality row `row` whose model walk first leaves the domain at
+/// step `first_out` (`k`), `{0, n - 2, n - 1} U {k - 2, k - 1, k} U {s : s mod 16 == 4 row mod
+/// 16}` within `0..n`, or every sample of `0..n` when `every_sample`.
+fn edge_restore_positions(
+    samples: u32,
+    first_out: u32,
+    row: usize,
+    every_sample: bool,
+) -> Vec<u64> {
+    const STRIDE: u64 = 16;
+    let n = u64::from(samples);
+    if every_sample {
+        return (0..n).collect();
+    }
+    let k = u64::from(first_out);
+    let offset = (4 * row as u64) % STRIDE;
+    let mut positions: Vec<u64> = [
+        Some(0),
+        n.checked_sub(2),
+        n.checked_sub(1),
+        k.checked_sub(2),
+        k.checked_sub(1),
+        Some(k),
+    ]
+    .into_iter()
+    .flatten()
+    .chain((offset..n).step_by(STRIDE as usize))
+    .filter(|&sample| sample < n)
+    .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    positions
 }
 
 // The body of `EffectDifferential::assert_edge_ramps_restore`.
@@ -2844,4 +2892,35 @@ fn assert_edge_ramps_restore(factory: &dyn NativeEffectFactory) {
         factory.descriptor().display_name,
         violations.join("\n")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_restore_positions;
+
+    #[test]
+    fn edge_restore_positions_keep_the_reach_critical_samples() {
+        for (n, k) in [(64, 34), (64, 49), (128, 66), (64, 1), (64, 63)] {
+            for row in 0..4 {
+                let positions = edge_restore_positions(n, k, row, false);
+                let (n, k) = (u64::from(n), u64::from(k));
+                for required in [0, k - 1, k, n - 2, n - 1] {
+                    assert!(
+                        positions.contains(&required),
+                        "n {n}, k {k}, row {row}: {required} missing from {positions:?}"
+                    );
+                }
+                assert!(positions.iter().all(|&sample| sample < n), "{positions:?}");
+                assert!(
+                    positions.len() as u64 <= n / 16 + 6,
+                    "n {n}, k {k}, row {row}: {} positions",
+                    positions.len()
+                );
+                assert_eq!(
+                    edge_restore_positions(n as u32, k as u32, row, true),
+                    (0..n).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
 }

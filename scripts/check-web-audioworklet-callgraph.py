@@ -16,6 +16,16 @@ Modes
     `unreachable` instruction and fail unless that set equals `TRAP_ALLOW_LIST` plus any
     `--trap-owner` substrings the caller named.
 
+    The C allocator names (`free`, `malloc`, `calloc`, `realloc`) match only as the *whole* symbol
+    name (issue #1234). Searched as substrings they also matched any out-of-line Rust function
+    whose mangled name merely ends in `4free` -- an ordinary queue accessor named `free` read as
+    the allocator. On `wasm32-unknown-unknown` the Rust allocator is already matched by
+    `dlmalloc`, `dealloc`, `__rust_alloc` and `__rust_realloc`. This checker never sees an import:
+    an import has no body, so `wasm-objdump -d` prints no function header for it, and
+    `check-web-audioworklet.sh` refuses a module with any import before this gate runs. A member
+    named exactly `free`, `malloc`, `calloc` or `realloc` is therefore a defined C allocator
+    entry point, and that is exactly what the anchored alternative refuses.
+
     `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
     control path (`port.onmessage`), where the engine's rule is "never allocate on the render
     thread" and a checked index inside a pure-math helper is not an allocation. It is refused
@@ -101,8 +111,9 @@ PANIC_ENTRY = re.compile(
     r"|panic_const|panic_fmt"
 )
 FORBIDDEN = re.compile(
-    r"dealloc|dlmalloc|free|malloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
-    r"|insert_large_chunk|memory_grow|__rust_alloc"
+    r"^(free|malloc|calloc|realloc)$"
+    r"|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk"
+    r"|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc"
 )
 # The one non-entry trap owner that may remain, with the reason it is unreachable in production:
 # `PreparedRenderPlan::render_inner` inlines `PlanarBufferMut::plane_mut`, whose `&mut
@@ -611,6 +622,41 @@ def self_test() -> int:
         "000020 func[1] <render_next>:",
     ) + "000030 func[2] <_ZN8dlmalloc4free17h0E>:\n 000031: 0b                         | end\n"
     expect("(a) dlmalloc free", check_callgraph(parse(freeing), "miso_engine_web_v1_render") == 1)
+
+    # (a1) issue #1234: the C allocator names are anchored to the whole symbol name.
+    def reaching(name: str) -> dict[int, Function]:
+        return parse(freeing.replace("<_ZN8dlmalloc4free17h0E>", f"<{name}>"))
+
+    # An out-of-line Rust accessor that is merely *named* like a C allocator is not the
+    # allocator, for each of the four names (a name that contains or ends in one, unanchored).
+    for length, c_name in ((4, "free"), (6, "malloc"), (6, "calloc"), (7, "realloc")):
+        expect(
+            f"(a1) out-of-line accessor named {c_name} passes",
+            check_callgraph(
+                reaching(f"_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer{length}{c_name}"),
+                "miso_engine_web_v1_render",
+            )
+            == 0,
+        )
+    # An unmangled name that merely *begins* with a C allocator name is not the allocator: the
+    # anchor holds at the end too.
+    for c_name in ("free", "malloc", "calloc", "realloc"):
+        expect(
+            f"(a1) unmangled {c_name}_count passes",
+            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 0,
+        )
+    # A member named exactly like a C allocator entry point fails, each of the four.
+    for c_name in ("free", "malloc", "calloc", "realloc"):
+        expect(
+            f"(a1) bare C allocator {c_name}",
+            check_callgraph(reaching(c_name), "miso_engine_web_v1_render") == 1,
+        )
+    # The Rust allocator's symbols still fail; `__rust_realloc` is new to the list.
+    for rust_name in ("_ZN8dlmalloc4free17h0E", "__rust_realloc"):
+        expect(
+            f"(a1) Rust allocator {rust_name}",
+            check_callgraph(reaching(rust_name), "miso_engine_web_v1_render") == 1,
+        )
 
     # (b) an `unreachable` in a function that is neither a panic entry nor allow-listed fails.
     trapping = VALID_SHAPE.replace(

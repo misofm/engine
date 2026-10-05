@@ -79,14 +79,14 @@ bounded tail of decision 15 D15-4. Today such an edit rebuilds the plan.
     before right.
   - **Domain.** A trim that `checked_trim_gain` refuses gives `LiveRebuild::Domain`.
     `checked_trim_gain` becomes `pub`, documented as `checked_fader_gain` is.
-  - **Ramps.** Per *Session `controlSmoothing`: configurable ramp lengths for live mute, fader
-    and pan changes* (#1054) D3 and D4, a TrimDb record carries `LiveRamps::fader_samples` (the
-    `fader_ms` key) and a PolarityInvert record `LiveRamps::mute_samples` (the `mute_ms` key),
-    each read through `LiveRamps::resolve` with the strip's `Input` entry, so a
-    `SetTrackBuiltins` that carries its own length uses it (*Carry an optional per-edit ramp
-    length on live session edits*, #1394 D6).
-    No input-specific ramp field exists (D15-1: every live value ramps; an explicit 0 stays
-    legal).
+  - **Ramps.** Per *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and
+    pan changes* (#1054) D3 and D4, a TrimDb record carries `LiveRamps::fader_samples` (the
+    `fader_ms` key) and a PolarityInvert record `for_row(PolarityInvert)`, twice
+    `LiveRamps::mute_samples` (the `mute_ms` key times two; root, 2026-10-05, from #1055,
+    `FINDINGS.md` 9.2), each read through `LiveRamps::resolve` with the strip's `Input` entry, so a
+    `SetTrackBuiltins` that carries its own length uses it (*Carry an optional per-edit ramp length
+    on live session edits*, #1394 D6). No input-specific ramp field exists (D15-1: every live value
+    ramps; an explicit 0 stays legal).
   - `delay_samples` stays compared, so its change is `Structure`.
 - **D3. The cells.** The records are written to the strip's input cells from *Hold strip
   input-lane values in latest-target cells* (#1346), built on *Hold live values in latest-target
@@ -144,7 +144,9 @@ Run every command from the repository root.
    - a `delay_samples` change gives `Structure`;
    - a trim past either end of `[-144, 24]`, and a NaN trim, give `Domain`;
    - a TrimDb record carries `LiveRamps::for_session(next).fader_samples` and a PolarityInvert
-     record its `mute_samples`.
+     record twice its `mute_samples` (`for_row(PolarityInvert)`; root, 2026-10-05, from #1055),
+     checked with `mute_ms` and `fader_ms` set so that twice the mute length differs from the fader
+     length.
 
    `cargo test --locked -p host-core --all-targets --features host-core/test-support`
 2. **Equal to a rebuild.** New cases in the capi live tests, on `long_session` rewritten through

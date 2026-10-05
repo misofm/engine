@@ -685,6 +685,15 @@ fn vcas_on_cycles(edges: &[Vec<usize>]) -> Vec<bool> {
     on_cycle
 }
 
+/// A route's gain domain in dB, inclusive (issue #1237 D1; owner question Q2 of decision 13).
+///
+/// The graph compiler's `route_values` refuses the same domain for the lowering and every live
+/// record; `graph-compiler`'s `route_coefficients` test holds the two to the same boundaries.
+const ROUTE_GAIN_DB_MINIMUM: f32 = -144.0;
+const ROUTE_GAIN_DB_MAXIMUM: f32 = 24.0;
+/// A route's `channel_matrix` coefficient domain is `[-1, 1]`, inclusive (issue #1237 D1).
+const ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM: f32 = 1.0;
+
 fn validate_routes(
     session: &SessionModel,
     index: &Index<'_>,
@@ -701,7 +710,13 @@ fn validate_routes(
             &route.destination,
             &path.key("destination"),
         );
-        validate_finite(diagnostics, route.gain_db, &path.key("gain_db"));
+        validate_finite_range(
+            diagnostics,
+            route.gain_db,
+            ROUTE_GAIN_DB_MINIMUM,
+            ROUTE_GAIN_DB_MAXIMUM,
+            &path.key("gain_db"),
+        );
         // A route into the output is never live, so a follow there could only be prepared, and a
         // live unmute of its source would leave the strip's main route silent (#1218 D1, DESIGN
         // P11). The boolean is legal in general and illegal in this context.
@@ -720,7 +735,13 @@ fn validate_routes(
             ("rl", route.channel_matrix.rl),
             ("rr", route.channel_matrix.rr),
         ] {
-            validate_finite(diagnostics, value, &matrix_path.key(field));
+            validate_finite_range(
+                diagnostics,
+                value,
+                -ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
+                ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM,
+                &matrix_path.key(field),
+            );
         }
     }
 }
