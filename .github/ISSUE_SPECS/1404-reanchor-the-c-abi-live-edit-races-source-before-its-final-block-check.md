@@ -54,6 +54,7 @@ which is 20 race runs.
 | `taskset` 1 CPU, 4 busy loops on it | instrumented copy | 0 / 20 |
 | Split: control thread's CPU shared with 3 busy loops; each render thread moved by `taskset -p` to an idle CPU | `main` | **3 / 3** |
 | Same split | instrumented copy | **2 / 2** |
+| Split with 6 busy loops on the control thread's CPU (independent verifier) | `main` | **3 / 3** |
 | Unloaded, 40 ms sleep injected after the last edit | instrumented copy | **1 / 1** |
 
 Every failure printed the original message, `[0.0, 0.0]`. Uniform 1-CPU contention cannot
@@ -71,45 +72,52 @@ passing runs, the source ended the race at most a few blocks behind.
 
 ## Decisions
 
-- **D1. Restart the source before the final block.** A new `ConstantFeed::restart` seeks the
-  source to frame 0 under the next generation and resets the feed, as a host re-anchors a source
-  that fell behind. The seek must return `RESULT_OK`: the settle has rendered a block since any
-  earlier seek, which emptied the one-slot command queue. The settle's first fed block runs before
-  the restart, so a candidate still pending swaps in and takes any seek the feed queued for its
-  fresh ring. Plan swaps from capi reserve retirement, so they are never deferred.
-- **D2. Start the restart from the worst state, every run.** Between the first settle block and
-  the restart, render `RACE_SOURCE_LAG_BLOCKS = 64` blocks unfed (eight rings), then `fill`. That
-  leaves the source far behind the render clock with its ring full of stale PCM, whatever the race
-  left. After the seek, the first block may play nothing: it drops the stale ring, and the full
-  ring left no room for the restarted feed. Every later block plays fed PCM: that first block freed
-  the ring, and each block is fed before it renders. `settle` is at least two, so the final block
-  is at least the third after the restart. With D2, removing D1 fails every invocation at run 0.
-- **D3. Nothing else changes.** Same race, same edits, same counts and asserts, same reference
-  plan, same bit-exact comparison. `fed_render_c` now calls a new `render_c`, which renders without
-  feeding. The race's history-free session (`race_session`: no inserts, no console slots, no
-  filters, no delay) means extra blocks change nothing in the final block except what the source
-  feeds it.
+- **D1. Restart the source right after the settle's first block.** A new
+  `ConstantFeed::restart` seeks the source to frame 0 under the next generation and resets the
+  feed's position, as a host re-anchors a source that fell behind. The settle's first fed block runs
+  before it, so a candidate still pending swaps in and takes any seek the feed queued for its fresh
+  ring. Plan swaps from capi reserve retirement, so they are never deferred. The seek must return
+  `RESULT_OK`. The source's command queue has one slot, every rendered block empties it, and the
+  feed seeks only inside `fill`, which does not run between that block and the restart.
+- **D2. Why the final block then plays fed PCM.** The ring never queues more blocks than one render
+  pops (eight), and the old generation's blocks are queued ahead of the restarted feed's. So the
+  first block after the restart drops every old block, and it plays the restarted feed's first
+  quantum if the ring had room for it. Every later block plays fed PCM, because each block is fed
+  before it renders. `settle` is at least two, so the final block is at least the third after the
+  restart.
+- **D3. Nothing else changes.** Same race, same edits, same counts and asserts, same reference plan,
+  same bit-exact comparison. The settle renders the same number of blocks as before, so the final
+  block is still about one ramp after the race, and the test still bounds how long a live ramp may
+  run (gate 2).
 
-**Rejected: pace the render thread on PCM readiness**, as `plan_swap_race.rs` does. Each
-structural edit here restarts the source in the candidate's fresh ring, so the retiring plan's ring
-starves until the swap. A render thread waiting for that PCM would never reach the swap.
+**Rejected: render many blocks unfed before the restart.** Attempt 1 (`c977cae67`) did this
+(`RACE_SOURCE_LAG_BLOCKS = 64`), so that removing the restart would fail every run with no
+contention. The verifier showed the cost. It moved the final block about 67 blocks past the race,
+and a live pan ramp 128 times too long then passed the race test, which fails it on `main`. The
+deterministic unit test `live_fader_mute_and_pan_edits_change_the_running_plan_bit_exactly` still
+catches that mutant, but the race test should not lose it. The verifier also built this
+restart-only variant: it failed 0 of 5 under the 6-loop split and 0 of 8 under the 3-loop split.
+
+**Rejected: pace the render thread on PCM readiness**, as `plan_swap_race.rs` does. Each structural
+edit here restarts the source in the candidate's fresh ring, so the retiring plan's ring starves
+until the swap. A render thread waiting for that PCM would never reach the swap.
 
 **Rejected: more settle blocks.** The lag the race can leave has no bound, so no fixed count is
-enough.
+enough, and every extra block weakens the ramp bound D3 keeps.
 
 ## Authorized paths
 
-- `crates/capi/tests/resource_lifecycle.rs`: `ConstantFeed::restart`, `render_c` and its use in
-  `fed_render_c`, `RACE_SOURCE_LAG_BLOCKS`, the settle in `race_live_edits` and its doc comment.
+- `crates/capi/tests/resource_lifecycle.rs`: `ConstantFeed::restart`, the settle in
+  `race_live_edits` and its doc comment.
 - This spec.
 
 ## Non-goals
 
 - Production code. The source's underrun and late-PCM rules are the shipped contract.
-- C ABI telemetry for source underruns. The C ABI exposes no consumer counters, so the test
-  cannot observe an underrun directly. Whether a C host needs them is a product question for a
-  separate issue.
-- `plan_swap_race.rs`, which paces its render thread and checks no PCM.
+- C ABI telemetry for source underruns. The C ABI exposes no consumer counter, so the test cannot
+  observe an underrun directly. #1318 (*Report held source blocks apart from underruns*) already
+  records that gap.
+- `plan_swap_race.rs`: see #1405.
 
 ## Hazards
 
@@ -120,20 +128,21 @@ enough.
 
 ## Objective gates
 
-1. **Red on revert, deterministically.** With D2 kept and the `restart` call removed, the test fails
-   every invocation at run 0 with "the raced plan's final block [0.0, 0.0]". This is PR evidence,
-   not a committed test.
-2. **The oracle keeps its teeth.** In `commit_live` (`crates/capi/src/runtime/control.rs:1087-1091`),
-   resolving producers from `self.providers` instead of the newest pending epoch sends a live edit
-   committed behind a pending candidate to the retiring plan. That fails the fixed test. This is PR
-   evidence.
+1. **Red on revert.** Without the restart, the settle is `main`'s, and `main` fails under the split
+   contention of the evidence table. This is PR evidence, not a committed test.
+2. **The oracle keeps its teeth.** Each mutant below fails the fixed test. This is PR evidence.
+   - In `commit_live` (`crates/capi/src/runtime/control.rs:1087-1091`), resolve producers from
+     `self.providers` instead of the newest pending epoch. A live edit committed behind a pending
+     candidate then reaches the retiring plan.
+   - In `classify_live_delta` (`crates/host-core/src/live_delta.rs:308-313`), make the matrix
+     record's `smoothing_samples` 128 times longer. A live pan ramp then outlasts the settle.
 3. **No intermittent failure under contention.**
-   - The fixed test, 200 or more invocations with `taskset` on 1 CPU shared with 2 busy loops,
-     0 failures.
-   - The fixed test, 200 or more invocations under the split contention above, 0 failures.
+   - The whole `resource_lifecycle` binary, which includes the race test, at least 200 invocations
+     with `taskset` on 1 CPU shared with 2 busy loops: 0 failures.
+   - The race test, at least 200 invocations under the 3-loop split contention: 0 failures.
    - The whole `capi` test suite (its unit tests, `resource_lifecycle` and `plan_swap_race`), 200
      iterations with `taskset` on 1 CPU shared with 1 busy loop. The unit tests and
-     `resource_lifecycle` have 0 failures. `plan_swap_race` fails its own non-vacuity guard
+     `resource_lifecycle` must have 0 failures. `plan_swap_race` fails its own non-vacuity guard
      intermittently there. That is a separate, pre-existing defect, filed as #1405, and its counts
      are recorded below.
 4. **Workspace gates.** The `test-debug-a` job's `cargo test` command
@@ -145,27 +154,42 @@ enough.
    `bash scripts/check-cross-targets.sh`.
 
 *Test value.* No new test. The race test's settle is rewritten. It turns red on the same defects
-as before (gate 2): a live edit that races a plan swap and reaches the retiring plan, or is lost.
-It no longer turns red when the harness feeds the source too late.
+as before (gate 2): a live edit that races a plan swap and reaches the retiring plan or is lost,
+and a live ramp that outlasts the settle. It no longer turns red when the harness feeds the source
+too late.
 
 ## Gate results
 
-Debug binaries built from this change. The contention lanes ran on a host already loaded by other
-work.
+These are debug binaries. The contention lanes ran on a host already loaded by other work.
+Attempt 1 (`c977cae67`, with the unfed lag) received an adversarial PASS with two MINORs and three
+NITs. This revision applies the verifier's preferred fix for MINOR 1, and the results below are
+for this revision unless they say otherwise.
 
-1. Red on revert: 6 of 6 invocations failed at run 0 with "the raced plan's final block
-   [0.0, 0.0]".
-2. Mutation: 3 of 3 invocations failed at run 0 with "[-0.08495355, 0.033467546] against ...
-   [-0.1212493, 0.039765462]". A lost live edit is nonzero, but it is wrong.
+1. Red on revert: `main` failed 3 of 3 under the 3-loop split, and 3 of 3 under the verifier's
+   6-loop split, each at its first failing run with "[0.0, 0.0]".
+2. Mutants, 3 of 3 invocations each, failing at run 0:
+   - the `commit_live` mutant: "[-0.08495355, 0.033467546] against ... [-0.1212493,
+     0.039765462]";
+   - the ramp mutant: "[-0.11219247, 0.03819576]" (one run "[-0.10992405, 0.037801996]") against
+     the same reference.
 3. Contention:
-   - 1 CPU with 2 busy loops: 200 of 200 invocations passed (8 lanes of 25, about 48 s each). One
-     invocation with `--nocapture` counted 3146 control calls that overlapped a render call.
-   - Split: IN PROGRESS.
-   - Whole suite, 1 CPU with 1 busy loop: IN PROGRESS.
-4. Workspace gates: `test-debug-a` exits 0 (120 test binaries, the race test `ok`); fmt clean;
-   clippy clean; realtime policy ok (89 marked regions in 25 files) and its mutation tests ok;
-   workspace policy ok and its mutation tests ok; `audit capi` passes (100000 calls, 0
-   allocations, locks, syscalls, total violations); `check-cross-targets.sh` PASS.
+   - Whole `resource_lifecycle` binary, 1 CPU with 2 busy loops: 200 of 200 invocations passed
+     (8 lanes of 25). On attempt 1's binary, the race test alone passed 200 of 200 the same way.
+     One attempt-1 invocation with `--nocapture` counted 3146 control calls that overlapped a
+     render call.
+   - Race test under the 3-loop split: 200 of 200 passed (4 lanes of 50). Attempt 1 also passed
+     200 of 200; `main` failed 3 of 3.
+   - Whole `capi` suite, 1 CPU with 1 busy loop, 200 iterations (8 lanes of 25, attempt 1's
+     `resource_lifecycle`): the unit tests and `resource_lifecycle` failed 0 times. `plan_swap_race`
+     failed in 89 iterations, all at `plan_swap_race.rs:572` (#1405). The 24-swap test failed 83
+     times and the 200-swap test 28. One earlier lane was voided and rerun: the disk filled up,
+     and that broke its log writes, not its tests.
+4. Workspace gates:
+   - On this revision: `test-debug-a` exits 0 (120 test binaries, the race test `ok`); fmt clean;
+     clippy clean; realtime policy ok (89 marked regions in 25 files) and its mutation tests ok;
+     workspace policy ok and its mutation tests ok.
+   - On attempt 1, unchanged by this test-only revision: `audit capi` passes (100000 calls; 0
+     allocations, locks and syscalls; 0 total violations), and `check-cross-targets.sh` PASS.
 
 ## Dependencies
 

@@ -28,12 +28,18 @@ overlaps.
 
 ## Evidence
 
-From #1404's 1-CPU suite gate: debug binaries, each lane pinned with `taskset` to one CPU shared
-with one busy loop, on a host already loaded by other work. Each failure was this assertion. Both
-tests failed it: `control_calls_racing_plan_swapping_renders_never_wedge_replacement` (24 swaps, no
-readers) and `resource_queries_racing_plan_swaps_always_find_the_published_row` (200 swaps, two
-readers). The final counts are in #1404's gate results. In the first 28 suite iterations, 10 runs
-of `plan_swap_race` failed. Unpinned on an idle multi-core host, the binary passes.
+From #1404's 1-CPU suite gate: debug binaries at `6fb211594` (this file is unchanged there), 200
+suite iterations in 8 lanes. Each lane was pinned with `taskset` to one CPU shared with one busy
+loop, on a host already loaded by other work.
+
+- In 89 of the 200 iterations, `plan_swap_race` failed.
+- `control_calls_racing_plan_swapping_renders_never_wedge_replacement` (24 swaps, no readers)
+  failed 83 of 200.
+- `resource_queries_racing_plan_swaps_always_find_the_published_row` (200 swaps, two readers)
+  failed 28 of 200.
+
+All 111 failures were this assertion, at `:572`. In the same iterations, the `capi` unit tests and
+`resource_lifecycle` failed 0 times. Unpinned on an idle multi-core host, the binary passes.
 
 ## Decisions (for the brief to confirm)
 
