@@ -98,3 +98,46 @@ and prove first that an unmutated copy, staged the same way, passes.
 
 - Work only from this body. Read `scripts/check-capi-abi.sh` first; do not survey the workspace.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Change: `capi_abi_self_test` in `scripts/check-capi-abi.sh` only. `stage_header <leg>` copies the
+real header to `$scratch_root/<leg>/miso_engine_v1.h`; `expect_header_failure` refuses a staged
+copy that is byte-identical to the original (`cmp -s`), requires the checker to fail, captures its
+stderr and refuses a failure whose stderr contains `No such file or directory`. A header staging
+control (`header-staging-control/miso_engine_v1.h`, unmodified, passed through
+`MISO_ENGINE_CAPI_HEADER`) must pass before the three legs run. The baseline control and the
+non-header legs are unchanged; the default path is untouched.
+
+Hazard check: at the head commit the first `uint64_t reserved[4];` is the tail of
+`miso_engine_v1_engine_config` (header line 160); its size is pinned by
+`MISO_ENGINE_V1_ENGINE_CONFIG_SIZE` (40) in both fixtures. No leg turned green, so no pin gap.
+
+Gates (x86_64-unknown-linux-gnu):
+
+1. `bash scripts/check-capi-abi.sh` -> rc 0, `C ABI check: ok (x86_64-unknown-linux-gnu, shared and static linkage)`.
+2. `bash scripts/check-capi-abi.sh --self-test` -> rc 0, `C ABI mutation tests: ok`.
+3. Red on revert (`stage_header` writing `$scratch_root/<leg>.h` again) -> rc 1,
+   `C ABI mutation self-test FAILED: header staging control (unmodified staged header) did not pass`
+   (stderr shows `fatal error: miso_engine_v1.h: No such file or directory`). With the staging
+   control also removed, deliverable 3 catches it: rc 1,
+   `C ABI mutation self-test FAILED: header-constant-drift failed on a missing file, not on drift:`.
+4. Layout `sed` replaced by `s/NO_SUCH_PATTERN_1232/x/` -> rc 1,
+   `C ABI mutation self-test FAILED: header-layout-drift did not change the staged header`.
+5. Constant `sed` deleted -> rc 1,
+   `C ABI mutation self-test FAILED: header-constant-drift did not change the staged header`.
+6. `bash scripts/check-workspace-policy.sh` rc 0; `bash scripts/test-workspace-policy.sh` rc 0
+   (`workspace policy mutation tests: ok`).
+
+First diagnostic per leg, with the staged header named correctly:
+
+- header-constant-drift: `crates/capi/tests/c/header_smoke.cpp:7:42: error: static assertion failed` (`MISO_ENGINE_V1_ABI_VERSION == UINT32_C(0x00010000)`).
+- header-layout-drift: `crates/capi/tests/c/header_smoke.cpp:8:52: error: static assertion failed` (`sizeof(miso_engine_v1_engine_config) == MISO_ENGINE_V1_ENGINE_CONFIG_SIZE`).
+- header-signature-drift: `crates/capi/tests/c/abi_smoke.c:59:56: error: initialization of 'uint32_t (* const)(void)' ... from incompatible pointer type 'uint32_t (*)(uint32_t)' [-Werror=incompatible-pointer-types]`.
+
+Test value: the repaired legs turn red if the header's ABI constant, a struct layout or a function
+signature drifts without the fixtures following, which the vacuous legs never exercised; the
+staging control and the identical-copy check turn red if staging or a `sed` pattern silently stops
+producing a real mutation.
