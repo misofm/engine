@@ -86,7 +86,7 @@ bits. This closes decision 14's F4 for the multiband compressor.
   effect contract (conformance and direct preparation use it). Only the session lowering changes.
 - **D5. Carry (D15-7).** The live bypass is lane state. A banked lane's bypass and shunt words carry
   through *Carry live-controlled effect lanes across a plan swap* (#1280, D2 and D4), and a per-node
-  instance's through *Carry per-node effect instances across a plan swap* (#1282, D3). The sentence
+  instance's through *Carry per-node effect instances across a plan swap* (#1282, D2). The sentence
   of #1282's D1 that says a committed multiband bypass change is a prepared bypass that is not
   carried no longer holds: under the C ABI that change is now a live `Bypass` record, and the owner
   carries. No new payload word: recovery state is not carried.

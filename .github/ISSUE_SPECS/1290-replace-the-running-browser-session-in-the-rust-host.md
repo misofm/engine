@@ -58,7 +58,8 @@ and SDK are the rewritten slices #1293-#1297.
     (`crates/engine/src/realtime/plan_exchange.rs:265`).
   - Render adopts in `RealtimePlanOwner::enter_block` (`:375`). That step continues the clock,
     runs `carry_from` (`crates/engine/src/realtime/plan.rs:917`) and sends the old plan to the
-    retirement queue. The control side reclaims it with `PlanRetirer::try_reclaim` (`:512`).
+    retirement queue. The control side reclaims it with `PlanRetirer::try_reclaim`
+    (`crates/engine/src/realtime/plan_exchange.rs:512`).
 - **Successor preparation.**
   - `SuccessorBase { inventory, committed }` (`crates/host-core/src/prepare.rs:641`).
   - `prepare_host_runtime_with_live_controls_successor` (`:926`).
@@ -154,7 +155,8 @@ and SDK are the rewritten slices #1293-#1297.
   browser engine module* (#1293) and #1386.
 - No transitions of its own. Fade-in, duck-swap and two-phase removal come from #1288, #1324 and
   #1325.
-- No warm-successor catch-up: *Run the browser catch-up in the Worker's service loop* (#1361).
+- No warm-successor deadline check: *Check the warm-successor deadline in the browser Worker's
+  service loop and report its outcome* (#1361).
 
 ## Hazards
 
@@ -203,7 +205,8 @@ and SDK are the rewritten slices #1293-#1297.
    and the spectrum read returns no `Failed` epoch and no sequence gap.
 8. **Realtime.** Integration test binary `hosts/host-web/tests/structural_apply_realtime.rs`.
    Decision 15 rules that host-web's native allocation-count gates live in an integration binary,
-   never in `src/tests.rs`, which already registers a `#[global_allocator]`. It links
+   never in the lib's unit tests, whose test build already registers a `#[global_allocator]`
+   (`hosts/host-web/src/ffi.rs:4540`, in `live_response_ffi_tests`). It links
    `bench_support::alloc`, calls `assert_installed()` first, and runs the scripts of gates 1, 2
    and 4 through the test-support halves (#1381). The render thread's thread-scoped counters read
    `allocations == 0 && frees == 0` around every render call, after warm-up. Every retired plan

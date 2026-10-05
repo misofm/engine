@@ -151,11 +151,11 @@ the Rust host* (#1290) publishes through.
   - `miso_engine_web_v1_watermark_read(handle: u32) -> u32` copies the watermark and its counters
     into a fixed record, `WebPlanWatermark`, found at `miso_engine_web_v1_watermark_ptr(handle) ->
     u32`. The record is 96 bytes and mirrors `miso_engine_v1_watermark` (#1314 D6) field for
-    field: `struct_size`, `reserved0`, `revision`, `first_sample`, `outcome_flags`, `exact_count`,
-    `preroll_fallback_count`, `transition_fallback_count`, `superseded_count`, `reserved[4]`. It
-    lives in the control half and is allocated at boot. A read that gives up after #1314 D4's
-    attempts returns `RESULT_BACKPRESSURE` and leaves the record untouched: a read to retry,
-    never a refused edit.
+    field, in its order: `struct_size`, `reserved0`, `revision`, `first_sample`, `outcome_flags`,
+    `exact_count`, `transition_fallback_count`, `superseded_count`, `reserved[5]`. It has no
+    pre-roll counter (D15-8 (round-5 amendment)). It lives in the control half and is allocated
+    at boot. A read that gives up after #1314 D4's attempts returns `RESULT_BACKPRESSURE` and
+    leaves the record untouched: a read to retry, never a refused edit.
   - The read calls `SessionState::watermark()`, the accessor that *Publish the applied-revision
     watermark in the browser status* (#1349) D3 names: a read of #1314's `PlanWatermarkReader`,
     cloned from `PlanPublisher::watermark_reader()` when the session is built. Root orders this
@@ -167,6 +167,9 @@ the Rust host* (#1290) publishes through.
     and on the repeating one-quantum timer that #1387 starts for the source drain. The browser may
     clamp the timer; correctness does not depend on the period, because deadlines are counted in
     render samples (D15-17).
+  - Both modes run the same service step, so any step a later slice adds to it runs the same with
+    or without cross-origin isolation. The Worker runs no catch-up: a warm successor is adopted by
+    render (D15-8 (round-5 amendment)), and its deadline check is #1361's.
   - `single` mode: no control work runs inside `process()`. The worklet's control handler calls
     the export after every control message. The main-realm host also posts an internal
     `miso.service.v1` message to the worklet, on #1332 D7's control-plane-to-worklet port, from a
@@ -225,7 +228,8 @@ the Rust host* (#1290) publishes through.
 
 - No structural edit (#1290). No live edit in the Worker (*Admit browser live edits in the Worker
   through the committed model*, #1382).
-- No catch-up (*Run the browser catch-up in the Worker's service loop*, #1361).
+- No warm-successor deadline check (*Check the warm-successor deadline in the browser Worker's
+  service loop and report its outcome*, #1361).
 - No watermark words in the browser status block (#1349).
 - No adapter preparation hook and no plan attachment field (#1400).
 

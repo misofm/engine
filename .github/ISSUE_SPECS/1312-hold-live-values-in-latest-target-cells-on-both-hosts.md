@@ -17,9 +17,9 @@ This is the first slice of D15-2: the strip fader/mute and matrix/pan lanes, and
 primitive. The remaining cell slices reuse the primitive and the counter: *Hold effect parameter,
 bypass and EQ-target values in latest-target cells* (#1345), *Hold strip input-lane values in
 latest-target cells* (#1346) and *Hold route-lane values in latest-target cells* (#1347). Under
-R10 the browser status field and the cross-host agreement test are split out into the
-successor *Report live_values_superseded in the browser status and prove both hosts drain strip
-cells alike* (#1399).
+AGENTS.md's half-day rule, the browser status field and the cross-host agreement test are split
+out into the successor *Report live_values_superseded in the browser status and prove both hosts
+drain strip cells alike* (#1399).
 
 ## Context
 
@@ -45,7 +45,7 @@ cells alike* (#1399).
   (`crates/capi/include/miso_engine_v1.h:50-55`).
 - **Browser admission.** The matrix and fader bands use the same producers, with a free-room pass
   and `in_flight` accounting (`hosts/host-web/src/lib.rs:1548-1559`, `queue_available`
-  `:1762-1772`, `push` `:1800-1815`, room check `:5568-5580`); solo and VCA mutes compose into
+  `:1762-1789`, `push` `:1800-1815`, room check `:5568-5580`); solo and VCA mutes compose into
   fader records.
 - **Counters.** `CounterId` ends at `ValidationFailures = 15`
   (`crates/protocol/src/message_wire.rs:626-642`). The control plane refreshes provider counters
@@ -75,7 +75,7 @@ cells alike* (#1399).
     writer is writing. Render reads the newest completed write in one pass: no retry, no spin, no
     skip.
   - A write that completes before a block's drain begins is applied in that block. That is D15-2
-    condition 2 and the ack meaning of R1.
+    condition 2 and D15-2's ack meaning.
   - **Peek (carry only):** `peek_unread(&self) -> Option<(words, sequence)>` returns the `middle`
     slot's words and sequence when `middle` has `FRESH`, and `None` otherwise. It changes nothing:
     `middle`, the front index, the last applied sequence and the dirty word stay as they were, so
@@ -83,7 +83,7 @@ cells alike* (#1399).
     to this cell can start before the peek ends), because a write after the peek began may reuse
     that slot. The plan-swap carry (*Carry live-controlled effect lanes across a plan swap*, #1280
     D2) is its only caller; it peeks a predecessor whose cells no control write reaches once its
-    successor is published (D15-17, #1356). The reader also exposes `last_applied(&self) -> u64`.
+    successor is published (D15-17; #1053 D7). The reader also exposes `last_applied(&self) -> u64`.
 - **D2. One counter unit: cell values replaced unread.** `live_values_superseded` counts, per
   cell, committed values that a later write to the **same cell** replaced before render read them.
   When render reads sequence `s` after `p`, it adds `s - p - 1`. A record that writes two cells
@@ -98,13 +98,14 @@ cells alike* (#1399).
   a kind were read with equal words, render applies one `Both` call, as today's single record
   does.
 - **D5. Producers.** `TrackControlProducer::{producer, fader}` become cell writers with infallible
-  writes; the input lane stays a queue until #1346. The rings at `:3583-3587` for these two lanes
-  and their resource rows are replaced by the cells' rows, computed from the types.
+  writes; the input lane stays a queue until #1346. The rings at
+  `crates/builtins-compiler/src/lib.rs:3583-3587` for these two lanes and their resource rows are
+  replaced by the cells' rows, computed from the types.
 - **D6. The contract the carry slices rely on.** A stage exposes `apply_pending(&mut self)`: the
-  D1 read and D4 order for every dirty cell, the same code the block drain runs. #1277's move and
-  copy modes call it on the predecessor before exporting a lane; every write to the predecessor's
-  cells happened before the successor's publication, so it sees them all. #1277 writes its
-  retarget values into the successor's cells with the D5 writers, which cannot fail.
+  D1 read and D4 order for every dirty cell, the same code the block drain runs. #1277's carry
+  calls it on the predecessor before exporting a lane; every write to the predecessor's cells
+  happened before the successor's publication, so it sees them all. #1277 writes its retarget
+  values into the successor's cells with the D5 writers, which cannot fail.
 - **D7. Validate before any write (D15-2 condition 3).** `commit_live`'s order stays: every
   fallible check, then the cell writes, then the protocol commit. The fader and matrix room terms
   of step 4 go; nothing else moves. The browser writes cells only after its whole batch passed
@@ -115,8 +116,8 @@ cells alike* (#1399).
   The browser's status field is #1399's.
 - **D9. Ack meaning (unchanged bytes).** Header text: a committed live value reaches render no
   later than the first block whose render call begins after the submit returns, or, while a
-  successor is pending, at its adoption, which the watermark reports (R1); a later value for the
-  same lane committed before that block replaces it, and `LIVE_VALUES_SUPERSEDED` counts it. The
+  successor is pending, at its adoption, which the watermark reports (D15-2, D15-17); a later
+  value for the same lane committed before that block replaces it, and `LIVE_VALUES_SUPERSEDED` counts it. The
   16-value room and the backpressure string are removed for fader, mute and pan or matrix; effect
   lanes keep theirs until #1345.
 - **D10. FIFO stays FIFO.** Effect records (including `Observe`), input records, route records,
@@ -215,7 +216,8 @@ cells alike* (#1399).
 - Gate 3: a cell that tears, applies twice, or skips the latest completed write (the single
   sequence-word design this replaces would skip it); judged by the interleavings loom reaches.
 - Gate 3's peek case: a `peek_unread` that consumes the value (swaps `middle` or clears `FRESH`
-  or the dirty bit), so the predecessor in copy mode never applies it (#1280 D6).
+  or the dirty bit), so a second peek or the next read no longer sees it. #1280 D2's carry and
+  its count rely on a peek that changes nothing.
 - Gate 4: a carry path that applies pending cells differently from the block drain, which #1277
   relies on.
 

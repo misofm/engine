@@ -2,10 +2,9 @@
 
 Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
 Code anchors verified on `main` at `6fb211594`: no file this spec cites changed since `d2fe0555a`.
-Stream A order (the one edge with #1322): *Carry plan state by copy as well as by move* (#1322),
-then this issue, then the effect-lane carries (#1279-#1282). Those carries restore soft-clip lanes
-through the same payload calls, in move and copy mode (D15-7, D15-8 step 2), so an own-snapshot
-refusal would leave a carried lane at rest. #1322 touches no soft-clip code; the edge is order only.
+Stream A order: this issue, then the effect-lane carries (#1279-#1282). Those carries restore
+soft-clip lanes through the same payload calls (D15-7), so an own-snapshot refusal would leave a
+carried lane at rest.
 
 Successor item of *Make every banked effect's state restore allocation-free* (#1278, closed). Its
 attempt-1 amendment and attempts 2 and 3 left it open as "soft-clip's two open non-finite history
@@ -57,8 +56,9 @@ snapshot is taken at the block boundary:
 | case 2, inf | 0 dB, 0 / 0 dB, 1 / -6 dB, 0.5 | `+inf` at 120 | no | `X` `+inf` (word 19); dry `+inf` (word 80) | `effect.state.history` |
 | case 2, NaN | 0 dB, 0 (identity) | NaN at 120 | no | `X`, `e` and dry NaN | `effect.state.history` |
 
-- Case 1: two opposite infinities in the `X` window give `inf - inf`, so `u` and `e` are NaN. The
-  identity output is the dry sample, so it stays finite. Off the identity path, the same input
+- Case 1: two infinite `X` words whose half-band tap products have opposite signs give
+  `inf - inf`, so `u` and `e` are NaN. The even taps alternate in sign, so same-sign words can do
+  this too (amended 2026-10-05, verdict NIT-1). The identity output is the dry sample, so it stays finite. Off the identity path, the same input
   makes the output NaN and D7 resets the lane in the same block.
 - Case 2: a non-finite input in a block's last 31 samples reaches the output only after the
   31-sample dry delay. So at the block boundary the dry history (and `X`) hold it, and the output
@@ -66,10 +66,17 @@ snapshot is taken at the block boundary:
 
 **Why every such word is harmless (the soundness argument).** Soft-clip has no recursive state. Its
 three histories are FIR delay lines, and the kernel reads no history word older than 31 samples.
-So a non-finite history word has two possible outcomes:
+So a non-finite history word has one of three outcomes (amended 2026-10-05, verdict MINOR-1):
 
 - it reaches the output, and D7 zeroes that block and resets the lane;
-- it ages out unread within 31 samples (a NaN in `e` on the identity path).
+- `cubic` reads it and clamps it to a finite value (an `X` `±inf` gives `±2/3`);
+- it feeds only a path that the identity select discards (a NaN in `e` on the identity or bypass
+  path).
+
+A word the effect writes itself lives at most 31 samples without D7. A crafted payload can hold an
+`X` NaN beside a finite dry word, a state the effect never produces. On the identity path it can
+keep making `e` NaNs for up to about 59 samples without D7. Nothing is recursive, so no output
+leaves the D7 bound.
 
 The ramps are validated separately and stay finite.
 
@@ -102,7 +109,8 @@ rendered bit, and it is what #1071's rule already requires.
   promise for these states, and it counts as "refusals" states the effect produced itself. Rejected
   as the fix, but kept as the generic fallback.
 - **(C) Accept the effect's own non-finite words on restore. Recommended.** Widen
-  `decode_lane_words`'s history rules to exactly the words the kernel can hold:
+  `decode_lane_words`'s history rules to every word the kernel can hold (the `X` and `e` rules also
+  admit a normal below the flush threshold, and `X` admits `-0.0`; see Non-goals):
   - `X`: every word except a subnormal. That covers zero, a normal, `±inf` (overflow or an infinite
     input) and NaN (a NaN input). A drive gain is at least `-24 dB`, so `2 * drive * x` is never
     `0 * inf`.
@@ -112,9 +120,9 @@ rendered bit, and it is what #1071's rule already requires.
   This is control-plane decode only. The kernel, the snapshot and every rendered bit stay as they
   are, and the restored lane continues bit for bit, D7 report included. This was checked on the
   scratch copy for all three rows of the table at mix 0, 1 and 0.5, over three continuation blocks.
-  A crafted payload gains nothing beyond what the effect's own input can cause: by the soundness
-  argument, every non-finite word is D7-recovered or ages out within 31 samples, whatever words
-  surround it.
+  A crafted payload can cause no output beyond a D7 recovery: by the soundness argument, every
+  non-finite word reaches the output under D7, is clamped by `cubic`, or feeds only a discarded
+  path, whatever words surround it (amended 2026-10-05, verdict MINOR-1).
 
   **The NaN-bits concern in #1278.** That note said NaN payload bits are platform-dependent. A
   restore copies the word bit for bit, so continued and restored agree on any one target. A NaN
@@ -258,10 +266,9 @@ attempt-2 overshoot bound, subnormal mix steps), and it needs its own tests. See
 
 ## Dependencies
 
-- *Carry plan state by copy as well as by move* (#1322)
+- None open. #1071 and #1278 are on `main`.
 
-The edge is stream order only; there is no code dependency (#1071 and #1278 are on `main`). This
-issue lands before *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane
+This issue lands before *Carry console effect lanes across a plan swap* (#1279) and the other effect-lane
 carries (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusal.
 
 ## Standing rules for the implementer
@@ -271,3 +278,106 @@ carries (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusa
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1
+
+Branch `codex/d15-stream-a`, base `main` at `8be19c86e`. The spec's anchors were verified at
+`d2fe0555a`; `git log d2fe0555a..8be19c86e -- crates/soft-clip` is empty, and the cited lines
+(`lib.rs:704-731`, `:764`, `:788`, `:793`; `kernel.rs:191`, `:192`, `:196`) are where the spec says.
+
+**Change.** `decode_lane_words` takes three named predicates in place of the `:764` rule array:
+`x_history_word_valid` (`!is_subnormal()`), `e_history_word_valid` (`normal_or_zero || is_nan`)
+and `dry_history_word_valid` (`true`), each documented with the kernel line that produces its
+words. The doc comment states the three sets and the soundness argument; the "A NaN is never
+accepted" and "the dry history must be finite" sentences are gone. `restores_and_continues` takes
+a block count and compares the `ProcessReport` per block; its four existing callers pass `1`.
+`a_snapshot_holding_an_overflowed_x_word_restores_and_continues_bit_for_bit` is deleted, superseded
+by the table test `a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit`
+(R1-R4, three continuation blocks each). Rejection test: rows `bad(12, NaN)`, `bad(73, NaN)`,
+`bad(103, inf)` deleted; `bad(43, -inf)` added.
+
+**Gate 1 red evidence** (new test, unfixed `lib.rs`, on `8be19c86e`, each row run alone by a
+temporary row filter that was not committed). Each row's snapshot-block assertions (D7 did not
+fire, the word classes are present) passed before the restore:
+
+| Row | Result |
+|---|---|
+| R1 | ok |
+| R2 | panicked `state_roundtrip.rs:197`: `the effect's own snapshot restores: StatePayloadError { code: "effect.state.history" }` |
+| R3 | same |
+| R4 | same |
+
+After the fix all four rows pass. A temporary probe (not committed) showed, for every row, D7
+firing in the first continuation block (`nonfinite_*_blocks: 128`, equal on both instances) and
+clean reports in blocks 2 and 3, so no stop condition was met: no non-finite word outlived 31
+samples, and none reached the output without D7.
+
+**Mutations** (each applied to `lib.rs`, run, reverted; the revert was diffed against the fixed file):
+
+| Mutation | Red test |
+|---|---|
+| M1: the `:764` rules restored | gate 1: R2, R3, R4 each red with `effect.state.history` (R1 green) |
+| M2: `e` admits infinities | rejection test, `word 43 = 0x7f800000` |
+| M3: `X` admits subnormals (`true`) | rejection test, `word 12 = 0x00000001` |
+| M4: `e` admits subnormals | rejection test, `word 43 = 0x00000001` |
+| M5: `e` admits `-inf` only (refuses `+inf`) | rejection test, `word 43 = 0xff800000` (the new `bad(43, -inf)` row) |
+
+**Gates**, all exit 0:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
+- `cargo test --locked -p soft-clip` (includes `tests/allocation.rs` and `tests/randomized.rs`)
+- `cargo run --locked -p conformance --example conformance_fixtures -- --check` (nothing re-pinned)
+- `cargo test --locked --release -p console-workload` (console digests unchanged)
+- `cargo test --locked -p conformance -p effect-compiler`
+- `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh`
+- `bash scripts/check-workspace-policy.sh`, `bash scripts/test-workspace-policy.sh`
+- `bash scripts/check-cross-targets.sh`: PASS; only the #1018 `ios-asm-memset-pattern16`
+  expected failures
+- worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`
+- `git diff --stat`: only `crates/soft-clip/src/lib.rs`, `crates/soft-clip/tests/state_roundtrip.rs`
+  and this spec.
+
+**ARTIFACT CHANGED.** The shipped AudioWorklet module `miso-engine-v1-audio-worklet.simd128.wasm`:
+before (`8be19c86e`) `a9a518625f4c0621c00a515be5a1c50b257601e9a7e492dbac45dbbcb5637b55`
+(2894202 B); after `33cc226eafae1b5cfa63a5a0fb2d0e296686dbc4ae0e387c22d9c2371f0bbcd6` (2894897 B).
+Named twin before `410039849ad1ca550bfc27349dc466eabec64c409b3e493132074dd735f68cf4`, after
+`557f7edcf3640bf9088d6f84023d36b4c750671bf2015eeac35a3d1ff834ab1b`. Not re-pinned.
+
+*Test value.* Gate 1: a restore that refuses a self-produced NaN in `e`, or a non-finite `X` or dry
+word, turns R2-R4 red (M1); R1 keeps the overflowed-`X` coverage of the test it replaces. Gate 2:
+an `e` rule that refuses only `+inf` turns `bad(43, -inf)` red (M5), which `bad(43, inf)` does not.
+
+### Follow-ups (after the attempt-1 PASS)
+
+The attempt-1 verdict (PASS, copied to
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-a/1300-attempt1.md`) left one MINOR and three
+NITs. This commit folds them in, as comment, doc and spec text only; no code or rendered bit moves.
+
+- **MINOR-1.** The soundness wording in `decode_lane_words`'s doc now states the three outcomes of a
+  non-finite history word (D7 at the output; clamped by `cubic`; read only by the path the
+  identity select discards) and the two bounds (31 samples for a self-produced word; about 59
+  samples of `e` NaNs from a crafted `X` NaN beside a finite dry word, with no output beyond a D7
+  recovery). The spec's paragraphs (Problem, soundness argument; option C) were edited in place,
+  each marked "amended 2026-10-05".
+- **NIT-1.** "Two opposite infinities" is replaced by "two infinite `X` words whose half-band tap
+  products have opposite signs" in `e_history_word_valid`'s doc, the gate-1 test's doc and the
+  spec's case 1.
+- **NIT-2.** "Exactly the words the kernel can write" is now "every word the kernel can write", and
+  the doc names the extra words admitted (a normal below `1e-20`; `-0.0` in `X`). The predicates
+  are unchanged (a non-goal).
+- **NIT-3.** `history_words`'s doc says it returns the values, not the classes.
+
+*Test value (from the verdict).*
+
+- `a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit` turns red on a restore
+  that refuses a non-finite history word the effect produced itself: a NaN in `X` (R4), a NaN in
+  `e` (R2, R4), a non-finite dry word (R3, R4) or an overflowed `±inf` in `X` (R1-R3); under each
+  such mutation no other soft-clip test went red.
+- `bad(43, f32::NEG_INFINITY)` turns red on an `e` rule that refuses only `+inf` (M5); with the row
+  removed the whole soft-clip suite is green under M5.

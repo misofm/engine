@@ -15,19 +15,28 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Root merges into `main` one stream batch at a time, rebases the others onto the result, and runs
   the full gate set once on every merged tree.
 - At most five implementation coordinators run at once: A, B, G, J and one of E, I or H(a).
-- Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, #1407, #1408 and #1409 (after #1408 and J's #1301), H's #1331
+- Start immediately (no file conflicts): A's #1300, B's #1309, E's #1055, G's #1328, #1407, #1408 and #1409 (after #1408; J's #1301 has landed), H's #1331
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
-  and #1381. The verifier still flagged #1280, #1316, #1332 and #1363 as tight; their stream
-  coordinator splits any that does not fit half a day before implementation (AGENTS.md).
-- **Stream C design gate.** Three adversarial rounds each found new defects in the warm successor
-  (decision 15, "Verification"); the last round's findings were folded in without a fourth check.
-  Before its first implementation slice, stream C's coordinator runs one fresh opus-xhigh design
-  verification of #1287, #1320, #1321, #1353-#1361, #1396 and #1397 together, and folds every
-  BLOCKER and MAJOR into the specs (and GitHub) first.
+  and #1381, and round 5 split #1287's first slice (the claim-line carry and fill went to #1402) and #1355
+  (the control plane's classification, publication and record went to #1403). Round 6 split #1358:
+  the default ring and every pin of the ring rule went to #1406, and the deadline step stayed.
+  The verifiers still flagged #1280, #1316, #1320, #1325, #1332, #1333, #1334, #1354, #1355, #1363
+  and #1397 as tight; their stream coordinator splits any that does not fit half a day before
+  implementation (AGENTS.md).
+- **Stream C design gate.** Every adversarial round from round 2 on found new defects in the warm
+  successor, and round 5 replaced its design with prime adoption (decision 15, "Verification";
+  D15-8 (round-5 amendment)). Before its first implementation slice, stream C's coordinator runs
+  one fresh opus-xhigh design verification of #1287, #1320, #1354, #1355, #1358, #1360, #1361,
+  #1396, #1397, #1402, #1403 and #1406 together, and folds every BLOCKER and MAJOR into the specs (and
+  GitHub) first. Its checklist includes the round-6 folds: the C1 restart walk over every edge kind
+  (#1354 D2 step 6), routing a warm growth on #1324 D4's duck set (#1403 D2, #1397 D1), and the
+  donor republished on a refused deadline re-preparation (#1358 D3).
 - Critical path: S0, then B #1309, then B #1312 (cells) and #1343, then A's carry slices (#1277 onward)
   and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
-  slices that write into them (#1312 before #1277, #1345 before #1280).
+  slices that write into them (#1312 before #1277, #1345 before #1280). Inside C: #1287, then
+  #1402 and (after D #1324) #1354, then #1355, then #1403, then #1397; A's #1286 measures on #1355, and
+  #1406, #1358 and #1360 take its constants, so #1361 comes last.
 - Umbrellas (no stream; root keeps them current): #1269 *Swap a rebuilt plan without an audio gap*
   and #1053 *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
   the live console lanes*. Their slice tables mirror the issues below.
@@ -41,29 +50,36 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 
 | File | Order |
 |---|---|
-| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1287 slices) → D (#1288, #1324, #1325) → F |
+| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F |
 | `crates/lane/src/kernels/builtins.rs` (the D11 trim, fader and matrix ramp kernels), the ramp stages in `crates/builtins/src/lib.rs` (`InputStage::set_trim_signed`/`settle`, `FaderRampStage`, `MatrixStage`), `crates/dsp-reference/src/ramp.rs` | G #1408 → G #1409 → B (#1312, #1346) → E (#1054, #1394) → A #1277 → D #1288 |
 | `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter`), `docs/rulings/builtins-input-liveness-d2.md` (#808 paragraph) | G #1407 → G #1329 → F (#1268, #1262) |
 | `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370) |
 | `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`'s walk, `ramp_path_within`), the effect payload readers' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid`), their restore-refusal test rows (delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`, limiter restore corruptions, `crates/compressor/tests/payload.rs`), soft clip's overshoot restore tests (`tests/state_roundtrip.rs`, `tests/randomized.rs`), `crates/delay/tests/MUTATIONS.md` (M18, M19), the #1301 spec | J #1301 → G #1409 → G #1411 (#1409 and #1411 in one Stream G pull request); A's carry slices (#1279, #1280, #1282) and that pull request in either order, the second rebases |
-| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
+| `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → B (#1315, #1345) → G (#1339, #1340, #1377, #1378); F #1306 after B #1345, either order with G, the second rebases |
+| `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262); J #1418 (two region markers around `drain_controls`) and J #1420 (the test module only) in any order, the later slice rebases; J #1423 (the strip record types) after B #1312 and #1346 |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
-| `crates/effect-contract/src/lib.rs` | G #1409 (`ParameterSmoother`'s `Linear` arm only) → J #1330 → A #1362 → G #1377 |
-| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1354, #1355) → H #1381 → B #1349 |
-| `crates/engine/src/realtime/plan.rs` | A #1322 → B (#1343, #1344) → H #1400 → C (#1396, #1355, #1358) → H #1381 |
-| `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319) → C (#1353, #1320) |
-| `crates/host-core/src/live_delta.rs` | B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) and I #1335 → F → G #1371 |
-| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → F → H #1381 |
-| `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) |
-| `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → D (#1288, #1363) → G #1371 |
-| `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
+| `crates/effect-contract/src/lib.rs` | J #1330 → G #1377; G #1409 (`ParameterSmoother`'s `Linear` arm only) in either order with J #1330, the later slice rebases |
+| `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1396, #1355) → H #1381 → B #1349 |
+| `crates/engine/src/realtime/plan.rs` | B #1311 → H #1400 → C #1396 → H #1381 |
+| `crates/engine/src/realtime/spsc.rs` | B (#1343, #1311) → C #1320 (`peek` only) |
+| `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319, #1343, #1344) → C (#1320, #1355) |
+| `crates/host-core/src/transition.rs` | D (#1325, #1324) → C #1397 |
+| `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371; J #1423 (strip record construction only) after B #1312 and #1346, rebasing over the rest |
+| `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
+| `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
+| `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371 |
+| `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379; J #1415 (`ids.rs`'s route constants only) in any order, the later slice rebases |
 | `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → A payload (#1279, #1280) → G #1337 → G #1372 |
-| `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H |
+| `hosts/host-web/src/lib.rs` | H owns; J #1423 (record construction in `into_track_record` and the coalescing sites) lands after B #1312 and #1346; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381 |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
-| `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases |
+| `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only) |
+| `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only) |
+| `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall` only) lands after H #1381 and rebases over any later edit |
+| `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
+| `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`) in any order, the later slice rebases |
 
 Hot-file note (2026-10-05, after #1329 attempt 1): #1408 changes the D11 ramp law that the trim,
 fader and matrix share, in the ramp kernels and their twin. Stream B's cells (#1312, #1346) and
@@ -99,28 +115,26 @@ readers for #1411 by named exception.
 
 ## Stream A
 
-- **Coordinator scope:** Swap carry on the C ABI core: copy and move carry for every state owner, latency floors and their reset, meter carry.
-- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/engine/src/realtime/plan.rs` (#1322, one trait method), `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323).
-- **Depends on:** S0; B #1312 before #1277 and #1345 before #1280 (cells first); #1323 needs #1309 and #1310; #1286 needs #1321.
+- **Coordinator scope:** Swap carry on the C ABI core: move-mode carry for every state owner, latency floors and their reset, meter carry, and the swap block's cost record (#1286).
+- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323). By named exception, for #1323 D3's `SuccessorBase::new` only: the `SuccessorBase` construction sites in `crates/host-core/tests/support/successor.rs`, `crates/host-core/tests/withdrawn_successor.rs` (B's, #1344) and `crates/capi/tests/resource_lifecycle.rs` (B's).
+- **Depends on:** S0; B #1312 before #1277 and #1345 before #1280 (cells first); #1323 needs #1309, #1310, #1311 and #1314; #1286 needs C #1354 and #1355.
 - **Parallel-safe with:** G, J, K, H(a); B once #1312 and #1345 have landed.
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
 |---|---|---|---|---|
-| 1 | #1362 | Copy a per-node effect's state into a same-layout instance in one pass | — | — |
-| 2 | #1322 | Carry plan state by copy as well as by move | — | — |
-| 3 | #1300 | Let soft-clip restore its own non-finite history | #1322 | — |
-| 4 | #1277 | Carry fader, mute and pan ramps across a plan swap | #1322 | #1312 |
-| 5 | #1279 | Carry console effect lanes across a plan swap | #1277, #1322 | — |
-| 6 | #1280 | Carry live-controlled effect lanes across a plan swap | #1279 | #1312, #1345 |
-| 7 | #1281 | Carry an insert lane that moves between a bank and a per-node instance | #1280 | — |
-| 8 | #1282 | Carry per-node effect instances across a plan swap | #1281, #1362 | — |
-| 9 | #1283 | Carry compensation lines across a plan swap | #1282 | — |
-| 10 | #1284 | Carry strip delay lines and live send ramps across a plan swap | #1283 | — |
-| 11 | #1285 | Keep every node's latency from dropping during playback | #1284 | — |
-| 12 | #1286 | Record the swap block's cost on the 64-track console | #1284, #1322 | #1321, #1331 |
-| 13 | #1327 | Carry meter and effect observation state across a plan swap | #1284 | — |
-| 14 | #1323 | Reset latency floors at a host-declared discontinuity | #1285 | #1309, #1310 |
-| 15 | #1395 | Carry spectrum capture state across a plan swap | #1327 | #1401 |
+| 1 | #1300 | Let soft-clip restore its own non-finite history | — | — |
+| 2 | #1277 | Carry fader, mute and pan ramps across a plan swap | — | #1312 |
+| 3 | #1279 | Carry console effect lanes across a plan swap | #1277 | — |
+| 4 | #1280 | Carry live-controlled effect lanes across a plan swap | #1279 | #1312, #1345 |
+| 5 | #1281 | Carry an insert lane that moves between a bank and a per-node instance | #1280 | — |
+| 6 | #1282 | Carry per-node effect instances across a plan swap | #1281 | — |
+| 7 | #1283 | Carry compensation lines across a plan swap | #1282 | — |
+| 8 | #1284 | Carry strip delay lines and live send ramps across a plan swap | #1283 | — |
+| 9 | #1285 | Keep every node's latency from dropping during playback | #1284 | — |
+| 10 | #1286 | Record the swap block's cost on the 64-track console | #1284 | #1331, #1354, #1355 |
+| 11 | #1327 | Carry meter and effect observation state across a plan swap | #1284 | — |
+| 12 | #1323 | Reset latency floors at a host-declared discontinuity | #1285 | #1309, #1310, #1311, #1314 |
+| 13 | #1395 | Carry spectrum capture state across a plan swap | #1327 | #1401 |
 
 ## Stream B
 
@@ -141,7 +155,7 @@ readers for #1411 by named exception.
 | 8 | #1398 | Size the C ABI's plan capacities and resource admission for a superseding candidate | #1309 | — |
 | 9 | #1314 | Publish an applied-revision watermark and complete edits asynchronously | #1309, #1343 | — |
 | 10 | #1310 | Supersede an unadopted candidate plan by compare-and-swap | #1309, #1314, #1343, #1344, #1398 | — |
-| 11 | #1311 | Adopt a successor plan no earlier than a scheduled sample, with a return queue | #1309, #1314, #1343 | — |
+| 11 | #1311 | Adopt a successor plan no earlier than a scheduled sample | #1309, #1314, #1343 | — |
 | 12 | #1316 | Anchor every seek on the plan's source-read clock | #1314, #1318 | — |
 | 13 | #1348 | Add miso_engine_v1_service for bounded control work between edits | #1309, #1311, #1314 | — |
 | 14 | #1317 | Document the seek contract and the C ABI growth rule in the header | #1316, #1318 | — |
@@ -158,27 +172,25 @@ readers for #1411 by named exception.
 
 ## Stream C
 
-- **Coordinator scope:** Latency growth: the warm successor (D15-8) with its shared block pool, peek cursor, off-thread executor, catch-up, held edits, supersession, fallbacks and service wiring.
-- **Owns:** `crates/source` (after B's #1316-#1319, #1350), `crates/engine/src/realtime` (after #1310, #1311, #1343), host-core successor and catch-up code (`crates/host-core/src/catch_up.rs`, after stream A); #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285.
-- **Depends on:** A (#1277, #1285, #1322, #1323, #1327), B (#1309-#1316, #1348), D #1324, #1286, H #1331/#1332/#1333/#1349/#1381 for #1361.
+- **Coordinator scope:** Latency growth by prime adoption (D15-8 (round-5 amendment)): lead floors and source-claim lines, their carry and fill, the source-read clock, the readiness check and raw-frame prime, warm preparation, adoption at the first ready block, the duck-swap of restarted strips, the transition fallback and its deadline, and the service wiring on both hosts. There is no off-thread executor, catch-up, peek pool, copy-mode carry or render-thread pre-roll.
+- **Owns:** `crates/source` readiness and prime (#1320) and the source driver's two prime methods (#1355), after B's #1316-#1319, #1343, #1344, #1350; `crates/engine/src/realtime/spsc.rs` `peek` only (#1320); `crates/engine/src/realtime` source-read clock (#1396), after #1310, #1311, #1314, #1343; host-core warm-successor code (`crates/host-core/src/warm.rs`, new) and its rows in `prepare.rs`, `source.rs` and `transition.rs` (`grown_strips`, #1397), after streams A and D; the control-plane growth path and service step (#1355 tests, #1396's declaration term, #1403, #1358, #1360, #1397); `crates/capi` and `tools/audit/src/capi.rs` for #1360, with `docs/C_ABI_V1_QUALIFICATION.md`; the source-report assertions in `crates/host-core/tests/` and `crates/capi/tests/`, and `Cargo.lock`, for #1320; `crates/host-core/tests/source_read_clock.rs` (new) for #1396; `hosts/host-web` for #1361. By named exception in stream H's files, for #1406's ring rule only: `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance` and the doc comment of `ring_prefill_survives_stall`), the ring override field's doc comment in `hosts/host-web/src/lib.rs`, `tools/parameter-metadata/src/abi_layout.rs` and `tools/parameter-metadata/tests/abi_layout.rs`, `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`, `sdk/src/core/abi.ts` (`defaultSourceRingFrames`), the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`, the ring assertions of `sdk/test/{boot,browser,builder,render}-evals.mjs`, the per-source in-flight bound in `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` and its quantum-64 case in `scripts/test-web-audioworklet.mjs`, the ring comments of `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and `sdk/src/browser/shipped-host.d.ts`, rows 7 and 8 of `hosts/host-web/MUTATIONS.md`, the ring sentence of `hosts/host-web/DEPLOYMENT.md`, the ring comment of `scripts/web-mixing-automation-benchmark.mjs`, the ring label in `docs/derivations/241-browser-source-identities.md`, the qualification record's ring label in `hosts/host-web/qualification/{qualification.js,run.mjs,generate-matrix.mjs}` with the key rename in `results.json` and the regenerated `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`, and a note in `docs/derivations/243-sdk-boot.md`; `crates/capi/src/runtime/tests.rs` (B's) for the same assertions. #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285; #1402 edits `crates/graph` and `prepare.rs` after #1283.
+- **Depends on:** A (#1277, #1283, #1285, #1286, #1323, #1327, #1395), B (#1309, #1310, #1311, #1313, #1314, #1316, #1318, #1319, #1343, #1344, #1348, #1349, #1351, #1398), D (#1288, #1324, #1325), and for #1361 H (#1290, #1293, #1294, #1331, #1332, #1333, #1381).
 - **Parallel-safe with:** E, F, G, J.
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
 |---|---|---|---|---|
-| 1 | #1287 | Pre-roll a successor whose latency grows | — | #1285 |
-| 2 | #1353 | Keep source transfer blocks in a shared pool, immutable from publication to release | — | #1316, #1318, #1319, #1350 |
+| 1 | #1287 | Grow latency during playback by adopting a primed warm successor | — | #1285 |
+| 2 | #1402 | Carry source-claim lines across a plan swap and fill a grown line for a prime | #1287 | #1283, #1285 |
 | 3 | #1396 | Give a plan a source-read clock that leads its render clock | — | #1316, #1323 |
-| 4 | #1321 | Render a successor plan off the render thread with a pinned floating-point environment | #1287 | — |
-| 5 | #1320 | Give the source ring a read-only peek cursor that gates release | #1287, #1353 | #1316, #1318, #1319 |
-| 6 | #1354 | Snapshot a running plan into a returned successor at a block | #1287, #1320 | #1284, #1285, #1286, #1311, #1322, #1327, #1395 |
-| 7 | #1355 | Catch up a returned successor and adopt it exactly at a scheduled sample | #1320, #1321, #1354, #1396 | #1277, #1310, #1312, #1314, #1327, #1344, #1345, #1346, #1347, #1398 |
-| 8 | #1356 | Hold live edits during a catch-up and apply them at the adoption sample | #1355 | #1277, #1309, #1311, #1312, #1314, #1345, #1346, #1347 |
-| 9 | #1357 | Supersede a running catch-up by a structural edit | #1320, #1354, #1355, #1356 | #1310, #1314, #1344, #1348 |
-| 10 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when no catch-up can finish | #1354, #1355, #1356, #1396 | #1288, #1311, #1314, #1324, #1344 |
-| 11 | #1359 | Turn a pending catch-up into a plain rebuild at a host-declared stop | #1355, #1357, #1396 | #1310, #1323, #1344 |
-| 12 | #1358 | Fall back from a missed catch-up deadline: bounded render-thread pre-roll, then the transition | #1355, #1356, #1396, #1397 | #1286, #1311, #1314, #1331, #1343, #1344 |
-| 13 | #1360 | Run the C ABI catch-up from miso_engine_v1_service and report its outcome | #1358, #1359, #1397 | #1286, #1309, #1313, #1314, #1348 |
-| 14 | #1361 | Run the browser catch-up in the Worker's service loop | #1360 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
+| 4 | #1320 | Let a source consumer check and replay its next blocks for a prime | — | #1316, #1318, #1319 |
+| 5 | #1354 | Prepare a warm successor whose carried nodes lead the predecessor by P | #1287, #1396, #1402 | #1277, #1285, #1323, #1324 |
+| 6 | #1355 | Adopt a warm successor with a raw-frame prime at the first ready block | #1287, #1320, #1354, #1396, #1402 | #1277, #1310, #1311, #1314, #1323, #1327, #1343, #1344, #1395 |
+| 7 | #1406 | Grow the default source ring by the warm-prime headroom | #1354, #1355 | #1286 |
+| 8 | #1403 | Classify a latency-growth edit and publish its warm successor from the control plane | #1320, #1354, #1355, #1396 | #1310, #1311, #1313, #1314, #1323, #1324, #1325, #1343, #1348, #1398 |
+| 9 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt | #1354, #1355, #1396, #1403 | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1398 |
+| 10 | #1358 | Fall back to the transition when a warm successor is not ready by its deadline | #1354, #1355, #1396, #1397, #1403, #1406 | #1310, #1314, #1323, #1325, #1343, #1398 |
+| 11 | #1360 | Check the warm-successor deadline in miso_engine_v1_service and report its outcome | #1354, #1355, #1358, #1397, #1403, #1406 | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1398 |
+| 12 | #1361 | Check the warm-successor deadline in the browser Worker's service loop and report its outcome | #1355, #1360, #1403, #1406 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
 
 ## Stream D
 
@@ -193,7 +205,7 @@ readers for #1411 by named exception.
 | 2 | #1326 | Give every browser plan live strip fader and mute lanes | — | — |
 | 3 | #1363 | Ramp a route that a plan swap adds to or removes from a surviving strip | #1288 | #1054, #1283, #1284, #1285, #1310, #1314 |
 | 4 | #1391 | Give every route whose tap precedes its strip's fader a live lane on every plan | #1326 | #1225, #1347 |
-| 5 | #1392 | Keep an added strip's pending fade-in across a later plan swap | #1288, #1363 | #1277, #1283, #1284, #1322 |
+| 5 | #1392 | Keep an added strip's pending fade-in across a later plan swap | #1288, #1363 | #1277, #1283, #1284 |
 | 6 | #1325 | Remove a strip in two phases: ramp out, then a scheduled swap | #1288, #1363, #1391 | #1054, #1309, #1310, #1311, #1312, #1313, #1314, #1347 |
 | 7 | #1324 | Duck-swap a strip whose state cannot continue across a plan swap | #1288, #1325, #1363, #1391 | #1277, #1310 |
 
@@ -201,7 +213,7 @@ readers for #1411 by named exception.
 
 - **Coordinator scope:** Smoothness: researched ramp defaults, every live value ramps, bypass crossfade.
 - **Owns:** `crates/session`, `LiveRamps` in `crates/host-core/src/live_delta.rs` (after B), `sdk/src/core/live-controls.ts`, `crates/effect-contract/src/live.rs` (after #1280 and #1312); `crates/protocol` opcode (#1365) after B.
-- **Depends on:** S0; #1341 needs #1280 and #1322; #1364 needs #1335.
+- **Depends on:** S0; #1341 needs #1280 and #1345; #1364 needs #1335.
 - **Parallel-safe with:** A, B, G, J, K.
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
@@ -211,7 +223,7 @@ readers for #1411 by named exception.
 | 3 | #1394 | Carry an optional per-edit ramp length on live session edits | #1054 | — |
 | 4 | #1364 | Resolve an absent live ramp to the session default on the browser and in the SDK | #1054 | — |
 | 5 | #1365 | Edit control_smoothing by a session transaction, model-only | #1054 | — |
-| 6 | #1341 | Crossfade the bypass switch over the session ramp | #1054, #1055 | #1280, #1322, #1345 |
+| 6 | #1341 | Crossfade the bypass switch over the session ramp | #1054, #1055 | #1280, #1345 |
 | 7 | #1388 | Run the blinded listening session for the live ramp defaults | #1054, #1055, #1364 | — |
 | 8 | #1393 | Crossfade the browser's live bypass command over the session ramp | #1341, #1364 | — |
 
@@ -264,7 +276,7 @@ readers for #1411 by named exception.
 | 19 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
 | 20 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
 | 21 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 22 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1279, #1280, #1345, #1394 |
+| 22 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
 | 23 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
 | 24 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
 | 25 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
@@ -333,6 +345,15 @@ readers for #1411 by named exception.
 | 10 | #1303 | Route the builtins fader domain checks through checked_fader_gain | — | #1277, #1312 |
 | 11 | #1304 | Tighten the four-lane reference graph ceilings from measured AArch64 rows | — | — |
 | 12 | #1237 | Bound route gain and matrix values | — | — |
+| 13 | #1415 | Spell the route gain and matrix domain once, in the session model | — | — |
+| 14 | #1417 | Refuse a C allocator name anywhere in an unmangled worklet symbol | — | — |
+| 15 | #1418 | Require every loop around a realtime drain to drain a different queue on each pass | — | — |
+| 16 | #1419 | Use the shared StopOnDrop in the C ABI plan-swap race test | — | — |
+| 17 | #1420 | Make the nonadjacent split-pair harness's track choices observable to its tests | — | — |
+| 18 | #1421 | Remove both temporary directories the web AudioWorklet test script creates | — | — |
+| 19 | #1422 | Run doctests in CI | — | — |
+| 20 | #1416 | Let only host-core build the live route records that hosts push | #1422 | — |
+| 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
 
 ## Stream K
 

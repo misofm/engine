@@ -1,4 +1,4 @@
-# Ship an AVX-512 desktop build that the installer selects
+# Ship an AVX-512 desktop build that the installer selects (on hold)
 
 **On hold (owner, 2026-10-01: "Let's hold off on AVX512 implementation").** It is also blocked on
 hardware. Do not start until the owner lifts the hold and the blockers below are cleared. Until
@@ -46,4 +46,4 @@ that differ in bits.
 
 ## Dependencies
 
-- #1112, the feature-keyed lane width predicate.
+- None open. #1112, the feature-keyed lane width predicate, is closed as completed.

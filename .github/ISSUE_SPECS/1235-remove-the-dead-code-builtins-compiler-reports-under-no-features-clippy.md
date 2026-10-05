@@ -76,3 +76,36 @@ CI does not see it: `qualification.yml`'s lint job runs `cargo clippy --locked -
 ## Dependencies
 
 - None.
+
+## Attempt record
+
+### Attempt 1 (base `9edd1a6b8` on `codex/d15-stream-j`)
+
+Change, `crates/builtins-compiler/src/lib.rs` only:
+
+- Deliverable 1: `TestOnlyInitialMatrixTrace`, `EMPTY_INITIAL_MATRIX_TRACE`, the
+  `SCALAR_INITIAL_MATRIX_TRACE` thread-local, `record_initial_matrix_state`, `initial_matrix_state`
+  and the `record_initial_matrix_state` call site in `strip_bindings` move from `cfg(test)` to
+  `cfg(all(test, feature = "test-support"))`, the gate of their three callers.
+- Deliverable 2: `BoundaryVariant::{Nonadjacent, NonadjacentOutputConflict}` are gated
+  `cfg(all(test, feature = "test-support"))`, the gate of every test that constructs them
+  (`NonadjacentTrackA` stays ungated: ungated tests construct it). Four `matches!` uses named the
+  gated variants inside or-patterns, where a `cfg` attribute cannot go; each became the equivalent
+  `match` whose gated variants sit in their own `cfg`-attributed arm. Every arm returns what the
+  `matches!` form returned, so with the feature on the four expressions are the same functions of
+  `variant`, and with it off the arms for absent variants are absent.
+- Nothing is silenced: no `allow`/`expect(dead_code)` added. No production code moved (the one
+  production-file site is a `cfg(test)` statement whose gate narrowed).
+- No new or rewritten tests, so no test-value answer or mutation run is owed; the defect's own
+  reproducer is gate 1, red on base and green on head.
+
+Gates (host heavily loaded; times not recorded):
+
+| Gate | Base `9edd1a6b8` | Head |
+| --- | --- | --- |
+| 1. `cargo clippy --locked -p graph -p builtins-compiler --all-targets -- -D warnings` | exit 101: `function initial_matrix_state is never used` (`lib.rs:1004`), `variants Nonadjacent and NonadjacentOutputConflict are never constructed` (`lib.rs:6075`) | exit 0 (only the two out-of-scope `clippy.toml` fast-dB warnings) |
+| also `cargo clippy --locked -p builtins-compiler --all-targets --features test-support -- -D warnings` | -- | exit 0 |
+| 2. `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | -- | exit 0 |
+| 3a. `cargo test --locked -p builtins-compiler --features test-support` | exit 0; 76 passed, 0 failed, 2 ignored (lib 54) | exit 0; 76 passed, 0 failed, 2 ignored; sorted test-name list identical to base |
+| 3b. `cargo test --locked -p builtins-compiler` | exit 0; 57 passed, 0 failed, 1 ignored | exit 0; 57 passed, 0 failed, 1 ignored; sorted test-name list identical to base |
+| 4. `cargo fmt --all -- --check`; `bash scripts/check-workspace-policy.sh` | -- | both exit 0 |

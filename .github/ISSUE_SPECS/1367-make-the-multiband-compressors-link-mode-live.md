@@ -112,6 +112,9 @@ edit's ramp or the session default, and multiband inserts that differ only by li
 ## Dependencies
 
 - *Multiband compressor: a ramp's cut moves a lane's bits in a bank* (#1069).
-- *Carry the link record from the edit to the lane* (#1371), which brings #1368 and #1370.
-- *Carry live-controlled effect lanes across a plan swap* (#1280) and *Carry per-node effect
-  instances across a plan swap* (#1282).
+- *Carry the link record from the edit to the lane* (#1371).
+- *Carry live-controlled effect lanes across a plan swap* (#1280).
+- *Carry per-node effect instances across a plan swap* (#1282).
+
+The link-record slice (#1371) brings *Lower the link mode to per-lane state in the linked effects'
+banks* (#1368) and *Ramp a lane's detector link between modes* (#1370) with it.

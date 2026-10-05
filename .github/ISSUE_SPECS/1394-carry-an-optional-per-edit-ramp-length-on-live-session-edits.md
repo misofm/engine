@@ -18,7 +18,7 @@ canonical JSON never shows it, and the next edit without a length uses the sessi
 
 ## Context
 
-- **Decision 15, D15-1 recorded resolution** (root ruling R9): every live edit carries an optional
+- **Decision 15, D15-1 recorded resolution**: every live edit carries an optional
   per-edit ramp length end to end; absent means the session default and an explicit 0 is legal. The
   bypass crossfade (*Crossfade the bypass switch over the session ramp*, #1341) is the one row with
   no per-edit length; it always uses the session mute ramp.

@@ -77,18 +77,32 @@ scope (see Hazards).
   becomes `pub` (documented). Sites in crates that already depend on `bench-support` (`tools/audit`,
   `crates/compressor`) use it. `crates/engine` cannot (`bench-support` depends on `engine`) and fixes
   its two sites locally.
-- **D4. The capi copy (NIT).** `crates/capi` does not depend on `bench-support` today, and
-  `bench-support` installs its audited `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169`)
-  in any binary that links it. Add `bench-support` as a capi **dev-dependency** and use its
-  `StopOnDrop` in `resource_lifecycle.rs` and in sites 1 and 6 only if `cargo test --locked -p capi`
-  stays green with it; otherwise keep capi's own copy, use it for sites 1 and 6 within the same test
-  target where possible, and record in the evidence why the dedupe was declined.
+- **D4. The capi copy (NIT).** `crates/capi` has `bench-support` as a dev-dependency
+  (`crates/capi/Cargo.toml:25-26`), but nothing in capi's library test binary names a
+  `bench_support` symbol today (`crates/capi/src` never does). An rlib whose symbols are never named
+  is not linked, and its `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169-170`) then
+  installs nothing (`:223-226`). So that binary does not run under the audited allocator today.
+  - `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`),
+    from which its allocation counts come. That test binary cannot link `bench_support`, so its
+    `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason.
+  - Sites 1 and 6 sit in capi's library test binary. Naming `bench_support::producer::StopOnDrop`
+    there links `bench-support` into it for the first time. The audited allocator becomes its
+    global allocator, and every engine render in it, already inside `in_render_scope`
+    (`crates/engine/src/realtime/audit.rs:174-204`, compiled in because `bench-support` enables
+    `engine/realtime-audit`, `tools/bench-support/Cargo.toml:14`), is then audited under the
+    default `Mode::Abort`. That is a real change, not a no-op.
+  - Decision: sites 1 and 6 use `bench_support::producer::StopOnDrop` (D3), and capi's whole
+    library test suite must pass under the audited allocator; site 1's test calls
+    `bench_support::alloc::assert_installed()` once, so the gate cannot pass with the allocator
+    silently absent. A library test that fails only under it is a render-path defect the audit
+    exists to catch: it is recorded in the evidence and filed as its own issue, and sites 1 and 6
+    then use a local guard like `resource_lifecycle.rs`'s, so this tooling slice installs no
+    allocator.
 
 ## Authorized paths
 
 - `crates/capi/src/ffi.rs` (site 1's test only), `crates/capi/src/runtime/tests.rs` (site 6's test
-  only), `crates/capi/tests/resource_lifecycle.rs` (its `StopOnDrop` only), `crates/capi/Cargo.toml`
-  (the `[dev-dependencies]` entry of D4 only)
+  only)
 - `tools/audit/src/builtins_graph.rs` (site 2's thread handling only)
 - `crates/engine/src/realtime/spsc.rs` (site 3's test only), `crates/engine/tests/observation_transport.rs`
   (site 4's test only)
@@ -126,7 +140,8 @@ scope (see Hazards).
    or binary exits with a failure well inside the bound and prints the planted panic or the
    deadline message. Record both exit codes and the message per site.
 2. **Nothing else moved.**
-   - `cargo test --locked -p capi`, `cargo test --locked -p engine`,
+   - `cargo test --locked -p capi` (its library suite under the audited allocator, D4),
+     `cargo test --locked -p engine`,
      `cargo test --locked -p compressor --test conformance`, `cargo test --locked -p audit` and
      `cargo test --locked -p bench-support` pass;
    - `cargo build --locked --release -p audit`, then
@@ -148,7 +163,6 @@ planted panics show once, as PR evidence.
 ## Evidence
 
 - Gate 1's table: site, planted panic, exit code and message before and after.
-- D4's outcome: deduped, or declined and why.
 
 ## Dependencies
 
@@ -161,3 +175,85 @@ planted panics show once, as PR evidence.
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (Terra, branch `codex/d15-stream-j`)
+
+**Change.** `bench_support::producer::StopOnDrop` is `pub` (documented). Each site's releasing
+thread now holds a drop guard that marks it ended however it leaves its loop, and each wait on a
+peer is bounded at 10 s and panics naming the site and the wait:
+
+| Site | Release on any exit | Bounded wait |
+|---|---|---|
+| 1 `ffi.rs` plan queries | render thread's `StopOnDrop(render_ended)` (bench-support) | query loop fails if the render thread renders no block for 10 s (per-block progress counter: the whole run takes ~2.5 s in debug, so a total deadline would sit too close) |
+| 2 `builtins_graph.rs` `run_audit` + `issue070_…` | control thread's `StopOnDrop(stop)` stops the worker; the worker's `StopOnDrop(ended)` | `await_worker` for readiness and the reclaim: fails at once if the worker ended short of it, else after 10 s; runs outside every traced interval |
+| 3 `spsc.rs` stress | local `EndedOnDrop` per side (engine cannot depend on bench-support) | a full or empty queue fails at once if the peer ended, else after 10 s with no progress |
+| 4 `observation_transport.rs` | writer's local `DoneOnDrop` | reader fails after 10 s with no newer window, checking the clock once every 1,024 polls so it does not thin out the racing reads. The start barrier stays: neither side runs anything that can fail before it |
+| 5 `conformance.rs` attribution | worker's `StopOnDrop(ended)` (bench-support) | three `Barrier`s replaced by atomic flags with a 10 s deadline (`await_flag`); the wait inside `in_render_scope` spins on an atomic and reads the clock, and does not allocate or lock (the barrier it replaces took a mutex there) |
+| 6 `runtime/tests.rs` lockstep | each side's `StopOnDrop` (bench-support) | two `Barrier`s replaced by two progress counters (`await_lockstep`), same lockstep order; fails at once if the peer ended short of the step, else after 10 s |
+
+No assertion, count or iteration number changed (D2).
+
+**D4 outcome: split.** The spec's premise is stale: `crates/capi` already has `bench-support`
+as a dev-dependency (added by #1273 for `tests/plan_swap_race.rs`), so `Cargo.toml` is unchanged.
+Sites 1 and 6 (capi lib unit tests) use `bench_support::producer::StopOnDrop`, and
+`cargo test --locked -p capi` stays green with it. The dedupe in `tests/resource_lifecycle.rs` is
+**declined**: naming `bench_support` there links its `#[global_allocator]`, and the build fails
+with "the `#[global_allocator]` in this crate conflicts with global allocator in: bench_support"
+(tried, reverted). Its copy's doc comment now says why.
+Material side effect (verifier NIT-3): because sites 1 and 6 name `bench_support`, capi's lib
+unit-test binary now links bench_support's auditing `#[global_allocator]` (it used `System`
+before), in `Mode::Abort`; any allocation inside an armed render scope, including a panic's
+allocation inside render, aborts the whole binary (SIGABRT, no test name).
+
+**Found, not fixed (out of the authorized paths).** `crates/capi/tests/plan_swap_race.rs:211`
+keeps a third private `StopOnDrop`, although that file already links `bench_support` and could use
+the now-public one.
+
+**Gate 1 (PR evidence; planted panics, `timeout -s KILL 120`).** Planted with `assert!`s in the
+thread that releases the waiter; the same plants before (on `3854c03bb`) and after.
+
+| Site | Planted panic | Before | After |
+|---|---|---|---|
+| 1 | render thread, block 100 | 137 (killed at 120 s) | 101 in 0.2 s: `PLANTED site1 render` |
+| 2 `run_audit`, debug binary | control-thread assertion after the first render | 137 (killed at 120 s; plant printed, then hung) | 101 at once: `PLANTED site2 main` |
+| 2 `run_audit`, release binary | same | 134 (abort) | 134 (abort) |
+| 2 `run_audit`, release binary | worker, on the reclaim command | 134 (abort, after the 1M renders) | 134 (abort) |
+| 2 test `issue070_…` | control-thread assertion after publishing B | 137 | 101 at once: `PLANTED site2 test main` |
+| 2 test `issue070_…` | worker, on the reclaim command | 137 | 101 at once: `PLANTED site2 worker`, then `the retirement worker ended before a reclaimed plan` |
+| 3 | consumer, item 500,000 | 137 | 101 at once: `PLANTED site3 consumer`, then `spsc stress: the consumer ended while the producer waited at item 500128` |
+| 4 | writer, window 500,000 | 137 | 101 in 0.1 s: `PLANTED site4 writer` |
+| 5 | worker, after its probe | 137 | 101 at once: `PLANTED site5 worker` |
+| 6 | renderer, block 2 | 137 | 101 at once: `PLANTED site6 render`, then `lockstep: the peer ended before the renderer consumed block 2` |
+| 6 | producer, block 2 | 137 | 101 at once: `PLANTED site6 producer`, then `lockstep: the peer ended before the producer submitted block 2` |
+
+The release `audit` binary never hung: `[profile.release]` sets `panic = "abort"`, so any panic
+ends the process (134) before and after. The hang was in the unwinding builds: the debug binary
+and the `cargo test` harness. Both are fixed.
+
+**Gate 2.** `cargo test --locked` for `-p capi`, `-p engine`, `-p bench-support`, `-p audit`
+and `-p compressor --test conformance`: all pass. After `cargo build --locked --release -p audit`:
+`trace-builtins-graph-audit.sh` PASS (issue-070 graph all-TID trace), `test-realtime-audit-probes.sh
+builtins-graph` ok (9 operations), `test-builtins-fixtures.sh` ok.
+
+**Gate 3.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`, `check-`/`test-workspace-policy.sh`, `check-`/`test-bench-policy.sh`,
+`check-`/`test-realtime-policy.sh`, `check-conformance-boundaries.sh`: all pass.
+
+**Test value.** No new test. Each rewritten test keeps its claim and catches what it caught
+before; the planted panics above show that a failure now reports instead of hanging.
+
+**Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05).** The verifier passed attempt 1;
+its MINOR and NITs are folded, with no change to any assertion, count or iteration number:
+- MINOR-1: `WORKER_DEADLINE` and `await_worker` now sit above `run_retirement_worker`'s doc, and
+  that doc again opens with the original realtime-reachability paragraph, plus one clause: on a
+  control-thread panic, and only on that failure path, control's `StopOnDrop` stops the worker
+  inside the armed lifetime.
+- NIT-1: site 1's query thread reads the clock once every 1,024 queries, as site 4 does, so the
+  stall check no longer thins the queries that race render.
+- NIT-2: `await_lockstep` takes a `&'static str` and formats its message (with the block,
+  `target - 1`) only on failure; the two messages read as before.
+- NIT-3: recorded in the D4 outcome above.
+- NIT-4 (`crates/capi/tests/plan_swap_race.rs`'s private `StopOnDrop`) is outside the authorized
+  paths; root files it as a follow-up.

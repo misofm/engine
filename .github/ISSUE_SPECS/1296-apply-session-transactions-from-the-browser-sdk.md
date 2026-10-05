@@ -66,10 +66,10 @@ committed session.
     `replace` path (the diff runs in the engine against the committed model, D15-11).
   - `revision: bigint`, the latest committed revision this engine has seen.
   - `watermark(): { revision; sample; outcome }` and `applied(revision): Promise<{ sample;
-    outcome }>`. `outcome` exposes the flags `exact`, `prerollFallback`, `transitionFallback`,
+    outcome }>`. `outcome` exposes the flags `exact`, `transitionFallback` and
     `superseded` (D15-17). `applied` never rejects for a committed revision; it rejects only when the
-    engine is disposed. While the AudioContext is suspended it stays pending: the catch-up deadline
-    counts render samples (D15-17).
+    engine is disposed. While the AudioContext is suspended it stays pending: the warm-successor
+    deadline counts render samples (D15-17).
   `SessionTransaction` and its builder come from #1383. `revision` follows every committed reply,
   from `apply`, `replaceSession` and live edits (#1382).
 - **D2. No validation pass outside the control plane.** The browser engine does not scratch-boot an

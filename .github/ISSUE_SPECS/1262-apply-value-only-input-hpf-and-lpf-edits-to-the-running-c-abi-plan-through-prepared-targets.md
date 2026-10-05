@@ -160,8 +160,8 @@ Run every command from the repository root.
 - *State a bounded tail and an exact-rest bound for every node* (#1329), for gate 4's bound and
   worst-case pair
 - *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328)
-- *Hold strip input-lane values in latest-target cells* (#1346), and *Hold live values in
-  latest-target cells on both hosts* (#1312) under it
+- *Hold strip input-lane values in latest-target cells* (#1346)
+- *Hold live values in latest-target cells on both hosts* (#1312), under #1346
 
 ## Standing rules for the implementer
 

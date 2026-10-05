@@ -70,8 +70,9 @@ that swaps the plan.
   same domain checks, one `FaderDb` per changed lane, one `Mute` per changed lane, one matrix
   record when a lowered bit changes, and the same ramp lengths (`ramps.fader_samples`,
   `ramps.mute_samples`, the lowered matrix smoothing), including whatever per-edit ramp the track
-  records take (rule R9; the strip's `EditRamps` entries through `LiveRamps::resolve`, *Carry an
-  optional per-edit ramp length on live session edits*, #1394 D6). If #1277 has already extracted
+  records take (D15-1's recorded resolution; the strip's `EditRamps` entries through
+  `LiveRamps::resolve`, *Carry an optional per-edit ramp length on live session edits*, #1394
+  D6). If #1277 has already extracted
   this function (its D5), reuse it. Never write a second copy.
 - **D3. Order.** `LiveDelta::strips` holds the tracks first, then the submixes, each in canonical
   ID order. That is the order of `HostLiveControlHandles::strip_controls`.
@@ -94,8 +95,7 @@ that swaps the plan.
   between the base and the successor's model is retargeted, not restarted. #1277 D3 calls a value
   live when the classifier would emit a record for it, so after D1-D2 these values are live.
   #1277 D5's successor loop runs D2's function for submix pairs as well as track pairs and writes
-  the records into the successor's cells. Copy mode keeps the records on the prepared successor,
-  as #1277 D5 does for tracks.
+  the records into the successor's cells.
 
 ## Deliverables
 
@@ -167,8 +167,7 @@ that swaps the plan.
 6. **Carry, then retarget** (`crates/host-core/tests/successor_swap.rs`). A has a bus. B is A plus
    a muted track whose ID sorts first, and B also changes the bus fader. Run 1 is the structural
    swap with D7's retarget. Run 2 writes the same record to A just before the swap and prepares B
-   from a base that holds it. Every block of the two runs is bit-identical, in move mode and in
-   copy mode (copy after block 6, then the adoption).
+   from a base that holds it. Every block of the two runs is bit-identical.
 7. **Realtime.** Extend
    `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
    (`crates/capi/tests/resource_lifecycle.rs:2900`) with bus edits, over 20 runs:

@@ -85,6 +85,11 @@ mode, how many control allocations ran in the worklet.
   worklet reads it in its message handler, never in `process()`, and reports it in the host
   status. In `worker` mode the counter also counts the Worker's allocations, which are not on an
   audio thread, so the status reports 0.
+
+  Isolation moves boot and rebuild work off the audio thread. No edit's exactness depends on it:
+  the Worker runs no catch-up, and a latency growth is adopted by render in both modes (D15-8
+  (round-5 amendment); *Check the warm-successor deadline in the browser Worker's service loop and
+  report its outcome*, #1361).
 - **D2. Worker mode, boot.**
   1. The main realm creates one shared `WebAssembly.Memory`, using the module's declared maximum
      (#1380 pins it).
@@ -197,7 +202,8 @@ mode, how many control allocations ran in the worklet.
 4. The qualification server serves COOP/COEP on an isolated leg and omits them on a non-isolated
    leg. `npm run qualify` runs both.
 5. `hosts/host-web/DEPLOYMENT.md` and `BROWSER_DEPLOYMENT_MATRIX.md` state the isolation
-   requirement and what `single` mode does.
+   requirement and what `single` mode does: isolation changes where control work runs, never what
+   an edit renders.
 
 ## Authorized paths
 

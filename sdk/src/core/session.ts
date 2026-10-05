@@ -321,6 +321,24 @@ function f32(value: unknown, path: string): number {
   return rounded;
 }
 
+/** A route's gain domain in dB, inclusive: the engine's `validate_routes` bound (issue #1237 D1). */
+const ROUTE_GAIN_DB_DOMAIN = Object.freeze([-144, 24] as const);
+/** A route's `channel_matrix` coefficient domain, inclusive (issue #1237 D1). */
+const ROUTE_COEFFICIENT_DOMAIN = Object.freeze([-1, 1] as const);
+
+/**
+ * A route's gain or matrix coefficient: a finite `f32` inside `domain`, refused outside it under
+ * the engine's own code, `numeric.out_of_schema_range` (issue #1237 D4). Both bounds are exact
+ * `f32` values, so the comparison of the rounded value is the engine's.
+ */
+function routeNumber(value: unknown, domain: readonly [number, number], path: string): number {
+  const normalized = f32(value, path);
+  if (normalized < domain[0] || normalized > domain[1]) {
+    fail(path, `a route value must lie in [${domain[0]}, ${domain[1]}]`, CODE.outOfRange);
+  }
+  return normalized;
+}
+
 function u64(value: unknown, path: string): bigint {
   const normalized = typeof value === "number"
     ? (Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : undefined)
@@ -861,10 +879,10 @@ export class SessionBuilder {
     }
     if (spec.matrix !== undefined) {
       for (const key of ["ll", "lr", "rl", "rr"] as const) {
-        f32(spec.matrix[key], `${path}.matrix.${key}`);
+        routeNumber(spec.matrix[key], ROUTE_COEFFICIENT_DOMAIN, `${path}.matrix.${key}`);
       }
     }
-    if (spec.gainDb !== undefined) f32(spec.gainDb, `${path}.gainDb`);
+    if (spec.gainDb !== undefined) routeNumber(spec.gainDb, ROUTE_GAIN_DB_DOMAIN, `${path}.gainDb`);
     if (spec.mute !== undefined) bool(spec.mute, `${path}.mute`);
     if (spec.followsMute !== undefined) {
       bool(spec.followsMute, `${path}.followsMute`);
@@ -1400,7 +1418,9 @@ interface ResolvedAutomationTarget {
  * pair must already appear in that instance's params, which is exactly what the engine checks. A
  * `builtins` target has no instance, so it is resolved against the builtin parameter ABI and
  * restricted to the rows that declare `blockTarget`. The prepared input-filter rows are live
- * through the paired command path; `delay_samples` remains prepared-only and is refused here.
+ * through the paired command path; `delay_samples` remains prepared-only and is refused here. An
+ * effect target is likewise restricted to the rows that are `automatable` at the `block` rate, as
+ * the engine's preparation is (`effect.automation.rate`).
  */
 function resolveAutomationTarget(
   target: AutomationTarget,
@@ -1461,6 +1481,14 @@ function resolveAutomationTarget(
   }
   const descriptor = effectDescriptor(effectId, `${path}.slotId`);
   const row = effectParameter(descriptor, target.parameter, `${path}.parameter`);
+  // Decision 15 E1 (#1335 D5): the engine refuses an effect target that is not automatable or not
+  // block-rate (`effect.automation.rate`), so the builder refuses it too, as it does a builtin.
+  if (!row.automatable || row.automationRateName !== "block") {
+    fail(
+      `${path}.parameter`,
+      `${row.name} is prepared-only, so a span addressed at it could only ever be inert`,
+    );
+  }
   if (row.channelPolicyName === "shared" && target.channel !== "both") {
     fail(`${path}.channel`, `${row.name} is a shared parameter and is addressed as 'both'`);
   }
@@ -1632,8 +1660,8 @@ function normalize(state: BuilderState): SessionModel {
       id: spec.id,
       source: normalizeRouteSource(spec.source),
       destination: normalizeRouteDestination(spec.destination),
-      channel_matrix: matrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
-      gain_db: f32(spec.gainDb ?? 0, `route("${spec.id}").gainDb`),
+      channel_matrix: routeMatrixRecord(spec.matrix ?? IDENTITY_MATRIX, `route("${spec.id}").matrix`),
+      gain_db: routeNumber(spec.gainDb ?? 0, ROUTE_GAIN_DB_DOMAIN, `route("${spec.id}").gainDb`),
       mute: spec.mute ?? false,
       // #1218 D5: a send follows its source's mute by default; a route into the output never does.
       follows_mute: spec.followsMute ?? spec.destination.kind === "submix_input",
@@ -1661,12 +1689,13 @@ function normalize(state: BuilderState): SessionModel {
   }) as SessionModel;
 }
 
-function matrixRecord(matrix: Matrix2x2, path: string): ModelRecord {
+/** A route's `channel_matrix`: each coefficient inside the route coefficient domain. */
+function routeMatrixRecord(matrix: Matrix2x2, path: string): ModelRecord {
   return freeze({
-    ll: f32(matrix.ll, `${path}.ll`),
-    lr: f32(matrix.lr, `${path}.lr`),
-    rl: f32(matrix.rl, `${path}.rl`),
-    rr: f32(matrix.rr, `${path}.rr`),
+    ll: routeNumber(matrix.ll, ROUTE_COEFFICIENT_DOMAIN, `${path}.ll`),
+    lr: routeNumber(matrix.lr, ROUTE_COEFFICIENT_DOMAIN, `${path}.lr`),
+    rl: routeNumber(matrix.rl, ROUTE_COEFFICIENT_DOMAIN, `${path}.rl`),
+    rr: routeNumber(matrix.rr, ROUTE_COEFFICIENT_DOMAIN, `${path}.rr`),
   });
 }
 

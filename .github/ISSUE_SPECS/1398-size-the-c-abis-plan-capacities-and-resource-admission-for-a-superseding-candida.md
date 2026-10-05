@@ -10,7 +10,7 @@ call* (#1309), and this slice edits them there.
 
 A structural transaction is never refused because render has swapped plans but not yet published
 the new epoch. The C ABI's bookkeeping and resource admission hold every plan and compiled model
-that supersession (#1310) or a catch-up's re-preparation can keep alive at once: the running plan,
+that supersession (#1310) or a warm successor's transition re-preparation can keep alive at once: the running plan,
 a withdrawn or displaced candidate and its successor, and three compiled models. The header states the sizing rule a host's caps must meet.
 
 ## Context
@@ -19,7 +19,7 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
   { return Err(CommandError::Backpressure) }` (`crates/capi/src/runtime/control.rs:892-899`). Its
   comment gives the reason: the retired epoch's report row stays for any-thread readers, so the
   report table (capacity 2, `crates/capi/src/runtime/compile.rs:765`) is full. The control state is
-  already correct in that window: `synchronize_plan_epochs` (`control.rs:783-826`) reclaims the
+  already correct in that window: `synchronize_plan_epochs` (`control.rs:783-824`) reclaims the
   retired plan and promotes the pending provider; only the atomic and its row lag.
 - **Capacities.** Exchange retirement capacity 1 (`compile.rs:170-171` for the resource report,
   `:758-759` for the exchange itself), report rows 2 (`:765`), pending providers 1 and retired
@@ -72,17 +72,21 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
   (`capi.resource.limit`). The largest-allocation check folds every held row. Before #1310 the
   held set is at most two plans, so no current admission changes.
   - **Re-preparation peak.** A candidate that the control thread may later prepare again without
-    a submit, from the same committed model (a warm successor, whose catch-up re-prepares under
-    *Catch up a returned successor and adopt it exactly at a scheduled sample*, #1355 D10), is
-    admitted with `AdmissionPeak::WithReprepare`. Admission then also checks a second peak: the
-    running plan plus the prospective row twice (the candidate and its re-preparation, which keeps
-    the displaced candidate as its donor and is no larger, #1355 D10), with the same model terms.
-    Every other held candidate is dropped before a re-preparation can run, so it is not in that
-    peak. Both peaks must fit, or the submit is refused before commit with the cap's diagnostic.
-    `service` then runs no cross-plan admission. The default, `AdmissionPeak::Single`, is today's
-    check; *Run the C ABI catch-up from miso_engine_v1_service and report its outcome* (#1360) D1
-    passes `WithReprepare` for a warm candidate. Releasing the displaced plan's row before re-preparing
-    is not an option: the displaced plan is the donor of the rings it holds.
+    a submit, from the same committed model, is admitted with `AdmissionPeak::WithReprepare`. That
+    is a warm successor published `Primed`: when it is not ready by its deadline, the control plane
+    withdraws it and prepares the transition instead, keeping the withdrawn candidate as the donor
+    of its rings (*Fall back to the transition when a warm successor is not ready by its
+    deadline*, #1358; *Duck-swap the strips a latency growth restarts, and fall back to the
+    transition when a warm successor cannot adopt*, #1397). Admission then also checks a second
+    peak: the running plan plus the prospective row twice (the warm candidate and the transition's
+    re-preparation, which #1397 keeps no larger than the warm candidate in any D4 term), with the
+    same model terms. Every other held candidate is dropped before a re-preparation can run, so it
+    is not in that peak. Both peaks must fit, or the submit is refused before commit with the
+    cap's diagnostic. `service` then runs no cross-plan admission. The default,
+    `AdmissionPeak::Single`, is today's check; *Classify a latency-growth edit and publish its
+    warm successor from the control plane* (#1403) D2 passes `WithReprepare` when it admits a
+    warm candidate. Releasing the withdrawn plan's row before re-preparing is not an option: the
+    withdrawn plan is the donor of the rings it holds.
 - **D5. Sizing rule and reference limits.** The header states it: each cap above must be at least
   three times one plan's row, and the graph cap also covers three compiled models. The repository's
   reference limits must admit three plans of their sessions: `audit_limits`
@@ -144,8 +148,8 @@ a withdrawn or displaced candidate and its successor, and three compiled models.
 - Gate 2: an admission that forgets a held plan or model (a missing third term) passes one byte
   over the cap.
 - Gate 3: an admission that checks a warm candidate only against the plans held at submit admits a
-  catch-up whose re-preparation (three plans) exceeds the caller's caps, so `service` would retry a
-  refused re-preparation forever.
+  warm candidate whose transition re-preparation (three plans) exceeds the caller's caps, so the
+  deadline fallback would be refused and the edit could neither adopt nor fall back.
 
 ## Dependencies
 

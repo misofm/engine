@@ -31,12 +31,23 @@ counter the C ABI does not serve is refused with a type.
   `collect_render_activity`), which every control call runs first (D2).
 - The snapshot event is lossy telemetry by contract (`docs/CONTROL_PROTOCOL_SEMANTICS.md`,
   "Automation and events").
+- **The registry.** `CounterId` is the frozen registry in
+  `crates/protocol/src/message_wire.rs:622-642` (it ends at `ValidationFailures = 15`);
+  `parse_counter_id` (`:2032-2051`) decodes it. *Hold live values in latest-target cells on both
+  hosts* (#1312 D8) adds `LiveValuesSuperseded = 16`.
+- *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+  successor cannot adopt* (#1397) keeps a session counter, `transition_reprepare_refusals`:
+  transition re-preparations that were refused anyway and retried at the next service step.
+  *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360)
+  copies it into the provider and names it in the header. The C ABI needs a counter ID to serve
+  it.
 
 ## Decisions frozen for this slice
 
 - **D1. A fixed served set.** The C ABI provider serves a fixed counter set from construction,
-  each at 0 until written: `TELEMETRY_COALESCED`, `TELEMETRY_DROPPED`, `CANCELED_AUTOMATION`, and
-  `LIVE_VALUES_SUPERSEDED` once #1312 has added it. `COUNTERS_GET` with `all` returns all of them.
+  each at 0 until written: `TELEMETRY_COALESCED`, `TELEMETRY_DROPPED`, `CANCELED_AUTOMATION`,
+  `TRANSITION_REPREPARE_REFUSALS` (D6), and `LIVE_VALUES_SUPERSEDED` once #1312 has added it.
+  `COUNTERS_GET` with `all` returns all of them.
 - **D2. Typed refusal of unserved counters.** `ControlProvider::telemetry_configure` returns
   `Result<TelemetryConfiguration, ParameterProviderError>`. A configuration naming a counter ID
   outside the served set is `ParameterProviderError::NotFound`, which the controller answers with
@@ -54,11 +65,16 @@ counter the C ABI does not serve is refused with a type.
   replayed.
 - **D5. The acked-batch question** does not arise: the event is noncritical telemetry. A refused
   configuration changes nothing.
+- **D6. `TRANSITION_REPREPARE_REFUSALS`.** `CounterId::TransitionReprepareRefusals` joins the
+  frozen registry and `parse_counter_id` at the next free value when this merges (17 if #1312's
+  16 has landed), never a reused one; tests use the name, never the number. The provider serves
+  it at 0 from construction. #1360 writes it in the service step's counter refresh. It counts
+  `transition_reprepare_refusals` (D15-17).
 
 ## Deliverables
 
 1. D1 in host-core's provider, D2 in the protocol's provider trait and controller, D3-D4 in the
-   control plane's `collect_render_activity`.
+   control plane's `collect_render_activity`, D6 in the protocol's registry.
 2. `docs/C_ABI_V1_QUALIFICATION.md`: the served counter set and the cadence.
 
 ## Authorized paths
@@ -68,11 +84,13 @@ counter the C ABI does not serve is refused with a type.
 - `crates/host-core/src/control_provider.rs` (the counter set and `telemetry_configure`).
 - `crates/protocol/src/controller.rs` (the trait signature and the `TelemetryConfigure` arm),
   every in-repo `ControlProvider` implementation for the new signature.
+- `crates/protocol/src/message_wire.rs` (`CounterId` and `parse_counter_id` only, D6).
 - `crates/capi/src/runtime/tests.rs`, `docs/C_ABI_V1_QUALIFICATION.md`.
 
 ## Non-goals
 
-- The meter batch (#1352). New counters (each comes with its own issue, e.g. #1312).
+- The meter batch (#1352). New counters other than D6's (each comes with its own issue, e.g.
+  #1312). Writing a nonzero `TRANSITION_REPREPARE_REFUSALS` (#1360).
 
 ## Objective gates
 
@@ -85,10 +103,13 @@ counter the C ABI does not serve is refused with a type.
    fourth block and a call stage one snapshot.
 3. **Refusal (same file).** Configuring `MALFORMED_FRAMES` (7), which the C ABI does not serve,
    answers `NOT_FOUND`; `COUNTERS_GET` and the stored configuration are unchanged.
-4. **Superseded oracle bytes.** `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`
+4. **Served at 0 (same file).** On a fresh session, `COUNTERS_GET` for
+   `TRANSITION_REPREPARE_REFUSALS` answers 0, not `NOT_FOUND`, and configuring it is accepted; its
+   ID round-trips through the wire encoder and `parse_counter_id`.
+5. **Superseded oracle bytes.** `all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes`
    (`crates/capi/src/runtime/tests.rs:1857`) pins a counter snapshot built from the render
    sequence; re-pin those wire bytes with this issue as the reason.
-5. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p protocol --features
+6. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p protocol --features
    test-support`; `cargo test --locked -p host-core --features control-provider,test-support`;
    `bash scripts/check-protocol-control-policy.sh`; `cargo fmt --all -- --check`;
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`.
@@ -98,6 +119,8 @@ counter the C ABI does not serve is refused with a type.
 - Gate 1: a snapshot filled with anything but the counter's own value (today's defect).
 - Gate 2: a snapshot cadence that ignores the configured period.
 - Gate 3: a configuration accepted for a counter that can never report.
+- Gate 4: an ID missing from the decoder or the served set makes a host's read of the counter
+  `NOT_FOUND` or its configuration refused.
 
 ## Dependencies
 

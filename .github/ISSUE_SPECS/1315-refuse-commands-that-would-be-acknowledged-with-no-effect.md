@@ -66,8 +66,8 @@ advertises command `0x0006` (`crates/protocol/src/message_wire.rs:3496`, `:3512`
   because the wire rule ties it to the session family; with no batch admitted, nothing raises it.
 - **D3. The control plane serves no automation.** Its controller config uses
   `ProviderFeatures { automation: false, ..ProviderFeatures::ALL }` (today `compile.rs:795`).
-  *Research: render stored session automation in the engine, identically on every platform*
-  (#1058) sets it true when it wires a render-side drain.
+  It stays false until the slice that answer A9 of *Research: render stored session automation in
+  the engine, identically on every platform* (#1058) names wires a render-side drain.
 - **D4. Browser bypass lift is refused.** Preparation records on each effect producer whether its
   bypass is prepared (`!lowers_session_bypass(id)` and session `bypass` true). The browser's
   admission refuses a `COMMAND_EFFECT_BYPASS` with value `0` to such an instance with
