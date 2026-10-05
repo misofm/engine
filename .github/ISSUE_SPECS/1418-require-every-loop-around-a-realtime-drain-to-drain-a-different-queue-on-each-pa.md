@@ -59,10 +59,19 @@ other findings and left this one documented.
 `for (lane, control) in controls.iter_mut().enumerate()`, then
 `let Some(control) = control.as_mut() else { continue; };`, then the counted drain of `control`.
 Each pass drains a different queue. It sits outside every marked region (the file's regions are
-`:532-595`, `:1063-1105`, `:1107-1135` and `:1514-1570`), and a pop in a helper is a documented
-limit of the per-region rule, so the gate never sees it. The marked drains it does see
-(`crates/builtins-compiler/src/lib.rs:1074` and `:1118`, `crates/graph/src/runtime.rs:897`) have no
-outer loop. The gate passes the real tree as `realtime policy: ok (89 marked regions in 25 files)`.
+`:532-595`, `:1063-1105` and `:1107-1135`), and a pop in a helper is a documented limit of the
+per-region rule, so the gate never sees it. The gate passes the real tree as
+`realtime policy: ok (89 marked regions in 25 files)`.
+
+*Correction (root, 2026-10-05; re-verified at `4387b935e`).* An earlier text of this section said
+that the marked drains in `crates/builtins-compiler/src/lib.rs` have no outer loop, and it listed a
+fourth region at `:1514-1570`. Both were wrong. The file has only the three regions above. The
+marked fader and matrix drains, `drain_fader_controls` (`:1064`, outer loop at `:1068`, count at
+`:1074`) and `drain_matrix_controls` (`:1108`, outer loop at `:1112`, count at `:1118`), are in the
+same shape as `drain_controls`: `for (lane, control) in controls.iter_mut().enumerate()`, then
+`let Some(control) = control.as_mut() else { continue; };`, then the counted drain. Each pass
+drains a different queue, so both pass D1. The other marked drain cited here,
+`crates/graph/src/runtime.rs:897` (`drain`), has no outer loop.
 
 ## Decisions
 
@@ -412,3 +421,19 @@ approaches it.
 - #1426 (the pop's receiver is the counted queue) is not done here.
 - Files touched: `scripts/check-realtime-policy.sh`, `scripts/test-realtime-policy.sh` and this
   spec. `crates/builtins-compiler/src/lib.rs` is unchanged from attempt 1.
+
+## Rescope (root, 2026-10-05)
+
+- **Status.** Root rescoped this issue after two FAIL verdicts: attempt 1 (`da878bd49`) and
+  attempt 2 (`7caf972db`). Both attempts are reverted in `9d955dc66`.
+  `scripts/check-realtime-policy.sh`, `scripts/test-realtime-policy.sh` and the `drain_controls`
+  markers in `crates/builtins-compiler/src/lib.rs` are back at their pre-#1418 state. The Attempt
+  records above and the verdict copies stay as evidence.
+- **Method.** An awk text scan cannot see Rust's grammar. The loop rule (D1 to D6) moves to a Rust
+  syntax-tree tool, `tools/realtime-policy`. Root files the tool as stream J tool slices.
+- **Amendment.** Amendment 1 follows with the tool issues. It gives the new decisions, gates and
+  dependencies, and it replaces the method parts of D1 to D6 and the Objective gates above. Until
+  then, no implementation starts from this body.
+- **Attempt budget.** The budget restarts under Amendment 1. Attempts 1 and 2 above do not count
+  against it.
+- **GitHub.** The issue stays open. It is not delivered.

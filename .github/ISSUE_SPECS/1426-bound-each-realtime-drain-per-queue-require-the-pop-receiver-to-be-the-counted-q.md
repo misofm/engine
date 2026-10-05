@@ -6,35 +6,46 @@ Found while implementing *Require every loop around a realtime drain to drain a 
 each pass* (#1418, attempt 1, commit `da878bd49` on `codex/d15-stream-j2`); root filed it as a
 separate issue. No production code changes.
 
-## Problem (verified on `codex/d15-stream-j2` at `5a73048e4`, which contains #1418)
+**Blocked (root, 2026-10-05).** This issue is blocked on Amendment 1 of #1418. Root rescoped #1418
+after two FAIL verdicts and reverted its gate changes (`9d955dc66`); the drain rule moves to a Rust
+syntax-tree tool (`tools/realtime-policy`). Do not start an attempt until that amendment and its
+tool issues are filed. The amendment says whether this rule lands in the awk gate cited below or in
+the tool; if in the tool, this body is restated against it first. The anchors below are re-verified
+on the gate as it is after the revert (`scripts/check-realtime-policy.sh` is at its pre-#1418
+state).
+
+## Problem (verified on `codex/d15-stream-j2` at `4387b935e`, after #1418's revert)
 
 - **The drain bound is a count of one queue, but the gate never checks which queue is popped.**
-  `scripts/check-realtime-policy.sh` accepts a marked `try_pop` drain when its loop is bounded by
-  an entry count (`counted()`, `:234-259`). `counted()` extracts the count's receiver into `crecv`
-  (`:249-252`), but `crecv` is used only by #1418's outward queue-selection walk (`selwalk`,
-  `:334` and `:346`). The pop is matched by the bare word `try_pop` (`check()`, `:538-541`): it
+  `scripts/check-realtime-policy.sh` accepts a marked `try_pop` drain when its innermost loop is
+  bounded by an entry count (`counted()`, `:206-225`). `counted()` matches the count's binding
+  against a receiver pattern (`recv`, `:219`; the binding test at `:221`) but never keeps the
+  receiver it matched. The pop is matched by the bare word `try_pop` (`check()`, `:383-387`): it
   records the line, the frame stack and the `from_fn` flag, never its receiver. A pop is then
-  judged by its loops alone (`:561-569`). So
+  judged by its loops alone (`:401-410`). So
   `let available = a.available_at_entry(); for _ in 0..available { b.try_pop() }` passes: queue
   `b` is drained by `a`'s count, and the bound is no longer a bound on `b`.
-- **The header form never sets `crecv`.** `for P in 0..<path>.available_at_entry()` (`classify()`,
-  `:328-331`) passes its path straight to `selwalk`; a pop-receiver check must take the counted
-  receiver from that path too.
+- **The header form keeps no receiver either.** `for P in 0..<path>.available_at_entry()`
+  (`classify()`, `:292-293`) sets `inner[f]` without keeping `<path>`; a pop-receiver check must
+  take the counted receiver from that path too.
 - **No self-test case covers it.** In `scripts/test-realtime-policy.sh`, every counted case pops
   from the receiver it counts (`control`/`control`, `controls[lane]`/`controls[lane]`,
   `self.control_lane_consumer_for_this_strip` on both); no case pops from a different receiver.
-- **The real tree already complies.** The five marked drains pop the queue they count:
-  - `crates/builtins-compiler/src/lib.rs` `drain_controls`: count `:473`, bound `:474`, pop `:475`
-    (`control`, bound at `:470` by `let Some(control) = control.as_mut() else`);
-  - the same file's fader drain (`:1076`, `:1077`, `:1078`) and matrix drain (`:1120`, `:1121`,
-    `:1122`), both `control`;
+- **The real tree already complies.** Every counted drain pops the queue it counts:
+  - `crates/builtins-compiler/src/lib.rs` fader drain (`drain_fader_controls`, `:1064`: count
+    `:1074`, bound `:1075`, pop `:1076`) and matrix drain (`drain_matrix_controls`, `:1108`: count
+    `:1118`, bound `:1119`, pop `:1120`), both `control`;
   - `crates/graph/src/runtime.rs` `drain`: count `:897`, bound `:899`, pop `:900`
     (`self.control.consumer`);
   - `crates/effect-contract/src/live.rs` `stage_records`: count `:349-352`
-    (`self.control.as_ref().map_or(0, Consumer::available_at_entry)`, so `crecv` is
+    (`self.control.as_ref().map_or(0, Consumer::available_at_entry)`, so the counted receiver is
     `self . control`), bound `:359`, `:364-365`, pop `:366`
     (`self.control.as_mut().map(Consumer::try_pop)`). The receiver here precedes
     `.as_mut().map(Consumer::`, not `.try_pop`.
+  - `crates/builtins-compiler/src/lib.rs` `drain_controls` (count `:472`, bound `:473`, pop `:474`;
+    `control` is bound at `:469` by `let Some(control) = control.as_mut() else`) complies too, but
+    at the head it is outside every marked region: #1418 attempt 1's markers were reverted, and
+    #1418's amendment marks it.
   `crates/engine/src/realtime/plan_exchange.rs:377` pops once in an `if ... && let` header, not in
   a counted loop.
 
@@ -42,17 +53,17 @@ separate issue. No production code changes.
 
 - **D1. A counted pop pops the counted queue.** For every `try_pop` that the gate judges against a
   counted inner loop (`inner[f]`), the pop's receiver must equal that loop's counted receiver,
-  token for token, after stripping one trailing `. as_ref ( )` or `. as_mut ( )` from each, as
-  `counted()` already does for `crecv`. The counted receiver comes from the `let` count binding
-  (`crecv`) or from the header path of `for P in 0..<path>.available_at_entry()`. A pop whose
+  token for token, after stripping one trailing `. as_ref ( )` or `. as_mut ( )` from each. The
+  counted receiver comes from the `let` count binding that `counted()` accepts (`:221`) or from the
+  header path of `for P in 0..<path>.available_at_entry()` (`:292`). A pop whose
   receiver differs, or cannot be read, fails with the existing drain class
   (`bound it with available_at_entry`).
 - **D2. Two pop spellings, nothing else.** The pop's receiver is read from exactly two forms:
   `<recv> . try_pop ( )` and `<recv> [. as_mut ( ) | . as_ref ( )] . map ( <Ident> : : try_pop )`.
   Any other spelling of a pop inside a counted drain fails (fail safe; the drain is rewritten, not
   the rule relaxed).
-- **D3. The real tree passes unchanged.** No source file changes; the five drains above pass.
-- **D4. Comments.** The gate's rule comment (`:80-169`) states D1 and D2; the self-test's case
+- **D3. The real tree passes unchanged.** No source file changes; the counted drains above pass.
+- **D4. Comments.** The gate's rule comment (`:78-144`) states D1 and D2; the self-test's case
   comments say which defect each new case catches.
 
 ## Authorized paths
@@ -63,14 +74,15 @@ separate issue. No production code changes.
 
 ## Non-goals
 
-- Proving that a collection holds each queue once (`:136-139` stays as it is).
+- Taking collections at their word (the comment at `:126-130` stays as it is).
 - Changing any drain in production code.
 - Pops outside a counted loop (single pops in headers, as at `plan_exchange.rs:377`).
 
 ## Hazards
 
-- `scripts/check-realtime-policy.sh` was rewritten by #1418, which is not on `main` yet; this
-  issue lands after it.
+- #1418's attempts rewrote `scripts/check-realtime-policy.sh` and were reverted (`9d955dc66`).
+  #1418's Amendment 1 decides where the drain rule lives; this issue lands after it and is
+  re-anchored on whatever it leaves.
 - The gate runs under gawk, mawk and busybox awk. Any new function must not recurse on its own
   output (#1418's attempt 1 found an `if let` header that recursed without bound).
 
@@ -107,8 +119,9 @@ case pops a different receiver from the one it counts.
 
 ## Dependencies
 
-- *Require every loop around a realtime drain to drain a different queue on each pass* (#1418):
-  this issue edits the gate as #1418 leaves it.
+- **Blocked on** Amendment 1 of *Require every loop around a realtime drain to drain a different
+  queue on each pass* (#1418) and the stream J tool issues it names (`tools/realtime-policy`).
+  This issue edits the drain rule where that amendment leaves it.
 
 ## Standing rules for the implementer
 
