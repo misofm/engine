@@ -1327,6 +1327,63 @@ mutate_count_from_closed_region_function() {
         '    }' \
         '}'
 }
+# A block item shadows a slice parameter for its whole block too, even when it is declared after
+# the loop: here the outer loop iterates an infinite range (stream-J batch verdict MINOR-1).
+mutate_outer_over_slice_parameter_shadowed_by_block_const() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(rounds: &[u8], control: &mut Consumer<Record>) {' \
+        '    {' \
+        '        for _ in rounds {' \
+        '            let available = control.available_at_entry();' \
+        '            for _ in 0..available {' \
+        '                let Ok(record) = control.try_pop() else {' \
+        '                    break;' \
+        '                };' \
+        '                apply(record);' \
+        '            }' \
+        '        }' \
+        '        #[allow(non_upper_case_globals)]' \
+        '        const rounds: core::ops::RangeFrom<u32> = 0..;' \
+        '    }' \
+        '}'
+}
+# A count binding under `#[cfg(..)]` may not be compiled, leaving the earlier binding as the count
+# (stream-J batch verdict MINOR-2).
+mutate_count_under_cfg() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = usize::MAX;' \
+        '    #[cfg(debug_assertions)]' \
+        '    let available = control.available_at_entry();' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# `r#while!` is a user macro, not the keyword, and may rebind the count (stream-J batch verdict
+# NIT-1).
+mutate_count_in_raw_identifier_macro() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'macro_rules! r#while {' \
+        '    ($x:ident $($rest:tt)*) => {' \
+        '        let $x = usize::MAX;' \
+        '    };' \
+        '}' \
+        '' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry();' \
+        '    r#while!(available == 0);' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
 for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
     second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
     bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
@@ -1340,7 +1397,9 @@ for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_
     count_rebound_by_for_pattern inflated_count while_count_raised_in_body outer_repeat \
     open_tail_last_file raw_c_string_literals region_ends_in_comment count_in_user_macro \
     count_raised_by_max outer_over_iterator_parameter outer_over_rebound_slice_parameter \
-    outer_zip_then_cycle count_shadowed_by_block_static count_from_closed_region_function; do
+    outer_zip_then_cycle count_shadowed_by_block_static count_from_closed_region_function \
+    outer_over_slice_parameter_shadowed_by_block_const count_under_cfg \
+    count_in_raw_identifier_macro; do
     expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and

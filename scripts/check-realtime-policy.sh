@@ -96,14 +96,18 @@ gate_scan_forbidden 'marked realtime forbidden-body predicate' \
 #     `self.controls[lane]`), or one plain alias `let [mut] <count> = <entry count>;`. From that
 #     binding to the loop every other mention of `<count>` is a read: the left operand of a
 #     comparison, outside any macro call but `debug_assert!` (no rebinding, assignment, borrow,
-#     method call or macro argument). No `static`, `const` or `use` in the region may name
-#     `<count>`, and a `let` made at the region's outermost level leaves scope at the first `}`
-#     that closes a block opened before the region;
+#     method call or macro argument; a raw-identifier macro such as `r#while!` is a macro, not
+#     the keyword). The binding carries no `cfg`-family attribute (`#[cfg(..)]`,
+#     `#[cfg_attr(..)]`): a binding that may not be compiled leaves an earlier one as the count.
+#     No `static`, `const` or `use` in the region may name `<count>`, and a `let` made at the
+#     region's outermost level leaves scope at the first `}` that closes a block opened before
+#     the region;
 #   - every other loop around that pop is finite: a bounded loop as above, `for P in 0..<bound>`
 #     (`<bound>` an integer literal or a path: `self.lanes`, `LANES`, `self.controls.len()`),
 #     `&<fields>`, `&mut <fields>`, `<fields>.iter()`/`.iter_mut()`, or a slice or array
-#     parameter of the enclosing `fn` that nothing names before the loop (each optionally
-#     `.enumerate()`d or `.zip(..)`ped), or the closure of `core::array::from_fn`. Finite is not
+#     parameter of the enclosing `fn` that nothing names before the loop and no `static`,
+#     `const` or `use` in the region names (each optionally `.enumerate()`d or `.zip(..)`ped),
+#     or the closure of `core::array::from_fn`. Finite is not
 #     small: the gate bounds each pass, not the product of the passes, so `0..usize::MAX` or an
 #     `array::from_fn` into `[(); usize::MAX]` around a drain that re-reads its count passes;
 #   - a `try_pop` in the header of a loop (its condition, iterator or pattern, a block nested
@@ -199,7 +203,7 @@ if [[ -n "$marked_files" ]]; then
         # names `x` exactly once; between the binding and `hs` every mention of `x` is a read; and
         # no `static`, `const` or `use` in the region can name `x` (a block item shadows a `let`
         # of an enclosing block, even when it is declared after the loop).
-        function counted(x, before, hs, he, depth,   k, t, b, ident, num, recv, cap) {
+        function counted(x, before, hs, he, depth,   k, t, b, ident, num, recv, cap, a) {
             for (k = ns; k >= 1; k--) {
                 if (!onstack[st_frame[k]] || st_end[k] >= before) continue
                 t = st_top[k]; sub(/^(# (! )?\[[^]]*\] )*/, "", t)
@@ -207,6 +211,10 @@ if [[ -n "$marked_files" ]]; then
                 b = k; break
             }
             if (!b || mentions(x, hs, he) != 1 || !reads(x, st_end[b] + 1, hs - 1) || item(x)) return 0
+            # A binding under a `cfg`-family attribute (`cfg`, `cfg_attr`, or any path to one) may
+            # not be compiled, leaving an earlier binding of the same name as the count.
+            a = substr(st_top[b], 1, length(st_top[b]) - length(t))
+            if (a ~ /(^| )cfg[A-Za-z0-9_]*( |$)/) return 0
             ident = "[A-Za-z_][A-Za-z0-9_]*"; num = "[0-9][0-9_]*(u8|u16|u32|u64|usize)?"
             recv = ident "( \\. " ident "( \\( \\))?| [[] (" num "|" ident "( \\. " ident ")*) []])*"
             cap = "( \\. min \\( (" num "|" ident "( (\\.|: :) " ident ")*) \\))?"
@@ -242,6 +250,8 @@ if [[ -n "$marked_files" ]]; then
                     if (substr(F, j, 1) != "!") continue
                     j--; while (substr(F, j, 1) == " ") j--
                     w = ""; while (j >= 1 && wc(substr(F, j, 1))) w = substr(F, j--, 1) w
+                    # `r#while!` is a macro whose name is a raw identifier, not the keyword.
+                    if (w != "" && substr(F, j, 1) == "#" && substr(F, j - 1, 1) == "r") return 0
                     if (w != "" && w !~ /^(if|while|match|return|break|in|else|let|mut)$/ && w != "debug_assert") return 0
                 }
                 p = e
@@ -296,12 +306,13 @@ if [[ -n "$marked_files" ]]; then
         }
         # Whether `x` is a slice or array parameter (`&[T]`, `&mut [T]` or `[T; N]`) of the
         # innermost enclosing `fn`, named nowhere between the `{` of that function and the loop
-        # at `f`.
+        # at `f`, and named by no `static`, `const` or `use` in the region (a block item shadows
+        # the parameter for its whole block, even when it is declared after the loop).
         function slice(x, f,   k, g, h) {
             for (k = D; k >= 1; k--) {
                 g = fid[k]; h = hdr[g]; sub(/^(# (! )?\[[^]]*\] )*/, "", h)
                 if (h !~ /(^| )fn [A-Za-z_]/) continue
-                return h ~ ("[(,] (mut )?" x " : (& (" q " [A-Za-z_][A-Za-z0-9_]* )?(mut )?)?[[]") && mentions(x, hopen[g] + 1, hstart[f] - 1) == 0
+                return h ~ ("[(,] (mut )?" x " : (& (" q " [A-Za-z_][A-Za-z0-9_]* )?(mut )?)?[[]") && mentions(x, hopen[g] + 1, hstart[f] - 1) == 0 && !item(x)
             }
             return 0
         }

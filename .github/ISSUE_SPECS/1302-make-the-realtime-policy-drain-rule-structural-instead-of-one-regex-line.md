@@ -684,3 +684,65 @@ policy mutation tests: ok` under all three. `check-workspace-policy.sh` and
 `test-workspace-policy.sh`: ok. Every fixture file the new cases and the valid fixture write is
 `rustfmt --edition 2024 --check` clean. (The fixture's `crates/capi/src/ffi.rs` test-module line
 is not clean; that line predates #1302.) `shellcheck` is not installed and was not run.
+
+### Batch-verdict follow-ups (implementer, 2026-10-05)
+
+Folds MINOR-1, MINOR-2 and NIT-1 of the stream-J batch verdict
+(`/home/bl/misofm/submix-verdicts/stream-j-batch-verdict.md`, at `ef3b8835a`). Same two scripts;
+no Rust source; floors unchanged. The verifier's `FIX.diff` was the starting point; MINOR-2 is
+written wider than it.
+
+**Folds.**
+- *MINOR-1.* `slice()` also requires that no `static`, `const` or `use` in the region names the
+  parameter (`item(x)`): a block item shadows the parameter for its whole block, even when it is
+  declared after the loop. New case `outer-over-slice-parameter-shadowed-by-block-const` (the
+  verifier's `e03`: `const rounds: RangeFrom<u32> = 0..;` after the loop, in the block around it).
+- *MINOR-2.* `counted()` refuses a count binding whose attributes name any `cfg`-family word
+  (`cfg`, `cfg_attr`, or any other word that starts with `cfg`): a binding that may not be
+  compiled leaves an earlier binding of the same name as the count. The verifier's fix matched
+  only an attribute that opens with `cfg`; this one also catches `cfg` as the last segment of a
+  path. New case `count-under-cfg` (the verifier's `e02`: `let available = usize::MAX;` then
+  `#[cfg(debug_assertions)] let available = control.available_at_entry();`). A
+  `#[cfg_attr(not(debug_assertions), cfg(any()))]` variant is refused too (scratch only).
+- *NIT-1.* `reads()` takes a macro name written as a raw identifier (`r#while!`) as a macro, not
+  the keyword. New case `count-in-raw-identifier-macro` (the verifier's `e06`: a local
+  `macro_rules! r#while` that rebinds its first token, called as `r#while!(available == 0);`).
+- The gate comment states all three.
+
+**Mutation evidence.** Each mutant reverts one fold in a scratch copy of the gate. The self-test
+was run against each mutant; the three new shapes were also run through each mutant directly.
+Every row agrees under gawk 5.2.1, mawk 1.3.4 and busybox awk.
+
+| Mutant of the gate | Self-test | New shapes refused |
+|---|---|---|
+| none | `realtime policy mutation tests: ok` | all three |
+| M1: `slice()` without `&& !item(x)` | red first at `drain-outer-over-slice-parameter-shadowed-by-block-const` | the other two |
+| M2: no `cfg`-attribute refusal in `counted()` | red first at `drain-count-under-cfg` | the other two |
+| N1: no raw-identifier test in `reads()` | red first at `drain-count-in-raw-identifier-macro` | the other two |
+
+Every case before the new one stays green under each mutant (the self-test stops at the first
+red), and each new shape is refused by the two mutants that do not revert its own fold. So each
+fold has one distinct catching case. Per new case, the defect only it catches:
+`outer-over-slice-parameter-shadowed-by-block-const`, a slice parameter shadowed by a later block
+item and taken as finite; `count-under-cfg`, a cfg-gated count binding believed;
+`count-in-raw-identifier-macro`, a raw-identifier macro read as the keyword `while`.
+
+**Other shapes.** With the fixed gate, the verifier's `e02`, `e03`, `e05`, `e06` and `e12` are
+refused and the bounded control `b00` passes, under all three awks.
+
+**Gates.** `bash scripts/check-realtime-policy.sh`: `realtime policy: ok (89 marked regions in
+25 files)` under all three awks. `bash scripts/test-realtime-policy.sh`: `realtime policy
+mutation tests: ok` under all three. `check-workspace-policy.sh`: ok. The three new fixture shapes
+are `rustfmt --edition 2024 --check` clean.
+
+**Not fixed here: recommended follow-up issue for root.** The verdict's MINOR-3 and NIT-2 are a
+design gap in D2's outer-loop rule, which the gate comment documents ("Finite is not small"). A
+finite but huge outer loop around a drain that reads its count again on each pass passes:
+`for _ in 0..usize::MAX` (verifier `e01`), `for _ in 0..control.capacity()` (`e08`) or any other
+zero-argument method, and a zero-sized array parameter `rounds: [(); usize::MAX]` (`e04`). Each is
+the pop-until-empty drain the Problem section forbids. Recommended issue: "outer loops must
+iterate distinct queues". A finite outer loop around a drain is accepted only when the count's
+receiver is bound by the outer loop's pattern, indexed by it, or bound inside the loop from an
+expression that names it. `drain_two_lanes`, `drain_lane_fields`, `drain_lane_constant`,
+`drain_zipped_lanes` and `drain_lane_slice` meet this. `drain_lane_pairs` (one queue drained once
+per `from_fn` call), `e01`, `e04` and `e08` do not.
