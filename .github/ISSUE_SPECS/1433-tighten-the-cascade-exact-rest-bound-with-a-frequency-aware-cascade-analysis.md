@@ -160,9 +160,11 @@ coordinate with stream F (#1261, #1262) as #1329 does.
    real exact rest `R_meas` of the top pair (`input_section_worst_case_pair(rate)`) at +24 dBFS, as
    #1329 attempt 2 did (alternating input, `+24 dB` trim, the A9 law in place; first sample from
    which every output sample is `±0.0` and the eight integrator words equal the reset state).
-   Assert `R_meas <= peak_plus_24_dbfs <= 1.10 · R_meas` (the stated margin: 10 %, which the
-   estimate `1.02M-1.07M` plus `2 · N_SILENCE` meets against `983,374`). Record `R_meas` and the
-   certified value per rate. A certified value above the margin is a finding for Sol (D4), not a
+   Assert `R_meas <= peak_plus_24_dbfs <= 1.15 · R_meas` (the stated margin: 15 %, root decision
+   2026-10-05: the estimate `1.02M-1.07M` plus `2 · N_SILENCE` sits within 1 % of a 10 % ceiling,
+   so a sound, useful result could fail on calibration rather than substance; the issue's purpose is
+   to tighten, and the reported ratio keeps it honest). Record `R_meas`, the certified value and the
+   achieved ratio `peak_plus_24_dbfs / R_meas` per rate. A certified value above the margin is a finding for Sol (D4), not a
    gate change.
 3. **#1329's gates unchanged and green:** its gate 1(a) (fixed design), gate 2 (soundness on the
    real kernel, with the new `R` as the rest sample) and gate 3 (the restated figures, now the new
@@ -183,7 +185,7 @@ coordinate with stream F (#1261, #1262) as #1329 does.
   a scanned design; #1329's crude-value comparison catches a change that loosens instead.
 - Gate 2: an unsound tightening (a dropped `2 · N_SILENCE`, a missed reset pattern, a telescoping
   step that loses a boundary term) certifies below the real kernel's rest; a step that does not
-  tighten (the universal ball left in place) misses the 10 % margin. No test compares #1329's
+  tighten (the universal ball left in place) misses the 15 % margin. No test compares #1329's
   certified rest with the measured one from above.
 
 ## Dependencies

@@ -302,7 +302,7 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    exact tail at a floor 30 dB lower. The 30 dB margin absorbs the `eps / 2` split (6 dB), the
    cascade union bound and the `f32` rate inflation (`7 * 2^-24 * kappa` against `1 - rho = 5.2e-5`
    at the extreme: about 0.8 % of the decay rate per unit of modal condition number `kappa`, so the
-   margin holds for `kappa` up to roughly 13); a Putzer `m * rho^m` factor costs about 13 nats, roughly
+   margin holds for `kappa` up to roughly 13, a proportional placeholder: the measured value replaces this figure); a Putzer `m * rho^m` factor costs about 13 nats, roughly
    250,000 samples at the extreme against the margin's roughly 66,000, so it is red. Disabled
    filters assert `tail == 0`. The certified tail is the one computed with D3's reset-aware exact
    reference (Amendment 2, F1). A certified value above the tightness line is a finding for Sol
