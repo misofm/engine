@@ -978,6 +978,51 @@ mod tests {
             assert_eq!(hooks.load(Ordering::Relaxed), 0);
         }
 
+        /// Two carrying swaps on one owner, with a withdrawn candidate between them: each
+        /// applied block hands over exactly once, the withdrawn block hands over nothing, and the
+        /// output stays gap-free against the uninterrupted reference.
+        #[test]
+        fn hand_over_runs_only_on_the_applied_block() {
+            let reference = reference();
+            let hooks = Arc::new(AtomicUsize::new(0));
+            let (mut publisher, mut owner, mut retirer) =
+                plan_exchange(oscillator(0, true, &hooks), config(1)).expect("exchange");
+            let mut blocks = Vec::new();
+            let mut withdrawn = None;
+            for block in 0..BLOCKS {
+                match block {
+                    1 => assert!(publisher.publish(oscillator(1, true, &hooks)).is_ok()),
+                    3 => {
+                        let _ = retirer.try_reclaim().expect("plan zero");
+                        assert!(publisher.publish(oscillator(2, true, &hooks)).is_ok());
+                        withdrawn = match publisher.withdraw() {
+                            Withdrawal::Withdrawn(candidate) => Some(candidate),
+                            _ => panic!("an unclaimed candidate is withdrawn"),
+                        };
+                    }
+                    5 => {
+                        let _ = publisher.republish(withdrawn.take().expect("candidate"));
+                    }
+                    _ => {}
+                }
+                let before = hooks.load(Ordering::Relaxed);
+                let (output, report) = owner_block(&mut owner);
+                blocks.push(output);
+                let (swap, carry, calls) = match block {
+                    1 | 5 => (SwapOutcome::Applied, CarryOutcome::Carried, 1),
+                    _ => (SwapOutcome::None, CarryOutcome::NotRequested, 0),
+                };
+                assert_eq!((report.swap, report.carry), (swap, carry), "block {block}");
+                assert_eq!(
+                    hooks.load(Ordering::Relaxed) - before,
+                    calls,
+                    "block {block}"
+                );
+            }
+            assert_eq!(blocks, reference);
+            assert_eq!(owner.carried_count(), 2);
+        }
+
         #[test]
         fn the_non_contiguous_render_reports_the_hand_over() {
             let reference = reference();

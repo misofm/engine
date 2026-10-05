@@ -233,9 +233,9 @@ attempt.
   exchange (asserted, documented under `# Panics`). That proves the mailbox has an `Empty` cell
   and keeps adopted epochs monotone. It fits #1310 D4 (A withdrawn, B reserved then refused,
   A republished).
-- The generation counter (D2) is implemented, but no test here can turn red on its removal: with
-  the payload moved out after the claim CAS, a withdraw-then-republish ABA is benign today. The
-  generation exists for #1311, which loads fields before the claim.
+- The generation counter (D2) is implemented. *Correction (attempt 2):* this record said no test
+  could turn red on its removal. That was wrong: a sequential test of D4's rule (a claim from a
+  load taken before a withdraw and republish fails) turns red without it; attempt 2 adds it.
 
 **Tests (each new or rewritten test, with its mutation run: defect applied -> red, reverted -> green).**
 Gate 1 (`crates/engine/src/realtime/mod.rs`):
@@ -309,3 +309,67 @@ render path drops a candidate or a credit.
    `check-workspace-policy.sh`: ok. Worklet chain (`build-web-audioworklet.sh --named-twin`,
    `check-web-audioworklet.sh`, `check-browser-expected-resources.py --artifacts`,
    `test-web-audioworklet.sh`): pass.
+
+### Attempt 2 (implementer, 2026-10-05)
+
+Folds the attempt-1 verdict (`FAIL`, one MAJOR, two MINOR). Test-only change; no production code
+changed, because the verdict found the implementation correct and only its proof incomplete.
+
+**What changed.**
+- M-1: `crates/engine/src/realtime/spsc.rs` gains the loom model
+  `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied`. Render claims until it has adopted two
+  candidates; control publishes three, waiting with `yield_now` until `try_reserve` finds an
+  `Empty` cell. So control writes into a cell render moved a payload out of at an earlier claim,
+  which is the steady state of every second publication. It asserts adoption order `[1, 2]` and
+  that each value drops exactly once. The waits use `yield_now` on both sides; a straight-line
+  control thread does not let loom schedule a claim between the publications (verifier's probe).
+- m-1: `crates/engine/src/realtime/mod.rs` restores `carry::hand_over_runs_only_on_the_applied_block`
+  without the deferral: publish B at block 1 (applied, carried, one hook call), reclaim and
+  publish C at block 3 and withdraw it before the render (no swap, no call), republish C at
+  block 5 (applied, carried, one call); then the output equals the reference and
+  `carried_count() == 2`.
+- m-2: `crates/engine/src/realtime/spsc.rs` gains
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: publish, observe, withdraw,
+  republish the same value, the stale claim returns `None`, and a fresh observe and claim return
+  the value. The attempt-1 statement that no such test could be written is corrected above.
+
+**Mutation runs (defect applied -> red; reverted -> green).**
+- Loom, gate-2 command (`spsc_loom`, now 4 tests):
+  - MA, the claim CAS success ordering `AcqRel` -> `Acquire`: only
+    `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied` red ("Causality violation: Concurrent
+    write accesses to `UnsafeCell`"); the two attempt-1 models stay green.
+  - MB, `try_reserve`'s load `Acquire` -> `Relaxed`: only the new model red (same violation).
+  - MC, the publication CAS `Release`/`Acquire` -> `Relaxed`/`Relaxed`: all three mailbox models
+    red, including the new one.
+  - Reverted: 4 passed (about 4 s of model time).
+- Carry, the hand-over runs only on an owner's first swap (`enter_block`'s `carry_from` behind
+  `if self.carried == 0 && self.carry_mismatched == 0`): only
+  `hand_over_runs_only_on_the_applied_block` red (engine 43/44); reverted 44 + 4 + 1.
+- Generation removed (`MailboxWord::advanced` returns `self`): only
+  `stale_claim_after_withdraw_and_republish_fails_on_the_generation` red (engine 43/44);
+  reverted 44 + 4 + 1.
+
+**Test value.**
+- `spsc_loom_plan_mailbox_reuses_the_cell_render_emptied`: a claim CAS without `Release`, or a
+  `try_reserve` load without `Acquire`, lets control's write race render's move out of the same
+  cell; no other test reaches cell reuse.
+- `hand_over_runs_only_on_the_applied_block`: a hand-over that runs only on an owner's first swap;
+  no other test catches it (engine, `host-core` `successor_swap` and `graph`
+  `rt11_swap_carry_alloc` stay green under it, per the verifier's run).
+- `stale_claim_after_withdraw_and_republish_fails_on_the_generation`: a transition that does not
+  advance the generation, so a stale claim succeeds after a withdraw and republish.
+
+**Gates.**
+1. `cargo test --locked -p engine --features realtime-audit`: 44 + 4 + 1 passed.
+2. `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom`: 4 passed.
+3. `cargo build --locked --release -p audit -p capi`; `target/release/audit capi`: allocations,
+   deallocations, locks, syscalls, `total_violations` 0. `trace-realtime-audit.sh` ok,
+   `trace-graph-audit.sh` PASS, `trace-builtins-graph-audit.sh` PASS (1,000,000 blocks each).
+   `check-realtime-policy.sh` ok (90 regions in 25 files), `test-realtime-policy.sh` ok.
+5. `-p capi` (73 + 2 + 11), `-p host-core --features control-provider,test-support --test
+   successor_swap` (32), `-p graph --features test-support --test rt11_swap_carry_alloc` (1),
+   `-p source` (37 + 1 + 1), `-p control-plane --features test-support` ok, `-p audit --release`
+   (33): all pass. `cargo fmt --all -- --check` ok; `cargo clippy --locked --workspace
+   --all-targets --all-features -- -D warnings` ok; `check-workspace-policy.sh` ok;
+   `check-cross-targets.sh` PASS. The worklet chain was not re-run: the change is inside
+   `#[cfg(test)]` modules, so the browser-compiled module is unchanged.

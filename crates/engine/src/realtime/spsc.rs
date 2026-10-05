@@ -986,6 +986,48 @@ mod loom_tests {
             );
         });
     }
+
+    /// #1343 gate 2, cell reuse: render claims until it has adopted two candidates while control
+    /// publishes three, each into a cell render emptied at an earlier claim. The claim's
+    /// `Release` and `try_reserve`'s `Acquire` order render's move out of a cell before control's
+    /// next write into it; loom's cells fail the model if either edge is missing. Both sides
+    /// wait with `yield_now`, so loom schedules claims between the publications.
+    #[test]
+    fn spsc_loom_plan_mailbox_reuses_the_cell_render_emptied() {
+        loom::model(|| {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (mut writer, mut reader) = plan_mailbox::<Candidate>();
+            let render = loom::thread::spawn(move || {
+                let mut adopted = Vec::new();
+                while adopted.len() < 2 {
+                    if let Some(observed) = reader.observe() {
+                        if let Some(value) = reader.claim(observed) {
+                            adopted.push(value.id);
+                        }
+                    }
+                    loom::thread::yield_now();
+                }
+                (adopted, reader)
+            });
+            for id in 1..=3 {
+                loop {
+                    if let Some(permit) = writer.try_reserve() {
+                        assert!(permit.commit(candidate(id, &drops)).is_ok());
+                        break;
+                    }
+                    loom::thread::yield_now();
+                }
+            }
+            let (adopted, reader) = render.join().expect("render");
+            assert_eq!(adopted, [1, 2]);
+            drop((writer, reader));
+            assert_eq!(
+                drops.load(Ordering::Relaxed),
+                3,
+                "each value ends exactly once"
+            );
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1209,5 +1251,23 @@ mod tests {
         assert_eq!(producer.full_count(), full + 1);
         assert_eq!(consumer.try_pop(), Ok(2));
         assert_eq!(producer.available_capacity(), 1);
+    }
+
+    /// #1343 D2/D4: a claim built from a load taken before control withdrew and republished the
+    /// candidate fails, although the word's cell states match again; only the generation tells
+    /// the two words apart. A fresh load then claims the republished value.
+    #[test]
+    fn stale_claim_after_withdraw_and_republish_fails_on_the_generation() {
+        use super::{MailboxWithdrawal, plan_mailbox};
+        let (mut writer, mut reader) = plan_mailbox::<u32>();
+        assert!(writer.try_reserve().expect("empty").commit(1).is_ok());
+        let observed = reader.observe().expect("full");
+        let MailboxWithdrawal::Withdrawn(value) = writer.withdraw() else {
+            panic!("an unclaimed candidate is withdrawn")
+        };
+        assert!(writer.try_reserve().expect("empty").commit(value).is_ok());
+        assert!(reader.claim(observed).is_none(), "a stale claim must fail");
+        let observed = reader.observe().expect("full again");
+        assert_eq!(reader.claim(observed), Some(1));
     }
 }
