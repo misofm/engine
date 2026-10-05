@@ -20,9 +20,11 @@ Modes
     name (issue #1234). Searched as substrings they also matched any out-of-line Rust function
     whose mangled name merely ends in `4free` -- an ordinary queue accessor named `free` read as
     the allocator. On `wasm32-unknown-unknown` the Rust allocator is already matched by
-    `dlmalloc`, `dealloc`, `__rust_alloc` and `__rust_realloc`, and `wasm-objdump` prints an
-    import's or export's name unmangled, so a bare `free`, `malloc`, `calloc` or `realloc` can
-    only be a C allocator's symbol, and that is exactly what the anchored alternative refuses.
+    `dlmalloc`, `dealloc`, `__rust_alloc` and `__rust_realloc`. This checker never sees an import:
+    an import has no body, so `wasm-objdump -d` prints no function header for it, and
+    `check-web-audioworklet.sh` refuses a module with any import before this gate runs. A member
+    named exactly `free`, `malloc`, `calloc` or `realloc` is therefore a defined C allocator
+    entry point, and that is exactly what the anchored alternative refuses.
 
     `--allocation-only` runs the forbidden-name half alone. Use it for an export that runs on the
     control path (`port.onmessage`), where the engine's rule is "never allocate on the render
@@ -625,15 +627,24 @@ def self_test() -> int:
     def reaching(name: str) -> dict[int, Function]:
         return parse(freeing.replace("<_ZN8dlmalloc4free17h0E>", f"<{name}>"))
 
-    # An out-of-line Rust accessor that is merely *named* `free` is not the allocator.
-    expect(
-        "(a1) out-of-line accessor named free passes",
-        check_callgraph(
-            reaching("_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer4free"),
-            "miso_engine_web_v1_render",
+    # An out-of-line Rust accessor that is merely *named* like a C allocator is not the
+    # allocator, for each of the four names (a name that contains or ends in one, unanchored).
+    for length, c_name in ((4, "free"), (6, "malloc"), (6, "calloc"), (7, "realloc")):
+        expect(
+            f"(a1) out-of-line accessor named {c_name} passes",
+            check_callgraph(
+                reaching(f"_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer{length}{c_name}"),
+                "miso_engine_web_v1_render",
+            )
+            == 0,
         )
-        == 0,
-    )
+    # An unmangled name that merely *begins* with a C allocator name is not the allocator: the
+    # anchor holds at the end too.
+    for c_name in ("free", "malloc", "calloc", "realloc"):
+        expect(
+            f"(a1) unmangled {c_name}_count passes",
+            check_callgraph(reaching(f"{c_name}_count"), "miso_engine_web_v1_render") == 0,
+        )
     # A member named exactly like a C allocator entry point fails, each of the four.
     for c_name in ("free", "malloc", "calloc", "realloc"):
         expect(
