@@ -61,11 +61,9 @@ the stream-J `README.md` there, "Open for root/S0"). The gap predates #1237.
 
 ## Non-goals
 
-- The strip producers. `TrackControlProducer` (`crates/builtins-compiler/src/lib.rs:254`,
-  re-exported by `crates/host-core/src/lib.rs:236-237`) exposes its raw
-  `Producer<TrackControlRecord>` fields, which an embedder can push an unchecked matrix into.
-  That is the same class of gap on another lane, with other owners (stream B's latest-target
-  cells, #1312 and #1346, replace those queues). Record it in the Evidence for root.
+- The strip lanes. `TrackControlProducer` (`crates/builtins-compiler/src/lib.rs:254`) lets an
+  embedder push an unchecked strip record: the same class of gap, covered by *Make live strip
+  records valid by construction* (#1423).
 - Effect records. The C ABI send edits (#1225). Route cells (*Hold route-lane values in
   latest-target cells*, #1347).
 
@@ -75,10 +73,10 @@ the stream-J `README.md` there, "Open for root/S0"). The gap predates #1237.
   infallible `write` and keeps validation in `RouteControlRecord::new`. Either order works; the
   slice that lands second rebases and keeps D1: the host-core producer accepts only the host-core
   newtype.
-- **CI does not run doctests.** The required workflow's `cargo test` steps use `--all-targets`,
-  which excludes doctests (`.github/workflows/qualification.yml:609-620`). The existing
-  `compile_fail` doctests have the same gap. Run gate 1 locally and record it; do not change CI in
-  this issue.
+- **CI does not run doctests on `main` yet.** The required workflow's `cargo test` steps use
+  `--all-targets`, which excludes doctests (`.github/workflows/qualification.yml:609-620`).
+  *Run doctests in CI* (#1422) adds the doctest steps; this issue lands after it, so gate 1 runs in
+  `test-debug-a`. Do not change CI in this issue.
 - **Shipped module bytes.** A newtype should not change generated code, but `push`'s signature
   changes. Gate 3 confirms that no render digest moves.
 
@@ -111,12 +109,12 @@ a behaviour.
 ## Evidence
 
 - Gate 1's mutation run (the doctest's failure) and the revert.
-- The strip-producer gap from the Non-goals, with its file and line, for root.
 - Each gate command and its exit status at the PR head.
 
 ## Dependencies
 
-- None. *Bound route gain and matrix values* (#1237) is on `main`.
+- *Run doctests in CI* (#1422): D4's guarantee counts only once CI runs doctests.
+  *Bound route gain and matrix values* (#1237) is on `main`.
 
 ## Standing rules for the implementer
 
