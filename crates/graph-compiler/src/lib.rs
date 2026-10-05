@@ -65,22 +65,24 @@ pub struct GraphBuiltinsCompileRequest {
 /// the reader only.
 ///
 /// The compiler-owned graph and builtin parts are private: external bindings cannot create a value
-/// carrying internal-builtin provenance. rustc reports "cannot construct with struct literal
-/// syntax due to private fields", an error with no code.
+/// carrying internal-builtin provenance. Struct literal syntax needs every field to be visible.
+/// The fence uses functional record update (`..base`), which names no field, so it fails only
+/// because a field is private, never because a field is missing (E0063), and it compiles as soon
+/// as every field is public. rustc reports E0451 (private field).
 ///
 /// ```compile_fail
 /// use graph_compiler::PreparedGraphBuiltinsArtifact;
 ///
-/// fn construct() -> PreparedGraphBuiltinsArtifact {
-///     PreparedGraphBuiltinsArtifact {}
+/// fn construct(base: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsArtifact {
+///     PreparedGraphBuiltinsArtifact { ..base }
 /// }
 /// ```
 ///
 /// ```
 /// use graph_compiler::PreparedGraphBuiltinsArtifact;
 ///
-/// fn construct() -> PreparedGraphBuiltinsArtifact {
-///     unimplemented!()
+/// fn construct(base: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsArtifact {
+///     base
 /// }
 /// ```
 ///

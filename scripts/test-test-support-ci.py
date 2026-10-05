@@ -182,15 +182,6 @@ def main() -> int:
     fails("test-debug-b narrowed to --lib", {"builtins", "lane", "parametric-eq"},
           (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
            "cargo test --locked --lib \\\n            -p lane"))
-    # The doctest step (#1422) runs no integration or unit test, so it must not count: with the
-    # whole-package step narrowed to doctests, both jobs' --doc steps remain and cover nothing.
-    fails("test-debug-b narrowed to --doc", {"builtins", "lane", "parametric-eq"},
-          (WORKFLOW, "cargo test --locked --all-targets \\\n            -p lane",
-           "cargo test --locked --doc \\\n            -p lane"))
-    fails("test-debug-a narrowed to --doc",
-          {"builtins-compiler", "effect-compiler", "graph", "host-core", "host-web", "protocol",
-           "rack"},
-          in_a("--all-targets", "--doc"))
     fails("test-debug-b with a harness name filter", {"builtins", "lane", "parametric-eq"},
           in_b(DEBUG_B_FEATURES, DEBUG_B_FEATURES[:-1] + " -- --exact bank\n"))
     fails("test-debug-b with a positional name filter", {"builtins", "lane", "parametric-eq"},

@@ -113,7 +113,10 @@ guarantee is a `compile_fail` doctest. CI and test tooling only; no engine code 
    and their output lists every `compile_fail` doctest and its twin (record the count).
    `bash scripts/run-aarch64-tests.sh debug` on an AArch64 host, if one is available, or the PR's `aarch64-debug` job, passes with the doctest run.
 2. **A broken guarantee is red (PR evidence).** Make one guarantee false: add
-   `unsafe impl Sync for PreparedHost {}` in `crates/host-core/src/prepare.rs`. The
+   `#[allow(unsafe_code)] unsafe impl Sync for PreparedHost {}` in
+   `crates/host-core/src/prepare.rs` (the workspace sets `unsafe_code = "deny"`, so the line
+   without the attribute stops the lib from building before any doctest runs; `lane`'s
+   `fpenv.rs` already allows `unsafe_code`, so its line needs no attribute). The
    `test-debug-a` doctest step command exits non-zero, naming that doctest. Revert. Repeat for `lane`'s `CanonicalFpEnv` with the `test-debug-b` command.
 3. **A wrong reason is red (evidence per pair).** For each `compile_fail`/twin pair: rename an
    item in the shared part of both snippets (or introduce the same typo in both): the twin turns
@@ -248,3 +251,60 @@ and the lint job's `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --
 `shellcheck` is not installed here; `bash -n` passes.
 
 **Gate 5.** Pending the batch's single PR run (wall times of the new steps to be recorded there).
+
+### Follow-ups (stream J batch 2 follow-ups worker; verdict `1422-attempt1.md` and root rulings)
+
+**Root ruling (gate 2 text).** Gate 2 above now spells the line with `#[allow(unsafe_code)]` and
+says why.
+
+**MINOR-1: the two "narrowed to --doc" cases are deleted** from `scripts/test-test-support-ci.py`
+(with their comment). They caught nothing unique: with `--doc` removed from
+`NARROWING_TARGET_FLAGS` the 15 rewritten scoped cases also go red, because each doctest step
+carries the same features as its job's whole-package step, and D1 keeps those lists identical. So
+the scoped cases defend `--doc` narrowing as long as D1 holds; the deleted cases would become the
+only catch only if a doctest step's feature list stopped matching its job's, which D1 forbids.
+Mutation after the deletion: `--doc` removed from `NARROWING_TARGET_FLAGS`: the self-test is red
+("mutation accepted: host-web/test-support removed from test-debug-a"); restored: green.
+
+**MINOR-2: the construct fence is reshaped so it fails only for private fields.** The fence was
+`PreparedGraphBuiltinsArtifact {}`, which with every field public still fails, with E0063 (missing
+fields), so it could not see its own guarantee break. Naming every field would not fix that durably
+(each new field brings E0063 back). The fence is now functional record update,
+`fn construct(base: PreparedGraphBuiltinsArtifact) -> PreparedGraphBuiltinsArtifact {
+PreparedGraphBuiltinsArtifact { ..base } }`, which names no field: it fails only when a field is
+private, and compiles once every field is public. Its twin is `fn construct(base: ..) -> .. { base
+}`, which differs in that one construct. The doc comment says so. Runs (`cargo test --locked -p
+graph-compiler --doc`; the fence is at line 73, its twin at line 81):
+
+| Run | Result |
+|---|---|
+| fence flipped to a plain doctest | red, E0451 "fields `graph`, `builtin_processors`, `builtin_observers`, `report`, `track_controls` and `meter_consumers` ... are private"; no other error |
+| every field of `PreparedBuiltinsGraphArtifact` public | red: lines 73, 92 (mutate) and 106 (extract); twin 81 green |
+| every field public and `graph` renamed `plan` | red: line 73 only. The mutate and extract fences stay green for the wrong reason (no field `graph`), so this fence is the only catch. The attempt-1 fence (`{}`) under the same mutation: all 12 green, the defect unseen |
+| typo in the shared path of both snippets | red: twin line 81 only; the fence stays green (the wrong-reason defect the twin catches) |
+
+*Test value.* The reshaped fence is red if every field of the artifact becomes public, including
+when the `graph` field is also renamed, which leaves the mutate and extract fences green for the
+wrong reason.
+
+**NIT-1: snippets reshaped in attempt 1** (the record said none needed a fix). Two edits were made
+so each pair differs in exactly one construct; neither changed rustc's reason (the verifier checked
+each): the construct fence moved from `let _ = PreparedGraphBuiltinsArtifact {};`, with its comment
+inside the snippet, to a `fn construct() -> PreparedGraphBuiltinsArtifact` body (now reshaped again,
+MINOR-2); and five host-core and lane fences renamed their helper `requires_send`/`requires_sync`
+to `requires`.
+
+**NIT-2: the shipped module moves.** Attempt 1 changed only doc comments, but three lines added to
+`crates/host-core/src/prepare.rs` move panic `Location` line numbers: the shipped AudioWorklet module
+went from `c4d170dd...` (parent) to `e4d822a6...` (9 bytes differ, size unchanged). Expect
+ARTIFACT CHANGED in the PR's `artifact-identity` summary. This follow-up's two added doc lines in
+`crates/graph-compiler/src/lib.rs` do not move it: built before and after them, the shipped module
+is `46c8b035206b350470b41d7f20a4cd29341215e556511b8fb1f21bd71a610e79` both times (0 bytes differ;
+the module moved from `e4d822a6...` because of the slices committed since attempt 1).
+
+**Gates (follow-ups).** `cargo test --locked -p graph-compiler --doc`: 12 passed.
+`python3 -B scripts/test-test-support-ci.py`, `check-test-support-ci.py`,
+`check-ci-path-routing.py`, `test-ci-path-routing.py`: exit 0. `RUSTDOCFLAGS='-D warnings' cargo doc
+--locked -p graph-compiler --no-deps`, `cargo fmt --all -- --check`: exit 0. Worklet chain:
+`build-web-audioworklet.sh --named-twin` exit 0, `check-web-audioworklet.sh
+--without-metadata-regeneration` exit 0, `check-browser-expected-resources.py --artifacts` exit 0.
