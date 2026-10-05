@@ -56,8 +56,9 @@ snapshot is taken at the block boundary:
 | case 2, inf | 0 dB, 0 / 0 dB, 1 / -6 dB, 0.5 | `+inf` at 120 | no | `X` `+inf` (word 19); dry `+inf` (word 80) | `effect.state.history` |
 | case 2, NaN | 0 dB, 0 (identity) | NaN at 120 | no | `X`, `e` and dry NaN | `effect.state.history` |
 
-- Case 1: two opposite infinities in the `X` window give `inf - inf`, so `u` and `e` are NaN. The
-  identity output is the dry sample, so it stays finite. Off the identity path, the same input
+- Case 1: two infinite `X` words whose half-band tap products have opposite signs give
+  `inf - inf`, so `u` and `e` are NaN. The even taps alternate in sign, so same-sign words can do
+  this too (amended 2026-10-05, verdict NIT-1). The identity output is the dry sample, so it stays finite. Off the identity path, the same input
   makes the output NaN and D7 resets the lane in the same block.
 - Case 2: a non-finite input in a block's last 31 samples reaches the output only after the
   31-sample dry delay. So at the block boundary the dry history (and `X`) hold it, and the output
@@ -65,10 +66,17 @@ snapshot is taken at the block boundary:
 
 **Why every such word is harmless (the soundness argument).** Soft-clip has no recursive state. Its
 three histories are FIR delay lines, and the kernel reads no history word older than 31 samples.
-So a non-finite history word has two possible outcomes:
+So a non-finite history word has one of three outcomes (amended 2026-10-05, verdict MINOR-1):
 
 - it reaches the output, and D7 zeroes that block and resets the lane;
-- it ages out unread within 31 samples (a NaN in `e` on the identity path).
+- `cubic` reads it and clamps it to a finite value (an `X` `±inf` gives `±2/3`);
+- it feeds only a path that the identity select discards (a NaN in `e` on the identity or bypass
+  path).
+
+A word the effect writes itself lives at most 31 samples without D7. A crafted payload can hold an
+`X` NaN beside a finite dry word, a state the effect never produces. On the identity path it can
+keep making `e` NaNs for up to about 59 samples without D7. Nothing is recursive, so no output
+leaves the D7 bound.
 
 The ramps are validated separately and stay finite.
 
@@ -101,7 +109,8 @@ rendered bit, and it is what #1071's rule already requires.
   promise for these states, and it counts as "refusals" states the effect produced itself. Rejected
   as the fix, but kept as the generic fallback.
 - **(C) Accept the effect's own non-finite words on restore. Recommended.** Widen
-  `decode_lane_words`'s history rules to exactly the words the kernel can hold:
+  `decode_lane_words`'s history rules to every word the kernel can hold (the `X` and `e` rules also
+  admit a normal below the flush threshold, and `X` admits `-0.0`; see Non-goals):
   - `X`: every word except a subnormal. That covers zero, a normal, `±inf` (overflow or an infinite
     input) and NaN (a NaN input). A drive gain is at least `-24 dB`, so `2 * drive * x` is never
     `0 * inf`.
@@ -111,9 +120,9 @@ rendered bit, and it is what #1071's rule already requires.
   This is control-plane decode only. The kernel, the snapshot and every rendered bit stay as they
   are, and the restored lane continues bit for bit, D7 report included. This was checked on the
   scratch copy for all three rows of the table at mix 0, 1 and 0.5, over three continuation blocks.
-  A crafted payload gains nothing beyond what the effect's own input can cause: by the soundness
-  argument, every non-finite word is D7-recovered or ages out within 31 samples, whatever words
-  surround it.
+  A crafted payload can cause no output beyond a D7 recovery: by the soundness argument, every
+  non-finite word reaches the output under D7, is clamped by `cubic`, or feeds only a discarded
+  path, whatever words surround it (amended 2026-10-05, verdict MINOR-1).
 
   **The NaN-bits concern in #1278.** That note said NaN payload bits are platform-dependent. A
   restore copies the word bit for bit, so continued and restored agree on any one target. A NaN
@@ -343,3 +352,32 @@ Named twin before `410039849ad1ca550bfc27349dc466eabec64c409b3e493132074dd735f68
 *Test value.* Gate 1: a restore that refuses a self-produced NaN in `e`, or a non-finite `X` or dry
 word, turns R2-R4 red (M1); R1 keeps the overflowed-`X` coverage of the test it replaces. Gate 2:
 an `e` rule that refuses only `+inf` turns `bad(43, -inf)` red (M5), which `bad(43, inf)` does not.
+
+### Follow-ups (after the attempt-1 PASS)
+
+The attempt-1 verdict (PASS, copied to
+`docs/handoffs/decision-15-2026-10-05/verdicts/stream-a/1300-attempt1.md`) left one MINOR and three
+NITs. This commit folds them in, as comment, doc and spec text only; no code or rendered bit moves.
+
+- **MINOR-1.** The soundness wording in `decode_lane_words`'s doc now states the three outcomes of a
+  non-finite history word (D7 at the output; clamped by `cubic`; read only by the path the
+  identity select discards) and the two bounds (31 samples for a self-produced word; about 59
+  samples of `e` NaNs from a crafted `X` NaN beside a finite dry word, with no output beyond a D7
+  recovery). The spec's paragraphs (Problem, soundness argument; option C) were edited in place,
+  each marked "amended 2026-10-05".
+- **NIT-1.** "Two opposite infinities" is replaced by "two infinite `X` words whose half-band tap
+  products have opposite signs" in `e_history_word_valid`'s doc, the gate-1 test's doc and the
+  spec's case 1.
+- **NIT-2.** "Exactly the words the kernel can write" is now "every word the kernel can write", and
+  the doc names the extra words admitted (a normal below `1e-20`; `-0.0` in `X`). The predicates
+  are unchanged (a non-goal).
+- **NIT-3.** `history_words`'s doc says it returns the values, not the classes.
+
+*Test value (from the verdict).*
+
+- `a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit` turns red on a restore
+  that refuses a non-finite history word the effect produced itself: a NaN in `X` (R4), a NaN in
+  `e` (R2, R4), a non-finite dry word (R3, R4) or an overflowed `±inf` in `X` (R1-R3); under each
+  such mutation no other soft-clip test went red.
+- `bad(43, f32::NEG_INFINITY)` turns red on an `e` rule that refuses only `+inf` (M5); with the row
+  removed the whole soft-clip suite is green under M5.

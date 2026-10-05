@@ -715,17 +715,29 @@ struct LaneRestore {
 ///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
 /// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
 /// * `remaining` must not exceed the smoothing window;
-/// * each history admits exactly the words the kernel can write into it (#1300):
+/// * each history admits every word the kernel can write into it (#1300):
 ///   * `X` admits every word except a subnormal ([`x_history_word_valid`]);
 ///   * `e` admits a zero, a normal or a NaN ([`e_history_word_valid`]);
 ///   * the dry history admits every word ([`dry_history_word_valid`]).
 ///
+///   The `X` and `e` rules also admit some words the kernel never writes: a normal below the
+///   flush threshold (`1e-20`), and in `X` a `-0.0`. `flush` writes neither. Tightening this is
+///   out of scope (#1071 attempt-1 NIT-1).
+///
 ///   A history word may be non-finite at a block boundary while the output is still finite, so
 ///   D7 (which checks only the output) has not cleared it. That is sound: soft-clip has no
 ///   recursive state, its three histories are FIR delay lines, and the kernel reads no word older
-///   than 31 samples. So every non-finite word either reaches the output, where D7 zeroes the
-///   block and resets the lane, or ages out unread within 31 samples. A crafted payload gains
-///   nothing beyond what the effect's own input can cause.
+///   than 31 samples. A non-finite history word has one of three outcomes:
+///   * it reaches the output, and D7 zeroes the block and resets the lane;
+///   * `cubic` reads it and clamps it to a finite value (an `X` infinity gives `±2/3`);
+///   * it feeds only a path that the identity select discards (an `e` NaN on the identity or
+///     bypass path).
+///
+///   A word the effect writes itself lives at most 31 samples without D7. A crafted payload can
+///   hold an `X` NaN beside a finite dry word, which the effect never produces. On the identity
+///   path that `X` NaN can keep making `e` NaNs for up to about 59 samples without D7. If the mix
+///   or output leaves identity in that time, D7 fires. Nothing is recursive, so no output leaves
+///   the D7 bound: a crafted payload can cause no output beyond a D7 recovery.
 ///
 /// Flushing on snapshot instead would change rendered bits (a subnormal dry sample is the output
 /// at `mix == 0`) and break the exact continuation the plan-swap carry relies on (#1278 D2a).
@@ -802,7 +814,9 @@ fn x_history_word_valid(value: f32) -> bool {
 ///
 /// The kernel pushes `flush(cubic(u))` (`kernel.rs:196`), where `u` is interpolated from `X`.
 /// `cubic` clamps `±inf` to `±2/3` and returns NaN for NaN, so `e` is never infinite; a NaN comes
-/// from a NaN in `X` or from two opposite infinities in the interpolation window (`inf - inf`).
+/// from a NaN in `X`, or from two infinite `X` words in the interpolation window whose half-band
+/// tap products have opposite signs (`inf - inf`). The even taps alternate in sign, so two
+/// infinities of the same sign can also do this.
 fn e_history_word_valid(value: f32) -> bool {
     normal_or_zero(value) || value.is_nan()
 }

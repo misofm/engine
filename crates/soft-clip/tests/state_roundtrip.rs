@@ -354,7 +354,7 @@ struct NonFiniteRow {
     expect: fn(&str, &[u8]),
 }
 
-/// The classes of the 31 `X`, 30 `e` and 31 dry words of one payload section.
+/// The values of the 31 `X`, 30 `e` and 31 dry words of one payload section.
 fn history_words(section: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let range = |words: std::ops::Range<usize>| -> Vec<f32> {
         words
@@ -364,14 +364,15 @@ fn history_words(section: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     (range(12..43), range(43..73), range(73..104))
 }
 
-/// Soft-clip has no recursive state, so every non-finite word it holds at a block boundary either
-/// reaches the output (D7 resets the lane) or ages out unread within 31 samples. Its own snapshot
+/// Soft-clip has no recursive state, so every non-finite word it writes itself lives at most 31
+/// samples without D7: it reaches the output (D7 resets the lane), `cubic` clamps it, or only the
+/// path the identity select discards reads it. Its own snapshot
 /// of such a state must restore and continue bit for bit, D7 reports included (#1300, option C):
 ///
 /// * R1, a finite `1e37` overflows `2 * drive * x` to an infinity in `X`, which the cubic clamps
 ///   (#1278; #1071 attempt 1 MINOR-2);
-/// * R2, two opposite infinities in the `X` window make the interpolated `u` and so `e` NaN, while
-///   the identity path outputs the finite dry sample;
+/// * R2, two infinite `X` words whose half-band tap products have opposite signs make the
+///   interpolated `u` and so `e` NaN, while the identity path outputs the finite dry sample;
 /// * R3 and R4, a non-finite input in a block's last 31 samples sits in the dry and `X` histories
 ///   (and `e` for a NaN) before the 31-sample dry delay brings it to the output.
 #[test]
