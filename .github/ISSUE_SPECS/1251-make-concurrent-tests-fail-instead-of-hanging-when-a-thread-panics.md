@@ -188,6 +188,10 @@ Sites 1 and 6 (capi lib unit tests) use `bench_support::producer::StopOnDrop`, a
 **declined**: naming `bench_support` there links its `#[global_allocator]`, and the build fails
 with "the `#[global_allocator]` in this crate conflicts with global allocator in: bench_support"
 (tried, reverted). Its copy's doc comment now says why.
+Material side effect (verifier NIT-3): because sites 1 and 6 name `bench_support`, capi's lib
+unit-test binary now links bench_support's auditing `#[global_allocator]` (it used `System`
+before), in `Mode::Abort`; any allocation inside an armed render scope, including a panic's
+allocation inside render, aborts the whole binary (SIGABRT, no test name).
 
 **Found, not fixed (out of the authorized paths).** `crates/capi/tests/plan_swap_race.rs:211`
 keeps a third private `StopOnDrop`, although that file already links `bench_support` and could use
@@ -225,3 +229,17 @@ builtins-graph` ok (9 operations), `test-builtins-fixtures.sh` ok.
 
 **Test value.** No new test. Each rewritten test keeps its claim and catches what it caught
 before; the planted panics above show that a failure now reports instead of hanging.
+
+**Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05).** The verifier passed attempt 1;
+its MINOR and NITs are folded, with no change to any assertion, count or iteration number:
+- MINOR-1: `WORKER_DEADLINE` and `await_worker` now sit above `run_retirement_worker`'s doc, and
+  that doc again opens with the original realtime-reachability paragraph, plus one clause: on a
+  control-thread panic, and only on that failure path, control's `StopOnDrop` stops the worker
+  inside the armed lifetime.
+- NIT-1: site 1's query thread reads the clock once every 1,024 queries, as site 4 does, so the
+  stall check no longer thins the queries that race render.
+- NIT-2: `await_lockstep` takes a `&'static str` and formats its message (with the block,
+  `target - 1`) only on failure; the two messages read as before.
+- NIT-3: recorded in the D4 outcome above.
+- NIT-4 (`crates/capi/tests/plan_swap_race.rs`'s private `StopOnDrop`) is outside the authorized
+  paths; root files it as a follow-up.

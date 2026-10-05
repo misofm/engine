@@ -2954,12 +2954,14 @@ const LOCKSTEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10
 /// # Panics
 ///
 /// When the peer has ended (normally or by a panic: its `StopOnDrop` set `peer_ended`) short of
-/// `target`, or after [`LOCKSTEP_DEADLINE`]; the message names `what` this side waited for (#1251).
+/// `target`, or after [`LOCKSTEP_DEADLINE`]; the message names `what` this side waited for and the
+/// block, `target - 1` (#1251). The message is formatted only on failure, so the wait allocates
+/// nothing on its passing path.
 fn await_lockstep(
     progress: &std::sync::atomic::AtomicU64,
     target: u64,
     peer_ended: &std::sync::atomic::AtomicBool,
-    what: &str,
+    what: &'static str,
 ) {
     use std::sync::atomic::Ordering;
     let deadline = std::time::Instant::now() + LOCKSTEP_DEADLINE;
@@ -2970,10 +2972,14 @@ fn await_lockstep(
         if progress.load(Ordering::Acquire) >= target {
             return;
         }
-        assert!(!ended, "lockstep: the peer ended before {what}");
+        let block = target - 1;
+        assert!(
+            !ended,
+            "lockstep: the peer ended before {what} block {block}"
+        );
         assert!(
             std::time::Instant::now() < deadline,
-            "lockstep: {what} did not happen within {LOCKSTEP_DEADLINE:?}"
+            "lockstep: {what} block {block} did not happen within {LOCKSTEP_DEADLINE:?}"
         );
         std::thread::yield_now();
     }
@@ -3030,12 +3036,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
                     false,
                 );
                 submitted.store(block + 1, std::sync::atomic::Ordering::Release);
-                await_lockstep(
-                    consumed,
-                    block + 1,
-                    render_ended,
-                    &format!("the renderer consumed block {block}"),
-                );
+                await_lockstep(consumed, block + 1, render_ended, "the renderer consumed");
             }
         });
         scope.spawn(move || {
@@ -3047,7 +3048,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
                     submitted,
                     block + 1,
                     producer_ended,
-                    &format!("the producer submitted block {block}"),
+                    "the producer submitted",
                 );
                 let mut pcm = [f32::NAN; 256];
                 let output = crate::PlanarOutput {

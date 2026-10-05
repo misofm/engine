@@ -110,11 +110,6 @@ enum RetirementCommand {
     Reclaim,
 }
 
-/// Run only the audit-local, off-render retirement ownership handoff.
-///
-/// Before control disarms the graph markers this loop can reach only the move-SPSC poll, atomic
-/// loads/stores, and a processor spin hint. Reclamation, destruction, and thread exit occur only
-/// after control sends its sole command outside that armed lifetime.
 /// How long the control thread waits on the retirement worker (to start, or to reclaim one plan)
 /// before it fails. Each takes microseconds while the worker runs.
 const WORKER_DEADLINE: Duration = Duration::from_secs(10);
@@ -143,10 +138,16 @@ fn await_worker(ended: &AtomicBool, what: &str, reached: impl Fn() -> bool) {
     }
 }
 
-/// The retirement worker: reclaims the one retired plan on command, then spins until `stop`.
+/// Run only the audit-local, off-render retirement ownership handoff.
 ///
-/// `ended` is set however this returns or unwinds, so a control thread waiting on it fails instead
-/// of hanging; the control thread's own `StopOnDrop` on `stop` releases this loop the same way.
+/// Before control disarms the graph markers this loop can reach only the move-SPSC poll, atomic
+/// loads/stores, and a processor spin hint. Reclamation, destruction, and thread exit occur only
+/// after control sends its sole command outside that armed lifetime, or, only on the failure path
+/// of a control-thread panic, after control's `StopOnDrop` sets `stop` inside it.
+///
+/// The worker reclaims the one retired plan on command, then spins until `stop`. `ended` is set
+/// however this returns or unwinds, so a control thread waiting on it fails instead of hanging;
+/// the control thread's own `StopOnDrop` on `stop` releases this loop the same way.
 fn run_retirement_worker(
     mut commands: Consumer<RetirementCommand>,
     mut retirer: PlanRetirer,

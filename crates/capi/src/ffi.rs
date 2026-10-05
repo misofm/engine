@@ -2536,16 +2536,21 @@ mod tests {
                 let mut queries = 0_u64;
                 let mut storage = [0_u8; 64];
                 let mut progress = (0, std::time::Instant::now());
+                // The stall check reads the clock once every `STALL_CHECK_POLLS` queries, so it
+                // does not thin out the queries that race render.
+                const STALL_CHECK_POLLS: u64 = 1_024;
                 while !render_ended_ref.load(std::sync::atomic::Ordering::Acquire) || queries == 0 {
-                    let blocks = rendered_ref.load(std::sync::atomic::Ordering::Relaxed);
-                    if blocks == progress.0 {
-                        assert!(
-                            progress.1.elapsed() < RENDER_DEADLINE,
-                            "plan queries: the render thread rendered no block after {blocks} \
-                             within {RENDER_DEADLINE:?}"
-                        );
-                    } else {
-                        progress = (blocks, std::time::Instant::now());
+                    if queries.is_multiple_of(STALL_CHECK_POLLS) {
+                        let blocks = rendered_ref.load(std::sync::atomic::Ordering::Relaxed);
+                        if blocks == progress.0 {
+                            assert!(
+                                progress.1.elapsed() < RENDER_DEADLINE,
+                                "plan queries: the render thread rendered no block after \
+                                 {blocks} within {RENDER_DEADLINE:?}"
+                            );
+                        } else {
+                            progress = (blocks, std::time::Instant::now());
+                        }
                     }
                     let mut resources = empty_report();
                     assert_eq!(
