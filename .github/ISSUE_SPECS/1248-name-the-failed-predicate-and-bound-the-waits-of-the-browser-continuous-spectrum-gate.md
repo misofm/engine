@@ -141,3 +141,18 @@ Defect each gate change catches, which no existing check catches:
 
 Not run: the CI runner itself (no push, per worker rules). Only chromium was used for the plants. The
 predicates under test are browser-independent harness logic.
+
+### Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05)
+
+The verifier passed attempt 1 and ran a closer gate-2 plant (plant B), which is now the stronger
+gate-2 evidence. Plant B held every `onUpdate`, automatic or pumped, until 500 ms after
+`startRendering()` returned, then replayed them in order. This is the spec's "500 ms delay before
+the first `onUpdate`" directly:
+- with the fix: chromium, firefox and webkit all pass (race wait 499-500 ms, loop 0 ms).
+- with the old code: chromium fails with
+  `...; false: automaticDelivery, windows >= 1 (windows=0), gap`. The old 48-pump loop also gave up
+  before any window was delivered.
+
+Note for #1106 (no change here, outside this spec's authorized paths): the 10 s deadline literal is
+duplicated, once in `runContinuousSpectrumQualification` and once in the hop probe (`10_000`). When
+#1106 lands, it can hoist one shared spectrum-deadline constant.
