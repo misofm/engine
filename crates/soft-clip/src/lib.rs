@@ -715,17 +715,17 @@ struct LaneRestore {
 ///   itself produces, within a few ulps of its own line ([`ramp_current_valid`]);
 /// * `step` must be finite, and for the gains zero or normal ([`ramp_step_valid`]);
 /// * `remaining` must not exceed the smoothing window;
-/// * the interpolation and decimation histories (`X`, `e`) must be zero or normal. The kernel
-///   flushes both before they enter a history (D7), and `lane::flush` zeroes every magnitude
-///   below `FLUSH_EPS` (`1e-20`), so the kernel writes only zeros and magnitudes of at least
-///   `1e-20`; the check is the looser zero-or-normal, which refuses every subnormal;
-/// * except that `X` may also hold an infinity ([`x_history_word_valid`]): `X` is
-///   `2 * drive * x`, which overflows for a finite input above about `2.7e36` at `+36 dB`. The
-///   cubic clamps the infinity to `±2/3`, so the output stays finite and D7 never clears it, and
-///   the effect holds it for 31 samples (#1278, #1071 attempt 1 MINOR-2). A NaN is never
-///   accepted, in any history;
-/// * the dry history must be finite: it holds the input unflushed by design, so the identity
-///   path can reproduce any input sample, subnormals included.
+/// * each history admits exactly the words the kernel can write into it (#1300):
+///   * `X` admits every word except a subnormal ([`x_history_word_valid`]);
+///   * `e` admits a zero, a normal or a NaN ([`e_history_word_valid`]);
+///   * the dry history admits every word ([`dry_history_word_valid`]).
+///
+///   A history word may be non-finite at a block boundary while the output is still finite, so
+///   D7 (which checks only the output) has not cleared it. That is sound: soft-clip has no
+///   recursive state, its three histories are FIR delay lines, and the kernel reads no word older
+///   than 31 samples. So every non-finite word either reaches the output, where D7 zeroes the
+///   block and resets the lane, or ages out unread within 31 samples. A crafted payload gains
+///   nothing beyond what the effect's own input can cause.
 ///
 /// Flushing on snapshot instead would change rendered bits (a subnormal dry sample is the output
 /// at `mix == 0`) and break the exact continuation the plan-swap carry relies on (#1278 D2a).
@@ -761,7 +761,11 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
         e: [0.0; E_HISTORY_AGES],
         dry: [0.0; DRY_HISTORY_AGES],
     };
-    let rules: [fn(f32) -> bool; 3] = [x_history_word_valid, normal_or_zero, f32::is_finite];
+    let rules: [fn(f32) -> bool; 3] = [
+        x_history_word_valid,
+        e_history_word_valid,
+        dry_history_word_valid,
+    ];
     for ((slot, offset), valid) in [
         (&mut restore.x[..], X_HISTORY_WORD),
         (&mut restore.e[..], E_HISTORY_WORD),
@@ -783,10 +787,30 @@ fn decode_lane_words(words: &[u32]) -> Result<LaneRestore, StatePayloadError> {
     Ok(restore)
 }
 
-/// `true` if `value` is a word the interpolator input history `X` can hold: a zero, a normal, or
-/// the infinity a finite input overflows `2 * drive * x` to.
+/// `true` if `value` is a word the interpolator input history `X` can hold: every word except a
+/// subnormal.
+///
+/// The kernel pushes `flush(2 * drive * xin)` (`kernel.rs:192`). `flush` zeroes every magnitude
+/// below `1e-20` and leaves a NaN or an infinity unchanged, so `X` holds a zero, a normal, an
+/// infinity (a finite input above about `2.7e36` at `+36 dB` overflows, or the input is infinite)
+/// or a NaN (a NaN input). The drive gain is at least `-24 dB`, so the product is never `0 * inf`.
 fn x_history_word_valid(value: f32) -> bool {
-    normal_or_zero(value) || value.is_infinite()
+    !value.is_subnormal()
+}
+
+/// `true` if `value` is a word the decimation history `e` can hold: a zero, a normal or a NaN.
+///
+/// The kernel pushes `flush(cubic(u))` (`kernel.rs:196`), where `u` is interpolated from `X`.
+/// `cubic` clamps `±inf` to `±2/3` and returns NaN for NaN, so `e` is never infinite; a NaN comes
+/// from a NaN in `X` or from two opposite infinities in the interpolation window (`inf - inf`).
+fn e_history_word_valid(value: f32) -> bool {
+    normal_or_zero(value) || value.is_nan()
+}
+
+/// `true` for every word: the dry history holds the raw input `xin` unflushed (`kernel.rs:191`),
+/// and a host may submit any `f32`, so the identity path can reproduce any input sample.
+fn dry_history_word_valid(_value: f32) -> bool {
+    true
 }
 
 /// `true` if `value` is finite and either a zero or a normal. Signed zeros are accepted.

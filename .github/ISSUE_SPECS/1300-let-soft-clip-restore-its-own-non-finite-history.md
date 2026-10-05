@@ -269,3 +269,77 @@ carries (#1280-#1282), so no carried soft-clip lane meets an own-snapshot refusa
 - A test that greps source or prose is refused.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1
+
+Branch `codex/d15-stream-a`, base `main` at `8be19c86e`. The spec's anchors were verified at
+`d2fe0555a`; `git log d2fe0555a..8be19c86e -- crates/soft-clip` is empty, and the cited lines
+(`lib.rs:704-731`, `:764`, `:788`, `:793`; `kernel.rs:191`, `:192`, `:196`) are where the spec says.
+
+**Change.** `decode_lane_words` takes three named predicates in place of the `:764` rule array:
+`x_history_word_valid` (`!is_subnormal()`), `e_history_word_valid` (`normal_or_zero || is_nan`)
+and `dry_history_word_valid` (`true`), each documented with the kernel line that produces its
+words. The doc comment states the three sets and the soundness argument; the "A NaN is never
+accepted" and "the dry history must be finite" sentences are gone. `restores_and_continues` takes
+a block count and compares the `ProcessReport` per block; its four existing callers pass `1`.
+`a_snapshot_holding_an_overflowed_x_word_restores_and_continues_bit_for_bit` is deleted, superseded
+by the table test `a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit`
+(R1-R4, three continuation blocks each). Rejection test: rows `bad(12, NaN)`, `bad(73, NaN)`,
+`bad(103, inf)` deleted; `bad(43, -inf)` added.
+
+**Gate 1 red evidence** (new test, unfixed `lib.rs`, on `8be19c86e`, each row run alone by a
+temporary row filter that was not committed). Each row's snapshot-block assertions (D7 did not
+fire, the word classes are present) passed before the restore:
+
+| Row | Result |
+|---|---|
+| R1 | ok |
+| R2 | panicked `state_roundtrip.rs:197`: `the effect's own snapshot restores: StatePayloadError { code: "effect.state.history" }` |
+| R3 | same |
+| R4 | same |
+
+After the fix all four rows pass. A temporary probe (not committed) showed, for every row, D7
+firing in the first continuation block (`nonfinite_*_blocks: 128`, equal on both instances) and
+clean reports in blocks 2 and 3, so no stop condition was met: no non-finite word outlived 31
+samples, and none reached the output without D7.
+
+**Mutations** (each applied to `lib.rs`, run, reverted; the revert was diffed against the fixed file):
+
+| Mutation | Red test |
+|---|---|
+| M1: the `:764` rules restored | gate 1: R2, R3, R4 each red with `effect.state.history` (R1 green) |
+| M2: `e` admits infinities | rejection test, `word 43 = 0x7f800000` |
+| M3: `X` admits subnormals (`true`) | rejection test, `word 12 = 0x00000001` |
+| M4: `e` admits subnormals | rejection test, `word 43 = 0x00000001` |
+| M5: `e` admits `-inf` only (refuses `+inf`) | rejection test, `word 43 = 0xff800000` (the new `bad(43, -inf)` row) |
+
+**Gates**, all exit 0:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+- `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
+- `cargo test --locked -p soft-clip` (includes `tests/allocation.rs` and `tests/randomized.rs`)
+- `cargo run --locked -p conformance --example conformance_fixtures -- --check` (nothing re-pinned)
+- `cargo test --locked --release -p console-workload` (console digests unchanged)
+- `cargo test --locked -p conformance -p effect-compiler`
+- `bash scripts/check-realtime-policy.sh`, `bash scripts/test-realtime-policy.sh`
+- `bash scripts/check-workspace-policy.sh`, `bash scripts/test-workspace-policy.sh`
+- `bash scripts/check-cross-targets.sh`: PASS; only the #1018 `ios-asm-memset-pattern16`
+  expected failures
+- worklet chain: `build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+  --without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+  `test-web-audioworklet.sh`
+- `git diff --stat`: only `crates/soft-clip/src/lib.rs`, `crates/soft-clip/tests/state_roundtrip.rs`
+  and this spec.
+
+**ARTIFACT CHANGED.** The shipped AudioWorklet module `miso-engine-v1-audio-worklet.simd128.wasm`:
+before (`8be19c86e`) `a9a518625f4c0621c00a515be5a1c50b257601e9a7e492dbac45dbbcb5637b55`
+(2894202 B); after `33cc226eafae1b5cfa63a5a0fb2d0e296686dbc4ae0e387c22d9c2371f0bbcd6` (2894897 B).
+Named twin before `410039849ad1ca550bfc27349dc466eabec64c409b3e493132074dd735f68cf4`, after
+`557f7edcf3640bf9088d6f84023d36b4c750671bf2015eeac35a3d1ff834ab1b`. Not re-pinned.
+
+*Test value.* Gate 1: a restore that refuses a self-produced NaN in `e`, or a non-finite `X` or dry
+word, turns R2-R4 red (M1); R1 keeps the overflowed-`X` coverage of the test it replaces. Gate 2:
+an `e` rule that refuses only `+inf` turns `bad(43, -inf)` red (M5), which `bad(43, inf)` does not.

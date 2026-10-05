@@ -179,15 +179,17 @@ fn an_overshooting_ramp_restores_and_continues(
         "the ramp has crossed its edge: current {current:e} ({:#010x})",
         current.to_bits()
     );
-    restores_and_continues(source, &payload, frames);
+    restores_and_continues(source, &payload, frames, 1);
 }
 
 /// `payload`, the snapshot of `source` after `frames` samples, restores into a fresh instance
-/// with different initial values, snapshots back to itself, and the two continue bit for bit.
+/// with different initial values, snapshots back to itself, and the two continue bit for bit
+/// over `blocks` further 128-sample blocks, with equal reports per block.
 fn restores_and_continues(
     mut source: Box<dyn effect_contract::PreparedNativeEffect>,
     payload: &(Vec<u8>, Vec<u8>, Vec<u8>),
     frames: usize,
+    blocks: usize,
 ) {
     let mut destination = prepare(&values_from([(0.0, 0.0), (0.0, 0.0), (1.0, 1.0)]));
     destination
@@ -195,27 +197,31 @@ fn restores_and_continues(
         .expect("the effect's own snapshot restores");
     assert_eq!(&support::snapshot(destination.as_ref()), payload);
 
-    let mut expected_left: Vec<f32> = (0..128).map(|index| signal(index + frames, 0)).collect();
-    let mut expected_right: Vec<f32> = (0..128).map(|index| signal(index + frames, 1)).collect();
-    let mut actual_left = expected_left.clone();
-    let mut actual_right = expected_right.clone();
-    let first_sample = frames as u64;
-    process(
-        source.as_mut(),
-        &mut expected_left,
-        &mut expected_right,
-        first_sample,
-        &[],
-    );
-    process(
-        destination.as_mut(),
-        &mut actual_left,
-        &mut actual_right,
-        first_sample,
-        &[],
-    );
-    assert_eq!(bits(&actual_left), bits(&expected_left));
-    assert_eq!(bits(&actual_right), bits(&expected_right));
+    for block in 0..blocks {
+        let start = frames + block * 128;
+        let mut expected_left: Vec<f32> = (0..128).map(|index| signal(index + start, 0)).collect();
+        let mut expected_right: Vec<f32> = (0..128).map(|index| signal(index + start, 1)).collect();
+        let mut actual_left = expected_left.clone();
+        let mut actual_right = expected_right.clone();
+        let first_sample = start as u64;
+        let expected_report = process(
+            source.as_mut(),
+            &mut expected_left,
+            &mut expected_right,
+            first_sample,
+            &[],
+        );
+        let actual_report = process(
+            destination.as_mut(),
+            &mut actual_left,
+            &mut actual_right,
+            first_sample,
+            &[],
+        );
+        assert_eq!(bits(&actual_left), bits(&expected_left), "block {block}");
+        assert_eq!(bits(&actual_right), bits(&expected_right), "block {block}");
+        assert_eq!(actual_report, expected_report, "block {block}");
+    }
     assert_eq!(
         support::snapshot(source.as_ref()),
         support::snapshot(destination.as_ref())
@@ -335,33 +341,121 @@ fn a_drive_overshoot_retargeted_inward_restores_and_continues() {
         current > top,
         "the current is still past the top: {current:e} against {top:e}"
     );
-    restores_and_continues(source, &payload, 64);
+    restores_and_continues(source, &payload, 64, 1);
 }
 
-/// A finite input of `1e37` at `+36 dB` overflows `2 * drive * x` to an infinity in the `X`
-/// history, the cubic clamps it, and the output stays finite, so D7 never clears it: the effect
-/// holds that infinity for 31 samples, and its own snapshot must restore (#1278; #1071 attempt 1
-/// MINOR-2).
+/// One planted history state of [`a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit`].
+struct NonFiniteRow {
+    name: &'static str,
+    output_db: (f32, f32),
+    mix: (f32, f32),
+    left: &'static [(usize, f32)],
+    right: &'static [(usize, f32)],
+    expect: fn(&str, &[u8]),
+}
+
+/// The classes of the 31 `X`, 30 `e` and 31 dry words of one payload section.
+fn history_words(section: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let range = |words: std::ops::Range<usize>| -> Vec<f32> {
+        words
+            .map(|index| support::word_f32(section, index))
+            .collect()
+    };
+    (range(12..43), range(43..73), range(73..104))
+}
+
+/// Soft-clip has no recursive state, so every non-finite word it holds at a block boundary either
+/// reaches the output (D7 resets the lane) or ages out unread within 31 samples. Its own snapshot
+/// of such a state must restore and continue bit for bit, D7 reports included (#1300, option C):
+///
+/// * R1, a finite `1e37` overflows `2 * drive * x` to an infinity in `X`, which the cubic clamps
+///   (#1278; #1071 attempt 1 MINOR-2);
+/// * R2, two opposite infinities in the `X` window make the interpolated `u` and so `e` NaN, while
+///   the identity path outputs the finite dry sample;
+/// * R3 and R4, a non-finite input in a block's last 31 samples sits in the dry and `X` histories
+///   (and `e` for a NaN) before the 31-sample dry delay brings it to the output.
 #[test]
-fn a_snapshot_holding_an_overflowed_x_word_restores_and_continues_bit_for_bit() {
-    let values = values_from([(36.0, 36.0), (-6.0, 3.0), (0.5, 1.0)]);
-    let mut source = prepare(&values);
-    let mut left: Vec<f32> = (0..128).map(|index| signal(index, 0)).collect();
-    let mut right: Vec<f32> = (0..128).map(|index| signal(index, 1)).collect();
-    left[120] = 1.0e37;
-    right[118] = -1.0e37;
-    let report = process(source.as_mut(), &mut left, &mut right, 0, &[]);
-    assert_eq!(report.nonfinite_left_blocks, 0, "D7 did not fire");
-    assert_eq!(report.nonfinite_right_blocks, 0, "D7 did not fire");
-    assert!(left.iter().chain(&right).all(|sample| sample.is_finite()));
-    let payload = support::snapshot(source.as_ref());
-    for (section, name) in [(&payload.1, "left"), (&payload.2, "right")] {
-        let infinite = (12..43)
-            .filter(|&index| support::word_f32(section, index).is_infinite())
-            .count();
-        assert_eq!(infinite, 1, "{name}: one infinity in the X history");
+fn a_snapshot_holding_non_finite_history_restores_and_continues_bit_for_bit() {
+    let rows = [
+        NonFiniteRow {
+            name: "R1",
+            output_db: (-6.0, 3.0),
+            mix: (0.5, 1.0),
+            left: &[(120, 1.0e37)],
+            right: &[(118, -1.0e37)],
+            expect: |name, section| {
+                let (x, _, _) = history_words(section);
+                let infinite = x.iter().filter(|word| word.is_infinite()).count();
+                assert_eq!(infinite, 1, "{name}: one infinity in the X history");
+            },
+        },
+        NonFiniteRow {
+            name: "R2",
+            output_db: (0.0, 0.0),
+            mix: (0.0, 0.0),
+            left: &[(118, 1.0e37), (120, -1.0e37)],
+            right: &[],
+            expect: |name, section| {
+                let (x, e, _) = history_words(section);
+                assert!(
+                    x.iter().any(|word| word.is_infinite()),
+                    "{name}: X infinity"
+                );
+                assert!(e.iter().any(|word| word.is_nan()), "{name}: e NaN");
+            },
+        },
+        NonFiniteRow {
+            name: "R3",
+            output_db: (0.0, 0.0),
+            mix: (1.0, 1.0),
+            left: &[(120, f32::INFINITY)],
+            right: &[],
+            expect: |name, section| {
+                let (x, _, dry) = history_words(section);
+                assert!(x.contains(&f32::INFINITY), "{name}: X +inf");
+                assert!(dry.contains(&f32::INFINITY), "{name}: dry +inf");
+            },
+        },
+        NonFiniteRow {
+            name: "R4",
+            output_db: (0.0, 0.0),
+            mix: (0.0, 0.0),
+            left: &[(120, f32::NAN)],
+            right: &[],
+            expect: |name, section| {
+                let (x, e, dry) = history_words(section);
+                assert!(x.iter().any(|word| word.is_nan()), "{name}: X NaN");
+                assert!(e.iter().any(|word| word.is_nan()), "{name}: e NaN");
+                assert!(dry.iter().any(|word| word.is_nan()), "{name}: dry NaN");
+            },
+        },
+    ];
+    for row in rows {
+        let values = values_from([(36.0, 36.0), row.output_db, row.mix]);
+        let mut source = prepare(&values);
+        let mut left: Vec<f32> = (0..128).map(|index| signal(index, 0)).collect();
+        let mut right: Vec<f32> = (0..128).map(|index| signal(index, 1)).collect();
+        for &(index, value) in row.left {
+            left[index] = value;
+        }
+        for &(index, value) in row.right {
+            right[index] = value;
+        }
+        let report = process(source.as_mut(), &mut left, &mut right, 0, &[]);
+        let name = row.name;
+        assert_eq!(report.nonfinite_left_blocks, 0, "{name}: D7 did not fire");
+        assert_eq!(report.nonfinite_right_blocks, 0, "{name}: D7 did not fire");
+        assert!(
+            left.iter().chain(&right).all(|sample| sample.is_finite()),
+            "{name}: the snapshot block's output is finite"
+        );
+        let payload = support::snapshot(source.as_ref());
+        (row.expect)(name, &payload.1);
+        if !row.right.is_empty() {
+            (row.expect)(name, &payload.2);
+        }
+        restores_and_continues(source, &payload, 128, 3);
     }
-    restores_and_continues(source, &payload, 128);
 }
 
 /// The same payload restored into a bank at a *different* cursor position renders the same block.
@@ -517,8 +611,7 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     bad(6, 1, "effect.state.parameter");
     // `remaining` beyond the smoothing window.
     bad(3, 65, "effect.state.parameter");
-    // A NaN history word, and a subnormal one.
-    bad(12, f32::NAN.to_bits(), "effect.state.history");
+    // A subnormal history word: the kernel flushes `e` before it enters the history.
     bad(43, 1, "effect.state.history");
     // #1071 accepts only the subnormals the effect can hold: never in the flushed `X` history,
     // never as a gain (the gains' converted range starts at -24 dB). Word 0 is the in-flight drive
@@ -526,11 +619,10 @@ fn a_restore_rejects_a_stale_version_a_wrong_length_and_every_invalid_word() {
     // the overshoot allowance (#1071 attempt 2) does not admit it.
     bad(12, 1, "effect.state.history");
     bad(0, 1, "effect.state.parameter");
-    bad(73, f32::NAN.to_bits(), "effect.state.history");
-    bad(103, f32::INFINITY.to_bits(), "effect.state.history");
-    // `X` may hold an infinity (an overflowed `2 * drive * x`), but the shaped `e` never does:
-    // the cubic is bounded.
+    // `X` may hold an infinity (an overflowed `2 * drive * x`), and `X`, `e` and dry may hold a
+    // NaN (#1300), but the shaped `e` is never infinite, of either sign: the cubic is bounded.
     bad(43, f32::INFINITY.to_bits(), "effect.state.history");
+    bad(43, f32::NEG_INFINITY.to_bits(), "effect.state.history");
 
     // The overshoot allowance is for in-flight ramps only (#1071 attempt 2 review, MINOR-2). An
     // output at rest at its +24 dB top with its current one ulp above the top: a ramp at rest
