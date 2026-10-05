@@ -435,15 +435,16 @@ create_fixture() {
         '// REALTIME_POLICY_END' \
         >"$root/crates/builtins-compiler/src/lib.rs"
     # The floors rose with #1269 phase 1 (the swap carry and effect-restore regions) and #1053
-    # (#1253's drains) to the merged tree's 25 files and 89 regions. The thirteen files and
-    # forty-three regions above keep the shapes the mutations below exercise; these twelve files
-    # hold the other forty-six regions (one file of thirteen, eleven of three), so the fixture
-    # again sits exactly on both floors.
+    # (#1253's drains) to the merged tree's 25 files and 89 regions, and with decision-15 stream B
+    # batch 1 (#1314 Amendment 1) to 26 files and 93 regions. The thirteen files and forty-three
+    # regions above keep the shapes the mutations below exercise; these thirteen files hold the
+    # other fifty regions (one file of fourteen, twelve of three), so the fixture again sits
+    # exactly on both floors.
     mkdir -p "$root/crates/floor/src"
     local pad region regions
-    for pad in $(seq 1 12); do
+    for pad in $(seq 1 13); do
         regions=3
-        [[ "$pad" -eq 1 ]] && regions=13
+        [[ "$pad" -eq 1 ]] && regions=14
         for region in $(seq 1 "$regions"); do
             printf '%s\n' \
                 '// REALTIME_POLICY_BEGIN' \
@@ -1404,13 +1405,13 @@ for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_
 done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
 # trips the file floor instead of passing with less coverage.
-expect_failure marked-file-count-floor 'expected at least twenty-five marked realtime files' \
+expect_failure marked-file-count-floor 'expected at least twenty-six marked realtime files' \
     'sed -i "/REALTIME_POLICY/d" "$root/crates/builtins/src/lib.rs"'
-expect_failure no-marked-files-uses-floor 'expected at least twenty-five marked realtime files' \
+expect_failure no-marked-files-uses-floor 'expected at least twenty-six marked realtime files' \
     'find "$root/crates" "$root/hosts" "$root/tools" -name "*.rs" -type f -exec sed -i "/REALTIME_POLICY/d" {} +'
 # Deleting one marked region of a multi-region file leaves every marker matched and trips the
 # region floor.
-expect_failure marked-region-count-floor 'expected at least eighty-nine marked realtime regions' \
+expect_failure marked-region-count-floor 'expected at least ninety-three marked realtime regions' \
     'drop_first_marked_region "$root/crates/rack/src/lib.rs"'
 # The unmatched-marker check reaches files outside the old root too: the region keeps its
 # BEGIN and loses its END, so the per-file count check, not the floors, must red.
