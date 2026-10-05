@@ -284,16 +284,19 @@ pub(crate) fn sidechain_matches(
 /// a one-time semantic-hash change: its `route-transform` canonical line now carries the
 /// deterministic coefficient instead of the host's.
 ///
-/// `matrix` is `[ll, lr, rl, rr]`, the session's `channel_matrix` in that order.
+/// `matrix` is `[ll, lr, rl, rr]`, the session's `channel_matrix` in that order. A subnormal
+/// coefficient is in the route domain (issue #1237 D1/D2) and is kept: the fold
+/// ([`graph::gated_route_coefficients`]) flushes any subnormal product to `+0.0` (D3), and at a
+/// gain above 1 such a coefficient can fold to a normal product. Inside [`route_values`]' domain
+/// the gain checks below cannot fail (every gain in `[-144, 24]` dB converts to a normal finite
+/// `f32`); they stay as defence for this function's own contract.
 pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTransform> {
     let gain = math::db_to_gain_f32(gain_db);
     let [ll, lr, rl, rr] = matrix;
     (gain_db.is_finite()
         && gain.is_finite()
         && !gain.is_subnormal()
-        && matrix
-            .into_iter()
-            .all(|v| v.is_finite() && !v.is_subnormal()))
+        && matrix.into_iter().all(f32::is_finite))
     .then_some(RouteTransform {
         gain,
         ll,
@@ -339,7 +342,7 @@ pub(crate) fn route_values(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteValueError {
     /// The gain is outside `[-144, 24]` dB or a matrix coefficient outside `[-1, 1]` (issue
-    /// #1237), a value is non-finite, or a coefficient is subnormal.
+    /// #1237), or a value is non-finite. A subnormal coefficient is in domain (its fold flushes).
     Domain,
 }
 

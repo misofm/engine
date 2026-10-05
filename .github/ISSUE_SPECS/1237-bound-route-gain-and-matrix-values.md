@@ -232,3 +232,62 @@ plus #1302 attempt 2's policy scripts), with `<A>`/`<B>` rebuilt from that head 
 Hazard (D3 moves no checked-in bits): proven by gate 6 -- graph fixtures, console fixtures,
 builtins fixtures and the browser expected-resources digests and rows all pass unchanged.
 
+
+### Attempt 2 (implementer, 2026-10-05) -- J1-1 fixed, J1-4 folded
+
+Attempt 1's verdict was FAIL on MAJOR J1-1: the session (D1) and the SDK builder (D4) accept a
+subnormal `channel_matrix` coefficient, but `route_transform` refused it, so the lowering refused
+the route at boot as `graph.gain.non_finite` at `$.routes[id=<r>].gain_db` (wrong code, wrong
+field) and a live send of the same value was `domain`.
+
+- **Decision followed.** The spec does not decide subnormal inputs separately: D1 bounds a
+  coefficient to `[-1, 1]` and D3 flushes every subnormal *product* to `+0.0`. So a subnormal
+  coefficient is in the domain on every path. `route_transform`
+  (`crates/graph-compiler/src/ids.rs`) now checks coefficients with `is_finite` only; its doc and
+  `RouteValueError::Domain`'s doc say so. The gain's finite/subnormal checks stay as defence
+  (unreachable in `[-144, 24]` dB, per the verdict's exhaustive sweep). D2's one domain now holds:
+  `[-144, 24] x [-1, 1]^4` on the session, the lowering, the live path and the SDK builder.
+- **SDK builder.** No change needed: `routeNumber` already accepts a subnormal (`Math.fround`,
+  finite, in bounds). The eval now proves the builder and the engine agree on it end to end.
+- **J1-4 (NIT).** `route_coefficients.rs`'s module doc no longer says the file "refuses a fold
+  that overflows".
+- **J1-5 (NIT), recorded.** The lowering's refusal arm (`crates/graph-compiler/src/compile.rs`,
+  `let Ok(transform) = route_values(..) else { .. "graph.gain.non_finite" .. }`) is now
+  unreachable from a validated session: every value the session accepts is in `route_values`'
+  domain. It is kept as defence (a lowering must not panic on an unchecked model) and is untested
+  by construction. Its gate independence (#1216 D2) still holds structurally: `route_values` takes
+  no gate, and gate 2's 8-gate loop holds it on the live path.
+- **Open for the S0/root coordinator, not implemented here (outside the authorized paths):**
+  - **J1-2 (MINOR).** The route domain is still two literal copies (`session/src/validate.rs`,
+    `graph-compiler/src/ids.rs`); one exported constant would live in `crates/session/src/model.rs`
+    (exported by `pub use model::*`), which this spec does not authorize. Gate 2 remains the drift
+    guard.
+  - **J1-3 (MINOR).** `host_core::RouteControlRecord` (re-export of
+    `graph::RouteControlRecord::new`, public) lets an embedder push coefficients that never went
+    through `route_values` or D3. No shipped host does; needs a follow-up or folding into #1225.
+
+Tests extended (no new test functions):
+
+| Test | Change | Defect it now also catches | Mutation | Result |
+| --- | --- | --- | --- | --- |
+| `route_coefficients.rs::a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it` (gate 2) | adds `±1e-45`, `±f32::MIN_POSITIVE / 2`, `±f32::MIN_POSITIVE` to the gain and to every coefficient | the live path or the lowering refuses a subnormal value the session accepts | M6: restore `route_transform`'s `!v.is_subnormal()` coefficient check | red (`:396`, `channel_matrix.ll = 1e-45`: live `Err(Domain)`, session `None`); green on revert |
+| `route_coefficients.rs::a_subnormal_folded_coefficient_is_positive_zero` (gate 4) | adds a 0 dB case with coefficients `1e-45`, `-1e-45`, `-f32::MIN_POSITIVE / 2` | a subnormal coefficient is refused at boot instead of compiling and binding `+0.0` | M6 | red (`:449`, the compile panic); green on revert |
+| `sdk/test/builder-evals.mjs` "a route's gain and matrix are bounded ..." (gate 5) | accepted set adds `gainDb ±1e-45` and each coefficient `±1e-45`, `±2^-127`; with the asset, each must also `validate()` ok | the builder accepts a subnormal value the engine then refuses at boot (the J1-1 symptom), or the builder refuses it | the eval run against the attempt-1 module (`/tmp/claude-1002/v1237/A`, built from `e9dc1a4b2` by the verifier) | red (`validate` ok `false`); green against this attempt's module; builder-only (`MISO_ENGINE_SDK_SKIP_ASSET=1`) green |
+
+Gates run at the attempt-2 tree (`<A>`/`<B>` rebuilt by `build-web-audioworklet.sh --named-twin`,
+exit 0, shipped module `d6b7b8df...51d4b0`, 2894073 B):
+
+| Gate | Command | Exit |
+| --- | --- | --- |
+| focused | `cargo test -p session -p graph-compiler -p graph -p host-web -p host-core` (744 passed) | 0 |
+| 5 | `check-sdk-headless.sh <A>` (361/361), `sdk-package.sh check <A>`, `check-sdk-types.sh` | 0, 0, 0 |
+| 6 | `graph_fixture -- --check`; `check-graph-determinism.sh` (100/100); `check-browser-expected-resources.py --artifacts <A>` | 0, 0, 0 |
+| 7 | `cargo fmt --all -- --check`; clippy `-D warnings` (workspace, all targets/features); `RUSTDOCFLAGS='-D warnings' cargo doc` | 0, 0, 0 |
+| 7 | test-debug-a (exact command, plus `builtins-compiler --no-run`): 1432 passed, 0 failed | 0 |
+| 7 | policy check/test pairs: bench, builtins, effect-runtime, graph, host-core, lane, protocol-control, rack, realtime, session, workspace (22/22) | all 0 |
+| 7a | `check-web-audioworklet.sh <A> <B>/...named.wasm` | 0 |
+
+Not rerun in attempt 2 (attempt-1 results stand; this attempt changes only `route_transform`'s
+coefficient check, which no checked-in route reaches with a subnormal value, and test files):
+test-debug-b, `check-builtins-fixtures.sh`, `check-console-fixtures.sh`, `test-web-audioworklet.sh`,
+`check-cross-targets.sh`.

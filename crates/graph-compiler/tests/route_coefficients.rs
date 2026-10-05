@@ -3,7 +3,8 @@
 //! A plan binds `graph::gated_route_coefficients(&route.transform, route.gate)` for each prepared
 //! route, and a live producer will push `graph_compiler::route_coefficients` of the values it is
 //! handed. The two layers agree only because the second calls the first; this file holds them to
-//! it, pins which column each source lane's gate zeroes, and refuses a fold that overflows.
+//! it and pins which column each source lane's gate zeroes. Issue #1237 bounds the values the
+//! live path accepts to the session's route domain.
 //! *Mute a route in the session* (#1216) and *Let a route into a submix follow its source strip's
 //! mute in the session* (#1218) extend it with the gates a session can set; #1216 also holds the
 //! session's mute to the sealed graph text.
@@ -331,14 +332,15 @@ fn session_refusal(model: &SessionModel, path: &str) -> Option<String> {
 /// Issue #1237 gate 2: a route value is in domain on the live path (`route_coefficients`, which
 /// host-core's send producer and host-web's admission call) exactly when the session accepts it.
 /// The values are gate 1's boundaries, each one `f32` step either side of them, and the
-/// non-finite values; each is set on the gain or on one coefficient of an otherwise unity route,
-/// under every gate. This replaces #1215's +700 dB overflow case: inside the domain no fold can
+/// non-finite values, and subnormal values of both signs with the smallest normal; each is set on
+/// the gain or on one coefficient of an otherwise unity route, under every gate. An accepted value
+/// must also compile, so the lowering (`route_values` too) cannot refuse what the session accepts. This replaces #1215's +700 dB overflow case: inside the domain no fold can
 /// overflow (the largest product is about `15.85`).
 ///
 /// Test value: red if the two paths' domains differ -- `route_values` left unbounded, bounded by
-/// other limits than `validate_routes`, exclusive where the session is inclusive, or checking
-/// only the open gate -- so a value the session refuses could still be pushed live, or one it
-/// accepts refused.
+/// other limits than `validate_routes`, exclusive where the session is inclusive, refusing a
+/// subnormal coefficient the session accepts, or checking only the open gate -- so a value the
+/// session refuses could still be pushed live, or one it accepts refused live or at boot.
 #[test]
 fn a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it() {
     let base = parse_session_json(SESSION).expect("fixture parses");
@@ -348,6 +350,11 @@ fn a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it() {
         let mut values: Vec<f32> = bounds.into_iter().flat_map(steps).collect();
         values.extend([bounds[0] - 0.5, bounds[1] + 0.5, 0.0, -0.0]);
         values.extend([f32::NAN, f32::INFINITY, f32::NEG_INFINITY]);
+        // Subnormal values of both signs, and the smallest normal (#1237 attempt 1 verdict J1-1):
+        // in the session's domain, so the live path and the lowering must accept them too.
+        let half_normal = f32::MIN_POSITIVE / 2.0;
+        values.extend([1.0e-45, -1.0e-45, half_normal, -half_normal]);
+        values.extend([f32::MIN_POSITIVE, -f32::MIN_POSITIVE]);
         values
     };
     let gates: Vec<(bool, [bool; 2])> = (0..8_u8)
@@ -408,47 +415,59 @@ fn a_route_value_is_in_domain_live_exactly_when_the_session_accepts_it() {
 
 /// Issue #1237 gate 4 (the coefficients): a folded product that is subnormal, of either sign, is
 /// `+0.0` in that position, from the plan's bound constants and from the live path alike. At
-/// -144 dB (`6.31e-8`) a coefficient of `±1.0e-35` folds to about `±6.3e-43`.
+/// -144 dB (`6.31e-8`) a coefficient of `±1.0e-35` folds to about `±6.3e-43`; at 0 dB a subnormal
+/// coefficient (`±1.0e-45`, `±f32::MIN_POSITIVE / 2`) is itself the product.
 ///
 /// Test value: red if `gated_route_coefficients` returns the subnormal product, or flushes a
-/// negative one to `-0.0`, or flushes the wrong position, or a normal product with it.
+/// negative one to `-0.0`, or flushes the wrong position, or a normal product with it; and red if
+/// a subnormal coefficient is refused at boot instead of compiling and binding `+0.0` (#1237
+/// attempt 1 verdict J1-1).
 #[test]
 fn a_subnormal_folded_coefficient_is_positive_zero() {
     let base = parse_session_json(SESSION).expect("fixture parses");
     let tiny = 1.0e-35_f32;
-    let matrix = [tiny, -tiny, 0.5, -tiny];
-    let gain = math::db_to_gain_f32(-144.0);
-    assert!(
-        (gain * tiny).is_subnormal() && (gain * -tiny).is_subnormal(),
-        "the draw folds to a subnormal of each sign"
-    );
-    let expected = [0.0_f32, 0.0, gain * 0.5, 0.0];
-    assert!(expected[2].is_normal());
-    let mut model = base.clone();
-    model.routes[0].gain_db = -144.0;
-    let channel = &mut model.routes[0].channel_matrix;
-    [channel.ll, channel.lr, channel.rl, channel.rr] = matrix;
-    let artifact = compile(&model).expect("an in-domain route compiles");
-    let id = model.routes[0].id.as_str().to_owned();
-    let prepared = artifact
-        .graph()
-        .routes()
-        .iter()
-        .find(|route| {
-            matches!(&route.node, graph::GraphNodeId::Route { route_id }
-                if route_id.as_str() == id)
-        })
-        .expect("the route is prepared");
-    assert_eq!(
-        bits(gated_route_coefficients(&prepared.transform, prepared.gate)),
-        bits(expected),
-        "the plan's bound constants"
-    );
-    assert_eq!(
-        bits(route_coefficients(-144.0, matrix, false, [false; 2]).expect("in domain")),
-        bits(expected),
-        "the live path"
-    );
+    let half_normal = f32::MIN_POSITIVE / 2.0;
+    let cases = [
+        (-144.0_f32, [tiny, -tiny, 0.5, -tiny]),
+        (0.0, [1.0e-45, -1.0e-45, 0.5, -half_normal]),
+    ];
+    for (gain_db, matrix) in cases {
+        let gain = math::db_to_gain_f32(gain_db);
+        assert!(
+            [0, 1, 3]
+                .into_iter()
+                .all(|index| (gain * matrix[index]).is_subnormal()),
+            "{gain_db} dB: the draw folds to a subnormal of each sign"
+        );
+        let expected = [0.0_f32, 0.0, gain * 0.5, 0.0];
+        assert!(expected[2].is_normal());
+        let mut model = base.clone();
+        model.routes[0].gain_db = gain_db;
+        let channel = &mut model.routes[0].channel_matrix;
+        [channel.ll, channel.lr, channel.rl, channel.rr] = matrix;
+        let artifact = compile(&model)
+            .unwrap_or_else(|codes| panic!("{gain_db} dB: an in-domain route compiles: {codes:?}"));
+        let id = model.routes[0].id.as_str().to_owned();
+        let prepared = artifact
+            .graph()
+            .routes()
+            .iter()
+            .find(|route| {
+                matches!(&route.node, graph::GraphNodeId::Route { route_id }
+                    if route_id.as_str() == id)
+            })
+            .expect("the route is prepared");
+        assert_eq!(
+            bits(gated_route_coefficients(&prepared.transform, prepared.gate)),
+            bits(expected),
+            "{gain_db} dB: the plan's bound constants"
+        );
+        assert_eq!(
+            bits(route_coefficients(gain_db, matrix, false, [false; 2]).expect("in domain")),
+            bits(expected),
+            "{gain_db} dB: the live path"
+        );
+    }
 }
 
 /// #1216 gate 5: a route's mute is in the sealed graph text. The same session compiles twice, one

@@ -478,10 +478,14 @@ describe("validation refusals name the offending path", () => {
       [{ gainDb: 24.5 }, "gainDb"],
       [{ gainDb: -144.5 }, "gainDb"],
     ];
-    const accepted = [{ gainDb: 24 }, { gainDb: -144 }];
+    const accepted = [{ gainDb: 24 }, { gainDb: -144 }, { gainDb: 1e-45 }, { gainDb: -1e-45 }];
     for (const key of ["ll", "lr", "rl", "rr"]) {
       for (const value of [1.5, -1.5]) refusals.push([{ matrix: { ...unity, [key]: value } }, `matrix.${key}`]);
-      for (const value of [1, -1]) accepted.push({ matrix: { ...unity, [key]: value } });
+      // Subnormal coefficients of both signs are in the domain on every path (#1237 attempt 1
+      // verdict J1-1): the builder accepts them and the engine boots them (its fold flushes).
+      for (const value of [1, -1, 1e-45, -1e-45, 2 ** -127, -(2 ** -127)]) {
+        accepted.push({ matrix: { ...unity, [key]: value } });
+      }
     }
     for (const [values, field] of refusals) {
       assert.throws(
