@@ -281,3 +281,12 @@ randomized`: exit 0, six binaries ok. The delay's probe alone in that shape `fin
 **Gate 4.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
 --all-features -- -D warnings`, `scripts/check-workspace-policy.sh`,
 `scripts/test-workspace-policy.sh`, `scripts/check-conformance-boundaries.sh`: all pass.
+
+**Attempt 1 verdict follow-up (batch follow-ups, 2026-10-05): gate 2's margin is host load, not
+implementation cost.** The verifier passed attempt 1 and instrumented an export (then reverted
+it). The green per-PR delay probe makes 412 snapshot/restore pairs, 13.4 % of the full walk's
+3,072: 88 at 44.1 kHz, 108 each at 48, 88.2 and 96 kHz (row 0 has fewer because its stride offset 0
+overlaps samples 0, 32 and 48). From the spec's per-pair costs, 412 pairs predict about 9.5 s
+including twin preparation; the prototype measured 9.65 s. The verifier's one re-measurement,
+after a `--no-run` build at load average about 25 on 32 cores (25.72 before, 24.69 after), gave
+`finished in` 10.91 s. The 14.95 s above was load variance on a busy host.
