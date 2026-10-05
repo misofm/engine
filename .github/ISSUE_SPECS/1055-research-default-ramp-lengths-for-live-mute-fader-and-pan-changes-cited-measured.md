@@ -305,3 +305,20 @@ pass. Restored with `cp` and checked identical with `cmp`: 17 passed.
   flip's dip through zero is heard as a dip (a kernel question for a successor root may open; #1388
   cannot act on it); settings beyond the representative ones; banked, AArch64 and wasm renders.
 - #1388 remains owner-pending: no listening response or result exists or was simulated.
+
+### Follow-ups (2026-10-05)
+
+Attempt 2 received PASS (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e/1055-attempt2.md`;
+attempt 1's verdict is beside it). Its four findings are folded into `FINDINGS.md`, text only, in
+the commit that adds this entry; no CSV, harness or `listening/` file changed.
+
+- MINOR-1: 9.8 adds the three missed places that pin polarity to the plain mute length: #1261 gate 1
+  (`1261-*.md:146-147`), #1364 gate 1 (`1364-*.md:131-132`, polarity resolves to 960 at 48 kHz)
+  and D2 (`:62`), and #1394's background sentence (`1394-*.md:26-27`), its only change. The specs
+  themselves are not edited; root carries the list.
+- NIT-1: 9.2 fact 1 gives HF splatter as +6.00 to +6.03 dB, apart from total splatter (+6.02 to
+  +6.03 dB), checked against `polarity_click.csv` and `mute_click.csv`.
+- NIT-2: total splatter "is not a measure section 1 decides by".
+- NIT-3: the matrix-through-zero paragraph notes that the #1388 outcome `muteMs` 20 ms with
+  `panMs` 20 or 35 ms puts `panMs` below twice `muteMs` at the defaults, with a pointer to 9.2 and
+  9.8 and no new rule.

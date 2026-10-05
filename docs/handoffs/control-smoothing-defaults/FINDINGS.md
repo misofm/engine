@@ -363,8 +363,12 @@ non-subnormal value (`route_transform`, `crates/graph-compiler/src/ids.rs:288-30
 therefore a polarity flip of that path, 9.2's case, on the `panMs` ramp: at the defaults `panMs`
 (20 ms) is twice `muteMs` (10 ms), so the flip clicks like the 10 ms mute (9.2); a session that
 sets `panMs` below twice `muteMs` gets a louder one (at `panMs` equal to `muteMs`, 6 dB more: the
-click of a mute half as long). The two rows keep `panMs`, because a row's length is per row, not
-per value (#1054 D4).
+click of a mute half as long). That case can also be the defaults themselves: one preregistered
+#1388 outcome (`muteMs` 20 ms with `panMs` 20 or 35 ms) puts `panMs` below twice `muteMs`, so a
+matrix coefficient flip at those defaults clicks louder than the mute. This is the same argument
+9.2 makes against `faderMs` as the polarity key; this record does not add a rule for it, and root
+weighs it with the #1388 result (9.2, 9.8). The two rows keep `panMs`, because a row's length is
+per row, not per value (#1054 D4).
 
 ### 9.2 Polarity invert (question 4): `muteMs` is the key, but twice its length
 
@@ -374,8 +378,8 @@ both exact for the linear law (`T = N / fs`):
 
 1. *At the same length the flip is the mute plus 6.02 dB.* A constant gain moves nothing, so the
    flip spreads twice the mute's amplitude. Measured over every length, rate, material and
-   transition: +6.02 to +6.03 dB on total and HF splatter, +5.45 to +6.17 dB on OOB, worst OOB and
-   CTR (these read the output, which also holds the source's own floor and frame leakage).
+   transition: +6.02 to +6.03 dB on total splatter, +6.00 to +6.03 dB on HF splatter, +5.45 to
+   +6.17 dB on OOB, worst OOB and CTR (these read the output, which also holds the source's own floor and frame leakage).
 2. *A flip over `2N` is two mutes over `N` back to back.* Its slope, `2 / (2N)`, is the mute's
    `1 / N`, held twice as long: `+1` to `0`, then at once `0` to `-1`. So its gain spectrum is the
    `N`-mute's times `1 + e^(-j 2 pi f T)`, of magnitude `|2 cos(pi f T)|`: the flip's
@@ -443,7 +447,7 @@ transitions (invert against mute, restore against unmute; `summarise.py`), in dB
 - **What the difference is.** Near the source the flip is what it is meant to be: a reversal of
   every partial's phase, a change of 2 where the mute's is 1. A real gain carries the reversal out
   by passing through silence, which is the dip below. Total splatter weighs that region against the
-  region around the null, so it is not a measure of the click.
+  region around the null, so it is not a measure section 1 decides by.
 
 **Answer.** `muteMs` is the right key and not enough length. At 10 ms the flip clicks like a 5 ms
 mute (bass CTR +24.3 dB; about +4 dB over the threshold in quiet at 20 dB quieter playback), which is
@@ -731,12 +735,20 @@ Not verified:
     exception; gate 3: "`for_row` returns the D3 key's field for every `LiveRampRow`" becomes "...,
     and twice `mute_samples` for `PolarityInvert`"; the schema document's table says so.
   - #1261 D2, the Ramps bullet: a `PolarityInvert` record carries `for_row(PolarityInvert)`, not
-    `LiveRamps::mute_samples`.
+    `LiveRamps::mute_samples`. #1261 gate 1 (`1261-*.md:146-147`): "a PolarityInvert record its
+    `mute_samples`" becomes twice `mute_samples` (`for_row(PolarityInvert)`); left as it is, the
+    gate tests the rule this record removes.
   - #1364: its row map ("mute, solo, polarity ... use `mute`") and its gate-1 example of a wrong row
     map ("polarity on the fader key"). At the defaults `2 * mute == fader` (960 samples at 48 kHz
-    either way), so that test needs non-default keys to tell the two apart.
+    either way), so that test needs non-default keys to tell the two apart. #1364 gate 1
+    (`1364-*.md:131-132`): "480 for the mute rows" at 48 kHz holds for mute, solo, send mute,
+    `follows_mute` and VCA mute, but polarity resolves to 960. #1364 D2 (`:62`): admission replaces
+    the sentinel with "the field that #1054 D3 names", which becomes `for_row(row)` (twice
+    `mute_samples` for polarity).
   - #1394 D5: `resolve` falls back to `for_row`, so an absent polarity length resolves to twice
-    `mute_samples` with no change of its own; its gates test no polarity row.
+    `mute_samples` with no change of its own; its gates test no polarity row. Only its background
+    sentence changes (`1394-*.md:26-27`): "`for_row(row)` returns the D3 key field for a row"
+    gains "(twice `mute_samples` for `PolarityInvert`)".
 - **Root confirms one choice (9.2):** the derived rule `2 * mute_samples` inside the three-key
   schema, over #1054's present text (polarity at `mute_samples`) and over a fourth key
   (`polarityMs`).
