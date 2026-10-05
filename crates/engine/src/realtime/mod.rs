@@ -761,6 +761,59 @@ mod tests {
             assert_eq!(level(&publisher), (10, 4 * QUANTUM, OUTCOME_EXACT));
             assert_eq!(read(&publisher).exact, 9);
         }
+
+        /// One block whose output has two channels where the plan has one, so `render_inner`
+        /// refuses it with `OutputShape`; `contiguous` picks the render path.
+        fn refused_block(owner: &mut RealtimePlanOwner, sample: u64, contiguous: bool) {
+            let mut output = [1.0_f32; 4];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 2, 2, 2).expect("output"),
+            };
+            let result = if contiguous {
+                owner.render_contiguous(io, sample)
+            } else {
+                owner.render(
+                    io,
+                    RenderTime {
+                        absolute_sample: sample,
+                    },
+                )
+            };
+            assert!(
+                matches!(result, Err(RenderError::OutputShape)),
+                "{result:?}"
+            );
+        }
+
+        /// #1314 D3: a block that errors publishes nothing, on either render path, even when the
+        /// block adopted a candidate or a live edit is pending; the next block that renders
+        /// publishes the revision with its own first sample.
+        #[test]
+        fn a_block_that_errors_publishes_nothing() {
+            let (mut publisher, mut realtime, _retirer) =
+                plan_exchange_at_revision(prepared(1), 1, one_retirement()).expect("exchange");
+            publish_at(&mut publisher, 2, 7);
+
+            // `render`: the refused block claims B but renders nothing.
+            refused_block(&mut realtime, QUANTUM, false);
+            assert_eq!(realtime.active_plan_id(), 2);
+            assert_eq!(level(&publisher), (1, 0, OUTCOME_EXACT));
+            assert_eq!(read(&publisher).exact, 0);
+            let _ = block(&mut realtime, 2);
+            assert_eq!(level(&publisher), (7, 2 * QUANTUM, OUTCOME_EXACT));
+
+            // `render_contiguous`: a live edit on the running plan.
+            assert_eq!(publisher.set_revision(8), RevisionTarget::Active);
+            let next = realtime.next_absolute_sample();
+            refused_block(&mut realtime, next, true);
+            assert_eq!(level(&publisher), (7, 2 * QUANTUM, OUTCOME_EXACT));
+            let mut output = [1.0_f32; 2];
+            let io = RenderIo {
+                output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+            };
+            let _ = realtime.render_contiguous(io, next).expect("render");
+            assert_eq!(level(&publisher), (8, next, OUTCOME_EXACT));
+        }
     }
 
     /// #1311: a candidate adopted no earlier than a scheduled sample, or primed once the running

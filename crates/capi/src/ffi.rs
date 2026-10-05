@@ -2664,15 +2664,15 @@ mod tests {
             plan_error::text(plan_error::OUTPUT_LAYOUT),
             "a const-plan query must not clear the render diagnostic"
         );
-        for poison in [0, 1] {
+        // `reserved0`, then each of the five `reserved` words alone.
+        for poison in 0..=5 {
             let mut out = Watermark {
                 revision: u64::MAX,
                 ..valid
             };
-            if poison == 0 {
-                out.reserved0 = 1;
-            } else {
-                out.reserved[4] = 1;
+            match poison {
+                0 => out.reserved0 = 1,
+                word => out.reserved[word - 1] = 1,
             }
             let before = out;
             assert_eq!(

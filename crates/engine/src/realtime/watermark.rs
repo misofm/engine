@@ -82,7 +82,7 @@ pub struct PlanWatermark {
     pub superseded: u64,
 }
 
-/// A read gave up after [`MAXIMUM_READ_ATTEMPTS`] torn attempts; the caller retries.
+/// A read gave up after `MAXIMUM_READ_ATTEMPTS` torn attempts; the caller retries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WatermarkBusy;
 

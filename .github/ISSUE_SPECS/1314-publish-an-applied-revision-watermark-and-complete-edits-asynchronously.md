@@ -380,3 +380,62 @@ fallible step and every push; a withdrawn candidate takes its revision word with
 revision committed while a candidate is pending goes to that candidate. So no ack precedes a drop,
 and the running plan never reports a revision before the plan that carries it renders (gates 1,
 2 and 8, and the loom model).
+
+### Batch follow-up (2026-10-05)
+
+Folds the attempt-1 verdict (`PASS`; MINOR F1-F4, NIT N3). F5 (realtime-policy floors), N1, N2
+and N4 are root's items and are not touched here.
+
+- **F1.** `cargo doc -D warnings` refused two links from public docs to private items. The public
+  `WatermarkBusy` doc (`watermark.rs`) now names `MAXIMUM_READ_ATTEMPTS` in plain backticks, and so
+  does the `From<CompileLimits> for ControlLimits` doc for the private `limits_are_valid`
+  (`crates/capi/src/runtime/mod.rs`, from #1309, a cross-slice fix the verdict asked for here).
+- **F2.** `crates/capi/tests/plan_swap_race.rs` gains
+  `a_watermark_advance_names_a_block_that_applied_the_edit`. A control thread under
+  `bench_support::producer::render_while_producing` commits 320 live fader edits on `eq0` of the
+  stateless fixture (1024-frame blocks), one at a time, alternating -6 dB and 0 dB. A `RenderGate`
+  handshake parks the render thread before a render call and starts it from the measured commit
+  and render durations, so the revision stores sweep from a quarter call before the render call
+  to its end, in either build profile (debug: render about 4.3 ms, commit about 1.1 ms; release:
+  about 18 us and 88 us). After each block the render thread reads the watermark; at an advance to
+  `r` it must name the block's first sample, and the block's last samples must be `r`'s steady
+  level, measured single-threaded beforehand (the fader ramp ends within one block, which the
+  measurement asserts). A guard requires more than a tenth of the stores inside a render call
+  (debug about 240, release about 200, of 320). The shared source-submit code became
+  `submit_dc_block`, which the existing `Control::feed` now calls.
+  - Mutation M14 (the revision loaded after `render_inner` in `render_contiguous`, the C ABI's
+    path; also with `render` moved): red in 10 of 10 debug runs and 10 of 10 release runs
+    ("block 8: the watermark advanced to edit 9 in a block that did not apply it"). Reverted: 20 of
+    20 debug runs and 5 of 5 release runs green.
+  - Finding for root (not a defect in this slice): the converse does not hold, and the test does
+    not assert it. A strip drains its live lane inside `render_inner`, at its node, so an edit
+    whose record is pushed after render's revision load but before that drain renders in this
+    block, while the watermark reports it at the next block's first sample, one block late. The
+    first draft of this test compared against a single-threaded replay at the reported blocks and
+    went red on unmodified code for exactly this reason. D3's "in effect" sentence reads as exact;
+    the watermark is conservative in this direction only (never early).
+- **F3.** `realtime::tests::watermark::a_block_that_errors_publishes_nothing` (engine): a block that
+  `render_inner` refuses with `OutputShape` publishes nothing on either render path, even after it
+  claimed a candidate (`render`) or with a live revision pending (`render_contiguous`), and the next
+  rendered block publishes the revision at its own first sample. Mutation M15 (`advance` before the
+  error propagates), applied to `render` alone and to `render_contiguous` alone: each red (engine
+  54 passed, 1 failed). Reverted: 55 + 4 + 1.
+- **F4.** The loom model `spsc_loom_plan_mailbox_claim_races_withdrawal` now stores revision 1 in the
+  initial cell and 7 in the candidate's, and render reads `active_revision()` after its block: 1 when
+  the withdrawal wins, 7 when the claim wins. Mutation L3 (`self.active = observed.full` above the
+  claim compare-and-swap): only this model red ("a lost claim moved the Active cell"), the other 7
+  loom models green. Reverted: 8 passed.
+- **N3.** `plan_watermark_refuses_reserved_words_and_is_pure` (`ffi.rs`) poisons `reserved0` and each
+  of the five `reserved` words alone. Mutation (the query checks only `reserved0` and
+  `reserved[4]`, the two words the old test poisoned): red. Reverted: green.
+
+Test value:
+- `a_watermark_advance_names_a_block_that_applied_the_edit`: render loading the revision word after
+  `render_inner` (M14), which reports a commit landing after the strip's drain at a block that did
+  not apply it; no single-threaded test can place a commit inside `render_inner`.
+- `a_block_that_errors_publishes_nothing`: render publishing before a refused block's error
+  propagates (M15), on either path; every suite was green under it.
+- the extended loom claim-race model: a lost claim that still moves render's cached `Active` index
+  (L3), so render would report a withdrawn candidate's revision; loom, engine and capi were green
+  under it.
+- the extended reserved-word test: a query that checks only some of the reserved words.

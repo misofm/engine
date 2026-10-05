@@ -1083,24 +1083,38 @@ mod loom_tests {
     /// #1343 gate 2: render claims while control withdraws the same candidate. Exactly one side
     /// wins: render adopts it and control reads `Taken`, or control holds it whole and render
     /// adopted nothing. Loom's cells fail the model if render reads the cell control writes.
+    /// #1314 D3 (verifier F4): after its block render reads the revision of the cell it now
+    /// renders from, the candidate's 7 if it won the claim and the initial 1 if it lost it.
     #[test]
     fn spsc_loom_plan_mailbox_claim_races_withdrawal() {
         loom::model(|| {
             let drops = Arc::new(AtomicUsize::new(0));
             let (mut writer, mut reader) = plan_mailbox::<Candidate>();
+            assert!(
+                !writer.store_revision(1),
+                "the initial plan's cell is Active"
+            );
             let render = loom::thread::spawn(move || {
                 let adopted = render_blocks(&mut reader, 1);
-                (adopted, reader)
+                let revision = reader.active_revision();
+                (adopted, revision, reader)
             });
-            publish(&mut writer, candidate(1, &drops));
+            let permit = writer.try_reserve().expect("an Empty cell");
+            permit.write_revision(7);
+            assert!(permit.commit(candidate(1, &drops)).is_ok());
             let outcome = writer.withdraw();
-            let (adopted, reader) = render.join().expect("render");
+            let (adopted, revision, reader) = render.join().expect("render");
             match outcome {
                 MailboxWithdrawal::Withdrawn(value, _, _) => {
                     assert_eq!(value.id, 1);
                     assert!(adopted.is_empty(), "adopted and withdrawn both");
+                    // #1314 D3: a lost claim leaves render on the initial plan's cell.
+                    assert_eq!(revision, 1, "a lost claim moved the Active cell");
                 }
-                MailboxWithdrawal::Taken => assert_eq!(adopted, [1]),
+                MailboxWithdrawal::Taken => {
+                    assert_eq!(adopted, [1]);
+                    assert_eq!(revision, 7);
+                }
                 MailboxWithdrawal::Nothing => panic!("a publication is never Nothing"),
             }
             drop((writer, reader));

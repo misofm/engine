@@ -145,7 +145,7 @@ pub(crate) fn limits_are_valid(limits: CompileLimits) -> bool {
 
 /// The frozen ABI limits as the control plane's plain limits (#1309 D3): every numeric field, same
 /// name and type, with `maximum_capi_retained_bytes` as `maximum_control_retained_bytes`. The
-/// header words (`struct_size`, `reserved0`, `reserved`) are [`limits_are_valid`]'s alone.
+/// header words (`struct_size`, `reserved0`, `reserved`) are `limits_are_valid`'s alone.
 impl From<CompileLimits> for ControlLimits {
     fn from(limits: CompileLimits) -> Self {
         Self {
