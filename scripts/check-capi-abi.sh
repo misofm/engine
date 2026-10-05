@@ -64,18 +64,43 @@ capi_abi_self_test() {
         printf '%s\n' "$scratch_root/$1/miso_engine_v1.h"
     }
     expect_header_failure() {
-        local name="$1" staged="$2" log="$scratch_root/$1.stderr"
-        if cmp -s "$original_header" "$staged"; then
-            printf 'C ABI mutation self-test FAILED: %s did not change the staged header\n' \
-                "$name" >&2
+        local name="$1" staged="$2" log="$scratch_root/$1.stderr" cmp_status=0
+        if [[ ! -f "$staged" ]]; then
+            printf 'C ABI mutation self-test FAILED: %s staged header is missing: %s\n' \
+                "$name" "$staged" >&2
             return 1
         fi
-        if "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$staged" bash "$0" "$workspace_root" \
-            >/dev/null 2>"$log"; then
+        cmp -s "$original_header" "$staged" || cmp_status=$?
+        case "$cmp_status" in
+            1) ;;
+            0)
+                printf 'C ABI mutation self-test FAILED: %s did not change the staged header\n' \
+                    "$name" >&2
+                return 1
+                ;;
+            *)
+                printf 'C ABI mutation self-test FAILED: %s could not compare the staged header (cmp status %s)\n' \
+                    "$name" "$cmp_status" >&2
+                return 1
+                ;;
+        esac
+        # The mutated header must still compile alone, so the leg's red has to come from the
+        # fixtures' pins, not from a mutation that broke the header's syntax.
+        if ! "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -fsyntax-only -x c "$staged" \
+            2>"$log"; then
+            printf 'C ABI mutation self-test FAILED: %s staged header does not compile alone:\n' \
+                "$name" >&2
+            cat "$log" >&2
+            return 1
+        fi
+        # LC_ALL=C keeps the compiler's missing-file text in English; GCC says `No such file or
+        # directory` and clang says `'miso_engine_v1.h' file not found`.
+        if "${common_env[@]}" LC_ALL=C MISO_ENGINE_CAPI_HEADER="$staged" bash "$0" \
+            "$workspace_root" >/dev/null 2>"$log"; then
             printf 'C ABI mutation unexpectedly passed: %s\n' "$name" >&2
             return 1
         fi
-        if grep -qF 'No such file or directory' "$log"; then
+        if grep -qE "No such file or directory|'miso_engine_v1\.h' file not found" "$log"; then
             printf 'C ABI mutation self-test FAILED: %s failed on a missing file, not on drift:\n' \
                 "$name" >&2
             cat "$log" >&2

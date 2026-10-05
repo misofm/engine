@@ -141,3 +141,27 @@ Test value: the repaired legs turn red if the header's ABI constant, a struct la
 signature drifts without the fixtures following, which the vacuous legs never exercised; the
 staging control and the identical-copy check turn red if staging or a `sed` pattern silently stops
 producing a real mutation.
+
+### Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05)
+
+The verifier passed attempt 1. Its MINOR and both NITs are folded into `expect_header_failure`
+(inside `capi_abi_self_test` only); the default checker path is unchanged.
+- MINOR-1: each header leg runs with `LC_ALL=C`, and the missing-file refusal matches both GCC's
+  `No such file or directory` and clang's `'miso_engine_v1.h' file not found`.
+- NIT-1: a missing staged file is refused by name (`[[ -f ]]`), and `cmp` is branched on
+  explicitly: 0 refuses an unchanged copy, 1 continues, any other status refuses.
+- NIT-2: the mutated header must compile alone (`$CC -std=c11 -Wall -Wextra -Werror -pedantic
+  -fsyntax-only -x c`) before the leg runs, so a leg's red has to come from the fixtures' pins.
+
+Mutation evidence (each applied to the script, the self-test run, then the script restored; the
+same mutation on the attempt-1 script for comparison):
+
+| Mutation | Attempt 1, gcc | Attempt 1, clang | Fold, gcc | Fold, clang |
+|---|---|---|---|---|
+| M1: constant leg staged under its old name `<leg>.h` | rc 1 (missing file) | rc 0, `ok` | rc 1 (missing file) | rc 1 (missing file) |
+| M2: constant leg's `sed` deleted, staged path never written | rc 0, `ok` | rc 0, `ok` | rc 1 (`staged header is missing`) | rc 1 (same) |
+| M3: layout leg's `sed` drops the `;` (header syntax broken) | rc 0, `ok` | rc 0, `ok` | rc 1 (`does not compile alone`) | rc 1 (same) |
+
+Unmutated: `check-capi-abi.sh --self-test` rc 0 with gcc and with `CC=clang CXX=clang++`;
+`check-capi-abi.sh` rc 0. The non-English-locale case is not reproduced here (no gcc/libc
+translations installed); `LC_ALL=C` removes it by construction.
