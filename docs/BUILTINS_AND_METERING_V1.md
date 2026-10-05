@@ -72,9 +72,15 @@ is exact positive zero even for a negative input, while an unmuted lane at unity
 negative zero. Matrix coefficients are bounded finite values in `[-1, 1]`; a settled lane whose
 matrix is exactly the identity passes its samples through untouched. A retarget computes each
 coefficient's per-sample increment **once**, at the event (`step = (target - current) / n`), then
-iterates `current += step` and assigns the target exactly on the last sample (master plan D11).
-The pre-#83 law, which divided by the remaining count on every sample, is not the same arithmetic
-for windows longer than two samples.
+iterates `current = ramp_toward(current, step, target)` and assigns the target exactly on the last
+sample (master plan D11). `ramp_toward` is `current + step` held inside
+`[min(current, target), max(current, target)]` (issue #1408): without it a long ramp's accumulated
+rounding can carry the word past its target before the snap (a +24 dB polarity flip over
+22,137,669 samples reached +26.46 dB), and with it every trim, fader, mute and matrix word stays
+between the values it moves between on every frame. The clamp replaces a word only when it is
+strictly beyond an endpoint, so an in-range word -- signed zeros included -- keeps the unclamped
+bits, and it needs no stored start. The pre-#83 law, which divided by the remaining count on every
+sample, is not the same arithmetic for windows longer than two samples.
 
 A bank accepts one to `width` prepared tracks. Lanes at or above that count are **padding lanes**:
 they carry identity coefficients and unit trim, they are sanitized like any other lane so nothing

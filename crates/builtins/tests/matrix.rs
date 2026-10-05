@@ -628,3 +628,59 @@ fn scalar_fused_fader_matrix_matches_the_separate_stages() {
         }
     }
 }
+
+/// Issue #1408 gate 3: no matrix word passes its target.
+///
+/// Found by a scalar simulation of the unclamped D11 law (see the issue's attempt record): a
+/// one-second identity-to-swap move at 48 kHz carries the `1 -> 0` words to `-0.000624` before
+/// their snap. Inputs `(1, 0)` and `(0, 1)` read the four applied words out directly
+/// (`yl = ll`, `yr = rl`, then `yl = lr`, `yr = rr`).
+///
+/// Red mutation: revert `matrix2x2_ramp_block`'s step 3 to `current + step` -> `ll` and `rr`
+/// leave `[0, 1]`.
+#[test]
+fn a_long_matrix_move_stays_inside_its_endpoints() {
+    const WINDOW: u32 = 48_000;
+    const BLOCK: usize = 4_096;
+    let swap = Matrix2x2 {
+        ll: 0.0,
+        lr: 1.0,
+        rl: 1.0,
+        rr: 0.0,
+    };
+    let start = Matrix2x2::IDENTITY;
+    let mut first = chain_with(WINDOW);
+    let mut second = chain_with(WINDOW);
+    first.set_matrix_target(swap).expect("target");
+    second.set_matrix_target(swap).expect("target");
+    let frames = WINDOW as usize + 64;
+    let mut rendered = 0;
+    while rendered < frames {
+        let block = BLOCK.min(frames - rendered);
+        let mut ll = vec![1.0_f32; block];
+        let mut rl = vec![0.0_f32; block];
+        first.process_matrix(DualMonoBlock::new(&mut ll, &mut rl, 0).expect("block"));
+        let mut lr = vec![0.0_f32; block];
+        let mut rr = vec![1.0_f32; block];
+        second.process_matrix(DualMonoBlock::new(&mut lr, &mut rr, 0).expect("block"));
+        for (name, words, from, to) in [
+            ("ll", &ll, start.ll, swap.ll),
+            ("lr", &lr, start.lr, swap.lr),
+            ("rl", &rl, start.rl, swap.rl),
+            ("rr", &rr, start.rr, swap.rr),
+        ] {
+            let (low, high) = (from.min(to), from.max(to));
+            for (index, word) in words.iter().enumerate() {
+                assert!(
+                    (low..=high).contains(word),
+                    "{name} at frame {}: {word:e} outside [{low:e}, {high:e}]",
+                    rendered + index
+                );
+            }
+            if rendered + block == frames {
+                assert_eq!(words[block - 1], to, "{name} settles at its target");
+            }
+        }
+        rendered += block;
+    }
+}

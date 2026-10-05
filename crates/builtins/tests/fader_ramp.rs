@@ -316,3 +316,59 @@ fn a_cross_block_ramp_is_partition_invariant() {
         "a cross-block fader ramp is to_bits identical across the partition boundary"
     );
 }
+
+/// Issue #1408 gate 3: no fader or mute move applies a gain outside the two words it moves
+/// between.
+///
+/// Found by a scalar simulation of the unclamped D11 law (see the issue's attempt record): a
+/// one-second fade from unity to mute at 48 kHz accumulates to `-0.000624` before its snap, and
+/// a +24 dB to -144 dB move over 65,536 samples reaches `-0.0108` -- in both cases a gain whose
+/// sign the user never set. DC `1.0` in, so every output sample is the applied gain word.
+///
+/// Red mutation: revert `gain_mute_ramp_block`'s step 3 to `current + step` -> both moves leave
+/// their interval.
+#[test]
+fn a_long_fader_or_mute_move_stays_inside_its_endpoints() {
+    const BLOCK: usize = 4_096;
+    for (from_db, mute, to_db, window) in [
+        (0.0_f32, true, 0.0_f32, 48_000_u32),
+        (24.0, false, -144.0, 65_536),
+    ] {
+        let mut live =
+            FaderMuteRampBuiltins::new(parameters(from_db, from_db, false, false)).expect("fader");
+        let start = live.target_gain(0);
+        let target = if mute {
+            live.set_mute(BuiltinLaneSelector::Both, true, window);
+            0.0
+        } else {
+            live.set_fader_db(BuiltinLaneSelector::Both, to_db, window)
+                .expect("domain");
+            live.target_gain(0)
+        };
+        let (low, high) = (start.min(target), start.max(target));
+        let frames = window as usize + 64;
+        let mut rendered = 0;
+        while rendered < frames {
+            let block = BLOCK.min(frames - rendered);
+            let mut left = vec![1.0_f32; block];
+            let mut right = vec![1.0_f32; block];
+            live.process(
+                DualMonoBlock::new(&mut left, &mut right, rendered as u64).expect("block"),
+            );
+            for (index, gain) in left.iter().chain(&right).enumerate() {
+                assert!(
+                    (low..=high).contains(gain),
+                    "{from_db} dB -> {} over {window}: frame {} applies {gain:e} outside \
+                     [{low:e}, {high:e}]",
+                    if mute {
+                        "mute".to_owned()
+                    } else {
+                        format!("{to_db} dB")
+                    },
+                    rendered + index % block
+                );
+            }
+            rendered += block;
+        }
+    }
+}

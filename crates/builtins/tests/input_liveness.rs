@@ -6,10 +6,10 @@
 //!    before the feature existed -- the same call, on the same prepared coefficient words, in the
 //!    same order. The settled state is initialised *from* `InputLane::trim_signed`, so "the same
 //!    words" is a bit comparison and not a re-derivation.
-//! 2. **The ramp obeys the smoother law.** The trim coefficient's per-sample sequence is
-//!    bit-identical to `effect_contract::ParameterSmoother` under
-//!    `SmoothingRule::Linear` -- the same D11 form the fader and the matrix already obey, and the
-//!    one the metadata's `linearNUpdates` policy declares.
+//! 2. **The ramp obeys the D11 law.** The trim coefficient's per-sample sequence is
+//!    bit-identical to `dsp_reference::ReferenceLinearRamp`, the hand-written D11 twin with the
+//!    issue #1408 endpoint clamp -- the same law the fader and the matrix obey. A long flip at
+//!    +24 dB never takes the gain past its endpoints (`a_long_polarity_flip_stays_inside_its_trim`).
 //! 3. **The ramping body is the settled body when the coefficient does not move.** This is the
 //!    load-bearing half of "the ramping path ignores the elision plan": a retarget to the value a
 //!    lane already holds makes every frame's trim the settled trim, so a block rendered through
@@ -30,7 +30,8 @@ use builtins::test_support::{
     input_state_words, input_trim_ramp_words, input_trim_words,
 };
 use builtins::*;
-use effect_contract::{BankWidth, ParameterSmoother, SmoothingRule};
+use dsp_reference::ReferenceLinearRamp;
+use effect_contract::BankWidth;
 use lane::Backend;
 
 /// Every bank width this build has, with the backend that executes it: both in the 8-lane (AVX2)
@@ -277,8 +278,11 @@ fn observed_trim_sequence(from_db: f32, to_db: f32, samples: u32, frames: usize)
 ///
 /// Red mutation: move `remaining = remaining - 1` after the `done` compare -> the ramp runs one
 /// frame long and the whole tail shifts.
+///
+/// The oracle is the D11 twin rather than `effect_contract::ParameterSmoother`: the effect
+/// smoother's clamp is a separate issue (#1409), so it is not the trim's law (#1408 D4).
 #[test]
-fn the_trim_ramp_is_bit_identical_to_the_parameter_smoother() {
+fn the_trim_ramp_is_bit_identical_to_the_reference_ramp() {
     for (from_db, to_db) in [
         (0.0_f32, -12.0_f32),
         (-12.0, 0.0),
@@ -291,14 +295,9 @@ fn the_trim_ramp_is_bit_identical_to_the_parameter_smoother() {
             let frames = samples as usize + 4;
             let observed = observed_trim_sequence(from_db, to_db, samples, frames);
 
-            // The oracle. `ParameterSmoother` is the contract's own statement of the linear-N law
-            // and is proven bit-identical to `LinearRamp`
-            // (`effect-runtime/tests/contract_ramp_identity.rs`), so this is the law and not a
-            // second implementation of the kernel.
-            //
             // The endpoints are the *coefficients*, because that is what ramps: `trim_db` is a
-            // decibel control and the chain multiplies by a gain, so the smoother is seeded and
-            // aimed with the same `db_gain` conversion preparation uses.
+            // decibel control and the chain multiplies by a gain, so the twin is seeded and aimed
+            // with the same `db_gain` conversion preparation uses.
             let from_gain = f32::from_bits(
                 input_trim_words(&input(parameters(
                     channel(from_db, false, 0.0, 0.0),
@@ -311,11 +310,10 @@ fn the_trim_ramp_is_bit_identical_to_the_parameter_smoother() {
                     channel(to_db, false, 0.0, 0.0),
                 )))[0],
             );
-            let mut smoother = ParameterSmoother::new(from_gain, SmoothingRule::Linear, samples)
-                .expect("a nonzero linear window");
-            assert!(smoother.set_target(to_gain), "finite target");
+            let mut reference = ReferenceLinearRamp::settled(from_gain);
+            reference.set_target(to_gain, samples);
             let expected: Vec<u32> = (0..frames)
-                .map(|_| smoother.next_value().to_bits())
+                .map(|_| reference.next_value().to_bits())
                 .collect();
             assert_eq!(
                 observed, expected,
@@ -563,6 +561,105 @@ fn a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient() {
     }
 }
 
+/// Issue #1408 gate 2: the polarity flip that broke #1329's bound. A flip at +24 dB over
+/// 22,137,669 samples accumulates enough rounding under the unclamped D11 law to reach `21.04`
+/// (+26.46 dB) before its snap; with the endpoint clamp no applied gain passes the trim word `g`.
+const LONG_FLIP: u32 = 22_137_669;
+const LONG_FLIP_BLOCK: usize = 4_096;
+
+/// Renders `LONG_FLIP + 64` frames of DC `1.0` at `lanes` words per frame through `render`, in
+/// `LONG_FLIP_BLOCK`-frame blocks; checks every output word against `bound` and returns the last
+/// 64 frames' words of each channel.
+fn long_flip_render(
+    lanes: usize,
+    bound: f32,
+    mut render: impl FnMut(&mut [f32], &mut [f32]),
+) -> [Vec<u32>; 2] {
+    let words = (LONG_FLIP as usize + 64) * lanes;
+    let tail_start = words - 64 * lanes;
+    let mut tails = [Vec::new(), Vec::new()];
+    let mut left = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
+    let mut right = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
+    let mut rendered = 0;
+    while rendered < words {
+        let block = (LONG_FLIP_BLOCK * lanes).min(words - rendered);
+        left[..block].fill(1.0);
+        right[..block].fill(1.0);
+        render(&mut left[..block], &mut right[..block]);
+        for (channel, plane) in [&left[..block], &right[..block]].into_iter().enumerate() {
+            for (index, value) in plane.iter().enumerate() {
+                assert!(
+                    value.abs() <= bound,
+                    "channel {channel} word {}: |{value}| passes the trim {bound}",
+                    rendered + index
+                );
+                if rendered + index >= tail_start {
+                    tails[channel].push(value.to_bits());
+                }
+            }
+        }
+        rendered += block;
+    }
+    tails
+}
+
+/// Red mutation: revert any `input_chain_ramp_block*`/`identity_chain_ramp_block*` trim update to
+/// `current + step` -> the flip reaches `21.04` at `+24 dB` (`g = 15.85`).
+#[test]
+fn a_long_polarity_flip_stays_inside_its_trim() {
+    let mut live = input(parameters(
+        channel(24.0, false, 0.0, 0.0),
+        channel(24.0, false, 0.0, 0.0),
+    ));
+    let g = f32::from_bits(input_trim_words(&live)[0]);
+    for (inverted, settled) in [(true, -g), (false, g)] {
+        live.set_polarity_invert(BuiltinLaneSelector::Both, inverted, LONG_FLIP);
+        let tails = long_flip_render(1, g, |left, right| {
+            live.process(DualMonoBlock::new(left, right, 0).expect("block"));
+        });
+        for tail in tails {
+            assert_eq!(tail, vec![settled.to_bits(); 64], "settles at {settled}");
+        }
+    }
+}
+
+/// The same flip on one member of a four-lane bank: the banked trim body is clamped too, and the
+/// uncommanded members hold their trim.
+///
+/// Red mutation: as above, on the banked bodies.
+#[test]
+fn a_long_polarity_flip_on_a_bank_member_stays_inside_its_trim() {
+    let width = BankWidth::for_backend(Backend::Simd4).expect("four-lane bank");
+    let lanes = width.lanes() as usize;
+    let prepared = || {
+        input(parameters(
+            channel(24.0, false, 0.0, 0.0),
+            channel(24.0, false, 0.0, 0.0),
+        ))
+    };
+    let g = f32::from_bits(input_trim_words(&prepared())[0]);
+    let mut bank = BuiltinInputBank::new(
+        Backend::Simd4,
+        width,
+        (0..lanes).map(|_| prepared()).collect(),
+    )
+    .expect("bank");
+    for (inverted, settled) in [(true, -g), (false, g)] {
+        bank.set_polarity_invert(0, BuiltinLaneSelector::Both, inverted, LONG_FLIP)
+            .expect("member");
+        let tails = long_flip_render(lanes, g, |left, right| {
+            let frames = (left.len() / lanes) as u32;
+            bank.process(left, right, frames);
+        });
+        for tail in tails {
+            for (index, word) in tail.iter().enumerate() {
+                let expected = if index % lanes == 0 { settled } else { g };
+                assert_eq!(*word, expected.to_bits(), "tail word {index} settles");
+            }
+        }
+    }
+}
+
 /// The two parameters share one coefficient and do not overwrite each other.
 ///
 /// Red mutation: drop the sign-preserving branch from `set_trim_db` -> a trim ride silently clears
@@ -762,5 +859,98 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
                 "lane {lane} at {width:?}, settled coefficient"
             );
         }
+    }
+}
+
+/// Issue #1408: every trim body holds its word inside the endpoints, not only the identity one.
+///
+/// The long flip above has its filters disabled, so it reaches only the elided-identity body. A
+/// shorter move the unclamped law also takes past its target -- a polarity flip at -1 dB over
+/// 2^20 samples, whose unclamped word leaves `[-g, g]` for its last ~7,200 frames, by up to
+/// `0.0125` -- is driven here through each other body on a four-lane bank: the filtered dual and
+/// collapsed bodies, the identity collapsed body, and both filter-retarget bodies (a filter
+/// retarget issued while the clamped word already holds its target, so its 64 frames run the
+/// filter body's trim update). The word read back at every block end must stay inside `[-g, g]`.
+///
+/// Red mutation: revert the trim update of `input_chain_ramp_block`,
+/// `input_chain_ramp_block_mono`, `input_chain_ramp_block_filter`,
+/// `input_chain_ramp_block_filter_mono` or `identity_chain_ramp_block_mono` to `current + step`
+/// -> the matching leg reads a word past `g`.
+#[test]
+fn every_trim_body_keeps_a_flip_inside_its_trim() {
+    const WINDOW: u32 = 1 << 20;
+    // Inside the clamped word's hold stretch (it reaches the target near frame 1,041,300).
+    const RETARGET_AT: usize = 255 * LONG_FLIP_BLOCK;
+    let width = BankWidth::for_backend(Backend::Simd4).expect("four-lane bank");
+    let lanes = width.lanes() as usize;
+    let filter = prepare_input_filter_pair(48_000, 80.0, 0.0)
+        .expect("pair")
+        .targets[0];
+    // (name, prepared HPF, collapsed, filter retarget)
+    for (name, hpf_hz, collapsed, retarget) in [
+        ("filtered dual", 40.0_f32, false, false),
+        ("filtered collapsed", 40.0, true, false),
+        ("identity collapsed", 0.0, true, false),
+        ("filter-retarget dual", 0.0, false, true),
+        ("filter-retarget collapsed", 0.0, true, true),
+    ] {
+        let prepared = || {
+            input(parameters(
+                channel(-1.0, false, hpf_hz, 0.0),
+                channel(-1.0, false, hpf_hz, 0.0),
+            ))
+        };
+        let g = f32::from_bits(input_trim_words(&prepared())[0]);
+        let mut bank = BuiltinInputBank::new(
+            Backend::Simd4,
+            width,
+            (0..lanes).map(|_| prepared()).collect(),
+        )
+        .expect("bank");
+        bank.set_polarity_invert(0, BuiltinLaneSelector::Both, true, WINDOW)
+            .expect("member");
+        let frames = WINDOW as usize + 64;
+        let mut left = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
+        let mut right = vec![0.0_f32; LONG_FLIP_BLOCK * lanes];
+        let mut rendered = 0;
+        while rendered < frames {
+            let block = if retarget && rendered == RETARGET_AT {
+                bank.apply_prepared_filter(
+                    0,
+                    PreparedInputFilterTarget {
+                        lanes: BuiltinLaneSelector::Both,
+                        ..filter
+                    },
+                )
+                .expect("filter target");
+                64
+            } else {
+                LONG_FLIP_BLOCK.min(frames - rendered)
+            };
+            left[..block * lanes].fill(1.0);
+            right[..block * lanes].fill(1.0);
+            if collapsed {
+                bank.process_mono(&mut left[..block * lanes], block as u32);
+            } else {
+                bank.process(
+                    &mut left[..block * lanes],
+                    &mut right[..block * lanes],
+                    block as u32,
+                );
+            }
+            rendered += block;
+            for channel in 0..if collapsed { 1 } else { 2 } {
+                let word = bank.trim_signed(0, channel);
+                assert!(
+                    word.abs() <= g,
+                    "{name}: channel {channel} trim {word} after frame {rendered} passes {g}"
+                );
+            }
+        }
+        assert_eq!(
+            bank.trim_signed(0, 0).to_bits(),
+            (-g).to_bits(),
+            "{name} settles"
+        );
     }
 }

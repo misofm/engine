@@ -139,6 +139,41 @@ pub fn gain_mute_block<L: Lane>(io: &mut [f32], frames: usize, gain: L, mute: L:
     }
 }
 
+/// One D11 ramp update that never passes its target (issue #1408).
+///
+/// Returns `current + step`, held inside `[min(current, target), max(current, target)]`. Every
+/// builtin ramp (trim and polarity, fader and mute, and the four matrix words) advances its word
+/// with this and nothing else, as step 3 of each ramping kernel's frozen order:
+/// `current = select(done, target, ramp_toward(current, step, target))`.
+///
+/// # Why it is exact and needs no stored start
+///
+/// The step is `(target - start) / n`, so it has the sign of `target - start`. Round-to-nearest
+/// is monotone and `current` is representable, so `fl(current + step)` never lands on the far
+/// side of `current` from the direction of `step`. By induction from the event, every word lies
+/// between `start` and `target`; the lower bound is therefore never the active side, and the clamp
+/// only holds a word that would pass `target` at `target`. Once there, both bounds are `target`
+/// and the word stays. Without the clamp, a long ramp's accumulated rounding is bounded only by
+/// `max(|start|, |2 target - start|)`.
+///
+/// # Operand order is part of the contract
+///
+/// [`Lane::max`] and [`Lane::min`] keep their *second* operand unless the first is strictly
+/// beyond it. `L::max(low, next)` and `L::min(high, x)` therefore replace the word only when it is
+/// strictly outside an endpoint: an in-range word keeps the unclamped law's exact bits, including
+/// a `+0.0` next to a `-0.0` endpoint and the reverse, and a NaN `next` passes through rather than
+/// being hidden. Do not write `L::max(next, low)` or a `clamp`. The trait forms are the D8
+/// specification at every width (`check-lane-policy.sh`).
+///
+/// Four lane operations beyond the add, one generic body at every width.
+#[inline(always)]
+pub fn ramp_toward<L: Lane>(current: L, step: L, target: L) -> L {
+    let next = current.add(step);
+    let low = L::min(current, target);
+    let high = L::max(current, target);
+    L::min(high, L::max(low, next))
+}
+
 /// State of a ramping fader/mute, one set per lane (issue #212, the banked strip fader).
 ///
 /// One channel of one bank: every array is `[lane]`, and a dual-mono stage carries two of these.
@@ -165,7 +200,8 @@ pub struct GainMuteRamp<L: Lane> {
 /// Frozen operation order, per frame:
 /// 1. `remaining = remaining - 1`
 /// 2. `done = remaining <= 0`
-/// 3. `current = select(done, target, current + step)`
+/// 3. `current = select(done, target, ramp_toward(current, step, target))` -- the word never
+///    passes its target ([`ramp_toward`])
 /// 4. `store(frame, andnot(load(frame) * current, done & mute))`
 ///
 /// # Why the clear is gated on `done` and not on the block
@@ -191,7 +227,7 @@ pub fn gain_mute_ramp_block<L: Lane>(io: &mut [f32], frames: usize, r: &mut Gain
     for frame in io.chunks_exact_mut(L::WIDTH) {
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
-        current = L::select(done, r.target, current.add(r.step));
+        current = L::select(done, r.target, ramp_toward(current, r.step, r.target));
         L::load(frame)
             .mul(current)
             .andnot(L::mask_and(done, r.mute))
@@ -427,7 +463,8 @@ pub struct Matrix2x2Ramp<L: Lane> {
 /// Frozen operation order, per frame:
 /// 1. `remaining = remaining - 1`
 /// 2. `done = remaining <= 0`
-/// 3. `current[i] = select(done, target[i], current[i] + step[i])` for `i` in `0..4`
+/// 3. `current[i] = select(done, target[i], ramp_toward(current[i], step[i], target[i]))` for
+///    `i` in `0..4` -- no word passes its target ([`ramp_toward`])
 /// 4. `l = load(left)`, `r = load(right)`
 /// 5. `yl = ll * l + lr * r`, `yr = rl * l + rr * r` — the [`matrix2x2_block`] arithmetic, in the
 ///    same operation order
@@ -456,7 +493,7 @@ pub fn matrix2x2_ramp_block<L: Lane>(
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
         for ((current, target), step) in current.iter_mut().zip(&r.target).zip(&r.step) {
-            *current = L::select(done, *target, current.add(*step));
+            *current = L::select(done, *target, ramp_toward(*current, *step, *target));
         }
         let l = L::load(left_frame);
         let right_sample = L::load(right_frame);
@@ -638,7 +675,8 @@ pub struct InputTrimRamp<L: Lane> {
 /// Frozen operation order, per frame and per channel `ch`:
 /// 1. `remaining[ch] = remaining[ch] - 1`
 /// 2. `done = remaining[ch] <= 0`
-/// 3. `trim = select(done, target[ch], current[ch] + step[ch])`; `current[ch] = trim`
+/// 3. `trim = select(done, target[ch], ramp_toward(current[ch], step[ch], target[ch]))`;
+///    `current[ch] = trim` -- the trim never passes its target ([`ramp_toward`])
 /// 4. `x = load(frame)`
 /// 5. `bad = !(|x| < NONFINITE_LIMIT)`; `sanitized[ch] = sanitized[ch] + (1.0 & bad)`
 /// 6. `v = andnot(x, bad) * trim`
@@ -690,7 +728,7 @@ pub fn input_chain_ramp_block<L: Lane>(
             let trim = L::select(
                 done,
                 r.target[channel],
-                current[channel].add(r.step[channel]),
+                ramp_toward(current[channel], r.step[channel], r.target[channel]),
             );
             current[channel] = trim;
             let x = L::load(frame);
@@ -758,7 +796,11 @@ pub fn input_chain_ramp_block_mono<L: Lane>(
     for frame in io.chunks_exact_mut(L::WIDTH) {
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
-        let trim = L::select(done, r.target[0], current.add(r.step[0]));
+        let trim = L::select(
+            done,
+            r.target[0],
+            ramp_toward(current, r.step[0], r.target[0]),
+        );
         current = trim;
         let x = L::load(frame);
         let bad = L::mask_not(x.abs().lt(limit));
@@ -832,7 +874,11 @@ pub fn input_chain_ramp_block_filter<L: Lane>(
                 let value = L::select(
                     done,
                     trim.target[channel],
-                    trim_current[channel].add(trim.step[channel]),
+                    ramp_toward(
+                        trim_current[channel],
+                        trim.step[channel],
+                        trim.target[channel],
+                    ),
                 );
                 trim_current[channel] = value;
                 value
@@ -937,7 +983,11 @@ pub fn input_chain_ramp_block_filter_mono<L: Lane>(
         let trim_value = if trim_ramping {
             trim_remaining = trim_remaining.sub(one);
             let done = trim_remaining.le(zero);
-            let value = L::select(done, trim.target[0], trim_current.add(trim.step[0]));
+            let value = L::select(
+                done,
+                trim.target[0],
+                ramp_toward(trim_current, trim.step[0], trim.target[0]),
+            );
             trim_current = value;
             value
         } else {
@@ -1038,7 +1088,7 @@ fn identity_chain_ramp_block<L: Lane>(
             let trim = L::select(
                 done,
                 r.target[channel],
-                current[channel].add(r.step[channel]),
+                ramp_toward(current[channel], r.step[channel], r.target[channel]),
             );
             current[channel] = trim;
             let x = L::load(frame);
@@ -1093,7 +1143,11 @@ fn identity_chain_ramp_block_mono<L: Lane>(
     for frame in io.chunks_exact_mut(L::WIDTH) {
         remaining = remaining.sub(one);
         let done = remaining.le(zero);
-        let trim = L::select(done, r.target[0], current.add(r.step[0]));
+        let trim = L::select(
+            done,
+            r.target[0],
+            ramp_toward(current, r.step[0], r.target[0]),
+        );
         current = trim;
         let x = L::load(frame);
         let bad = L::mask_not(x.abs().lt(limit));

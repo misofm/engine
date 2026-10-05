@@ -385,14 +385,17 @@ Polarity inversion is **0**: it is folded into the trim coefficient at prepare t
 (`trim_signed: if params.polarity_invert { -trim } else { trim }`).
 
 **Live trim and polarity (issue #210 phase 3) are 0 too**, and this is a named gap term rather
-than a floor row: *live input trim ramp -- 3 lane-ops per lane-sample while a retarget is in
+than a floor row: *live input trim ramp -- 7 lane-ops per lane-sample while a retarget is in
 flight, floor 0*.
 
 `trim_db` and `polarity_invert` are `BlockTarget` since phase 3, and while a retarget is ramping
 the input chain runs `input_chain_ramp_block`, whose frame body is the row above with step 3's
-constant trim replaced by three more lane-ops: `sub` (the countdown), `le` (the done compare) and a
-`select`-plus-`add` pair collapsing to the D11 update. Three lane-ops, per channel, **only on the
-blocks a ramp is in flight**, which is at most one smoothing window per admitted command.
+constant trim replaced by seven more lane-ops: `sub` (the countdown), `le` (the done compare), a
+`select`-plus-`add` pair collapsing to the D11 update, and the four of issue #1408's endpoint
+clamp (`ramp_toward`: `min` and `max` of the word and its target, then `max` and `min` holding the
+update between them). Seven lane-ops, per channel, **only on the blocks a ramp is in flight**,
+which is at most one smoothing window per admitted command. The fader and matrix ramps pay the
+same four clamp lane-ops per ramped word, on their ramping blocks only.
 
 It is not a floor row for the reason the delay term is not one: the floor states what the frozen
 spec requires of **every** block, and this is required of none. A lane no command has ever

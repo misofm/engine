@@ -271,4 +271,101 @@ none
 
 ## Attempt record
 
-None yet.
+### Attempt 1 (implementer, 2026-10-05, on `codex/d15-stream-g` at `f44cf54bf`)
+
+**Change.** `lane::kernels::builtins::ramp_toward` exactly as D1 (operand order D3); the eight
+sites call it as `select(done, target, ramp_toward(current, step, target))`; the frozen-order docs
+of `gain_mute_ramp_block`, `matrix2x2_ramp_block` and `input_chain_ramp_block` (which the other
+trim bodies cite) state the clamp. `ReferenceLinearRamp::next_value` uses a written-out scalar twin
+with the same strict comparisons. The trim oracle test is now
+`the_trim_ramp_is_bit_identical_to_the_reference_ramp` against `ReferenceLinearRamp`. Docs:
+`docs/BUILTINS_AND_METERING_V1.md` (the D11 paragraph) and the live trim ramp gap term in
+`docs/rulings/effect-floor-accounting.md` (3 -> 7 lane-ops; fader/matrix 4 per word on ramping
+blocks). No control-side, state-record or sealed-size change.
+
+**Gate 3 search (scalar simulation of the unclamped law, `f32`, step `(T - S) / n` once).** Fader:
+every pair on a 6 dB grid over `[-144, 24]` dB plus every grid level to mute (`T = 0`); matrix:
+every pair on the `k/8` grid over `[-1, 1]`; windows `2^0..=2^24` and 3, 5, 7, 48,000, 96,000,
+480,000; the shortest overshooting window per pair recorded. Shortest found: fader -132 -> -126 dB
+over 8,192; matrix several pairs over 48,000. Moves used in the tests (realistic ones):
+
+- fader `0 dB -> mute` over 48,000 (one second at 48 kHz): old word reaches `-6.236e-4`;
+- fader `+24 dB -> -144 dB` over 65,536: old word reaches `-1.082e-2` (the gain changes sign);
+- matrix identity -> swap over 48,000: `ll` and `rr` (`1 -> 0`) reach `-6.236e-4`.
+
+**Gate 2 reach, and an added test.** The flip of gate 2 runs with filters disabled, so it reaches
+only `identity_chain_ramp_block` (the elided dual body); per-site mutation showed the other five
+trim bodies left on the old law stay green under it, so the Test-value claim "any of the trim
+bodies" was not true of gate 2 alone. Added `every_trim_body_keeps_a_flip_inside_its_trim`
+(`input_liveness.rs`): a polarity flip at -1 dB over 2^20 samples, whose unclamped word leaves
+`[-g, g]` for its last ~7,200 frames by up to `0.0125`, on a four-lane bank through the filtered
+dual, filtered collapsed, identity collapsed, filter-retarget dual and filter-retarget collapsed
+bodies (the filter retarget is issued at frame 1,044,480, inside the clamped word's hold stretch),
+reading `trim_signed` at every block end. Gate 2 itself is as specified, both directions, on
+`InputBuiltins` and on a `Simd4` bank member, release and debug (about 54 s in debug).
+
+**Gate 1 notes.** "Returns `target` for any step once `current == target`" holds for every nonzero
+step (tested: `+-1`, `+-1e-30`, `+-` the smallest subnormal, `+-inf`, targets including `+-0.0`);
+a zero step on a `-0.0` target returns `-0.0 + +0.0 = +0.0`, the unclamped bits, which D3 requires
+(an in-range word keeps its bits). The randomized half runs the gate's 100,000 ramps in release and
+a 4,000 prefix of the same seeded sequence in debug (the `g4_flush.rs` pattern), and asserts that
+the sample reaches the clamp (some unclamped ramp leaves its interval) at every width. Also added
+twin unit tests in `dsp-reference/src/ramp.rs` (`a_long_ramp_never_passes_its_target`,
+`the_clamp_keeps_a_signed_zero_word`): no existing test reaches the twin's clamp, because the
+oracle comparisons use windows the old law does not overshoot.
+
+**Mutation evidence** (each introduced alone, the named tests red, reverted, green):
+
+| Mutation | Red |
+| --- | --- |
+| site 1 `gain_mute_ramp_block` -> `current + step` | `a_long_fader_or_mute_move_stays_inside_its_endpoints` |
+| site 2 `matrix2x2_ramp_block` | `a_long_matrix_move_stays_inside_its_endpoints` |
+| site 3 `input_chain_ramp_block` | `every_trim_body_...` (filtered dual: `-0.8966807` passes `0.8912509`) |
+| site 4 `input_chain_ramp_block_mono` | `every_trim_body_...` (filtered collapsed) |
+| site 5 `input_chain_ramp_block_filter` trim | `every_trim_body_...` (filter-retarget dual: `-0.89136153`) |
+| site 6 `input_chain_ramp_block_filter_mono` trim | `every_trim_body_...` (filter-retarget collapsed) |
+| site 7 `identity_chain_ramp_block` | both gate 2 tests (word 19,414,966: `-15.848933` passes `15.848932`), `every_trim_body_...` |
+| site 8 `identity_chain_ramp_block_mono` | `every_trim_body_...` (identity collapsed) |
+| `low.max(next).min(high)` (wrong outer order) | gate 1 fixed: `ramp_toward(-1, 1, -0.0)` = `-0.0` |
+| `high.min(next.max(low))` (wrong inner order) | gate 1 fixed: `ramp_toward(-0.0, -0.0, +0.0)` = `+0.0` |
+| one-sided `low.max(next)` / `high.min(next)` | gate 1 fixed and randomized |
+| `select(high > x, x, high)` / `select(x < high, x, high)` | gate 1 fixed (signed zero) |
+| NaN hidden (`select(x == x, x, target)`) | gate 1 fixed: NaN step |
+| in-range snap (`|x - target| < 1e-6` -> `target`) | gate 1 fixed and randomized ("moved while ... in range") |
+| twin reverted to `current += step` | `a_long_ramp_never_passes_its_target` |
+| twin outer order swapped | `the_clamp_keeps_a_signed_zero_word` |
+
+**D6 before/after evidence: no rendered bit of any existing test or pinned artifact moved.**
+
+- `BUILTINS_DIGESTS`: every one of the ten corpus cases' `case_values::<f32>` dumped before and
+  after the change is byte-identical (the clamp never engages in them; their windows are 37..=129
+  frames and none overshoots). The width claim is G5's (run below, unchanged pins).
+- `fixtures/builtins/v1`: `audit fixture-builtins --write` into a scratch root from the base kernel
+  and from the clamped kernel produce identical trees (all 50 files); `check-builtins-fixtures.sh`
+  passes. Observation outside this slice: at `f44cf54bf` the `--write` output's
+  `reference/filter-response.csv` already differs from the committed file (identically for the
+  base and the clamped kernel) while `--check` passes; not touched here.
+- Every existing test: with the old law restored in every kernel and the new twin in place, the
+  `lane`, `builtins` and `dsp-reference` suites (release) fail only the new gate tests above, so no
+  existing test (oracle comparisons, partition, cohort, elision, determinism) has a moved frame.
+- Therefore no re-pin; `fixtures/builtins/v1/resources.jsonl` unchanged.
+
+**Spelling of D1.** The body is D1's in the trait form, `L::min(high, L::max(low, next))` with
+`low = L::min(current, target)`, `high = L::max(current, target)`: identical operations and operand
+order (`L::max(a, b)` is `a.max(b)`), but `check-lane-policy.sh` refuses the method spelling
+`.max(`/`.min(` inside `crates/lane` without a `LANE-OP-OK` marker, and the trait form is the
+crate's default (`L::max(c, peak)` in the meter kernels).
+The mutation runs above were made on the method spelling before this respelling; the two are the
+same operations, and every gate below ran on the final spelling.
+
+**Gates (all on the final tree).** `cargo fmt --check` ok; the gate-6 `test-debug-b` command ok
+(349 s); `--release -p builtins --test input_liveness` ok (16 tests); `--release -p lane -p math
+-p wasm-gates --features math/lane` ok (G5 native corpus pins unchanged); `test-debug-a` ok;
+`conformance_fixtures --check` ok; `audit` release + `check-builtins-fixtures.sh` ok (50 files);
+`run-wasm-gates.sh` ok (native + simd128 + V8 spill gate, no carried stack slot); worklet chain
+(`build-web-audioworklet.sh --named-twin`, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`test-web-audioworklet.sh`) ok, resources within budget; `check-cross-targets.sh` PASS (the
+#1018 expected failures only); `check-lane-policy.sh`, `check-builtins-policy.sh`,
+`check-graph-determinism.sh`, `check-workspace-policy.sh` ok; `cargo clippy --workspace
+--all-targets -D warnings` ok. AArch64 is CI-only and not run here.
