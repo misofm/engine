@@ -94,16 +94,31 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   | key | rows |
   |---|---|
   | `fader_ms` | fader dB, input trim, send gain, VCA offset, detector link glide (#1371) |
-  | `mute_ms` | mute, solo, polarity invert, send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade (#1341) |
+  | `mute_ms` | mute, solo, polarity invert (`mute_ms` times two; root, 2026-10-05, from #1055), send mute, send `follows_mute` toggle, VCA mute, effect bypass crossfade (#1341) |
   | `pan_ms` | pan, matrix, send matrix |
+
+  - **Polarity invert is twice the mute ramp** (root, 2026-10-05, from #1055; `FINDINGS.md` 9.2,
+    9.8). It is a derived rule on the `mute_ms` key, not a fourth key. A flip is a change of twice
+    the signal; over twice the mute length its click measures as the mute's at every launch rate,
+    where over the mute length it is about 6 dB louder. A separate key would let the two lengths
+    drift apart, and no product need asks for it.
+  - **Matrix coefficients through zero** (root, 2026-10-05, from #1055; `FINDINGS.md` 9.1). A raw
+    matrix coefficient (in `[-1, 1]`) or a send matrix coefficient (any finite value) that crosses
+    zero is a polarity flip of that path on the `pan_ms` ramp. The default table keeps
+    `pan_ms >= 2 x mute_ms` (20 >= 2 x 10), so such a crossing clicks no more than a mute. Gate 2
+    checks it on the defaults. A session's explicit values may set `pan_ms` lower; it then gets a
+    louder crossing.
 
 - **D4. `LiveRamps`.** It gains `pan_samples` and `link_samples`; `for_session(model)` fills all
   four from D2 and D3. It gains `LiveRampRow`, one variant per row of D3's table, and
-  `for_row(row: LiveRampRow) -> u32`, which returns that row's key field. Every C ABI row reads its
-  length through it: this slice's fader, mute and matrix; input trim and polarity (#1261), sends
-  (#1225, #1226), VCA (#1247), the link glide (#1371). #1394 adds `resolve(row, edit_ramp)` on top
-  of `for_row`. The bypass crossfade (#1341) always uses `mute_samples` (D15-1: the one row with no
-  per-edit length). No row has a separate default.
+  `for_row(row: LiveRampRow) -> u32`, which returns that row's key field, and twice `mute_samples`
+  for `PolarityInvert` (root, 2026-10-05, from #1055; at most 192,000 samples at 1000 ms and 96 kHz,
+  inside the trim kernel's exact `f32` countdown, `2^24`). Every C ABI row reads its length through
+  it: this slice's fader, mute and matrix; input trim and polarity (#1261), sends (#1225, #1226),
+  VCA (#1247), the link glide (#1371). #1394 adds `resolve(row, edit_ramp)` on top of `for_row`. The
+  bypass crossfade (#1341) always uses `mute_samples` (D15-1: the one row with no per-edit length).
+  No row has a separate default; the polarity row's length derives from `mute_samples` and has no
+  key of its own (root, 2026-10-05, from #1055).
 - **D5. Pan and matrix.** Precedence for a matrix record: the post-commit model's
   `smoothing_samples` if non-zero; else `pan_samples`. (#1394 puts an edit's own ramp first.)
   Preparation and the model are unchanged, so canonical JSON still says 0.
@@ -122,7 +137,8 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
 ## Deliverables
 
 1. D1 and D2 in `crates/session`, with `docs/SESSION_SCHEMA_V1.md` (the root key list at `:35-38`,
-   the tagged grammar, bounds, default table, rounding, D3's table), `docs/session-v1.schema.json`,
+   the tagged grammar, bounds, default table, rounding, D3's table with its polarity note and its
+   matrix property (root, 2026-10-05, from #1055)), `docs/session-v1.schema.json`,
    the writer corpus regenerated (every document gains `default`; one document carries `explicit`),
    the SDK canonical writer's root key, tagged order and float keys, and the SDK builder's
    `{ "kind": "default" }` emit. D1a's migration lands in its own commit.
@@ -185,11 +201,14 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
    corpus loop, run by `check-sdk-headless.sh`).
 2. **Rounding** (`crates/session` unit test). 441/480/882/960 for 10 ms and 882/960/1764/1920 for
    20 ms at the four launch rates; 221 for 5 ms at 44.1 kHz (a tie); 0 for `-0.0`;
-   `{ "kind": "default" }` gives the default table.
+   `{ "kind": "default" }` gives the default table. `CONTROL_SMOOTHING_DEFAULT` holds
+   `pan_ms >= 2 * mute_ms` (D3's matrix property; root, 2026-10-05, from #1055).
 3. **Classifier** (`crates/host-core/tests/live_delta.rs`, rewritten test). At 48 kHz with the
    default table: a fader, a mute and a pan change give `FaderDb` 960, `Mute` 480, matrix 960 (96
-   when the model says 96). With `mute_ms` 5, `fader_ms` 15 and `pan_ms` 25: 720, 240, 1200.
-   With all session keys at 0: 0, 0, 0. `for_row` returns the D3 key's field for every `LiveRampRow`.
+   when the model says 96). With `mute_ms` 5, `fader_ms` 15 and `pan_ms` 25: 720, 240, 1200. With
+   all session keys at 0: 0, 0, 0. `for_row` returns the D3 key's field for every `LiveRampRow`, and
+   twice `mute_samples` for `PolarityInvert`: 960 at 48 kHz with the default table, 480 with
+   `mute_ms` 5 (root, 2026-10-05, from #1055).
 4. **C ABI, the ramp is heard** (`crates/capi/src/runtime/live_tests.rs`, new). A playing session
    with `"control_smoothing": { "kind": "default" }` takes a mute transaction. The first block after the commit equals
    neither the unmuted nor the muted control; from the first block after the ramp, the output is
@@ -223,8 +242,11 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   key today.
 - Gate 2 turns red if the rounding truncates, rounds half to even or converts in `f32` (each gives
   220 at 5 ms and 44.1 kHz).
+- Gate 2 also turns red if a default change puts `pan_ms` below twice `mute_ms`, so a matrix
+  coefficient through zero would click more than a mute (root, 2026-10-05, from #1055).
 - Gate 3 turns red if the classifier keeps a pan window of 0, ignores the session for one row, or
-  maps a row to the wrong key.
+  maps a row to the wrong key, or gives polarity the plain mute length (root, 2026-10-05, from
+  #1055).
 - Gate 4 turns red if `for_session` still returns 0 (the mute steps), or a ramp never lands on its
   target.
 - Gate 5 turns red if a session 0 is read as "use the default".

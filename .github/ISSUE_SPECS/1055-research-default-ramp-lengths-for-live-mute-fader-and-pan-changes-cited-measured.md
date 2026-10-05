@@ -28,9 +28,16 @@ default values (decision 15, D15-1 recorded resolution).
   `docs/handoffs/control-smoothing-defaults/` (`FINDINGS.md` sections 1-8, `data/`, `measure/`,
   `listening/`). The recommended table is mute (and solo) 10 ms, fader 20 ms, pan and raw matrix
   20 ms (`FINDINGS.md:11-17`).
-- `FINDINGS.md` has no section 9 yet. What remains is the decision-15 addition below.
-- No human has run the packet (`FINDINGS.md:257`). That is #1388's work, not a closing condition
-  here.
+- The decision-15 addition below is delivered as `FINDINGS.md` section 9 (root, 2026-10-05, from
+  #1055): commits `d541cc11c` (attempt 1), `21a1d5af4` (attempt 2), `17f0bf18c` (the attempt-2
+  verdict's follow-ups) and `8eacefa34` (listening Amendment 1). The verdict is PASS on attempt 2
+  (`docs/handoffs/decision-15-2026-10-05/verdicts/stream-e/1055-attempt2.md`). Root's ruling
+  confirms the polarity row at twice `muteMs`, a derived rule with no fourth key (9.2, 9.8).
+- Amendment 1 to `listening/PREREGISTRATION.md` adds block P (36 polarity trials, made before any
+  trial); the session is now 104 trials (root, 2026-10-05, from #1055).
+- No human has run the packet (`FINDINGS.md:260`). That is *Run the blinded listening session for
+  the live ramp defaults* (#1388), owner-pending, not a closing condition here (root, 2026-10-05,
+  from #1055).
 
 ## Decision-15 addition: every live row (D15-1) and the bypass switch (D15-13 E5)
 

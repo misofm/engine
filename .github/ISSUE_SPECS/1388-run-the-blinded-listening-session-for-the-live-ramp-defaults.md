@@ -18,13 +18,18 @@ private assignment key before reveal.
 ## Context
 
 - **The packet.** `docs/handoffs/control-smoothing-defaults/listening/` holds `PREREGISTRATION.md`
-  (status `preregistered`, 68 trials in blocks M, F and R, exact one-sided binomial tests, positive
-  controls, and mechanical decision rules), `listening.py` (prepare, run, validate, reveal,
-  self-test) and `README.md` (the procedure). It follows `dsp-research/listening/TEMPLATE.md`.
+  (status `preregistered`, 104 trials in blocks M, F, R and P (Amendment 1, 2026-10-05, made before
+  any trial, adds block P's 36 polarity trials; root, 2026-10-05, from #1055), exact one-sided
+  binomial tests, positive controls, and mechanical decision rules), `listening.py` (prepare, run,
+  validate, reveal, self-test) and `README.md` (the procedure). It follows
+  `dsp-research/listening/TEMPLATE.md`.
 - **The rules** (`PREREGISTRATION.md`, "Decision rules"): `muteMs` is 5, 10 or 20 ms by the M-block
   primaries and the R-block check; `faderMs` and `panMs` stay 20 ms unless F-30-20 is detected,
   else 35 ms or 20 ms with a host update-rate requirement. A missed positive control makes every
-  non-detection inconclusive.
+  non-detection inconclusive. Block P (Amendment 1) changes no value: it records whether the
+  shipped polarity flip (2 x muteMs, 20 ms) is heard, and as a dip or a click, as a finding for
+  root. Its two controls gate only block P's non-detections, and the M, F and R controls gate only
+  M, F and R (root, 2026-10-05, from #1055).
 - **The stimuli** come from the engine's own ramps: `control_smoothing_measure stimuli`, built from
   `docs/handoffs/control-smoothing-defaults/measure/`, which links `crates/builtins` by path
   (`measure/Cargo.toml`). The packet records the engine commit (`prepare --commit`).
@@ -39,37 +44,52 @@ private assignment key before reveal.
 
 - **D1. Candidate.** Prepare the packet at the `main` commit that contains #1054, so the stimuli
   are rendered by the shipped ramp kernels. Before preparation, confirm that the shipped defaults
-  appear among the packet's conditions (mute 10 ms, fader and pan 20 ms in sections 1-8). If #1055
-  section 9 added contrasts by a dated preregistration amendment, they run in the same session.
-- **D2. Procedure.** Exactly `listening/README.md`: `prepare`, the three `run` blocks (separate
-  sittings allowed), `validate`, `reveal`. A second person as facilitator is preferred. Playback
-  chain, level and listener details are recorded at reveal, as the record's fields require.
+  appear among the packet's conditions (mute 10 ms, fader and pan 20 ms in sections 1-8).
+  Amendment 1 (block P) runs in the same session; confirm that the shipped polarity flip, twice
+  the mute default (960 samples at 48 kHz, `polarity-bass-20ms`), is among the conditions
+  (root, 2026-10-05, from #1055).
+- **D2. Procedure.** Exactly `listening/README.md`: `prepare`, the four `run` blocks (M, F, R, P;
+  root, 2026-10-05, from #1055) (separate sittings allowed), `validate`, `reveal`. A second person
+  as facilitator is preferred. Playback chain, level and listener details are recorded at reveal, as
+  the record's fields require.
 - **D3. Record.** A completed copy of the preregistration, `listening/RECORD-<UTC date>.md`, with
   status `complete`, the counts, p-values, the decision `reveal` printed, the playback chain, and
   the sign-offs. `PREREGISTRATION.md` itself is not edited. Commit `public/preparation.json`,
   `responses.jsonl` and `reveal.json` next to the record. Stimulus WAVs are not committed; they
-  re-render from the recorded commit.
+  re-render from the recorded commit. The record states block P's outcome (`decisions.polarity`);
+  a heard outcome is recorded as a finding for root (root, 2026-10-05, from #1055).
 - **D4. Applying the result.** The only product change is the value of a key in
   `CONTROL_SMOOTHING_DEFAULT`, with the expected sample counts that tests state for the default
   table, and the default table's text in the docs. A session document that says
   `control_smoothing: { "kind": "default" }` (#1054 D1) follows the new value; one that says
   `explicit` keeps its own. Where the fader rule offers 35 ms or 20 ms with a
   host update-rate requirement, take 35 ms: the engine does not add a host contract to keep a
-  default. If the decision equals the shipped table, no product file changes.
-- **D5. Inconclusive.** If a positive control is missed, the session is inconclusive. The record is
-  committed as such, the defaults stay, and a fresh packet (new seed) may be run once under the same
-  preregistration; the issue closes on the second record whatever it says.
+  default. If the decision equals the shipped table, no product file changes. Block P's outcome
+  never changes the table (root, 2026-10-05, from #1055). The defaults keep
+  `panMs >= 2 x muteMs`, so a matrix coefficient crossing zero (a polarity flip of that path on the
+  `panMs` ramp) clicks no more than a mute (`FINDINGS.md` 9.1, #1054 D3). Before any default
+  changes, check the decided values against this invariant and state the check in the record; a
+  decision that breaks it (for example `muteMs` 20 ms with `panMs` 20 or 35 ms) goes to root
+  before D4 applies it (root, 2026-10-05, from #1055).
+- **D5. Inconclusive.** If an M, F or R control is missed, the value decision is inconclusive; a
+  missed P control makes only block P inconclusive (Amendment 1). Either allows the one fresh
+  packet (new seed) under the same preregistration, and that rerun repeats all four blocks
+  (root, 2026-10-05, from #1055). The record is committed as such, the defaults stay, and the
+  issue closes on the second record whatever it says.
 
 ## Deliverables
 
 1. The completed record and its raw files (D3).
 2. If D4 applies: the value change and the updated expected counts and docs.
-3. A one-line pointer in `FINDINGS.md` section 1 ("Provisional on listening") to the record.
+3. One-line pointers to the record in `FINDINGS.md` section 1 ("Provisional on listening") and in
+   section 9.7 (block P's outcome on the polarity flip's dip and click) (root, 2026-10-05, from
+   #1055).
 
 ## Authorized paths
 
 - `docs/handoffs/control-smoothing-defaults/listening/` (new record and raw files only),
-  `docs/handoffs/control-smoothing-defaults/FINDINGS.md` (the pointer)
+  `docs/handoffs/control-smoothing-defaults/FINDINGS.md` (the pointers in section 1 and 9.7;
+  root, 2026-10-05, from #1055)
 - If D4 applies: the default table in `crates/session/src/` (the `CONTROL_SMOOTHING_DEFAULT` value
   only), `docs/SESSION_SCHEMA_V1.md` (the table), and the expected default sample counts in
   `crates/session/tests/`, `crates/host-core/tests/live_delta.rs`,
@@ -87,9 +107,10 @@ private assignment key before reveal.
 1. `TMPDIR=<scratch> python3 docs/handoffs/control-smoothing-defaults/listening/listening.py self-test`
    passes.
 2. `python3 docs/handoffs/control-smoothing-defaults/listening/listening.py validate <packet>`
-   passes, and `reveal` run again on the committed responses prints the decision the record states.
-3. The record has every field of `dsp-research/listening/TEMPLATE.md`, 68 valid response rows (plus
-   any amendment's), and no synthetic answer.
+   passes, and `reveal` run again on the committed responses prints the decision the record states,
+   including block P's outcome (root, 2026-10-05, from #1055).
+3. The record has every field of `dsp-research/listening/TEMPLATE.md`, 104 valid response rows
+   (68 plus Amendment 1's 36; root, 2026-10-05, from #1055), and no synthetic answer.
 4. If D4 applies: `git diff --stat` against the base touches only D4's paths, and these pass:
    `cargo test --locked -p session`,
    `cargo test --locked -p host-core --features test-support --test live_delta`,

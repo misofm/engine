@@ -178,7 +178,12 @@ bits. This closes decision 14's F4 for the multiband compressor.
    crossfade equals the control that never bypassed.
 6. **Realtime.** The bank render path still allocates nothing (`tests/no_alloc_render.rs`), the
    recovery block included.
-7. Commands:
+7. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass crossfade's click
+   is measured against #1055's mute baseline, at the session's `muteMs` default, with the
+   `docs/handoffs/control-smoothing-defaults/measure/` harness and method (`FINDINGS.md` 9.4,
+   `data/bypass_crossfade.csv`, `data/mute_click.csv`) and the multiband compressor's rows added;
+   the result is recorded in the PR.
+8. Commands:
    - `cargo test --locked --all-targets -p multiband-compressor -p effect-runtime --features math/lane,lane/test-support`
    - `cargo test --locked -p effect-compiler -p graph-compiler -p host-core --features effect-compiler/test-support,graph/test-support,host-core/test-support`
    - `cargo test --locked -p host-web -p capi --features host-web/test-support,host-core/test-support`
