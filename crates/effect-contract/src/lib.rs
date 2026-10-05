@@ -2472,8 +2472,9 @@ const fn scratch_for(quality: QualityDescriptor, quantum: u32) -> Result<u64, Ef
 /// # Errors
 ///
 /// `effect.prepare.capacity`, `effect.link_mode.unsupported`, `effect.quality.unsupported`,
-/// `effect.resource.limit`, `effect.sidechain.missing` and `effect.sidechain.unknown_port` for a
-/// request the descriptor does not admit.
+/// `effect.resource.limit`, `effect.sidechain.missing`, `effect.sidechain.unknown_port`,
+/// `effect.parameter.unknown` and `effect.parameter.initial` for a request the descriptor does not
+/// admit.
 pub fn validate_prepare_request(
     d: &'static EffectDescriptor,
     r: PrepareEffectRequest<'_>,

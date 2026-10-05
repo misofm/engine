@@ -14,3 +14,7 @@ Time of `miso_engine_web_v1_boot` on a fresh instance, 25 boots per document per
 | sixty_four_track_console | 64 | 2 | 50.437 | 103.721 | 18.9 | 38.9 | 0.302 | 5.4 |
 | sixty_four_track_app_shape | 64 | 2 | 45.674 | 96.751 | 17.1 | 36.3 | 0.295 | 5.5 |
 | sixty_four_track_console_sends | 64 | 2 | 74.795 | 142.156 | 28.0 | 53.3 | 0.616 | 11.1 |
+
+## Interpretation (added after verification, #1330 batch follow-ups)
+
+This record and its pair (`d15-15-descriptor-before/`, base, loadavg 95.49; `d15-15-descriptor-after/`, branch, loadavg 39.22) are confounded by host load (≈95 -> ≈39) and cannot measure the change. The issue spec's Attempt record cites the verifier's uncommitted back-to-back pair at loadavg 23-25, which puts the change at roughly 12-20 % p50 faster.

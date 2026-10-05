@@ -173,14 +173,28 @@ Base `3ade8e969` (branch `codex/d15-stream-j`); implementation commit `a9f09e29a
   and `artifacts/steps/d15-15-descriptor-after/` (module `b723ff9f...` at `a9f09e29a`, loadavg
   39.22). Boot p50, mean of the two rounds:
 
-  | document | before ms | after ms | change |
+  | document | before ms | after ms | observed (confounded: loadavg 95 -> 39) |
   |---|---|---|---|
   | nine_track_eq | 4.892 | 3.531 | -27.8 % |
   | sixty_four_track_console | 48.498 | 33.206 | -31.5 % |
   | sixty_four_track_app_shape | 45.311 | 32.550 | -28.2 % |
   | sixty_four_track_console_sends | 77.748 | 54.380 | -30.1 % |
 
-  Candidly: the host load fell from ~95 to ~39 between the two runs, so most of this ~30 % is the
-  load difference, not the change; the profile's 8-9 % attribution is the better estimate of the
-  change's share. The two records cannot separate them, and per the benchmark rules the run was
-  not repeated.
+  The host load fell from ~95 to ~39 between the two runs, so the two committed records are
+  confounded by host load and cannot measure the change; the observed ~30 % is not attributed. Per
+  the benchmark rules the run was not repeated.
+
+  Verifier evidence (uncommitted, attempt-1 verdict): one back-to-back pair of the same frozen
+  workload at nearly the same load (loadavg 23.2 then 24.8), modules reproducing the record digests,
+  pinned to CPU 31, both `uncontrolled`, both validators accepted. Records:
+  `/tmp/claude-1002/v1330/clone-base/artifacts/steps/v1330-verifier-before/` and
+  `/tmp/claude-1002/v1330/clone-branch/artifacts/steps/v1330-verifier-after/`. Boot p50, mean of
+  the two rounds: nine_track_eq 4.193 -> 3.454 ms (-17.6 %), sixty_four_track_console
+  39.078 -> 32.506 ms (-16.8 %), sixty_four_track_app_shape 38.281 -> 30.804 ms (-19.5 %),
+  sixty_four_track_console_sends 60.920 -> 53.564 ms (-12.1 %). One uncontrolled pair, so
+  descriptive too, but it puts the change at roughly 12-20 % p50 faster.
+
+  Peak Wasm memory for `sixty_four_track_console` moves 5,701,632 -> 5,767,168 B (one 64 KiB
+  page), deterministically (in both committed records and the verifier's rerun). The removed
+  per-instance `validate_descriptor` calls allocated `BTreeSet`/`BTreeMap` scratch, so the
+  allocator's layout changed. No diagnostic and no rendered bit moves.
