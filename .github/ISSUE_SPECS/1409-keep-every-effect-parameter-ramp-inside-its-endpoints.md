@@ -3,7 +3,7 @@
 Stream G of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-4(b)).
 Filed 2026-10-05 as the successor of *Keep every trim, fader and matrix ramp inside its endpoints*
 (#1408), whose D7 left the effect ramps out. Code anchors verified on `codex/d15-stream-g` at
-`b800633e2`.
+`b800633e2`; the D6 and D8 test anchors (compressor, limiter, soft clip) on `1a2a6bc4b`.
 
 ## Product outcome
 
@@ -80,7 +80,27 @@ through the clamp #1408 adds for the builtins.
   `lib.rs:1626`; transient shaper `lib.rs:683`; limiter `lib.rs:4084`) with a 64-ulp slack that
   exists for this overshoot. Delay's `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`
   (`crates/delay/src/lib.rs:2746`) refuses two forged finite steps whose path leaves the domain
-  (`"path past the domain"`, `:2773-2778`).
+  (`"path past the domain"`, `:2773-2778`), and the limiter's restore corruptions
+  (`crates/true-peak-limiter/src/lib.rs:7613`) refuse `"moving limit walked past its bounds by its
+  step"` (`:7623-7625`, current and target at the ceiling, step `-1e30`, 8 remaining), and the
+  compressor's payload tests refuse a mix step that walks out of `[0, 1]`
+  (`a_step_that_leaves_the_domain_before_the_snap_is_refused`,
+  `crates/compressor/tests/payload.rs:391-418`) and `"a moving path below zero"` on the release
+  coefficient (`:449-450`, in `a_coefficient_below_zero_or_above_its_design_is_refused`): all rest
+  on the walk alone.
+- **Tests that assert the old law's overshoot.** Soft clip's
+  `an_overshooting_ramp_restores_and_continues` (`crates/soft-clip/tests/state_roundtrip.rs:155`)
+  asserts that its snapshot's `current` has crossed the edge (`:177-181`); its four callers
+  (`:247`, `:255`, `:267`, `:276`) and `a_drive_overshoot_retargeted_inward_restores_and_continues`
+  (`:294`, which starts from an overshot drive) rest on that premise. Soft clip's randomized
+  `a_restored_near_edge_ramp_continues_bit_for_bit` (`crates/soft-clip/tests/randomized.rs:199`)
+  asserts that its generator crosses every edge (`:200`, `:209-221`, fed by `near_edge_case`'s
+  crossing report, `:193`). After D1 no engine ramp crosses its target, so all of these turn red.
+- **#1301's probe.** Stream J's #1301 (*Make the shared edge-ramp restore probe cheap enough for
+  every pull request*) rewrites `edge_ramp_restore_violations` (`crates/conformance/src/randomized.rs`)
+  and records its catches as mutation counts measured on the unclamped law (its gate 1: delay M18
+  24 refusals, gate strict current 32, limiter 4-ulp budget 4). Each catch is an effect's own
+  snapshot past its target being refused, so after D1 the counts may fall to zero.
 - **Oracles of the law in tests:** `crates/effect-runtime/tests/{ramp,partition,lane_identity,stationary_hoist,contract_ramp_identity}.rs`,
   `crates/soft-clip/tests/ramp_law.rs`, `crates/transient-shaper/tests/partition.rs`, the
   compressor kernel unit tests (`crates/compressor/src/kernel.rs:1530-1640`), and the delay unit test
@@ -140,9 +160,26 @@ through the clamp #1408 adds for the builtins.
   them") stays true. By D2 the walk then accepts exactly when `current` and `target` are inside, so
   the loop is deleted and the function keeps its `remaining`, finite-step, endpoint and settled-step
   clauses; its doc cites D2. The 64-ulp slacks at the callers are unchanged (non-goal). The delay's
-  two `"path past the domain"` rows now describe an admitted payload whose render stays inside its
-  endpoints; they are deleted (superseded), and any other effect test row whose refusal rested on a
-  finite step walking past its target is listed in the PR and deleted.
+  two `"path past the domain"` rows, the limiter's `"moving limit walked past its bounds by its
+  step"` row, the compressor's `a_step_that_leaves_the_domain_before_the_snap_is_refused` (its
+  accepting half, a path inside `[0, 1]` restoring, goes with it) and its `"a moving path below
+  zero"` row now describe an admitted payload whose render stays inside its endpoints; they are
+  deleted (superseded), with their doc lines, and any other effect test row whose refusal rested on
+  a finite step walking past its target is listed in the PR and deleted.
+- **D8. Root decision (2026-10-05): this slice owns #1301's consequences.** Stream J's #1301 lands
+  before this slice, so this slice edits on top of it. It (a) deletes the `ramp_path_inside` walk
+  and the superseded refusal rows with their tests (D6); (b) deletes the soft clip tests that
+  assert the old law's overshoot (Context): `an_overshooting_ramp_restores_and_continues`, its four
+  callers and `a_drive_overshoot_retargeted_inward_restores_and_continues`, and in
+  `a_restored_near_edge_ramp_continues_bit_for_bit` the `crossed` counter and its every-edge
+  assertion (the bit-for-bit continuation stays); (c) re-measures #1301's gate-1 mutations on the
+  clamped law, per pull request and full walk exactly as #1301 runs them, and records each count
+  here, naming any catch that falls to zero; (d) adds an amendment note to the #1301 spec carrying
+  those counts, beside the note root filed on 2026-10-05 (if #1301's spec has already left
+  `.github/ISSUE_SPECS/`, the note goes in a comment on GitHub #1301 instead). It does not edit the
+  probe, its six caller tests or `crates/delay/tests/MUTATIONS.md`; a lost catch is reported to
+  root, and the restore-slack removal that gives the probe a catch again is stream A's follow-up
+  (*Remove the 64-ulp restore slack once every effect ramp is clamped*, #1411).
 - **D7. Bits move only where the old word passed its target**, from that frame until the snap.
   The PR carries one-time before/after evidence over every test and pinned artifact that renders an
   effect ramp: each moved case, its first moved frame, its largest change, and confirmation that on
@@ -175,10 +212,12 @@ through the clamp #1408 adds for the builtins.
 ## Deliverables
 
 1. The re-export and the nine sites (D1, D4, D5); each site's frozen-order doc states the clamp.
-2. `ramp_path_inside` per D6, and the superseded refusal rows deleted.
+2. `ramp_path_inside`'s walk deleted per D6; the delay, limiter and compressor refusal rows and the
+   soft clip overshoot tests deleted per D6 and D8(b).
 3. Gates 1-3 as tests; every oracle in Context updated to the clamped law.
 4. Re-pins per D7, with the evidence in this spec.
 5. `docs/EFFECT_CONTRACT_V1.md:133-147` states the clamped law.
+6. #1301's mutation counts re-measured and recorded here, and the #1301 amendment note (D8(c-d)).
 
 ## Authorized paths
 
@@ -192,6 +231,11 @@ through the clamp #1408 adds for the builtins.
   `crates/delay/src/lib.rs`, `crates/soft-clip/src/kernel.rs`, `crates/soft-clip/src/lib.rs`,
   `crates/true-peak-limiter/src/lib.rs`; in those files also the unit tests named in Context and
   D6's refusal rows
+- `crates/compressor/tests/payload.rs`: D6's two deletions only
+- `crates/soft-clip/tests/state_roundtrip.rs` and `crates/soft-clip/tests/randomized.rs`: D8(b)'s
+  deletions only
+- `.github/ISSUE_SPECS/1301-make-the-shared-edge-ramp-restore-probe-cheap-enough-for-every-pull-request.md`:
+  D8(d)'s amendment note only (or a comment on GitHub #1301)
 - One new `tests/ramp_endpoint.rs` in each of `compressor`, `gate-expander`,
   `multiband-compressor`, `delay`, `soft-clip`, `transient-shaper`, `true-peak-limiter`;
   `crates/soft-clip/tests/ramp_law.rs`, `crates/transient-shaper/tests/partition.rs`
@@ -200,16 +244,17 @@ through the clamp #1408 adds for the builtins.
 - `docs/EFFECT_CONTRACT_V1.md` (the smoothing paragraph), this spec
 
 `crates/lane`, `crates/effect-runtime` and the effects' parameter code are stream G's column; the
-`ParameterSmoother` arm (stream J's `crates/effect-contract`), the payload refusal rows (stream A's
-payload code) and the corpus pins are named exceptions recorded in
+`ParameterSmoother` arm (stream J's `crates/effect-contract`), the payload refusal rows and soft
+clip overshoot tests (stream A's payload code), the #1301 note and the corpus pins are named
+exceptions recorded in
 `docs/handoffs/decision-15-2026-10-05/STREAMS.md`.
 
 ## Non-goals
 
 - The builtins (#1408), the SVF coefficient word ramps of the EQ and the input filter (#1407), the
   delay tap crossfade, `OnePole99`, the indexed route ramp; any window, countdown, snap or design
-  function; the 64-ulp restore slacks (with D2 they are unused headroom; removing them is payload
-  work for stream A, flagged to root).
+  function; the 64-ulp restore slacks (with D2 they are unused headroom; stream A's #1411 removes
+  them after this slice).
 - Rejected alternatives:
   - Prove no overshoot per parameter: the probe finds reachable overshoots on every domain edge.
   - Clamp to the parameter's domain instead of `[start, target]`: still renders values the user
@@ -225,10 +270,10 @@ payload code) and the corpus pins are named exceptions recorded in
   `#[inline(never)]` (`kernel.rs:192-197`). If a gate turns red, report it with the build evidence;
   do not weaken a gate.
 - D5's split adds a kernel shape in sites 7-8; it must not change the settled path's bits or cost.
-- #1301's recorded mutation counts (`.github/ISSUE_SPECS/1301-*.md` gate 1: gate strict current 32
-  refusals, limiter 4-ulp budget 4) were measured on the old law; after this slice engine snapshots
-  stay inside their endpoints, so those mutations may refuse nothing. Root amends #1301; this slice
-  does not edit it.
+- #1301's recorded mutation counts (`.github/ISSUE_SPECS/1301-*.md` gate 1: delay M18 24 refusals,
+  gate strict current 32, limiter 4-ulp budget 4) were measured on the old law; after this slice
+  engine snapshots stay inside their endpoints, so those mutations may refuse nothing. This slice
+  re-measures and records them (D8); it does not weaken or rewrite the probe to restore a catch.
 - Hot files: `effect_runtime` ramps and the effect ramp bodies are shared with stream A's carry
   slices (#1279, #1280, #1282) and stream G's #1336, #1338 and #1370, which add `LinearRamp`
   users; `crates/effect-contract/src/lib.rs` is J #1330's and A #1362's. This slice lands first
@@ -256,10 +301,16 @@ payload code) and the corpus pins are named exceptions recorded in
    without a connected sidechain (sites 2 and 4). Red on revert of each site. If a word's search
    finds no overshooting move, record the bounds here; gate 1 covers its law.
 3. **Twin and oracles:** `contract_ramp_identity.rs` passes unchanged; every oracle in Context is
-   bit-identical to the clamped law; every other existing test passes unchanged except D6's deleted
-   rows and those D7's evidence names.
+   bit-identical to the clamped law; every other existing test passes unchanged except D6's and
+   D8(b)'s deletions and those D7's evidence names.
 4. **Re-pins per D7 only.**
-5. Commands:
+5. **#1301 re-measured (PR evidence, not committed).** On the merged tree with #1301, apply each
+   of #1301's gate-1 mutations (delay M18, gate strict current, limiter 4-ulp budget), run that
+   crate's `the_effects_own_edge_ramp_snapshots_restore` per pull request (no variable set) and
+   full (`MISO_ENGINE_RANDOMIZED_SCALE=1`), and record each "its own snapshot is refused" count,
+   whether the two lists are byte-identical, and green after revert, in this spec and the #1301
+   note (D8).
+6. Commands:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p effect-contract -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane`
    - the `test-debug-a` workspace command from `.github/workflows/qualification.yml`
@@ -288,6 +339,9 @@ payload code) and the corpus pins are named exceptions recorded in
 - *Keep every trim, fader and matrix ramp inside its endpoints* (#1408), for `ramp_toward`, its
   law test and the `ReferenceLinearRamp` twin, and for moving the trim oracle off
   `ParameterSmoother` (its D4) before this slice changes it
+- *Make the shared edge-ramp restore probe cheap enough for every pull request* (#1301, stream J),
+  which lands first: this slice re-measures its mutation counts on the probe as #1301 leaves it and
+  amends its spec (D8)
 
 ## Attempt record
 

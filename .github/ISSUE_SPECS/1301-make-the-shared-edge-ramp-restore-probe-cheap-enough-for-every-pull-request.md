@@ -224,6 +224,15 @@ catches, which gate 1 shows once against its full walk; no caller test changes.
 
 - None. #1278 (PR #1299) is on `main` at `d2fe0555a`.
 
+## Amendment note (root decision 2026-10-05)
+
+This issue lands as written. Later, stream G's *Keep every effect parameter ramp inside its
+endpoints* (#1409, which lands after this one) clamps every effect ramp word to its endpoints,
+deletes the `ramp_path_inside` walk (`crates/effect-runtime/src/state_payload.rs`) and the restore
+refusal rows and tests it supersedes, and re-measures this issue's gate-1 mutation counts (delay
+M18 24, gate strict current 32, limiter 4-ulp budget 4), which were measured on the unclamped
+ramp law and may fall to zero. #1409 records the new counts here.
+
 ## Standing rules for the implementer
 
 - Work only from this body. Read the cited lines first; do not survey the workspace.

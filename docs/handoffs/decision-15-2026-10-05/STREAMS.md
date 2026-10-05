@@ -15,7 +15,7 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Root merges into `main` one stream batch at a time, rebases the others onto the result, and runs
   the full gate set once on every merged tree.
 - At most five implementation coordinators run at once: A, B, G, J and one of E, I or H(a).
-- Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, #1407, #1408 and #1409 (after #1408), H's #1331
+- Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, #1407, #1408 and #1409 (after #1408 and J's #1301), H's #1331
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
   and #1381. The verifier still flagged #1280, #1316, #1332 and #1363 as tight; their stream
@@ -45,6 +45,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/lane/src/kernels/builtins.rs` (the D11 trim, fader and matrix ramp kernels), the ramp stages in `crates/builtins/src/lib.rs` (`InputStage::set_trim_signed`/`settle`, `FaderRampStage`, `MatrixStage`), `crates/dsp-reference/src/ramp.rs` | G #1408 → G #1409 → B (#1312, #1346) → E (#1054, #1394) → A #1277 → D #1288 |
 | `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter`), `docs/rulings/builtins-input-liveness-d2.md` (#808 paragraph) | G #1407 → G #1329 → F (#1268, #1262) |
 | `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370) |
+| `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`'s walk, `ramp_path_within`), the effect payload readers' ramp range rules (compressor `state.rs` `validate_channel`, gate `parse_lane`, multiband, delay `read_carried_ramp`, transient shaper and limiter `read_lane`, limiter `coefficient_bounds`, soft clip `ramp_current_valid`), their restore-refusal test rows (delay `a_carried_ramp_is_refused_unless_its_whole_path_is_valid`, limiter restore corruptions, `crates/compressor/tests/payload.rs`), soft clip's overshoot restore tests (`tests/state_roundtrip.rs`, `tests/randomized.rs`), `crates/delay/tests/MUTATIONS.md` (M18, M19), the #1301 spec | J #1301 → G #1409 → A #1411; A's carry slices (#1279, #1280, #1282) and #1411 in either order, the second rebases |
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
 | `crates/effect-contract/src/lib.rs` | G #1409 (`ParameterSmoother`'s `Linear` arm only) → J #1330 → A #1362 → G #1377 |
@@ -73,6 +74,12 @@ changes only the live filter retarget in `crates/builtins` (stream A's column, a
 lands before B, E, A and D change the ramp code, and before the effect slices (A #1279, #1280,
 #1282; G #1336, #1338, #1370) that add or carry effect ramps.
 
+Hot-file note (2026-10-05, root decision): #1409 owns #1301's consequences. Stream J's #1301 lands
+first; #1409 then deletes the `ramp_path_inside` walk and the restore-refusal rows and soft clip
+overshoot tests it supersedes, re-measures #1301's mutation counts (measured on the unclamped law)
+and records them in an amendment note on the #1301 spec. Stream A's #1411 then removes the 64-ulp
+restore slack from every effect's payload reader, which #1409's clamp leaves unused.
+
 ## Stream S0
 
 - **Coordinator scope:** Decisions and specs (root).
@@ -87,8 +94,8 @@ lands before B, E, A and D change the ramp code, and before the effect slices (A
 ## Stream A
 
 - **Coordinator scope:** Swap carry on the C ABI core: copy and move carry for every state owner, latency floors and their reset, meter carry.
-- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/engine/src/realtime/plan.rs` (#1322, one trait method), `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323).
-- **Depends on:** S0; B #1312 before #1277 and #1345 before #1280 (cells first); #1323 needs #1309 and #1310; #1286 needs #1321.
+- **Owns:** `crates/builtins*`, `crates/rack`, `crates/graph`, `crates/graph-compiler` (except #1384), effect crates' payload code, `crates/host-core/src/prepare.rs`, `crates/host-core/tests/successor_swap.rs`; by named exception: `crates/engine/src/realtime/plan.rs` (#1322, one trait method), `crates/host-core/src/live_delta.rs` record functions (#1277, #1280, #1284), `crates/host-core/src/spectrum.rs` (#1327), the `control-plane` crate after #1309 (#1280, #1323), `ramp_path_within` and its docs in `crates/effect-runtime/src/state_payload.rs` (#1411).
+- **Depends on:** S0; B #1312 before #1277 and #1345 before #1280 (cells first); #1323 needs #1309 and #1310; #1286 needs #1321; #1411 needs G #1409.
 - **Parallel-safe with:** G, J, K, H(a); B once #1312 and #1345 have landed.
 
 | Order | Issue | Title | After (same stream) | After (other streams) |
@@ -108,6 +115,7 @@ lands before B, E, A and D change the ramp code, and before the effect slices (A
 | 13 | #1327 | Carry meter and effect observation state across a plan swap | #1284 | — |
 | 14 | #1323 | Reset latency floors at a host-declared discontinuity | #1285 | #1309, #1310 |
 | 15 | #1395 | Carry spectrum capture state across a plan swap | #1327 | #1401 |
+| 16 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | — | #1409 |
 
 ## Stream B
 
@@ -224,7 +232,7 @@ lands before B, E, A and D change the ramp code, and before the effect slices (A
 ## Stream G
 
 - **Coordinator scope:** DSP contracts: SVF joint flush, engine-wide tail and exact-rest bounds, live gate/EQ/multiband parameters, live bypass shunts, per-strip and multiband link mode.
-- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows it supersedes and the effect corpus pins (#1409), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
+- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows and soft clip overshoot tests it supersedes, the effect corpus pins and the #1301 amendment note (#1409), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
 - **Depends on:** A's carry slice for each effect crate (#1279, #1280, #1282); #1069 for the multiband; E #1054 for #1371.
 - **Parallel-safe with:** A (coordinate on effect crates), B, E, J.
 
@@ -238,7 +246,7 @@ lands before B, E, A and D change the ramp code, and before the effect slices (A
 | 6 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
 | 7 | #1407 | Retarget a live input filter only through its designs and their mixtures | — | — |
 | 8 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
-| 9 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | — |
+| 9 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
 | 10 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
 | 11 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
 | 12 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
