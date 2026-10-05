@@ -175,7 +175,7 @@ New tests, test value and mutation runs (each mutation applied, red observed, re
 | `hosts/host-web/src/tests.rs::a_live_send_edit_outside_the_route_domain_is_refused` (gate 3) | browser send admission bounds differ from the session's | M2 | red (`tests.rs:11069`) |
 | `route_coefficients.rs::a_subnormal_folded_coefficient_is_positive_zero` (gate 4, coefficients) | subnormal product reaches the bound/pushed constant, or flushes to `-0.0` | M3 flush removed; M3b flush to `-0.0` | red both (`:442`) |
 | `host-web tests.rs::a_subnormal_route_renders_as_a_zero_coefficient` (gate 4, render) | subnormal constant renders a nonzero subnormal sample | M3 (`6.25e-43 vs 0e0`); M3b | red both |
-| `sdk/test/builder-evals.mjs` "a route's gain and matrix are bounded ..." (gate 5) | builder checks f32 only, exclusive bound, or wrong code/path | not run (see below) | -- |
+| `sdk/test/builder-evals.mjs` "a route's gain and matrix are bounded ..." (gate 5) | builder checks f32 only, exclusive bound, or wrong code/path | M5a `route()` `gainDb` back to `f32`; M5b `route()` matrix back to `f32`; M5c exclusive bound (`<=`/`>=`); M5d refusal without `CODE.outOfRange` | red all four, green on revert (run in the gate-completion pass below) |
 
 Gates run at `d1a9daf30`:
 
@@ -194,3 +194,41 @@ test-debug-a/b, policy pairs) and gate 7a (worklet build/check/test, cross-targe
 (no checked-in digest moves under D3) therefore remains unproven by gate 6; by construction D3 only
 moves bits for a route whose folded product is subnormal, and no checked-in route has a coefficient
 below `1.9e-31`.
+
+#### Gate completion (same attempt, 2026-10-05) -- all remaining gates run
+
+Not a new attempt: the outstanding gates above were run at `16a5b920b` (attempt-1 implementation
+plus #1302 attempt 2's policy scripts), with `<A>`/`<B>` rebuilt from that head by
+`bash scripts/build-web-audioworklet.sh --named-twin <B> <A>` (exit 0; shipped module
+`1a334cd5...c101d`, 2894346 B). One #1237 defect found and fixed:
+
+- **clippy** (gate 7) refused `crates/session/tests/route_domain.rs` with
+  `clippy::type_complexity` on the gate-1 field table under `-D warnings`. Fixed in `784b5d61c` with
+  a `type Setter` alias (table, test and assertions unchanged); clippy then exit 0 and
+  `route_domain` passes. Gates 5, 6, 7a's worklet legs, fmt and rustdoc ran at `16a5b920b`;
+  clippy (rerun), test-debug-a/b, the policy pairs and `check-cross-targets.sh` ran at
+  `784b5d61c`. The fix touches only that test file, so no earlier result can move.
+
+| Gate | Command | Exit |
+| --- | --- | --- |
+| 5 | `check-sdk-headless.sh <A>` (all evals, incl. the new route-domain eval) | 0 |
+| 5 | `sdk-package.sh check <A>` | 0 |
+| 5 | new builder eval alone, mutations M5a-M5d (table above) | red x4, green on revert |
+| 6 | `cargo run -p graph-compiler --bin graph_fixture -- --check` | 0 |
+| 6 | `check-graph-determinism.sh` (100/100) | 0 |
+| 6 | `check-builtins-fixtures.sh . target/release/audit` (50 files) | 0 |
+| 6 | `check-console-fixtures.sh target/release/session_validator` | 0 |
+| 6 | `check-browser-expected-resources.py --artifacts <A>` | 0 |
+| 7 | `cargo fmt --all -- --check` | 0 |
+| 7 | `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings` | 101 at `16a5b920b` (above), 0 at `784b5d61c` |
+| 7 | `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` | 0 |
+| 7 | test-debug-a (qualification.yml's exact command, plus `builtins-compiler --no-run`) | 0 (1432 passed, 0 failed) |
+| 7 | test-debug-b (exact command) and `conformance_fixtures -- --check` | 0 (813 passed, 0 failed); 0 |
+| 7 | policy check/test pairs: workspace, session, bench, host-core, protocol-control, realtime, lane, rack, builtins, graph, effect-runtime | all 0 |
+| 7a | `check-web-audioworklet.sh <A> <B>/...named.wasm` | 0 |
+| 7a | `test-web-audioworklet.sh` | 0 |
+| 7a | `check-cross-targets.sh` | 0 (the ten `ios-asm-memset-pattern16` rows are #1018's expected failures; no #1237 commit touches any script or ceiling) |
+
+Hazard (D3 moves no checked-in bits): proven by gate 6 -- graph fixtures, console fixtures,
+builtins fixtures and the browser expected-resources digests and rows all pass unchanged.
+
