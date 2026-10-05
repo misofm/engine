@@ -30,8 +30,9 @@ cross-origin isolation.
   words.
 - The browser feeds sources from its PCM pump, which fills every ring until it is full
   (`pumpUntilFull`, `hosts/host-web/web/stem-store/pcm-pump.js:189`). Ring headroom covers `P_MAX`
-  plus one quantum (#1358), so a pump that keeps up keeps the `P + q` frames that an exact growth
-  needs queued.
+  plus one quantum, and the browser host's per-source in-flight bound follows that ring (*Grow the
+  default source ring by the warm-prime headroom*, #1406 D2 and D4), so a pump that keeps up keeps
+  the `P + q` frames that an exact growth needs queued.
 - The worklet's render-locked allocation counter (*Gate AudioWorklet render against allocation
   statically and at runtime*, #1333 D1-D3) spans all of `miso_engine_web_v1_render`, so it covers
   the readiness check and the prime.
@@ -119,6 +120,8 @@ cross-origin isolation.
 ## Dependencies
 
 - *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
+- *Grow the default source ring by the warm-prime headroom* (#1406): the ring and the host's
+  in-flight bound.
 - *Classify a latency-growth edit and publish its warm successor from the control plane* (#1403).
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355).
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332).

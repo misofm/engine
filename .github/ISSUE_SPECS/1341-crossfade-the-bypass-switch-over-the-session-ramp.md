@@ -16,7 +16,7 @@ ramp in *Crossfade the browser's live bypass command over the session ramp* (#13
 
 ## Context
 
-- **The shunt** (`crates/effect-contract/src/live.rs:822-998`). The wet path always runs. The dry
+- **The shunt** (`crates/effect-contract/src/live.rs:822-990`). The wet path always runs. The dry
   signal is delayed by exactly the declared latency. "Selection is whole-block, never per sample"
   (`:841-843`), done by copies, so `-0.0` survives (`apply`, `:979-984`; `dry`, `:987-990`).
   `capture` (`:948-976`) must run on every block when the shunt has a latency line (`feeds_line`,

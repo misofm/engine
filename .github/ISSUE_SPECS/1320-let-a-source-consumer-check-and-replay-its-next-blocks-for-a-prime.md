@@ -133,7 +133,7 @@ successor carries. Nothing is copied, no block is shared, and no second reader e
 
 - No graph, plan-exchange or host-core change. Calling readiness before the claim, the prime in
   the source section, and setting the flags are #1355's.
-- No change to seek semantics (stream B, #1316-#1319). No ring sizing (#1358).
+- No change to seek semantics (stream B, #1316-#1319). No ring sizing (#1406).
 
 ## Objective gates
 

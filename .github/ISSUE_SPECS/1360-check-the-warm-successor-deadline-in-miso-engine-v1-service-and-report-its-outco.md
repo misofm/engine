@@ -44,9 +44,11 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 ## Decisions frozen for this slice
 
 - **D1. The production `WarmConfig`.** The C ABI creates every session with
-  `warm: Some(WarmConfig { p_max: P_MAX_SAMPLES(fs), prime_bytes_max: PRIME_BYTES_MAX })` for the
-  session's rate (#1403 D1), so its rebuilds are classified by #1403 D2 and routed by #1397 D1-D2.
-  Before this slice only `test-support` sessions hold a `WarmConfig`; every arm of #1403 D2 exists
+  `warm: Some(WarmConfig { p_max: P_MAX_SAMPLES(fs, q), prime_bytes_max: PRIME_BYTES_MAX })` for
+  the session's rate and quantum (#1403 D1; `P_MAX_SAMPLES` is *Grow the default source ring by the
+  warm-prime headroom*, #1406 D1), so its rebuilds are classified by #1403 D2 and routed by #1397
+  D1-D2. Before this slice only `test-support` sessions hold a `WarmConfig`; every arm of #1403 D2
+  exists
   once #1397 has landed, which this slice depends on.
   This slice writes `PRIME_BYTES_MAX` into `crates/host-core/src/warm.rs` with the value *Record
   the swap block's cost on the 64-track console* (#1286) D3 derives; the constant's comment names
@@ -61,7 +63,8 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
     `check_prime_deadline`). `Withdrawal::Taken` means render
     adopted it exactly, and the step publishes nothing. `Withdrawal::Withdrawn` hands the candidate
     to `fall_back_to_transition` as its donor (#1397 D2), which re-prepares and publishes the
-    transition.
+    transition. If that re-preparation is refused, #1358 D3 republishes the donor and sets its
+    record again, so the next service call's step withdraws it again.
   - One step does at most one withdrawal and at most one re-preparation. It never loops on render
     progress and never waits, so #1348 D3's bound holds with this step added. There is no slice
     constant and no rendering on the control thread.
@@ -75,10 +78,11 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
     host keeps at least `P + q` frames of each source queued past that source's read position,
     where `P` is the latency growth rounded up to whole render quanta and `q` is the render
     quantum. A host that keeps its rings full always qualifies with the default ring
-    (`source_ring_frames = 0`), whose headroom covers `P_MAX` (#1358).
+    (`source_ring_frames = 0`), whose headroom covers `P_MAX` (#1406).
   - A host that passes a nonzero `source_ring_frames` needs at least `stall + P_MAX + q` frames
     for warm growth: `stall` is the stall body of the default rule (#1354 D1's
-    `stall_ring_frames`) and `P_MAX` is #1358's `P_MAX_SAMPLES` for the session's rate. With
+    `stall_ring_frames`) and `P_MAX` is #1406's `P_MAX_SAMPLES` for the session's rate and
+    quantum. With
     less, a growth whose `P + q` exceeds the ring's frames above `stall` takes the transition
     (`WarmUnavailable::LeadBound`, #1354 D2), which still completes the edit.
   - At adoption the engine reads each carried source `P` frames further ahead in that one render
@@ -150,8 +154,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
    candidate pending and publish nothing. After it, one call does exactly one withdrawal and one
    re-preparation (deliverable 2's counters each grow by exactly 1).
 5. **Refusal counter (control-plane test, `test-support`).** With one injected re-preparation
-   refusal, the service step keeps the revision pending, `COUNTERS_GET` reports
-   `TRANSITION_REPREPARE_REFUSALS` 1, and the next service call publishes the transition.
+   refusal, the service step keeps the revision pending and republishes the donor (#1358 D3),
+   `COUNTERS_GET` reports `TRANSITION_REPREPARE_REFUSALS` 1, and the next service call withdraws
+   it again and publishes the transition (deliverable 2's withdrawal counter reads 2).
 6. **Audit.** `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
    passes with the new leg.
 7. Commands:
@@ -188,7 +193,9 @@ A mobile host that adds a latent effect during playback gets a seamless swap thr
 - *Adopt a warm successor with a raw-frame prime at the first ready block* (#1355): render's
   adoption.
 - *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): the
-  deadline D2 checks, and `P_MAX_SAMPLES`.
+  deadline D2 checks, and the republished donor on a refused re-preparation.
+- *Grow the default source ring by the warm-prime headroom* (#1406): `P_MAX_SAMPLES` and the
+  default ring D4 describes.
 - *Record the swap block's cost on the 64-track console* (#1286): the `PRIME_BYTES_MAX` value D1
   writes.
 - *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm

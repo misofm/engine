@@ -24,8 +24,9 @@ successor with a raw-frame prime at the first ready block* (#1355) calls with th
   adds the edge lines, keyed by `GraphEdgeId` (its D1), moved when equal (D2); its D3 leaves
   claim lines to this issue.
 - Successor preparation and the carry join are in host-core: `SuccessorBase`
-  (`crates/host-core/src/prepare.rs:641`), `prepare_host_runtime_successor` (`:909`), and the
-  `test-support` successor entry points (`:946`, `:967`).
+  (`crates/host-core/src/prepare.rs:641`), `prepare_host_runtime_successor` (`:909`),
+  `prepare_host_runtime_with_live_controls_successor` (`:926`), and the `test-support` successor
+  entry point `test_only_prepare_host_runtime_with_live_controls_successor_on` (`:969`).
 - The lemma (#1287, binding): L2 fills a W claim line of length `λ'` with the last `λ'` samples of
   `[A's λ pending] ++ [prime]`, where the prime is `k = P / q` consumer blocks on A's own schedule.
   A grown line on a carried node (`λ' = λ + P`) then emits exactly A's samples; a line on a

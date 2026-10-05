@@ -45,25 +45,31 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 
 ## Decisions frozen for this slice
 
-- **D1. A warm edit that restarts strips.** This is the arm of #1403 D2's match for `Warm` with
-  `lead_samples > 0` and a warm successor whose `restarted_strips()` is not empty. Until this
-  slice, #1403 D2 routes this arm, the `lead_samples == 0` arm and `Unavailable` to today's path.
-  Only `test-support` sessions hold a `WarmConfig` before #1360 and #1361, which depend on this
+- **D1. A warm edit that ducks strips.** This is the arm of #1403 D2's match for `Warm` with
+  `lead_samples > 0` and a non-empty duck set: #1324 D4's set, the strips the edit removes plus the
+  warm successor's `restarted_strips()`. A growth that only removes a strip ("replace a stem":
+  remove X, add a track with a limiter) takes this arm too, so X ramps out (#1325) instead of
+  stopping dead at the adoption block (#1269 P4). Until this slice, #1403 D2 routes this arm, the
+  `lead_samples == 0` arm and `Unavailable` to today's path. Only `test-support` sessions hold a
+  `WarmConfig` before #1360 and #1361, which depend on this
   slice, so no product session reaches these arms before they exist. That is merge order, not a
   gap. The control
   plane runs #1325 D7's shared step with #1324 D4's duck set, with one change at the end:
-  1. The warm successor applies #1324 D2-D3 to those strips: a whole pre-fader restart, armed.
-     A strip in `restart_whole` (#1354 D2 step 6) is restarted in every owner as #1324 D2 states
-     for such a strip, and ducked and armed the same way.
-  2. In the same transaction, the control plane writes their ramped mutes to the running plan
-     (#1325 D2) and reads `p`.
+  1. The warm successor applies #1324 D2-D3 to its restarted strips: a whole pre-fader restart,
+     armed. A strip in `restart_whole` (#1354 D2 step 6) is restarted in every owner as #1324 D2
+     states for such a strip, and ducked and armed the same way. A removed strip is not in W.
+  2. In the same transaction, the control plane writes the ramped mutes of the whole duck set to
+     the running plan (#1325 D2) and reads `p`.
   3. It publishes through `publish_primed` (#1403 D3), admitted with `AdmissionPeak::WithReprepare`
      as #1403 D2 admits every warm candidate, with `not_before` = #1325 D3's `S` instead of
-     `NoEarlierThan(S)`. For this edit, #1325 D3's `C` counts every line out of a ducked strip
-     that W keeps: its route lines, and every `EffectSidechain` line from its `post_fader` or
-     `post_pan` tap into a carried node (#1354 D2 step 2 keeps that consumer carried). So by
-     `not_before` every restarted strip and every line out of it holds only exact `+0.0`, and a
-     line that W shortens drops only `+0.0`. That is the isolation the lemma needs.
+     `NoEarlierThan(S)`. For this edit, #1325 D3's `C` counts, in the running plan, every route
+     line out of a ducked strip (removed or restarted, #1324 D4); every `EffectSidechain` line
+     from a restarted strip's `post_fader` or `post_pan` tap into a carried node (#1354 D2 step 2
+     keeps that consumer carried); and, for a restarted submix whose `input` tap feeds a carried
+     node under #1354 D2 step 2's exemption (every line into its `Input` stage comes from a ducked
+     or added strip), that sidechain line plus the longest line into the stage. So by
+     `not_before` every ducked strip and every line out of it holds only exact `+0.0`, and a line
+     that W shortens drops only `+0.0`. That is the isolation the lemma needs.
   4. Render adopts at the first ready block at or after `not_before` (#1355 D4). The armed strips
      fire at the first block at or after that block plus `D` (#1288 D3).
 
@@ -74,7 +80,9 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
   `Δ = 0` over C), there is no lead and no prime. The successor is prepared with that
   `WarmLead` (#1354 D4), so its `restart_whole` strips join `restarted_strips()`, and it is
   published as #1324 D4 publishes an ordinary duck-swap (`NoEarlierThan(S)`, not `Primed`), with
-  `AdmissionPeak::Single`. It completes `EXACT`; it is not a transition fallback.
+  `AdmissionPeak::Single`, and with `S` counted with step 3's `C`, not #1325's route lines alone: a
+  `restart_whole` strip whose arrival grows can shorten a `post_fader` sidechain line into a
+  carried consumer. It completes `EXACT`; it is not a transition fallback.
 - **D2. The transition fallback.** One host-core entry point, `fall_back_to_transition(..)` in
   `crates/host-core/src/warm.rs`, takes an optional donor. It runs:
   - at submit, in #1403 D2's arm for `Unavailable` (any reason), with no donor;
@@ -98,8 +106,9 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
      carry's retargets (#1277 D5) ramp the carried strips to it.
   3. If the re-preparation is refused anyway, that is a defect. The donor is kept whole,
      `transition_reprepare_refusals` (a saturating session counter) rises, and a debug assertion
-     fires. The next deadline step retries. The revision stays pending and never completes as
-     nothing.
+     fires. The function returns the donor to its caller, the deadline step, which republishes it
+     and sets its record again (#1358 D3), so it is never held outside the mailbox. The next
+     deadline step retries. The revision stays pending and never completes as nothing.
   4. The duck set is `grown_strips(predecessor, successor)`, a new function in
      `crates/host-core/src/transition.rs`, sorted by ID, joined with #1324's restarted strips. It
      returns every strip whose content timing moves: a strip with a node whose arrival grows over
@@ -142,10 +151,16 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
 
 ## Non-goals
 
-- The deadline, its step and ring headroom (#1358). C ABI and browser wiring (#1360, #1361).
+- The deadline and its step (#1358), and the ring headroom (#1406). C ABI and browser wiring (#1360,
+  #1361).
 - No change to #1324's duck itself (its D2-D5) or to #1288's fade.
 
 ## Objective gates
+
+Every source ring is set explicitly, as in #1355's gates, to `stall_ring_frames(fs, q) +
+P_MAX_SAMPLES(fs, q) + q` (7,296 frames at 48 kHz and quantum 128). The fixture's own 4,096 frames
+(`crates/host-core/tests/support/successor.rs:33`) are below the stall body, so with them every
+warm edit would be `LeadBound`.
 
 1. **Latent insert on an audible strip.** A is #1355 gate 1's two tracks, both audible; quantum
    128, 48 kHz, every source queued at least `P + q` frames ahead. The edit adds a true-peak limiter
@@ -175,13 +190,26 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
    at (#1324 gate 1's form). The advance reports `TRANSITION_FALLBACK`, and
    `transition_fallback_count` grows by the revisions it covers.
 4. **Transition with a donor.** A `Primed` candidate is withdrawn and passed as the donor, with the
-   injected refusal. `transition_reprepare_refusals` counts 1, the revision stays pending and the
-   donor is held. The next call completes the revision with `TRANSITION_FALLBACK`. With an edit
-   that also adds a source `c`, fed from frame 0 while the candidate was pending, the transition
+   injected refusal. `transition_reprepare_refusals` counts 1, the revision stays pending, and the
+   donor is republished `Full` with its words and its record set again (#1358 D3). The next deadline
+   step withdraws it again and completes the revision with `TRANSITION_FALLBACK`. With an edit that
+   also adds a source `c`, fed from frame 0 while the candidate was pending, the transition
    holds the donor's `c` ring and plays every chunk submitted since frame 0. A structural edit
    refused while that transition is pending (#1310 D4 republishes it) leaves its word: its
    adoption still reports `TRANSITION_FALLBACK`.
-5. Commands:
+5. **A warm growth that also removes a strip (moved from #1403 gate 2).** A renders sources `s`
+   (track 1) and `u` (track 2), with a session mute ramp `N`. W1 is #1403 gate 1's growth,
+   published `Primed` with frames withheld, so every ring is flagged. A structural edit then
+   removes track 1 and adds a second muted limiter track, which supersedes W1 by #1310 with a
+   warm successor W2 whose duck set is track 1, so it takes D1.
+   - At W2's publication, `s`'s ring reads `prime_required() == false`, `u`'s reads `true`, and
+     `not_before` is #1325 D3's `S`.
+   - `u` alone is queued `P + q` frames ahead; `s` is fed exactly the frames A renders up to `S`
+     and none past them. W2 is adopted at the first block at or after `S`, never before.
+   - Up to that block the output equals A continued with track 1 live-muted by the same ramped
+     mute at the same block, fed the same frames; from it on, for 64 blocks, it equals that
+     reference continued.
+6. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
@@ -197,9 +225,14 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
   line's adopts early, and the shortened line drops nonzero samples. Red.
 - Gate 3: a bound that refuses the edit, a transition that reports `EXACT`, or a duck set without
   track 2 breaks the references. Red.
-- Gate 4: a refused re-preparation that drops the revision completes it as nothing; a fallback
-  that drops the donor before preparing loses `c`'s acked chunks; a republish that resets the
-  word reports `EXACT`. Red.
+- Gate 4: a refused re-preparation that drops the revision completes it as nothing; a refusal
+  that holds the donor outside the mailbox leaves no record, so no step retries; a fallback that
+  drops the donor before preparing loses `c`'s acked chunks; a republish that resets the word
+  reports `EXACT`. Red.
+- Gate 5: a warm growth routed on `restarted_strips()` alone publishes W2 at the render clock and
+  cuts track 1 dead at the adoption block; a `publish_primed` that leaves the withdrawn
+  candidate's flags alone keeps `s` flagged, so W2 waits for frames the host never sends and is
+  not adopted at the first block at or after `S`. Red.
 
 ## Dependencies
 

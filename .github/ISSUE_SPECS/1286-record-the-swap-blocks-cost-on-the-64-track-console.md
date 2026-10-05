@@ -15,8 +15,8 @@ derivation** of every warm-successor constant. It measures, against an ordinary 
   the first ready block*, #1355): the first growth, and the growth that brings `ΣP` to `P_MAX`.
 
 D3 below is the only place where `P_MAX_SAMPLES`, the ring headroom and `PRIME_BYTES_MAX` are
-defined. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358)
-writes `P_MAX_SAMPLES` and the ring headroom into code, and *Check the warm-successor deadline in
+defined. *Grow the default source ring by the warm-prime headroom* (#1406) writes `P_MAX_SAMPLES`
+and the ring headroom into code, and *Check the warm-successor deadline in
 miso_engine_v1_service and report its outcome* (#1360) writes `PRIME_BYTES_MAX` and passes both
 bounds to *Prepare a warm successor whose carried nodes lead the predecessor by P* (#1354)'s
 `WarmConfig`. None restates a formula. `P_MAX_SAMPLES` and the ring headroom are formulas
@@ -42,8 +42,8 @@ whole-bank move (#1269, Deferred) earns a brief.
 - The default source ring is `ceil(100 ms · fs / quantum) + 2` quanta
   (`default_source_ring_frames`, `crates/host-core/src/prepare.rs:65-77`;
   `SOURCE_STALL_TOLERANCE_MS`, `:57`). *Prepare a warm successor whose carried nodes lead the
-  predecessor by P* (#1354) D1 names that body `stall_ring_frames(fs, q)`, and #1358 D2 makes the
-  default `stall_ring_frames(fs, q) + P_MAX_SAMPLES(fs) + q`. A host sets the ring itself with
+  predecessor by P* (#1354) D1 names that body `stall_ring_frames(fs, q)`, and #1406 D2 makes the
+  default `stall_ring_frames(fs, q) + P_MAX_SAMPLES(fs, q) + q`. A host sets the ring itself with
   `HostPrepareCaps::source_ring_frames` (`crates/host-core/src/prepare.rs:106`).
 - **Rounding slack carries.** `Δ` is taken against the floored arrivals `a(n)` of the previous
   growth, so `ΣP` after `j` growths is `ceil_q` of track 1's natural arrival, not the sum of each
@@ -100,11 +100,11 @@ whole-bank move (#1269, Deferred) earns a brief.
   - Sessions `C_1` to `C_4`: `C_j` is A after growths 1 to `j` of the chain at 96 kHz (one limiter
     and one soft clipper each). Each step `C_(j-1) -> C_j` restarts track 1 and carries every
     other node at `a(n) + P` (C1 holds, because the floor dominates every other node's arrival),
-    and `C_4` reaches `P_MAX_SAMPLES(96 kHz) = 4,096`.
+    and `C_4` reaches `P_MAX_SAMPLES(96 kHz, 128) = 4,096`.
   - Every source ring is set explicitly through `HostPrepareCaps::source_ring_frames` to
-    `stall_ring_frames(96 kHz, 128) + P_MAX_SAMPLES(96 kHz) + 128 = 9,856 + 4,096 + 128 = 14,080`
-    frames, so each growth has #1354 D2 step 7's headroom whether or not #1358 has changed the
-    default; a default ring before #1358 would make every growth `LeadBound`.
+    `stall_ring_frames(96 kHz, 128) + P_MAX_SAMPLES(96 kHz, 128) + 128 = 9,856 + 4,096 + 128 =
+    14,080` frames, so each growth has #1354 D2 step 7's headroom whether or not #1406 has changed
+    the default; a default ring before #1406 would make every growth `LeadBound`.
   - All sessions are prepared through host-core as the C ABI prepares them, with live lanes; each
     `C_j` through #1354's warm preparation, with a `WarmConfig` whose `prime_bytes_max` is
     unbounded, since this run is what sets it.
@@ -127,11 +127,13 @@ whole-bank move (#1269, Deferred) earns a brief.
   on the browser's 64-track app session at its own rate `fs_h` (48 kHz, as every browser
   qualification session runs, e.g. `hosts/host-web/qualification/live-control-session.json:5`);
   the record states `fs_h` beside `h`.
-  1. `P_MAX_SAMPLES(fs) = 4 · ceil_q(L_max(fs))`, where `L_max(fs)` is the largest declared latency
+  1. `P_MAX_SAMPLES(fs, q) = 4 · ceil_q(L_max(fs))` at the session's quantum `q` (the notation's
+     `q = 128` gives this record's values; at 96 kHz and `q = 127` it is `4 · 1,016 = 4,064`), so it
+     is a whole number of quanta at every quantum, where `L_max(fs)` is the largest declared latency
      of any launch native effect at `fs` over its quality modes (the true-peak limiter's
      `Fs/100 + 6`, `crates/true-peak-limiter/src/lib.rs:236-242`, unless the record finds a larger
      one). That is four of the largest growths between host-declared discontinuities.
-  2. **Ring headroom.** `default_source_ring_frames` grows by `P_MAX_SAMPLES(fs) + q`: a source
+  2. **Ring headroom.** `default_source_ring_frames` grows by `P_MAX_SAMPLES(fs, q) + q`: a source
      whose read position leads render by `ΣP <= P_MAX_SAMPLES`, and whose next prime needs `P + q`
      frames queued, still leaves the producer the full stall tolerance. There is no deadline term:
      render reads nothing ahead while it waits for readiness. The record reports the ring bytes of
@@ -157,9 +159,10 @@ whole-bank move (#1269, Deferred) earns a brief.
      - The estimate for the 64-track console at 96 kHz is about 512 KiB for the first growth and up
        to 2 MiB at `ΣP = P_MAX_SAMPLES`. The record confirms or corrects it; it is not a gate.
 
-  `P_MAX_SAMPLES` and the headroom at 44.1, 48 and 88.2 kHz come from the same formulas.
+  `P_MAX_SAMPLES` and the headroom at 44.1, 48 and 88.2 kHz, and at every other quantum, come from
+  the same formulas.
   `PRIME_BYTES_MAX` is one byte count for every rate: 96 kHz has the largest primes and the
-  largest `o / D`. Quanta other than 128 are outside this measurement, and the record says so.
+  largest `o / D`. Quanta other than 128 are outside its timed measurement, and the record says so.
 - **D4. Home.** A new `bench swap` subcommand in `tools/bench` (add `host-core` to its
   dependencies), with its own validator, and a `--swap` mode of the operator runner, or another
   home the bench policy accepts. `bash scripts/check-bench-policy.sh` must pass either way.
@@ -177,7 +180,7 @@ whole-bank move (#1269, Deferred) earns a brief.
 
 1. D1-D5.
 2. `artifacts/steps/swap-carry-base/` with the record and the report.
-3. A comment on #1269, #1287, #1358 and #1360 with the move and adoption block p50 and p99
+3. A comment on #1269, #1287, #1358, #1360 and #1406 with the move and adoption block p50 and p99
    against the ordinary p50 and p99, and D3's values.
 
 ## Authorized paths
@@ -193,21 +196,21 @@ whole-bank move (#1269, Deferred) earns a brief.
 - No optimisation of the carry or the prime. A large number opens a weekly-pass issue; it is not
   chased here.
 - No browser number (#1331), and no AArch64 timing (that waits for funding).
-- No change to any engine constant: #1358 and #1360 write D3's values into code.
+- No change to any engine constant: #1406 and #1360 write D3's values into code.
 
 ## Objective gates
 
 1. The preflight passes. The self-test, without timing, renders A and B through one move swap,
    and one cycle A → `C_1` → … → `C_4` through four primed adoptions: each adoption happens at its
    `not_before` block with `carry == Carried` and `P == ceil_q(L_max)`, `C_4`'s `ΣP` equals
-   `P_MAX_SAMPLES(96 kHz)`, and
+   `P_MAX_SAMPLES(96 kHz, 128)`, and
    every block has a nonzero output peak.
 2. The validator refuses:
    - a record with a missing distribution or a missing D3 value;
    - a swap or adoption count different from the frozen one;
    - a run with no carrying swap (`carry != Carried`), or an adoption with `prime_bytes() == 0`;
    - an adoption later than its `not_before` block (the prime was not ready, so the run timed
-     something else), or a `C_4` whose `ΣP` is not `P_MAX_SAMPLES(96 kHz)`;
+     something else), or a `C_4` whose `ΣP` is not `P_MAX_SAMPLES(96 kHz, 128)`;
    - a run with any silent timed block, or an input other than the tone.
 3. Exactly one timed invocation, recorded with its warmup and its two rounds.
 4. Commands:
@@ -224,7 +227,7 @@ whole-bank move (#1269, Deferred) earns a brief.
 - Gate 2: a run whose swaps silently stopped carrying (every swap cold) would time the wrong thing;
   so would an adoption that primed nothing, one deferred because the bench fed its rings too late,
   a growth chain that never reached `P_MAX`, or blocks on the silent fast path. A record without
-  D3's values would leave #1358 and #1360 without their bounds. The validator turns red on each.
+  D3's values would leave #1406 and #1360 without their bounds. The validator turns red on each.
 
 ## Dependencies
 

@@ -19,22 +19,24 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
   and #1381, and round 5 split #1287's first slice (the claim-line carry and fill went to #1402) and #1355
-  (the control plane's classification, publication and record went to #1403).
-  The verifiers still flagged #1280, #1316, #1320, #1325, #1332, #1333, #1334, #1354, #1358, #1363
+  (the control plane's classification, publication and record went to #1403). Round 6 split #1358:
+  the default ring and every pin of the ring rule went to #1406, and the deadline step stayed.
+  The verifiers still flagged #1280, #1316, #1320, #1325, #1332, #1333, #1334, #1354, #1355, #1363
   and #1397 as tight; their stream coordinator splits any that does not fit half a day before
-  implementation (AGENTS.md). #1358 splits most easily into its default ring with the pins outside
-  host-core, and the deadline step.
+  implementation (AGENTS.md).
 - **Stream C design gate.** Every adversarial round from round 2 on found new defects in the warm
   successor, and round 5 replaced its design with prime adoption (decision 15, "Verification";
   D15-8 (round-5 amendment)). Before its first implementation slice, stream C's coordinator runs
   one fresh opus-xhigh design verification of #1287, #1320, #1354, #1355, #1358, #1360, #1361,
-  #1396, #1397, #1402 and #1403 together, and folds every BLOCKER and MAJOR into the specs (and GitHub)
-  first.
+  #1396, #1397, #1402, #1403 and #1406 together, and folds every BLOCKER and MAJOR into the specs (and
+  GitHub) first. Its checklist includes the round-6 folds: the C1 restart walk over every edge kind
+  (#1354 D2 step 6), routing a warm growth on #1324 D4's duck set (#1403 D2, #1397 D1), and the
+  donor republished on a refused deadline re-preparation (#1358 D3).
 - Critical path: S0, then B #1309, then B #1312 (cells) and #1343, then A's carry slices (#1277 onward)
   and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
   slices that write into them (#1312 before #1277, #1345 before #1280). Inside C: #1287, then
   #1402 and (after D #1324) #1354, then #1355, then #1403, then #1397; A's #1286 measures on #1355, and
-  #1358 and #1360 take its constants, so #1361 comes last.
+  #1406, #1358 and #1360 take its constants, so #1361 comes last.
 - Umbrellas (no stream; root keeps them current): #1269 *Swap a rebuilt plan without an audio gap*
   and #1053 *Deliver value-only fader, mute and pan transactions to the running C ABI plan through
   the live console lanes*. Their slice tables mirror the issues below.
@@ -48,7 +50,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 
 | File | Order |
 |---|---|
-| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1358) → F |
+| `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1402, #1396) → D (#1288, #1324, #1325) → C (#1354, #1355, #1397, #1406) → F |
 | `crates/effect-compiler/src/prepare.rs` | I #1335 (starts immediately) → B (#1315, #1345) → G (#1339, #1340, #1377, #1378); F #1306 after B #1345, either order with G, the second rebases |
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
@@ -67,6 +69,10 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |
+| `tools/parameter-metadata/src/abi_layout.rs` | H (#1333, #1380, #1332, #1381, #1293, #1386) and B (#1399, #1349) → C #1406 (the `sourceRing` rule only) |
+| `scripts/check-abi-layout-v1.py` | H (#1333, #1332, #1381, #1293, #1386), B #1349 and G #1378 → C #1406 (the `sourceRing` check only) |
+| `hosts/host-web/src/tests.rs` | about 30 slices of streams B, D, E, F, G and H edit it; C #1406 (`default_ring_covers_stall_tolerance` only) lands after H #1381 and rebases over any later edit |
+| `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
 | `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry |
@@ -142,7 +148,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 ## Stream C
 
 - **Coordinator scope:** Latency growth by prime adoption (D15-8 (round-5 amendment)): lead floors and source-claim lines, their carry and fill, the source-read clock, the readiness check and raw-frame prime, warm preparation, adoption at the first ready block, the duck-swap of restarted strips, the transition fallback and its deadline, and the service wiring on both hosts. There is no off-thread executor, catch-up, peek pool, copy-mode carry or render-thread pre-roll.
-- **Owns:** `crates/source` readiness and prime (#1320) and the source driver's two prime methods (#1355), after B's #1316-#1319, #1343, #1344, #1350; `crates/engine/src/realtime/spsc.rs` `peek` only (#1320); `crates/engine/src/realtime` source-read clock (#1396), after #1310, #1311, #1314, #1343; host-core warm-successor code (`crates/host-core/src/warm.rs`, new) and its rows in `prepare.rs`, `source.rs` and `transition.rs` (`grown_strips`, #1397), after streams A and D; the control-plane growth path and service step (#1355 tests, #1396's declaration term, #1403, #1358, #1360, #1397); `crates/capi` and `tools/audit/src/capi.rs` for #1360, with `docs/C_ABI_V1_QUALIFICATION.md`; the source-report assertions in `crates/host-core/tests/` and `crates/capi/tests/`, and `Cargo.lock`, for #1320; `crates/host-core/tests/source_read_clock.rs` (new) for #1396; `hosts/host-web` for #1361. By named exception in stream H's files, for #1358's ring rule only: `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance`), `tools/parameter-metadata/src/abi_layout.rs` and `tools/parameter-metadata/tests/abi_layout.rs`, `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`, `sdk/src/core/abi.ts` (`defaultSourceRingFrames`), the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`, and the qualification record's ring label in `hosts/host-web/qualification/{qualification.js,run.mjs,generate-matrix.mjs}`; `crates/capi/src/runtime/tests.rs` (B's) for the same assertions. #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285; #1402 edits `crates/graph` and `prepare.rs` after #1283.
+- **Owns:** `crates/source` readiness and prime (#1320) and the source driver's two prime methods (#1355), after B's #1316-#1319, #1343, #1344, #1350; `crates/engine/src/realtime/spsc.rs` `peek` only (#1320); `crates/engine/src/realtime` source-read clock (#1396), after #1310, #1311, #1314, #1343; host-core warm-successor code (`crates/host-core/src/warm.rs`, new) and its rows in `prepare.rs`, `source.rs` and `transition.rs` (`grown_strips`, #1397), after streams A and D; the control-plane growth path and service step (#1355 tests, #1396's declaration term, #1403, #1358, #1360, #1397); `crates/capi` and `tools/audit/src/capi.rs` for #1360, with `docs/C_ABI_V1_QUALIFICATION.md`; the source-report assertions in `crates/host-core/tests/` and `crates/capi/tests/`, and `Cargo.lock`, for #1320; `crates/host-core/tests/source_read_clock.rs` (new) for #1396; `hosts/host-web` for #1361. By named exception in stream H's files, for #1406's ring rule only: `hosts/host-web/src/tests.rs` (`default_ring_covers_stall_tolerance`), `tools/parameter-metadata/src/abi_layout.rs` and `tools/parameter-metadata/tests/abi_layout.rs`, `scripts/check-abi-layout-v1.py` and `scripts/fixtures/abi-layout-v1-self-test.json`, `sdk/src/core/abi.ts` (`defaultSourceRingFrames`), the regenerated `sdk/assets/miso-engine-v1-abi-layout.json` and `sdk/src/generated/abi.ts`, the ring assertions of `sdk/test/{boot,browser,builder}-evals.mjs`, the per-source in-flight bound in `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` and its case in `scripts/test-web-audioworklet.mjs`, the ring comments of `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` and `sdk/src/browser/shipped-host.d.ts`, the row of `hosts/host-web/MUTATIONS.md`, the qualification record's ring label in `hosts/host-web/qualification/{qualification.js,run.mjs,generate-matrix.mjs}` with the key rename in `results.json` and the regenerated `hosts/host-web/BROWSER_DEPLOYMENT_MATRIX.md`, and a note in `docs/derivations/243-sdk-boot.md`; `crates/capi/src/runtime/tests.rs` (B's) for the same assertions. #1287's first slice edits `crates/graph` and `crates/graph-compiler` after #1285; #1402 edits `crates/graph` and `prepare.rs` after #1283.
 - **Depends on:** A (#1277, #1283, #1285, #1286, #1323, #1327, #1395), B (#1309, #1310, #1311, #1313, #1314, #1316, #1318, #1319, #1343, #1344, #1348, #1349, #1351, #1398), D (#1288, #1324, #1325), and for #1361 H (#1290, #1293, #1294, #1331, #1332, #1333, #1381).
 - **Parallel-safe with:** E, F, G, J.
 
@@ -154,11 +160,12 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 4 | #1320 | Let a source consumer check and replay its next blocks for a prime | — | #1316, #1318, #1319 |
 | 5 | #1354 | Prepare a warm successor whose carried nodes lead the predecessor by P | #1287, #1396, #1402 | #1277, #1285, #1324 |
 | 6 | #1355 | Adopt a warm successor with a raw-frame prime at the first ready block | #1287, #1320, #1354, #1396, #1402 | #1277, #1310, #1311, #1314, #1323, #1327, #1343, #1344, #1395 |
-| 7 | #1403 | Classify a latency-growth edit and publish its warm successor from the control plane | #1320, #1354, #1355, #1396 | #1310, #1311, #1313, #1314, #1323, #1343, #1348, #1398 |
-| 8 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt | #1354, #1355, #1396, #1403 | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1398 |
-| 9 | #1358 | Fall back to the transition when a warm successor is not ready by its deadline | #1354, #1355, #1396, #1397, #1403 | #1286, #1310, #1314, #1343 |
-| 10 | #1360 | Check the warm-successor deadline in miso_engine_v1_service and report its outcome | #1354, #1355, #1358, #1397, #1403 | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1398 |
-| 11 | #1361 | Check the warm-successor deadline in the browser Worker's service loop and report its outcome | #1355, #1360, #1403 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
+| 7 | #1406 | Grow the default source ring by the warm-prime headroom | #1354, #1355 | #1286 |
+| 8 | #1403 | Classify a latency-growth edit and publish its warm successor from the control plane | #1320, #1354, #1355, #1396 | #1310, #1311, #1313, #1314, #1323, #1324, #1325, #1343, #1348, #1398 |
+| 9 | #1397 | Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt | #1354, #1355, #1396, #1403 | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1398 |
+| 10 | #1358 | Fall back to the transition when a warm successor is not ready by its deadline | #1354, #1355, #1396, #1397, #1403, #1406 | #1310, #1314, #1323, #1325, #1343 |
+| 11 | #1360 | Check the warm-successor deadline in miso_engine_v1_service and report its outcome | #1354, #1355, #1358, #1397, #1403, #1406 | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1398 |
+| 12 | #1361 | Check the warm-successor deadline in the browser Worker's service loop and report its outcome | #1355, #1360, #1403, #1406 | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1381 |
 
 ## Stream D
 

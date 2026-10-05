@@ -79,17 +79,23 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
 - **C1 (alignment).** `a'(n) = a(n) + P` for every `n` in C, checked at preparation. Floors are
   lower bounds (#1285 D1), so a node can arrive later than its floor. If one does, preparation
   restarts strips whole (every node of a restarted strip joins R), recomputes `Δ` over the new C,
-  and checks again:
-  - if the late node's input comes through an R or N strip whose `Input` stage is held later than
-    its floor by carried feeders (which arrive at their lead), it restarts those feeders whole,
-    recursively through every feeder that is a submix, so that `Input` stage falls back to `a(n)`;
-  - otherwise it restarts the late node's own strip whole.
+  and checks again (#1354 D2 step 6):
+  - it takes the first late C node in schedule order and walks back from its late inputs through
+    R and N nodes along every edge kind (route, added route, sidechain: PDC takes its maximum over
+    sidechain edges too, `crates/graph-compiler/src/pdc.rs:61-65`), following the inputs that hold
+    each arrival;
+  - it restarts whole the strip of every C node that holds that path at its lead (a route node
+    counts as its source strip), recursively through every one that is a submix;
+  - only when the walk finds no such node does it restart the late node's own strip whole; the
+    output belongs to no strip, so there the walk finding none returns
+    `WarmUnavailable::Misaligned`.
 
-  It iterates until C1 holds. Only if every strip that reaches the output would restart does
+  It iterates until C1 holds. Only if every strip that reaches the output is restarted whole does
   preparation return `WarmUnavailable::Misaligned`, and the edit takes the transition, which gives
   that same audio. So a latent insert added on a submix (a limiter on a bus) is warm-exact: its
-  carried feeders restart with it and duck-swap (W9), and every other path, the output included,
-  stays exact. A
+  carried feeders restart with it and duck-swap (W9). A kick that keys the bass's compressor, when
+  the edit adds a limiter to the bass, restarts the kick, whose key holds the bass's chain late.
+  Every other path, the output included, stays exact. A
   growth that the restarts confine to R leaves `Δ = 0`: the edit is then an ordinary rebuild that
   duck-swaps those strips, not a transition.
 - **C2 (isolation).** Every edge from R or N into C carries exact `+0.0` over `[S, fire)`: fader
@@ -99,10 +105,14 @@ Floors are `a(n) + P` on C, `a(n)` on R, none on N. W's source-read offset is `O
   the consuming strip in R (repeated until no strip joins). A track's `input` tap (its raw source,
   whose line L3 fills) and a `post_fader` or `post_pan` tap (exact `+0.0` from the duck's end to
   the fire) keep the consumer in C. A restarted submix's `input` tap (the sum of its incoming
-  routes) keeps the consumer in C only if that submix's `Input` stage arrives at exactly
-  `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354 D2 step 4).
-  If it arrives at `a(n) + g` with `g ≠ P`, every carried line into that stage and the sidechain
-  line out of it change length by `P - g` samples, so the consuming strip joins R.
+  routes) keeps the consumer in C if every line into that submix's `Input` stage comes from an R
+  or added strip (exact `+0.0` from the duck's end to the fire, with `S` counting the sidechain
+  line plus the longest line into the stage, #1397 D1 step 3), and otherwise only if the stage
+  arrives at exactly `a(n) + P`, checked with C1 (with `P = 0` for a rebuild that grows nothing,
+  #1354 D2 step 4). If it arrives at `a(n) + g` with `g ≠ P`, every carried line into that stage
+  and the sidechain line out of it change length by `P - g` samples, so the consuming strip joins
+  R. Under a lead that needs a line into the stage that is not carried, such as a route from a
+  restarted strip's tap before the fader: a carried route's floor holds the stage at `a(n) + P`.
 - **C3 (bounds).** `ΣP + P <= P_MAX` and the prime's bytes `<= PRIME_BYTES_MAX`, else the
   transition (`WarmUnavailable::LeadBound`, `WarmUnavailable::PrimeBudget`).
 - **C4 (readiness).** Render checks it on the **active** plan's consumers before it claims: `S >=
@@ -184,14 +194,15 @@ during the adoption callback is observed at block S on the new clock.
 - **W8. Constants.** `P_MAX` and `PRIME_BYTES_MAX` are engine constants. *Record the swap block's
   cost on the 64-track console* (#1286) owns their single derivation (the prime adoption block
   measured at `ΣP = P_MAX`), with *Prove two Wasm instances on one shared memory in three browser
-  engines and on iOS* (#1331) for the browser rows. #1358 writes `P_MAX_SAMPLES` and the ring
-  headroom (`P_MAX` plus one quantum) into code, and #1360 writes `PRIME_BYTES_MAX`. No other spec
+  engines and on iOS* (#1331) for the browser rows. *Grow the default source ring by the
+  warm-prime headroom* (#1406) writes `P_MAX_SAMPLES(fs, q)` and the ring headroom (`P_MAX` plus
+  one quantum) into code, and #1360 writes `PRIME_BYTES_MAX`. No other spec
   restates a formula.
-- **W9. Edits that restart strips.** An edit that both grows latency and restarts strips (#1324
-  D1, such as a latent insert added to an audible strip) ducks those strips on the predecessor
-  through #1324, and `not_before` holds adoption until the duck has settled and its lines have
-  drained. The restarted strips fade in at `S + D` (#1324 D3, #1288 D4). Carried paths stay
-  exact.
+- **W9. Edits that duck strips.** An edit that both grows latency and ducks strips, restarting
+  them (#1324 D1, such as a latent insert added to an audible strip) or removing them (#1325),
+  ducks those strips on the predecessor (#1324 D4's duck set), and `not_before` holds adoption until
+  the duck has settled and its lines have drained (#1397 D1). The restarted strips fade in at
+  `S + D` (#1324 D3, #1288 D4). Carried paths stay exact.
 
 ## Decisions frozen for this slice
 
@@ -299,10 +310,12 @@ Every slice must also keep zero allocations, frees and syscalls on render.
    `PrimedCandidate` record.
 7. *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
    successor cannot adopt* (#1397): W9 and W6's `fall_back_to_transition`.
-8. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7,
-   `PRIME_DEADLINE_SAMPLES` and the ring headroom.
-9. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
-10. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
+8. *Grow the default source ring by the warm-prime headroom* (#1406): `P_MAX_SAMPLES` and the
+   ring headroom, with every pin of the ring rule.
+9. *Fall back to the transition when a warm successor is not ready by its deadline* (#1358): W7
+   and `PRIME_DEADLINE_SAMPLES`.
+10. *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* (#1360).
+11. *Check the warm-successor deadline in the browser Worker's service loop and report its outcome*
     (#1361).
 
 `P_MAX` and `PRIME_BYTES_MAX` come from *Record the swap block's cost on the 64-track console*

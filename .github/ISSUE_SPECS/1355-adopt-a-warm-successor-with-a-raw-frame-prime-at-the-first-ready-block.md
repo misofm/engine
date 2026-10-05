@@ -85,7 +85,7 @@ gap and no jump.
   - Render keeps no in-flight state, takes nothing back and never returns a candidate. While W is
     pending, the cost per block is at most `lead_blocks + 2` loads per flagged ring.
 - **D5. Adoption and prime, in the same block.** The claim adopts W by pointer swap and runs the
-  move-mode carry as today (`:418`, `:421`). In `GraphExecutor::adopt_predecessor`, after
+  move-mode carry as today (`crates/engine/src/realtime/plan_exchange.rs:418`, `:421`). In `GraphExecutor::adopt_predecessor`, after
   `adopt_sources` (`crates/graph/src/lib.rs:3161-3172`) and the claim-line carry (#1402 D1):
   - for each moved source and each `j` in `0..lead_blocks`, the driver calls
     `prime_block_at(S + O + j * q)` on its consumer, through a new
@@ -130,7 +130,7 @@ gap and no jump.
 ## Non-goals
 
 - Warm preparation and its refusals (#1354). The duck of restarted strips and the transition
-  (#1397). The deadline and ring headroom (#1358).
+  (#1397). The deadline (#1358) and the ring headroom (#1406).
 - Control-plane classification, `Primed` publication and the `PrimedCandidate` record (#1403).
   The outcome word (#1397). The C ABI and the browser (#1360, #1361).
 
@@ -141,8 +141,8 @@ Unless a gate says otherwise: A is the two-track fixture of
 (`crates/host-core/tests/support/successor.rs:33`) give every ring 4,096 frames, below today's
 5,120-frame default at 48 kHz and quantum 128. So every gate sets each source ring explicitly
 through `HostPrepareCaps::source_ring_frames` (`crates/host-core/src/prepare.rs:106`) to
-`stall_ring_frames(fs, q)` (#1354 D1, today's default ring) plus #1286 D3's `P_MAX_SAMPLES(fs)` plus
-`q`. At quantum 128 that is 6,912, 7,296, 12,800 and 14,080 frames at 44.1, 48, 88.2 and 96 kHz
+`stall_ring_frames(fs, q)` (#1354 D1, today's default ring) plus #1286 D3's
+`P_MAX_SAMPLES(fs, q)` plus `q`. At quantum 128 that is 6,912, 7,296, 12,800 and 14,080 frames at 44.1, 48, 88.2 and 96 kHz
 (4,736 + 2,048 + 128; 5,120 + 2,048 + 128; 9,088 + 3,584 + 128; 9,856 + 4,096 + 128), so #1354 D2's
 headroom check passes at every growth. Every source is kept queued at least `P + q` frames ahead.
 "Equals A continued" means bit-identical, every block, to A rendered on with no swap and the same
@@ -176,19 +176,19 @@ widths.
    `a + P`, so B's `Input` stage arrives at exactly `a + P` (#1354's check), and track 3 stays
    carried. The output equals A continued. (#1354 gates the `g < P` case, which restarts track 3.)
 6. **Realtime.** Every pending block's readiness check, and the adoption block of a fourth growth
-   whose `ΣP + P` equals #1286 D3 item 1's `P_MAX_SAMPLES(fs)`, make zero allocations and frees on
-   the render thread (`bench_support::alloc`'s current-thread counters). Locks and syscalls are
+   whose `ΣP + P` equals #1286 D3 item 1's `P_MAX_SAMPLES(fs, 128)`, make zero allocations and frees
+   on the render thread (`bench_support::alloc`'s current-thread counters). Locks and syscalls are
    checked by the realtime policy scripts on these functions and by #1360 D6's `audit capi` leg.
    - The four growths are #1286 D1's growth chain, the one construction: growth `j` (1 to 4) adds
      to track 1 one true-peak limiter (`L = fs / 100 + 6`,
      `crates/true-peak-limiter/src/lib.rs:236-242`) plus `c(fs)` soft clippers (31 samples,
      `crates/soft-clip/src/lib.rs:178`), with `c` = 2, 0, 0 and 1 at 44.1, 48, 88.2 and 96 kHz.
      A has no latency, so track 1 arrives at `j · (L + 31c)` (`j ·` 509, 486, 888 and 997), each
-     growth has `P = ceil_q(L)` (512, 512, 896 and 1,024), and `ΣP` after the fourth is 2,048,
-     2,048, 3,584 and 4,096, which is `P_MAX_SAMPLES(fs)`. #1286 D1's table shows the arithmetic
-     per rate and why no other `c` works (track delay cannot pad an arrival,
+     growth has `P = ceil_q(L + 31c)` (512, 512, 896 and 1,024), and `ΣP` after the fourth is 2,048,
+     2,048, 3,584 and 4,096, which is `P_MAX_SAMPLES(fs, 128)`. #1286 D1's table shows the
+     arithmetic per rate and why no other `c` works (track delay cannot pad an arrival,
      `crates/graph-compiler/src/pdc.rs:12-17`). The test asserts that `ΣP` equals
-     `P_MAX_SAMPLES(fs)` first; a mismatch fails it.
+     `P_MAX_SAMPLES(fs, 128)` first; a mismatch fails it.
 7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support --test warm_successor`
    - `cargo test --locked -p graph --features graph/test-support`, `cargo test --locked -p source`

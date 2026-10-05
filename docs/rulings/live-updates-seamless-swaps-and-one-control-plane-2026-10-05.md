@@ -167,13 +167,18 @@ when a dependency forces the order, and then sequence the correct solution.
      keep #1285's floors `a(n)`, added nodes have none. `Δ` is the largest arrival growth over the
      carried nodes, and `P = q·⌈Δ/q⌉`. Its source-read offset is the predecessor's plus `P` (#1396).
   2. Preparation checks alignment: every carried node arrives at exactly `a(n) + P`. If one is
-     late because a restarted or added strip's `Input` stage is held late by carried feeders,
-     those feeders are restarted whole (recursively through submix feeders); otherwise the late
-     node's own strip is restarted whole (#1324 D2). `Δ` is recomputed and the check repeats
-     (#1354). Only if every strip that reaches the output would restart does preparation return
-     `WarmUnavailable::Misaligned`, and the edit takes the transition, which gives the same audio.
-     So a latent insert on a bus restarts the bus's carried feeders and stays exact on every
-     other path, the output included. If the restarts leave `Δ = 0`, the edit is an ordinary
+     late, preparation takes the first late carried node in schedule order and walks back from
+     its late inputs through restarted and added nodes, along every edge kind (route, added
+     route, sidechain; PDC takes its maximum over sidechain edges too). It restarts whole every
+     carried strip that holds that path at its lead (a route counts as its source strip),
+     recursively through submix feeders, and only when the walk finds none, the late node's own
+     strip (#1324 D2). The output belongs to no strip: there a walk that finds none returns
+     `WarmUnavailable::Misaligned`. `Δ` is recomputed and the check repeats (#1354 D2 step 6).
+     Otherwise preparation returns `WarmUnavailable::Misaligned` only when every strip that
+     reaches the output is restarted whole, and the edit takes the transition, which gives the
+     same audio. So a latent insert on a bus restarts the bus's carried feeders, a kick that keys
+     a bass compressor restarts the kick when the bass gains a limiter, and every other path,
+     the output included, stays exact. If the restarts leave `Δ = 0`, the edit is an ordinary
      rebuild that duck-swaps those strips.
   3. Submit publishes the candidate as `Primed { not_before, lead_blocks }` (#1311).
   4. Render checks readiness (C4 below) on the **active** plan's consumers before it claims the
@@ -215,10 +220,12 @@ when a dependency forces the order, and then sequence the correct solution.
        `insert_send`, `insert_return` or `pre_fader` tap makes the consuming strip join R
        (repeated until none joins). A track's `input` tap (raw source) and a `post_fader` or
        `post_pan` tap (exact `+0.0` from the duck's end to the fire) keep the consumer in C. A
-       restarted submix's `input` tap (the sum of its incoming routes) keeps it in C only if that
-       submix's `Input` stage arrives at exactly `a(n) + P`, checked with C1 (with `P = 0` for a
-       rebuild that grows nothing, #1354 D2 step 4); otherwise the lines into that stage and out
-       of it change length and the consuming strip joins R.
+       restarted submix's `input` tap (the sum of its incoming routes) keeps it in C if every line
+       into that submix's `Input` stage comes from a restarted or added strip (exact `+0.0` from
+       the duck's end to the fire, with `S` counting the sidechain line and the longest line into
+       the stage, #1397 D1), and otherwise only if that stage arrives at exactly `a(n) + P`,
+       checked with C1 (with `P = 0` for a rebuild that grows nothing, #1354 D2 step 4); otherwise
+       the lines into that stage and out of it change length and the consuming strip joins R.
     3. C3, bounds: `ΣP + P ≤ P_MAX` and prime bytes `≤ PRIME_BYTES_MAX`.
     4. C4, readiness, checked by render on the active plan before it claims: S is at or after
        `not_before`; every source W carries has its next `P/q + 1` blocks queued and playable; no
@@ -266,7 +273,7 @@ when a dependency forces the order, and then sequence the correct solution.
   carried path, and render pays one bounded raw-frame fill (round 1, C2; round 2; round 5). An
   edited or restarted strip takes its D15-9 transition, which no mechanism can avoid.
 - *Issues:* #1285, #1323 (stream A); #1287 and its slices #1320, #1354, #1355, #1358, #1360, #1361,
-  #1396, #1397, #1402, #1403 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
+  #1396, #1397, #1402, #1403, #1406 (stream C); #1311 (stream B). Retired by the round-5 amendment (closed as not
   planned): #1321, #1322, #1353, #1356, #1357, #1359, #1362.
 
 **D15-9. Transitions for strips whose state cannot continue.**
@@ -444,7 +451,9 @@ automation mask and `AUTOMATION_ENQUEUE`.
   fallback; its edit stays pending until render resumes. When the deadline passes, the next control
   call withdraws the `Primed` candidate (a `Taken` result means render adopted it exactly),
   re-prepares with the withdrawn candidate as the donor and publishes the transition (#1358, #1397).
-  `transition_fallback` reports it.
+  `transition_fallback` reports it. If that re-preparation is refused (a defect, counted), the
+  donor is republished as it was and the next call retries, so a candidate is never held outside
+  the mailbox.
 - **Edits submitted during a pending window:**
   - **Live:** committed at once. If a rebuild candidate is pending, the edit goes to the newest
     candidate's cells and applies at adoption (#1053 D7). A pending warm candidate is an ordinary
@@ -604,9 +613,16 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
   headroom baseline measured against a default that #1358 grows (M3), a control-plane warm path
   with no owner or lifecycle (M4), four unpassable gates (M5) and an over-size #1355 (M6), plus
   minors. All were folded in before merge.
+- **Round 6: PASS-WITH-FIXES**, no blocker. Five majors: a C1 iteration that restarted feeders
+  only through a held-late `Input` stage and had no rule at the output (M1; now the walk of step
+  2), an unpassable `g < P` gate (M2), a warm growth that also removes a strip published without
+  the ramp-out (M3; now routed on #1324 D4's duck set), a refused deadline re-preparation with no
+  holder (M4; now republished, #1358 D3), and a default ring that missed quanta other than 128 and
+  pins outside its slice (M5; `P_MAX_SAMPLES(fs, q)`, split to #1406), plus minors. All were folded
+  in before merge.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
 passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its
 seams with streams B, D and H. Stream C is now #1287, #1320, #1354, #1355, #1358, #1360, #1361,
-#1396, #1397, #1402 and #1403. Its coordinator still runs one fresh design verification of those specs
+#1396, #1397, #1402, #1403 and #1406. Its coordinator still runs one fresh design verification of those specs
 before the first implementation slice (`docs/handoffs/decision-15-2026-10-05/STREAMS.md`).

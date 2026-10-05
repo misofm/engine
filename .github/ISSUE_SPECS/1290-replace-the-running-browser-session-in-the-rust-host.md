@@ -58,7 +58,8 @@ and SDK are the rewritten slices #1293-#1297.
     (`crates/engine/src/realtime/plan_exchange.rs:265`).
   - Render adopts in `RealtimePlanOwner::enter_block` (`:375`). That step continues the clock,
     runs `carry_from` (`crates/engine/src/realtime/plan.rs:917`) and sends the old plan to the
-    retirement queue. The control side reclaims it with `PlanRetirer::try_reclaim` (`:512`).
+    retirement queue. The control side reclaims it with `PlanRetirer::try_reclaim`
+    (`crates/engine/src/realtime/plan_exchange.rs:512`).
 - **Successor preparation.**
   - `SuccessorBase { inventory, committed }` (`crates/host-core/src/prepare.rs:641`).
   - `prepare_host_runtime_with_live_controls_successor` (`:926`).

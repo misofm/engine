@@ -77,20 +77,27 @@ scope (see Hazards).
   becomes `pub` (documented). Sites in crates that already depend on `bench-support` (`tools/audit`,
   `crates/compressor`) use it. `crates/engine` cannot (`bench-support` depends on `engine`) and fixes
   its two sites locally.
-- **D4. The capi copy (NIT).** `crates/capi` already has `bench-support` as a dev-dependency
-  (`crates/capi/Cargo.toml:25`). `bench-support` installs its audited `#[global_allocator]`
-  (`tools/bench-support/src/alloc.rs:169`) in any binary that links it, and
-  `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`), from
-  which its allocation counts come. That test binary cannot link `bench_support`, so its
-  `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason. Sites 1 and 6 sit
-  in capi's library test binary, which has no global allocator of its own. It already links
-  `bench-support` through that dev-dependency, so it already runs under the audited allocator, and
-  `bench-support` enables `engine/realtime-audit` (`tools/bench-support/Cargo.toml:14`), so every
-  engine render in that binary already runs inside `in_render_scope`
-  (`crates/engine/src/realtime/audit.rs:174-204`) under the default `Mode::Abort`. `StopOnDrop`
-  only stores an atomic flag when dropped (`tools/bench-support/src/producer.rs:28-34`) and
-  allocates nothing, so using it changes no allocator, no feature and no render scope. Sites 1
-  and 6 use `bench_support::producer::StopOnDrop` (D3).
+- **D4. The capi copy (NIT).** `crates/capi` has `bench-support` as a dev-dependency
+  (`crates/capi/Cargo.toml:25-26`), but nothing in capi's library test binary names a
+  `bench_support` symbol today (`crates/capi/src` never does). An rlib whose symbols are never named
+  is not linked, and its `#[global_allocator]` (`tools/bench-support/src/alloc.rs:168-169`) then
+  installs nothing (`:223-226`). So that binary does not run under the audited allocator today.
+  - `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`),
+    from which its allocation counts come. That test binary cannot link `bench_support`, so its
+    `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason.
+  - Sites 1 and 6 sit in capi's library test binary. Naming `bench_support::producer::StopOnDrop`
+    there links `bench-support` into it for the first time. The audited allocator becomes its
+    global allocator, and every engine render in it, already inside `in_render_scope`
+    (`crates/engine/src/realtime/audit.rs:174-204`, compiled in because `bench-support` enables
+    `engine/realtime-audit`, `tools/bench-support/Cargo.toml:14`), is then audited under the
+    default `Mode::Abort`. That is a real change, not a no-op.
+  - Decision: sites 1 and 6 use `bench_support::producer::StopOnDrop` (D3), and capi's whole
+    library test suite must pass under the audited allocator; site 1's test calls
+    `bench_support::alloc::assert_installed()` once, so the gate cannot pass with the allocator
+    silently absent. A library test that fails only under it is a render-path defect the audit
+    exists to catch: it is recorded in the evidence and filed as its own issue, and sites 1 and 6
+    then use a local guard like `resource_lifecycle.rs`'s, so this tooling slice installs no
+    allocator.
 
 ## Authorized paths
 
@@ -133,7 +140,8 @@ scope (see Hazards).
    or binary exits with a failure well inside the bound and prints the planted panic or the
    deadline message. Record both exit codes and the message per site.
 2. **Nothing else moved.**
-   - `cargo test --locked -p capi`, `cargo test --locked -p engine`,
+   - `cargo test --locked -p capi` (its library suite under the audited allocator, D4),
+     `cargo test --locked -p engine`,
      `cargo test --locked -p compressor --test conformance`, `cargo test --locked -p audit` and
      `cargo test --locked -p bench-support` pass;
    - `cargo build --locked --release -p audit`, then

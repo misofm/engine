@@ -74,7 +74,15 @@ never leaves it muted.
     nodes lead the predecessor by P*, #1354 D2 step 6); without one, at its predecessor arrival.
     This holds for every rebuild, warm or not; #1354 D2 step 4 applies the same check with `P = 0`.
     If the line changes length, #1283 D4's head-aligned copy breaks the detector's input at `S`,
-    so the consuming strip joins the set. A `post_fader` or `post_pan` tap is exact `+0.0`
+    so the consuming strip joins the set. Under a lead the stage misses `a + P` only when a line
+    that is not carried held it in A, such as a route from a restarted strip's tap before the
+    fader (D2): a carried `post_fader` or `post_pan` route out of a restarted strip has its floor
+    `a + P` (#1285 D2) and holds the stage there. The submix's `input` tap also adds nothing,
+    whatever the stage's arrival, when every line into the stage comes from a ducked or an added
+    strip: those lines hold exact `+0.0` from the end of the duck until the fire, and the
+    scheduled `S` counts the sidechain line plus the longest line into the stage (*Duck-swap the
+    strips a latency growth restarts, and fall back to the transition when a warm successor cannot
+    adopt*, #1397 D1 step 3). A `post_fader` or `post_pan` tap is exact `+0.0`
     from the end of the duck until the fire (the fader is ducked to a settled `+0.0`, then armed
     muted), so it adds nothing either.
 - **D2. Whole pre-fader restart.** For a duck-swapped strip, preparation marks not carried, after
@@ -92,9 +100,11 @@ never leaves it muted.
     is in `restarted_strips()` (#1354 D4) and is marked not carried in every owner, after the
     fader too (matrix/pan, post-fader and post-pan sends, their compensation lines), except its
     claim lines. It is ducked (D4) and armed (D3) like any duck-swapped strip. Nothing is lost by
-    restarting its post-fader owners at rest: by `S` its fader output and every route line out of
-    it hold exact `+0.0` (D4's duck and #1325 D3's `C`), and its armed fader keeps them at `+0.0`
-    until the fire.
+    restarting its post-fader owners at rest: by `S` its fader output and every line out of it
+    hold exact `+0.0` (D4's duck, with `S` counted with #1397 D1 step 3's `C`: #1325 D3's route
+    lines, plus each `EffectSidechain` line from its `post_fader` or `post_pan` tap into a carried
+    node, which its grown arrival can shorten), and its armed fader keeps them at `+0.0` until the
+    fire.
 - **D3. Arm.** Each duck-swapped strip is armed through #1288's arm entry point (its D1 strip-set
   argument; channels the model leaves unmuted), with `D` per #1288 D4 (its pre-fader latency; for a
   submix plus the longest compensation delay of an input route whose line starts at rest). Its

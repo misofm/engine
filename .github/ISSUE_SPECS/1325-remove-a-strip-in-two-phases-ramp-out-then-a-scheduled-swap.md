@@ -142,7 +142,10 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   preparation restarted: *Duck-swap a strip whose state cannot continue across a plan swap* (#1324 D4) adds
   `successor.restarted_strips()` to the removed strips here. It returns no arm set; arming is a
   preparation step. One transaction that both removes and adds strips uses one `S`; added strips
-  fade in by #1288.
+  fade in by #1288. A latency growth whose warm successor is prepared and whose duck set is not
+  empty is published `Primed` with `not_before = S` instead of `NoEarlierThan(S)` (*Duck-swap the
+  strips a latency growth restarts, and fall back to the transition when a warm successor cannot
+  adopt*, #1397 D1); its duck set, ramps and `S` are this step's.
 - **D8. Realtime and the acked-batch question.** Render work is the existing mute ramp and one
   not-before comparison at block entry (#1311). Every fallible step (preparation, publication and
   retirement credit, D15-17) runs before the cell writes and the commit, and a cell write cannot

@@ -45,7 +45,7 @@ drain strip cells alike* (#1399).
   (`crates/capi/include/miso_engine_v1.h:50-55`).
 - **Browser admission.** The matrix and fader bands use the same producers, with a free-room pass
   and `in_flight` accounting (`hosts/host-web/src/lib.rs:1548-1559`, `queue_available`
-  `:1762-1772`, `push` `:1800-1815`, room check `:5568-5580`); solo and VCA mutes compose into
+  `:1762-1789`, `push` `:1800-1815`, room check `:5568-5580`); solo and VCA mutes compose into
   fader records.
 - **Counters.** `CounterId` ends at `ValidationFailures = 15`
   (`crates/protocol/src/message_wire.rs:626-642`). The control plane refreshes provider counters
@@ -98,8 +98,9 @@ drain strip cells alike* (#1399).
   a kind were read with equal words, render applies one `Both` call, as today's single record
   does.
 - **D5. Producers.** `TrackControlProducer::{producer, fader}` become cell writers with infallible
-  writes; the input lane stays a queue until #1346. The rings at `:3583-3587` for these two lanes
-  and their resource rows are replaced by the cells' rows, computed from the types.
+  writes; the input lane stays a queue until #1346. The rings at
+  `crates/builtins-compiler/src/lib.rs:3583-3587` for these two lanes and their resource rows are
+  replaced by the cells' rows, computed from the types.
 - **D6. The contract the carry slices rely on.** A stage exposes `apply_pending(&mut self)`: the
   D1 read and D4 order for every dirty cell, the same code the block drain runs. #1277's carry
   calls it on the predecessor before exporting a lane; every write to the predecessor's cells

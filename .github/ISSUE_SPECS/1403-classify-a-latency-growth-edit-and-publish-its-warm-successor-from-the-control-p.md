@@ -11,8 +11,9 @@ first ready block* (#1355) by the round-5 review (M4, M6). Code anchors verified
 The control plane turns a latency-growing structural edit into a published warm successor, and
 keeps exactly one record of it until it is adopted, superseded or withdrawn.
 - A session that holds a `WarmConfig` classifies every rebuild with `warm_lead` (#1354).
-- A growth whose successor restarts no strip is prepared warm and published `Primed { not_before,
-  lead_blocks }` (#1311), with each ring's `prime_required` flag (#1320 D4) set first.
+- A growth that ducks no strip (it removes none and its successor restarts none) is prepared warm
+  and published `Primed { not_before, lead_blocks }` (#1311), with each ring's `prime_required`
+  flag (#1320 D4) set first.
 - The control plane keeps one `PrimedCandidate` record for that candidate, keyed by its epoch. The
   record never outlives its candidate, so a later step never acts on a candidate it does not name.
 - Live edits, a superseding structural edit and a declared stop act on the pending candidate in
@@ -63,11 +64,12 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
 - **D2. Classification.** With `Some(config)`, the rebuild path calls `host_core::warm_lead`
   (#1354 D2) before it prepares the successor (`control.rs:907`). The result routes the edit:
   - `Ordinary`: today's path, published `Next`.
-  - `Warm(lead)` with `lead_samples > 0`, and the warm successor's `restarted_strips()` empty:
-    prepared warm (`SuccessorBase::warm = Some(&lead)`, #1354 D4), admitted with
-    `AdmissionPeak::WithReprepare` (#1398 D4) so that a later transition re-preparation fits the
-    caps, then published by D3.
-  - `Warm` with restarted strips, `Warm` with `lead_samples == 0`, and `Unavailable`: these are
+  - `Warm(lead)` with `lead_samples > 0` and an empty duck set: *Duck-swap a strip whose state
+    cannot continue across a plan swap* (#1324) D4's set, the strips the edit removes plus the
+    warm successor's `restarted_strips()`. It is prepared warm (`SuccessorBase::warm =
+    Some(&lead)`, #1354 D4), admitted with `AdmissionPeak::WithReprepare` (#1398 D4) so that a
+    later transition re-preparation fits the caps, then published by D3.
+  - `Warm` with a non-empty duck set, `Warm` with `lead_samples == 0`, and `Unavailable`: these are
     *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
     successor cannot adopt* (#1397) D1 and D2, which extend this match. This slice routes them to
     today's path. No product session reaches them before #1397, because no product session holds
@@ -88,9 +90,10 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
      primes, and render's check waits on a source the host may have stopped feeding.
   3. It then reserves and publishes W with `Primed { not_before, lead_blocks: P / q }` (#1311 D6).
 
-  `not_before` is the `render_clock()` read at publication, unless the edit also ducks strips
-  (#1397 D1). Control publishes only into an `Empty` cell (#1343 D3), so no `Primed` candidate is
-  `Full` while the flags are written. Render reads them only for a `Full` `Primed` cell, so a stale
+  `not_before` is the `render_clock()` read at publication in D2's arm, whose duck set is empty; in
+  #1397 D1's arm it is #1325 D3's `S`. Control publishes only into an `Empty` cell (#1343 D3), so no
+  `Primed` candidate is `Full` while the flags are written. Render reads them only for a `Full`
+  `Primed` cell, so a stale
   value outside that window is never read. Every `Primed` publication rewrites every flag it can
   reach.
 - **D4. The record and its lifecycle.** `publish_primed` returns
@@ -111,8 +114,11 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
     record, passing the withdrawn candidate's set as `withdrawn_sources`.
   - **#1323's declared stop (D2):** the withdrawn candidate's record is dropped with it. The
     discontinuity successor is published `Next`, so it leaves no record.
-  - **#1358's deadline step:** owns the record from its withdrawal on (*Fall back to the transition
-    when a warm successor is not ready by its deadline*, #1358 D3).
+  - **#1358's deadline step** (*Fall back to the transition when a warm successor is not ready by
+    its deadline*, #1358 D3): it drops the record on `Taken`, `Nothing` or a successful
+    transition. When the transition's re-preparation is refused, it republishes the withdrawn
+    candidate as #1310 D4 republishes and sets the record again, unchanged, so the record and its
+    candidate stay together and every path above handles it as a pending candidate.
 - **D5. Edits while W is pending** (#1355 D6). A live edit goes to the newest candidate's cells
   and applies at S (#1053 D7). A structural edit supersedes W by #1310, including D5 step 5. A
   declared stop supersedes W by #1323 D2. This slice gates all three through the control plane.
@@ -140,8 +146,8 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
 
 - Warm preparation and its refusals (#1354). Render's readiness check, adoption and prime
   (#1355).
-- The duck of restarted strips, the transition and the outcome word (#1397). The deadline step and
-  ring headroom (#1358).
+- The duck of restarted strips, the transition and the outcome word (#1397). The deadline step (#1358)
+  and the ring headroom (#1406).
 - The production `WarmConfig`, the C ABI and the browser (#1360, #1361).
 
 ## Objective gates
@@ -149,10 +155,11 @@ keeps exactly one record of it until it is adopted, superseded or withdrawn.
 All gates are control-plane unit tests with `test-support`, at 48 kHz and quantum 128. A is the
 two-track fixture of `crates/host-core/tests/successor_swap.rs`. Every source ring is set
 explicitly to 7,296 frames: `stall_ring_frames(48 kHz, 128)` (#1354 D1, 5,120), plus
-*Record the swap block's cost on the 64-track console* (#1286) D3's `P_MAX_SAMPLES(48 kHz)`
-(2,048), plus one quantum. So #1354 D2's headroom check passes whether or not #1358 has changed the
-default ring. Every carried source is kept queued at least `P + q` frames ahead unless a
-gate withholds frames. "Equals A continued" means bit-identical, every block, to A rendered on with
+*Record the swap block's cost on the 64-track console* (#1286) D3's `P_MAX_SAMPLES(48 kHz, 128)`
+(2,048), plus one quantum. So #1354 D2's headroom check passes whether or not *Grow the default
+source ring by the warm-prime headroom* (#1406) has changed the default ring. Every carried source
+is kept queued at least `P + q` frames ahead unless a gate withholds frames. "Equals A continued"
+means bit-identical, every block, to A rendered on with
 no swap and the same host commands, timed on the source-read clock.
 
 1. **Classification and publication.** The edit adds a muted track with a true-peak limiter insert
@@ -167,13 +174,14 @@ no swap and the same host commands, timed on the source-read clock.
    - With no `WarmConfig`, the same edit is published `Next`, no record exists, and every flag is
      `false`.
    - With the config, an edit that grows nothing is published `Next`, and no record exists.
-2. **Flags of a withdrawn candidate's rings.** A renders sources `s` and `u`. W1 is gate 1's
-   growth, published `Primed` with frames withheld, so every ring is flagged. A structural edit
-   then removes `s`'s track and adds a second muted limiter track, which supersedes W1 by #1310
-   with a warm successor W2. At W2's publication, `s`'s ring reads `prime_required() == false` and
-   `u`'s reads `true`. Then `u` alone is queued `P + q` frames ahead and `s` gets no frame past
-   A's next block: W2 is adopted at the first block at or after its `not_before`, and the output
-   equals A continued up to that block.
+2. **Routing on the duck set.** The flags of a withdrawn candidate's rings (D3 step 2) are gated
+   by *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm
+   successor cannot adopt* (#1397) gate 5, since an edit that removes a source's track has a
+   non-empty duck set. Here: gate 1's growth plus the removal of track 2 has a non-empty duck set,
+   so D3's arm does not take it. Until #1397 it takes today's path, a two-phase removal
+   (*Remove a strip in two phases: ramp out, then a scheduled swap*, #1325) published
+   `NoEarlierThan(S)`; no record exists, and no block before `S` differs from A continued with
+   track 2 live-muted by the same ramped mute at the same block.
 3. **Edits while pending (moved from #1355 gate 5).** W is gate 1's growth, published with frames
    withheld.
    - A live fader edit on track 2 applies at S. The output equals A continued with the same value
@@ -202,8 +210,8 @@ no swap and the same host commands, timed on the source-read clock.
   the source-read clock, adopts it before render is ready or at the wrong block; a session without
   a config that classifies changes today's path; an admission at `Single` would let a later
   transition exceed the caps. Red.
-- Gate 2: a `publish_primed` that leaves the withdrawn candidate's flags alone keeps `s` flagged,
-  so W2 waits for frames the host never sends and is not adopted at `not_before`. Red.
+- Gate 2: a classifier that routes on `restarted_strips()` alone publishes the edit `Primed` at the
+  render clock, and track 2 stops dead at the adoption block (#1269 P4). Red.
 - Gate 3: a supersession that drops W's producers with W leaves `c` with no producer, so its
   submits are refused and A underruns; a stop reported `SUPERSEDED` for a candidate that folded in
   nothing miscounts it. Red.
@@ -225,4 +233,6 @@ no swap and the same host commands, timed on the source-read clock.
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348): every call services
   first.
 - *Report each transaction's edit path in its response* (#1313).
+- *Duck-swap a strip whose state cannot continue across a plan swap* (#1324): D4's duck set.
+- *Remove a strip in two phases: ramp out, then a scheduled swap* (#1325): gate 2's path.
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).

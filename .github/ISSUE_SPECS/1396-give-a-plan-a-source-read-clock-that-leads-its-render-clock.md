@@ -18,7 +18,7 @@ both clocks.
 
 - `RenderTime` has one field, `absolute_sample` (`crates/engine/src/realtime/plan.rs:497-500`).
   The graph executor passes it to the source section:
-  `source_set.begin_block(time.absolute_sample, ...)` (`crates/graph/src/lib.rs:3255-3256`). The
+  `source_set.begin_block(time.absolute_sample, ...)` (`crates/graph/src/lib.rs:3256`). The
   source driver hands it to every consumer: `consumer.begin_block_at(first_sample)`
   (`crates/source/src/lib.rs:1701-1721`). The consumer's own `next_frame` decides which PCM plays;
   the block sample decides only when a held anchored seek applies (`begin_block_at`, `:1115`).

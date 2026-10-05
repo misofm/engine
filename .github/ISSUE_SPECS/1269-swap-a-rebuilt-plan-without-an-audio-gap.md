@@ -199,11 +199,13 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
      #1285's floors, N has none). `Δ` is the largest arrival growth over C, `P = q·⌈Δ/q⌉`, and the
      source-read offset is the predecessor's plus `P` (*Give a plan a source-read clock that leads
      its render clock*, #1396). Preparation checks that every carried node arrives at exactly
-     `a(n) + P`; a node that does not has its strip restarted whole (#1324 D2) and `Δ` recomputed,
-     and if it cannot be restarted preparation returns `WarmUnavailable::Misaligned` and the edit
-     takes the transition (*Prepare a warm successor whose carried nodes lead the predecessor by
-     P*, #1354). A sidechain from a restarted strip's tap after its input and before its fader
-     restarts the consuming strip too (#1324 D1).
+     `a(n) + P`. For the first late one it walks back through restarted and added nodes along
+     every edge kind and restarts whole each carried strip that holds that path at its lead (only
+     if it finds none, the late node's own strip; #1324 D2), then recomputes `Δ`. Only when every
+     strip that reaches the output is restarted whole does it return
+     `WarmUnavailable::Misaligned`, and the edit takes the transition (*Prepare a warm successor
+     whose carried nodes lead the predecessor by P*, #1354 D2 step 6). A sidechain from a restarted
+     strip's tap after its input and before its fader restarts the consuming strip too (#1324 D1).
   2. Submit classifies the edit and publishes it as `Primed { not_before, lead_blocks }` (#1311;
      *Classify a latency-growth edit and publish its warm successor from the control plane*,
      #1403).
@@ -232,7 +234,8 @@ submix input, every effect with a sidechain. Compensation lines carry by `GraphE
   transition when a warm successor is not ready by its deadline*, #1358 D1). The deadline is counted
   in render samples, so a paused host never falls back (D15-17). There is no render-thread pre-roll.
   #1286 derives `P_MAX` and `PRIME_BYTES_MAX`, with the browser row from the spike (#1331); ring
-  headroom is `P_MAX` plus one quantum (#1358).
+  headroom is `P_MAX` plus one quantum (*Grow the default source ring by the warm-prime headroom*,
+  #1406).
 - **No permanent latency reserve.** A reserve is a permanent cost on every session.
 
 VST3 states that a plug-in's latency change may interrupt playback, because the host must recompute
@@ -374,11 +377,12 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1320 | *Let a source consumer check and replay its next blocks for a prime* | C | #1316, #1318, #1319 |
 | #1354 | *Prepare a warm successor whose carried nodes lead the predecessor by P* | C | #1277, #1285, #1287, #1324, #1396, #1402 |
 | #1355 | *Adopt a warm successor with a raw-frame prime at the first ready block* | C | #1277, #1287, #1310, #1311, #1314, #1320, #1323, #1327, #1343, #1344, #1354, #1395, #1396, #1402 |
-| #1403 | *Classify a latency-growth edit and publish its warm successor from the control plane* | C | #1310, #1311, #1313, #1314, #1320, #1323, #1343, #1348, #1354, #1355, #1396, #1398 |
+| #1403 | *Classify a latency-growth edit and publish its warm successor from the control plane* | C | #1310, #1311, #1313, #1314, #1320, #1323, #1324, #1325, #1343, #1348, #1354, #1355, #1396, #1398 |
 | #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt* | C | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1354, #1355, #1396, #1398, #1403 |
-| #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1286, #1310, #1314, #1343, #1354, #1355, #1396, #1397, #1403 |
-| #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398, #1403 |
-| #1361 | *Check the warm-successor deadline in the browser Worker's service loop and report its outcome* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1355, #1360, #1381, #1403 |
+| #1406 | *Grow the default source ring by the warm-prime headroom* | C | #1286, #1354, #1355 |
+| #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1310, #1314, #1323, #1325, #1343, #1354, #1355, #1396, #1397, #1403, #1406 |
+| #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398, #1403, #1406 |
+| #1361 | *Check the warm-successor deadline in the browser Worker's service loop and report its outcome* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1355, #1360, #1381, #1403, #1406 |
 | #1326 | *Give every browser plan live strip fader and mute lanes* | D | none |
 | #1288 | *Fade in a strip that a swap adds during playback* | D | #1054 |
 | #1325 | *Remove a strip in two phases: ramp out, then a scheduled swap* | D | #1054, #1288, #1309, #1310, #1311, #1312, #1313, #1314, #1347, #1363, #1391 |
