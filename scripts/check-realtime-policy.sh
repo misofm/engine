@@ -76,12 +76,128 @@ fi
 gate_scan_forbidden 'marked realtime forbidden-body predicate' \
     'Vec::|vec!|Box::|String::|\.to_vec\(|\.collect\(|Arc::clone|Rc::clone|drop\(|Mutex|RwLock|Condvar|mpsc|sync_channel|thread::|sleep\(|yield_now|spin_loop|std::fs|std::net|std::process|println!|eprintln!|format!|log::|tracing::|async[[:space:]]|\.await|File::|Tcp|Udp|\.expect\(|\.unwrap\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(' '' "$scratch_file" || exit $?
 
-# #1253: a render-thread drain pops at most the records present at block entry. A
-# `while let Ok(..) = ..try_pop()` loop keeps popping whatever a concurrent producer publishes
-# while it runs -- data-dependent, unbounded render work. The bounded form reads
-# `available_at_entry()` once and pops at most that many records.
+# #1253, #1302: a render-thread drain pops at most the records present at block entry. A loop
+# that pops until the queue is empty keeps popping whatever a concurrent producer publishes while
+# it runs (the C ABI prepares with `Concurrent` delivery) -- data-dependent, unbounded render
+# work. What this gate proves, per marked region, reading rustfmt's layout (four-space indents, a
+# wrapped loop header's `{` ending its last line; `cargo fmt --all -- --check` is required):
+#   - every `try_pop` that sits in a loop (the `fn try_pop` definition never does) has an
+#     innermost loop bounded by a count taken from `available_at_entry`: `for _ in 0..<count> {`,
+#     `for _ in 0..<expr naming available_at_entry> {`, or `while <count> != 0 {` (or `> 0 {`)
+#     whose body's first statement is `<count> -= 1;`. `<count>` is the nearest in-scope
+#     `let [mut] <count> = ..;` (comments dropped, the statement joined up to its `;`) naming
+#     `available_at_entry`, or a plain one-step alias `let [mut] <count> = <entry count>;`, with no
+#     other assignment to it between the binding and the loop, nor inside a `while` body;
+#   - every loop enclosing that innermost loop, up to the enclosing `fn`, is a `for .. in` over
+#     something other than an open range: a `while` or `loop` around a bounded drain re-drains
+#     without bound;
+#   - a line with `while`, `loop` or `for .. in` anywhere in its code is a loop opener, and only
+#     one that starts the line (after an optional `'label:`) can be bounded, so a one-line
+#     `while let Ok(..) = ..try_pop() {` body or a `let x = loop {` is refused;
+#   - `iter::from_fn`, `iter::repeat_with` and `iter::successors` are refused outright: they run a
+#     pop in a loop without a loop keyword.
+# It is not a Rust parser. Recursion, a pop inside a closure handed to some other repeating
+# adapter, a `use` that renames an iterator constructor, a count inflated by arithmetic inside its
+# own `available_at_entry` statement, and a count mutated through a `&mut` borrow stay outside it.
 gate_scan_forbidden 'marked realtime unbounded try_pop drain (bound it with available_at_entry)' \
-    'while[[:space:]]+let[[:space:]]+Ok[[:space:]]*\(.*=.*\.try_pop[[:space:]]*\(' '' "$scratch_file" || exit $?
+    '(^|[^[:alnum:]_])iter::(from_fn|repeat_with|successors)([^[:alnum:]_]|$)' '' "$scratch_file" || exit $?
+if [[ -n "$marked_files" ]]; then
+    mapfile -t marked_list <<<"$marked_files"
+    if drain_hits="$(awk -v q="'" '
+        function code(s,  i) { i = index(s, "//"); if (i) s = substr(s, 1, i - 1); sub(/[ \t]+$/, "", s); return s }
+        function ind(s) { match(s, /^ */); return RLENGTH }
+        function trim(s) { sub(/^ +/, "", s); return s }
+        function word(x) { return "(^|[^A-Za-z0-9_])" x "([^A-Za-z0-9_]|$)" }
+        function label() { return q "[A-Za-z_][A-Za-z0-9_]*: *" }
+        function unlabel(s) { s = trim(s); sub("^" label(), "", s); return s }
+        # A loop keyword anywhere on the line makes it a loop opener; only an opener that starts
+        # its line (after an optional label) can have a bounded header.
+        function isloop(s) { return s ~ word("while") || s ~ word("loop") || s ~ word("for [^{}]* in") }
+        function isfn(s) { return trim(s) ~ /^(pub(\([a-z: ]+\))? +)?((const|async|unsafe|default|extern( +"[^"]*")?) +)*fn +[A-Za-z_]/ }
+        # The scope chain of line `from`: walking back, a line indented less than every line seen
+        # so far opens a block enclosing `from`. Fills chain[1..chain_n], innermost first, up to
+        # and including the enclosing function line.
+        function enclosing(from,  k, m) {
+            chain_n = 0; m = ind(c[from])
+            for (k = from - 1; k >= 1; k--) {
+                if (c[k] ~ /^ *$/ || ind(c[k]) >= m) continue
+                m = ind(c[k]); chain[++chain_n] = k
+                if (isfn(c[k])) return
+            }
+        }
+        # A loop header: its opener joined up to the first line ending in `{`, whitespace collapsed.
+        function header(l,  j, h) {
+            h = ""
+            for (j = l; j <= n; j++) { h = h " " trim(c[j]); if (c[j] ~ /\{$/) break }
+            header_end = j; gsub(/ +/, " ", h); sub(/^ /, "", h); return unlabel(h)
+        }
+        function assigns(x, s) {
+            if (trim(s) ~ ("^let +(mut +)?" x "([ :=]|$)")) return 0
+            return s ~ ("(^|[^A-Za-z0-9_.])" x " *([-+*/%&|^]|<<|>>)?=([^=>]|$)")
+        }
+        # Whether `x` is an entry count at line `before`: its nearest in-scope binding names
+        # available_at_entry, or aliases such a binding in one step, and nothing assigns it between.
+        function counted(x, before, depth,   k, m, b, j, st) {
+            if (depth > 1) return 0
+            b = 0; m = ind(c[before])
+            for (k = before - 1; k >= 1 && !b; k--) {
+                if (c[k] ~ /^ *$/ || ind(c[k]) > m) continue
+                if (ind(c[k]) < m) { m = ind(c[k]); if (isfn(c[k])) return 0; continue }
+                if (trim(c[k]) ~ ("^let +(mut +)?" x "( *:[^=]*)? *=([^=]|$)")) b = k
+            }
+            if (!b) return 0
+            for (j = b + 1; j < before; j++) if (assigns(x, c[j])) return 0
+            st = ""
+            for (j = b; j <= n; j++) { st = st " " trim(c[j]); if (c[j] ~ /;$/) break }
+            gsub(/ +/, " ", st); sub(/^ /, "", st)
+            if (st ~ /available_at_entry/) return 1
+            if (st ~ ("^let (mut )?" x "( ?:[^=]*)? = [A-Za-z_][A-Za-z0-9_]*;$")) {
+                sub(/^.*= /, "", st); sub(/;$/, "", st); return counted(st, b, depth + 1)
+            }
+            return 0
+        }
+        function bounded(l,  h, x, j, first) {
+            h = header(l)
+            if (h ~ /^for [^{}]* in 0\.\.[^{}]*available_at_entry[^{}]* \{$/) return 1
+            if (h ~ /^for [^{}]* in 0\.\.[A-Za-z_][A-Za-z0-9_]* \{$/) {
+                x = h; sub(/^.* in 0\.\./, "", x); sub(/ \{$/, "", x); return counted(x, l, 0)
+            }
+            if (h ~ /^while [A-Za-z_][A-Za-z0-9_]* (!= 0|> 0) \{$/) {
+                x = h; sub(/^while /, "", x); sub(/ .*/, "", x)
+                if (!counted(x, l, 0)) return 0
+                first = 0
+                for (j = header_end + 1; j <= n; j++) {
+                    if (c[j] ~ /^ *$/) continue
+                    if (ind(c[j]) <= ind(c[l])) break
+                    if (!first) { first = j; if (trim(c[j]) != x " -= 1;") return 0; continue }
+                    if (assigns(x, c[j])) return 0
+                }
+                return first != 0
+            }
+            return 0
+        }
+        function check(  i, k, l, ok) {
+            for (i = 1; i <= n; i++) {
+                if (c[i] !~ word("try_pop")) continue
+                enclosing(i); l = 0; ok = 1
+                if (isloop(c[i])) { l = i; ok = bounded(i) }
+                for (k = 1; k <= chain_n; k++) {
+                    if (!isloop(c[chain[k]])) continue
+                    if (!l) { l = chain[k]; ok = bounded(l) }
+                    else if (header(chain[k]) !~ /^for [^{}]* in [^{}]* \{$/ || header(chain[k]) ~ /\.\. \{$/) ok = 0
+                }
+                if (!ok) print FILENAME ":" ln[i] ":" c[i]
+            }
+        }
+        /REALTIME_POLICY_BEGIN/ { inside = 1; n = 0; next }
+        /REALTIME_POLICY_END/ { inside = 0; check(); next }
+        inside { n++; c[n] = code($0); ln[n] = FNR }
+    ' "${marked_list[@]}" 2>&1)"; then :; else rc=$?; printf '%s\n' "$drain_hits" >&2; fail "realtime drain-bound scan failed (awk status $rc)"; fi
+    [[ -z "$drain_hits" ]] || {
+        printf '%s\n' "$drain_hits" >&2
+        fail 'marked realtime unbounded try_pop drain (bound it with available_at_entry)'
+    }
+fi
 
 # The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12): it scans the whole
 # {crates,hosts,tools} tree, of which the realtime module is a part, rather than one of five copies

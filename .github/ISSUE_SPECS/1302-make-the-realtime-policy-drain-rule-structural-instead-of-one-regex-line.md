@@ -282,3 +282,87 @@ mutation cases are its tests.
   marked source, and its self-test runs on fixtures; both are allowed.
 - Commit on its own branch from synchronized `main`.
 - Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+**Changed.** `scripts/check-realtime-policy.sh`: the one-line regex is deleted (D4) and replaced by
+the D3 iterator scan and a structural `awk` pass over every marked file, run after body
+extraction, with its own checked status (`realtime drain-bound scan failed (awk status N)`).
+`scripts/test-realtime-policy.sh`: the four bounded real shapes inside existing fixture regions
+(D5: floors untouched), seventeen `expect_failure` drain cases, the `drain-bound` tool-failure
+injection for `partial` 0 and 1, and a counter-mutant proving that injection reds only when the
+status is observed. The `body-read:awk` matcher now excludes the new pass (it names `runtime.rs`
+too), so the existing `per-file-read` counter-mutant still reaches its intended assertion.
+
+**Where the rule goes beyond the D2 sketch, and why (all inside the two authorized scripts).**
+1. *A loop keyword anywhere on a line opens a loop; only a line-leading one (after an optional
+   `'label:`) can be bounded.* The sketch's start-of-line opener let the existing one-line case
+   `fn drain_fader_controls() { while let Ok(record) = control.try_pop() { .. } }` pass (it is not a
+   line-leading `while`), contradicting D4, and also let `'drain: loop {` and `let x = loop {`
+   pass.
+2. *Every loop enclosing the innermost one, up to the `fn`, must be a `for .. in` over a non-open
+   range.* A bounded `for _ in 0..available` inside an outer `loop` that re-reads
+   `available_at_entry` drains without bound; the real site 1 sits in a per-lane `for` and passes.
+3. *The count is the nearest in-scope binding* (scope walk by indentation, stopping at the `fn`),
+   *with no assignment to it between binding and loop.* The sketch took the earliest binding in
+   the region, so a shadowing `let available = usize::MAX;` or an earlier function's binding
+   passed.
+4. *A `while <count> != 0` body's first statement must be `<count> -= 1;`, with no other
+   assignment in the body.* Without it, a `while remaining != 0` that never decrements (or only
+   conditionally) pops until empty.
+5. *Header bounded forms use `[^{}]*` instead of `.*`*, so a one-line loop body cannot join onto a
+   later line and borrow its `available_at_entry`.
+6. *The `fn try_pop` exemption (D2.2) is dropped.* Under D2.7 a pop with no enclosing loop passes,
+   and a definition never has one, so the exemption has no observable effect: a mutant removing it
+   reddens nothing. The `pub fn try_pop(&mut self)` fixture shape stays (gate 2) and still defends
+   "a pop outside a loop passes" (mutant M12c below).
+
+**Gate 1.** `bash scripts/check-realtime-policy.sh` -> `realtime policy: ok (89 marked regions in
+25 files)` (gawk 5.2.1; also under mawk and busybox awk).
+
+**Gate 2.** `bash scripts/test-realtime-policy.sh` -> `realtime policy mutation tests: ok` (gawk and
+mawk).
+
+**Real sites (debug run, not committed; innermost loop found).**
+`builtins-compiler/src/lib.rs:1076` -> `1075: for _ in 0..available {`;
+`:1120` -> `1119: for _ in 0..available {`; `effect-contract/src/live.rs:366` ->
+`364: while remaining != 0 {`; `engine/src/realtime/plan_exchange.rs:377` -> no loop;
+`graph/src/runtime.rs:900` -> `899: for _ in 0..available {`; `engine/src/realtime/spsc.rs:440` is
+the definition (no loop). Identical under gawk, mawk and busybox awk.
+
+**Gate 3 and per-case test value (scratch mutants of the gate, each run through a copy of the
+self-test that reports every case instead of stopping; not committed).** A case is "red" when the
+mutant gate passes its fixture.
+
+| Mutant of the gate | Cases red |
+|---|---|
+| M1 walk-back takes the outermost loop, checks only it | valid fixture (the per-lane `for` is not an entry count); on a fixture without that drain, `loop-inside-bounded-for` (case 7) |
+| M2 old one-line regex restored, D3 scan and pass deleted | cases 1-8 (`wrapped-while-let`, `let-else-loop`, `path-pop`, `constant-bound`, `bound-not-at-entry`, `second-loop-in-bounded-region`, `loop-inside-bounded-for`, `from-fn`, `repeat-with`) and every extra case |
+| M3 a region naming `available_at_entry` passes | existing `marked-unbounded-try-pop-drain`, case 6, case 7, `bounded-drain-inside-outer-loop`, `count-from-another-function`, `shadowed-count`, `reassigned-count`, both `while` cases |
+| M4 any `for .. in 0..` is bounded | case 4, case 5, `count-from-another-function`, `shadowed-count`, `reassigned-count` |
+| M5 any identifier is an entry count | case 5, `count-from-another-function`, `shadowed-count`, `reassigned-count` |
+| M6 enclosing loops unchecked | `bounded-drain-inside-outer-loop` |
+| M7 earliest binding anywhere in the region (the sketch) | `count-from-another-function`, `shadowed-count` |
+| M8 no assignment check | `reassigned-count` |
+| M9 no first-decrement check | `while-without-decrement`, `while-decrement-not-first` |
+| M10 start-of-line openers only (the sketch) | existing `marked-unbounded-try-pop-drain`, `labelled-loop`, `loop-expression` |
+| M11 D3 scan dropped | `from-fn`, `repeat-with` |
+| M12b no alias step | valid fixture (the `live.rs` shape) |
+| M12c a pop outside any loop is refused | valid fixture (`plan_exchange` and the `try_pop` definition) |
+
+Unmutated, every case is green. Test value per case: 1-3 red if the rule reverts to one spelling on
+one line (M2); 4 and 5 red if any range or any identifier counts (M4, M5); 6 red on a region-level
+rule (M3); 7 red if the outermost loop is checked instead of the innermost (M1); 8 red if D3's scan
+is dropped (M11); `bounded-drain-inside-outer-loop` red if enclosing loops are unchecked (M6);
+`count-from-another-function` and `shadowed-count` red if the binding search ignores scope
+(M7); `reassigned-count` red without the assignment check (M8); the two `while` cases red without
+the first-decrement check (M9); `labelled-loop` and `loop-expression` red if only line-leading
+unlabelled openers count (M10); the valid fixture red if the rule refuses a real shape (M12b,
+M12c). `drain-bound-0/1` red if the pass's awk status is swallowed (counter-mutant
+`drain-bound`, committed, proves it).
+
+**Gate 4.** `bash scripts/check-workspace-policy.sh` -> `workspace policy: ok`;
+`bash scripts/test-workspace-policy.sh` -> `workspace policy mutation tests: ok`. `shellcheck` is
+not installed on this host: not run.

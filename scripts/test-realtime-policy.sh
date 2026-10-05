@@ -41,6 +41,11 @@ create_fixture() {
         'struct Allowed;' \
         '// REALTIME_POLICY_BEGIN' \
         'fn push() {}' \
+        'impl<T> Consumer<T> {' \
+        '    pub fn try_pop(&mut self) -> Result<T, QueueEmpty> {' \
+        '        self.take_front()' \
+        '    }' \
+        '}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/spsc.rs"
     printf '%s\n' \
@@ -64,6 +69,15 @@ create_fixture() {
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn exchange_plane() {}' \
+        'impl Exchange {' \
+        '    fn enter_block(&mut self) {' \
+        '        if self.pending.is_none()' \
+        '            && let Ok(candidate) = self.publication.try_pop()' \
+        '        {' \
+        '            self.pending = Some(candidate);' \
+        '        }' \
+        '    }' \
+        '}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/engine/src/realtime/plan_exchange.rs"
     # Indented markers, the shape the real region in crates/graph/src/lib.rs carries.
@@ -121,6 +135,23 @@ create_fixture() {
         '// REALTIME_POLICY_BEGIN' \
         'impl EffectControlLane {' \
         '    fn stage() {}' \
+        '    pub fn stage_records(&mut self) -> usize {' \
+        '        let available = self' \
+        '            .control' \
+        '            .as_ref()' \
+        '            .map_or(0, Consumer::available_at_entry);' \
+        '        let mut staged = 0_usize;' \
+        '        let mut remaining = available;' \
+        '        // A comment line between the alias and the loop is not code.' \
+        '        while remaining != 0 {' \
+        '            remaining -= 1;' \
+        '            let Some(Ok(record)) = self.control.as_mut().map(Consumer::try_pop) else {' \
+        '                break;' \
+        '            };' \
+        '            staged += admit(record);' \
+        '        }' \
+        '        staged' \
+        '    }' \
         '}' \
         '// REALTIME_POLICY_END' \
         >"$root/crates/effect-contract/src/live.rs"
@@ -275,6 +306,20 @@ create_fixture() {
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn drain_fader_controls() {}' \
+        'fn drain_fader_records(controls: &mut [Option<Consumer<Record>>]) {' \
+        '    for (lane, control) in controls.iter_mut().enumerate() {' \
+        '        let Some(control) = control.as_mut() else {' \
+        '            continue;' \
+        '        };' \
+        '        let available = control.available_at_entry();' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(lane, record);' \
+        '        }' \
+        '    }' \
+        '}' \
         '// REALTIME_POLICY_END' \
         '' \
         '// REALTIME_POLICY_BEGIN' \
@@ -427,6 +472,208 @@ expect_failure marked-tools-root-scanned "$alloc_class" \
 # with a message naming the bounded form.
 expect_failure marked-unbounded-try-pop-drain 'bound it with available_at_entry' \
     'sed -i "s/fn drain_fader_controls() {}/fn drain_fader_controls() { while let Ok(record) = control.try_pop() { apply(record); } }/" "$root/crates/builtins-compiler/src/lib.rs"'
+# #1302: the drain rule is structural. Each mutation below is an unbounded drain, or an escape
+# from the rule, that a one-line spelling match or a region-level `available_at_entry` check
+# passes. Replace one exact fixture line with the given lines; a missing anchor fails here so a
+# drifted fixture cannot pass a case vacuously.
+replace_line() {
+    local file="$1" anchor="$2" text
+    shift 2
+    text="$(printf '%s\n' "$@")"
+    awk -v anchor="$anchor" -v text="$text" '
+        $0 == anchor { print text; found = 1; next }
+        { print }
+        END { if (!found) exit 3 }
+    ' "$file" >"$file.tmp" || { printf 'fixture anchor missing in %s: %s\n' "$file" "$anchor" >&2; exit 1; }
+    mv -- "$file.tmp" "$file"
+}
+drain_class='bound it with available_at_entry'
+builtins_compiler='crates/builtins-compiler/src/lib.rs'
+mutate_wrapped_while_let() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'impl MatrixBank {' \
+        '    fn drain_matrix_controls(&mut self) {' \
+        '        while let Ok(record) = self' \
+        '            .some_long_receiver_name' \
+        '            .control_consumer_for_this_lane' \
+        '            .try_pop()' \
+        '        {' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+mutate_let_else_loop() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    loop {' \
+        '        let Ok(record) = control.try_pop() else { break };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_path_pop() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    while let Ok(record) = Consumer::try_pop(control) {' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_constant_bound() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    for _ in 0..64 {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_bound_not_at_entry() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.capacity();' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+# The fader region already holds the bounded `drain_fader_records`.
+mutate_second_loop_in_bounded_region() {
+    replace_line "$root/$builtins_compiler" 'fn drain_fader_controls() {}' \
+        'fn drain_fader_controls(control: &mut Consumer<Record>) {' \
+        '    loop {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_loop_inside_bounded_for() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    let available = control.available_at_entry();' \
+        '    for _ in 0..available {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break;' \
+        '        };' \
+        '        apply(record);' \
+        '        loop {' \
+        '            let Ok(extra) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(extra);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+mutate_from_fn() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    core::iter::from_fn(|| control.try_pop().ok()).for_each(apply);' \
+        '}'
+}
+mutate_repeat_with() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    core::iter::repeat_with(|| control.try_pop())' \
+        '        .map_while(Result::ok)' \
+        '        .for_each(apply);' \
+        '}'
+}
+# Beyond the spec's eight: the shapes of an entry count that is not one when the loop runs.
+mutate_bounded_drain_inside_outer_loop() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        '    loop {' \
+        '        let available = control.available_at_entry();' \
+        '        if available == 0 {' \
+        '            break;' \
+        '        }' \
+        '        for _ in 0..available {' \
+        '            let Ok(record) = control.try_pop() else {' \
+        '                break;' \
+        '            };' \
+        '            apply(record);' \
+        '        }' \
+        '    }' \
+        '}'
+}
+# The parameter is not the earlier function's entry count, though that binding precedes it in
+# the same region.
+mutate_count_from_another_function() {
+    local file="$root/$builtins_compiler"
+    awk '
+        /REALTIME_POLICY_END/ && !done {
+            print "fn drain_fader_tail(control: &mut Consumer<Record>, available: usize) {"
+            print "    for _ in 0..available {"
+            print "        let Ok(record) = control.try_pop() else {"
+            print "            break;"
+            print "        };"
+            print "        apply(record);"
+            print "    }"
+            print "}"
+            done = 1
+        }
+        { print }
+    ' "$file" >"$file.tmp"
+    mv -- "$file.tmp" "$file"
+}
+mutate_shadowed_count() {
+    replace_line "$root/$builtins_compiler" '        for _ in 0..available {' \
+        '        let available = usize::MAX;' \
+        '        for _ in 0..available {'
+}
+mutate_reassigned_count() {
+    replace_line "$root/$builtins_compiler" '        let available = control.available_at_entry();' \
+        '        let mut available = control.available_at_entry();' \
+        '        available = usize::MAX;'
+}
+mutate_while_without_decrement() {
+    sed -i '/^            remaining -= 1;$/d' "$root/crates/effect-contract/src/live.rs"
+}
+mutate_while_decrement_not_first() {
+    replace_line "$root/crates/effect-contract/src/live.rs" '            remaining -= 1;' \
+        '            if staged == 0 {' \
+        '                remaining -= 1;' \
+        '            }'
+}
+mutate_labelled_loop() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) {' \
+        "    'drain: loop {" \
+        '        let Ok(record) = control.try_pop() else {' \
+        "            break 'drain;" \
+        '        };' \
+        '        apply(record);' \
+        '    }' \
+        '}'
+}
+mutate_loop_expression() {
+    replace_line "$root/$builtins_compiler" 'fn drain_matrix_controls() {}' \
+        'fn drain_matrix_controls(control: &mut Consumer<Record>) -> usize {' \
+        '    let mut applied = 0;' \
+        '    let last = loop {' \
+        '        let Ok(record) = control.try_pop() else {' \
+        '            break applied;' \
+        '        };' \
+        '        applied += apply(record);' \
+        '    };' \
+        '    last' \
+        '}'
+}
+for drain_case in wrapped_while_let let_else_loop path_pop constant_bound bound_not_at_entry \
+    second_loop_in_bounded_region loop_inside_bounded_for from_fn repeat_with \
+    bounded_drain_inside_outer_loop count_from_another_function shadowed_count reassigned_count \
+    while_without_decrement while_decrement_not_first labelled_loop loop_expression; do
+    expect_failure "drain-${drain_case//_/-}" "$drain_class" "mutate_$drain_case"
+done
 # Deleting every marker of one file to silence the gate drops it out of the discovered set and
 # trips the file floor instead of passing with less coverage.
 expect_failure marked-file-count-floor 'expected at least twenty-five marked realtime files' \
@@ -477,7 +724,8 @@ case "$INJECT_MODE:$TOOL_NAME" in
   end-count:rg) [[ "$joined" == *'-c REALTIME_POLICY_END'*runtime.rs* ]] && hit=1 ;;
   final-predicate:rg) [[ "$joined" == *'Vec::'* ]] && hit=1 ;;
   marker-sort:sort) hit=1 ;;
-  body-read:awk) [[ "$joined" == *runtime.rs* ]] && hit=1 ;;
+  body-read:awk) [[ "$joined" == *runtime.rs* && "$joined" != *available_at_entry* ]] && hit=1 ;;
+  drain-bound:awk) [[ "$joined" == *available_at_entry* ]] && hit=1 ;;
   capi-region:awk) [[ "$joined" == *capi/src/ffi.rs* ]] && hit=1 ;;
   whole-plan-scan:rg) [[ "$joined" == *'plan|'* ]] && hit=1 ;;
 esac
@@ -504,6 +752,7 @@ for partial in 0 1; do
     expect_tool_error "begin-count-$partial" rg begin-count 'BEGIN marker count failed' "$partial"
     expect_tool_error "end-count-$partial" rg end-count 'END marker count failed' "$partial"
     expect_tool_error "body-read-$partial" awk body-read 'realtime body extraction failed' "$partial"
+    expect_tool_error "drain-bound-$partial" awk drain-bound 'realtime drain-bound scan failed' "$partial"
     expect_tool_error "final-predicate-$partial" rg final-predicate 'marked realtime forbidden-body predicate' "$partial"
     expect_tool_error "capi-region-$partial" awk capi-region 'capi production-region extraction failed' "$partial"
     expect_tool_error "whole-plan-scan-$partial" rg whole-plan-scan 'whole-plan reference scan errored' "$partial"
@@ -532,6 +781,9 @@ prove_realtime_mutant_rejected marker-discovery \
 prove_realtime_mutant_rejected per-file-read \
   '/realtime body extraction failed/c\    '\'' "$source" 2>\&1)"; then :; else :; fi' \
   body-read 1 awk
+prove_realtime_mutant_rejected drain-bound \
+  '/realtime drain-bound scan failed/s/else rc=.*fi$/else drain_hits=""; fi/' \
+  drain-bound 1 awk
 prove_realtime_mutant_rejected final-predicate '/scratch_file.*exit/s/exit.*$/true/' final-predicate
 
 printf 'realtime policy mutation tests: ok\n'
