@@ -49,7 +49,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   retirement credit) into the cell whose state is `Empty`. Then it compare-and-swaps the word to
   mark that cell `Full` (`Release`). Render changes the word only when a cell is `Full`, and
   control publishes only when none is, so this compare-and-swap cannot fail. A failure would be a
-  broken invariant: it is returned as a typed internal error and never retried.
+  broken invariant: it is never retried; the mailbox returns the typed error and the exchange treats
+  it as unreachable (Amendment 2).
 - **D4. Render claims in one compare-and-swap, with no separate release.** At block entry render
   loads the word (`Acquire`). If a cell is `Full`, one compare-and-swap of the whole word marks
   that cell `Active` and the previously `Active` cell `Empty`. That single transition is the
@@ -180,6 +181,14 @@ tree compiles only with both, so a same-commit sibling would be ceremony. This t
 past AGENTS.md's half-day size (about half a day plus two to three hours for the audits); root
 accepted the overrun for that reason. The first run stopped before any change and is not an
 attempt.
+
+## Amendment 2 (root, 2026-10-05)
+
+D3 said a failed publication compare-and-swap "is returned as a typed internal error", while D5
+makes republication infallible and the exchange's commit runs after the protocol commit, where a
+returned error would leave a committed session with no plan published. Root ruled on the
+attempt-1 verdict: the mailbox returns the typed error (`MailboxInvariantBroken`), and the
+exchange (`commit`, `republish`) treats it as unreachable. D3 now says so.
 
 ## Dependencies
 
