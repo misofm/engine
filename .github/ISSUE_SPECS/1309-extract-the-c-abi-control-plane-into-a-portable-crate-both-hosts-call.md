@@ -82,6 +82,8 @@ session stores `ControlLimits` (D3).
   `Row: From<PlanResources> + Copy` and `PlanResources: From<Row>`. For `PlanResourceReport` the
   conversion is lossless: `TAIL_FINITE` maps to `TailSamples::Finite(n)` and `TAIL_INFINITE` to
   `TailSamples::Infinite`, and back.
+  Amendment 2: the row type is the adapter's associated type `ControlAdapter::Row` (D5), so
+  `SessionState<A: ControlAdapter>` and `SharedPlanState<A::Row>` are generic over the adapter.
 - **D5. Adapter allocations.** The crate's constructor takes `adapter_allocations: &[u64]`, the byte
   sizes of the fixed allocations the adapter keeps per session: capi passes `Session` and `Plan`
   (today's `compile.rs:233-234` rows). They enter the fixed allocation rows and the
@@ -94,6 +96,17 @@ session stores `ControlLimits` (D3).
   `CompileLimits`, so the `Session` fixed row, and with it `capi_retained_bytes`, falls by exactly
   `size_of::<CompileLimits>() - size_of::<ControlLimits>()`. Every other fixed row and the
   largest-allocation fold stay the same.
+  Amendment 2: replaced as a constructor argument. The crate charges `Session` and `Plan` again
+  on every structural rebuild (`command` calls `prepare_runtime`, which charges them through
+  `capi_resources`), and storing the sizes in `SessionState` would grow `Session`. So the adapter
+  supplies them at the type level: the crate defines
+  `trait ControlAdapter { type Row: From<PlanResources> + Copy; const ADAPTER_ALLOCATIONS:
+  &'static [u64]; }` with the bound `PlanResources: From<A::Row>`, and the control plane is
+  `SessionState<A: ControlAdapter>`. capi implements it once (`Row = PlanResourceReport`,
+  `ADAPTER_ALLOCATIONS` = the sizes of `Session` and `Plan`). Nothing is stored, the values
+  cannot differ between calls, and gate 1 stays as Amendment 1 wrote it. *Prepare through an
+  adapter-supplied preparer in the control-plane crate* (#1400) may later add its
+  `RuntimePreparer` to this trait; this slice does not pre-build it.
 - **D6. Typed failures.** The crate never spells `capi.`. `CompileFailure` becomes an enum:
   `Resource(ResourceFault)` with `ResourceFault::{Arithmetic, Platform, Limit, Allocation,
   ProtocolQueue, PlanExchange}`, and `Diagnostics(Vec<u8>)` for the session and preparation
@@ -227,6 +240,17 @@ had no verdict and is not an attempt. Root ruled:
    and capi maps it; `graph`/`source`/`effect` `.resource.limit` become
    `CompileFailure::Diagnostics` with today's exact bytes; `live_peak_tests` stays in capi with
    `validate_live_peak`, `LiveEpochResources` and `CapiResources` exposed under `test-support`.
+
+## Amendment 2 (root, 2026-10-05)
+
+D5's constructor argument could not meet gate 1: the crate needs the adapter's allocation sizes on
+every structural rebuild, and storing them inside `Session` would change the `Session` row by more
+than Amendment 1's exact shrink. Root ruled for one adapter type parameter:
+`SessionState<A: ControlAdapter>`, whose trait carries `type Row: From<PlanResources> + Copy` (with
+`PlanResources: From<A::Row>`) and `const ADAPTER_ALLOCATIONS: &'static [u64]`, implemented by
+capi (D4, D5). Gate 1 is unchanged from Amendment 1. #1400's `RuntimePreparer` may later join
+this trait; it is not pre-built here. The stopped runs before this amendment had no verdict and
+are not attempts.
 
 ## Dependencies
 
