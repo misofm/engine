@@ -50,8 +50,9 @@ gets its own slice (see "Non-goals").
 ## Decisions frozen for this slice
 
 - **D1. Tail.** `TailSamples::Finite(T)` means: for every input of peak `P > 0` that is zero from
-  sample `N` on, under any control history the node admits before `N` (block-boundary targets and
-  their ramps; a ramp may be in flight at `N`), and with no control event at or after `N`,
+  sample `N` on, under any control history the node admits before `N` (block-boundary targets
+  under #1407's retarget law; a ramp may be in flight at `N` and completes by `N + 64`), and with no
+  control event at or after `N`,
   `|y[n]| < P * 10^(-144/20)` for every `n >= N + latency + T`. `T` is counted beyond latency, as
   PDC already composes it. Document it on the type and in `docs/EFFECT_CONTRACT_V1.md`.
   `Infinite` keeps its meaning ("no bound stated") for nodes whose slice has not landed.
@@ -79,7 +80,13 @@ gets its own slice (see "Non-goals").
   `REST_EPS`). `S` is summed exactly to a horizon `H` plus a closed-form remainder; for the HPF→LPF
   cascade the remainder uses the union bound
   `sum_{m>=H} |h| <= |h_L|_1 * S_H(ceil(H/2)) + S_L(ceil(H/2)) * |h_H|_1`. The derivation goes in
-  `docs/derivations/1329-input-section-tail-and-rest.md`.
+  `docs/derivations/1329-input-section-tail-and-rest.md`. The `f32` deviation half treats rounding
+  as relative (`rho_f`) and the per-word flush as absolute: at most `sqrt(2)*FLUSH_EPS` per section
+  per step, accumulated to the stall radius `kappa*sqrt(2)*FLUSH_EPS/(1 - rho_f)` and carried
+  through the section's output row. Per rate define `P*` as the smallest peak for which that term
+  fits the deviation budget left after rounding. For `P >= P*` the bound is the sum; for `P < P*`
+  the derivation proves exact rest (all integrator words `+0.0` via `REST_EPS`) at or before
+  `N + latency + T`. The flush is never modelled as relative error.
 - **D4. Fixed design (no live input lane).** `T` and `R` come from the strip's own designed sections
   (max over left and right), with the prepared trim as a gain on `P`. Disabled filters: `T = 0`,
   `R = 0` (trim and polarity are memoryless).
@@ -87,9 +94,12 @@ gets its own slice (see "Non-goals").
   `builtins`: the bound over the whole cutoff domain (each section disabled or in `[10 Hz, max]`),
   trim +24 dB, any history of filter targets and their 64-sample ramps. All builtin sections share
   `k = sqrt(2)`, so every designed step matrix is the bilinear map of one fixed `M` and they share
-  eigenvectors `V`; the derivation bounds the state at `N` in the `V`-norm across any target history,
-  including ramp steps whose interpolated words are off that curve (their `V`-norm bound
-  `q_ramp` over the domain is part of the derivation), then bounds the free response. Production
+  eigenvectors `V`. Under #1407, the recursion words any history reaches are the designs, the
+  identity with +0.0 integrators, and the f32-accumulated interior words of 64-step ramps and
+  restart chains among designs. `q_ramp = max ||A(w)||_V` over them, plus `6*2^-24*kappa`, must be
+  `< 1`. The state at N is bounded by the invariant ball `R = g * max_w b(w)/(1 - q(w))`, with `b`
+  the V-norm of the input column. The free response starts at N + 64. `g = 10^(24/20)`, valid by
+  #1408. Production
   evaluates the closed form at the worst-case pair below (round 1: HPF one ulp below the maximum
   into LPF at the maximum, both channels). #1262's gate 4 enables this pair live:
 
@@ -120,6 +130,23 @@ gets its own slice (see "Non-goals").
   not folded into a node's floor; the graph extent's meaning across gain, and the tail term of a
   strip's `delay_samples` line (a pure delay, not latency), are
   *Define how node tails compose through gain in the graph extent* (#1379).
+
+## Amendment 1 (root decisions, 2026-10-05, after attempt 1's blocker)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(b). Attempt 1 stopped
+before code: under today's live filter retarget law the reachable recursion words leave the stable
+set in `f32` (see "Attempt record"), and a long trim ramp overshoots the trim domain, so D5 had no
+finite bound to prove. The root approved option (m), the live filter retarget law, as
+*Retarget a live input filter only through its designs and their mixtures* (#1407): every
+reachable recursion word becomes a design or a mixture of designs, the #808 contract is restored,
+and it adds no state, no latency and no sealed-size change. It also approved *Keep every trim,
+fader and matrix ramp inside its endpoints* (#1408), which makes D5's `g = 10^(24/20)` valid. This
+slice now follows both. D1 and D5, gates 1(b), 2, 5 and 6, the authorized paths and the
+dependencies are amended accordingly; the D7 reach (finding 2) is added to the authorized paths,
+and D3 states how the flush enters the `f32` deviation (finding 1). Rejected: holding a target until
+its ramp completes, a budget argument, live filter lanes only at quanta of 64 or more, and
+duplicate-resend removal alone (#1407 "Non-goals").
 
 ## Deliverables
 
@@ -155,6 +182,9 @@ gets its own slice (see "Non-goals").
   `crates/graph-compiler/tests/track_delay.rs` (the digest), `fixtures/graph/v1/direct-route.*`
   (regenerated by `crates/graph-compiler/src/bin/graph_fixture.rs`)
 - `crates/host-core/tests/live_lanes.rs` (the tail assertions)
+- `tools/audit/src/fixture_builtins.rs`; `fixtures/builtins/v1/resources.jsonl` (regenerated by
+  `audit fixture-builtins`); `crates/builtins-compiler/tests/metered_preparation.rs`;
+  `crates/graph-compiler/tests/MUTATIONS.md`; `docs/rulings/builtins-input-liveness-d2.md`
 - `docs/BUILTINS_AND_METERING_V1.md`, `dsp-research/filters.md`,
   `docs/derivations/1329-input-section-tail-and-rest.md` (new), this spec
 
@@ -202,10 +232,12 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
    filters assert `tail == 0`. A certified value above the tightness line is a finding for Sol
    with the measured ratio, not a gate change. (b) Live bound:
    assert no scanned design exceeds `input_section_live_bound(rate)`: 100,000 log-spaced cutoffs
-   plus the last 65,536 `f32` values below each rate's maximum, for both sections.
+   plus the last 65,536 `f32` values below each rate's maximum, for both sections, and every
+   scanned interior ramp word has `q_f32(w) <= q_ramp < 1`.
 2. **Soundness on the real kernel** (release): the domain extreme of D5 at every rate, `P` in
    `{1.0, 10^(24/20), 1e29}`, input = `P * sign(h[T + i])` reversed over the last 1,000,000 samples
-   before `N`, one live filter target applied 32 samples before `N`. Assert `|y[n]| < P * eps` for
+   before `N`, one live filter target applied 32 samples before `N`; and a quantum-1 history that
+   re-sends and alternates the worst-case pair with disable, with a disable in flight at `N`. Assert `|y[n]| < P * eps` for
    every `n` from `N + T` until exact rest, and from `N + R` on (`R` = `peak_plus_24_dbfs` for the
    first two `P`, `any_sanitized_input` for the last) D2's rest: every output sample is `±0.0`
    (one run with polarity inverted, so `-0.0` is reached), and the eight SVF integrator words
@@ -220,6 +252,8 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
 5. **Re-pins, one at a time:** regenerate `fixtures/graph/v1/direct-route.*` with `graph_fixture`
    and update `ZERO_DELAY_CANONICAL_SHA256`; the only expected byte change is `infinite` →
    `finite:<T>` on post-input-builtins rows. Any other moved byte stops the slice.
+   `resources.jsonl`: only the `engine_owned_*` byte counts move, by exactly the
+   tail-entry/`InputBuiltins` size delta.
 6. Commands:
    - `cargo test --locked --all-targets -p lane -p math -p effect-runtime -p delay -p compressor -p multiband-compressor -p gate-expander -p true-peak-limiter -p transient-shaper -p soft-clip -p parametric-eq -p builtins -p dsp-reference -p conformance --features math/lane,parametric-eq/test-support,builtins/test-support,lane/test-support`
    - `cargo test --locked --release -p builtins --features builtins/test-support --test tail_contract`
@@ -229,6 +263,7 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
      `bash scripts/check-effect-contract.sh`, `bash scripts/check-dsp-research.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `cargo build --locked --release -p audit && ./target/release/audit capi` (`qualification.yml:715`)
+   - `bash scripts/check-builtins-fixtures.sh . target/release/audit`
    - `cargo clippy --locked --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`
 
 ## Test value
@@ -248,3 +283,38 @@ coordinate with stream F (#1261, #1262 edit `builtins-compiler`).
 ## Dependencies
 
 - *Flush the SVF jointly so builtin and EQ filters reach exact rest* (#1328)
+- *Retarget a live input filter only through its designs and their mixtures* (#1407)
+- *Keep every trim, fader and matrix ramp inside its endpoints* (#1408)
+
+## Attempt record
+
+### Attempt 1 (2026-10-05, branch `codex/d15-stream-g`)
+
+**Blocked, no code.** Verification before implementation (opus-xhigh; evidence in
+`/tmp/claude-1002/v1329-blocker/`) found D5 unprovable under today's laws:
+
+- **Live filter retarget law.** A 15 Hz LPF at 48 kHz, disabled and re-sent every 1-frame block:
+  worst one-step `f32` V-norm ratio over 2M states against the exact operator norm, block 800
+  `+9.40e-9` (exact `-4.76e-9`), block 1000 `+4.08e-10` (`-2.04e-10`), block 1400 `+7.49e-13`
+  (`-3.75e-13`); trajectory frames 700-1500 `f32` net `+1.45e-6` where exact is `-1.45e-6`. The
+  ramp never completes while re-sends continue (`c1`, `a2` stuck at `0x00000020`, `m0` at
+  `0x3f7fffe0`), the section never elides, the integrators are never cleared. Without re-sends, at
+  quantum 1, one block of a 10 Hz design then a disable gives exact `q - 1` of `-1.13e-7` (96 kHz),
+  `-1.23e-7` (88.2 kHz), `-2.26e-7` (48 kHz), `-2.46e-7` (44.1 kHz), inside D3's inflation `8.6e-7`.
+- **Finding 1 (gate 1(a) tightness), reproduced:** LPF at the maximum, `T_b(eps/2)` /
+  `T_b(eps/32)`: 44.1 kHz 0 dB 337,306 / 381,702, +24 dB 381,544 / 436,557; 48 kHz 0 dB
+  335,140 / 379,557, +24 dB 379,402 / 434,156. `P*` about `6e-13`, consistent with the stall radius
+  `6.66e-16` through the LPF-at-maximum output row (about `6e-5`).
+- **Finding 2 (D7 reach):** `tools/audit/src/fixture_builtins.rs` (names `builtins::BuiltinTail`;
+  pins `BOXED_TAIL_ENTRY_BYTES = 24`, `BOXED_INPUT_ENTRY_BYTES = 704`,
+  `INPUT_PROCESSOR_BYTES = 688`, `STRIP_PREPARATION_BYTES = 1072`),
+  `fixtures/builtins/v1/resources.jsonl` (checked by `scripts/check-builtins-fixtures.sh`),
+  `crates/builtins-compiler/tests/metered_preparation.rs:12,104`,
+  `crates/graph-compiler/tests/MUTATIONS.md` rows 964-1, 964-3 and the 964-3 recheck row, and
+  `docs/rulings/builtins-input-liveness-d2.md` ("retain a conservative Infinite tail") were outside
+  the authorized paths.
+- **Finding 3 (trim overshoot):** a real `InputBuiltins` polarity flip at +24 dB with
+  `smoothing_samples = 22,137,669` reaches trim word `21.04` (+26.46 dB) before the snap; host-web
+  admits any `u32` window.
+
+Outcome: Amendment 1; #1407 and #1408 filed and made dependencies.
