@@ -2025,8 +2025,10 @@ fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
 }
 
 /// Stops the render thread of the #1258 live-edit race however the control thread leaves the
-/// scope, so a failed assertion cannot hang the join. The plan-swap race keeps its own copy in
-/// `plan_swap_race.rs` (#1273).
+/// scope, so a failed assertion cannot hang the join. A copy of
+/// `bench_support::producer::StopOnDrop`, kept because naming anything from `bench_support` links
+/// its `#[global_allocator]`, which conflicts with this file's counting allocator at compile time
+/// (#1251 D4). The plan-swap race keeps its own copy in `plan_swap_race.rs` (#1273).
 struct StopOnDrop<'a>(&'a AtomicBool);
 
 impl Drop for StopOnDrop<'_> {

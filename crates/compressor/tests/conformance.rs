@@ -9,9 +9,12 @@
 mod support;
 
 use std::hint::black_box;
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use bench_support::alloc as bench_alloc;
+use bench_support::producer::StopOnDrop;
 use effect_contract::{EffectBankProcessBlock, EffectProcessBlock, ParameterChannel};
 use engine::realtime::audit;
 
@@ -57,31 +60,52 @@ fn scoped_allocator_attribution_controls_are_live_and_isolated() {
     );
 
     audit::reset();
-    let ready = Arc::new(Barrier::new(2));
-    let start = Arc::new(Barrier::new(2));
-    let done = Arc::new(Barrier::new(2));
+    // The worker allocates only after this thread is armed (`start`), and this thread stays armed
+    // until the worker has left (`ended`). `ended` is the worker's `StopOnDrop`, so a failed worker
+    // assertion releases this thread instead of leaving it blocked inside the armed scope; and
+    // the waits are atomic flags with a deadline, which do not allocate there (#1251).
+    let ready = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(AtomicBool::new(false));
+    let ended = Arc::new(AtomicBool::new(false));
     let worker_ready = Arc::clone(&ready);
     let worker_start = Arc::clone(&start);
-    let worker_done = Arc::clone(&done);
+    let worker_ended = Arc::clone(&ended);
     let worker = std::thread::spawn(move || {
-        worker_ready.wait();
-        worker_start.wait();
+        let _ended = StopOnDrop(&worker_ended);
+        worker_ready.store(true, Ordering::Release);
+        await_flag(&worker_start, "allocation-control worker: the start");
         let mut probe = Vec::with_capacity(1);
         probe.push(1_u8);
         probe.reserve(128);
         assert!(probe.capacity() > 1, "worker probe did not grow");
         black_box(&probe);
         drop(probe);
-        worker_done.wait();
     });
-    ready.wait();
+    await_flag(&ready, "allocation-control: the worker's readiness");
     audit::in_render_scope(|| {
-        start.wait();
-        done.wait();
+        start.store(true, Ordering::Release);
+        await_flag(&ended, "allocation-control: the worker's end");
     });
     worker.join().expect("allocation-control worker");
     let other_thread = audit::snapshot();
     assert_eq!(other_thread, audit::AuditSnapshot::default());
+}
+
+/// How long a thread of the attribution test waits for the other before it fails. Each wait is
+/// one thread start or one heap probe, microseconds when the other thread is running.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Spins until `flag` is set, failing with `what` after [`HANDSHAKE_DEADLINE`]. It neither
+/// allocates nor locks, so it may wait inside an armed audit scope.
+fn await_flag(flag: &AtomicBool, what: &str) {
+    let deadline = Instant::now() + HANDSHAKE_DEADLINE;
+    while !flag.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not arrive within {HANDSHAKE_DEADLINE:?}"
+        );
+        core::hint::spin_loop();
+    }
 }
 
 /// The installed allocator is live for both allocation and free, while repeated production

@@ -5,6 +5,7 @@
 //! exchange while all allocation and forbidden-operation hooks are armed by the render entrypoint.
 
 use bench_support::alloc as bench_alloc;
+use bench_support::producer::StopOnDrop;
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use graph_compiler::Backend;
 use std::{
@@ -14,6 +15,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::ThreadId,
+    time::{Duration, Instant},
 };
 
 use builtins::{MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
@@ -113,13 +115,47 @@ enum RetirementCommand {
 /// Before control disarms the graph markers this loop can reach only the move-SPSC poll, atomic
 /// loads/stores, and a processor spin hint. Reclamation, destruction, and thread exit occur only
 /// after control sends its sole command outside that armed lifetime.
+/// How long the control thread waits on the retirement worker (to start, or to reclaim one plan)
+/// before it fails. Each takes microseconds while the worker runs.
+const WORKER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Spins until `reached` holds, for the control thread's waits on the retirement worker.
+///
+/// # Panics
+///
+/// When the worker has ended (`ended`, its `StopOnDrop`, is set however it leaves, a panic
+/// included) without `reached`, or after [`WORKER_DEADLINE`]; the message names `what` the
+/// control thread waited for (#1251). It runs outside every traced render interval.
+fn await_worker(ended: &AtomicBool, what: &str, reached: impl Fn() -> bool) {
+    let deadline = Instant::now() + WORKER_DEADLINE;
+    loop {
+        // Read the end first: the worker published everything it did before it ended.
+        let worker_ended = ended.load(Ordering::Acquire);
+        if reached() {
+            return;
+        }
+        assert!(!worker_ended, "the retirement worker ended before {what}");
+        assert!(
+            Instant::now() < deadline,
+            "the retirement worker did not report {what} within {WORKER_DEADLINE:?}"
+        );
+        core::hint::spin_loop();
+    }
+}
+
+/// The retirement worker: reclaims the one retired plan on command, then spins until `stop`.
+///
+/// `ended` is set however this returns or unwinds, so a control thread waiting on it fails instead
+/// of hanging; the control thread's own `StopOnDrop` on `stop` releases this loop the same way.
 fn run_retirement_worker(
     mut commands: Consumer<RetirementCommand>,
     mut retirer: PlanRetirer,
     ready: &AtomicBool,
     reclaimed_epoch_plus_one: &AtomicU64,
     stop: &AtomicBool,
+    ended: &AtomicBool,
 ) -> ThreadId {
+    let _ended = StopOnDrop(ended);
     ready.store(true, Ordering::Release);
     loop {
         if stop.load(Ordering::Acquire) {
@@ -180,10 +216,12 @@ fn run_audit() {
     let ready = AtomicBool::new(false);
     let reclaimed_epoch_plus_one = AtomicU64::new(0);
     let stop = AtomicBool::new(false);
+    let worker_ended = AtomicBool::new(false);
     let (retirement_thread_id, audit) = std::thread::scope(|scope| {
         let ready_ref = &ready;
         let reclaimed_ref = &reclaimed_epoch_plus_one;
         let stop_ref = &stop;
+        let worker_ended_ref = &worker_ended;
         let retirement_thread = scope.spawn(move || {
             run_retirement_worker(
                 command_receiver,
@@ -191,11 +229,12 @@ fn run_audit() {
                 ready_ref,
                 reclaimed_ref,
                 stop_ref,
+                worker_ended_ref,
             )
         });
-        while !ready.load(Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
+        // A failed assertion below stops the worker before the scope joins it (#1251).
+        let _stop = StopOnDrop(stop_ref);
+        await_worker(&worker_ended, "readiness", || ready.load(Ordering::Acquire));
 
         let mut output = [0.0_f32; QUANTUM * 2];
         let left_address = output.as_ptr() as usize;
@@ -239,9 +278,9 @@ fn run_audit() {
         command_sender
             .try_push(RetirementCommand::Reclaim)
             .expect("one empty reclaim command slot");
-        while reclaimed_epoch_plus_one.load(Ordering::Acquire) == 0 {
-            core::hint::spin_loop();
-        }
+        await_worker(&worker_ended, "a reclaimed plan", || {
+            reclaimed_epoch_plus_one.load(Ordering::Acquire) != 0
+        });
         assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
         assert_eq!(command_sender.success_count(), 1);
         stop.store(true, Ordering::Release);
@@ -794,10 +833,12 @@ mod tests {
         let ready = AtomicBool::new(false);
         let reclaimed_epoch_plus_one = AtomicU64::new(0);
         let stop = AtomicBool::new(false);
+        let worker_ended = AtomicBool::new(false);
         let retirement_thread_id = std::thread::scope(|scope| {
             let ready_ref = &ready;
             let reclaimed_ref = &reclaimed_epoch_plus_one;
             let stop_ref = &stop;
+            let worker_ended_ref = &worker_ended;
             let retirement_thread = scope.spawn(move || {
                 run_retirement_worker(
                     command_receiver,
@@ -805,11 +846,12 @@ mod tests {
                     ready_ref,
                     reclaimed_ref,
                     stop_ref,
+                    worker_ended_ref,
                 )
             });
-            while !ready.load(Ordering::Acquire) {
-                core::hint::spin_loop();
-            }
+            // A failed assertion below stops the worker before the scope joins it (#1251).
+            let _stop = StopOnDrop(stop_ref);
+            await_worker(&worker_ended, "readiness", || ready.load(Ordering::Acquire));
 
             let b_epoch = match publisher.publish(applied) {
                 Ok(epoch) => epoch,
@@ -832,9 +874,9 @@ mod tests {
             command_sender
                 .try_push(RetirementCommand::Reclaim)
                 .expect("one reclaim command");
-            while reclaimed_epoch_plus_one.load(Ordering::Acquire) == 0 {
-                core::hint::spin_loop();
-            }
+            await_worker(&worker_ended, "a reclaimed plan", || {
+                reclaimed_epoch_plus_one.load(Ordering::Acquire) != 0
+            });
             assert_eq!(reclaimed_epoch_plus_one.load(Ordering::Acquire), 1);
             assert_eq!(command_sender.success_count(), 1);
             stop.store(true, Ordering::Release);
