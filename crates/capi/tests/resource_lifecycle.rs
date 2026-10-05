@@ -1045,15 +1045,16 @@ impl Budget {
 /// metadata 56,137 -> 185,121 (+128,984 each); the prepared plan's observed bytes move by exactly
 /// as much, so the slack above is unchanged. The eight-lane ceilings are the new values plus 10 %,
 /// rounded up to 64. The four-lane rows were measured by #1304 on 2026-10-05 (`e3375bc1d`, whose
-/// graph rows equal #1263's) under qemu-user: `CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu`,
-/// `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64-static -L <arm64 glibc>"`, then
-/// `scripts/run-aarch64-tests.sh`'s debug-mode budget-test command, which prints them on every
-/// AArch64 debug run. graph session+plan and incremental 341,210 and graph metadata 166,309; the
-/// ceilings are those plus 10 %, rounded up to 64. #1263's parent measured 231,794 and 56,893
-/// there, so the four-lane move is 109,416 (nine members x 2,104 plus three four-lane banks x
-/// 30,160), against 128,984 at eight lanes. capi retained moved 258,231 -> 273,640 (+15,409) inside its budget: the effect
-/// producer table (nine 104-byte producers) and its owned payload, the EQ owners and the effect
-/// and strip IDs (14,425), and 16 bytes in each of the three provider-epoch slots (48).
+/// graph rows equal #1263's) under qemu-user: `CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu` with
+/// that target's runner and linker (the full cross environment is in the #1304 spec's Attempt
+/// record), then `scripts/run-aarch64-tests.sh`'s debug-mode budget-test command, which prints them
+/// on every AArch64 debug run. graph session+plan and incremental 341,210 and graph metadata
+/// 166,309; the ceilings are those plus 10 %, rounded up to 64. #1263's parent measured 231,794 and
+/// 56,893 there, so the four-lane move is 109,416 (nine members x 2,104 plus three four-lane banks
+/// x 30,160), against 128,984 at eight lanes. capi retained moved 258,231 -> 273,640 (+15,409)
+/// inside its budget: the effect producer table (nine 104-byte producers) and its owned payload,
+/// the EQ owners and the effect and strip IDs (14,425), and 16 bytes in each of the three
+/// provider-epoch slots (48).
 const REFERENCE_BUDGETS: [Budget; 19] = [
     Budget {
         row: "graph_session_plus_plan_bytes",

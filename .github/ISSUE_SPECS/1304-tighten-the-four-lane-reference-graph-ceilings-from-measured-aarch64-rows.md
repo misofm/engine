@@ -220,3 +220,12 @@ AArch64 release job: not run here (the D1 step is debug-only); it is the PR's.
 
 *Test value.* No new test (as the brief states); the mutation above shows the tightened four-lane
 ceiling binds.
+
+#### Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05)
+
+The verifier passed attempt 1. Folded, doc comment only (no budget value changes):
+- NIT 1: the `REFERENCE_BUDGETS` doc paragraph from "rounded up to 64. The four-lane rows" to the
+  end is reflowed to 100 columns or fewer (the 123-column line is gone).
+- NIT 2: the doc comment no longer spells a partial qemu command; it names the target with "that
+  target's runner and linker" and points to this Attempt record for the full cross environment.
+- NIT 3 is informational (the four-lane history behind D4); no change.
