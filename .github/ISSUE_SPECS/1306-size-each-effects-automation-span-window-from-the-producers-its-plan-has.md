@@ -14,6 +14,11 @@ automation renders, which is the kind of later fix the owner principle forbids. 
 retitled for decision 15 (formerly *Bound C ABI live effect windows by lane depth (owner
 question)*).
 
+**Not ready for implementation** until *Research: render stored session automation in the engine,
+identically on every platform* (#1058) records its answers A7 (the stored span bound per effect
+instance) and A8 (whether `AUTOMATION_ENQUEUE` stages spans into effect windows, and its bound).
+D1's `stored` term and its `AUTOMATION_ENQUEUE` term are those answers, unchanged.
+
 ## Product outcome
 
 Each prepared effect's per-block automation span window is sized from its plan's own span
@@ -58,6 +63,10 @@ per eight-lane bank at S = 4,096 today).
   `:1185`), so two instances bank together only when their capacities are equal.
 - The effect contract refuses a capacity of 0 (`effect.prepare.capacity`,
   `effect-contract/src/lib.rs:2466-2475`).
+- Effect preparation takes one session-wide value: `EffectCompileCaps::maximum_automation_spans_per_block`
+  (`crates/effect-compiler/src/prepare.rs:22-27`). `prepare_with_console_eligibility` refuses it
+  at 0 (`:309-317`) and copies it into every instance's `PrepareEffectLimits` (`:459-463`).
+  `EffectCompileCaps` is `Copy`, and more than 50 test and tool literals build it.
 
 **Reference numbers** (`crates/capi/tests/resource_lifecycle.rs:1039-1053`; nine console-slot EQs,
 S = 128, eight lanes): at `6fb211594`, `graph_session_plus_plan_bytes` and
@@ -76,21 +85,29 @@ term.
     for each `Block`-rate `PerLane` one (44 for the parametric EQ). Prepared-target cells and the
     bypass cell stage no span and do not count. With this term #1345 D4's deferral never fires
     for a live edit, because the window holds every live cell;
-  - `stored` is the per-block span bound for the instance's stored automation, as #1058's design
-    computes it at preparation;
-  - if #1058's design routes `AUTOMATION_ENQUEUE` batches into effect span windows, their
-    per-block bound, at most S, is a third term;
+  - `stored` is #1058's answer A7: the per-block span bound for the instance's stored
+    automation, evaluated at preparation;
+  - if #1058's answer A8 routes `AUTOMATION_ENQUEUE` batches into effect span windows, their
+    per-block bound from A8, at most S, is a third term; if A8 says they do not, there is none;
   - the result is at least 1, the contract's minimum.
 
-  This issue owns the function. The stored-automation term is supplied by the first issue that
-  renders stored automation, filed from #1058's design, as a summand of this function. That issue
-  adds no second sizing.
+  This issue owns the function. The slice that renders stored effect automation (#1058's answer
+  A11 names it) evaluates A7 as a summand of this function and adds no second sizing.
 - **D2. Cohorts are kept.** Every instance of the same native effect identity and quality in one
   session gets the maximum of their D1 values, so no bank cohort splits. A console slot's
   instances are covered by the same rule.
 - **D3. S leaves the preparation caps.** Remove `HostPrepareCaps::maximum_automation_spans_per_block`.
   The parts that change:
-  - `prepare.rs:1350` passes D2's capacity per instance;
+  - effect preparation takes a per-instance capacity. `prepare_with_console_eligibility`
+    (`crates/effect-compiler/src/prepare.rs:301`) gains a capacity function of the instance's
+    native effect identity and quality, and puts its value in each `PrepareEffectLimits`
+    (`:459-463`). `EffectCompileCaps` keeps its shape and `Copy`, so no literal changes: its
+    `maximum_automation_spans_per_block` becomes a ceiling, and a capacity of 0 or above it is
+    refused with `effect.resource.limit` (`:309-317`). `prepare_native_session_effects` (`:270`)
+    passes the ceiling as every instance's capacity, as today. A new
+    `prepare_native_session_effects_with_automation_capacity` takes the function;
+  - host-core (`crates/host-core/src/prepare.rs:1344-1352`) calls that entry with D2's function
+    and a ceiling of `u32::MAX`: the graph estimate already charges each window's bytes;
   - capi keeps S only for `per_block_automation_density` (`compile.rs:130-133`);
   - the browser's derivation at `hosts/host-web/src/lib.rs:6574-6583` is deleted;
   - every `HostPrepareCaps` literal loses the field's line.
@@ -121,6 +138,8 @@ D1-D6.
 ## Authorized paths
 
 - `crates/host-core/src/prepare.rs`: the caps field and the effect-caps call (D1-D3).
+- `crates/effect-compiler/src/prepare.rs` and `crates/effect-compiler/tests/native_session.rs`:
+  the per-instance capacity entry, the ceiling check and gate 2's effect-compiler test (D3). Stream B also edits this file (#1315, #1345), so root sequences the merge.
 - `crates/control-plane/src/compile.rs`: `prepare_caps` and `prepare_runtime` (moved there from
   `crates/capi/src/runtime/compile.rs` by #1309; `prepare_caps` then takes `ControlLimits`).
 - `hosts/host-web/src/lib.rs`: the caps derivation at `:6574-6591` only. This is stream H's file,
@@ -160,6 +179,9 @@ D1-D6.
    reference session at S = 128 and at S = 4,096: the three graph rows are equal.
    A host-core unit test of D1's function: an EQ instance with a live lane gets 44, the same
    instance without one gets 1, and a cohort of the two gets 44 (D2).
+   An effect-compiler unit test: the capacity function's value reaches each instance's prepared
+   `automation_capacity`, and a value of 0 or above the ceiling is refused with
+   `effect.resource.limit`.
 3. **Exact numbers (PR evidence).** Record the reference graph rows at eight lanes (predicted: the
    post-#1345 base minus 60,480) and at four lanes (from the AArch64 debug log), before and after. Every other
    row must be unchanged, and any difference from the prediction explained.
@@ -179,15 +201,17 @@ D1-D6.
   that, because every C ABI resource test runs at S = 128.
 - The D1 unit test turns red if the live term counts a queue depth, the bypass or target cells,
   or a channel too few, or if a cohort splits.
+- The effect-compiler test turns red if preparation keeps one session-wide capacity, or admits a
+  capacity the contract or the ceiling refuses.
 
 ## Dependencies
 
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): its cells
   are D1's live term.
 - *Research: render stored session automation in the engine, identically on every platform* (#1058):
-  its design gives D1's stored term, and says whether `AUTOMATION_ENQUEUE` feeds effect windows.
-  This issue lands in the same batch as the first issue that renders stored automation, filed
-  from #1058's design.
+  its answer A7 is D1's stored term, and its answer A8 says whether `AUTOMATION_ENQUEUE` feeds
+  effect windows and with what bound. This issue lands in the same batch as the slice that
+  renders stored effect automation, which #1058's answer A11 names.
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
 - *Tighten the four-lane reference graph ceilings from measured AArch64 rows* (#1304), for the
   four-lane rows in D6

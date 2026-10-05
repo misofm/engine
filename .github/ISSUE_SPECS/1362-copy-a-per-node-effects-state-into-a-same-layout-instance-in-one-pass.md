@@ -100,7 +100,7 @@ twice through a payload scratch buffer. *Carry per-node effect instances across 
    (`bench_support::alloc` thread counters, statics warmed).
 4. Commands:
    - `cargo test --locked -p effect-contract -p compressor -p delay -p gate-expander -p multiband-compressor -p parametric-eq -p soft-clip -p transient-shaper -p true-peak-limiter -p effect-compiler`
-   - `cargo build --locked --release -p audit && bash scripts/trace-effect-contract-audit.sh target/release/audit`
+   - `cargo build --locked --release -p bench && bash scripts/trace-effect-contract-audit.sh target/release/bench`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `bash scripts/check-cross-targets.sh`, `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`

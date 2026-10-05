@@ -63,16 +63,14 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   - it consumes nothing: the predecessor's cells stay unread, which D6 needs;
   - it writes no cell, so the control thread stays each cell's only writer.
 
-  `carry_from` records `mode` in each carried slot. Each carried slot resolves at the **successor's first rendered block**, before that block
-  stages anything, and a `render_slice` block of a catch-up counts (*Catch up a returned successor
-  and adopt it exactly at a scheduled sample*, #1355). This is not a live-lane drain, so #1355 D4's
-  closed lanes do not hold it: the carried slot is render-owned state, like a ramp in flight. The
-  predecessor would apply the same value at its next block, which is the same boundary B, so the
-  adopted output is exact (#1322 D2(b)). It resolves in #1345 D3's order:
-  - if the successor's live lanes are open (#1355 D4) and its own cell holds an unread value, that
-    value is newer (written after the successor's publication or by D4's retarget). It applies;
-  - otherwise the carried value applies, and the successor's own cell, if unread, stays unread
-    until its lanes open (at the adoption sample S for a warm successor, #1355 D4).
+  `carry_from` records `mode` in each carried slot. Each carried slot resolves at the **successor's
+  first rendered block**, before that block stages anything. The carried slot is render-owned
+  state, like a ramp in flight. The predecessor would apply the same value at its next block, which
+  is the same boundary B, so the adopted output is exact (#1322 D2(b)). It resolves in #1345 D3's
+  order:
+  - if the successor's own cell holds an unread value, that value is newer (written after the
+    successor's publication or by D4's retarget). It applies;
+  - otherwise the carried value applies.
 
   Counting (#1312 D2, one unit, each superseded value once):
   - **Move mode.** The predecessor never reads again, so the successor counts for it: it adds `n`
@@ -102,7 +100,7 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
   predecessor lane with unread cells copies exactly: its unread values go to the successor's
   carried slots and stay unread in the predecessor, which applies them at its own next block and
   counts what they superseded there. The successor applies the same values at its first rendered
-  block (D2), a catch-up block included, and counts nothing for them. There is no copy refusal.
+  block (D2) and counts nothing for them. There is no copy refusal.
 - **D7. Acked-batch question: can an ack ever precede a drop? No.** This slice adds no admission
   check and no refusal. Every acked value is in a cell of the plan it was written to. A carried
   value reaches the successor through D2, and a value superseded there is counted exactly.
@@ -153,19 +151,16 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
    gain (live values). Run 1 is the structural swap with D4's retarget. Run 2 writes the same edits
    to A just before the swap and prepares B from a base that holds them. The two runs are
    bit-identical in every block, and the strip is not in the restart set.
-6. **Copy mode.** Gates 2 and 4 with a copy after the swap block's predecessor block, then at least
-   two blocks rendered on B directly by the test before B is adopted (the shape of a catch-up
-   block; #1355's `render_slice` reuses this rule and owns the end-to-end catch-up gate), then the
-   adoption. Every block equals the
-   move run, and A equals its uncopied twin. A second case leaves one unread compressor value in A's
-   cell and one Observe record in its FIFO at the copy, then renders at least two catch-up blocks
-   before the adoption: the copy succeeds, B applies the value at its first rendered block,
-   every adopted block equals the move run, and A, rendered on, equals its uncopied twin bit for
-   bit, observation readings included.
+6. **Copy mode.** Gates 2 and 4 in #1322 gate 2's shape: copy after the swap block's predecessor
+   block, then at once run `adopt_predecessor_plan`, then render B on. Every block equals the move
+   run, and A, rendered on, equals its uncopied twin. A second case leaves one unread compressor
+   value in A's cell and one Observe record in its FIFO at the copy, then adopts at once: the copy
+   succeeds, B applies the value at its first block, every B block equals the move run, and A,
+   rendered on, equals its uncopied twin bit for bit, observation readings included.
 7. **Realtime.** Every swap block and copy call makes zero allocations and frees.
 8. Commands:
    - `cargo test --locked -p effect-contract -p rack -p graph -p host-core --features rack/test-support,graph/test-support,host-core/test-support`
-   - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit && bash scripts/trace-effect-contract-audit.sh target/release/audit`
+   - `cargo build --locked --release -p audit -p bench && bash scripts/trace-graph-audit.sh target/release/audit && bash scripts/trace-effect-contract-audit.sh target/release/bench`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
      `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
@@ -183,9 +178,8 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 - Gate 5: a retarget that loses to the carried value applies the old value last. A missing retarget
   keeps the old threshold. Either turns it red.
 - Gate 6: a copy that consumes the predecessor's unread value or Observe record moves A's bits or
-  readings. A copy that skips them loses the value in B. A carried slot that waits for the live
-  lanes to open applies the value at S instead of B, so the adopted blocks differ from the move
-  run. Any of these turns it red.
+  readings. A copy that skips them loses the value in B, so B's first block differs from the move
+  run. Either turns it red.
 
 ## Dependencies
 
@@ -194,6 +188,5 @@ carried lane's live parameter or bypass sounds exactly like "live edit, then str
 - *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): this slice
   carries the cells #1345 creates, so #1345 lands first.
 
-Dependent: *Catch up a returned successor and adopt it exactly at a scheduled sample* (#1355) keeps
-its live lanes closed until adoption (its D4) and resolves carried slots by this issue's D2 rule in
-its `render_slice` blocks; it lands after this issue.
+Carried effect slots under a latency-growth swap are gated by stream C's adoption spec (umbrella
+#1287, *Pre-roll a successor whose latency grows*).

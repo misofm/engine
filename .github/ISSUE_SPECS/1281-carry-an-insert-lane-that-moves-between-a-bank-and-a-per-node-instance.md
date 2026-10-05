@@ -18,8 +18,9 @@ mode.
   per node and eight bank; at 4 lanes, three and four. #888 and #889 (open) would bank partial
   groups. Whichever lands later keeps this slice's gates.
 - A per-node insert is `NodeKind::Effect(GraphPreparedEffect)` or `NodeKind::LiveControlEffect`
-  (`crates/graph/src/runtime.rs:1136`, `:1143`; struct `:1184`), with `processor: Box<dyn
-  PreparedNativeEffect>`. A bank lane is a lane of an `EffectBankStage` or a
+  (`crates/graph/src/runtime.rs:1136`, `:1143`; struct `LiveControlEffect` `:1184`). Both hold a
+  `GraphPreparedEffect` (`crates/graph/src/lib.rs:881`) with `processor: Box<dyn
+  PreparedNativeEffect>` (`:884`). A bank lane is a lane of an `EffectBankStage` or a
   `LiveControlEffectBankStage` (`crates/rack/src/lib.rs:750`, `:937`).
 - Per-node and bank payloads share one layout: `snapshot_state_payload` and `restore_state_payload`
   (`crates/effect-contract/src/lib.rs:1930`, `:1975`) and the bank pair (`:2070`, `:2079`). Both

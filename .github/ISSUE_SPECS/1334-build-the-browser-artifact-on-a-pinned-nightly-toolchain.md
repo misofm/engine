@@ -55,16 +55,26 @@ shape (no atomics, unshared memory), so its risk is reviewed apart from threadin
   The fuzz pin in `fuzz.yml`/`nightly.yml` stays its own literal and may differ later.
 - D2. **Builder.** `scripts/build-web-audioworklet.sh` reads `channel` from `[browser-artifact]`
   (refuses a missing or non-`nightly-YYYY-MM-DD` value), adds `--print-toolchain` (prints the
-  channel and exits, builds nothing), and builds with `cargo "+$channel" build --locked --release
-  --target wasm32-unknown-unknown -Zbuild-std=std,panic_abort -p host-web`. RUSTFLAGS keep
+  channel and exits, builds nothing), and builds with `RUSTUP_TOOLCHAIN="$channel" cargo build
+  --locked --release --target wasm32-unknown-unknown -Zbuild-std=std,panic_abort -p host-web`.
+  Keep the toolchain as an environment prefix, not `cargo "+$channel"`:
+  `scripts/check-artifact-evidence-leak.sh:112-115` finds the shipped invocation only by the
+  pattern `(^|[[:space:]])cargo (build|check)([[:space:]]|$)`, so `cargo +nightly-... build` would
+  leave no artifact invocation to gate and `lint` fails (`:117-118`). The prefix also overrides
+  `npm-publish.yml`'s job-wide `RUSTUP_TOOLCHAIN: "1.97.1"` for this one line. RUSTFLAGS keep
   `+simd128`, the strip flag and both remaps, and add
-  `--remap-path-prefix=$(rustc "+$channel" --print sysroot)=/rustc-sysroot`, because build-std
-  compiles std from the sysroot's `rust-src` and embeds that absolute path. No `+atomics`, no
-  shared or imported memory: that is #1332. The `parameter-metadata` run stays on stable.
-- D3. **Install everywhere the builder runs.** `artifact`, `artifact-identity` and `wasm-guests`
-  in `qualification.yml`, and the qualify step in `npm-publish.yml`, install the channel from
-  `bash scripts/build-web-audioworklet.sh --print-toolchain` with `--profile minimal --component
-  rust-src`. Stable installs stay for every other cargo use. `run-wasm-gates.sh` builds the G5
+  `--remap-path-prefix=$(RUSTUP_TOOLCHAIN="$channel" rustc --print sysroot)=/rustc-sysroot`,
+  because build-std compiles std from the sysroot's `rust-src` and embeds that absolute path. No
+  `+atomics`, no shared or imported memory: that is #1332. The `parameter-metadata` run stays on
+  stable.
+- D3. **Install everywhere the builder runs.** `artifact`, `artifact-identity`, `sdk` and
+  `wasm-guests` in `qualification.yml`, and the qualify step in `npm-publish.yml`, install the
+  channel with `channel="$(bash scripts/build-web-audioworklet.sh --print-toolchain)"` then
+  `rustup toolchain install "$channel" --profile minimal --component rust-src`. The `sdk` job
+  needs it although it builds no module: `sdk-package.sh check` runs
+  `test-sdk-artifact-builder-output-contract.sh` first (`scripts/sdk-package.sh:29-30`,
+  `qualification.yml:268-279`), which runs the real builder with only `cargo` mocked, so the
+  builder's real `rustc --print sysroot` query needs the channel installed. Stable installs stay for every other cargo use. `run-wasm-gates.sh` builds the G5
   guest with the same channel and `-Zbuild-std=std,panic_abort`, so G5 compares the compiler that
   ships.
 - D4. **Identity names the toolchain.** The `artifact` job emits `toolchain` (the channel) in place
@@ -133,9 +143,11 @@ shape (no atomics, unshared memory), so its risk is reviewed apart from threadin
 3. `bash scripts/run-wasm-gates.sh` passes (guest on the nightly).
 4. Reproducibility, PR evidence: the module digest is identical when built with `RUSTUP_HOME`
    pointing at a second copy of the toolchain and with another `CARGO_HOME` and checkout path.
-5. Browser legs for chromium, firefox and webkit: `npm run qualify -- --artifacts <out> --sdk-root
-   <repo>/sdk --browser <b> --record-matrix --candidate-commit <sha> --self-test-mutations`, then
-   `--check-matrix` accepts the regenerated files.
+5. Browser legs: `npm run qualify -- --artifacts <out> --sdk-root <repo>/sdk --browser <b>
+   --self-test-mutations` passes for each of chromium, firefox and webkit. The record is one run,
+   `npm run qualify -- --artifacts <out> --sdk-root <repo>/sdk --browser all --record-matrix
+   --candidate-commit <sha>` (`hosts/host-web/qualification/run.mjs:879-881` refuses
+   `--record-matrix` without `--browser all`), then `--check-matrix` accepts the regenerated files.
 6. `python3 -B scripts/web-audioworklet-identity.py --self-test` (with new cases), `python3 -B
    scripts/test-npm-publish-modes.py`, `python3 -B scripts/check-ci-path-routing.py` and `python3
    -B scripts/test-ci-path-routing.py`, `python3 -B scripts/check-release-shape.py --self-test`.

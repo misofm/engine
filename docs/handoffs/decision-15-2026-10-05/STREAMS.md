@@ -18,8 +18,9 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, H's #1331
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
-  and #1381. The verifier still flagged #1280, #1316, #1332 and #1363 as tight; their stream
-  coordinator splits any that does not fit half a day before implementation (AGENTS.md).
+  and #1381. The verifiers still flagged #1280, #1316, #1325, #1332, #1333, #1334 and #1363 as
+  tight; their stream coordinator splits any that does not fit half a day before implementation
+  (AGENTS.md).
 - **Stream C design gate.** Three adversarial rounds each found new defects in the warm successor
   (decision 15, "Verification"); the last round's findings were folded in without a fourth check.
   Before its first implementation slice, stream C's coordinator runs one fresh opus-xhigh design
@@ -48,7 +49,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1354, #1355) → H #1381 → B #1349 |
 | `crates/engine/src/realtime/plan.rs` | A #1322 → B (#1343, #1344) → H #1400 → C (#1396, #1355, #1358) → H #1381 |
 | `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319) → C (#1353, #1320) |
-| `crates/host-core/src/live_delta.rs` | B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) and I #1335 → F → G #1371 |
+| `crates/host-core/src/live_delta.rs` | I #1335 (starts immediately) → B (#1312, #1345-#1347) → A (#1277, #1280) → E (#1054, #1394, #1365, #1341) → F → G #1371 |
 | `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → D (#1288, #1363) → G #1371 |

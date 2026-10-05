@@ -77,18 +77,19 @@ scope (see Hazards).
   becomes `pub` (documented). Sites in crates that already depend on `bench-support` (`tools/audit`,
   `crates/compressor`) use it. `crates/engine` cannot (`bench-support` depends on `engine`) and fixes
   its two sites locally.
-- **D4. The capi copy (NIT).** `crates/capi` does not depend on `bench-support` today, and
-  `bench-support` installs its audited `#[global_allocator]` (`tools/bench-support/src/alloc.rs:169`)
-  in any binary that links it. Add `bench-support` as a capi **dev-dependency** and use its
-  `StopOnDrop` in `resource_lifecycle.rs` and in sites 1 and 6 only if `cargo test --locked -p capi`
-  stays green with it; otherwise keep capi's own copy, use it for sites 1 and 6 within the same test
-  target where possible, and record in the evidence why the dedupe was declined.
+- **D4. The capi copy (NIT).** `crates/capi` already has `bench-support` as a dev-dependency
+  (`crates/capi/Cargo.toml:26`). `bench-support` installs its audited `#[global_allocator]`
+  (`tools/bench-support/src/alloc.rs:169`) in any binary that links it, and
+  `crates/capi/tests/resource_lifecycle.rs` has its own counting `#[global_allocator]` (`:24`), from
+  which its allocation counts come. That test binary cannot link `bench_support`, so its
+  `StopOnDrop` (`:2030`) stays, and the NIT is closed as declined for that reason. Sites 1 and 6 sit
+  in capi's library test binary, which has no global allocator of its own and arms no render
+  scope; they use `bench_support::producer::StopOnDrop` (D3).
 
 ## Authorized paths
 
 - `crates/capi/src/ffi.rs` (site 1's test only), `crates/capi/src/runtime/tests.rs` (site 6's test
-  only), `crates/capi/tests/resource_lifecycle.rs` (its `StopOnDrop` only), `crates/capi/Cargo.toml`
-  (the `[dev-dependencies]` entry of D4 only)
+  only)
 - `tools/audit/src/builtins_graph.rs` (site 2's thread handling only)
 - `crates/engine/src/realtime/spsc.rs` (site 3's test only), `crates/engine/tests/observation_transport.rs`
   (site 4's test only)
@@ -148,7 +149,6 @@ planted panics show once, as PR evidence.
 ## Evidence
 
 - Gate 1's table: site, planted panic, exit code and message before and after.
-- D4's outcome: deduped, or declined and why.
 
 ## Dependencies
 

@@ -39,7 +39,7 @@ a `NativeEffectRegistry`. No rendered bit and no diagnostic a host can observe c
   `crates/host-core/src/prepare.rs:1342-1343`, and hands it to `prepare_native_session_effects`.
   `crates/host-core/src/live_delta.rs:424` and `crates/host-core/src/response.rs:534` do the same.
   The registry is built per preparation, so "once per registry" is once per type per preparation.
-- **No test pins the registry refusal of a main descriptor.** `crates/effect-contract/tests/response_analysis.rs:216-230`
+- **No test pins the registry refusal of a main descriptor.** `crates/effect-contract/tests/response_analysis.rs:223-232`
   covers the response-analysis descriptor only. Nothing outside `lib.rs` names
   `effect.descriptor.invalid` except `docs/EFFECT_CONTRACT_V1.md:213`.
 

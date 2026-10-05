@@ -66,9 +66,11 @@ Mono-source chains keep collapsing after the swap.
   (the `designed` flag and any RESTORED term), and update the cache's rustdoc: restore now also runs
   on a bound bank, in the swap block or copy block only. Chains take #1276's AND rule for their
   agreement flag. Update the two "no engine path snapshots a bound bank" docs.
-- **D6. Refusal.** A restore that refuses leaves the lane as prepared (at rest) and increments a
-  carry-refusal counter readable after render. It never panics on the render thread. #1278 makes a
-  refusal of an own payload a defect, so gate 1 asserts the counter is 0.
+- **D6. Refusal.** A restore that refuses leaves the lane as prepared (at rest) and increments its
+  console bank stage's saturating `u64` count `carry_refused`. The prepared graph plan sums these
+  in `carry_refusal_count()`, read after render (named like `RealtimePlanOwner::carry_mismatch_count`,
+  `crates/engine/src/realtime/plan_exchange.rs:372`). It never panics on the render thread. #1278
+  makes a refusal of an own payload a defect, so gate 1 asserts the count is 0.
 
 ## Deliverables
 
@@ -97,8 +99,8 @@ Mono-source chains keep collapsing after the swap.
    `CONSOLE_ELIGIBLE_EFFECTS` in `pre_insert` and `post_insert`. Each effect does work on the test
    signal: EQ gain, the compressor and the limiter reducing gain, the gate opening and closing.
    Session B adds a muted track whose ID sorts first, so every lane shifts. The swapped run (swap
-   after block 6) and a fresh B fed from frame 0 are bit-identical in every block. The refusal
-   counter is 0. With this slice's section of the program disabled, block 7 differs.
+   after block 6) and a fresh B fed from frame 0 are bit-identical in every block.
+   `carry_refusal_count()` is 0. With this slice's section of the program disabled, block 7 differs.
 2. **Collapse kept.** On a mono-source session with the same console, the successor's chains
    collapse in the blocks after the swap (`bank_collapse_counters` grows), and the output stays
    bit-identical.

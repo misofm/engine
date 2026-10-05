@@ -198,9 +198,15 @@ two render calls, so the ramp starts at `p`).
    so the second transaction writes no mute for B or its send: the adoption is at exactly gate 1's
    `S` (the watermark's first sample), not at a later `S` computed from the second commit.
 4. **A restore during phase 1 fades back in.** In gate 1, at block `k + 4` (mid-ramp) a second
-   transaction restores B exactly as it was. It returns OK. Every block up to `S` equals gate 1's
-   reference. From `S` on, every block equals a fresh plan of the restored session fed the same
-   source frames, with B muted and live-unmuted with `N` at `S`. From `S + N` on, B's output is the
+   transaction restores B exactly as it was. It returns OK. The reference is gate 1's reference
+   run (B's fader and its `pre_fader` send muted by a value-only transaction at the same point),
+   continued: right after the block that ends at `S`, a second value-only transaction unmutes both,
+   B's fader and the send, with ramp `N`, so both ramps start at `S`. Every block of the restore run
+   equals that reference bit for bit, before `S` and after it. A fresh plan of the restored session
+   is not a valid reference: muting its fader does not reach the `pre_fader` send, and it runs B's
+   pre-fader state from frame 0. In both runs B carries no insert, its input filters are off and
+   the session's console sections are empty, so the restart of B's strip at `S` (D6) restarts
+   nothing but its lanes, which the arming then drives. From `S + N` on, B's output is the
    unducked reference's.
    (b) The same with B's source fed one block ahead only, as in gate 2. Every submit for it before
    and after the restore returns OK, none is refused, and from `S` on B plays the frames submitted
