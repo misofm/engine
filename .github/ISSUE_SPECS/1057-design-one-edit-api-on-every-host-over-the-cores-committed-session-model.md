@@ -225,3 +225,38 @@ evidence in `/tmp/claude-1002/w1057/evidence/`.
   lease mention removed; worst-case latency includes resends; "approximate size", stable
   non-atomic build, not the nightly atomics artifact.
 - Gate: `bash scripts/check-workspace-policy.sh` ok.
+
+**Attempt 3** (answers the attempt-2 verdict: 2 MAJOR, 6 MINOR, 5 NIT). Work on `50fb23b5f`; no
+file under `crates/`, `hosts/`, `sdk/`, `tools/` or `scripts/` changed since `8be19c86e`, so every
+anchor holds on both. New measurement (note section 5.6): a scratch test of
+`ProtocolCodec::encoded_session_transaction_len` and of record layouts, in a `git archive` export
+under `/tmp/claude-1002/w1057b/` (tree and target deleted after; output kept in
+`/tmp/claude-1002/w1057b/evidence/sizes.txt`, not committed).
+
+- MAJOR-1: the browser `ControlLimits` are derived now, from the encoder. Largest live edit:
+  `UpsertEffectParam`, 176 bytes at 3-byte IDs and 416 bytes at the 127-byte ID; 1,024 of them are
+  426,032 bytes. Rule: 1,024 × the largest live edit at the 127-byte ID, rounded up to a power of
+  two. Values: frame 524,288, response 524,288, one replay entry of 1,048,576. P1 gains the gate
+  "every setter encodes to at most 416 bytes at the 127-byte ID", so no later issue rechecks the
+  values. The pre-P2c staging cost at these limits is measured (43-54 µs p50 natively per edit).
+- MAJOR-2: P2a has no exact-0 allocation gate, by the realtime rules: AGENTS.md allows counted
+  control allocations in the single-mode message handler and keeps the render-locked count at 0
+  (D15-10); the model clone in `prepare_transaction` allocates anyway, so a classifier-only 0 would
+  not make the handler allocation-free. P2a's gate is now "allocation count and bytes are equal
+  with and without 63 unnamed tracks" plus the time gate; the launch registry is built once. The
+  audio-thread protection is #1382's single-mode time gate.
+- MINORs: the single-mode snapshot writes at most 65,536 bytes per handler call with a writer
+  resumable inside strings, continued by the SDK's message, not by a timer; bound 2S + 2 quanta,
+  gated in P3 with `currentFrame`. The single-mode budget is measured in a cross-origin-isolated
+  Chromium Worker on the same module and exports (5 µs clock). Arm tags are `u64` (no wrap
+  refusal), carried as first and count in `CommandReply`, #1293's outcome record and #1294's
+  reply; P7 changes the read record (96 to 104 bytes) and the SDK layout; `armed()` settlement is
+  decided; #1280 D3 is cited. P2b keys on a value-setter predicate the compile can decide; P2c
+  plans the eviction read-only and applies it at commit, and stages the response in one boot-time
+  buffer. The SDK queue holds 64 calls and refuses with `backpressure`. New proposed issue P8 owns
+  the typed commit path in `protocol`.
+- NITs: per-call time is labelled an inference with its basis; the input-rate reliance is removed;
+  cut 1 defines lane-set overlap; a merged call reports `rebuild`; P7 lists the resource rows.
+- Correction found: route gain, mute and matrix already have setters, so P1 no longer lists them;
+  `SetVcaFader` replaces `UpsertVca` in P1's list.
+- Gate: `bash scripts/check-workspace-policy.sh` ok.
