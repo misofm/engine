@@ -72,6 +72,18 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   and fails `Full` without a credit. `legacy_outstanding`, `SwapOutcome::DeferredRetirementFull`
   and `deferred_count` are removed: a claimed candidate always finds retirement room for the plan
   it displaces. Their tests move to the reserved form or are deleted (gate 4).
+- **D8. The deferral audits (Amendment 1).** The `realtime`, `graph` and `builtins_graph` audits
+  and their trace scripts prove the render-side deferral path that D6 removes. Each audit replaces
+  its deferral round with two rounds, with exact asserted counts:
+  (i) **refused reservation**: while the retirement queue is full, every reservation is refused
+  `Full` on the control side; render keeps rendering the active plan with zero allocations,
+  deallocations, locks and syscalls. `swaps_deferred` becomes `reservations_refused`, and
+  `prior_plan_renders_on_deferred` becomes `prior_plan_renders_while_refused` (the builtins-graph
+  audit keeps its long range under the new names, each count exact);
+  (ii) **withdraw and republish**: a published candidate is withdrawn before any render
+  (`Withdrawn`), published again, and adopted at the next block with its epoch intact
+  (`withdrawals` and `republished_adoptions` exact).
+  Each trace script checks the new counts exactly in place of the deferred counts.
 - **D7. Acked-batch question: can an ack ever precede a drop? No.** Nothing in the exchange drops
   a candidate. A claimed candidate is adopted. A withdrawn one is returned whole to the control
   thread. A dropped `UnadoptedCandidate` is dropped only by the control thread's own choice.
@@ -90,6 +102,14 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
 - `crates/source/src/lib.rs` (its one test that publishes, `:3751`, only).
 - The control plane's publication call (`crates/control-plane/src/control.rs`), only as far as the
   API change requires. Withdrawal is used by #1310.
+- Amendment 1, mechanical edits only (the removed `publication_capacity` field and the move to
+  reserve-then-commit): `crates/control-plane/src/compile.rs`,
+  `crates/host-core/tests/successor_swap.rs`, `crates/host-core/tests/support/successor.rs`,
+  `crates/graph/tests/rt11_swap_carry_alloc.rs`, and `crates/source/src/lib.rs`'s
+  `exchange_config` test helper.
+- Amendment 1, the deferral audits (D8): `tools/audit/src/realtime.rs`, `tools/audit/src/graph.rs`,
+  `tools/audit/src/builtins_graph.rs`, `scripts/trace-realtime-audit.sh`,
+  `scripts/trace-graph-audit.sh`, `scripts/trace-builtins-graph-audit.sh`.
 
 ## Non-goals
 
@@ -122,6 +142,8 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
    --locked --release -p engine --lib spsc_loom`.
 3. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
    reports allocations, deallocations, locks, syscalls and `total_violations` 0.
+   `bash scripts/trace-realtime-audit.sh`, `bash scripts/trace-graph-audit.sh` and
+   `bash scripts/trace-builtins-graph-audit.sh` pass with D8's counts (Amendment 1).
    `bash scripts/check-realtime-policy.sh` passes with the script unchanged (no `unsafe` outside
    `spsc.rs`); `bash scripts/test-realtime-policy.sh`.
 4. **Superseded tests.** The `DeferredRetirementFull` cases (`mod.rs:309-315`, `:465-470`) are
@@ -140,7 +162,24 @@ watermark (#1314), supersession (#1310) and scheduled adoption (#1311) build on.
   or a publication into the `Active` cell.
 - Gate 2: a claim/withdraw race in which both sides take the candidate, render reads a cell being
   written, or render loops on a failed compare-and-swap. Only loom's interleavings reach it.
+- D8's audit rounds: a control-side refusal that disturbs the running plan (an allocation, lock or
+  syscall on render, or a render that stops rendering the active plan), and a withdraw-republish
+  cycle that loses the candidate or its epoch in the release build the audits measure.
 - Gate 4's replacement: a credit-less candidate published, which could defer a swap forever.
+
+## Amendment 1 (root, 2026-10-05)
+
+D2 and D6 remove `publication_capacity`, the unreserved `publish`,
+`SwapOutcome::DeferredRetirementFull` and `deferred_count`. That breaks files the original
+authorized paths did not list: mechanical call sites in `crates/control-plane/src/compile.rs`,
+two host-core test files, one graph test and `crates/source/src/lib.rs`'s `exchange_config`; and
+three audit binaries with their trace scripts, which exist to prove the deferral path. Root ruled:
+authorize the mechanical files for mechanical edits only, and the three audits and trace scripts
+with the frozen proof of D8; add the three trace runs to gate 3. One issue, no sibling split: the
+tree compiles only with both, so a same-commit sibling would be ceremony. This takes the slice
+past AGENTS.md's half-day size (about half a day plus two to three hours for the audits); root
+accepted the overrun for that reason. The first run stopped before any change and is not an
+attempt.
 
 ## Dependencies
 
