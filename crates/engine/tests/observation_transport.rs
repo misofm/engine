@@ -18,6 +18,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use engine::realtime::{ObservationReader, ObservationWindow, observation_slot};
 
@@ -101,6 +102,21 @@ fn repeat_reads_and_final_gap_have_exact_accounting() {
     assert_eq!(accounting.newest, 4);
 }
 
+/// How long the reader waits for a newer window before it fails. A running writer publishes one
+/// every few nanoseconds.
+const STALL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Sets the writer's `done` when dropped, so the reader stops however the writer leaves its loop
+/// (#1251). `engine` cannot use `bench_support::producer::StopOnDrop`: `bench-support` depends on
+/// `engine` (#1251 D3).
+struct DoneOnDrop(Arc<AtomicBool>);
+
+impl Drop for DoneOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 #[test]
 fn a_million_windows_are_read_whole_and_in_order() {
     let (publisher, reader) = observation_slot();
@@ -109,20 +125,40 @@ fn a_million_windows_are_read_whole_and_in_order() {
     let done = Arc::new(AtomicBool::new(false));
     let writer_done = Arc::clone(&done);
 
+    // The start barrier cannot hang: neither thread runs anything before it that can fail.
     let writer = thread::spawn(move || {
+        let _done = DoneOnDrop(writer_done);
         writer_barrier.wait();
         for sequence in 1..=WINDOWS {
             publisher.publish(window(sequence));
         }
-        writer_done.store(true, Ordering::Release);
         publisher.consumed_sequence()
     });
 
     barrier.wait();
     let mut accounting = ReadAccounting::default();
+    // The stall check reads the clock once every `STALL_CHECK_POLLS` polls, so it does not
+    // thin out the reads that race the writer.
+    const STALL_CHECK_POLLS: u32 = 1_024;
+    let mut polls = 0_u32;
+    let mut checked_newest = 0;
+    let mut checked_at = Instant::now();
     while !done.load(Ordering::Acquire) {
         if let Some(observed) = reader.read() {
             account_read(&reader, observed, &mut accounting);
+        }
+        polls = polls.wrapping_add(1);
+        if polls.is_multiple_of(STALL_CHECK_POLLS) {
+            if accounting.newest == checked_newest {
+                assert!(
+                    checked_at.elapsed() < STALL_DEADLINE,
+                    "observation reader: no window newer than {checked_newest} within \
+                     {STALL_DEADLINE:?}"
+                );
+            } else {
+                checked_newest = accounting.newest;
+                checked_at = Instant::now();
+            }
         }
     }
     if let Some(observed) = reader.read() {

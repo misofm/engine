@@ -2945,6 +2945,46 @@ fn direct_and_c_render_match_one_and_ten_tracks_across_launch_rates() {
     }
 }
 
+/// How long one side of the lockstep below waits for the other before it fails. Each step takes
+/// one block's submit or render, microseconds in a debug build.
+const LOCKSTEP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Waits until `progress` reaches `target`, for the lockstep below.
+///
+/// # Panics
+///
+/// When the peer has ended (normally or by a panic: its `StopOnDrop` set `peer_ended`) short of
+/// `target`, or after [`LOCKSTEP_DEADLINE`]; the message names `what` this side waited for and the
+/// block, `target - 1` (#1251). The message is formatted only on failure, so the wait allocates
+/// nothing on its passing path.
+fn await_lockstep(
+    progress: &std::sync::atomic::AtomicU64,
+    target: u64,
+    peer_ended: &std::sync::atomic::AtomicBool,
+    what: &'static str,
+) {
+    use std::sync::atomic::Ordering;
+    let deadline = std::time::Instant::now() + LOCKSTEP_DEADLINE;
+    loop {
+        // Read the peer's end before its progress: a peer that ended published its last
+        // progress first, so an ended peer short of `target` will never reach it.
+        let ended = peer_ended.load(Ordering::Acquire);
+        if progress.load(Ordering::Acquire) >= target {
+            return;
+        }
+        let block = target - 1;
+        assert!(
+            !ended,
+            "lockstep: the peer ended before {what} block {block}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lockstep: {what} block {block} did not happen within {LOCKSTEP_DEADLINE:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
     let mut model =
@@ -2957,12 +2997,20 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
         children.session_error,
     ))) as usize;
     let plan = Box::into_raw(Box::new(crate::Plan::new(children.plan))) as usize;
-    let submitted = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let consumed = std::sync::Arc::new(std::sync::Barrier::new(2));
+    // A lockstep of two counters in place of two barriers: the producer submits block `b` and
+    // waits until the renderer has consumed it; the renderer waits until block `b` is submitted,
+    // renders it and publishes it consumed. Each side's `StopOnDrop` marks it ended however it
+    // leaves its loop, so a failed assertion on one side fails the other's wait instead of
+    // leaving it blocked at a barrier (#1251).
+    let submitted = std::sync::atomic::AtomicU64::new(0);
+    let consumed = std::sync::atomic::AtomicU64::new(0);
+    let producer_ended = std::sync::atomic::AtomicBool::new(false);
+    let render_ended = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let producer_submitted = submitted.clone();
-        let producer_consumed = consumed.clone();
+        let (submitted, consumed) = (&submitted, &consumed);
+        let (producer_ended, render_ended) = (&producer_ended, &render_ended);
         scope.spawn(move || {
+            let _ended = bench_support::producer::StopOnDrop(producer_ended);
             let session = session as *mut crate::Session;
             let left = [0.25_f32; 128];
             let right = [-0.5_f32; 128];
@@ -2987,17 +3035,21 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
                     &right,
                     false,
                 );
-                producer_submitted.wait();
-                producer_consumed.wait();
+                submitted.store(block + 1, std::sync::atomic::Ordering::Release);
+                await_lockstep(consumed, block + 1, render_ended, "the renderer consumed");
             }
         });
-        let render_submitted = submitted.clone();
-        let render_consumed = consumed.clone();
         scope.spawn(move || {
+            let _ended = bench_support::producer::StopOnDrop(render_ended);
             let plan = plan as *mut crate::Plan;
             let mut observed_signal = false;
             for block in 0..6_u64 {
-                render_submitted.wait();
+                await_lockstep(
+                    submitted,
+                    block + 1,
+                    producer_ended,
+                    "the producer submitted",
+                );
                 let mut pcm = [f32::NAN; 256];
                 let output = crate::PlanarOutput {
                     struct_size: crate::PLANAR_OUTPUT_SIZE,
@@ -3014,7 +3066,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
                 );
                 assert!(pcm.iter().all(|sample| sample.is_finite()));
                 observed_signal |= pcm.iter().any(|sample| *sample != 0.0);
-                render_consumed.wait();
+                consumed.store(block + 1, std::sync::atomic::Ordering::Release);
             }
             assert!(observed_signal);
         });

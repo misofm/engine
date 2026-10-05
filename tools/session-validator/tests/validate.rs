@@ -544,3 +544,56 @@ fn effect_preparation_matches_engine_and_cli_refuses_without_canonical_output() 
         }
     }
 }
+
+/// Decision 14's probe (F1), closed by decision 15 E1 (#1335 gate 2): an automation on the
+/// observation fixture's EQ `band-1-enabled` passes stages 1-4 and fails `prepare-effects` with
+/// `effect.automation.rate` at the automation; the same automation on the block-rate
+/// `band-1-gain` passes every stage.
+///
+/// Red mutation: refuse the target anywhere `session-validator` does not run (a host-only check)
+/// -> the probe passes all five stages, as it did on 2026-10-04.
+#[test]
+fn an_automation_on_a_prepared_effect_parameter_fails_effect_preparation() {
+    let base: serde_json::Value =
+        serde_json::from_str(&fixture("observation-frame-shape.json")).unwrap();
+    for (parameter_id, unit, expected) in [(1, "linear", true), (4, "db", false)] {
+        let mut value = base.clone();
+        value["automation"] = serde_json::json!([{
+            "id": "probe",
+            "target": {
+                "entity_id": "t1",
+                "rack": "inserts",
+                "effect_id": "eq",
+                "parameter_id": parameter_id,
+                "channel": "both"
+            },
+            "segments": [{
+                "shape": "step",
+                "start_sample": "0",
+                "end_sample": "480",
+                "start_value": 1.0,
+                "end_value": 1.0,
+                "unit": unit
+            }]
+        }]);
+        let report = validate_session_document(&serde_json::to_string(&value).unwrap());
+        if !expected {
+            assert!(report.passed(), "{}", report.render("band-1-gain"));
+            continue;
+        }
+        assert_eq!(report.failed_stage(), Some(4), "{}", report.render("probe"));
+        assert!(
+            report.stages()[..4]
+                .iter()
+                .all(|stage| stage.status == StageStatus::Pass)
+        );
+        let diagnostics = &report.stages()[4].diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "effect.automation.rate");
+        assert_eq!(
+            diagnostics[0].path,
+            "$.automation[id=probe].target.parameter_id"
+        );
+        assert!(report.canonical().is_none());
+    }
+}
