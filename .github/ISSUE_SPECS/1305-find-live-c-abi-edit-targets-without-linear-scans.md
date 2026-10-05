@@ -42,7 +42,7 @@ delta and the strip table share canonical track order (`control.rs:1094-1107`).
   (`crates/host-core/src/prepare.rs:1382-1383`), whose builder appends each entry's rows
   contiguously, in entry order (`build_parameter_catalog`, `control_provider.rs:461`, loop at
   `:490-500`);
-- the producers: `attach_effect_live_controls(&mut effects, depth)` (`prepare.rs:1390-1395`;
+- the producers: `attach_effect_live_controls(&mut effects, depth)` (`crates/host-core/src/prepare.rs:1390-1395`;
   `crates/effect-compiler/src/prepare.rs:1372`), which pushes one producer per entry in entry
   order, and returns an error, not a partial table, if any entry fails; capi keeps that order
   (`effect_controls.into_boxed_slice()`, `crates/capi/src/runtime/compile.rs:619`).
@@ -78,7 +78,7 @@ transaction; that is out of scope here.
   `parameter_id` and `channel`. Its signature, result and doc contract stay; update its doc
   comment ("A linear search over the catalog").
 - **D4. State the order where it is made.** Add one sentence to the doc comments of
-  `EffectPreparedSession::entries` (or the sort at `prepare.rs:527`), of
+  `EffectPreparedSession::entries` (or the sort at `crates/effect-compiler/src/prepare.rs:527`), of
   `attach_effect_live_controls` and of `build_parameter_catalog`: the producer table and the
   catalog are in entry order, sorted by `track_id` first, and the control plane's lookups rely on
   it. Add a `debug_assert!` that the producer table is sorted by `track_id` where the control plane

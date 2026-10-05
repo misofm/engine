@@ -27,7 +27,7 @@ toggles, the browser and the C ABI render the same bits.
   (`hosts/host-web/src/lib.rs:4484-4501`) admits `COMMAND_EFFECT_BYPASS` only with channel 255,
   parameter 0, a zero `smoothing_samples` word and zero trailing values, and refuses anything else
   as `COMMAND_REASON_MALFORMED`; a value other than 0 or 1 is `COMMAND_REASON_DOMAIN`. It emits
-  `EffectControlRecord::Bypass(bool)` (`:4499`).
+  `EffectControlRecord::Bypass(bool)` (`:4500`).
 - **The session's lengths in the browser.** *Resolve an absent live ramp to the session default on
   the browser and in the SDK* (#1364, D2) has host-web compute `LiveRamps::for_session` from the
   session it prepared and keep it with the live controls. It keeps the bypass word's zero rule: a
@@ -36,8 +36,8 @@ toggles, the browser and the C ABI render the same bits.
   dev-dependency.
 - **Docs that still describe a step.** `COMMAND_EFFECT_BYPASS` (`hosts/host-web/src/lib.rs:836-844`),
   the `EffectBypass` kind in `sdk/src/browser/shipped-host.d.ts:202-209`, and the SDK's `bypass`
-  (`sdk/src/core/live-controls.ts:930-943`).
-- **The bypass has no per-edit length.** Decision 15, D15-1 recorded resolution (root ruling R9):
+  (`sdk/src/core/live-controls.ts:931-943`).
+- **The bypass has no per-edit length.** Decision 15, D15-1 recorded resolution:
   the bypass crossfade alone always uses the session mute ramp. *Carry an optional per-edit ramp
   length on live session edits* (#1394) gives no length to `SetEffectBypass`.
 

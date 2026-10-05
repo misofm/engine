@@ -136,6 +136,8 @@ the foundation for a per-strip console link override (#1369) and a live link swi
 
 ## Dependencies
 
-- *Carry console effect lanes across a plan swap* (#1279) and *Carry live-controlled effect lanes
-  across a plan swap* (#1280): stream A's carry slices for these four crates land first (decision
-  15's stream order), so this slice rebases on their payload code instead of racing it.
+- *Carry console effect lanes across a plan swap* (#1279)
+- *Carry live-controlled effect lanes across a plan swap* (#1280)
+
+Stream A's carry slices #1279 and #1280 for these four crates land first (decision 15's stream
+order), so this slice rebases on their payload code instead of racing it.

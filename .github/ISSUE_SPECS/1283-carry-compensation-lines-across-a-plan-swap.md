@@ -8,7 +8,7 @@ Slice 13 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 
 In a session with plug-in delay compensation, adding a track or a zero-latency effect no longer
 empties the compensation lines. Every compensated path keeps its delayed audio through the swap, at
-the output and inside submixes alike, in move mode and in copy mode. A route that the transaction
+the output and inside submixes alike. A route that the transaction
 re-points does not carry its line under its route ID, and its source strip is never ducked for it:
 a re-pointed route is a route removed plus a route added, which *Ramp a route that a plan swap adds
 to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
@@ -25,9 +25,10 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
   `StagedInput::line` (`:1295-1302`).
 - Edge IDs are stable: `GraphEdgeId::{TrackMain, RouteSource, RouteDestination, EffectSidechain}`
   (`graph/src/lib.rs:306-311`), keyed by node, route or effect.
-- The program scaffold, both modes, the restart set and the per-node carries come from *Carry plan
-  state by copy as well as by move* (#1322), *Carry fader, mute and pan ramps across a plan swap*
-  (#1277, D6) and *Carry per-node effect instances across a plan swap* (#1282).
+- The program scaffold is today's move-mode `GraphCarryProgram` (`crates/graph/src/lib.rs:2757`),
+  run at the swap block; the predecessor then retires. The restart set and the per-node carries
+  come from *Carry fader, mute and pan ramps across a plan swap* (#1277, D6) and *Carry per-node
+  effect instances across a plan swap* (#1282).
 
 ## Decisions frozen for this slice
 
@@ -46,29 +47,29 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
     it reads, which is the same ID here; #1363 D4 supplies the alias entries.
   - An effect owner that restarts (#1279 D1) does not stop the lines around it from carrying.
 - **D2. Equal length, move mode.** Swap the two rings and the cursor.
-- **D3. Equal length, copy mode.** Copy both rings and the cursor into the successor's
-  preallocated line (`copy_from_slice`). The predecessor's line is only read. The bytes go into
-  `carry_program_copy_bytes`.
-- **D4. Different lengths, both modes: a head-aligned copy.**
-  1. The successor first emits `P` samples of `+0.0`. `P` is a parameter of the carry program; it is
-     0 unless *Pre-roll a successor whose latency grows* (#1287) sets it.
-  2. Then it emits the predecessor's pending samples, in the order the predecessor would have
-     emitted them, truncated to fit or followed by `+0.0`.
+- **D3. Only edge lines.** This slice carries only lines keyed by a `GraphEdgeId`. A source-claim
+  line (a raw-source line on a source-reading node, *Grow latency during playback by adopting a
+  primed warm successor*, #1287 D1) is not an edge. *Carry source-claim lines across a plan swap
+  and fill a grown line for a prime* (#1402) carries it, keyed by claiming node and source, and
+  fills it by #1287's L2 and L3.
+- **D4. Different lengths: a head-aligned copy.** The successor emits the predecessor's pending
+  samples first, in the order the predecessor would have emitted them, truncated to fit or followed
+  by `+0.0`.
 
   So a path whose compensation grew by `δ` has a gap of `δ` samples after its pending audio, and one
   whose compensation shrank by `δ` skips `δ` samples. With no surviving node's arrival changing, an
   unchanged edge always has equal length. *Keep every node's latency from dropping during
-  playback* (#1285) keeps arrivals from dropping, and #1287 makes growth exact.
-- **D5. One routine.** One allocation-free copy routine serves D4 in both directions, both
-  channels and both modes.
+  playback* (#1285) keeps arrivals from dropping. In a warm adoption (#1287) every edge between
+  carried nodes keeps its length (its L1), so growth never reaches this gap.
+- **D5. One routine.** One allocation-free copy routine serves D4 in both directions and both
+  channels.
 
 ## Deliverables
 
 1. D1-D5 in `crates/graph` (the location table and the carry routine), and the inventory rows and
    the join in `crates/host-core`.
 2. Unit tests of D4's copy in `crates/graph`: equal, longer and shorter successor lengths; a
-   predecessor cursor at every position modulo the block; a wrapping source cursor; `P` of 0 and of
-   one quantum.
+   predecessor cursor at every position modulo the block; a wrapping source cursor.
 3. Gap-free tests in `crates/host-core/tests/successor_swap.rs`.
 
 ## Authorized paths
@@ -79,7 +80,8 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 
 ## Non-goals
 
-- No change to how PDC computes delays. No floors (#1285) and no catch-up (#1287).
+- No change to how PDC computes delays. No floors (#1285), no source-claim lines (#1287 D1) and no
+  claim-line carry (#1402).
 - No strip or submix input delay lines, and no live send ramps (#1284).
 - No route-level ramp for a re-pointed route, and no fading-route line alias (#1363 D4).
 
@@ -98,10 +100,8 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 4. **A re-pointed route does not duck its strip.** B re-points one route to another submix. Its
    line under the route ID starts at rest, every other line carries, and `restarted_strips()` is
    empty.
-5. **Copy mode.** Gates 1 and 2 with a copy after block 6, followed at once by the adoption. Every
-   block equals the move run, and A, rendered on after the copy, equals its uncopied twin.
-6. **Realtime.** The swap block and the copy call make zero allocations and frees.
-7. Commands:
+5. **Realtime.** The swap block makes zero allocations and frees.
+6. Commands:
    - `cargo test --locked -p graph -p graph-compiler -p host-core --features graph/test-support,host-core/test-support`
    - `bash scripts/check-graph-determinism.sh`
    - `cargo build --locked --release -p audit && bash scripts/trace-graph-audit.sh target/release/audit`
@@ -113,13 +113,11 @@ to or removes from a surviving strip* (#1363) ramps at route level (D15-9).
 - Gate 1: a line keyed by delay-vector index (which shifts when a track is added) instead of edge
   ID, or a line left at rest, turns it red.
 - Gate 2: a carry that handles only edges into the output leaves submix lines at rest. It turns red.
-- Gate 3: a copy that starts from the predecessor's write position instead of its read position,
-  or that ignores `P`, turns it red.
+- Gate 3: a copy that starts from the predecessor's write position instead of its read position
+  turns it red.
 - Gate 4: a rule keyed only by route ID carries a re-pointed route's line into the wrong bus. A
   rule that still restarts the source strip for a re-pointed route puts it in the restart set.
   Either turns it red.
-- Gate 5: a copy-mode swap of the rings leaves the predecessor with the successor's at-rest line.
-  Its twin turns red.
 
 ## Dependencies
 

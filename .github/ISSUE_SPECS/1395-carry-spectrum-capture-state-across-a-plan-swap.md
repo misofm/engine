@@ -79,12 +79,11 @@ swap"), which decision 15 rejects (D15-14). Only a changed or added capture star
   A host whose captures live inside the plan calls them in the swap block from its attachment
   hook. The browser does: *Swap and retire browser plans through the Worker's service loop*
   (#1381) D3.
-- **D4. Copy mode belongs to #1287 and #1354.** In a warm successor the observer renders the
-  catch-up, which overlaps windows the predecessor publishes. *Snapshot a running plan into a
-  returned successor at a block* (#1354, its D4) copies each carried spectrum observer's state
-  under D1's key, and *Pre-roll a successor whose latency grows* (#1287, its W6) publishes from it
-  only windows whose sequence the predecessor did not publish, exactly as #1327 D4 says for
-  meters. This slice's program section is move-mode only.
+- **D4. A warm successor carries by the same move.** A warm successor (*Grow latency during
+  playback by adopting a primed warm successor*, #1287) renders no block before its adoption at
+  `S` (D15-8 (round-5 amendment)). D2's section runs in that adoption block, as at any swap, so a
+  carried observer's `expected_block_sample` is the adoption block's start and no window is
+  published twice (#1327 D4). This slice adds no other mode.
 - **D5. Both hosts.** Everything is in host-core and in #1327's graph table. The browser's capture
   lives in its plan's host attachment, and #1381 D3's hook calls D3's pairing in the swap block,
   so the browser has no other carry code. The C ABI has nothing to carry.
@@ -110,8 +109,8 @@ swap"), which decision 15 rejects (D15-14). Only a changed or added capture star
 
 ## Non-goals
 
-- No copy mode (D4). No browser code (#1381's hook, #1290's gate). No change to the spectrum kernels, cadence rules or
-  read API.
+- No browser code (#1381's hook, #1290's gate). No change to the spectrum kernels, cadence rules
+  or read API.
 - No meter or observation tap carry (#1327).
 
 ## Objective gates

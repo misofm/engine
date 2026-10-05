@@ -47,8 +47,8 @@ permanent latency reserve.
   - a successor prepared at a declared discontinuity (#1323).
 
   Floors therefore last until the next declared discontinuity, never for the session's life.
-  *Pre-roll a successor whose latency grows* (#1287) adds its own `P` on top of these floors
-  through the same map.
+  *Grow latency during playback by adopting a primed warm successor* (#1287) adds its own `P` on
+  top of these floors, on carried nodes only, through the same map.
 - **D3. A path whose own latency dropped.** A floored single-input node whose upstream latency
   dropped gains a new compensation line, which starts at rest. That path's strip lost a latent
   effect, so it is already in the restart set (#1279 D1) and gets the duck-swap of *Duck-swap a
@@ -80,7 +80,7 @@ permanent latency reserve.
 
 ## Non-goals
 
-- No catch-up or pre-roll (#1287), and no latency reserve (rejected by D15-8).
+- No lead floors and no warm successor (#1287), and no latency reserve (rejected by D15-8).
 - No discontinuity declaration (#1323).
 
 ## Objective gates

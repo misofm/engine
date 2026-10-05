@@ -218,10 +218,10 @@ term into effective mute, for strips and for sends that follow them.
 
 - *Swap and retire browser plans through the Worker's service loop* (#1381).
 - *Report each transaction's edit path in its response* (#1313).
-- *Hold live values in latest-target cells on both hosts* (#1312), and the lane cells
-  *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345),
-  *Hold strip input-lane values in latest-target cells* (#1346) and *Hold route-lane values in
-  latest-target cells* (#1347).
+- *Hold live values in latest-target cells on both hosts* (#1312).
+- *Hold effect parameter, bypass and EQ-target values in latest-target cells* (#1345): lane cells.
+- *Hold strip input-lane values in latest-target cells* (#1346): lane cells.
+- *Hold route-lane values in latest-target cells* (#1347): lane cells.
 - *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
   (#1054): the session key and its defaults.
 - *Carry an optional per-edit ramp length on live session edits* (#1394): the per-edit ramp
@@ -229,16 +229,20 @@ term into effective mute, for strips and for sends that follow them.
 - *Resolve an absent live ramp to the session default on the browser and in the SDK* (#1364).
 - *Let C ABI sends follow their source strip's mute live* (#1226): the follow composition D3
   extends, and the mirror setter.
-- The shared classifier rows for every browser kind, so that none becomes a rebuild:
-  - *Deliver value-only send edits to the running C ABI plan* (#1225);
-  - *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390);
-  - *Deliver value-only VCA edits to the running C ABI plan* (#1247);
-  - *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261);
-  - *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets*
-    (#1262);
-  - *Apply value-only submix-strip input-section and effect edits to the running C ABI plan*
-    (#1267).
+- *Deliver value-only send edits to the running C ABI plan* (#1225): a shared classifier row.
+- *Deliver value-only submix-strip fader, mute and pan edits to the running C ABI plan* (#1390): a
+  shared classifier row.
+- *Deliver value-only VCA edits to the running C ABI plan* (#1247): a shared classifier row.
+- *Apply value-only input trim and polarity edits to the running C ABI plan* (#1261): a shared
+  classifier row.
+- *Apply value-only input HPF and LPF edits to the running C ABI plan through prepared targets*
+  (#1262): a shared classifier row.
+- *Apply value-only submix-strip input-section and effect edits to the running C ABI plan*
+  (#1267): a shared classifier row.
 - *Design: one edit API on every host over the core's committed session model* (#1057), item 8,
   for D3's ruling.
 - *Run the browser control plane in a Worker and keep the AudioWorklet render-only* (#1332): the
   `singleModeControlAllocations` counter.
+
+The six shared classifier rows (#1225, #1390, #1247, #1261, #1262, #1267) cover every browser
+kind, so that none becomes a rebuild.

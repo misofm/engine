@@ -7,8 +7,8 @@ Slice 18 of *Swap a rebuilt plan without an audio gap* (#1269). Code anchors ver
 Owner question Q3 of #1269 (fade in added strips, and over what length) is answered by decision 15
 D15-9: yes, from the strip's first played block, over the session mute ramp. No blocker remains.
 
-Split (R10): this slice is the fade for one swap. Keeping an arm that has not fired yet across a
-later swap is the successor *Keep an added strip's pending fade-in across a later plan swap*
+Split (AGENTS.md's half-day rule): this slice is the fade for one swap. Keeping an arm that has
+not fired yet across a later swap is the successor *Keep an added strip's pending fade-in across a later plan swap*
 (#1392). The two merge to `main` in the same batch.
 
 ## Product outcome
@@ -16,9 +16,10 @@ later swap is the successor *Keep an added strip's pending fade-in across a late
 A stem that a structural edit adds while audio plays enters with a fade instead of a step. A stem
 rarely starts at a zero crossing, so without a fade its first block is a click. Strips the edit did
 not add are not touched: their output stays bit-identical to the reference. The same armed fade is
-the "successor fades in" half of the duck-swap (#1324). It starts no earlier than the block at
-which render adopts the plan, so it composes with a warm successor (stream C, #1287) that rendered
-the strip off the render thread before adoption.
+the "successor fades in" half of the duck-swap (#1324). A plan renders no block before render
+adopts it, so the fade starts no earlier than the adopted block; this holds for a warm successor too
+(*Grow latency during playback by adopting a primed warm successor*, #1287), whose added strips
+start at rest at the adopted block.
 
 ## Context
 
@@ -51,8 +52,8 @@ the strip off the render thread before adoption.
   `adopt_predecessor` (`crates/engine/src/realtime/plan.rs:311`, `:917`; the graph executor's at
   `crates/graph/src/lib.rs:3139`). A synchronous host reaches the same hook through
   `PreparedRenderPlan::adopt_predecessor_plan` (`plan.rs:899`). It runs once per adoption, on the
-  render thread, before the plan's first adopted block. An off-thread catch-up slice (#1321) and a
-  copy-mode snapshot (#1354) never call it.
+  render thread, before the plan's first adopted block. No plan renders a block before this hook
+  runs: there is no off-thread rendering of a successor (D15-8 (round-5 amendment)).
 
 ## Decisions frozen for this slice
 
@@ -68,30 +69,30 @@ the strip off the render thread before adoption.
   only updates the remembered gain. `fire_fade_in` on an unarmed lane does nothing.
 - **D3. Fire (graph).** The prepared graph plan holds a fixed table of fade arms, one per armed
   strip: `{ claim: Option<u32>, owner, lane, delay_samples: u32, ramp_samples: u32, state }`, with
-  `state` one of `Waiting`, `FireAt(u64)`, `Done`, plus a count of entries not `Done`, plus one
-  `adopted: bool`, false at preparation. In `GraphExecutor::render`, after `begin_block` and only
-  while that count is nonzero:
+  `state` one of `Waiting`, `FireAt(u64)`, `Done`, plus a count of entries not `Done`. In
+  `GraphExecutor::render`, after `begin_block` and only while that count is nonzero:
   - `Waiting` becomes `FireAt(block_start + delay_samples)` when the claim's `played_planes` is
     `Some`, or at once when `claim` is `None` (a submix) or the driver does not provide played
-    planes. This runs on every block the plan renders, off-thread catch-up blocks included, so
-    the first played block is measured in the plan's own render time;
-  - `FireAt(s)` with `s <= block_start` **and `adopted`** calls the owner's `fire_fade_in` and
-    becomes `Done`.
+    planes. The first played block is measured in the plan's own render time;
+  - `FireAt(s)` with `s <= block_start` calls the owner's `fire_fade_in` and becomes `Done`.
 
-  The graph executor's `adopt_predecessor` sets `adopted = true` on entry, before any of its early
-  returns (`crates/graph/src/lib.rs:3139-3142` returns early without a carry program). So the fade
-  starts at the first block at or after `max(S, first played block + D)`, where `S` is the adopted
-  block. A warm successor keeps an added source's entry closed until adoption (*Catch up a
-  returned successor and adopt it exactly at a scheduled sample*, #1355 D2), so its first played
-  block is `S` and the fade fires at the first block at or after `S + D`, by the same rule; no
-  special case and no `D = 0` override exists. The frames before the fire
+  Every block a plan renders follows its adoption, so the fade starts at the first block at or
+  after `max(S, first played block + D)`, where `S` is the adopted block. In a warm successor
+  (#1287) an added strip's first played block is `S`, so the fade fires at the first block at or
+  after `S + D`, by the same rule; no special case and no `D = 0` override exists. The frames
+  before the fire
   stay muted (zeros, never a step). New trait methods with
   a no-op default: `GraphPreparedBuiltinBankProcessor::fire_fade_in(&mut self, lane, ramp)` and
   `GraphRuntimeProcessor::fire_fade_in(&mut self, ramp)`, implemented by the three owners above.
 - **D4. Delay `D` (host-core).** For a track: the sum of the latencies of the strip's nodes from its
-  input to its fader in the successor (a latent insert at rest emits zeros for its latency). For a
-  submix: that sum plus the largest `compensation_delay` of a route into it whose line starts at
-  rest. Computed on the control thread from the compiled successor.
+  input to its fader in the successor (a latent insert at rest emits zeros for its latency), plus
+  the compensation delay of every edge on that chain. A routed sidechain key that arrives later
+  than the strip's main path puts a `CompensationDelay` on the chain edge into the keyed effect
+  (PDC takes each node's input arrival as the maximum over its incoming edges, the sidechain edge
+  included, and delays every earlier edge to it, `crates/graph-compiler/src/pdc.rs:59-95`). That
+  line starts at rest and emits zeros for its length, as a latent insert does. For a submix: that
+  sum plus the largest `compensation_delay` of a route into it whose line starts at rest. Computed
+  on the control thread from the compiled successor.
 - **D5. Length.** `ramp_samples` = `LiveRamps::for_session(successor model).mute_samples`, the
   session mute ramp. After the ramp the stage is settled and the output equals the reference bit
   for bit (the ramp's exact end assignment).
@@ -147,19 +148,25 @@ the strip off the render thread before adoption.
    unarmed muted lane given `set_mute(false, N)` at the same block; a `set_mute(true)` before the
    fire leaves the lane muted after it; a fader record while armed is the gain the fade reaches.
 2. **Fire time (Part A).** A graph test with the played-planes fake (`PlayedSource`,
-   `crates/graph/src/runtime.rs:13288`) at quantum 128: (a) a plan adopted (through
+   `crates/graph/src/runtime.rs:13288`) at quantum 128: a plan adopted (through
    `adopt_predecessor_plan`) before block 0, whose claim first plays at block 5 with `D = 200`,
-   fires at the block that starts at sample 896, not at 640 or 768. (b) Adoption composes: the same
-   plan rendered blocks 0-7 unadopted (the claim plays from block 2, `D = 200`), then adopted
-   before block 8, fires at the block that starts at sample 1024 (block 8), not at 640.
+   fires at the block that starts at sample 896, not at 640 or 768.
 3. **Only added strips fade.** In `successor_swap.rs`, at `Backend::Simd8` and `Backend::Simd4`: a
    transaction adds a track whose source is fed exact zeros; every block of the swapped run equals a
    run with no add.
 4. **Fade shape.** With every other strip muted: (a) an added track on a playing source; (b) an
    added source started by `seek_at` at `A`, three blocks after the swap; (c) case (b) with a
-   true-peak limiter insert (`D > 0`). Each output equals a fresh plan of the successor session, fed
-   the same source frames at the same blocks, with the strip muted and given a live unmute of `N`
-   samples at the D3 fire block: bit-identical for every block.
+   true-peak limiter insert (`D > 0`); (d) case (a) at 48 kHz with the added track holding a
+   compressor insert whose routed sidechain reads the `pre_fader` tap of a carried track that holds
+   a true-peak limiter insert (486 samples, `crates/true-peak-limiter/src/lib.rs:242`; the model
+   mutes that track like every other, and its `pre_fader` tap precedes the mute). That carried
+   track's source is fed exact zeros before the swap block, so its warm limiter emits exact zeros
+   on `[S, S + 486)` like the reference's fresh one, and the compressor's detector state at the
+   fire is the same in both runs. The compressor adds no latency
+   (`crates/compressor/src/lib.rs:295`), so no node of the added strip is latent, but its main
+   path gets a 486-sample compensation line and `D` is 486. Each output equals a fresh
+   plan of the successor session, fed the same source frames at the same blocks, with the strip
+   muted and given a live unmute of `N` samples at the D3 fire block: bit-identical for every block.
 5. **Browser form.** Gate 4(a) with both runs prepared between render calls
    (`FaderMatrixBankProcessor`).
 6. **Realtime.** Extend `the_swap_block_allocates_and_frees_nothing` (`successor_swap.rs:476`) over
@@ -182,10 +189,11 @@ the strip off the render thread before adoption.
 - Gate 2: a fire at the played block that ignores `D` (the ramp runs while a latent insert still
   emits its at-rest zeros, so the cut stays a step) turns it red.
 - Gate 3: a fade applied to every strip at the swap (a global dip) turns it red.
-- Gate 2(b): a fire on a block rendered before adoption (the fade spent off-thread in a warm
-  successor's catch-up, so the strip enters at full gain at `S`) turns it red.
 - Gate 4(b): a fade that starts at the swap block for an anchored stem (finished before the stem
   plays, so the click remains) turns it red.
+- Gate 4(d): a `D` that counts node latencies only (0 here) fires the ramp at the first played
+  block while the compensation line still emits its at-rest zeros, so part of the ramp is spent
+  on zeros and the output differs from the reference's fade; it turns red.
 - Gate 5: arming only the split banks leaves the browser's fused form unfaded; it turns red.
 
 ## Dependencies

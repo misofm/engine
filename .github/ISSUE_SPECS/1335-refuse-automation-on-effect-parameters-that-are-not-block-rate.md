@@ -52,7 +52,7 @@ never meets an unrenderable target.
 - **Decision 14's probe.** An automation on `band-1-enabled` added to
   `fixtures/session/v1/observation-frame-shape.json` (an EQ insert, `:140-160`) passed all five
   stages of `cargo run -p session-validator -- validate`
-  (`docs/rulings/live-update-versus-rebuild-2026-10-04.md:252-269`).
+  (`docs/rulings/live-update-versus-rebuild-2026-10-04.md:263-272`).
 - **The SDK.** `resolveAutomationTarget` (`sdk/src/core/session.ts:1405-1477`) refuses a builtin
   row that is not `blockTarget` (`:1419-1424`). For an effect row it checks only the declared
   `(parameter, channel)` (`:1460-1475`). The row carries `automatable` and `automationRateName`

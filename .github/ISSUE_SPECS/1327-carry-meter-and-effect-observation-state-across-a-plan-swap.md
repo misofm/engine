@@ -88,17 +88,11 @@ changed or added owners start fresh.
     order) and pairs observation handles through its own host-core-index-to-slot map, because the
     browser keeps observations in gapped per-slot storage. After the swap block the successor holds
     the carried readers, and the retiring predecessor holds the fresh ones.
-- **D4. Copy mode belongs to #1287.** In a warm successor the observers render `[B, S + P)` during
-  the catch-up, which overlaps windows the predecessor publishes. How they continue depends on the
-  clock *Pre-roll a successor whose latency grows* (#1287) gives the successor at adoption. So #1287
-  carries observers through its catch-up under D1's keys:
-  - copy the window state at `B`;
-  - publish nothing until adoption;
-  - at `S`, take the predecessor's producer and publish only the windows whose sequence the
-    predecessor did not publish.
-
-  This slice's program sections are move-mode only. #1287 must not adopt a warm successor whose
-  observers it does not carry.
+- **D4. A warm successor carries by the same move.** A warm successor (*Grow latency during
+  playback by adopting a primed warm successor*, #1287) renders no block before its adoption at
+  `S` (D15-8 (round-5 amendment)). D2's section runs in that adoption block, as at any swap, so its
+  observers carry with no overlapping window and nothing published twice. This slice adds no other
+  mode.
 - **D5. Both hosts.** Everything is in engine (the record type and accessor only), host-core,
   graph, rack, builtins and effect-contract.
   - The browser's readers live in its plan's host attachment. #1381 D3 calls D3's pairing
@@ -142,8 +136,8 @@ changed or added owners start fresh.
 
 ## Non-goals
 
-- No copy mode (D4). No browser code: the attachment hook is #1381, the browser gate #1290. No
-  change to meter or spectrum kernels.
+- No browser code: the attachment hook is #1381, the browser gate #1290. No change to meter or
+  spectrum kernels.
 - No spectrum carry (#1395).
 
 ## Objective gates

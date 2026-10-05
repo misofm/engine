@@ -23,10 +23,11 @@ and #1288 merge to `main` in the same batch (#1288 Hazards).
     On `main`: `FaderRampStage` at `crates/builtins/src/lib.rs:2653`, `FaderLane` at `:798`,
     `set_mute` at `:2774`, the per-node form `FaderMuteRampBuiltins` at `:4163`.
   - The prepared graph plan holds a fixed fade table, one entry per armed strip, with `state` one
-    of `Waiting`, `FireAt(u64)`, `Done`, and an `adopted` flag set by the graph executor's
-    `adopt_predecessor` (#1288 D3; on `main` at `crates/graph/src/lib.rs:3139`).
+    of `Waiting`, `FireAt(u64)`, `Done` (#1288 D3). The graph executor's `adopt_predecessor`, which
+    this slice extends, is on `main` at `crates/graph/src/lib.rs:3139`.
   - Arming happens inside successor preparation through one entry point that takes a strip set
-    (#1288 D1); the delay `D` is the strip's pre-fader latency (#1288 D4).
+    (#1288 D1); the delay `D` is the strip's pre-fader latency, its chain's compensation lines
+    included (#1288 D4).
   - #1288 D6 leaves an arm still waiting when its plan is succeeded to this issue.
 - Route arms: *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363)
   gives an added route (its D3) and a send from a tap before an armed fader (its D1 (c)) an entry
@@ -48,8 +49,6 @@ and #1288 merge to `main` in the same batch (#1288 Hazards).
 - Successor preparation: `SuccessorBase { inventory, committed }`
   (`crates/host-core/src/prepare.rs:641-647`); `PlanStateInventory` (`:558-564`) holds one row
   list per state family.
-- Copy mode: *Carry plan state by copy as well as by move* (#1322) requires every carry family to
-  state its copy-mode mechanism (its D7).
 
 ## Decisions frozen for this slice
 
@@ -87,10 +86,10 @@ and #1288 merge to `main` in the same batch (#1288 Hazards).
   in the split bank, the fused `FaderMatrixBankProcessor` and the per-node form. The route ramp
   state #1284 carries for a route op gains the op's armed flag (#1363 D2), restored on import, in
   `crates/graph/src/runtime.rs`.
-- **D7. Copy mode (#1322 D7).** The fade table's entry states are plain data: copy mode copies
-  them into the successor's preallocated table in the same section as the fader lanes, and adds
-  their bytes to `carry_program_copy_bytes`. The successor's `adopted` flag stays false until the
-  adoption, so a warm successor's catch-up never fires a carried entry (#1288 D3).
+- **D7. A warm successor takes the same carry.** A warm successor (*Grow latency during playback
+  by adopting a primed warm successor*, #1287) is adopted in move mode at `S`, so D3 runs in its
+  adoption block as at any swap. It renders no block before that (D15-8 (round-5 amendment)), so no
+  carried entry can fire before adoption.
 - **D8. Realtime.** No allocation: the D3 copy walks two tables sized at preparation, matched by a
   strip-index map built at preparation. With no carried entry, adoption pays one length test.
 - **D9. Acked-batch question.** No queue or cell changes here; a structural edit's fallible steps
@@ -99,8 +98,7 @@ and #1288 merge to `main` in the same batch (#1288 Hazards).
 ## Deliverables
 
 1. D1, D2 and D5 in host-core successor preparation (`crates/host-core/src/prepare.rs`).
-2. D3, D7 and D8 in `crates/graph/src/lib.rs` (the fade table carry in `adopt_predecessor` and in
-   the copy section).
+2. D3 and D8 in `crates/graph/src/lib.rs` (the fade table carry in `adopt_predecessor`).
 3. D6 in `crates/builtins/src/lib.rs` and `crates/builtins-compiler/src/lib.rs`.
 4. The tests below. A sentence in `docs/C_ABI_V1_QUALIFICATION.md` beside #1288's fade text.
 
@@ -134,17 +132,15 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
    second case swaps mid-ramp: also equal (the ramp carries by #1277).
 3. **Restarted strip is not carried.** The added strip's second transaction also adds an insert to
    it: the successor holds no carried entry for it, and `restarted_strips()` contains it.
-4. **Copy mode.** Gate 1 with the second swap made by a copy after its block followed at once by
-   the adoption (#1322 gate 2's shape): every block equals the move run.
-5. **Route arm survives a second swap.** #1363 gate 1 (an added route A -> B with a compensation
+4. **Route arm survives a second swap.** #1363 gate 1 (an added route A -> B with a compensation
    delay of 300 samples), with a second structural transaction (it adds a muted track) prepared
    between render calls and adopted at the block after `S`, before `S + 300`. Every block equals
    #1363 gate 1's reference: bit-identical. The same for #1363 gate 6 (an added track's
    `pre_fader` send) with T's source started by `seek_at` three blocks after the swap (#1288 gate
    4(b)'s shape) and the second swap adopted before that start.
-6. **Realtime.** Extend `the_swap_block_allocates_and_frees_nothing` (`successor_swap.rs:476`) over
-   gate 1's and gate 5's second swap blocks: zero allocations and frees.
-7. Commands:
+5. **Realtime.** Extend `the_swap_block_allocates_and_frees_nothing` (`successor_swap.rs:476`) over
+   gate 1's and gate 4's second swap blocks: zero allocations and frees.
+6. Commands:
    - `cargo test --locked --all-targets -p builtins --features math/lane,builtins/test-support,lane/test-support`
    - `cargo test --locked -p builtins-compiler -p graph -p host-core -p capi --features builtins-compiler/test-support,graph/test-support,host-core/test-support`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit && bash scripts/trace-graph-audit.sh target/release/audit`
@@ -163,18 +159,16 @@ In `crates/host-core/tests/successor_swap.rs`, quantum 128, `N = 2000`, at `Back
   mutes a playing strip and fades it in again: a dip. It turns red.
 - Gate 3: a carried entry on a restarted chain (the predecessor's `D` against a new latency) turns
   it red.
-- Gate 4: a copy that leaves the table states out turns it red.
-- Gate 5: a successor that re-arms strips but not routes lets the added route, or the added
+- Gate 4: a successor that re-arms strips but not routes lets the added route, or the added
   strip's pre-fader send, enter at full level at the second swap; one that carries the entry but
   not the route op's armed flag fires it twice. Either turns it red.
-- Gate 6: a table carry that allocates on the render thread turns it red.
+- Gate 5: a table carry that allocates on the render thread turns it red.
 
 ## Dependencies
 
 - *Fade in a strip that a swap adds during playback* (#1288).
 - *Carry fader, mute and pan ramps across a plan swap* (#1277) (lane export and import,
   `restarted_strips()`).
-- *Carry plan state by copy as well as by move* (#1322) (copy mode, gate 4).
 - *Ramp a route that a plan swap adds to or removes from a surviving strip* (#1363) (route
   entries).
 - *Carry strip delay lines and live send ramps across a plan swap* (#1284) (route ramp import).

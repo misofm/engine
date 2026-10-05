@@ -65,6 +65,8 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   `S = ceil_q(p + q + N + C)` (#1311), where `q` is the quantum, `ceil_q` rounds up to a multiple
   of it, and `C` is the largest `compensation_delay`, in the displaced plan, of a route out of any
   strip this transaction ducks: a removed strip, or a duck-swapped one (#1324 D4) (0 if none).
+  When the transaction also restarts strips, #1324 D4 extends this `C` with the sidechain lines
+  that a restarted strip's taps feed into carried nodes; every duck-swap uses that `C`.
   Proof: the writes precede the read of `p`, so render drains them no later than the block that
   starts at `p + q`; every ramp ends by `p + q + N`, and every route line
   has emptied its last nonzero frame by `p + q + N + C <= S`. Between then and `S` the strip and
@@ -87,8 +89,10 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
 - **D5. Reporting.** The response path is `rebuild` (#1313). The revision completes when render
   adopts at `S`: the watermark (#1314) reports first sample `S` with `EXACT` (or `SUPERSEDED` when
   #1310 displaces it) and counts it in `exact_count`. A planned D15-9 transition is the designed
-  result of this edit, not a fallback: it never sets `PREROLL_FALLBACK` or `TRANSITION_FALLBACK`
-  nor their counters, which belong only to the catch-up fallback (#1358).
+  result of this edit, not a fallback: it never sets `TRANSITION_FALLBACK` nor its counter, which
+  belong only to the fallback of a warm successor that cannot adopt (*Duck-swap the strips a
+  latency growth restarts, and fall back to the transition when a warm successor cannot adopt*,
+  #1397).
 - **D6. Supersession and restore: the duck overlay.** The phase-1 writes are records pushed to the
   displaced plan, so they are part of its base (D15-7, P1.4).
   - The control plane keeps them in the displaced plan's epoch as a **duck overlay**: the strips and
@@ -140,7 +144,10 @@ predecessor, then a scheduled swap" step that the duck-swap (#1324) reuses.
   preparation restarted: *Duck-swap a strip whose state cannot continue across a plan swap* (#1324 D4) adds
   `successor.restarted_strips()` to the removed strips here. It returns no arm set; arming is a
   preparation step. One transaction that both removes and adds strips uses one `S`; added strips
-  fade in by #1288.
+  fade in by #1288. A latency growth whose warm successor is prepared and whose duck set is not
+  empty is published `Primed` with `not_before = S` instead of `NoEarlierThan(S)` (*Duck-swap the
+  strips a latency growth restarts, and fall back to the transition when a warm successor cannot
+  adopt*, #1397 D1); its duck set, ramps and `S` are this step's.
 - **D8. Realtime and the acked-batch question.** Render work is the existing mute ramp and one
   not-before comparison at block entry (#1311). Every fallible step (preparation, publication and
   retirement credit, D15-17) runs before the cell writes and the commit, and a cell write cannot
@@ -198,10 +205,15 @@ two render calls, so the ramp starts at `p`).
    so the second transaction writes no mute for B or its send: the adoption is at exactly gate 1's
    `S` (the watermark's first sample), not at a later `S` computed from the second commit.
 4. **A restore during phase 1 fades back in.** In gate 1, at block `k + 4` (mid-ramp) a second
-   transaction restores B exactly as it was. It returns OK. Every block up to `S` equals gate 1's
-   reference. From `S` on, every block equals a fresh plan of the restored session fed the same
-   source frames, with B muted and live-unmuted with `N` at `S`. From `S + N` on, B's output is the
-   unducked reference's.
+   transaction restores B exactly as it was. It returns OK. The reference is gate 1's reference
+   run (B's fader and its `pre_fader` send muted by a value-only transaction at the same point),
+   continued: right after the block that ends at `S`, a second value-only transaction unmutes both,
+   B's fader and the send, with ramp `N`, so both ramps start at `S`. Every block of the restore run
+   equals that reference bit for bit, before `S` and after it. A fresh plan of the restored session
+   is not a valid reference: muting its fader does not reach the `pre_fader` send, and it runs B's
+   pre-fader state from frame 0. In both runs B carries no insert, its input filters are off and
+   the session's console sections are empty, so the restart of B's strip at `S` (D6) restarts
+   nothing but its lanes, which the arming then drives.
    (b) The same with B's source fed one block ahead only, as in gate 2. Every submit for it before
    and after the restore returns OK, none is refused, and from `S` on B plays the frames submitted
    for those blocks (the bit-identity above holds with the same source frames).
@@ -246,7 +258,7 @@ two render calls, so the ramp starts at `p`).
 
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Supersede an unadopted candidate plan by compare-and-swap* (#1310).
-- *Adopt a successor plan no earlier than a scheduled sample, with a return queue* (#1311).
+- *Adopt a successor plan no earlier than a scheduled sample* (#1311).
 - *Hold live values in latest-target cells on both hosts* (#1312).
 - *Report each transaction's edit path in its response* (#1313).
 - *Publish an applied-revision watermark and complete edits asynchronously* (#1314).
