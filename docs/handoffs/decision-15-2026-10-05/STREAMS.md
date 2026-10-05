@@ -327,6 +327,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
 | 22 | #1426 | Bound each realtime drain per queue: require the pop receiver to be the counted queue | #1418 | — |
 | 23 | #1429 | Fail the web AudioWorklet test step when it leaves anything in its temporary directory | #1421 | — |
+| 24 | #1434 | Hold every block-form owner step in qualification.yml to its guard lines | #1429 | — |
 
 ## Stream K
 
