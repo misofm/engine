@@ -81,3 +81,58 @@ the note's heading for each. No product code change.
 - None. Q3 aligns the format with the `controlSmoothing` spec (#1054) as written; it does not wait
   for #1054 to land. #1306 and #1315 consume this issue's answers; this issue does not depend on
   them.
+
+## Decision record
+
+The findings note is `docs/handoffs/stored-automation-1058/README.md` (attempt 1; anchors checked on
+`6ee64f484`; reviewed by a fresh adversarial verifier, FAIL, every finding folded in). One line per
+answer:
+
+- **A1** ([Design](../../docs/handoffs/stored-automation-1058/README.md#a1-design)): the control
+  plane compiles each automated cell into an immutable segment table in the plan; render evaluates it
+  in node time on a 64-sample grid and at exact jump samples, and feeds the existing strip ramps,
+  effect `Point` spans (in pieces) and filter targets; hosts move a new timeline clock with one
+  session seek.
+- **A2** ([Live changes against automation](../../docs/handoffs/stored-automation-1058/README.md#a2-live-changes-against-automation)):
+  owner question OQ1; recommendation: offset on level rows, OR on mute, automation wins elsewhere;
+  automation wins until the ruling.
+- **A3** ([Format](../../docs/handoffs/stored-automation-1058/README.md#a3-format)): the table is
+  enough; it gains the hold rule, one entry per lane, the pan or matrix form, 64 samples between
+  jumps, unit, domain, shape and filter-order rules, and jump ramps from `control_smoothing`.
+- **A4** ([Cost](../../docs/handoffs/stored-automation-1058/README.md#a4-cost)): `80 + 32·n` bytes per
+  automated cell, owned by the plan, independent of song length; CPU per block at most
+  `2⌈q/64⌉ + 3` events per cell times per-row operation counts.
+- **A5** ([Bit-identity](../../docs/handoffs/stored-automation-1058/README.md#a5-bit-identity)): the
+  same session and host operations give the same bits on every target (scalar `f64` through
+  `crates/math` at events only, unfused kernels, node-time grid); after a seek, independent of when it
+  landed and of the quantum.
+- **A6** ([Automated mute and follows_mute sends](../../docs/handoffs/stored-automation-1058/README.md#a6-automated-mute-and-follows_mute-sends)):
+  every route into a submix whose source mute is automated gets a lane with `follows_mute` in its
+  cell; render calls `graph::gated_route_coefficients` at each automated mute event, at the strip's
+  sample and ramp.
+- **A7** ([Stored span bound, for #1306 D1](../../docs/handoffs/stored-automation-1058/README.md#a7-stored-span-bound-for-1306-d1)):
+  `stored(i)` is the number of distinct automated cells of the instance, 0 for a target-owning
+  effect; at most its `Block` cell count.
+- **A8** ([AUTOMATION_ENQUEUE and effect windows, for #1306 D1](../../docs/handoffs/stored-automation-1058/README.md#a8-automation_enqueue-and-effect-windows-for-1306-d1)):
+  no; #1306 D1 has no third term.
+- **A9** ([Serving AUTOMATION_ENQUEUE, for #1315 D3](../../docs/handoffs/stored-automation-1058/README.md#a9-serving-automation_enqueue-for-1315-d3)):
+  never served; the refusal is permanent and the command, its event and its queue leave the protocol
+  registry (slices 21a and 21b; slice 22 reserves the C limit); no ack can precede a drop.
+- **A10** ([The classifier mask, for #1260](../../docs/handoffs/stored-automation-1058/README.md#a10-the-classifier-mask-for-1260)):
+  the mask becomes per row; slice 10a removes the fader row and slice 20 the last; an automation edit
+  is a carried `rebuild` that completes `exact`; a static-value edit on an automated lane gives no
+  record.
+- **A11** ([The staged plan](../../docs/handoffs/stored-automation-1058/README.md#a11-the-staged-plan)):
+  thirty-seven slices in twenty-four steps, drafted in
+  `docs/handoffs/stored-automation-1058/proposed-specs/`; slices 18a and 18b render stored effect
+  automation and #1306 lands in their batch.
+
+## Attempt record
+
+**Attempt 1** (stream K research worker). No product code changed and no benchmark ran. A fresh
+adversarial verifier returned FAIL on the first draft (one blocker: a render-clock grid made the bits
+after a seek depend on when it landed; six majors); the note records each fold in its "Verification"
+section. Gate 3 deviates by root's instruction: the slices are drafts under
+`docs/handoffs/stored-automation-1058/proposed-specs/` for root to file as specs and GitHub issues.
+Gates run: `bash scripts/check-workspace-policy.sh` and `bash scripts/check-dsp-research.sh` (the
+latter checks the DSP research corpus, which this issue does not change).
