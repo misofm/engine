@@ -284,16 +284,19 @@ pub(crate) fn sidechain_matches(
 /// a one-time semantic-hash change: its `route-transform` canonical line now carries the
 /// deterministic coefficient instead of the host's.
 ///
-/// `matrix` is `[ll, lr, rl, rr]`, the session's `channel_matrix` in that order.
+/// `matrix` is `[ll, lr, rl, rr]`, the session's `channel_matrix` in that order. A subnormal
+/// coefficient is in the route domain (issue #1237 D1/D2) and is kept: the fold
+/// ([`graph::gated_route_coefficients`]) flushes any subnormal product to `+0.0` (D3), and at a
+/// gain above 1 such a coefficient can fold to a normal product. Inside [`route_values`]' domain
+/// the gain checks below cannot fail (every gain in `[-144, 24]` dB converts to a normal finite
+/// `f32`); they stay as defence for this function's own contract.
 pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTransform> {
     let gain = math::db_to_gain_f32(gain_db);
     let [ll, lr, rl, rr] = matrix;
     (gain_db.is_finite()
         && gain.is_finite()
         && !gain.is_subnormal()
-        && matrix
-            .into_iter()
-            .all(|v| v.is_finite() && !v.is_subnormal()))
+        && matrix.into_iter().all(f32::is_finite))
     .then_some(RouteTransform {
         gain,
         ll,
@@ -303,29 +306,43 @@ pub(crate) fn route_transform(gain_db: f32, matrix: [f32; 4]) -> Option<RouteTra
     })
 }
 
-/// The unfolded transform of a route whose values are in domain: `route_transform`'s checks, then
-/// every coefficient of the open fold finite. It backs [`route_coefficients`] and the compiler's
-/// lowering, so both refuse exactly the same values and the transform is derived once.
+/// A route's gain domain in dB, inclusive (issue #1237 D2). The session validator refuses the
+/// same domain (`validate_routes`); `tests/route_coefficients.rs` holds the two to the same
+/// boundaries.
+const ROUTE_GAIN_DB_MINIMUM: f32 = -144.0;
+const ROUTE_GAIN_DB_MAXIMUM: f32 = 24.0;
+/// A route's matrix coefficient domain is `[-1, 1]`, inclusive (issue #1237 D2).
+const ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM: f32 = 1.0;
+
+/// The unfolded transform of a route whose values are in domain: the gain in
+/// `[-144, 24]` dB and every coefficient in `[-1, 1]` (issue #1237 D2), then `route_transform`'s
+/// checks. It backs [`route_coefficients`] and the compiler's lowering, so both refuse exactly the
+/// same values and the transform is derived once.
+///
+/// Inside that domain no fold can overflow: the largest product is `db_to_gain(24) * 1`, about
+/// `15.85`. A product can still be subnormal (a coefficient below about `1.9e-31` at -144 dB);
+/// [`graph::gated_route_coefficients`] flushes it to `+0.0` (issue #1237 D3).
 pub(crate) fn route_values(
     gain_db: f32,
     matrix: [f32; 4],
 ) -> Result<RouteTransform, RouteValueError> {
-    let transform = route_transform(gain_db, matrix).ok_or(RouteValueError::Domain)?;
-    if gated_route_coefficients(&transform, RouteGate::OPEN)
-        .into_iter()
-        .all(f32::is_finite)
-    {
-        Ok(transform)
-    } else {
-        Err(RouteValueError::Domain)
+    // `contains` is false for NaN, so a non-finite value is refused here too.
+    let in_domain = (ROUTE_GAIN_DB_MINIMUM..=ROUTE_GAIN_DB_MAXIMUM).contains(&gain_db)
+        && matrix.iter().all(|coefficient| {
+            (-ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM..=ROUTE_COEFFICIENT_MAGNITUDE_MAXIMUM)
+                .contains(coefficient)
+        });
+    if !in_domain {
+        return Err(RouteValueError::Domain);
     }
+    route_transform(gain_db, matrix).ok_or(RouteValueError::Domain)
 }
 
 /// Why [`route_coefficients`] refused a route's values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RouteValueError {
-    /// The gain or a matrix coefficient is non-finite or subnormal, the linear gain is, or a
-    /// folded coefficient (`gain * coefficient`) overflows.
+    /// The gain is outside `[-144, 24]` dB or a matrix coefficient outside `[-1, 1]` (issue
+    /// #1237), or a value is non-finite. A subnormal coefficient is in domain (its fold flushes).
     Domain,
 }
 
@@ -333,11 +350,12 @@ pub enum RouteValueError {
 /// and the ones a live producer pushes (DESIGN 5.7, issue #1215).
 ///
 /// `matrix` is `[ll, lr, rl, rr]`; `source_lane_muted[lane]` zeroes the column that source lane
-/// feeds. The values are checked as the compiler checks a route (`route_transform`), and refused
-/// with [`RouteValueError::Domain`] when any folded product is not finite (a finite gain times a
-/// finite coefficient can overflow: +700 dB with `ll = 1e10`). That check is of the open fold, so
+/// feeds. The values are checked as the compiler checks a route, and refused with
+/// [`RouteValueError::Domain`] outside the session's route domain: the gain in `[-144, 24]` dB and
+/// every coefficient in `[-1, 1]` (issue #1237). The check reads the values, never the gate, so
 /// whether values are in domain never depends on the gate. The coefficients themselves are
-/// [`graph::gated_route_coefficients`] -- the runtime's own derivation, not a copy of it.
+/// [`graph::gated_route_coefficients`] -- the runtime's own derivation, not a copy of it, which
+/// flushes a subnormal product to `+0.0`.
 pub fn route_coefficients(
     gain_db: f32,
     matrix: [f32; 4],

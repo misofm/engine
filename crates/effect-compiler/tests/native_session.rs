@@ -31,7 +31,9 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     maximum: Some(24.0),
     default_value: 0.0,
     mapping: ParameterMapping::Linear,
-    automation_rate: AutomationRate::Sample,
+    // `canonical.json` automates this parameter, and preparation accepts only a `Block` target
+    // (decision 15 E1, #1335 D1).
+    automation_rate: AutomationRate::Block,
     channel_policy: ParameterChannelPolicy::Shared,
     smoothing: SmoothingRule::Linear,
     smoothing_samples: 8,
@@ -88,17 +90,33 @@ static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     observations: &[],
 };
 
-struct Factory;
+/// The same double with its one parameter at `AutomationRate::Sample`, under another identity:
+/// automatable, but with no rendering contract (#1335 D1).
+const SAMPLE_EFFECT_ID: EffectId = match EffectId::new("sample-eq") {
+    Ok(v) => v,
+    Err(_) => panic!("id"),
+};
+const SAMPLE_PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
+    automation_rate: AutomationRate::Sample,
+    ..PARAMETERS[0]
+}];
+static SAMPLE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
+    id: SAMPLE_EFFECT_ID,
+    parameters: &SAMPLE_PARAMETERS,
+    ..DESCRIPTOR
+};
+
+struct Factory(&'static EffectDescriptor);
 impl NativeEffectFactory for Factory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &DESCRIPTOR
+        self.0
     }
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
     ) -> Result<Box<dyn PreparedNativeEffect>, EffectPrepareError> {
         Ok(Box::new(Processor {
-            metadata: expected_prepared_metadata(&DESCRIPTOR, request)?,
+            metadata: expected_prepared_metadata(self.0, request)?,
         }))
     }
     fn bind_homogeneous_bank(
@@ -191,7 +209,8 @@ fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
 #[test]
 fn preparation_is_complete_sorted_and_preserves_cached_metadata() {
     let registry =
-        NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
+        NativeEffectRegistry::new([Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>])
+            .unwrap();
     let prepared = prepare_native_session_effects(&compiled(), &registry, caps()).unwrap();
     assert_eq!(prepared.entries.len(), 1);
     assert_eq!(prepared.entries[0].metadata.latency, LatencySamples(7));
@@ -210,7 +229,8 @@ fn unavailable_factory_and_resource_caps_return_no_partial_session() {
         .unwrap();
     assert_eq!(diagnostics.0[0].code, "effect.native.unavailable");
     let registry =
-        NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
+        NativeEffectRegistry::new([Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>])
+            .unwrap();
     let diagnostics = prepare_native_session_effects(
         &compiled(),
         &registry,
@@ -228,7 +248,8 @@ fn unavailable_factory_and_resource_caps_return_no_partial_session() {
 #[test]
 fn out_of_domain_session_parameters_reject_transactionally_without_panic() {
     let registry =
-        NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
+        NativeEffectRegistry::new([Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>])
+            .unwrap();
     let source = include_str!("../../../fixtures/session/v1/canonical.json");
     for value in [f32::from_bits(24.0_f32.to_bits() + 1), 25.0, f32::MAX] {
         let mut model = parse_session_json(source).unwrap();
@@ -301,6 +322,8 @@ fn retired_compressor_parameter_id_eight_rejects_before_native_publication() {
 fn retired_multiband_parameter_id_two_rejects_before_native_publication() {
     let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("canonical session fixture");
+    // The fixture's automation would now target the multiband's prepared crossover (#1335 D1).
+    model.automation.clear();
     {
         let effect = &mut model.tracks[0].inserts.effects[0];
         effect.identity = session::EffectIdentity::Native {
@@ -582,4 +605,257 @@ fn a_live_control_lane_starts_from_the_session_bypass() {
             "{track} {effect}: starts bypassed"
         );
     }
+}
+
+/// One stored automation, a single step segment in `unit`.
+fn automation(
+    id: &str,
+    (entity, rack, effect): (&str, session::RackName, &str),
+    parameter_id: u32,
+    channel: ParameterChannel,
+    unit: SessionParameterUnit,
+) -> session::Automation {
+    session::Automation {
+        id: session::StableId::parse(id).expect("automation ID"),
+        target: session::AutomationTarget {
+            entity_id: session::StableId::parse(entity).expect("entity ID"),
+            rack,
+            effect_id: session::StableId::parse(effect).expect("effect ID"),
+            parameter_id,
+            channel,
+        },
+        segments: vec![session::AutomationSegment {
+            shape: session::AutomationShape::Step,
+            start_sample: 0,
+            end_sample: 480,
+            start_value: 1.0,
+            end_value: 1.0,
+            unit,
+        }],
+    }
+}
+
+/// The diagnostics preparation returns for `model` on the launch registry, or none.
+fn launch_diagnostics(model: &session::SessionModel) -> Vec<effect_compiler::EffectDiagnostic> {
+    let compiled = compile_model(model).expect("the session compiles: only preparation refuses");
+    let registry = launch_native_effect_registry().expect("launch registry");
+    match prepare_native_session_effects(&compiled, &registry, caps()) {
+        Ok(_) => Vec::new(),
+        Err(diagnostics) => diagnostics.0,
+    }
+}
+
+fn rate_refusal(automation_id: &str) -> Vec<effect_compiler::EffectDiagnostic> {
+    vec![effect_compiler::EffectDiagnostic {
+        code: "effect.automation.rate",
+        path: format!("$.automation[id={automation_id}].target.parameter_id"),
+    }]
+}
+
+/// Decision 15 E1 (#1335 gate 1): an insert automation on the EQ's `band-1-enabled`
+/// (`AutomationRate::None`, not automatable) is refused once, at the automation; the same
+/// automation retargeted to the block-rate `band-1-gain` prepares.
+///
+/// Red mutations: no check in preparation -> the session prepares; a check run per lowered
+/// instance as well as per automation -> two diagnostics.
+#[test]
+fn an_insert_automation_on_a_prepared_parameter_is_refused() {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/observation-frame-shape.json"
+    ))
+    .expect("observation-frame fixture");
+    let eq = model
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.inserts.effects.iter_mut())
+        .find(|effect| effect.id.as_str() == "eq")
+        .expect("fixture EQ insert");
+    // `band-1-enabled` is per-lane: declare it on the left lane, which the automation names.
+    let enabled = eq
+        .params
+        .iter_mut()
+        .find(|param| param.parameter_id == 1)
+        .expect("band-1-enabled is declared");
+    enabled.channel = ParameterChannel::Left;
+    let accepted = model.clone();
+
+    model.automation.push(automation(
+        "eq-enabled",
+        ("t1", session::RackName::Inserts, "eq"),
+        1,
+        ParameterChannel::Left,
+        SessionParameterUnit::Linear,
+    ));
+    assert_eq!(launch_diagnostics(&model), rate_refusal("eq-enabled"));
+
+    let mut model = accepted;
+    model.automation.push(automation(
+        "eq-gain",
+        ("t1", session::RackName::Inserts, "eq"),
+        4,
+        ParameterChannel::Both,
+        SessionParameterUnit::Db,
+    ));
+    assert_eq!(launch_diagnostics(&model), Vec::new());
+}
+
+/// #1335 gate 1: a console target resolves through the session slot's identity (the strip's
+/// entry has none), and a submix's insert is checked like a track's.
+///
+/// Red mutations: resolve a console target among the strip's inserts -> the console automation
+/// prepares; walk only `model.tracks` -> the submix automation prepares.
+#[test]
+fn console_and_submix_automations_on_a_prepared_parameter_are_refused() {
+    let fixture = || {
+        parse_session_json(include_str!(
+            "../../../fixtures/session/v1/console-sixty-four-track-sends.json"
+        ))
+        .expect("console sends fixture")
+    };
+    // The console `eq` slot is the parametric EQ, and `ch00` declares its `band-1-enabled`.
+    let mut model = fixture();
+    model.automation.push(automation(
+        "desk-enabled",
+        ("ch00", session::RackName::Console, "eq"),
+        1,
+        ParameterChannel::Both,
+        SessionParameterUnit::Linear,
+    ));
+    assert_eq!(launch_diagnostics(&model), rate_refusal("desk-enabled"));
+
+    // The `post_insert` `limiter` slot's `lookahead` (parameter 3, rate `None`) is refused too: a
+    // lookup that ignored the slot ID would resolve it to the EQ's block-rate parameter 3.
+    let mut model = fixture();
+    model.automation.push(automation(
+        "desk-lookahead",
+        ("ch00", session::RackName::Console, "limiter"),
+        3,
+        ParameterChannel::Both,
+        SessionParameterUnit::Milliseconds,
+    ));
+    assert_eq!(launch_diagnostics(&model), rate_refusal("desk-lookahead"));
+
+    // Its block-rate `band-1-gain` on the left lane is accepted.
+    let mut model = fixture();
+    model.automation.push(automation(
+        "desk-gain",
+        ("ch00", session::RackName::Console, "eq"),
+        4,
+        ParameterChannel::Left,
+        SessionParameterUnit::Db,
+    ));
+    assert_eq!(launch_diagnostics(&model), Vec::new());
+
+    // The `fx-b` submix's EQ insert `tone`, with `band-1-enabled` declared on its left lane.
+    let mut model = fixture();
+    let tone = model
+        .submixes
+        .iter_mut()
+        .find(|submix| submix.id.as_str() == "fx-b")
+        .and_then(|submix| {
+            submix
+                .inserts
+                .effects
+                .iter_mut()
+                .find(|effect| effect.id.as_str() == "tone")
+        })
+        .expect("fixture submix EQ insert");
+    tone.params.push(EffectParam {
+        parameter_id: 1,
+        channel: ParameterChannel::Left,
+        unit: SessionParameterUnit::Linear,
+        value: 1.0,
+    });
+    model.automation.push(automation(
+        "bus-enabled",
+        ("fx-b", session::RackName::Inserts, "tone"),
+        1,
+        ParameterChannel::Left,
+        SessionParameterUnit::Linear,
+    ));
+    assert_eq!(launch_diagnostics(&model), rate_refusal("bus-enabled"));
+}
+
+/// #1335 D1: an automatable parameter whose rate is `Sample` is refused too; only `Block` has a
+/// rendering contract. `canonical.json` automates the double's parameter 1, which the `Block`
+/// double accepts.
+///
+/// Red mutation: refuse only a parameter that is not `automatable` -> the `Sample` double prepares.
+#[test]
+fn an_automatable_sample_rate_target_is_refused() {
+    let registry = NativeEffectRegistry::new([
+        Box::new(Factory(&DESCRIPTOR)) as Box<dyn NativeEffectFactory>,
+        Box::new(Factory(&SAMPLE_DESCRIPTOR)),
+    ])
+    .expect("test registry");
+    prepare_native_session_effects(&compiled(), &registry, caps())
+        .unwrap_or_else(|diagnostics| panic!("a block-rate target prepares: {:?}", diagnostics.0));
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+        .expect("canonical session fixture");
+    model.tracks[0].inserts.effects[0].identity = session::EffectIdentity::Native {
+        effect_id: session::StableId::parse("sample-eq").expect("effect ID"),
+    };
+    let session = compile_model(&model).expect("the session compiles");
+    let diagnostics = match prepare_native_session_effects(&session, &registry, caps()) {
+        Ok(_) => panic!("a sample-rate target must not prepare"),
+        Err(diagnostics) => diagnostics.0,
+    };
+    let automation_id = model.automation[0].id.as_str();
+    assert_eq!(diagnostics, rate_refusal(automation_id));
+}
+
+/// #1335 D2: an automation is refused by rate only when its target resolves to a native
+/// descriptor parameter. A third-party insert reports only its own
+/// `effect.third_party.unavailable_at_launch`, and a declared parameter the descriptor lacks
+/// reports only `effect.parameter.unknown`; neither adds `effect.automation.rate`.
+///
+/// Red mutations: report the rate refusal for a `cid` identity, or for a parameter ID the
+/// descriptor lacks -> a second diagnostic.
+#[test]
+fn automation_skips_targets_already_refused_for_another_reason() {
+    let canonical = || {
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
+            .expect("canonical session fixture")
+    };
+    let only = |code: &'static str| {
+        vec![effect_compiler::EffectDiagnostic {
+            code,
+            path: "$.tracks[id=vocal].effects[id=eq]".to_owned(),
+        }]
+    };
+
+    // `canonical.json` automates the `eq` insert's declared parameter 1 on `both`.
+    let mut model = canonical();
+    assert_eq!(model.automation.len(), 1);
+    model.tracks[0].inserts.effects[0].identity = session::EffectIdentity::ThirdPartyCid {
+        cid: "bafyopaque".to_owned(),
+    };
+    assert_eq!(
+        launch_diagnostics(&model),
+        only("effect.third_party.unavailable_at_launch")
+    );
+
+    // The multiband's retired parameter 2, declared and automated.
+    let mut model = canonical();
+    {
+        let effect = &mut model.tracks[0].inserts.effects[0];
+        effect.identity = session::EffectIdentity::Native {
+            effect_id: session::StableId::parse("miso.multiband-compressor")
+                .expect("multiband effect ID"),
+        };
+        effect.params = vec![EffectParam {
+            parameter_id: 2,
+            channel: ParameterChannel::Both,
+            unit: SessionParameterUnit::Hz,
+            value: 1_000.0,
+        }];
+    }
+    model.automation = vec![automation(
+        "retired",
+        ("vocal", session::RackName::Inserts, "eq"),
+        2,
+        ParameterChannel::Both,
+        SessionParameterUnit::Hz,
+    )];
+    assert_eq!(launch_diagnostics(&model), only("effect.parameter.unknown"));
 }

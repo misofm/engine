@@ -226,7 +226,17 @@ effect.prepare.failed
 effect.metadata.mismatch
 effect.state.invalid
 effect.third_party.unavailable_at_launch
+effect.automation.rate
 ```
+
+`effect.descriptor.invalid` is raised only by `NativeEffectRegistry::new`, once per effect type
+when its factory enters the registry; `validate_prepare_request` no longer re-validates the
+descriptor per prepared instance (issue #1330), and because session preparation builds the
+registry before preparing any effect, a host observes the same refusal as before.
+
+`effect.automation.rate` refuses a stored automation whose `inserts` or `console` target parameter
+is not `automatable` or whose `automation_rate` is not `Block` (decision 15 E1, issue #1335). Its
+path is `$.automation[id=<automation id>].target.parameter_id`.
 
 ## Evidence contract
 

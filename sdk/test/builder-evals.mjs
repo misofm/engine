@@ -458,6 +458,68 @@ describe("validation refusals name the offending path", () => {
     );
   });
 
+  test("a route's gain and matrix are bounded as the engine bounds them, at the route's path", async () => {
+    // Issue #1237 gate 5: `gainDb` in [-144, 24] dB, each matrix coefficient in [-1, 1], refused
+    // `numeric.out_of_schema_range` at the value's own path; the engine refuses the same defect
+    // written by hand with the same code. Red mutations: check a route's gain or one coefficient
+    // with `f32` alone, use an exclusive bound, or refuse without the engine's code.
+    const base = () => session({ id: "route.domain", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .output("out");
+    const route = (values) => base().route({
+      id: "r",
+      source: { kind: "track", trackId: "t", tap: "post_pan" },
+      destination: { kind: "output_input", outputId: "out" },
+      ...values,
+    });
+    const unity = { ll: 1, lr: 0, rl: 0, rr: 1 };
+    const refusals = [
+      [{ gainDb: 24.5 }, "gainDb"],
+      [{ gainDb: -144.5 }, "gainDb"],
+    ];
+    const accepted = [{ gainDb: 24 }, { gainDb: -144 }, { gainDb: 1e-45 }, { gainDb: -1e-45 }];
+    for (const key of ["ll", "lr", "rl", "rr"]) {
+      for (const value of [1.5, -1.5]) refusals.push([{ matrix: { ...unity, [key]: value } }, `matrix.${key}`]);
+      // Subnormal coefficients of both signs are in the domain on every path (#1237 attempt 1
+      // verdict J1-1): the builder accepts them and the engine boots them (its fold flushes).
+      for (const value of [1, -1, 1e-45, -1e-45, 2 ** -127, -(2 ** -127)]) {
+        accepted.push({ matrix: { ...unity, [key]: value } });
+      }
+    }
+    for (const [values, field] of refusals) {
+      assert.throws(
+        () => route(values),
+        (error) => {
+          assert.ok(error instanceof MisoUsageError, `expected a MisoUsageError, got ${error}`);
+          assert.equal(error.diagnosticCode, "numeric.out_of_schema_range", field);
+          assert.match(error.message, new RegExp(`^route\\("r"\\)\\.${field.replace(".", "\\.")}:`), field);
+          return true;
+        },
+      );
+    }
+    for (const values of accepted) {
+      const built = route(values);
+      if (asset !== undefined) {
+        assert.equal((await validate(built, { asset })).ok, true, JSON.stringify(values));
+      }
+    }
+    if (asset !== undefined) {
+      for (const edit of [
+        (row) => { row.gain_db = 24.5; },
+        (row) => { row.gain_db = -144.5; },
+        (row) => { row.channel_matrix.rl = 1.5; },
+        (row) => { row.channel_matrix.ll = -1.5; },
+      ]) {
+        const model = mutableModel(route({}).toJSON());
+        edit(model.routes[0]);
+        const outcome = await validate(JSON.stringify(model), { asset });
+        assert.equal(outcome.ok, false, "the engine must refuse the hand-written defect");
+        assert.equal(outcome.diagnostics[0]?.code, "numeric.out_of_schema_range");
+      }
+    }
+  });
+
   /** One track with a main route into the output and a `pre_fader` send into bus `verb`. */
   function withSend(send = {}, main = {}) {
     return session({ id: "route.follows-mute", sampleRateHz: 48_000 })
@@ -725,6 +787,34 @@ describe("validation refusals name the offending path", () => {
         }),
       /automation\("a"\)\.target\.channel/,
     );
+  });
+
+  test("an effect automation on a prepared-only parameter is refused by name", () => {
+    // Issue #1335 D5: the engine refuses an effect target that is not automatable at the block
+    // rate (`effect.automation.rate`), so the builder refuses it first. Red mutation: check only
+    // the declared `(parameter, channel)` for an effect row, as before, and `band-1-enabled`
+    // builds a session the engine refuses.
+    const base = session({ id: "auto", sampleRateHz: 48_000 })
+      .source("stem", { channels: 2, bitDepth: 24, frames: 480, content: CONTENT_A })
+      .track("t", {
+        source: "stem",
+        inserts: [effect("miso.parametric-eq", { "band-1-enabled": true, "band-1-gain": -2 }, { slotId: "eq" })],
+      });
+    const ride = (parameter, startValue, endValue) => ({
+      id: parameter,
+      target: { trackId: "t", rack: "inserts", slotId: "eq", parameter, channel: "both" },
+      segments: [{ shape: "step", startSample: 0n, endSample: 480n, startValue, endValue }],
+    });
+    assert.throws(
+      () => base.automation(ride("band-1-enabled", 1, 1)),
+      (error) => {
+        assert.ok(error instanceof MisoUsageError);
+        assert.match(error.message, /automation\("band-1-enabled"\)\.target\.parameter/);
+        assert.match(error.message, /band-1-enabled is prepared-only/);
+        return true;
+      },
+    );
+    assert.doesNotThrow(() => base.automation(ride("band-1-gain", -2, 0)));
   });
 
   test("an effect parameter outside its catalog domain is refused by name", () => {

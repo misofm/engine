@@ -54,24 +54,80 @@ capi_abi_self_test() {
     expect_failure missing-c-compiler \
         "${common_env[@]}" CC="$scratch_root/no-such-cc" bash "$0" "$workspace_root"
 
-    abi_header="$scratch_root/abi-version.h"
-    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$abi_header"
+    # Header legs (#1232). The fixtures `#include "miso_engine_v1.h"` and the checker adds only
+    # `-I"$(dirname "$header")"`, so a staged header must be named `miso_engine_v1.h` in its own
+    # directory or every run stops at "No such file or directory" before any assertion runs.
+    original_header="$workspace_root/crates/capi/include/miso_engine_v1.h"
+    stage_header() {
+        mkdir -p "$scratch_root/$1"
+        cp "$original_header" "$scratch_root/$1/miso_engine_v1.h"
+        printf '%s\n' "$scratch_root/$1/miso_engine_v1.h"
+    }
+    expect_header_failure() {
+        local name="$1" staged="$2" log="$scratch_root/$1.stderr" cmp_status=0
+        if [[ ! -f "$staged" ]]; then
+            printf 'C ABI mutation self-test FAILED: %s staged header is missing: %s\n' \
+                "$name" "$staged" >&2
+            return 1
+        fi
+        cmp -s "$original_header" "$staged" || cmp_status=$?
+        case "$cmp_status" in
+            1) ;;
+            0)
+                printf 'C ABI mutation self-test FAILED: %s did not change the staged header\n' \
+                    "$name" >&2
+                return 1
+                ;;
+            *)
+                printf 'C ABI mutation self-test FAILED: %s could not compare the staged header (cmp status %s)\n' \
+                    "$name" "$cmp_status" >&2
+                return 1
+                ;;
+        esac
+        # The mutated header must still compile alone, so the leg's red has to come from the
+        # fixtures' pins, not from a mutation that broke the header's syntax.
+        if ! "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -fsyntax-only -x c "$staged" \
+            2>"$log"; then
+            printf 'C ABI mutation self-test FAILED: %s staged header does not compile alone:\n' \
+                "$name" >&2
+            cat "$log" >&2
+            return 1
+        fi
+        # LC_ALL=C keeps the compiler's missing-file text in English; GCC says `No such file or
+        # directory` and clang says `'miso_engine_v1.h' file not found`.
+        if "${common_env[@]}" LC_ALL=C MISO_ENGINE_CAPI_HEADER="$staged" bash "$0" \
+            "$workspace_root" >/dev/null 2>"$log"; then
+            printf 'C ABI mutation unexpectedly passed: %s\n' "$name" >&2
+            return 1
+        fi
+        if grep -qE "No such file or directory|'miso_engine_v1\.h' file not found" "$log"; then
+            printf 'C ABI mutation self-test FAILED: %s failed on a missing file, not on drift:\n' \
+                "$name" >&2
+            cat "$log" >&2
+            return 1
+        fi
+    }
+
+    # Header positive control: an unmodified copy, staged exactly as the legs stage theirs, must
+    # pass. Without it a staging defect would make every header leg red for the wrong reason.
+    control_header="$(stage_header header-staging-control)"
+    "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$control_header" bash "$0" "$workspace_root" \
+        >/dev/null ||
+        { printf 'C ABI mutation self-test FAILED: header staging control (unmodified staged header) did not pass\n' >&2; return 1; }
+
+    abi_header="$(stage_header abi-version)"
     sed -i 's/UINT32_C(0x00010000)/UINT32_C(0x00010001)/' "$abi_header"
-    expect_failure header-constant-drift \
-        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$abi_header" bash "$0" "$workspace_root"
+    expect_header_failure header-constant-drift "$abi_header"
 
-    layout_header="$scratch_root/layout.h"
-    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$layout_header"
+    # The first `uint64_t reserved[4];` is miso_engine_v1_engine_config's tail (header at #1232).
+    layout_header="$(stage_header layout)"
     sed -i '0,/uint64_t reserved\[4\];/s//uint64_t reserved[3];/' "$layout_header"
-    expect_failure header-layout-drift \
-        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$layout_header" bash "$0" "$workspace_root"
+    expect_header_failure header-layout-drift "$layout_header"
 
-    signature_header="$scratch_root/signature.h"
-    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$signature_header"
+    signature_header="$(stage_header signature)"
     sed -i 's/miso_engine_v1_abi_version(void)/miso_engine_v1_abi_version(uint32_t reserved)/' \
         "$signature_header"
-    expect_failure header-signature-drift \
-        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$signature_header" bash "$0" "$workspace_root"
+    expect_header_failure header-signature-drift "$signature_header"
 
     real_nm="$(command -v "${NM:-nm}")"
     nm_add="$scratch_root/nm-add"

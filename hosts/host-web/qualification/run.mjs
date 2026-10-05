@@ -481,12 +481,23 @@ function validateSdkResponse(browserName, response) {
   const recoveryNotificationEndSample = canonicalU64(recoveryDelivery?.notificationEndSample);
   const recoveryResultCapturedSample = canonicalU64(recoveryDelivery?.resultCapturedSample);
   const recoveryResultEndSample = canonicalU64(recoveryDelivery?.resultEndSample);
-  gate(browserName, "sdk-spectrum-continuous", continuous?.pendingBeforeRender === true
-    && continuous?.sharedJob === true && continuous?.automaticDelivery === true
-    && continuous?.windows >= 1 && continuous?.gap === true
-    && continuous?.ownedArrays === true && continuous?.sharedAfterFirstClose === true
-    && continuous?.staleReadRefused === true,
-  "continuous spectrum did not prove warmup, shared ownership, capture loss, or close lifecycle");
+  // Each predicate is named so a failed run says which one was false; the pass condition is
+  // their conjunction, unchanged.
+  const continuousLifecycle = [
+    ["pendingBeforeRender", continuous?.pendingBeforeRender === true],
+    ["sharedJob", continuous?.sharedJob === true],
+    ["automaticDelivery", continuous?.automaticDelivery === true],
+    [`windows >= 1 (windows=${continuous?.windows})`, continuous?.windows >= 1],
+    ["gap", continuous?.gap === true],
+    ["ownedArrays", continuous?.ownedArrays === true],
+    ["sharedAfterFirstClose", continuous?.sharedAfterFirstClose === true],
+    ["staleReadRefused", continuous?.staleReadRefused === true],
+  ];
+  const falseContinuousLifecycle = continuousLifecycle
+    .filter(([, holds]) => !holds).map(([name]) => name);
+  gate(browserName, "sdk-spectrum-continuous", falseContinuousLifecycle.length === 0,
+    "continuous spectrum did not prove warmup, shared ownership, capture loss, or close lifecycle;"
+    + ` false: ${falseContinuousLifecycle.join(", ")}`);
   gate(browserName, "sdk-spectrum-continuous", continuous?.statuses?.includes("ready") === true
     && continuous?.hopFrames === 256
     && continuous?.nativeStart?.hopFrames === 256

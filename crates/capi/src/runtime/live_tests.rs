@@ -2845,3 +2845,109 @@ fn an_eq_bypass_beside_targets_filling_its_queue_rebuilds() {
     );
     assert_eq!(effect_room(&rig, Epoch::Current, "eq0", "eq"), 4);
 }
+
+// Issue #1335: stored automation on an effect parameter the plan keeps prepared.
+
+/// An `UpsertAutomation` of one step on `eq_session`'s `eq0` console EQ, on a `(parameter_id,
+/// channel)` that `eq0` declares.
+fn eq_automation_edit(
+    parameter_id: u32,
+    channel: session::ParameterChannel,
+    unit: session::ParameterUnit,
+) -> SessionEdit {
+    let id = |text: &str| StableId::parse(text).expect("stable ID");
+    SessionEdit::UpsertAutomation {
+        automation: session::Automation {
+            id: id("eq-ride"),
+            target: session::AutomationTarget {
+                entity_id: id("eq0"),
+                rack: session::RackName::Console,
+                effect_id: id("eq"),
+                parameter_id,
+                channel,
+            },
+            segments: vec![session::AutomationSegment {
+                shape: session::AutomationShape::Step,
+                start_sample: 0,
+                end_sample: 960,
+                start_value: 1.0,
+                end_value: 1.0,
+                unit,
+            }],
+        },
+    }
+}
+
+/// #1335 gate 3. On a playing engine, a transaction that only adds an automation on the console
+/// EQ's `band-1-enabled` (`automation_rate` `None`) is refused with the compile rejection a
+/// rebuild's preparation gives (`effect.automation.rate`): the revision, the committed model and
+/// the reliable lane do not move, no candidate is prepared, and the following blocks are
+/// bit-identical to an engine that never received it. The same transaction on the block-rate
+/// `band-1-gain` commits live, as #1260 D2 made it.
+///
+/// Red mutation: drop the classifier's automation check -> the edit commits live with no records:
+/// acked, and never heard (decision 14 F1).
+#[test]
+fn an_automation_on_a_prepared_effect_parameter_is_refused_before_any_ack() {
+    use session::{ParameterChannel, ParameterUnit};
+    let document = eq_session(48_000);
+    let mut rig = Rig::new(&document);
+    let mut untouched = Rig::new(&document);
+    for _ in 0..window(rig.latency(), 0, rig.quantum) {
+        assert_eq!(bits(&rig.step()), bits(&untouched.step()), "warm-up");
+    }
+
+    let refused = eq_automation_edit(1, ParameterChannel::Both, ParameterUnit::Linear);
+    let before = (refusal_state(&rig), rig.summary());
+    assert_eq!(
+        rig.apply(core::slice::from_ref(&refused)),
+        crate::RESULT_COMPILE_REJECTED
+    );
+    let mut rejected = parse_session_json(&document).expect("model");
+    protocol::apply_session_edit(&mut rejected, &refused).expect("the edit applies to the model");
+    let rejected = session::canonical_session_json(&rejected).expect("canonical rejected");
+    let Err(failure) = compile_children(&rejected, limits()) else {
+        panic!("an automation on band-1-enabled does not prepare")
+    };
+    assert_eq!(
+        rig.last_error(),
+        failure.diagnostics,
+        "the refusal is preparation's diagnostic"
+    );
+    assert!(
+        String::from_utf8_lossy(&failure.diagnostics).contains("effect.automation.rate"),
+        "{}",
+        String::from_utf8_lossy(&failure.diagnostics)
+    );
+    assert_eq!(
+        (refusal_state(&rig), rig.summary()),
+        before,
+        "no revision, no candidate, no event"
+    );
+    for _ in 0..3 {
+        let block = rig.block;
+        let expected = untouched.step();
+        assert!(
+            expected.iter().any(|sample| *sample != 0.0),
+            "block {block}"
+        );
+        assert_eq!(bits(&rig.step()), bits(&expected), "block {block}");
+    }
+
+    let accepted = eq_automation_edit(4, ParameterChannel::Left, ParameterUnit::Db);
+    let (revision, _, epoch, _) = rig.summary();
+    assert_eq!(
+        rig.apply(core::slice::from_ref(&accepted)),
+        crate::RESULT_OK
+    );
+    let (after, _, after_epoch, pending) = rig.summary();
+    assert_eq!(
+        (after, after_epoch, pending),
+        (revision + 1, epoch, 0),
+        "a block-rate target commits live: one revision, no candidate"
+    );
+    for _ in 0..3 {
+        let block = rig.block;
+        assert_eq!(bits(&rig.step()), bits(&untouched.step()), "block {block}");
+    }
+}

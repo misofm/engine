@@ -99,3 +99,77 @@ false positive.
 ## Dependencies
 
 - None. Found by *Admit live send commands in the browser* (#1222).
+
+## Attempt record
+
+### Attempt 1 (implementer, 2026-10-05)
+
+Base `3bf212cad` (branch `codex/d15-stream-j`); implementation commit `2e5bcc31f`.
+
+- **D1.** `FORBIDDEN` is now `^(free|malloc|calloc|realloc)$|dealloc|dlmalloc|drop_glue|drop_in_place|drop_slow|unlink_chunk|insert_large_chunk|memory_grow|__rust_alloc|__rust_realloc`.
+- **D2.** Self-test case (a1) in `self_test()` swaps the member in case (a)'s closure for each name:
+  - `_RNvMs_NtCs0_5graphNtB4_25GraphRouteControlProducer4free` **passes**. *Defect it catches:* an
+    unanchored C name, which would refuse every ordinary outlined Rust method named `free`.
+  - `free`, `malloc`, `calloc`, `realloc` each **fail**. *Defect it catches:* the C allocator
+    alternative deleted or mis-anchored, for example `^free$` alone, which would admit a real C
+    allocator reach. The base regex never refused bare `calloc` or `realloc` either.
+  - `_ZN8dlmalloc4free17h0E` and `__rust_realloc` **fail**. *Defect it catches:* `__rust_realloc`
+    missing from the list, since nothing else matches it. The dlmalloc row keeps the Rust allocator
+    refused alongside the anchored names; case (a) already covers it, so it is not a unique catch.
+- **D3.** `#[inline(always)]` and its justifying doc sentences are removed from
+  `GraphRouteControlProducer::free` (`crates/graph/src/lib.rs`) and `RouteControlProducer::free`
+  (`crates/host-core/src/route_controls.rs`). No other change.
+- **D4.** A paragraph under `--callgraph` in the module docstring says the C names are anchored and why.
+- **Gate 1.** `python3 -B scripts/check-web-audioworklet-callgraph.py --self-test`: exit 0.
+- **Gate 2 (red on revert).** With the exact base `FORBIDDEN` restored, the self-test exits 1:
+  `(a1) out-of-line accessor named free passes`, `(a1) bare C allocator calloc`,
+  `(a1) bare C allocator realloc` and `(a1) Rust allocator __rust_realloc` all fail. With only the
+  anchor removed (`free|malloc|calloc|realloc` unanchored), it exits 1 on exactly the out-of-line
+  accessor case. Restored, it is green.
+- **Gate 3 (mutation).** With the anchored alternative replaced by a never-matching `(?!)`, the self-test
+  exits 1 on `(a1) bare C allocator free`, `malloc`, `calloc` and `realloc`. A further mutation
+  dropping `|__rust_realloc` exits 1 on exactly `(a1) Rust allocator __rust_realloc`. Restored,
+  it is green.
+- **Gate 4.** `bash scripts/build-web-audioworklet.sh --named-twin N A` (exit 0), then
+  `bash scripts/check-web-audioworklet.sh A N/miso-engine-v1-audio-worklet.simd128.named.wasm`: exit 0
+  with the attributes removed.
+- **Gate 5.** `python3 -B scripts/check-browser-expected-resources.py --artifacts A`: exit 0 (the
+  digests and exact rows agree with the built module).
+- **Gate 6.** `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets
+  --all-features -- -D warnings` and `bash scripts/check-workspace-policy.sh`: all pass.
+- **Outlining (hazard 2).** Without the attribute LLVM keeps both accessors out of line.
+  `RouteControlProducer4free` and `GraphRouteControlProducer4free` are both members of the
+  `miso_engine_web_v1_command_submit` closure in the rebuilt named twin. The base regex would refuse
+  exactly these two there, which reproduces the #1222 finding, and the anchored regex passes it.
+- **No weakening (hazard 1).** Across every function in the rebuilt named twin, the only names the
+  base regex refuses that the new one admits are those two accessors. No function is named exactly
+  `free`, `malloc`, `calloc` or `realloc`. The new regex also refuses one name the base admitted:
+  `_RNvCs9wFQrvczXsK_7___rustc14___rust_realloc`.
+- **Size.** Shipped module: base `b723ff9f…` is 2,894,096 B, rebuilt `5cfb8572…` is 2,894,071 B
+  (-25 B). Named twin: 3,313,317 B before and 3,313,442 B after.
+
+### Attempt 1 verdict follow-ups (batch follow-ups, 2026-10-05)
+
+The verifier passed attempt 1. Folded:
+- NIT 1: `self_test()` now loops the out-of-line accessor pass case over all four names
+  (`…4free`, `…6malloc`, `…6calloc`, `…7realloc`) and adds four pass cases for unmangled names
+  that merely begin with a C allocator name (`free_count`, `malloc_count`, `calloc_count`,
+  `realloc_count`).
+  - Defect caught that no other case catches: a `FORBIDDEN` C alternative that loses its trailing
+    `$` (prefix match) or its grouping (`^free|malloc|calloc|realloc$`), which refuses an ordinary
+    function only *named* like an allocator.
+  - Mutation run (each applied to a copy of the checker, `--self-test` run):
+    - `$` dropped: attempt-1 self-test rc 0; fold rc 1 on the four `unmangled …_count` cases.
+    - ungrouped: attempt-1 self-test rc 0; fold rc 1 on the `malloc`, `calloc`, `realloc`
+      accessor cases and the `free_count`, `malloc_count`, `calloc_count` cases.
+    - unmutated: fold self-test rc 0.
+- NIT 3 (docstring): the import reasoning now says what holds: an import has no body, so
+  `wasm-objdump -d` prints no function header for it and this checker never sees one, and
+  `check-web-audioworklet.sh` refuses any import before this gate runs.
+
+Not folded:
+- NIT 2 (the `_ZN8dlmalloc4free17h0E` (a1) row duplicates case (a)): the spec requires that row;
+  it is left as is.
+- NIT 3 (spec text): the non-goal says `check-web-audioworklet.sh` runs the self-test; it is
+  `scripts/test-web-audioworklet.sh`, wired in by qualification.yml. Coverage is intact. The
+  non-goal is spec scope text, which the coordinator owns, so it is reported, not edited.
