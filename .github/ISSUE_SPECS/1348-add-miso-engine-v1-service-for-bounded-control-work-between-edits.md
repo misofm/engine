@@ -120,9 +120,13 @@ calls the same engine-side step.
    of `service`: with a meter handle configured, the retired plan is disposed and a render-peak meter record is staged, as with
    `service`.
 3. **Counters refresh on every call.** Configure a lossy telemetry lane to drop records, render
-   blocks, then call only `miso_engine_v1_source_submit_planar_f32` and then `COUNTERS_GET` for
-   `TELEMETRY_DROPPED`: it reports the drops counted by the earlier submit's service step, equal to
-   the controller's own count. *Red if the refresh stays in `command` only.*
+   blocks, then call only `miso_engine_v1_source_submit_planar_f32`. Right after each submit, the
+   provider's counter snapshot (read through a `test-support` observer, with no other control call
+   in between) reports the drops counted by that submit's service step, equal to the controller's
+   own count; a final `COUNTERS_GET` for `TELEMETRY_DROPPED` reports the same value end to end.
+   *Red if the refresh stays in `command` only, or if the step's second refresh is missing.*
+   (Amendment 1: `COUNTERS_GET` is itself a command and services first, so it alone cannot see a
+   refresh missing from `submit`.)
 4. **A pending candidate survives service (control-plane test, `test-support`).** Publish a
    rebuild, through a `test-support` publication hook, as `NoEarlierThan(S)` with `S` 64 blocks
    ahead, render one block, then call `service`
@@ -150,6 +154,14 @@ calls the same engine-side step.
   disposes of it or promotes its provider early (an acked revision's plan lost, or the control
   plane addressing a plan render does not run).
 - Gate 5: red if the step does work that grows with idle time or mutates state with nothing pending.
+
+## Amendment 1 (root, 2026-10-05)
+
+Gate 3's red claim could not hold as first written: `COUNTERS_GET` is a command, every command
+services first (D2), so it always reports refreshed counters even when `submit` skips the
+refresh. Root ruled that the verifier decides, and the attempt-1 verifier confirmed it. Gate 3 now
+reads the provider's counter snapshot through a `test-support` observer right after each submit,
+and keeps the end-to-end `COUNTERS_GET` check; the refresh-in-`command`-only mutant turns it red.
 
 ## Dependencies
 
