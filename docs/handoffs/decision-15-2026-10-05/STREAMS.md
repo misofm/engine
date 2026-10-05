@@ -15,7 +15,7 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
 - Root merges into `main` one stream batch at a time, rebases the others onto the result, and runs
   the full gate set once on every merged tree.
 - At most five implementation coordinators run at once: A, B, G, J and one of E, I or H(a).
-- Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, #1407 and #1408, H's #1331
+- Start immediately (no file conflicts): A's #1322 and #1300, B's #1309, E's #1055, G's #1328, #1407, #1408 and #1409 (after #1408), H's #1331
   and #1333, I's #1335, J, K.
 - Size: the fix round split #1225, #1288, #1290, #1296, #1310, #1312, #1327, #1341, #1355, #1358
   and #1381. The verifier still flagged #1280, #1316, #1332 and #1363 as tight; their stream
@@ -42,11 +42,12 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | File | Order |
 |---|---|
 | `crates/host-core/src/prepare.rs` | B #1312 → A (#1277-#1285) → B #1344 → A #1323 → H #1401 → C (#1287 slices) → D (#1288, #1324, #1325) → F |
-| `crates/lane/src/kernels/builtins.rs` (the D11 trim, fader and matrix ramp kernels), the ramp stages in `crates/builtins/src/lib.rs` (`InputStage::set_trim_signed`/`settle`, `FaderRampStage`, `MatrixStage`), `crates/dsp-reference/src/ramp.rs` | G #1408 → B (#1312, #1346) → E (#1054, #1394) → A #1277 → D #1288 |
+| `crates/lane/src/kernels/builtins.rs` (the D11 trim, fader and matrix ramp kernels), the ramp stages in `crates/builtins/src/lib.rs` (`InputStage::set_trim_signed`/`settle`, `FaderRampStage`, `MatrixStage`), `crates/dsp-reference/src/ramp.rs` | G #1408 → G #1409 → B (#1312, #1346) → E (#1054, #1394) → A #1277 → D #1288 |
 | `crates/builtins/src/lib.rs` (`InputStage::apply_prepared_filter`), `docs/rulings/builtins-input-liveness-d2.md` (#808 paragraph) | G #1407 → G #1329 → F (#1268, #1262) |
+| `crates/lane/src/kernels.rs` (`ramp_block`, the `ramp_toward` re-export), `crates/effect-runtime/src/ramp.rs`, `crates/effect-runtime/src/state_payload.rs` (`ramp_path_inside`), the effect ramp render bodies (compressor `RampVec`/`advance_ramps`, gate `channel_step`, multiband `Segment`/`run_segment`, delay `LaneChunk`/`CrossChunk`/`delay_chunk`, soft clip `SoftClipCoef`/`soft_clip_block`/`process`, limiter `RampLanes`) | G #1409 → A (#1279, #1280, #1282) → G (#1336, #1338, #1370) |
 | `crates/builtins-compiler/src/lib.rs` | B (#1312, #1346) → A (#1277) → D (#1288) → G (#1329) → F (#1261, #1262) |
 | `crates/effect-contract/src/live.rs` | B #1312 → B #1345 → A #1280 → E #1341 |
-| `crates/effect-contract/src/lib.rs` | J #1330 → A #1362 → G #1377 |
+| `crates/effect-contract/src/lib.rs` | G #1409 (`ParameterSmoother`'s `Linear` arm only) → J #1330 → A #1362 → G #1377 |
 | `crates/engine/src/realtime/plan_exchange.rs` | B #1343 → B (#1310, #1311, #1314) → C (#1354, #1355) → H #1381 → B #1349 |
 | `crates/engine/src/realtime/plan.rs` | A #1322 → B (#1343, #1344) → H #1400 → C (#1396, #1355, #1358) → H #1381 |
 | `crates/source/src/lib.rs` | B (#1318, #1316, #1350, #1319) → C (#1353, #1320) |
@@ -68,6 +69,9 @@ fader and matrix share, in the ramp kernels and their twin. Stream B's cells (#1
 stream E's ramp lengths (#1054, #1394) feed that law, and A's #1277 and D's #1288 carry or drive
 its words, so #1408 lands before any of them changes the ramp code; they rebase onto it. #1407
 changes only the live filter retarget in `crates/builtins` (stream A's column, a G exception).
+#1409 (filed the same day) gives every effect ramp the same clamp right after #1408, so it also
+lands before B, E, A and D change the ramp code, and before the effect slices (A #1279, #1280,
+#1282; G #1336, #1338, #1370) that add or carry effect ramps.
 
 ## Stream S0
 
@@ -220,7 +224,7 @@ changes only the live filter retarget in `crates/builtins` (stream A's column, a
 ## Stream G
 
 - **Coordinator scope:** DSP contracts: SVF joint flush, engine-wide tail and exact-rest bounds, live gate/EQ/multiband parameters, live bypass shunts, per-strip and multiband link mode.
-- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
+- **Owns:** `crates/lane`, `crates/dsp-reference`, effect crates' parameter and designer code, `crates/effect-runtime` (#1366, #1375); by named exception: `crates/builtins` `InputStage::apply_prepared_filter` (#1407), the builtins ramp tests and pins (#1408), the `ParameterSmoother` `Linear` arm in `crates/effect-contract`, the effect payload refusal rows it supersedes and the effect corpus pins (#1409), `crates/parametric-eq` rest predicates (#1328), `crates/builtins-compiler` tail rule (#1329), `crates/graph-compiler` extent (#1379), `crates/host-core/tests/live_delta.rs` rows (#1336, #1337, #1367), `sdk/` (#1369), classifier rows (#1371).
 - **Depends on:** A's carry slice for each effect crate (#1279, #1280, #1282); #1069 for the multiband; E #1054 for #1371.
 - **Parallel-safe with:** A (coordinate on effect crates), B, E, J.
 
@@ -234,22 +238,23 @@ changes only the live filter retarget in `crates/builtins` (stream A's column, a
 | 6 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
 | 7 | #1407 | Retarget a live input filter only through its designs and their mixtures | — | — |
 | 8 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
-| 9 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
-| 10 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 11 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 12 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 13 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 14 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
-| 15 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 16 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 17 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 18 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 19 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 20 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1279, #1280, #1345, #1394 |
-| 21 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 22 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 23 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 24 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 9 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | — |
+| 10 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
+| 11 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 12 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 13 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 14 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 15 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
+| 16 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 17 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 18 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 19 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
+| 20 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
+| 21 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1279, #1280, #1345, #1394 |
+| 22 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
+| 23 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
+| 24 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
+| 25 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 
