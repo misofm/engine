@@ -123,11 +123,14 @@ a block and no return path: render adopts the warm successor in move mode (#1355
      neither restarts, the output included, stays exact. Each pass adds a strip to R (the
      submix `input`-tap rule, step 4 or 6) or to `restart_whole` (the walk), no strip leaves
      either, and a strip can enter each once, so the loop ends within twice the strip count. The
-     walk and the first-node rule make the result independent of the order in which late nodes
-     are found. In the round-7 review's structural model (design evidence, not a gate; 4,650
-     random sessions, with removals and added latent buses) this walk terminated, met C1, the
-     sidechain closure and the submix rule, was order-independent across random schedules, and
-     never reached the invariant branch.
+     result is deterministic on W's schedule: the first-node rule reads W's one schedule order.
+     `P`, the ducked set and the decision kind do not depend on the schedule; `restart_whole`
+     can differ under another schedule (the round-8 review's model: 11 of 17,786 random
+     sessions, for example `[B1, T0, T1]` against `[T0, T1]` where B1's only carried node is a
+     dead-end `post_pan` stage). In the round-7 review's structural model (design evidence, not
+     a gate; 4,650 random sessions, with removals and added latent buses) this walk terminated,
+     met C1, the sidechain closure and the submix rule, and never reached the invariant
+     branch.
 
      **Known behaviour: the walk is exact but not minimal.** In that model about 5% of random
      sessions duck 1-4 more strips than the smallest restart set that meets C1 (a brute-force
@@ -258,7 +261,9 @@ every plan is prepared with an explicit `source_ring_frames = stall_ring_frames(
    by a route from Bu's `post_pan` tap, and routes NB to the output. `warm_lead` returns
    `Warm(WarmLead { lead_samples: 512, restart_whole: [Bu, T1] })`; preparing it gives
    `restarted_strips() == [Bu, T1]`, and T0's nodes (its route into Bu included) and the output
-   at exactly `a(n) + 512`. T0's slack into Bu (486 samples) absorbs the lead.
+   at exactly `a(n) + 512`. `Δ = 486` and `P = 512`: T0's route, at its lead floor, holds
+   restarted Bu 26 samples later than in A, so NB's path reaches the output at `Δ + 26`, and
+   `P − Δ = 26` absorbs that.
 10. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`

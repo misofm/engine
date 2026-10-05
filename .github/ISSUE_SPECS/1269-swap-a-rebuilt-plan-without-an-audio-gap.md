@@ -381,7 +381,7 @@ Each row's "Depends on" is the slice spec's own "Dependencies" section; the spec
 | #1403 | *Classify a latency-growth edit and publish its warm successor from the control plane* | C | #1310, #1311, #1313, #1314, #1320, #1323, #1324, #1325, #1343, #1348, #1354, #1355, #1396, #1398 |
 | #1397 | *Duck-swap the strips a latency growth restarts, and fall back to the transition when a warm successor cannot adopt* | C | #1288, #1310, #1311, #1314, #1324, #1325, #1343, #1344, #1354, #1355, #1396, #1398, #1403 |
 | #1406 | *Grow the default source ring by the warm-prime headroom* | C | #1286, #1354, #1355 |
-| #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1310, #1314, #1323, #1325, #1343, #1354, #1355, #1396, #1397, #1403, #1406 |
+| #1358 | *Fall back to the transition when a warm successor is not ready by its deadline* | C | #1310, #1314, #1323, #1325, #1343, #1354, #1355, #1396, #1397, #1398, #1403, #1406 |
 | #1360 | *Check the warm-successor deadline in miso_engine_v1_service and report its outcome* | C | #1286, #1309, #1311, #1313, #1314, #1323, #1348, #1351, #1354, #1355, #1358, #1397, #1398, #1403, #1406 |
 | #1361 | *Check the warm-successor deadline in the browser Worker's service loop and report its outcome* | C | #1290, #1293, #1294, #1331, #1332, #1333, #1349, #1355, #1360, #1381, #1403, #1406 |
 | #1326 | *Give every browser plan live strip fader and mute lanes* | D | none |

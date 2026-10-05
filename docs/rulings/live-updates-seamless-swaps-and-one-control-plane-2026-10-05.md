@@ -194,8 +194,11 @@ when a dependency forces the order, and then sequence the correct solution.
   6. `ΣP` is bounded by `P_MAX`, and the prime by `PRIME_BYTES_MAX` (#1286).
 - **Fallback, counted and reported:** the transition only, the D15-9 duck-swap of every strip whose
   content timing moves (#1397 D2's `grown_strips`: a strip with a node whose arrival grows, or with
-  an outgoing edge whose compensation line changes length, unedited strips included), joined with
-  #1324's restarted strips, counted `TRANSITION_FALLBACK`. It applies when preparation returns
+  an outgoing edge whose compensation line changes length, unedited strips included, plus the
+  consumer of every sidechain edge whose line changes length unless it leaves a ducked strip's
+  `post_fader` or `post_pan` tap), joined with #1324's restarted strips, with `S` counted with
+  #1324 D4's `C` (each sidechain line from a ducked strip's `post_fader` or `post_pan` tap
+  included), counted `TRANSITION_FALLBACK`. It applies when preparation returns
   `WarmUnavailable`, or when readiness is still unmet `prime_deadline_samples` of render after
   `not_before` (counted in render samples: one stall tolerance plus `P_MAX` plus one quantum,
   #1358 D1). There is no render-thread pre-roll. While render waits for readiness, the
@@ -572,8 +575,8 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
 - **#1328** *Flush the SVF jointly so builtin and EQ filters reach exact rest*, Amendment 1
   (A1-A6): the V8 spill gate's select classifier is corrected, not weakened; the EQ's per-frame
   output-limit flag is restructured so the dual depth-1 tail carries no stack slot; the masked
-  mono depth-2 pair's `ic1` spill is eliminated, or kept only under an evidence-based exception;
-  D6 (class B) is restated by change size.
+  mono depth-2 pair's `ic1` spill is eliminated (A6 chose elimination, not A3's exception path:
+  each section's dry mask is kept in state); D6 (class B) is restated by change size.
 - **#1329** *State a bounded tail and an exact-rest bound for every node*, Amendment 1: option (m),
   the live filter retarget law, is *Retarget a live input filter only through its designs and their
   mixtures* (#1407); D11's endpoint clamp is *Keep every trim, fader and matrix ramp inside its
@@ -600,7 +603,7 @@ decision lives in its issue's GitHub body (the issue's own branch carries the sp
 
 ### Verification
 
-Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it five times:
+Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it eight times:
 
 - **Round 1 (whole record, about 900 anchors): FAIL**, five blockers (an ack lost on the pre-roll
   fallback, a watermark that aliased under supersession, BACKPRESSURE for a live link value, an
@@ -639,6 +642,11 @@ Fresh Opus 5.5 adversarial verifiers, none of whom wrote the record, checked it 
   holder (M4; now republished, #1358 D3), and a default ring that missed quanta other than 128 and
   pins outside its slice (M5; `p_max_samples(fs, q)`, split to #1406), plus minors. All were folded
   in before merge.
+- **Round 7: PASS-WITH-FIXES**, no blocker. Three majors: the walk's feeder recursion (M1), the
+  #1406 pins (M2) and the `S` term for sidechain lines (M3). All were folded in.
+- **Round 8: PASS-WITH-FIXES**, no blocker. One major: the transition's grown strips fell outside
+  #1324 D4's `C` and #1397 D2's duck set for sidechain lines (M1). It was folded in, with the
+  minors.
 
 The authority statement, the decision coverage, the dependency graph (acyclic) and the GitHub titles
 passed every round. Every blocker from round 2 on was in stream C (the warm successor) or its

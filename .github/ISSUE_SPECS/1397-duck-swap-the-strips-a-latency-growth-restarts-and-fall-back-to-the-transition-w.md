@@ -63,7 +63,7 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
   3. It publishes through `publish_primed` (#1403 D3), admitted with `AdmissionPeak::WithReprepare`
      as #1403 D2 admits every warm candidate, with `not_before` = #1325 D3's `S` instead of
      `NoEarlierThan(S)`. `S` uses #1324 D4's `C`, the one every duck-swap uses: every route line
-     out of a ducked strip (removed or restarted); every `EffectSidechain` line from a restarted
+     out of a ducked strip (removed or restarted); every `EffectSidechain` line from a ducked
      strip's `post_fader` or `post_pan` tap into a carried node (#1354 D2 step 2 keeps that
      consumer carried); and, for a restarted submix whose `input` tap feeds a carried node under
      #1354 D2 step 2's exemption, that sidechain line plus the longest line into the stage. So by
@@ -111,11 +111,19 @@ timing moves are duck-swapped, and the watermark reports `TRANSITION_FALLBACK`.
   4. The duck set is `grown_strips(predecessor, successor)`, a new function in
      `crates/host-core/src/transition.rs`, sorted by ID, joined with #1324's restarted strips. It
      returns every strip whose content timing moves: a strip with a node whose arrival grows over
-     the predecessor, or a strip with an outgoing edge (route, send, or its path into the output)
-     whose compensation line changes length. A line that changes length restarts with a gap, so
-     its strip must be ducked. When the output's arrival grows, every strip that reaches the
-     output is in the set.
-  5. It is published as #1324 D4 publishes, with one `S`. Before publication it writes
+     the predecessor, or a strip with an outgoing edge (route, send, `EffectSidechain` edge, or
+     its path into the output) whose compensation line changes length. A line that changes
+     length restarts with a gap, so its strip must be ducked. When the output's arrival grows,
+     every strip that reaches the output is in the set. It also adds the consuming strip of every
+     `EffectSidechain` edge whose line changes length, except an edge from a ducked strip's
+     `post_fader` or `post_pan` tap (#1324 D4's `C` empties that line by `S`). Every other tap
+     (an `input` tap, track or submix, and every tap before the fader: `post_input`,
+     `insert_send`, `insert_return`, `pre_fader`) stays live through the duck, so the consumer's
+     key would jump at `S`. These rules repeat, with #1324 D1's sidechain rule over the joined
+     strips, until no strip is added, as #1324 D1 iterates.
+  5. It is published as #1324 D4 publishes, with one `S` and #1324 D4's `C`, which counts every
+     `EffectSidechain` line from a ducked strip's `post_fader` or `post_pan` tap into a carried
+     node. Before publication it writes
      `PlanReplacementReservation::set_outcome(TRANSITION_FALLBACK)` (D5). The adoption then
      advances the watermark with that flag, and `transition_fallback_count` grows by the covered
      revisions (#1314 D5).
@@ -214,7 +222,25 @@ warm edit would be `LeadBound`.
    - Up to that block the output equals A continued with track 1 live-muted by the same ramped
      mute at the same block, fed the same frames; from it on, for 64 blocks, it equals that
      reference continued.
-6. Commands:
+6. **A sidechain key out of a grown strip (round-8 M1).** 48 kHz, quantum 128. Track T1 routes
+   from its `post_fader` tap to submix G, G routes to submix H, and H routes to the output. Track
+   T2 holds two soft-clip inserts (31 samples each, `crates/soft-clip/src/lib.rs:178`) and routes
+   to H. Track K holds a true-peak limiter insert (486 samples), then a compressor insert whose
+   routed sidechain reads G's `post_fader` tap, and routes to the output. All are audible, and
+   T1's source drives G's key above K's threshold. The edit adds a soft-clip insert to T1, with
+   `P_MAX` set as in gate 3, so `warm_lead` returns `Unavailable(LeadBound)` and D2 runs at
+   submit. The G-to-K key line shrinks from 486 to 455 samples and the G-to-H route line from 62
+   to 31.
+   - (a) `grown_strips` returns `[G, T1]`. `C` is 486 (the G-to-K key line in A; no route line
+     out of T1 or G is longer than 62), and the watermark's first sample is
+     `S = ceil_q(p + q + N + 486)`. Every output block before the first fire block equals a
+     reference that makes no structural edit and live-mutes T1 and G with the same ramped mute
+     at the same block.
+   - (b) The same edit with K's key read from G's `pre_fader` tap: `grown_strips` returns
+     `[G, K, T1]`, and every output block before the first fire block equals a reference that
+     live-mutes T1, G and K the same way.
+   - Bit-identical, at both bank widths.
+7. Commands:
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `cargo test --locked -p control-plane --features control-plane/test-support`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`
@@ -238,6 +264,11 @@ warm edit would be `LeadBound`.
   cuts track 1 dead at the adoption block; a `publish_primed` that leaves the withdrawn
   candidate's flags alone keeps `s` flagged, so W2 waits for frames the host never sends and is
   not adopted at the first block at or after `S`. Red.
+- Gate 6(a): a `C` that counts sidechain lines only from restarted strips (round-8 M1) misses
+  ducked, not restarted G, so `S` counts 62 instead of 486; W's shorter key line drops 31
+  samples of G's fade tail from K's detector, and K's gain differs from the reference after
+  `S`. Gate 6(b): a `grown_strips` without the consumer rule leaves K audible
+  through the duck, and its key jumps 31 samples at `S`. Red.
 
 ## Dependencies
 

@@ -110,7 +110,9 @@ never leaves it muted.
   than adoption (#1288 D3), so for a playing source the fade starts at the first block at or after
   `S + D`.
 - **D4. Duck.** This issue extends #1325 D7's `plan_strip_transition`: the duck set is the removed
-  strips plus `successor.restarted_strips()`, and the duck routes are every route from those strips
+  strips plus `successor.restarted_strips()` (the transition also adds *Duck-swap the strips a
+  latency growth restarts, and fall back to the transition when a warm successor cannot adopt*,
+  #1397 D2's grown strips), and the duck routes are every route from those strips
   whose tap precedes the fader, minus every strip and route already in the running plan's duck
   overlay (#1325 D6: a second ramped mute would reset the running ramp to `N` from its part-ducked
   level and end it after the scheduled `S`). The control plane writes their ramped mutes and
@@ -118,17 +120,18 @@ never leaves it muted.
   covers every route out of a duck-swapped strip as well as out of a removed one, since a restarted
   pre-fader route's line must empty before `S`.
   - **`C` for every duck-swap.** On every duck-swap, warm or not (a rebuild that `warm_lead`
-    calls `Ordinary`, a lead-0 or `Primed` warm edit, and every rebuild of a session without a
-    `WarmConfig`), `plan_strip_transition` computes `C` as the largest of these lengths, all in
-    the running plan: each route line out of a ducked strip (#1325 D3); each `EffectSidechain`
-    line from a restarted strip's `post_fader` or `post_pan` tap into a carried node (D2: a
-    grown arrival can shorten it); and, for each restarted submix whose `input` tap feeds a
-    carried node's sidechain under D1's exemption (every line into its `Input` stage comes from
-    a ducked or an added strip), that sidechain line plus the longest line into the stage. A
-    ducked strip's last nonzero frame then leaves every such path by `p + q + N + C <= S`, so a
-    line that the successor shortens drops only exact `+0.0` at `S`. *Duck-swap the strips a
-    latency growth restarts, and fall back to the transition when a warm successor cannot adopt*
-    (#1397) D1 uses this `C` unchanged.
+    calls `Ordinary`, a lead-0 or `Primed` warm edit, every rebuild of a session without a
+    `WarmConfig`, and the transition, #1397 D2), `plan_strip_transition` computes `C` as the
+    largest of these lengths, all in the running plan: each route line out of a ducked strip
+    (#1325 D3); each `EffectSidechain` line from a ducked strip's `post_fader` or `post_pan` tap
+    into a carried node (a grown arrival can shorten it, for a restarted strip, D2, and for a
+    transition's grown strip); and, for each restarted submix whose `input` tap feeds a carried
+    node's sidechain under D1's exemption (every line into its `Input` stage comes from a ducked
+    or an added strip), that sidechain line plus the longest line into the stage. A ducked
+    strip's last nonzero frame then leaves every such path by `p + q + N + C <= S`, so a line
+    that the successor shortens drops only exact `+0.0` at `S`. *Duck-swap the strips a latency
+    growth restarts, and fall back to the transition when a warm successor cannot adopt* (#1397)
+    D1 and D2 use this `C` unchanged.
 - **D5. Edits during the window.**
   - A live edit to a ducked strip goes to the newest candidate's cells and applies at adoption
     (D15-17). A mute disarms the strip (#1288 D2), so the user's mute wins; a fader edit sets the
@@ -241,8 +244,8 @@ Through the exported C entries, quantum 128, 48 kHz, `N = 2000`, single-threaded
    and routes to the output; track T3 holds a true-peak limiter insert, then a compressor insert
    whose routed sidechain reads Bu's `input` tap, and routes to the output. All are audible. One
    transaction removes T2, adds track T1 with a true-peak limiter insert routed from its
-   `post_fader` tap to Bu, and removes Bu's limiter. No node's arrival grows, so it is a plain
-   duck-swap (with a `WarmConfig`, #1354 D2 step 4 returns `Ordinary`). Bu is restarted, T3 stays
+   `post_fader` tap to Bu, and removes Bu's limiter. No carried node's arrival grows (restarted
+   Bu's `Input` stage grows from 0 to `L`), so it is a plain duck-swap (with a `WarmConfig`, #1354 D2 step 4 returns `Ordinary`). Bu is restarted, T3 stays
    carried under D1's exemption (the only line into Bu's `Input` stage comes from added T1), and
    T3's sidechain line shrinks from the limiter's latency `L` to 0.
    (a) `plan_strip_transition` returns `C = L` (T3's sidechain line in A, plus T2's line into

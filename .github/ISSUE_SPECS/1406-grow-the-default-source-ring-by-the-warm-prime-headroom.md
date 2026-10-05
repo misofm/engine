@@ -40,7 +40,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
 - **SDK and browser pins.**
   - `sdk/test/boot-evals.mjs:83-84` and `:318`, `sdk/test/browser-evals.mjs:276` and
     `sdk/test/builder-evals.mjs:296` assert 9,906 (78 · 127) at 96 kHz and quantum 127.
-    `sdk/test/render-evals.mjs:158` asserts that the same ring is 78 quanta; its source region
+    `sdk/test/render-evals.mjs:159` asserts that the same ring is 78 quanta; its source region
     of 19,200 frames (`:135`) holds a full ring turnover (`:160-163`). `check-sdk-headless.sh:91`
     runs all of them.
   - `scripts/test-web-audioworklet.mjs:1103-1128` runs the browser host at 48 kHz and quantum 64
@@ -97,7 +97,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
     files are regenerated. The source-report assertions are updated.
   - The four 9,906 pins (`boot-evals.mjs:84` and `:318`, `browser-evals.mjs:276`,
     `builder-evals.mjs:296`) assert 14,097 (111 · 127), and the comment at `boot-evals.mjs:83`
-    says so. `render-evals.mjs:158` asserts 111 quanta; 14,097 frames still fit its 19,200-frame
+    says so. `render-evals.mjs:159` asserts 111 quanta; 14,097 frames still fit its 19,200-frame
     region. The `% quantumFrames == 0` checks at `boot-evals.mjs:85`, `builder-evals.mjs:297` and
     `render-evals.mjs:150-154` stay. `boot-evals.mjs:318` and `browser-evals.mjs:276` have none,
     and none is added: their literal is itself a whole number of quanta.
@@ -111,7 +111,7 @@ engine, the published ABI layout, the SDK and the browser host derive the same r
     derivation's history stays) state the new rule.
   - **Stale prose.** Each of these describes the default ring as the stall body alone, and is
     corrected to D2's rule (or, where the text means the stall body, renamed to the stall ring):
-    - `crates/host-core/src/prepare.rs:58-63` (the doc comment of `default_source_ring_frames`);
+    - `crates/host-core/src/prepare.rs:59-63` (the doc comment of `default_source_ring_frames`);
     - the module docs at `tools/parameter-metadata/src/abi_layout.rs:42-48` and
       `tools/parameter-metadata/tests/abi_layout.rs:12-15`;
     - `hosts/host-web/src/lib.rs:1215` (the override field's doc: "the engine's 100 ms
