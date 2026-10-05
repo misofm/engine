@@ -1,193 +1,190 @@
 # Deliver value-only VCA edits to the running C ABI plan
 
-Slice V8 of *VCA groups* (#1239). **Blocked:** it starts only after #1053's core (#1257 and #1258; not
-landed at filing),
-*Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225) and *Let C ABI
-sends follow their source strip's mute live* (#1226) have closed, and the VCA batch (#1240-#1246) is on
-`main`. **Re-verify every anchor when it starts:** #1053, #1225 and #1226 add the classifier and the
-live commit path this slice extends, and none of them exists at `8c6268967`. (Amended 2026-10-04,
-when #1053 became an umbrella of slices #1253-#1266; the references below follow its decision
-record and guards G1-G3.)
+Stream F of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-1, D15-2, D15-6).
+Code anchors verified on `main` at `6fb211594`.
 
-The design record cited below (`DESIGN`) is committed in `docs/handoffs/submix-sends-2026-10-02/`.
+Slice V8 of *VCA groups* (#1239). Rewritten 2026-10-05 for decision 15. Decision 14's follow-up F9
+(`docs/rulings/live-update-versus-rebuild-2026-10-04.md`, "F9, rule 1") asked for a reason to keep
+VCA membership structural on the C ABI. Decision 15 answers it: membership is live on the C ABI
+(D15-6). The C ABI's render plane holds no VCA state, so a membership change needs no new render
+memory, and "reach drift" is not a rule-3 reason. The old D1 (membership structural), the
+capi-owned `LiveVcaState` and the per-queue `BACKPRESSURE` gates are superseded by decision 15
+(D15-2, D15-6).
 
 ## Product outcome
 
-A fan's personal mix on a phone rides a VCA ("drums -3 dB") through the C ABI without a plan
-rebuild, with the browser's composition and bits. A member's own fader edit becomes value-only too,
-because the VCA offset is composed instead of guarded off, and a VCA mute silences its members'
-`follows_mute` sends in the same commit. Every other edit of a session that declares a VCA gets back
-the value-only path #1053, #1225 and #1226 gave VCA-free sessions.
+A C ABI host, such as a fan's personal mix on a phone, can make all of these VCA edits on the
+running plan, with no rebuild:
 
-## Context (forward-looking; re-verify after the dependencies land)
+- ride a VCA ("drums -3 dB"), or mute it;
+- add or remove a VCA;
+- change a VCA's members, including nested VCAs.
 
-- **At filing (`8c6268967`)** the C ABI has no live path: every committed transaction replaces the
-  plan (`git grep -n classify_live_delta` is empty). VCAs apply at preparation on the C ABI since
-  *Apply VCA offsets and mutes at preparation* (#1242), so a structural edit renders VCAs correctly.
-- **After #1053's core (#1257):** capi classifies a committed-model delta as live through
-  host-core's `classify_live_delta` (#1053 D1, #1255; behind the `control-provider` feature,
-  `crates/host-core/Cargo.toml:15`), domain-checks, room-checks every queue, checks the protocol
-  token, pushes, then commits, which cannot fail after the check (#1053 D6); every live fader and
-  mute record uses #1053's ramp seam, `LiveRamps::for_session` (its D3; a step until #1054).
-- **After #1225 and #1226:** strip faders and pans (tracks and submixes) and the gain, mute and
-  matrix of routes into submixes are live; a strip mute change also pushes its follow records
-  through `LiveRouteMuteFollow::delta` with a capi-owned `LiveRouteState`. #1225's D3 builds a route
-  record's `source_lane_muted` from the source strip's committed mutes, and #1226's D1 hands `delta`
-  the post-commit model's mutes as `effective_mute`.
-- **The VCA guard (DESIGN P13, widened at filing; #1239; #1053's G3):** `classify_live_delta` classifies a delta
-  as structural whenever the pre- or post-commit model declares a VCA. It exists because #1053
-  would push a member's own fader and drop the offset, and #1225/#1226 would read raw mutes and
-  reopen a VCA-muted member's following send. #1242 landed first, so #1053's #1255 implements it.
-  This slice removes it.
-- **After #1242:** `session::vca_effective_db`, `SessionModel::vca_reach` and
-  `SessionModel::effective_strip_faders` (per strip `db`, `mute = own || vca_mute`, `vca_mute`).
-- **After #1244:** `host_core::LiveVcaState` (`try_new` from a model, setters, `effective_db`,
-  `vca_mute`, `fader_delta`, `record_emitted_db`, shadow, `commit`, `rollback`).
-- **The C ABI has no solo**, so a strip's effective mute there is `own_mute || vca_mute` of the
-  committed model (#1239 rule 6).
-- **Opcodes** (#1241): `0700` upsert VCA (it can change membership), `0701` remove VCA, `0702` set VCA
-  fader.
-- **Resources.** `capi_resources` (`crates/capi/src/runtime/compile.rs:109-213` at `8c6268967`) and
-  the `resource_lifecycle` oracles (`crates/capi/tests/resource_lifecycle.rs`).
+The plan renders the same bits as a plan prepared from the edited session, after the ramp. A
+member's own fader edit is live too. A VCA mute silences its members' `follows_mute` sends in the
+same commit.
+
+## Context
+
+- **Guard G3.** `classify_live_delta` refuses any delta while either model declares a VCA
+  (`crates/host-core/src/live_delta.rs:216-218`, `LiveRebuild::Vca` at `:119-120`). The
+  classifier stays in host-core; #1309 moves capi's live admission and commit path into
+  `crates/control-plane`.
+- **Preparation composes VCAs once.** `SessionModel::effective_strip_faders`
+  (`crates/session/src/vca.rs:100`) gives each strip, in `strips()` order:
+  - `db[l] = vca_effective_db(own_db[l], reach offsets[l])`, where `vca_effective_db` is at
+    `:23` and the reach comes from `SessionModel::vca_reach` (`:52`);
+  - `mute[l] = own || vca_mute`.
+
+  The builtins compiler bakes these values into each strip's fader
+  (`crates/builtins-compiler/src/lib.rs:4941-4943`). The graph compiler reads the effective mute
+  for every following route (`crates/graph-compiler/src/compile.rs:323-333`). Render holds no VCA
+  state.
+- **The C ABI keeps no live VCA state.** See the module comment at
+  `crates/host-core/src/vca.rs:59-61`. `LiveVcaState` (`vca.rs:84`) is the browser's composition.
+  Its reach is fixed at `try_new` (`:116`), which is why the browser keeps membership structural
+  (decision 14, rule 1, the browser's boot-sized admission scratch).
+- **Count caps.** Preparation refuses `vca_count > caps.maximum_vcas` with `host.resource.count`
+  (`crates/host-core/src/prepare.rs:1162-1170`). The live path today never adds a VCA, so it never
+  runs this check.
+- **Opcodes** (#1241): `UpsertVca` `0x0700`, `RemoveVca` `0x0701` and `SetVcaFader` `0x0702`
+  (`crates/protocol/src/model.rs:112-116`).
+- **After #1225 and #1226:**
+  - strip records cover tracks and submixes;
+  - route records come from `route_target`, which reads the effective mute;
+  - follow-source mutes and `follows_mute` are live;
+  - every live value is a latest-target cell (#1312; route lanes #1347).
+- **Superseded tests.** These tests assert today's G3 behaviour:
+  - `any_vca_needs_a_rebuild` (`crates/host-core/tests/live_delta.rs:460`);
+  - the G3 case ("a VCA") of
+    `deltas_outside_the_live_set_rebuild_and_a_domain_failure_pushes_nothing`
+    (`crates/capi/src/runtime/live_tests.rs:1015`).
 
 ## Decisions frozen for this slice
 
-- **D1. Classification.** Remove the VCA guard. A delta is live when, besides the fields #1053,
-  #1225 and #1226 made live, it changes only VCA `fader` values (`0702`, or a `0700` that keeps the
-  VCA's membership). Adding or removing a VCA, and any membership change, is structural. A member's
-  own fader delta is live, with its effective value composed.
-- **D2. Effective mute on the C ABI.** Everywhere the C ABI live path reads a strip's mute -- the
-  `LiveRouteState` seed at preparation (#1226 D1), the `effective_mute` it hands
-  `LiveRouteMuteFollow::delta` (#1226 D1) and a following route record's `source_lane_muted` (#1225
-  D3) -- it reads the model's `effective_strip_faders()` `mute` (`own || vca_mute`; the committed
-  model at preparation, the post-commit model in a delta), never the raw
-  `left_mute`/`right_mute`. So the mirror starts equal to the prepared gate (#1242 D2).
-- **D3. Composition.** capi keeps one `LiveVcaState` per live plan, seeded at preparation from the
-  committed model. A live VCA delta, or a member fader delta, updates it under its shadow; its member
-  `FaderDb` records (`fader_delta`), the strip mute records (each changed strip's effective mute) and
-  the follow records are domain-checked and room-checked together, then pushed, then committed, in
-  #1053's order. A full queue is typed `Backpressure` with model, revision, replay and every mirror
-  unchanged.
-- **D4. Ramps.** Every record uses #1053's ramp seam (`LiveRamps::for_session`); a VCA change's ramp applies to every
-  member record it emits.
-- **D5. Resources.** `LiveVcaState::retained_bytes()` (its tables, mirrors and shadow) is charged in
-  `capi_resources`, and the oracles change by exactly those rows (zero for a session without VCAs).
+- **D1. Remove guard G3, and mask the VCAs.** Delete `LiveRebuild::Vca`. The classifier copies
+  `current.vcas` into the masked model, so every VCA field is out of the structural comparison:
+  the set, IDs, faders and members. VCAs are control-only, and their whole effect reaches render
+  through strip and route records (D2, D3).
+- **D2. Strip records diff effective faders.** For each strip, the classifier compares
+  `effective_strip_faders()` of `current` and `next`, lane by lane. It emits:
+  - one `FaderDb` carrying the effective dB for each lane whose effective gain bits change;
+  - one `Mute` carrying the effective mute for each lane whose effective mute changes.
+
+  The `Both` merging and the push order are today's. Raw `left_db`, `right_db` and mute values are
+  never read for records. With no VCA, `vca_effective_db` returns the member's own dB bit for bit
+  (`vca.rs:19-27`), so VCA-free sessions emit exactly what they emit today. The domain check is
+  `checked_fader_gain` on the effective dB, the value the plan bakes.
+- **D3. Route records.** #1225's `route_target` already reads the effective mute. A VCA mute or
+  unmute, or a membership change that alters a source's effective mute, emits the follow records
+  in the same delta.
+- **D4. Count caps on the live path.** Move the count check at `prepare.rs:1162-1170` into one
+  function that both preparation and the live admission call. A live delta whose `next` exceeds a
+  cap is refused with the same `host.resource.count` diagnostic and changes nothing.
+  `compiled_model_admission` (`crates/capi/src/runtime/compile.rs:76`, in `crates/control-plane/src/compile.rs` after #1309) already charges model growth.
+- **D5. Ramps (D15-1).** A `FaderDb` record uses the session's fader length, and a `Mute` record
+  uses its mute length. Both come from `LiveRamps::for_session(next)` (#1054). One VCA move ramps
+  every member it moves over that length.
+- **D6. No mirror.** The C ABI keeps no `LiveVcaState`. The classifier reads both committed models
+  (#1053 D9: the committed model is the authority), so membership drift cannot occur. Remove the
+  "keeps no live VCA state until #1247" clause from `vca.rs:59-61`. In its place, say that the C ABI
+  composes VCAs by diffing committed models.
+- **D7. Cost.** Each classification computes `effective_strip_faders()` twice. That is
+  `O(strips x reach)` on the control thread, under the caller's `maximum_vcas` and
+  `maximum_tracks`. It never runs on render.
 
 ## Deliverables
 
-- D1-D5 in capi's live commit path and host-core's classifier.
-- `docs/C_ABI_V1_QUALIFICATION.md`: VCA fader edits and member fader edits are value-only;
-  membership edits are structural.
-- #1053's guard G3 marked superseded in its spec, if the spec is still in
-  `.github/ISSUE_SPECS/`.
+- D1-D6 in the classifier, in `crates/control-plane`'s live admission, and in `prepare.rs`'s count
+  check.
+- `docs/C_ABI_V1_QUALIFICATION.md`: VCA fader, mute, membership and VCA add or remove edits are
+  value-only, and a live edit that exceeds `maximum_vcas` is refused like a compile.
+- The superseded tests in Context, inverted in the same PR.
+- In `.github/ISSUE_SPECS/1053-*.md`, if that spec is still present: mark guard G3 as superseded.
 
 ## Authorized paths
 
-- `crates/capi/src/runtime/{control.rs,compile.rs}` and any capi runtime module #1053, #1225 or
-  #1226 added for the live commit path
-- `crates/capi/tests/` (`resource_lifecycle.rs` and one new test file)
-- `crates/host-core/src/` (the classifier only; `LiveVcaState`, `LiveRouteState` and
-  `LiveRouteMuteFollow` are reused, not changed) and its tests
-- `docs/C_ABI_V1_QUALIFICATION.md`, `.github/ISSUE_SPECS/1053-*.md` (guard G3's bullet only)
-- this spec
+- `crates/host-core/src/live_delta.rs` (the classifier).
+- `crates/control-plane/src/control.rs`: `live_admission` and the live commit path (moved there by
+  #1309).
+- `crates/host-core/src/prepare.rs`: the count check at `:1162-1170` only (D4).
+- `crates/host-core/src/vca.rs`: the module comment at `:59-61` only (D6).
+- `crates/host-core/tests/live_delta.rs`, `crates/capi/src/runtime/live_tests.rs` and
+  `crates/capi/tests/resource_lifecycle.rs`.
+- `docs/C_ABI_V1_QUALIFICATION.md`; `.github/ISSUE_SPECS/1053-*.md` (guard G3's bullet only); this
+  spec.
 
 ## Non-goals
 
+- No browser change. The browser keeps membership structural under decision 14 rule 1, and
+  `LiveVcaState` is not changed.
+- No VCA solo, no send trim and no stored automation.
 - No new symbol, opcode or field.
-- No VCA solo, no send trim and no automation.
-- No change to the browser path.
 
 ## Hazards
 
-- **#1053's L0 window.** A live VCA edit during a plan swap lands in the candidate.
-- **Redundant records.** A VCA move that changes no effective value pushes nothing.
-- **Reach drift.** The capi mirror's reach comes from preparation; a membership change must stay
-  structural, or the pushed records target a reach the plan no longer has.
-- **Raw mutes.** Any C ABI path left reading `left_mute`/`right_mute` directly reopens a VCA-muted
-  member's following send (gates 2 and 3).
-- **The iOS memset rule.** `check-cross-targets.sh` counts `bl _memset_pattern16` per product crate
-  against `scripts/lib/aarch64-known-defects.py`; `capi` has no row, so one call fails it. New code
-  stores no splatted non-zero constant to memory.
+- **Raw values.** Any path that still reads `left_db`, `right_db`, `left_mute` or `right_mute` for
+  a record reopens a VCA-muted member's following send, or drops an offset. Gates 2 and 3 catch it.
+- **Clamping.** A VCA move that leaves every member clamped at +24 dB changes no effective bit, so
+  it emits nothing.
+- **The iOS memset rule.** `scripts/check-cross-targets.sh` counts `bl _memset_pattern16` per
+  product crate, and the new crate may have no row. Store no splatted non-zero constant to memory.
 
 ## Objective gates
 
-1. **PCM through the C ABI.** New capi test file. `0702` on a nested VCA, a `0702` that mutes that
-   VCA (with a `follows_mute` pre-fader send from one member), and a member's own `020f`
-   (`SetTrackFader`) each render bit-identically to a plan compiled from the committed model after
-   `latency_samples` plus the ramp (plus a send's compensation delay where it has one). No new epoch,
-   no re-seek; the downstream is stateless. Run with 1 and 10 tracks at each of the four launch
-   rates (44.1, 48, 88.2 and 96 kHz).
-   *Test value: it turns red if a VCA or member fader edit stays structural, if capi's composition
-   diverges from preparation's, or if a VCA mute leaves a member's follow send open.*
-2. **The mirror starts at the prepared gate.** With a member VCA-muted and a `follows_mute` send from it, toggling its own mute
-   (`020f` with `left_mute`/`right_mute` flipped while the VCA mute holds, so the effective mute is
-   unchanged) pushes no strip-mute and no follow record, and renders bit-identically to an untouched
-   plan.
-   *Test value: it turns red if capi seeds its route mirror from raw mutes, so the next mute delta
-   yields a redundant follow record that retargets a settled lane.*
-3. **Effective mute in send edits.** With a member VCA-muted, a live `0505` (`SetRouteGainDb`) on its
-   following send renders bit-identically to a fresh plan of the committed model (the column stays
-   zeroed).
-   *Test value: it turns red if a route record reads the raw committed mute instead of
-   `own || vca_mute`.*
-4. **Membership is structural.** `0700` changing members, `0700` adding a VCA, and `0701` each
-   produce a new epoch.
-   *Test value: it turns red if a membership change is pushed as values to a plan whose reach no
-   longer matches.*
-5. **No ack before a drop.**
-   - A VCA move that would overfill a member queue or a follow route queue is typed `Backpressure`,
-     with model, revision, replay and every mirror unchanged.
-   - An exact replay pushes nothing.
-   - A VCA move that changes no effective value (every member clamped) pushes nothing.
+1. **PCM through the C ABI.** Each edit below keeps the same plan, with no new epoch and no
+   re-seek. After `latency_samples`, plus the ramp, plus a send's compensation delay where it has
+   one, the output is bit-identical to a plan compiled from the committed model. The downstream is
+   stateless. The edits:
+   - `0x0702` on a nested VCA;
+   - `0x0702` that mutes that VCA, where one member has a `follows_mute` pre-fader send;
+   - a member's own `0x020f`;
+   - `0x0700` adding a member;
+   - `0x0700` adding a new VCA;
+   - `0x0701` removing a VCA.
 
-   *Test value: it turns red if any record is pushed before every queue's room is checked, or if
-   composition re-emits unchanged targets.*
-6. **Realtime.** The two-thread race (in `crates/capi/tests/resource_lifecycle.rs`, *Qualify live C
-   ABI edits against a concurrently rendering plan*, #1258) races VCA edits against render and a structural swap over 20 runs: `allocations == 0`
-   and `frees == 0` around each render call after warm-up, zero `INTERNAL` results, and a final
-   block bit-identical to a fresh plan of the final committed model.
-   *Test value: it turns red if VCA composition allocates on the render thread, or a racing VCA edit
-   lands in the retiring plan.*
-7. **Unchanged behaviour.**
-   - Every existing capi test passes, except the guard cases (an edit of a VCA session was
-     structural), which this slice inverts in the same PR.
-   - `bash scripts/check-capi-abi.sh` and `bash scripts/check-capi-abi.sh --self-test` pass.
-   - `cargo build --locked --release -p audit -p bench -p capi -p session-validator`, then
-     `./target/release/audit capi`, reports zero allocations, locks and syscalls.
-   - The `resource_lifecycle` oracles change only by the D5 rows.
-8. **Workspace, 4-lane and policy.**
-   - `cargo test --locked --workspace --all-targets --exclude lane --exclude math --exclude effect-runtime --exclude delay --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip --exclude parametric-eq --exclude builtins --exclude dsp-reference --exclude conformance --exclude audit --exclude bench --exclude console-workload --exclude wasm-gates --exclude wasm-gate-guest --exclude wasm-gate-corpus --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit`
-   - `cargo test --locked --release -p audit -p bench -p console-workload`
-   - `cargo fmt --all -- --check`
-   - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
-   - `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`
-   - `for x in host-core realtime workspace; do bash scripts/check-$x-policy.sh && bash scripts/test-$x-policy.sh || exit 1; done`
-   - `bash scripts/check-cross-targets.sh`
-   - `bash scripts/run-aarch64-tests.sh debug` on an arm64 host, or CI's `aarch64-debug` at the push.
+   Run with 1 and 10 tracks at 44.1, 48, 88.2 and 96 kHz.
+2. **Effective, not raw** (classifier unit test). One member is VCA-muted and has a `follows_mute`
+   send. Toggling the member's own mute while the VCA mute holds yields no strip record and no
+   route record.
+3. **Effective mute in send edits.** A member is VCA-muted. A live `0x0505` on its following send
+   renders bit-identically to a fresh plan of the committed model: the column stays zeroed.
+4. **Count cap.** With `maximum_vcas` equal to the current count, a `0x0700` adding a VCA returns
+   `COMPILE_REJECTED` with `host.resource.count`. The model, revision and cells are unchanged.
+5. **Redundant records.** An exact replay writes nothing. A VCA move that changes no effective
+   value, because every member is clamped, yields no record.
+6. **Realtime.** The race test
+   `live_edits_racing_a_rendering_plan_and_its_swaps_stay_exact_and_allocation_free`
+   (`crates/capi/tests/resource_lifecycle.rs:2900`) races VCA fader, mute and membership edits
+   against render and a structural swap, over 20 runs. It checks:
+   - `allocations == 0` and `frees == 0` around each render call after warm-up;
+   - zero `INTERNAL` results;
+   - a final block bit-identical to a fresh plan of the final committed model.
+7. **Unchanged behaviour and policy.** The commands of gate 6 of #1225 (`audit capi`,
+   `check-capi-abi.sh` and its self-test, the workspace test step, fmt, clippy, the host-core,
+   realtime and workspace policy scripts, `check-cross-targets.sh`, and `run-aarch64-tests.sh
+   debug`).
 
-## Evidence
+## Test value
 
-- The output of every gate command above, from the PR's head commit.
-- Each new test's name with its one-sentence test-value answer, and the mutation that turned it red.
-- The `resource_lifecycle` row changes, with reasons.
+- Gate 1 turns red in any of these cases:
+  - a VCA, member or membership edit is still structural;
+  - the live composition differs from preparation's;
+  - a VCA mute leaves a member's follow send open.
+- Gate 2 turns red if records diff raw mutes instead of effective ones. That emits a redundant
+  record, which retargets a settled lane.
+- Gate 3 turns red if a route record reads the raw committed mute instead of `own || vca_mute`.
+- Gate 4 turns red if a live edit commits a model that its own rebuild would refuse.
+- Gate 5 turns red if the composition re-emits unchanged targets.
+- Gate 6 turns red if the VCA path allocates on render, or if a racing VCA edit reaches the
+  retiring plan.
 
 ## Dependencies
 
-- *Enumerate VCA groups and drive them from the SDK* (#1246; the VCA batch on `main`), which
-  includes *Edit VCA groups through session transactions* (#1241, the opcodes D1 classifies)
-- *Apply value-only track fader, mute and pan transactions to the running C ABI plan* (#1257) and
-  *Qualify live C ABI edits against a concurrently rendering plan* (#1258), the core of the umbrella
-  *Deliver value-only fader, mute and pan transactions to the running C ABI plan through the live
-  console lanes* (#1053) -- **not landed at filing**
-- *Deliver value-only send and submix-strip edits to the running C ABI plan* (#1225)
-- *Let C ABI sends follow their source strip's mute live* (#1226)
-
-## Standing rules for the implementer
-
-- Extend #1053's, #1225's and #1226's paths; do not fork them.
-- No ack precedes a drop. The commit after the first push is infallible.
-- Never emit a redundant record.
-- "Bit-identical" gates are hard stops. NaNs are folded (decision 10).
-- A test that greps source or prose is refused. A superseded test is deleted, or inverted, in the
-  same PR.
-- Attempt budget: five attempts, one adversarial verdict each (`AGENTS.md`).
+- *Let C ABI sends follow their source strip's mute live* (#1226), and through it *Deliver
+  value-only send and submix-strip edits to the running C ABI plan* (#1225)
+- *Extract the C ABI control plane into a portable crate both hosts call* (#1309)
+- *Hold live values in latest-target cells on both hosts* (#1312)
+- *Hold route-lane values in latest-target cells* (#1347)
+- *Session `controlSmoothing`: configurable ramp lengths for live mute, fader and pan changes*
+  (#1054)

@@ -1,5 +1,7 @@
 # Tighten the four-lane reference graph ceilings from measured AArch64 rows
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Test-budget follow-up of *Prepare C ABI plans with live effect lanes* (#1263, slice of #1053),
 from its verdict's NIT 2 (`docs/handoffs/live-updates-1053/1263-attempt1.md`, recorded as "#1263
 N2" in that directory's `README.md`). No production code changes.

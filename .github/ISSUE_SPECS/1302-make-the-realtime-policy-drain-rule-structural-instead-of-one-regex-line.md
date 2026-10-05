@@ -1,5 +1,7 @@
 # Make the realtime-policy drain rule structural instead of one regex line
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Tooling follow-up of *Bound the builtin fader and matrix drains to the records present at block
 entry* (#1253, slice of umbrella #1053, decision D11). Its verdict (Sol, attempt 1, N1;
 `docs/handoffs/live-updates-1053/1253-attempt1.md`) found that the gate's unbounded-drain rule is a

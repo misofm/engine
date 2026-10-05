@@ -1,5 +1,7 @@
 # Remove the dead code builtins-compiler reports under no-features clippy
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Mission
 
 `builtins-compiler`'s lib test target does not pass clippy without features: two test helpers are

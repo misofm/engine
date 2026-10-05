@@ -1,5 +1,12 @@
 # Research: render stored session automation in the engine, identically on every platform
 
+Stream K of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-16): research now.
+Its design feeds *Bound C ABI live effect windows by lane depth (owner question)* (#1306, D15-5),
+*Refuse automation on effect parameters that are not block-rate* (#1335, D15-13 E1), the live
+classifier's automation mask (`host_core::classify_live_delta`, see below) and
+`AUTOMATION_ENQUEUE`, which *Refuse commands that would be acknowledged with no effect* (#1315)
+refuses until this research's first rendering slice wires it.
+
 Owner ruling (2026-09-28, `docs/rulings/engine-footprint-2026-09-28.md`): a producer's automation (fades, sweeps, rides) is **rendered by the core engine from the session file**, so fans hear it bit-identically on web and mobile; apps do not play it back.
 
 ## Today

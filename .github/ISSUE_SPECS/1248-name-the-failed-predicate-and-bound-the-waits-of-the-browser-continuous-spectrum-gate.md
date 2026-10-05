@@ -1,5 +1,7 @@
 # Name the failed predicate and bound the waits of the browser continuous-spectrum gate by a deadline
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Problem
 
 The browser qualification's `sdk-spectrum-continuous` gate failed once in Firefox and passed when

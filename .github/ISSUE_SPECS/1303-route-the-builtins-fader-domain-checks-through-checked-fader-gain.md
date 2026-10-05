@@ -1,5 +1,7 @@
 # Route the builtins fader domain checks through checked_fader_gain
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Refactor follow-up of *Classify a committed session delta as a live track fader, mute and pan
 update or a rebuild* (#1255, slice of umbrella #1053). Its verdict (Sol, attempt 1, NIT-1;
 `docs/handoffs/live-updates-1053/1255-attempt1.md`) found that two preparation-side checks still
@@ -144,7 +146,8 @@ preparation tests now guard the shared domain.
 
 ## Dependencies
 
-- None. #1255 is on `main`.
+- *Carry fader, mute and pan ramps across a plan swap* (#1277). Both edit `crates/builtins`; this
+  slice lands after it. #1255 is on `main`.
 
 ## Standing rules for the implementer
 

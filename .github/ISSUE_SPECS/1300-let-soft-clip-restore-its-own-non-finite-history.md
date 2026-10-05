@@ -1,5 +1,10 @@
 # Let soft-clip restore its own non-finite history
 
+Stream A of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-7, D15-8).
+Code anchors verified on `main` at `6fb211594`: no file this spec cites changed since `d2fe0555a`.
+Stream A runs it first: the move-mode and copy-mode carries (D15-7, D15-8 step 2) restore soft-clip
+lanes through the same payload calls, so an own-snapshot refusal would leave a carried lane at rest.
+
 Successor item of *Make every banked effect's state restore allocation-free* (#1278, closed). Its
 attempt-1 amendment and attempts 2 and 3 left it open as "soft-clip's two open non-finite history
 cases". It started as #1071 attempt-1 verdict MINOR-2 (`submix-verdicts/1071-attempt1.md`): "D7

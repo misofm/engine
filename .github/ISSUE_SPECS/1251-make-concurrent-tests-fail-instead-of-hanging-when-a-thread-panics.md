@@ -1,5 +1,7 @@
 # Make concurrent tests fail instead of hanging when a thread panics
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 Tooling issue, the follow-up that *Make the live-route allocation gates wait on the queue and fail
 instead of hanging* (#1250, closed by PR #1249) left out of scope. Its verdict (Sol, MINOR-1)
 listed the sites below. No production code changes.

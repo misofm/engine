@@ -1,5 +1,7 @@
 # Bound route gain and matrix values
 
+Stream J of decision 15 (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md`, D15-0).
+
 ## Mission
 
 Give every route the bounded domain the owner agreed on 2026-10-03: `gain_db` in `[-144, 24]` dB,
