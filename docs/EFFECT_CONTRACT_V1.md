@@ -228,6 +228,11 @@ effect.state.invalid
 effect.third_party.unavailable_at_launch
 ```
 
+`effect.descriptor.invalid` is raised only by `NativeEffectRegistry::new`, once per effect type
+when its factory enters the registry; `validate_prepare_request` no longer re-validates the
+descriptor per prepared instance (issue #1330), and because session preparation builds the
+registry before preparing any effect, a host observes the same refusal as before.
+
 ## Evidence contract
 
 The correct dual-accumulator/three-sample-delay mock has separate L/R delay, accumulator,

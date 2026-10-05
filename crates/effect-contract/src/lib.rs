@@ -2456,13 +2456,34 @@ const fn scratch_for(quality: QualityDescriptor, quantum: u32) -> Result<u64, Ef
     }
 }
 
+/// Validate one preparation request against its effect's descriptor.
+///
+/// # Precondition: `d` is already a valid descriptor
+///
+/// `d` is the descriptor of a factory a [`NativeEffectRegistry`] admitted, or one the caller
+/// validated itself with [`validate_descriptor`]. The registry is the one release-build validation
+/// point (issue #1330, decision 15 D15-15): a descriptor is `&'static` and immutable, so its
+/// validity cannot change after [`NativeEffectRegistry::new`] checked it, and re-walking it here
+/// for every prepared instance and every bank member was pure repeated work.
+/// `effect.descriptor.invalid` is raised by the registry, not by this function. Debug builds still
+/// assert the precondition, so a test that prepares an unregistered invalid descriptor directly
+/// fails loudly instead of silently preparing it.
+///
+/// # Errors
+///
+/// `effect.prepare.capacity`, `effect.link_mode.unsupported`, `effect.quality.unsupported`,
+/// `effect.resource.limit`, `effect.sidechain.missing` and `effect.sidechain.unknown_port` for a
+/// request the descriptor does not admit.
 pub fn validate_prepare_request(
     d: &'static EffectDescriptor,
     r: PrepareEffectRequest<'_>,
 ) -> Result<ValidatedPrepare, EffectPrepareError> {
-    validate_descriptor(d).map_err(|_| EffectPrepareError {
-        code: "effect.descriptor.invalid",
-    })?;
+    debug_assert!(
+        validate_descriptor(d).is_ok(),
+        "validate_prepare_request precondition: descriptor `{}` must be valid (admit it through \
+         NativeEffectRegistry::new or validate_descriptor before preparing it)",
+        d.id.as_str()
+    );
     if r.sample_rate == 0
         || r.quantum == 0
         || r.limits.maximum_total_state_bytes == 0
