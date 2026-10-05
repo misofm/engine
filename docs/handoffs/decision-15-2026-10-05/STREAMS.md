@@ -53,7 +53,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → D (#1288, #1363) → G #1371 |
 | `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
-| `crates/parametric-eq/src/lib.rs` | A payload (#1279, #1280) → G #1328 (rest predicates only) → G #1337 → G #1372 |
+| `crates/parametric-eq/src/lib.rs` | G #1328 (rest predicates, their test-module rows, and the per-frame output-limit check restructured so the dual depth-1 tail does not spill, #1328 Amendment 1 A2; landed before Stream A started) → A payload (#1279, #1280) → G #1337 → G #1372 |
 | `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
 | `sdk/src/core/live-controls.ts` | E (#1054, #1364) → G #1369 → H #1382 |

@@ -102,6 +102,52 @@ output `+0.0`, within a stated bound. Today two traps keep some of them ringing 
 - **D8. Unchanged.** `flush`, `FLUSH_EPS`, the EQ restore admission (finiteness), `section_is_identity`,
   the delay's one-pole flush, all coefficient designers, latency (0) and parameter smoothing.
 
+## Amendment 1 (root decisions, 2026-10-05, after attempt 1's verdict)
+
+Made by the decision-15 root coordinator under the owner's no-shortcuts delegation
+(`no-shortcuts-correctness-first`), in the context of decision 15 D15-4(a). Attempt 1's verdict
+(`/home/bl/misofm/submix-verdicts/1328-attempt1.md`) found the code sound and the V8 spill
+gate red, the D6 premises false and the authorized paths short. These decisions supersede the
+Hazards line "report it; do not weaken the gate" and the D6 premises below; everything else stands.
+
+- **A1. The spill gate's classifier is corrected, not weakened.** `flush_pair`'s two `mask_or` per
+  SVF step lower to bitwise `vpor`, which is not a select. `SELECT_OPS` in
+  `scripts/check-web-audioworklet-v8-spill.py` is corrected so `flush_pair`'s OR is not counted as
+  a select while a real select (the dry-mask bitselect, a blend) still is. The checker's
+  self-test gains a case proving a flush-pair `vpor` loop is select-free and a real-select loop is
+  still masked. The carried-slot rule is unchanged, and the #1000 red arms are rebuilt and shown
+  still red per the gate's own re-pin protocol.
+- **A2. The dual depth-1 tail must not spill.** The integer flag that attempt 1's build carried in
+  `[rbp-0xc8]` is the EQ's per-frame output-limit check for the two channels. That check is
+  restructured in `crates/parametric-eq` so the dual depth-1 tail carries no stack slot. This
+  must not change the check's semantics or any rendered bit. Acceptance by ruling is refused. Stream A
+  has not started on this file; the touch point is recorded in `STREAMS.md`'s hot-file notes.
+- **A3. The masked mono depth-2 pair's `ic1` state spill is eliminated too.** Only if the
+  implementer proves with evidence that no correct encoding avoids it does the slice measure the
+  browser cost (V8, the existing timing method) and record it here as an explicit accepted
+  exception with that evidence; the gate then holds that row with its reason.
+- **A4. D6 restated (class B, re-accepted).** The joint flush moves bits by change size, not only
+  in tails: below about -160 dBFS input a low-frequency state word can stay under `REST_EPS` and be
+  zeroed while input is live (10 Hz, S 0.1, +24 dB low shelf at 96 kHz fed -160/-180 dBFS), and in a
+  multi-section chain the first moved sample can sit at a loud level (about -169 dBFS in the input
+  HPF 100 Hz + LPF 22 kHz chain, where the HPF rests while the LPF still carries signal). Every
+  change is below 2.2e-13 (< -253 dBFS; largest measured -256.7 dBFS). Accepted: the slice fixes a
+  correctness defect (a limit cycle and a stuck fixed point) and the change is far below
+  audibility. The listening line reads "every *change* is below -253 dBFS"; the PR evidence
+  reproduces both named cases.
+- **A5. Authorized paths extended** (each re-pin or constant change with its own reason, never bulk):
+  the test modules of `crates/parametric-eq` (the four attempt-1 test edits are ratified) and, for A2,
+  the EQ's per-frame output-check code in `crates/parametric-eq/src/lib.rs`;
+  `scripts/check-web-audioworklet-v8-spill.py` (A1); `tools/bench/src/floor.rs`,
+  `scripts/console-benchmark-record-lib.jq`, `scripts/test-console-benchmark.sh` (the floors 69 / 27
+  / 307 become the ruling's derived values, and the ruling's interim "until their follow-up
+  re-pins them" text is removed); `crates/lane/tests/g2_kernel_identity.rs` and
+  `tools/audit/src/unfused_fma.rs` (their recurrence restatements adopt the joint flush);
+  `scripts/lib/aarch64-known-defects.py` (memset ratchet rows parametric-eq 132 → 128, builtins
+  194 → 186, as `check-cross-targets.sh` asks); stale prose in `docs/rulings/effect-floor-accounting.md`
+  (appendix and "inert" definition), `crates/parametric-eq/src/lib.rs` (leg-(c) description) and
+  `crates/builtins/tests/MUTATIONS.md`.
+
 ## DSP evidence (AGENTS.md)
 
 - **Equations:** TPT SVF in stored A1 form, `v3 = v0 - ic2`, `d1 = -c1·ic1 + a2·v3`,
