@@ -35,22 +35,25 @@ pub use graph::RouteControlResources;
 /// mute rule but not the route domain. This type has a private field and no public constructor, so
 /// every record a host can push has passed `route_coefficients`.
 ///
-/// A host cannot build one with an associated function. rustc reports E0599 (no function `new`);
-/// the fence carries no code because stable rustdoc does not check one (issue #1422 D2):
+/// The fences below check three doors, each beside a plain twin that differs only in the one
+/// forbidden construct. A public associated `new` of any signature (or a re-export of graph's
+/// record, which has one) turns the first red; rustc reports E0599 today (no function `new`). The
+/// fences carry no code because stable rustdoc does not check one (issue #1422 D2):
 ///
 /// ```compile_fail
 /// fn send(
 ///     producer: &mut host_core::RouteControlProducer,
 ///     inner: graph::RouteControlRecord,
 /// ) -> Result<(), host_core::RouteControlError> {
+///     let _ = host_core::RouteControlRecord::new;
 ///     let record: host_core::RouteControlRecord =
-///         host_core::RouteControlRecord::new([1.0, 0.0, 0.0, 1.0], false, 0).unwrap();
+///         producer.record(0.0, [1.0, 0.0, 0.0, 1.0], false, [false; 2], 0).unwrap();
 ///     producer.push(record)
 /// }
 /// ```
 ///
-/// Nor can it wrap graph's record with the tuple constructor. rustc reports E0423 (the constructor
-/// is private):
+/// A host cannot wrap graph's record with the tuple constructor. rustc reports E0423 (the
+/// constructor is private):
 ///
 /// ```compile_fail
 /// fn send(
@@ -62,8 +65,21 @@ pub use graph::RouteControlResources;
 /// }
 /// ```
 ///
-/// The twin of both: identical except that the producer builds the record, so a renamed item in
-/// the shared code turns it red:
+/// Nor can it convert graph's record with `From`/`Into`. rustc reports E0277 (no
+/// `From<graph::RouteControlRecord>`):
+///
+/// ```compile_fail
+/// fn send(
+///     producer: &mut host_core::RouteControlProducer,
+///     inner: graph::RouteControlRecord,
+/// ) -> Result<(), host_core::RouteControlError> {
+///     let record: host_core::RouteControlRecord = inner.into();
+///     producer.push(record)
+/// }
+/// ```
+///
+/// The twin of all three: identical except that the producer builds the record, so a renamed item
+/// in the shared code turns it red:
 ///
 /// ```
 /// fn send(
@@ -75,6 +91,9 @@ pub use graph::RouteControlResources;
 ///     producer.push(record)
 /// }
 /// ```
+///
+/// No fence can see a public constructor under another name, or a named public field; privacy and
+/// review hold those doors.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RouteControlRecord(graph::RouteControlRecord);
 

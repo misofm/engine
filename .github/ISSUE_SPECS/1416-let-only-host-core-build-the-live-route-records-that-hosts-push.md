@@ -172,9 +172,16 @@ route_controls`; each reverted, then green 3/3):
    graph-compiler `live_routes`: 11 passed; `route_coefficients`: 5 passed.
 3. `build-web-audioworklet.sh --named-twin`: shipped module
    `46c8b035206b350470b41d7f20a4cd29341215e556511b8fb1f21bd71a610e79` (2896155 B);
-   `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts` pass (the
-   module digest agrees with `expected.json`, so no rendered bit moved);
-   `test-web-audioworklet.sh` passes.
+   `check-web-audioworklet.sh` and `check-browser-expected-resources.py --artifacts` pass;
+   `test-web-audioworklet.sh` passes. *Corrected in attempt 2 (verdict MINOR-2):*
+   `expected.json` holds rendered PCM digests, not the module digest. The shipped module did
+   change: parent `34274bf34^` gives `d13e812c70b3f6b5d0080e9e95dd45da4746fe6edd5b31817d2f2982caf601e9`
+   (2896157 B, deterministic over two builds), this commit gives `46c8b035...` (2896155 B). In the
+   named twin, host-web's `ReadyOwnership::push` body goes from 1407 to 1383 B, and 51 other bodies
+   differ only in call indices (the impl order moved). Rendered PCM did not move. The PR's
+   `artifact-identity` job will show ARTIFACT CHANGED. Later commits on this branch (a #1415 doc
+   follow-up) moved the module again, to `ffc62262...` at `d23cbf56f`; the Hazards line "A newtype
+   should not change generated code" is wrong for this reason.
 4. `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features --
    -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
    `check-host-core-policy.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`.
@@ -182,3 +189,74 @@ route_controls`; each reverted, then green 3/3):
 *Test value.* Fence 1 is red if host-core again exposes graph's record or gives the newtype a
 public constructor; fence 2 is red if the newtype's field becomes public; no runtime test can see
 either, because the bypass is an API.
+
+### Attempt 2 (implementer, stream J batch 2)
+
+Answers the attempt 1 verdict (`34274bf34`, FAIL: MAJOR-1, MINOR-1, MINOR-2, NIT-1).
+
+**Change.** `crates/host-core/src/route_controls.rs`, doc comment of `RouteControlRecord` only; no
+code moved.
+
+- **MAJOR-1.** Fence 1 is now the twin's text plus one statement,
+  `let _ = host_core::RouteControlRecord::new;`. A path value compiles for any non-generic `new`,
+  so the fence is red for any public associated `new`, not only one of a given signature.
+- **MINOR-1.** A third fence: the twin's text with `<expr>` = `inner.into()` (the
+  `From<graph::RouteControlRecord>` door; `RouteControlRecord::from(inner)` needs the same impl).
+- **NIT-1.** The doc now says what the fences check (`new` of any signature or a re-export, the
+  tuple constructor, `From`/`Into`) and records the limit: no fence can see a public constructor
+  under another name (such as `from_graph`) or a named public field. Privacy and review hold those.
+- **MINOR-2.** Attempt 1's gate-3 sentence is corrected in place above.
+
+All three fences share the twin's signature and `producer.push(record)`; the twin is unchanged and
+serves all three. Codes are comments only; no `RUSTC_BOOTSTRAP`.
+
+**Each fence fails only for its stated reason.** Each fence turned plain gives exactly one error:
+fence 1 `E0599: no associated function or constant named 'new' found for struct
+host_core::RouteControlRecord`; fence 2 `E0423: cannot initialize a tuple struct which contains
+private fields`; fence 3 `E0277: the trait bound 'host_core::RouteControlRecord:
+From<graph::RouteControlRecord>' is not satisfied`. Reverted.
+
+**Mutation runs** (`cargo test --locked -p host-core --features control-provider,test-support --doc
+route_controls`, applied by script to the worktree file and restored after each run; baseline
+4/4 green, and green again after the last restore):
+
+| Mutation | F1 (`new`) | F2 (tuple) | F3 (`into`) | Twin |
+|---|---|---|---|---|
+| Spec's: `pub use graph::RouteControlRecord` in place of the newtype | **red** | green | **red** | green |
+| `pub fn new(target, mute, length) -> Self` | **red** | green | green | green |
+| `pub const fn new(inner: graph::RouteControlRecord) -> Self` | **red** | green | green | green |
+| `pub fn new(..) -> Option<Self>` | **red** | green | green | green |
+| `impl From<graph::RouteControlRecord> for RouteControlRecord` | green | green | **red** | green |
+| Tuple field made `pub` | green | **red** | green | green |
+| Rename `RouteControlProducer` in the shared part of all four | green | green | green | **red** (E0425) |
+| Rename `graph::RouteControlRecord` in the shared part | green | green | green | **red** (E0425) |
+| Rename `RouteControlError` in the shared part | green | green | green | **red** (E0425) |
+| Rename `push` in the shared part | green | green | green | **red** (E0599) |
+| Delete F1's forbidden statement | **red** | green | green | green |
+| Delete F2's forbidden expression (replaced by the twin's) | green | **red** | green | green |
+| Delete F3's forbidden expression (replaced by the twin's) | green | green | **red** | green |
+
+Not caught, by design (NIT-1): `pub const fn from_graph(inner) -> Self`, and a named `pub inner`
+field (D1 forbids that shape).
+
+**Gates at the attempt head** (all exit 0):
+
+1. `cargo test --locked -p host-core --features control-provider,test-support --doc`: 9 passed.
+2. host-core (`control-provider,test-support`): 284 passed (the extra one is fence 3); host-web
+   (`test-support`): 189 passed; graph-compiler `live_routes`: 11 passed; `route_coefficients`: 5
+   passed.
+3. Doc comments only, but a doc comment can move panic line numbers in the module, so the module
+   was rebuilt. `build-web-audioworklet.sh --module-only` with the file at `d23cbf56f` and
+   `--named-twin` with attempt 2 both give the shipped module
+   `ffc62262ec890efd154d6eaa65d615df8d308f340bc2398fcb3b4988b2421cbf` (2896155 B): attempt 2
+   moves no shipped byte. `check-web-audioworklet.sh --without-metadata-regeneration`,
+   `check-browser-expected-resources.py --artifacts` and `test-web-audioworklet.sh` pass.
+4. `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets --all-features --
+   -D warnings`; `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps`;
+   `check-host-core-policy.sh`, `check-realtime-policy.sh`, `check-workspace-policy.sh`.
+
+*Test value.* Fence 1 is red if host-core re-exports graph's record or gives the newtype a public
+associated `new` of any signature; fence 2 is red if the tuple field becomes public; fence 3 is red
+if host-core adds `From<graph::RouteControlRecord>` (or re-exports graph's record); the twin is red
+if a shared item is renamed, so no fence passes for the wrong reason. No runtime test can see any of
+these, because the bypass is an API.
