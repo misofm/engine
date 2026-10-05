@@ -137,6 +137,8 @@ bits. This closes decision 14's F4 for the multiband compressor.
   rewrite of #1315's gate-3 multiband half),
   `sdk/src/browser/shipped-host.d.ts` (doc only), `sdk/src/core/live-controls.ts` and
   `sdk/test/console-evals.mjs` (D3b only); stream H owns these, so coordinate the merge
+- `docs/handoffs/control-smoothing-defaults/` (gate 7 only: the harness `measure/` and its `data/`
+  CSVs; root, 2026-10-05, from #1055)
 
 ## Non-goals
 
@@ -181,8 +183,9 @@ bits. This closes decision 14's F4 for the multiband compressor.
 7. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass crossfade's click
    is measured against #1055's mute baseline, at the session's `muteMs` default, with the
    `docs/handoffs/control-smoothing-defaults/measure/` harness and method (`FINDINGS.md` 9.4,
-   `data/bypass_crossfade.csv`, `data/mute_click.csv`) and the multiband compressor's rows added;
-   the result is recorded in the PR.
+   `data/bypass_crossfade.csv`, `data/mute_click.csv`). What is recorded: the multiband
+   compressor's new rows in `data/bypass_crossfade.csv`, reproduced byte for byte over two runs of
+   the harness (`measure/README.md`); the result is recorded in the PR.
 8. Commands:
    - `cargo test --locked --all-targets -p multiband-compressor -p effect-runtime --features math/lane,lane/test-support`
    - `cargo test --locked -p effect-compiler -p graph-compiler -p host-core --features effect-compiler/test-support,graph/test-support,host-core/test-support`

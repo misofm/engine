@@ -741,22 +741,23 @@ Not verified:
     exception; gate 3: "`for_row` returns the D3 key's field for every `LiveRampRow`" becomes "...,
     and twice `mute_samples` for `PolarityInvert`"; the schema document's table says so.
   - #1261 D2, the Ramps bullet: a `PolarityInvert` record carries `for_row(PolarityInvert)`, not
-    `LiveRamps::mute_samples`. #1261 gate 1 (`1261-*.md:146-147`): "a PolarityInvert record its
+    `LiveRamps::mute_samples`. #1261 gate 1 (`1261-*.md:146-149`): "a PolarityInvert record its
     `mute_samples`" becomes twice `mute_samples` (`for_row(PolarityInvert)`); left as it is, the
     gate tests the rule this record removes.
   - #1364: its row map ("mute, solo, polarity ... use `mute`") and its gate-1 example of a wrong row
     map ("polarity on the fader key"). At the defaults `2 * mute == fader` (960 samples at 48 kHz
     either way), so that test needs non-default keys to tell the two apart. #1364 gate 1
-    (`1364-*.md:131-132`): "480 for the mute rows" at 48 kHz holds for mute, solo, send mute,
-    `follows_mute` and VCA mute, but polarity resolves to 960. #1364 D2 (`:62`): admission replaces
+    (`1364-*.md:133-135`): "480 for the mute rows" at 48 kHz holds for mute, solo, send mute,
+    `follows_mute` and VCA mute, but polarity resolves to 960. #1364 D2 (`:63-64`): admission replaces
     the sentinel with "the field that #1054 D3 names", which becomes `for_row(row)` (twice
     `mute_samples` for polarity).
   - #1394 D5: `resolve` falls back to `for_row`, so an absent polarity length resolves to twice
     `mute_samples` with no change of its own; its gates test no polarity row. Only its background
-    sentence changes (`1394-*.md:26-27`): "`for_row(row)` returns the D3 key field for a row"
+    sentence changes (`1394-*.md:27-28`): "`for_row(row)` returns the D3 key field for a row"
     gains "(twice `mute_samples` for `PolarityInvert`)".
 - **Root confirms one choice (9.2):** the derived rule `2 * mute_samples` inside the three-key
   schema, over #1054's present text (polarity at `mute_samples`) and over a fourth key
-  (`polarityMs`).
+  (`polarityMs`). Root confirmed the derived rule on 2026-10-05, and the carry into the dependent
+  specs above is applied in `fa089b8cb`; the spec line anchors are those of that commit.
 - **#1341:** `mute_ms` and its 10 ms default are confirmed for the bypass crossfade. **#1370 and
   #1371:** `fader_ms` and 20 ms are confirmed for the link glide.

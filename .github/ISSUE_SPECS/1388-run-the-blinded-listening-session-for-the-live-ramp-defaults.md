@@ -25,11 +25,11 @@ private assignment key before reveal.
   `dsp-research/listening/TEMPLATE.md`.
 - **The rules** (`PREREGISTRATION.md`, "Decision rules"): `muteMs` is 5, 10 or 20 ms by the M-block
   primaries and the R-block check; `faderMs` and `panMs` stay 20 ms unless F-30-20 is detected,
-  else 35 ms or 20 ms with a host update-rate requirement. A missed positive control makes every
-  non-detection inconclusive. Block P (Amendment 1) changes no value: it records whether the
-  shipped polarity flip (2 x muteMs, 20 ms) is heard, and as a dip or a click, as a finding for
-  root. Its two controls gate only block P's non-detections, and the M, F and R controls gate only
-  M, F and R (root, 2026-10-05, from #1055).
+  else 35 ms or 20 ms with a host update-rate requirement. A missed M, F or R control makes every
+  M, F and R non-detection inconclusive. Block P (Amendment 1) changes no value: it records
+  whether the shipped polarity flip (2 x muteMs, 20 ms) is heard, and as a dip or a click, as a
+  finding for root. A missed P control makes every block-P non-detection inconclusive and leaves block-P
+  detections standing; the M, F and R controls do not gate block P (root, 2026-10-05, from #1055).
 - **The stimuli** come from the engine's own ramps: `control_smoothing_measure stimuli`, built from
   `docs/handoffs/control-smoothing-defaults/measure/`, which links `crates/builtins` by path
   (`measure/Cargo.toml`). The packet records the engine commit (`prepare --commit`).
@@ -48,8 +48,8 @@ private assignment key before reveal.
   Amendment 1 (block P) runs in the same session; confirm that the shipped polarity flip, twice
   the mute default (960 samples at 48 kHz, `polarity-bass-20ms`), is among the conditions
   (root, 2026-10-05, from #1055).
-- **D2. Procedure.** Exactly `listening/README.md`: `prepare`, the four `run` blocks (M, F, R, P;
-  root, 2026-10-05, from #1055) (separate sittings allowed), `validate`, `reveal`. A second person
+- **D2. Procedure.** Exactly `listening/README.md`: `prepare`, the four `run` blocks in the order
+  M, F, R, P (root, 2026-10-05, from #1055) (separate sittings allowed), `validate`, `reveal`. A second person
   as facilitator is preferred. Playback chain, level and listener details are recorded at reveal, as
   the record's fields require.
 - **D3. Record.** A completed copy of the preregistration, `listening/RECORD-<UTC date>.md`, with
@@ -71,10 +71,10 @@ private assignment key before reveal.
   changes, check the decided values against this invariant and state the check in the record; a
   decision that breaks it (for example `muteMs` 20 ms with `panMs` 20 or 35 ms) goes to root
   before D4 applies it (root, 2026-10-05, from #1055).
-- **D5. Inconclusive.** If an M, F or R control is missed, the value decision is inconclusive; a
-  missed P control makes only block P inconclusive (Amendment 1). Either allows the one fresh
-  packet (new seed) under the same preregistration, and that rerun repeats all four blocks
-  (root, 2026-10-05, from #1055). The record is committed as such, the defaults stay, and the
+- **D5. Inconclusive.** A missed M, F or R control makes every M, F and R non-detection
+  inconclusive; a missed P control makes every block-P non-detection inconclusive and leaves
+  block-P detections standing (Amendment 1). Either allows the one fresh packet (new seed) under
+  the same preregistration, and that rerun repeats all four blocks (root, 2026-10-05, from #1055). The record is committed as such, the defaults stay, and the
   issue closes on the second record whatever it says.
 
 ## Deliverables

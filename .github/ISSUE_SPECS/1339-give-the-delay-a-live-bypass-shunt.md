@@ -122,6 +122,8 @@ the lift is heard with the tail already in place.
   `sdk/src/core/live-controls.ts`, `sdk/src/browser/shipped-host.d.ts`, `sdk/test/console-evals.mjs`
   (coordinate with stream H)
 - `docs/C_ABI_V1_QUALIFICATION.md`
+- `docs/handoffs/control-smoothing-defaults/` (gate 8 only: the harness `measure/` and its `data/`
+  CSVs; root, 2026-10-05, from #1055)
 
 ## Non-goals
 
@@ -176,8 +178,9 @@ the lift is heard with the tail already in place.
 8. **Click against the mute baseline** (root, 2026-10-05, from #1055). The bypass
    crossfade's click is measured against #1055's mute baseline, at the session's `muteMs` default,
    with the `docs/handoffs/control-smoothing-defaults/measure/` harness and method (`FINDINGS.md`
-   9.4, `data/bypass_crossfade.csv`, `data/mute_click.csv`) and the delay's rows added; the
-   result is recorded in the PR.
+   9.4, `data/bypass_crossfade.csv`, `data/mute_click.csv`). What is recorded: the delay's new
+   rows in `data/bypass_crossfade.csv`, reproduced byte for byte over two runs of the harness
+   (`measure/README.md`); the result is recorded in the PR.
 9. Commands:
    - `cargo test --locked --workspace --all-targets --exclude lane --exclude math --exclude effect-runtime --exclude delay --exclude compressor --exclude multiband-compressor --exclude gate-expander --exclude true-peak-limiter --exclude transient-shaper --exclude soft-clip --exclude parametric-eq --exclude builtins --exclude dsp-reference --exclude conformance --exclude audit --exclude bench --exclude console-workload --exclude wasm-gates --exclude wasm-gate-guest --exclude wasm-gate-corpus --features builtins-compiler/test-support,graph/test-support,host-web/test-support,host-core/test-support,effect-compiler/test-support,protocol/test-support,engine/realtime-audit`
    - `cargo test --locked -p delay`
