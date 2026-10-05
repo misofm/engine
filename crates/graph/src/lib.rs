@@ -1004,12 +1004,7 @@ pub struct RouteQueueFull {
 
 impl GraphRouteControlProducer {
     /// How many records the queue can accept now.
-    ///
-    /// Always inlined (issue #1222): the browser's command-submit closure is held to
-    /// `check-web-audioworklet-callgraph.py`'s allocation rule, which reads function *names*, and
-    /// an out-of-line function named `free` is indistinguishable there from the allocator's.
     #[must_use]
-    #[inline(always)]
     pub fn free(&self) -> usize {
         self.producer.available_capacity()
     }
