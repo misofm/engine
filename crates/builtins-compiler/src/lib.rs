@@ -7003,11 +7003,6 @@ mod tests {
             graph.sequential_schedule = schedule;
             graph.dependency_levels = levels.clone();
         }
-        // Issue #1420: a nonadjacent schedule's slot assertions run after binding, on the pair
-        // production selected; the schedule is kept for them because the graph moves into the
-        // artifact. An adjacent schedule is track-major, so the last track's ops are adjacent.
-        let nonadjacent_schedule = (backend == Backend::Scalar && n >= 2 && nonadjacent)
-            .then(|| graph.sequential_schedule.clone());
         if backend == Backend::Scalar && n >= 2 && !nonadjacent {
             let fader = GraphNodeId::TrackStage {
                 track_id: StableGraphId::parse(&track_name(n - 1)).expect("last scalar track"),
@@ -7147,84 +7142,6 @@ mod tests {
             })
             .unwrap_or_else(|failure| panic!("fixture bind: {}", failure.code));
         drop(_binding_observation);
-        // Issue #1420: the selected track is the one production selects, read from the graph's
-        // selected-pair witness rather than re-derived from the variant or the meter. The witness
-        // is thread-local and `graph::build_sequential` resets it on every build, so under the
-        // caller's `PAIR_WITNESS_LOCK` it describes this binding only (the harness cannot take
-        // that lock itself: its callers hold it and it is not re-entrant).
-        let selected = nonadjacent_schedule
-            .as_ref()
-            .and_then(|_| graph::test_only_selected_split_fader());
-        if nonadjacent_schedule.is_some() {
-            assert_eq!(
-                selected.is_some(),
-                between_render_calls,
-                "a paired nonadjacent preparation selects a split pair and a separate one does not"
-            );
-        }
-        if let (Some(schedule), Some(selected)) = (nonadjacent_schedule, selected) {
-            let selected_index = (0..n)
-                .find(|&index| {
-                    selected.node
-                        == GraphNodeId::TrackStage {
-                            track_id: StableGraphId::parse(&track_name(index))
-                                .expect("scalar track"),
-                            stage: TrackStage::PostFader,
-                        }
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "the selected split fader {:?} is a harness track's post-fader",
-                        selected.node
-                    )
-                });
-            let stage = |index: usize, stage: TrackStage| GraphNodeId::TrackStage {
-                track_id: StableGraphId::parse(&track_name(index)).expect("scalar track"),
-                stage,
-            };
-            let fader = stage(selected_index, TrackStage::PostFader);
-            let matrix = stage(selected_index, TrackStage::PostMatrix);
-            let other_index = if selected_index == 0 { n - 1 } else { 0 };
-            let other_fader = stage(other_index, TrackStage::PostFader);
-            let other_matrix = stage(other_index, TrackStage::PostMatrix);
-            let slot = schedule
-                .iter()
-                .position(|node| node == &fader)
-                .expect("scheduled scalar fader");
-            if selected_index == 0 {
-                assert_eq!(
-                    schedule.get(slot + 1),
-                    Some(&other_fader),
-                    "production scalar schedule places F_B between A's pair owners"
-                );
-                assert_eq!(
-                    schedule.get(slot + 2),
-                    Some(&matrix),
-                    "production scalar schedule retains A's matrix boundary"
-                );
-                assert_eq!(
-                    schedule.get(slot + 3),
-                    Some(&other_matrix),
-                    "production scalar schedule retains B's matrix after A's pair"
-                );
-            } else {
-                assert_eq!(
-                    schedule.get(slot + 1),
-                    Some(&other_matrix),
-                    "production scalar schedule places the other matrix between pair owners"
-                );
-                assert_eq!(
-                    schedule.get(slot + 2),
-                    Some(&matrix),
-                    "production scalar schedule retains the selected matrix boundary"
-                );
-                assert_eq!(
-                    schedule.get(slot - 1),
-                    Some(&other_fader),
-                    "production scalar schedule retains both fader boundaries"
-                );
-            }
-        }
         let binding_snapshot = observe_binding.then(test_only_phase_two_allocation_snapshot);
         (
             bound,

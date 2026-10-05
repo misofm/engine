@@ -93,8 +93,11 @@ calls them M1/B1, M3/B3, M5/B5 and M7/B7):
   module only; the slice that lands second rebases.
 - `PAIR_WITNESS_LOCK` serialises the witness tests. The harness cannot take it itself: its callers
   already hold it, and the lock is not re-entrant. The witness is thread-local and
-  `graph::build_sequential` resets it on every build (`crates/graph/src/runtime.rs:5723`), so the
-  harness's read is race-free under the caller's lock. Record this in the Evidence.
+  `graph::build_sequential` resets it on every build (`crates/graph/src/runtime.rs:5723`), so a
+  read right after a build describes that build only. That, not the caller's lock, is what makes
+  the read race-free: the `allocation_tracker` callers hold `SESSION`, not `PAIR_WITNESS_LOCK`
+  (corrected in the follow-ups; the harness no longer reads the witness). Record this in the
+  Evidence.
 - A deleted arm can change a fixture's track choice, so a render comparison can move. Each test
   compares a paired graph with its separate-owner twin built from the same variant, so both move
   together; a test that compares against a pinned value is a stop-and-report.
@@ -207,3 +210,36 @@ without features; both `cargo clippy --locked -p builtins-compiler --all-targets
 `-D warnings`; `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
 --all-features -- -D warnings`; `scripts/check-builtins-policy.sh`;
 `scripts/check-workspace-policy.sh`; `scripts/check-realtime-policy.sh`.
+
+### Follow-ups (stream J batch 2 follow-ups worker; verdict `1420-attempt1.md`, root ruling (a))
+
+**Root-authorized deviation from D3's test-value sentence.** Root took the verdict's MINOR-1
+option 1. The harness's witness-keyed nonadjacent block is deleted: the schedule copy
+(`nonadjacent_schedule`), the witness read, the "witness `Some` iff paired" presence check, the
+mapping of the witness node to a harness track, and the slot assertions on that track. So the
+harness no longer has a `selected_index` at all, and D3's sentence ("red if the harness's 'A'
+track and production's selected pair disagree") has no assertion behind it. Reason: under the
+observation path that Amendment 1 chose, the two agree by definition. With `n == 2` and a
+stage-major schedule the slot assertions hold for either orientation and read only the schedule
+the harness built itself. The verifier's SWAP mutant (slot assertions keyed on the other track)
+stayed green. The presence check had no unique catch either: every production mutant it caught
+(PSTALE, PNONE, PSEP2) is red without it (MINOR-2). Which pair production selects stays defended by
+four literal-ID tests that the verifier's PREV mutant (production selects the last candidate) turns
+red: `actual_scalar_nonadjacent_schedule_selects_the_split_owner`,
+`actual_scalar_overlapping_nonadjacent_candidates_select_one_and_keep_the_other_separate`,
+`..._failed_render_materializes...` and `..._ramp_retarget...`. The adjacent (track-major) branch's
+one adjacency assertion on track `n - 1` stays.
+
+**NIT-1.** The harness comment that said the read is race-free "under the caller's
+`PAIR_WITNESS_LOCK`" went with the block. The Hazards bullet above now says the read is race-free
+because the witness is thread-local and reset per build, not because of the lock.
+
+**Evidence.** D2's catch is intact after the deletion: M1 (`NonadjacentOutputConflict` output
+`n - 1` -> `0`) re-run: `cargo test -p builtins-compiler --features test-support --lib` 53 passed,
+1 failed (`actual_scalar_nonadjacent_output_track_takes_the_split_pair_now_the_output_is_dedicated`);
+restored: 54 passed. No new or rewritten test, so no new mutation is owed.
+
+**Gates (all pass).** `cargo test --locked -p builtins-compiler --features test-support` (lib 54;
+`allocation_tracker` 11 + 1 ignored; 3, 5, 1, 2) and without features (lib 47; 3, 4, 1, 2); both
+`cargo clippy --locked -p builtins-compiler --all-targets -- -D warnings` runs (only the existing
+`clippy.toml:80-81` config warnings); `cargo fmt --all -- --check`; `scripts/check-builtins-policy.sh`; `scripts/check-workspace-policy.sh`.
