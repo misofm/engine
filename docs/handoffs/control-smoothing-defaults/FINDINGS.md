@@ -368,7 +368,8 @@ click of a mute half as long). That case can also be the defaults themselves: on
 #1388 outcome (`muteMs` 20 ms with `panMs` 20 or 35 ms) puts `panMs` below twice `muteMs`, so a
 matrix coefficient flip at those defaults clicks louder than the mute. This is the same argument
 9.2 makes against `faderMs` as the polarity key; this record does not add a rule for it, and root
-weighs it with the #1388 result (9.2, 9.8). The two rows keep `panMs`, because a row's length is
+weighs it with the #1388 result (9.2, 9.8). Root's ruling (2026-10-05): the defaults keep
+`panMs >= 2 x muteMs`; #1054 D3 and #1388 D4 carry it. The two rows keep `panMs`, because a row's length is
 per row, not per value (#1054 D4).
 
 ### 9.2 Polarity invert (question 4): `muteMs` is the key, but twice its length
@@ -696,9 +697,9 @@ result of its own.
 Verified: the four section-9 CSVs reproduce byte for byte over two four-rate runs (attempt 2 adds
 the 40 ms rows to `polarity_click.csv`; with them removed the file is attempt 1's byte for byte, and
 the other three files are attempt 1's); the seven earlier CSVs reproduce byte for byte with the
-extended harness; 17 harness tests pass, clippy clean; mutation runs, recorded in the #1055 spec's
-attempt record, turn the crossfade tests red when the emulation accumulates `m` or computes either
-end, and turn the route-probe retarget test red when the probe keeps its position on a new record;
+extended harness; 21 harness tests pass (17 before Amendment 1 added four), clippy clean;
+mutation runs, recorded in the #1055 spec's attempt record, turn the crossfade tests red when the
+emulation accumulates `m` or computes either end, and turn the route-probe retarget test red when the probe keeps its position on a new record;
 every crossfade case asserts that the `f32` emulation copies both ends and stays within four `f32`
 epsilons (relative to the larger plane) of the analysed `dry + m (wet - dry)`; the mute-reference
 rows reproduce `mute_click.csv` within 0.20 dB (9.4); every effect block rendered reports nothing

@@ -186,6 +186,19 @@ bits. This closes decision 14's F4 for the multiband compressor.
    `data/bypass_crossfade.csv`, `data/mute_click.csv`). What is recorded: the multiband
    compressor's new rows in `data/bypass_crossfade.csv`, reproduced byte for byte over two runs of
    the harness (`measure/README.md`); the result is recorded in the PR.
+   Representative setting, as 9.4 sets the compressor's: the multiband compressor at its defaults
+   (crossover 1 kHz), each band's threshold calibrated per material and rate for 6.0 dB peak gain
+   reduction, no makeup, on the bass, kick and mix materials.
+   What passes, at the `muteMs` default (10 ms), on every launch rate, material and transition of
+   the new rows, by 9.4's own rule and tolerances: (a) on the bass and kick, wherever the step is
+   above -40 dB, the click's OOB is the `mute-reference` row's OOB plus the step, within -1.1 to
+   +1.8 dB ("the crossfade's click is the mute's at the same length scaled by that step"); and
+   (b) the step is at most 0 dB and no measure (OOB, worst OOB, CTR, HF splatter, total splatter)
+   exceeds the `mute-reference` row's at the same length, rate, material and transition ("No
+   effect's click exceeds the mute reference's ... on any measure"). Every existing row of
+   `data/bypass_crossfade.csv` stays byte-identical (`git diff` shows added rows only). If (a) or
+   (b) fails, the PR records the failing rows and the issue stops for root to decide the key or
+   the length; it does not pass silently (root, 2026-10-05, from #1055).
 8. Commands:
    - `cargo test --locked --all-targets -p multiband-compressor -p effect-runtime --features math/lane,lane/test-support`
    - `cargo test --locked -p effect-compiler -p graph-compiler -p host-core --features effect-compiler/test-support,graph/test-support,host-core/test-support`

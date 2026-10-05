@@ -144,6 +144,8 @@ hidden assignment withheld until reveal. Synthetic answers are prohibited.
 
 - **When.** 2026-10-05. No packet had been prepared, and no trial, response or reveal existed. The
   status stays `preregistered`.
+- **Wording corrected, 2026-10-05, before any trial:** the power sentence names the correct-answer
+  rate, and the control and peak lines are made exact (#1055 follow-up verdict); no value changed.
 - **Reason.** `../FINDINGS.md` section 9 ramps a polarity invert over twice the mute length
   (`2 x muteMs`, 20 ms at the shipped defaults), by the click measures section 1 decides by
   (9.2). The flip's gain passes through zero: below -6 dB for 10 ms of its 20 ms, below -20 dB for
@@ -158,7 +160,7 @@ hidden assignment withheld until reveal. Synthetic answers are prohibited.
   R, P, and a completed record lists 104 valid rows. Three training files are added. Nothing else
   in the record above changes: the contrasts, trial counts, statistics and decision rules of
   blocks M, F and R stay as written, and their positive controls (M-bass-0, F-30-0, R-mix-50) gate
-  only their own non-detections.
+  every M, F and R non-detection and no block-P result.
 
 ### Question (block P)
 
@@ -197,8 +199,8 @@ hidden assignment withheld until reveal. Synthetic answers are prohibited.
 
 - **Why these counts.** The same reasoning as blocks M, F and R. A decision rests on a detection at
   p <= 0.05, and 8 trials is the smallest count that allows one lapse: 7 of 8 gives p = 0.0352,
-  where 7 trials need 7 of 7 (6 of 7 gives 0.0625). With 8 trials, a listener who hears the
-  difference on 95 % of trials is detected with probability 0.94, on 90 % with 0.81, on 80 % with
+  where 7 trials need 7 of 7 (6 of 7 gives 0.0625). With 8 trials, a listener who answers
+  correctly on 95 % of trials is detected with probability 0.94, on 90 % with 0.81, on 80 % with
   0.50. The rule needs one decision per cue, so each of the three primaries has 8 trials. Each
   control has 2 trials and must be 2/2, as in the other blocks. The kick and mix contrasts support
   no decision; with 4 trials (4/4 gives p = 0.0625) they are descriptive. At the pace the other
@@ -269,7 +271,7 @@ hidden assignment withheld until reveal. Synthetic answers are prohibited.
   (`manifest.tsv`, harness at this amendment, crates at `17f0bf18c`): P-bass-20 and
   P-bass-20-inband 0.06 dB, P-bass-20-oob and P-bass-0-oob 0.00 dB, P-kick-20 0.04 dB, P-mix-20
   0.05 dB, and 0.63 dB for the P-bass-200-inband control (its dip).
-- Peak/clipping check: every block-P stimulus peaks at or below -1.9 dBFS (the kick, -1.894 dBFS).
+- Peak/clipping check: the highest block-P peak is -1.894 dBFS (the kick); none clips.
 
 ### Training (block P)
 

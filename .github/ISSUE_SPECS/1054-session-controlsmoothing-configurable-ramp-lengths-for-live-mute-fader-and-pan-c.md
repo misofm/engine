@@ -98,10 +98,8 @@ per-edit length is *Carry an optional per-edit ramp length on live session edits
   | `pan_ms` | pan, matrix, send matrix |
 
   - **Polarity invert is twice the mute ramp** (root, 2026-10-05, from #1055; `FINDINGS.md` 9.2,
-    9.8). It is a derived rule on the `mute_ms` key, not a fourth key. A flip is a change of twice
-    the signal; over twice the mute length its click measures as the mute's at every launch rate,
-    where over the mute length it is about 6 dB louder. A separate key would let the two lengths
-    drift apart, and no product need asks for it.
+    9.8): a derived rule on the `mute_ms` key (`2 x mute_ms`, 20 ms at the defaults), not a fourth
+    key.
   - **Matrix coefficients through zero** (root, 2026-10-05, from #1055; `FINDINGS.md` 9.1). A raw
     matrix coefficient (in `[-1, 1]`) or a send matrix coefficient (any finite value) that crosses
     zero is a polarity flip of that path on the `pan_ms` ramp. The default table keeps

@@ -28,8 +28,9 @@ private assignment key before reveal.
   else 35 ms or 20 ms with a host update-rate requirement. A missed M, F or R control makes every
   M, F and R non-detection inconclusive. Block P (Amendment 1) changes no value: it records
   whether the shipped polarity flip (2 x muteMs, 20 ms) is heard, and as a dip or a click, as a
-  finding for root. A missed P control makes every block-P non-detection inconclusive and leaves block-P
-  detections standing; the M, F and R controls do not gate block P (root, 2026-10-05, from #1055).
+  finding for root. A missed P control makes every block-P non-detection inconclusive and leaves
+  block-P detections standing; the M, F and R controls do not gate block P (root, 2026-10-05, from
+  #1055).
 - **The stimuli** come from the engine's own ramps: `control_smoothing_measure stimuli`, built from
   `docs/handoffs/control-smoothing-defaults/measure/`, which links `crates/builtins` by path
   (`measure/Cargo.toml`). The packet records the engine commit (`prepare --commit`).
@@ -49,9 +50,9 @@ private assignment key before reveal.
   the mute default (960 samples at 48 kHz, `polarity-bass-20ms`), is among the conditions
   (root, 2026-10-05, from #1055).
 - **D2. Procedure.** Exactly `listening/README.md`: `prepare`, the four `run` blocks in the order
-  M, F, R, P (root, 2026-10-05, from #1055) (separate sittings allowed), `validate`, `reveal`. A second person
-  as facilitator is preferred. Playback chain, level and listener details are recorded at reveal, as
-  the record's fields require.
+  M, F, R, P (separate sittings allowed; root, 2026-10-05, from #1055), `validate`, `reveal`. A
+  second person as facilitator is preferred. Playback chain, level and listener details are
+  recorded at reveal, as the record's fields require.
 - **D3. Record.** A completed copy of the preregistration, `listening/RECORD-<UTC date>.md`, with
   status `complete`, the counts, p-values, the decision `reveal` printed, the playback chain, and
   the sign-offs. `PREREGISTRATION.md` itself is not edited. Commit `public/preparation.json`,
@@ -73,9 +74,13 @@ private assignment key before reveal.
   before D4 applies it (root, 2026-10-05, from #1055).
 - **D5. Inconclusive.** A missed M, F or R control makes every M, F and R non-detection
   inconclusive; a missed P control makes every block-P non-detection inconclusive and leaves
-  block-P detections standing (Amendment 1). Either allows the one fresh packet (new seed) under
-  the same preregistration, and that rerun repeats all four blocks (root, 2026-10-05, from #1055). The record is committed as such, the defaults stay, and the
-  issue closes on the second record whatever it says.
+  block-P detections standing (Amendment 1). The record is committed as such. After a missed P
+  control alone, the M, F and R decisions stand and D4 applies them; only block P's
+  non-detections are inconclusive. After a missed M, F or R control, the defaults stay unless a
+  rerun decides otherwise. Any missed control allows, and does not require, the one fresh packet
+  (new seed) under the same preregistration; a rerun repeats all four blocks, and the issue then
+  closes on the second record whatever it says. With no rerun, the issue closes on the first
+  record (root, 2026-10-05, from #1055).
 
 ## Deliverables
 

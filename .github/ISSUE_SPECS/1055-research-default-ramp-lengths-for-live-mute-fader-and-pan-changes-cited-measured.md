@@ -355,7 +355,9 @@ answer or result was written or simulated outside the self-test's temporary dire
   own edge (bass partials stop at 1 kHz, section 1's out-of-band measures read from 1.5 kHz) by a
   zero-phase Kaiser FIR, so each primary carries one cue; a length contrast cannot, because a
   longer flip has both a longer dip and a weaker click. Counts: 8 is the smallest count that allows
-  one lapse at p <= 0.05 (7/8, p = 0.0352); power 0.94 / 0.81 / 0.50 at 95 / 90 / 80 % hit rates.
+  one lapse at p <= 0.05 (7/8, p = 0.0352); power 0.94 / 0.81 / 0.50 for a listener who answers
+  correctly on 95 / 90 / 80 % of trials (corrected 2026-10-05 from "hit rates"; see the verdict
+  fold below).
 - **Rule (block P, changes no value).** Each cue at the shipped flip is heard (detected), not
   heard (not detected, both P controls 2/2) or inconclusive. Outcome: not heard (all three not
   heard: answers 9.7 for that listener, chain and level), heard (as a dip, a click, both, or with
@@ -433,3 +435,36 @@ SHA-256; harness `cargo test --release --offline -- polarity split low_part`, li
 **For #1388's spec** (not edited here; root or the next worker applies it): the packet is now
 104 trials in blocks M, F, R and P; block P changes no value and records a finding; its controls
 gate only block P. See this worker's report for the exact text.
+*Note, 2026-10-05:* this is no longer pending. `fa089b8cb` and `7d67810a6` applied it to #1388's
+spec (Context, D1-D5, Deliverable 3, gates 2-3).
+
+### Follow-up verdict fold (root rulings, 2026-10-05)
+
+Verdict: `/home/bl/misofm/submix-verdicts/1055-followup-attempt1.md` (PASS; 4 MINOR, 8 NIT). Every
+finding is folded in text only, in this entry's commit on `codex/d15-stream-e`; no harness code,
+CSV or stimulus changed, and no listening response or result was written.
+
+- MINOR-1: #1388 D5 says what each miss leaves standing. After a missed P control alone, the M,
+  F and R decisions stand and D4 applies them; after a missed M, F or R control the defaults stay
+  unless a rerun decides otherwise. The one fresh packet is allowed, not required; a rerun repeats
+  all four blocks and the issue closes on the second record (root's ruling).
+- MINOR-2: #1339 gate 8 and #1340 gate 7 gain a pass criterion quoted from `FINDINGS.md` 9.4
+  (OOB is the mute reference's plus the step within -1.1 to +1.8 dB; no measure exceeds the mute
+  reference's), a representative setting (delay: mix 0.5, feedback 0.5; multiband: 6.0 dB peak gain
+  reduction per band), byte-identical existing rows of `bypass_crossfade.csv`, and a stop for root
+  on failure.
+- MINOR-3: Amendment 1's power sentence names the correct-answer rate, with a dated note in the
+  amendment; the same wording is corrected above in this record.
+- MINOR-4 and NIT-6: the successor draft (link glide) names per effect the material and setting on
+  which the link change moves the gain, reports a row with too small a gain difference as
+  vacuous, requires a latency-matched reference for the limiter, and fixes the `:365` anchor, gate
+  2's naming and the redundant test-value clause. The draft is outside the repository (root files it).
+- NIT-1 and NIT-5: Amendment 1's control line ("every M, F and R non-detection") and peak line
+  (-1.894 dBFS) are exact.
+- NIT-2: #1054 D3's rationale bullet is cut to the table note's values and a pointer to 9.2.
+- NIT-3: `FINDINGS.md` 9.1 points to root's matrix ruling (#1054 D3, #1388 D4); 9.7 says 21 tests.
+- NIT-4: #1388's new lines are rewrapped to 100 characters; D2's marker sits after its parenthesis.
+- NIT-7: the stale "not edited here" line above carries a dated note naming the two commits.
+- NIT-8: noted only. `split::tests::the_low_part_is_centred_on_its_input` overlaps
+  `stimuli::tests::the_split_stimuli_hold_the_dip_and_the_click_apart` (every centring defect
+  the verdict tried turns both red); it stays, because it points at the defect directly.
