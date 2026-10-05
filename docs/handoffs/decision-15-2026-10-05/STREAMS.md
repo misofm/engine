@@ -201,6 +201,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 6 | #1341 | Crossfade the bypass switch over the session ramp | #1054, #1055 | #1280, #1345 |
 | 7 | #1388 | Run the blinded listening session for the live ramp defaults | #1054, #1055, #1364 | — |
 | 8 | #1393 | Crossfade the browser's live bypass command over the session ramp | #1341, #1364 | — |
+| 9 | #1430 | Measure the link glide for the gate-expander, transient shaper and limiter at the ramp defaults | #1055 | — |
 
 ## Stream F
 
