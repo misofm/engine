@@ -135,6 +135,8 @@ retired: each raw value is refused, never reallocated and never renumbered. No r
    - `bash scripts/check-effect-runtime-policy.sh`, `bash scripts/test-effect-runtime-policy.sh`
    - `python3 -B scripts/check-parameter-metadata-v1.py --self-test` (also run by
      `scripts/test-web-audioworklet.sh:205`)
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

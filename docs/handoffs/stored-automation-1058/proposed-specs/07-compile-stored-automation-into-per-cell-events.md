@@ -201,7 +201,7 @@ it yet; draft 02's order check (`value_at`) and drafts 09a and 09b are its first
    - `cargo build --locked --release -p wasm-gates && bash scripts/run-wasm-gates.sh --without-v8-spill --without-native`
    - `bash scripts/run-aarch64-tests.sh release` (the `aarch64-release` job)
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
-     `bash scripts/check-cross-targets.sh`
+     `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

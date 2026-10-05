@@ -176,6 +176,8 @@ ramp in flight blocks the skip (`crates/compressor/src/lib.rs:568`;
    - `bash scripts/check-rack-policy.sh && bash scripts/test-rack-policy.sh`
    - `for x in realtime workspace; do bash scripts/check-$x-policy.sh && bash scripts/test-$x-policy.sh || exit 1; done`
    - `cargo test --locked -p rack`, `cargo test --locked -p graph --features test-support`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo fmt --all -- --check`,
      `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
 

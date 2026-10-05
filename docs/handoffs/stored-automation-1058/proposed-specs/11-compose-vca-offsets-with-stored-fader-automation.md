@@ -95,7 +95,9 @@ of a session without stored automation (draft 09a D6 is the one order change).
 - `crates/builtins-compiler/src/lib.rs` (the fader bank's dirty read of the offsets cell and the
   jump only)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `crates/host-core/tests/vca_automation_realtime.rs` (new)
+  `crates/control-plane/tests/vca_automation_realtime.rs` (new)
+- `crates/control-plane/Cargo.toml` (a `bench-support` dev-dependency for that binary, only if an
+  earlier slice has not added it), `Cargo.lock`
 
 `crates/session/src/vca.rs` is called, never changed (draft 09a D6 changes it).
 
@@ -123,9 +125,13 @@ of a session without stored automation (draft 09a D6 is the one order change).
    with its own ramp of 256 samples: track 0's jump and track 1's `FaderDb` ramp both last 256
    samples.
 2. **Many moves, one block** (browser, same file). Ten browser live edits of `v`'s offset before one render: the
-   output equals a twin that made only the last. Nested VCAs `v`, `w` reaching track 0, with offsets
-   whose two summation orders differ in `f64`: a move of `w` writes the `S` that a fresh plan of the
-   edited session computes, bit for bit.
+   output equals a twin that made only the last. Three nested VCAs reach track 0, declared in an
+   order that is not their ID order and nested so that the nesting order is not their ID order
+   either. Their offsets are `24`, `-24` and `2e-30` in ascending VCA-ID order. A move of the
+   third VCA to `1e-30` writes the `S` that a fresh plan of the edited session computes, bit for
+   bit: the sum in ID order, `(24 + -24) + 1e-30 = 1e-30`, has other `f64` bits than an order that
+   adds `1e-30` before `-24`, which gives `0.0`. With two offsets, no order can change the sum
+   (`f64` addition is commutative), so the case needs three.
 3. **No jump for an unchanged offset** (same files). A move of a VCA that does not reach track 0, or
    that moves `v` to its current value, writes no cell and moves no bit.
 4. **Reach change and VCA count change** (C ABI and browser, same files). Each of these is path
@@ -135,21 +141,27 @@ of a session without stored automation (draft 09a D6 is the one order change).
    a session that had none; removing a VCA that reaches track 0.
 5. **Classifier** (`crates/host-core/tests/live_delta.rs`, new). The move of gate 1 gives one
    offsets-cell write for track 0's lanes and one `FaderDb` per lane of track 1.
-6. **Realtime** (`crates/host-core/tests/vca_automation_realtime.rs`, new integration binary in host-core, which already has the bench-support dev-dependency,
-   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
-   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
-   `assert_installed()` first). It drives the script through host-core's shared commit and render
-   session, the code the browser Worker and the C ABI both run. For gate 1's script on the render
+6. **Realtime** (`crates/control-plane/tests/vca_automation_realtime.rs`, new integration binary in control-plane, the crate that
+   holds the shared commit, `control_plane::SessionState`, #1309 D1-D9. A host-core binary cannot
+   reach the commit without a dev-dependency cycle, since control-plane depends on host-core.
+   `scripts/check-bench-policy.sh:257-280` allows a `bench-support` dev-dependency only in a
+   `crates/` manifest, so no host-web binary can link it. The binary links `bench_support::alloc`
+   and calls `assert_installed()` first). It drives the script through control-plane's shared
+   commit and host-core's render session, the code the browser Worker (#1382) and the C ABI both
+   run. For gate 1's script on the render
    thread: `allocations == 0 && frees == 0` around every render call after warm-up.
 7. **Commands:**
    - `cargo test --locked -p session` (`vca_composition.rs` as draft 09a leaves it),
      `cargo test --locked -p host-core --features host-core/test-support`,
      `cargo test --locked -p capi`, `cargo test --locked -p host-web --features host-web/test-support`,
      `cargo test --locked -p builtins-compiler --features test-support`
+   - `cargo test --locked -p control-plane --features test-support`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `bash scripts/check-web-audioworklet.sh`, `bash scripts/test-web-audioworklet.sh`
    - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-realtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 8. **No rendered bit moves** for any session without stored automation, VCA sessions included:

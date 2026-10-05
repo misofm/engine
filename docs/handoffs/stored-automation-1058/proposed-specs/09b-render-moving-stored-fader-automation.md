@@ -153,6 +153,8 @@ exactly as before. The fader row leaves the classifier's mask in draft 10, in th
    - `bash scripts/run-aarch64-tests.sh debug` (the `aarch64-debug` job)
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-host-core-policy.sh`,
      `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

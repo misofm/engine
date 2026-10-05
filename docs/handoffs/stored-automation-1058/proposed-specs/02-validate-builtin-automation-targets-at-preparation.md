@@ -207,6 +207,8 @@ that would cross a curve with the same code. Nothing renders the table yet.
      `cargo test --locked -p capi`
    - the workspace debug leg (`test-debug-a` in `.github/workflows/qualification.yml`)
    - `bash scripts/check-builtins-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

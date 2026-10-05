@@ -189,7 +189,7 @@ drafts 06a and 06b, and the first reader draft 09b. All are in batch R1.
    - `cargo test --locked -p graph --features graph/test-support`
    - `cargo test --locked -p capi`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh`,
+   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule),
      `bash scripts/check-host-core-policy.sh`, `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

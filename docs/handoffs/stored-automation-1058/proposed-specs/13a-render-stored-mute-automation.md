@@ -82,7 +82,9 @@ mute are drafts 13b and 13c.
 - `crates/host-core/src/{prepare.rs,live_delta.rs,solo.rs}`, `crates/host-core/tests/live_delta.rs`
 - `crates/control-plane/src/` (the overlay composition's terms write)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `crates/host-core/tests/mute_automation_realtime.rs` (new)
+  `crates/control-plane/tests/mute_automation_realtime.rs` (new)
+- `crates/control-plane/Cargo.toml` (a `bench-support` dev-dependency for that binary, only if an
+  earlier slice has not added it), `Cargo.lock`
 
 ## Non-goals
 
@@ -114,11 +116,14 @@ mute are drafts 13b and 13c.
    other, non-automated lane it gives its `Mute` record; a VCA mute of `t` gives one terms write and
    no `Mute` record for the automated lane. Browser: a live mute edit through the Worker's apply on the automated lane replies
    `model_only` and moves no bit.
-5. **Realtime.** `crates/host-core/tests/mute_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
-   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
-   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
-   `assert_installed()` first). It drives the script through host-core's shared commit and render
-   session, the code the browser Worker and the C ABI both run. For gate 1's script:
+5. **Realtime.** `crates/control-plane/tests/mute_automation_realtime.rs` (new integration binary in control-plane, the crate that
+   holds the shared commit, `control_plane::SessionState`, #1309 D1-D9. A host-core binary cannot
+   reach the commit without a dev-dependency cycle, since control-plane depends on host-core.
+   `scripts/check-bench-policy.sh:257-280` allows a `bench-support` dev-dependency only in a
+   `crates/` manifest, so no host-web binary can link it. The binary links `bench_support::alloc`
+   and calls `assert_installed()` first). It drives the script through control-plane's shared
+   commit and host-core's render session, the code the browser Worker (#1382) and the C ABI both
+   run. For gate 1's script:
    `allocations == 0 && frees == 0` around every render call after warm-up.
    `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` reports all
    violation counts 0.
@@ -132,7 +137,7 @@ mute are drafts 13b and 13c.
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `bash scripts/check-web-audioworklet.sh`, `bash scripts/test-web-audioworklet.sh`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-host-core-policy.sh`,
-     `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh`,
+     `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule),
      `bash scripts/run-aarch64-tests.sh debug`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

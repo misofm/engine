@@ -92,6 +92,8 @@ the curve. Solo and VCA mutes compose with the curve for the send as for the str
      `cargo test --locked -p host-web --features host-web/test-support`
    - the workspace debug leg (`test-debug-a`) in `.github/workflows/qualification.yml`
    - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 5. **No rendered bit moves** for a session with no stored automation: `cargo build --locked

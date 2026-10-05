@@ -103,7 +103,9 @@ refused with `builtin.filter.order`, with nothing changed.
   `crates/host-core/tests/live_delta.rs`
 - `crates/control-plane/src/` (the group-cell write)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `crates/host-core/tests/filter_automation_realtime.rs` (new)
+  `crates/control-plane/tests/filter_automation_realtime.rs` (new)
+- `crates/control-plane/Cargo.toml` (a `bench-support` dev-dependency for that binary, only if an
+  earlier slice has not added it), `Cargo.lock`
 - `docs/BUILTINS_AND_METERING_V1.md`
 
 ## Non-goals
@@ -142,11 +144,14 @@ refused with `builtin.filter.order`, with nothing changed.
    `Err(LiveRebuild::Automation)`; a static change of the automated HPF gives no record; gate 5's
    edit gives one group-cell write and no `PreparedFilter` record; gate 6's gives `Domain`; an
    `lpf_hz` rewrite from `1000.0` to the same bits gives nothing.
-8. **Realtime.** `crates/host-core/tests/filter_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
-   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
-   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
-   `assert_installed()` first). It drives the script through host-core's shared commit and render
-   session, the code the browser Worker and the C ABI both run: `allocations == 0 && frees == 0`
+8. **Realtime.** `crates/control-plane/tests/filter_automation_realtime.rs` (new integration binary in control-plane, the crate that
+   holds the shared commit, `control_plane::SessionState`, #1309 D1-D9. A host-core binary cannot
+   reach the commit without a dev-dependency cycle, since control-plane depends on host-core.
+   `scripts/check-bench-policy.sh:257-280` allows a `bench-support` dev-dependency only in a
+   `crates/` manifest, so no host-web binary can link it. The binary links `bench_support::alloc`
+   and calls `assert_installed()` first). It drives the script through control-plane's shared
+   commit and host-core's render session, the code the browser Worker (#1382) and the C ABI both
+   run: `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&
    ./target/release/audit capi` reports all violation counts 0.
 9. **Commands:**
@@ -161,7 +166,7 @@ refused with `builtin.filter.order`, with nothing changed.
    - `bash scripts/check-web-audioworklet.sh`, `bash scripts/check-builtins-policy.sh`,
      `bash scripts/check-realtime-policy.sh`, `bash scripts/check-host-core-policy.sh`,
      `bash scripts/check-dsp-research.sh`, `bash scripts/check-workspace-policy.sh`,
-     `bash scripts/check-cross-targets.sh`, `bash scripts/run-aarch64-tests.sh debug`
+     `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule), `bash scripts/run-aarch64-tests.sh debug`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 10. **No rendered bit moves** for a session with no stored automation: `audit capi` gives the same

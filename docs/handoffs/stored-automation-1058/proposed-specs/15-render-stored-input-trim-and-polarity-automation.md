@@ -102,7 +102,9 @@ through the one shared rule of draft 10.
 - `crates/host-core/src/prepare.rs`, `crates/host-core/src/live_delta.rs`,
   `crates/host-core/tests/{live_delta.rs,symmetry_witness.rs}`
 - `crates/capi/src/runtime/live_tests.rs`
-- `hosts/host-web/src/tests.rs`, `crates/host-core/tests/input_automation_realtime.rs` (new)
+- `hosts/host-web/src/tests.rs`, `crates/control-plane/tests/input_automation_realtime.rs` (new)
+- `crates/control-plane/Cargo.toml` (a `bench-support` dev-dependency for that binary, only if an
+  earlier slice has not added it), `Cargo.lock`
 
 ## Non-goals
 
@@ -141,11 +143,14 @@ through the one shared rule of draft 10.
    lane gives no record; a static polarity change on that lane gives its record. In the browser,
    a live trim edit through the Worker's apply on the automated lane replies `model_only` and
    moves no bit, and a live polarity edit there replies `live`.
-8. **Realtime.** `crates/host-core/tests/input_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
-   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
-   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
-   `assert_installed()` first). It drives the script through host-core's shared commit and render
-   session, the code the browser Worker and the C ABI both run: `allocations == 0 && frees == 0`
+8. **Realtime.** `crates/control-plane/tests/input_automation_realtime.rs` (new integration binary in control-plane, the crate that
+   holds the shared commit, `control_plane::SessionState`, #1309 D1-D9. A host-core binary cannot
+   reach the commit without a dev-dependency cycle, since control-plane depends on host-core.
+   `scripts/check-bench-policy.sh:257-280` allows a `bench-support` dev-dependency only in a
+   `crates/` manifest, so no host-web binary can link it. The binary links `bench_support::alloc`
+   and calls `assert_installed()` first). It drives the script through control-plane's shared
+   commit and host-core's render session, the code the browser Worker (#1382) and the C ABI both
+   run: `allocations == 0 && frees == 0`
    around every render call after warm-up; `cargo build --locked --release -p audit -p capi &&
    ./target/release/audit capi` reports all violation counts 0.
 9. **Commands:**
@@ -153,12 +158,13 @@ through the one shared rule of draft 10.
      `cargo test --locked -p builtins-compiler --features test-support`,
      `cargo test --locked -p host-core --features host-core/test-support`,
      `cargo test --locked -p capi`, `cargo test --locked -p host-web --features host-web/test-support`
+   - `cargo test --locked -p control-plane --features test-support`
    - the workspace debug leg (`test-debug-a`) and the DSP leg (`test-debug-b`) in
      `.github/workflows/qualification.yml`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-audit.sh target/release/audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `bash scripts/check-web-audioworklet.sh`, `bash scripts/check-builtins-policy.sh`,
      `bash scripts/check-realtime-policy.sh`, `bash scripts/check-workspace-policy.sh`,
-     `bash scripts/check-cross-targets.sh`, `bash scripts/run-aarch64-tests.sh debug`
+     `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule), `bash scripts/run-aarch64-tests.sh debug`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 10. **No rendered bit moves** for a session with no stored automation: `audit capi` gives the same

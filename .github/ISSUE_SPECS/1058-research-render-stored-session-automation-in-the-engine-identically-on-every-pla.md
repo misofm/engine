@@ -235,3 +235,32 @@ three minors, nine nits). No product code changed and no benchmark ran. Per find
 The plan stays forty-one slices in twenty-six steps and seven batches. Gate 3 deviates as in
 attempt 1. Gates run: `bash scripts/check-workspace-policy.sh` and
 `bash scripts/check-dsp-research.sh`.
+
+**Follow-ups after PASS.** The attempt-4 verdict returned PASS with four minors and five nits
+(`docs/handoffs/decision-15-2026-10-05/verdicts/stream-k/1058-attempt4.md`, beside the verdicts of
+attempts 1-3). One follow-ups commit folds each one. No product code changed and no benchmark ran:
+
+- **m1**: the six realtime gates (drafts 11, 13a, 13b, 14b, 15, 16b) move to
+  `crates/control-plane/tests/`, which reaches the shared commit; each draft authorizes
+  control-plane's `bench-support` dev-dependency (allowed for a `crates/` manifest,
+  `scripts/check-bench-policy.sh:257-280`) and runs `cargo test -p control-plane`. No host-core
+  dev-dependency on control-plane.
+- **m2**: draft 09a D6 rewrites the three member-first oracles (`crates/host-core/tests/vca.rs:268-279`,
+  `hosts/host-web/src/tests.rs:13358-13371` and `:13697-13715`) and authorizes them; README F16
+  names them.
+- **m3**: README F19 states the iOS memset rule once and records why the trap-owner risk does not
+  apply (direct-call gate, `dyn` dispatch). Every draft that changes product code in `capi`'s
+  closure runs `bash scripts/check-cross-targets.sh`, R3 and R4 included; no ceiling row is
+  authorized.
+- **m4**: draft 24a puts the C ABI calls in a dedicated `tools/bench/src/console_capi.rs`, the only
+  new unsafe owner, and runs the six policy scripts whose pins it edits.
+- **Nit, 09a gate 1**: it asks for a case whose two orders give different gain bits (an example is
+  given) and asserts that first.
+- **Nit, 11 gate 2**: three nested VCAs, so the summation order is observable.
+- **Nit, 05 D6**: it states why `replacements == 1` stays true (#1323 D2 finds no floor and no
+  offset, so the declaration publishes nothing).
+- **Nit, A5 and 09a D2**: render's conversion is `vca_compose_db`.
+- **Nit, F16 Authority**: the private memory citation is gone. No file in `docs/rulings/` records
+  the standing summation-order ruling; F16 says so and asks root to record it in decision 15.
+
+Gates run: `bash scripts/check-workspace-policy.sh` and `bash scripts/check-dsp-research.sh`.

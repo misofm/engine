@@ -61,7 +61,8 @@ automation renders identically on every platform. It adds no new digest owner. B
 
 ## Authorized paths
 
-- `scripts/run-aarch64-tests.sh`, `scripts/lib/aarch64-known-defects.py` (a #1019 row only).
+- `scripts/run-aarch64-tests.sh`, `scripts/lib/aarch64-known-defects.py` (a #1019 row only; never an
+  `IOS_MEMSET_CEILINGS` row, README F19).
 - `crates/capi/src/runtime/tests.rs` (D2).
 
 ## Non-goals

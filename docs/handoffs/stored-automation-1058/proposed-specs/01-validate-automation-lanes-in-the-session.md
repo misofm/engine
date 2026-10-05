@@ -194,6 +194,8 @@ the table yet.
    - `mkdir -p target/ci/qualification-artifacts target/ci/qualification-named-twin && bash scripts/build-web-audioworklet.sh --named-twin target/ci/qualification-named-twin target/ci/qualification-artifacts`,
      then `bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts`
    - `bash scripts/check-session-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

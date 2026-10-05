@@ -471,7 +471,7 @@ a session seek, stored automation is also independent of when the seek landed an
 - **Sample-time arithmetic.** `u64` timeline and render samples; `t - t0` and `t1 - t0` convert to
   `f64` exactly below 2^53; one `f64` division gives `x`.
 - **Transcendentals.** Exponential segments use `math::pow` in `f64`; conversions use `db_gain`,
-  `pan_matrix`, the filter designers and `vca_effective_db`. `crates/math` is vendored libm with every
+  `pan_matrix`, the filter designers and `vca_compose_db` (draft 09a D6). `crates/math` is vendored libm with every
   target-conditional path and intrinsic removed (`crates/math/src/lib.rs:13-16`), and `clippy.toml`
   bans platform transcendentals (`clippy.toml:15-23`). The evaluator calls no lane math, so the
   AArch64 release divergence in `exp2_lane` (LANE-3, #1019; `docs/TARGET_MATRIX.md:163-167`) cannot
@@ -1045,11 +1045,15 @@ small cost and keeps the output fold.
     nothing for a curve value in the fader domain (draft 02), and `db_gain(±0) = 1` exactly, so the
     gain has the static bits. Every VCA edit, adding and removing a VCA included, is one live cell
     write; nothing rebuilds and no cap sizes the cell. Render adds one `f64` per event.
-  - **Authority.** Root ruled it under the owner's standing summation-order ruling (memory
-    `summation-order-ruling.md`): the class B order change measurably helps, because it keeps
-    D15-6's whole live set at a fixed 36 bytes per lane. The memory's text names a measured speed-up
-    as the ground; this change is for liveness and fixed memory, so root's reading of the ruling is
-    recorded here for owner review.
+  - **Authority.** Root ruled it under the owner's standing summation-order ruling: a class B
+    change of summation order is acceptable when it measurably helps. Here it keeps D15-6's whole
+    live set at a fixed 36 bytes per lane. No file in `docs/rulings/` records that standing ruling
+    (a search of `docs/rulings/` for "summation order" finds nothing), and the decision-15 record
+    has no row for F16. The nearest repository text is decision 15's class B delegation for
+    D15-4(a) only (`docs/rulings/live-updates-seamless-swaps-and-one-control-plane-2026-10-05.md:119-121`,
+    `:609-610`). The ruling as the owner gave it names a measured speed-up as the ground; this
+    change is for liveness and fixed memory. Root must record the standing ruling, and this
+    reading of it, in the decision-15 record when it files drafts 09a and 11, for owner review.
   - **The amendment to #1242's order.** It is a class B change to shipped, pinned bits:
     - the order is documented at `docs/SESSION_SCHEMA_V1.md:80` ("its own value first, then the
       reaching VCAs' offsets in ascending VCA ID"), implemented at `crates/session/src/vca.rs:19-34`
@@ -1060,7 +1064,13 @@ small cost and keeps the output fold.
       spells the rule `clamp(own_db + sum(offsets), -144, 24)` (`crates/session/src/vca.rs:5`);
     - **slice 09a makes the change** (draft 09a D6): the two functions in `vca.rs`, the sentence at
       `SESSION_SCHEMA_V1.md:80`, and the pinned test rewritten in the same change (draft 09a
-      gate 6), so no test pins the old order after it lands;
+      gate 6). Three more test oracles compute the member-first order today:
+      `reference_db` (`crates/host-core/tests/vca.rs:268-279`), the `lane` closure of
+      `a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute`
+      (`hosts/host-web/src/tests.rs:13358-13371`) and `vca_reference_effective` (`:13697-13715`).
+      They stay green, because they compare rendered PCM and the new order moves a dB value only in
+      degenerate cases, but each documents a retired rule. Draft 09a D6 rewrites the three in the
+      same change, so no test computes or pins the old order after it lands;
     - **which bits move.** Each term is in `[-144, 24]` (`crates/session/src/validate.rs:584` for a
       VCA offset; a member's fader likewise). With `k` terms, every partial sum is exact in `f64`
       when each nonzero term is at least `k·2^-20` dB in size (about `2e-6` dB for two terms,
@@ -1104,6 +1114,32 @@ small cost and keeps the output fold.
   `codex/d15-stream-g` (`5cfc1fb6d`), not on `c63f5f37d`. Attempt 3 read #1407 there: its D5
   keeps `InputStage::apply_prepared_filter` as the one retarget entry and changes only its rules,
   so 16a's call through it stays valid. Root merges stream G's specs before it files 16a.
+
+- **F19. The iOS memset rule. The worklet trap owners do not apply.**
+  - **The rule.** The required `cross-target` job (`.github/workflows/qualification.yml:889-915`)
+    runs `bash scripts/check-cross-targets.sh`. It counts `bl _memset_pattern16` in the iOS
+    release assembly of each product crate, which is every workspace crate in `capi`'s normal
+    dependency closure (`scripts/lib/product-crates.sh`). It fails when a count rises above the
+    crate's ceiling, and on any call in a crate that has no row
+    (`scripts/lib/aarch64-known-defects.py:62-73`, `:131-160`). `builtins-compiler`, `rack`,
+    `source` and `effect-compiler` are in the closure today with no row; `control-plane` (#1309)
+    and `automation` (draft 07) join it with no row. A new call site of an inlined four-lane kernel,
+    for example a split piece path beside a fused path, can add calls.
+  - **What every draft does.** Each draft that changes product code in a crate of that closure
+    runs `bash scripts/check-cross-targets.sh` as a gate and adds no `memset_pattern16` call. The
+    fix for a new call is in the slice's own code, never a ceiling: a raised ceiling adds a libc
+    call in render. No draft authorizes an `IOS_MEMSET_CEILINGS` row (draft 23b may add only a
+    #1019 expected test failure to `scripts/lib/aarch64-known-defects.py`). The drafts cite
+    this finding as "the iOS memset rule".
+  - **The trap owners do not apply.** `scripts/check-web-audioworklet-callgraph.py` follows only
+    direct `call N` edges (`CALL`, `:96`). Render reaches every new piece of code through
+    `call_indirect`: the plan executor (`crates/engine/src/realtime/plan.rs:550`,
+    `Option<Box<dyn PreparedPlanExecutor>>`), every bank stage (`crates/rack/src/lib.rs:1470`,
+    `Box<dyn BankStage>`) and every effect (`crates/graph/src/lib.rs:884`,
+    `Box<dyn PreparedNativeEffect>`). No draft adds Rust on the direct path from
+    `miso_engine_web_v1_render`, and draft 06a's export is a control export with its own list
+    entry. So no slice can add a trap owner to the closure that the gate walks. Draft 20's hazard
+    on trap owners is conservative and stays.
 
 ## Verification
 
@@ -1239,6 +1275,25 @@ returned **FAIL**: one major, three minors, nine nits. Each is folded in:
   `value_at` takes a segment table; 26 removes the retired rate from
   `scripts/check-parameter-metadata-v1.py`; 22's Context matches the #1306 rows; draft 08 cites
   #1408 and F18 says so; the memory formula is fixed (MA1).
+
+### Follow-ups after PASS
+
+The attempt-4 verdict returned **PASS** with four minors and five nits. Each is folded in:
+
+- **m1**: the realtime gates of drafts 11, 13a, 13b, 14b, 15 and 16b move to
+  `crates/control-plane/tests/`, the crate that holds the shared commit. A host-core binary cannot
+  reach the commit without a dev-dependency cycle. Each draft authorizes control-plane's
+  `bench-support` dev-dependency, which `scripts/check-bench-policy.sh:257-280` allows in a
+  `crates/` manifest.
+- **m2**: draft 09a D6 rewrites the three member-first oracles in the same change; F16 names them.
+- **m3**: finding F19 states the iOS memset rule and why the trap-owner risk does not apply. Every
+  draft that changes product code in `capi`'s closure runs `bash scripts/check-cross-targets.sh`.
+- **m4**: draft 24a's only new unsafe owner is `tools/bench/src/console_capi.rs`, which holds only
+  the C ABI calls, and its gates run the six policy scripts whose pins it edits.
+- **Nits**: 09a gate 1 asks for different gain bits, with an example; 11 gate 2 uses three VCAs;
+  05 D6 says why `replacements == 1` stays true; A5 and 09a D2 name `vca_compose_db`; F16's
+  authority cites no private file and says that no repository ruling records the standing
+  summation-order ruling.
 
 ## Spec anchors, checked again
 

@@ -184,6 +184,8 @@ drafts 09a and 09b render fader automation, an edit would be acked and never hea
    - `bash scripts/check-capi-abi.sh`, `bash scripts/check-host-core-policy.sh`,
      `bash scripts/check-graph-policy.sh`, `bash scripts/check-realtime-policy.sh`,
      `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 8. **No rendered bit moves** for a session with no stored automation: `audit capi` reports the same

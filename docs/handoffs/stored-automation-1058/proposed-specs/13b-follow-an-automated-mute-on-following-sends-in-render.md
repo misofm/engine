@@ -102,7 +102,9 @@ that write the send's cell are draft 13c's.
   op only; stream A's files, sequenced by root), `crates/lane/src/kernels.rs` (a range entry only,
   if the split needs one)
 - `crates/capi/src/runtime/live_tests.rs`, `hosts/host-web/src/tests.rs`,
-  `crates/host-core/tests/follow_automation_realtime.rs` (new)
+  `crates/control-plane/tests/follow_automation_realtime.rs` (new)
+- `crates/control-plane/Cargo.toml` (a `bench-support` dev-dependency for that binary, only if an
+  earlier slice has not added it)
 - `crates/graph/Cargo.toml` (a normal `automation` dependency: the route op runs draft 07's
   cursors in graph, and graph cannot reach them through builtins-compiler,
   `scripts/check-builtins-policy.sh:21`), `Cargo.lock`, `scripts/check-graph-policy.sh` (the
@@ -141,11 +143,14 @@ that write the send's cell are draft 13c's.
    second part's entry, bit for bit.
 4. **Carry** (`crates/host-core/tests/route_mute.rs`). A rebuild that adds an automated mute to `t`
    keeps the send's ramp state by route ID; the swap block allocates and frees nothing.
-5. **Realtime.** `crates/host-core/tests/follow_automation_realtime.rs` (new integration binary in host-core, which already has the bench-support dev-dependency,
-   `crates/host-core/Cargo.toml:37`; `scripts/check-bench-policy.sh:257-280` bans that edge in any
-   `hosts/` manifest, so no host-web binary can link it; it links `bench_support::alloc` and calls
-   `assert_installed()` first). It drives the script through host-core's shared commit and render
-   session, the code the browser Worker and the C ABI both run. For gate 1's script:
+5. **Realtime.** `crates/control-plane/tests/follow_automation_realtime.rs` (new integration binary in control-plane, the crate that
+   holds the shared commit, `control_plane::SessionState`, #1309 D1-D9. A host-core binary cannot
+   reach the commit without a dev-dependency cycle, since control-plane depends on host-core.
+   `scripts/check-bench-policy.sh:257-280` allows a `bench-support` dev-dependency only in a
+   `crates/` manifest, so no host-web binary can link it. The binary links `bench_support::alloc`
+   and calls `assert_installed()` first). It drives the script through control-plane's shared
+   commit and host-core's render session, the code the browser Worker (#1382) and the C ABI both
+   run. For gate 1's script:
    `allocations == 0 && frees == 0` around every render call after warm-up.
    `cargo build --locked --release -p audit -p capi && ./target/release/audit capi` reports all
    violation counts 0.
@@ -153,12 +158,13 @@ that write the send's cell are draft 13c's.
    - `cargo test --locked -p host-core --features host-core/test-support`,
      `cargo test --locked -p graph --features test-support`, `cargo test --locked -p capi`,
      `cargo test --locked -p host-web --features host-web/test-support`
+   - `cargo test --locked -p control-plane --features test-support`
    - the workspace debug leg (`test-debug-a`) in `.github/workflows/qualification.yml`
    - `cargo build --locked --release -p audit && bash scripts/trace-builtins-graph-audit.sh target/release/audit`
    - `bash scripts/check-web-audioworklet.sh`, `bash scripts/test-web-audioworklet.sh`
    - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-graph-policy.sh`,
      `bash scripts/check-host-core-policy.sh`, `bash scripts/check-workspace-policy.sh`,
-     `bash scripts/check-cross-targets.sh`, `bash scripts/run-aarch64-tests.sh debug`
+     `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule), `bash scripts/run-aarch64-tests.sh debug`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 7. **No rendered bit moves** for a session with no stored automation: `audit capi` gives the same

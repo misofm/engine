@@ -148,7 +148,7 @@ in batch R1, so `main` never holds the types with no caller.
    unchanged digests.
 4. **Commands:**
    - `cargo test --locked -p source`
-   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh`,
+   - `bash scripts/check-realtime-policy.sh`, `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule),
      `bash scripts/check-workspace-policy.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`

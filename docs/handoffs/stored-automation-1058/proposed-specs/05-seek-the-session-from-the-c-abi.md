@@ -113,7 +113,12 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
   `miso_engine_v1_session_seek(session, 3, B)` with `B = 8 * QUANTUM_FRAMES`, and submits one
   generation-3 quantum of `fixture-source` from frame `B`. It asserts that each call returns
   `RESULT_OK`. Its violation counts stay 0. Its `pcm_digest` moves (the seek changes the audio); no
-  gate pins it.
+  gate pins it. #1319 D4's liveness witness `replacements == 1` (`tools/audit/src/capi.rs:521-524`)
+  stays true: on the audit session `miso_engine_v1_declare_discontinuity` publishes nothing.
+  #1323 D2 prepares a successor only when the active plan has a floor above a node's natural
+  arrival or a source-read offset above 0. The audit's one structural transaction (an
+  `UpsertTrack`) raises no floor, and no plan of the audit has a source-read offset, so neither
+  term holds, the call returns OK and no second plan is swapped in.
 - **D7. The acked-batch question.** The call checks every slot before it pushes any (D1), and only
   the control thread pushes, so it is acknowledged only when every consumer holds the seek. A held
   anchored seek moves with its consumer across a swap. No ack can precede a drop.
@@ -195,7 +200,7 @@ seeks stay, for a stem a transaction adds; they never move the timeline.
    - `cargo test --locked -p host-core --features host-core/test-support`
    - `bash scripts/check-capi-abi.sh`, `bash scripts/check-capi-abi.sh --self-test`
    - `cargo build --locked --release -p audit -p capi && ./target/release/audit capi`
-   - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh`
+   - `bash scripts/check-workspace-policy.sh`, `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

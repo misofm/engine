@@ -200,6 +200,8 @@ the manifest `fuzz/corpus/complete-schema-manifest.md:10`, the record
      `bash scripts/check-capi-abi.sh`, `bash scripts/check-conformance-boundaries.sh`,
      `bash scripts/check-workspace-policy.sh`
    - `CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo check --locked --target wasm32-unknown-unknown -p target-smoke -p protocol`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

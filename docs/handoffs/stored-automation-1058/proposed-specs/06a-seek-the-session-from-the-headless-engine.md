@@ -140,6 +140,8 @@ export in draft 06b.
      `bash scripts/check-sdk-types.sh`,
      `bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts`
    - `python3 -B scripts/check-abi-layout-v1.py` with its self-test
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`, `bash scripts/check-workspace-policy.sh`
 

@@ -126,7 +126,9 @@ This is the second of three slices that retire the command, all in batch P1 (one
    `bash scripts/run-protocol-allocation-audit.sh target/release/audit` and
    `./target/release/audit capi` with zero allocations, locks and syscalls, and the same
    `pcm_digest` as base (PR evidence).
-6. **Commands:** as draft 21a's gate 6.
+6. **Commands:** as draft 21a's gate 6, which includes `bash scripts/check-cross-targets.sh`
+   (README F19, the iOS memset rule: no new `memset_pattern16` call; fix one in code, never by a
+   ceiling).
 
 ## Test value
 

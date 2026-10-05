@@ -86,9 +86,16 @@ is descriptive: no threshold, no tuning.
   fixture's source PCM before every block (outside the clock), and times
   `miso_engine_v1_render_f32_planar` alone, one call per arm per observation, arms alternated.
   `bench` gains `capi` and `session-validator` as dependencies. The C ABI entry points are
-  `unsafe extern "C"` (`crates/capi/src/ffi.rs:311`, `:426`, `:807`), so `tools/bench/src/console.rs`
-  becomes an approved unsafe owner beside `tools/audit/src/capi.rs`, with the same
-  justification: it calls the C ABI as a host does. Every arm hashes its output outside the clock.
+  `unsafe extern "C"` (`crates/capi/src/ffi.rs:311`, `:426`, `:807`), and the workspace denies
+  `unsafe_code` (`Cargo.toml:90`). So a new module `tools/bench/src/console_capi.rs` holds only the
+  C ABI calls: safe wrappers of compile, source submit, render and destroy, each with its `SAFETY`
+  comment, and nothing else. It holds no clock, no digest and no row logic; `console.rs` calls the
+  wrappers and keeps the timing and the record. `console_capi.rs` becomes an approved unsafe owner
+  beside `tools/audit/src/capi.rs`, with the same justification: it calls the C ABI as a host does.
+  `tools/bench/src/console.rs` (3,067 lines, every console row) stays outside both unsafe-owner
+  lists: `scripts/check-bench-policy.sh:209-211` says that a new owner file is a new unsafe
+  boundary, and the narrowest boundary is the one that holds only the FFI. Every arm hashes its
+  output outside the clock.
 - **D3. In-run statements.** Asserted before the record is printed: `flat`'s digest equals
   `none`'s (class A: a flat curve emits no event and renders the static value, A1.4 "change
   only"); `moving`'s differs from `flat`'s; zero allocations, locks and syscalls inside the clock
@@ -117,7 +124,8 @@ is descriptive: no threshold, no tuning.
 
 - `tools/console-workload/src/stored_automation.rs`, `tools/console-workload/src/lib.rs` (the
   module line)
-- `tools/bench/src/console.rs`, `tools/bench/Cargo.toml`, `Cargo.lock`
+- `tools/bench/src/console.rs`, `tools/bench/src/console_capi.rs` (new; the C ABI calls only),
+  `tools/bench/src/main.rs` (its module line only), `tools/bench/Cargo.toml`, `Cargo.lock`
 - `scripts/console-benchmark-record-validator.jq`, `scripts/console-benchmark-validator.jq`,
   `scripts/console-benchmark-record-lib.jq`, `scripts/test-console-benchmark.sh`
 - `scripts/operator/run-console-benchmark.sh`, `scripts/operator/preflight-console-benchmark.sh`
@@ -127,7 +135,7 @@ is descriptive: no threshold, no tuning.
   and `session-validator` join, only
 - `scripts/check-bench-policy.sh` (the approved unsafe owners under `tools/`, `:219-233`) and
   `scripts/check-realtime-policy.sh` (the unsafe ownership allowlist, `:29`):
-  `tools/bench/src/console.rs` joins each, only, and their self-tests
+  `tools/bench/src/console_capi.rs` joins each, only, and their self-tests
   `scripts/test-bench-policy.sh` (the owner list of the `unsafe-owner-grep-error` case, `:499`)
   and `scripts/test-realtime-policy.sh` (its unsafe-owner fixtures), only where they list the
   owners; `docs/REALTIME_DEPENDENCY_POLICY.md` ("Unsafe-code
@@ -175,6 +183,10 @@ is descriptive: no threshold, no tuning.
      (untimed; it launches no timed workload)
    - `bash scripts/check-bench-preconditions.sh`, `bash scripts/check-console-benchmark-fixture.sh`,
      `bash scripts/test-console-benchmark.sh`, `bash scripts/check-workspace-policy.sh`
+   - the six policy scripts whose pins this slice edits: `bash scripts/check-bench-policy.sh`,
+     `bash scripts/test-bench-policy.sh`, `bash scripts/check-realtime-policy.sh`,
+     `bash scripts/test-realtime-policy.sh`, `bash scripts/check-conformance-boundaries.sh`,
+     `bash scripts/test-conformance-boundaries.sh`
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 

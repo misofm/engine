@@ -101,7 +101,7 @@ admission path remains that could write a live record onto an automated lane.
   whose curve is flat at `v` is therefore set to the bits a static `v` prepares. Every curve
   evaluation and conversion of preparation runs inside `CanonicalFpEnv`, as render's do (README
   A1.1). A conversion that fails is unreachable (draft 02
-  bounds the curve to the fader domain and `vca_effective_db` clamps) and refuses preparation with
+  bounds the curve to the fader domain and `vca_compose_db` clamps, D6) and refuses preparation with
   `host.automation.fader`.
 - **D3. Mono collapse is kept.** The fader is seam-side (Context), so a fader automation that drives
   one lane, or both lanes with different curves, keeps the track's collapse. This refines the
@@ -126,7 +126,16 @@ admission path remains that could write a live record onto an automated lane.
   - `vca_effective_db(member, offsets)`: `member` bit for bit when `vca_offsets_sum` is `None`,
     otherwise `vca_compose_db(member, sum)`.
 
-  `effective_strip_faders` still passes the reach in ascending VCA-ID order. The sentence at
+  `effective_strip_faders` still passes the reach in ascending VCA-ID order. Three test oracles
+  compute the member-first order today and are rewritten in this change to sum the offsets first,
+  then add the member (`vca_offsets_sum` and `vca_compose_db`, or the same arithmetic written out):
+  - `reference_db` (`crates/host-core/tests/vca.rs:268-279`), with its rustdoc;
+  - the `lane` closure of `a_browser_vca_renders_as_its_effective_faders_under_solo_and_mute`
+    (`hosts/host-web/src/tests.rs:13358-13371`);
+  - `vca_reference_effective` (`hosts/host-web/src/tests.rs:13697-13715`), with its rustdoc. Its
+    clamp flag compares the clamped value with the new sum.
+
+  The sentence at
   `docs/SESSION_SCHEMA_V1.md:80` becomes "summed in `f64` (the reaching VCAs' offsets first, in
   ascending VCA ID, then its own value added to that sum)". This is a class B change to #1242's
   order that root ruled under the standing summation-order ruling (README F16); it moves the bits of a static session only when
@@ -141,7 +150,9 @@ admission path remains that could write a live record onto an automated lane.
    only if #1312's module has no three-word form (its two- and five-word cells, #1312 D3, show the
    form it uses).
 3. D6 in `crates/session/src/vca.rs` and `crates/session/src/lib.rs`, its gate rewritten in
-   `crates/session/tests/vca_composition.rs`, and the sentence in `docs/SESSION_SCHEMA_V1.md:80`.
+   `crates/session/tests/vca_composition.rs`, the three oracles of D6 rewritten in
+   `crates/host-core/tests/vca.rs` and `hosts/host-web/src/tests.rs`, and the sentence in
+   `docs/SESSION_SCHEMA_V1.md:80`.
 4. Tests in `crates/host-core/tests/stored_fader_automation.rs` (new),
    `crates/capi/src/runtime/tests.rs` and `hosts/host-web/src/tests.rs` (one test).
 
@@ -150,7 +161,9 @@ admission path remains that could write a live record onto an automated lane.
 - `crates/host-core/src/prepare.rs`, `crates/host-core/tests/stored_fader_automation.rs` (new)
 - `crates/builtins-compiler/src/lib.rs` (program and event-state installation on the fader bank
   processor and the scalar track; the offsets cell's read; the program charge)
-- `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (one test)
+- `crates/capi/src/runtime/tests.rs`, `hosts/host-web/src/tests.rs` (one new test, and the two
+  oracles of D6 at `:13358-13371` and `:13697-13715`)
+- `crates/host-core/tests/vca.rs` (`reference_db`, `:268-279`, only)
 - `crates/engine/src/realtime/latest_cell.rs` (a three-word cell form and its loom case, only if
   #1312's module has none)
 - `crates/session/src/vca.rs` (D6), `crates/session/src/lib.rs` (the `pub use` at `:31` only),
@@ -182,8 +195,9 @@ admission path remains that could write a live record onto an automated lane.
 - **Bit-identity with VCAs.** D6's one rule serves the static path and the cell, so `S` in the
   cell is the static path's own sum; draft 11's live edit computes it with the same function, so
   it keeps the same property.
-- **A pinned order changes** (D6). The amendment to #1242's documented order and its pinned test
-  land in this slice, together, so `main` never holds a test that pins the old order.
+- **A pinned order changes** (D6). The amendment to #1242's documented order, its pinned test and
+  the three oracles of D6 land in this slice, together, so `main` never holds a test that pins or
+  computes the old order.
 
 ## Objective gates
 
@@ -191,10 +205,16 @@ admission path remains that could write a live record onto an automated lane.
    new). A session with a flat fader automation at `v = -7.25` dB (one `linear` segment from `v`
    to `v`) on one track renders, bit for bit, the session with static `fader_db` `-7.25` and no
    automation, for 64 blocks, on the C ABI and on the browser host. The same with a `both` entry on
-   a track one VCA reaches with an offset of `+3` dB, and on a track three VCAs reach, with offsets
-   chosen so that the two orders of README F16 give different `f64` sums (so the test reads the new
-   order on both paths). The same in a session with two VCAs, for a track that neither reaches and
-   whose flat value is `-0.0` dB (the cell's `S = +0.0`).
+   a track one VCA reaches with an offset of `+3` dB, and on a track three VCAs reach, with a flat
+   value and offsets for which the two orders of README F16 give different gain bits. Different
+   `f64` sums are not enough: they can round to the same `f32` dB value. An example: the flat value
+   `f32::from_bits(0x405a_f905)` (about 3.42145 dB) and the offsets, in ascending VCA-ID order,
+   `f32::from_bits(0xc1af_fc6c)` (about -21.99825 dB), `24.0` and `f32::from_bits(0x2624_8cd2)`
+   (about 5.7e-16 dB). The member-first order gives the dB bits `0x40ad_8ad3`, the offsets-first
+   order `0x40ad_8ad2`. The test first asserts that `checked_fader_gain` of the two orders' dB
+   values differs in bits, so a render that keeps the other order than the static path cannot
+   pass. The same in a session with two VCAs, for a track that neither reaches and whose flat value
+   is `-0.0` dB (the cell's `S = +0.0`).
 2. **Bytes.** The same session with and without one automated fader lane: `builtin_bank_bytes`,
    `graph_incremental_plan_bytes` and `graph_session_plus_plan_bytes` each differ by the builder's
    byte report for that program, and a `maximum_graph_session_plus_plan_bytes` one byte below the
@@ -226,6 +246,8 @@ admission path remains that could write a live record onto an automated lane.
      `./target/release/audit capi`
    - `bash scripts/run-aarch64-tests.sh debug` (the `aarch64-debug` job)
    - `bash scripts/check-host-core-policy.sh`, `bash scripts/check-workspace-policy.sh`
+   - `bash scripts/check-cross-targets.sh` (README F19, the iOS memset rule: no new
+     `memset_pattern16` call; fix one in code, never by a ceiling)
    - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
      `cargo fmt --all -- --check`
 
@@ -239,7 +261,9 @@ admission path remains that could write a live record onto an automated lane.
   audible change.
 - Gate 5 turns red if a new three-word cell form can tear or skip.
 - Gate 6 turns red if the static composition keeps the member-first order or sums the offsets in
-  another order than given; the rewritten line 81 replaces the case that pinned today's order.
+  another order than given; the rewritten line 81 replaces the case that pinned today's order. The
+  three rewritten oracles of D6 are not new tests: they keep their gates and now state the order
+  that the engine computes.
 
 ## Dependencies
 
