@@ -973,6 +973,61 @@ mod tests {
             credits_balance(&publisher, &mut retirer, 1);
         }
 
+        /// Gate 1 on the production path: `render_contiguous`, which the C ABI drives, schedules
+        /// by the running plan's clock. A candidate due at 7 (between block starts) renders the
+        /// predecessor at 0, 2, 4 and 6 and adopts at 8.
+        #[test]
+        fn render_contiguous_adopts_no_earlier_than_at_the_first_block_at_or_past_it() {
+            let (mut publisher, mut owner, mut retirer) =
+                plan_exchange(prepared(1), one_retirement()).expect("exchange");
+            reserve(&mut publisher, prepared(2), PlanAdoption::NoEarlierThan(7));
+            for sample in (0..=8).step_by(2) {
+                assert_eq!(owner.next_absolute_sample(), sample);
+                let mut output = [1.0_f32; 2];
+                let io = RenderIo {
+                    output: PlanarBufferMut::try_new(&mut output, 1, 2, 2).expect("output"),
+                };
+                let report = owner.render_contiguous(io, sample).expect("render");
+                let expected = if sample < 8 {
+                    (SwapOutcome::None, 1)
+                } else {
+                    (SwapOutcome::Applied, 2)
+                };
+                assert_eq!(
+                    (report.swap, report.render.plan_id),
+                    expected,
+                    "block {sample}"
+                );
+            }
+            credits_balance(&publisher, &mut retirer, 1);
+        }
+
+        /// D5 for `Primed`: a `not_before` of 5, between block starts, is not reached by the
+        /// block at 4, whose hook is not asked, and adopts at 6, where the hook saw 6.
+        #[test]
+        fn an_off_grid_primed_candidate_adopts_at_the_first_block_past_not_before() {
+            let running = Probe::default();
+            running.set_ready(true);
+            let (mut publisher, mut owner, mut retirer) =
+                plan_exchange(gated(1, &running), one_retirement()).expect("exchange");
+            let primed = PlanAdoption::Primed {
+                not_before: 5,
+                lead_blocks: 1,
+            };
+            reserve(&mut publisher, prepared(2), primed);
+            for sample in [0, 2, 4] {
+                assert_eq!(
+                    at(&mut owner, sample),
+                    (SwapOutcome::None, 1),
+                    "block {sample}"
+                );
+            }
+            assert_eq!(running.calls(), 0, "asked before not_before");
+            assert_eq!(at(&mut owner, 6), (SwapOutcome::Applied, 2));
+            assert_eq!((running.calls(), running.last()), (1, (6, 1)));
+            credits_balance(&publisher, &mut retirer, 1);
+        }
+
         /// Gate 1, `Primed` ready: not adopted before `not_before`, where the hook is not asked;
         /// adopted at `not_before`, where the running plan's hook saw that block's start and the
         /// lead, and the candidate's own hook was never asked.

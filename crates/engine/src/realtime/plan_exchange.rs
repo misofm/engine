@@ -787,7 +787,9 @@ impl RealtimePlanOwner {
     ) -> Result<RealtimeRenderReport, RenderError> {
         super::audit::in_render_scope(|| {
             // The block can only start where the running plan's clock stands, which an adopted
-            // plan continues; a call at any other sample renders nothing, so it schedules nothing.
+            // plan continues. A call at another sample renders nothing, so the clock, not the
+            // argument, decides the adoption; a candidate due by the clock is still adopted here,
+            // and its first rendered block starts at the clock.
             let block_start = self.active.1.next_absolute_sample();
             let (swap, carry) = self.enter_block(block_start);
             let active_epoch = self.active.0;

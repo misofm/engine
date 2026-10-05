@@ -518,8 +518,8 @@ const ADOPTION_PRIMED: u8 = 2;
 /// reserves it and kept across withdrawal and republication.
 ///
 /// **The claim rule (D2, D5).** At each block entry render loads the mailbox word, then the
-/// `Full` cell's schedule, and claims the candidate only if [`Self::admits`] the block that is
-/// about to render; a claimed candidate is adopted in that same block, before it renders (D4).
+/// `Full` cell's schedule, and claims the candidate only if the schedule admits the block that is
+/// about to render (`PlanAdoption::admits`); a claimed candidate is adopted in that same block, before it renders (D4).
 /// A candidate that is not admitted stays `Full` and withdrawable; render looks again at the next
 /// block and never waits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -578,10 +578,19 @@ impl PlanAdoption {
         match kind {
             ADOPTION_NEXT => Self::Next,
             ADOPTION_NO_EARLIER_THAN => Self::NoEarlierThan(due),
-            _ => Self::Primed {
+            ADOPTION_PRIMED => Self::Primed {
                 not_before: due,
                 lead_blocks,
             },
+            _ => {
+                debug_assert!(
+                    false,
+                    "plan mailbox invariant broken: unknown adoption kind"
+                );
+                // Unreachable: only `encode` writes the kind. A schedule render cannot read never
+                // admits a block, so the candidate stays published and withdrawable.
+                Self::NoEarlierThan(u64::MAX)
+            }
         }
     }
 }

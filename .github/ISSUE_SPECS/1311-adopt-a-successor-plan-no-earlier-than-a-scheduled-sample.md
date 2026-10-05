@@ -283,3 +283,62 @@ listed tests went red. With the defect reverted, every test is green.
   the withdraw-and-republish, which only some interleavings expose (L1, L2, L3).
 
 **Open items.** None in scope. #1355 implements the graph plan's `prime_ready` and the prime.
+
+### Batch follow-up (2026-10-05)
+
+Folds the attempt-1 verdict (`PASS`; MINOR F1-F2, NIT N1-N3 and N5). N4 (make the schedule a
+`commit` argument) and the path-authorization item are root's and are not touched here.
+
+- **F1.** The public `PlanAdoption` doc no longer links the `pub(crate)` `admits`: it says "the
+  schedule admits the block" and names `PlanAdoption::admits` in plain backticks.
+  `RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` now exits 0 (with #1314's
+  two link fixes from the batch follow-up before this one).
+- **F2.** `realtime::tests::scheduled_adoption::render_contiguous_adopts_no_earlier_than_at_the_first_block_at_or_past_it`:
+  through `render_contiguous`, the C ABI's path, a `NoEarlierThan(7)` candidate renders the
+  predecessor at 0, 2, 4 and 6 and adopts at 8. Mutations of `render_contiguous`'s block start in
+  `plan_exchange.rs`: `u64::MAX` (every scheduled candidate adopts at once) and `0` (none ever
+  adopts): each turns only this test red (engine with `realtime-audit`: 56 passed, 1 failed).
+  Reverted: green.
+- **N1.** The `render_contiguous` comment now says that a call at another sample renders nothing,
+  so the clock, not the argument, decides the adoption, and that a candidate due by the clock is
+  still adopted in that call.
+- **N2.** Correction to the attempt-1 record above. L1 (no generation in the word) is not
+  loom-only: the existing unit test
+  `spsc::tests::stale_claim_after_withdraw_and_republish_fails_on_the_generation` (#1343) turns red
+  under it too. The D7 paragraph's "loses its claim on the generation (loom L1)" therefore rests on
+  that unit test as well. The loom models' own catches are L2 (readiness read ordered before the
+  observation, a model mutation) and **L4** (found by the verifier): the cell's schedule stored
+  after the `Release` that marks the cell `Full` instead of before it. Under L4 the loom models
+  `..._due_check_of_one_publication_never_claims_another` and `..._an_unready_candidate_stays_withdrawable`
+  turn red (render sees the cell's earlier `Next` schedule and claims an undue or unready
+  candidate) and every unit test stays green. L4 is the defect only loom catches.
+- **N3.** `PlanAdoption::decode` has an explicit `ADOPTION_PRIMED` arm. The wildcard, which only a
+  broken invariant reaches (only `encode` writes the kind), fires a `debug_assert!` and decodes to
+  `NoEarlierThan(u64::MAX)`, a schedule that never admits a block, so such a candidate stays
+  published and withdrawable instead of being adopted under an invented schedule. No test: the
+  arm is unreachable through the mailbox's API.
+- **N5.** `realtime::tests::scheduled_adoption::an_off_grid_primed_candidate_adopts_at_the_first_block_past_not_before`:
+  a `Primed` candidate with `not_before` 5 is not asked about or adopted at block 4 and adopts at
+  6, where the hook saw `(6, 1)`. Mutation (the `Primed` arm admits at `block_start + 1 >=
+  not_before`, an off-by-one invisible to every on-grid `not_before`): only this test red (56
+  passed, 1 failed). Reverted: green.
+
+Test value:
+- `render_contiguous_adopts_no_earlier_than_...`: `render_contiguous` scheduling by anything but
+  the running plan's clock (block start `u64::MAX` or `0`); every engine, host-core and capi test
+  was green under both (verifier run R1).
+- `an_off_grid_primed_candidate_...`: a `Primed` due check that admits the block before an
+  off-grid `not_before`; every on-grid `Primed` test stays green under it.
+
+Gates after the three batch follow-up commits (#1343, #1314, #1311; x86_64 Linux):
+`RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps` rc 0;
+`cargo test --locked -p engine --features realtime-audit` 57 + 4 + 1; loom (`spsc_loom`) 8 passed;
+`cargo test --locked -p capi` 81 + 3 + 11; `host-core --features control-provider,test-support
+--test successor_swap` 32; `check-realtime-policy.sh` ok (93 regions in 26 files),
+`test-realtime-policy.sh` ok; `audit capi` 0 allocations, deallocations, locks and syscalls,
+`total_violations` 0; `check-capi-abi.sh` ok; `cargo fmt --all -- --check` ok; `cargo clippy
+--locked --workspace --all-targets --all-features -- -D warnings` ok; `check-cross-targets.sh`
+PASS; `check-workspace-policy.sh` ok; worklet chain (named twin build, `check-web-audioworklet.sh
+--without-metadata-regeneration`, `check-browser-expected-resources.py --artifacts`,
+`check-scalar-oracle-absent.py`, `test-web-audioworklet.sh`, V8 spill) all rc 0, shipped module
+`412df408...d850`, unchanged.
