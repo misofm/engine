@@ -32,7 +32,7 @@ local spec in `.github/ISSUE_SPECS/` and equals its GitHub body.
   GitHub) first. Its checklist includes the round-6 folds: the C1 restart walk over every edge kind
   (#1354 D2 step 6), routing a warm growth on #1324 D4's duck set (#1403 D2, #1397 D1), and the
   donor republished on a refused deadline re-preparation (#1358 D3).
-- Critical path: S0, then B #1309, then B #1312 (cells) and #1343, then A's carry slices (#1277 onward)
+- Critical path: S0, then B #1309, then B #1432 and #1312 (cells) and #1343, then A's carry slices (#1277 onward)
   and B #1398/#1310/#1311, then {C, D, F, H #1332}, then H's SDK slices. Cells precede the carry
   slices that write into them (#1312 before #1277, #1345 before #1280). Inside C: #1287, then
   #1402 and (after D #1324) #1354, then #1355, then #1403, then #1397; A's #1286 measures on #1355, and
@@ -64,7 +64,7 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `crates/control-plane/src/*` (after #1309) | B → H #1400 (`RuntimePreparer`) → A #1323 → D #1325 → C (#1396, #1355, #1403, #1397, #1358, #1360) → F → H #1381 |
 | `crates/capi/include/miso_engine_v1.h` | B (#1318, #1314, #1316) → B #1317 → B #1348 → A (#1285, #1323) → D (#1288, #1324, #1325) → C #1360 |
 | `crates/graph/src/{lib,runtime}.rs` | A → B (#1344, #1347) → C (#1287, #1402, #1396) → D (#1288, #1363) → C #1355 → G #1371 |
-| `crates/graph-compiler/src/*` | A #1285 → J #1384 → C #1287 first slice → G #1379 |
+| `crates/graph-compiler/src/*` | B #1312 (one test and its doc text) → A #1285 → J #1384 → C #1287 first slice → G #1379 |
 | `crates/parametric-eq/src/lib.rs` | A payload (#1279, #1280) → G #1328 (rest predicates only) → G #1337 → G #1372 |
 | `hosts/host-web/src/lib.rs` | H owns; B (#1312, #1345-#1347, #1399), D #1326 and E #1364 land before H #1332 rewires the worklet; B #1349 lands after H #1381; F #1306 lands when #1058's design allows and never blocks H; C #1406 edits one doc comment (the ring override field's) after H #1381 |
 | `sdk/src/core/session.ts` | I #1335 → E #1364 → H #1385 |
@@ -135,15 +135,16 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | 13 | #1348 | Add miso_engine_v1_service for bounded control work between edits | #1309, #1311, #1314 | — |
 | 14 | #1317 | Document the seek contract and the C ABI growth rule in the header | #1316, #1318 | — |
 | 15 | #1350 | Tighten the seek entry points: source.id.invalid, a typed held preparation, timed reads only | #1316 | — |
-| 16 | #1312 | Hold live values in latest-target cells on both hosts | #1309, #1348 | — |
-| 17 | #1319 | Test held seeks across swaps and supersession, and add a seek to audit capi | #1310, #1348 | — |
-| 18 | #1351 | Report each configured counter's own value in the C ABI counter snapshot | #1309, #1348 | — |
-| 19 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
-| 20 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
-| 21 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
-| 22 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
-| 23 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
-| 24 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
+| 16 | #1432 | Add the latest-target cell primitive and its loom model | #1309 | — |
+| 17 | #1312 | Hold live values in latest-target cells on both hosts | #1309, #1348, #1432 | — |
+| 18 | #1319 | Test held seeks across swaps and supersession, and add a seek to audit capi | #1310, #1348 | — |
+| 19 | #1351 | Report each configured counter's own value in the C ABI counter snapshot | #1309, #1348 | — |
+| 20 | #1346 | Hold strip input-lane values in latest-target cells | #1312 | — |
+| 21 | #1347 | Hold route-lane values in latest-target cells | #1312 | — |
+| 22 | #1399 | Report live_values_superseded in the browser status and prove both hosts drain strip cells alike | #1312 | — |
+| 23 | #1352 | Report each configured meter handle's own meter in the C ABI meter batch | #1309, #1351 | — |
+| 24 | #1345 | Hold effect parameter, bypass and EQ-target values in latest-target cells | #1312, #1399 | — |
+| 25 | #1349 | Publish the applied-revision watermark in the browser status | #1309, #1314, #1348, #1399 | #1381 |
 
 ## Stream C
 

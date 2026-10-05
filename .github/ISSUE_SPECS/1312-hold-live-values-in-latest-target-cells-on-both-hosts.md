@@ -13,8 +13,9 @@ block and never skips it. An exact `live_values_superseded` counter, readable th
 `COUNTERS_GET`, reports how many committed cell values a later one replaced before render read
 them. The ack bytes do not change.
 
-This is the first slice of D15-2: the strip fader/mute and matrix/pan lanes, and the cell
-primitive. The remaining cell slices reuse the primitive and the counter: *Hold effect parameter,
+This is the first lane slice of D15-2: the strip fader/mute and matrix/pan lanes, on the cell
+primitive of *Add the latest-target cell primitive and its loom model* (#1432, split out by
+Amendment 1). The remaining cell slices reuse the primitive and the counter: *Hold effect parameter,
 bypass and EQ-target values in latest-target cells* (#1345), *Hold strip input-lane values in
 latest-target cells* (#1346) and *Hold route-lane values in latest-target cells* (#1347). Under
 AGENTS.md's half-day rule, the browser status field and the cross-host agreement test are split
@@ -59,36 +60,17 @@ drain strip cells alike* (#1399).
 
 ## Decisions frozen for this slice
 
-- **D1. The cell: a triple buffer that never tears and never skips.** New module
-  `crates/engine/src/realtime/latest_cell.rs`, safe Rust (atomics only, no `unsafe`).
-  - A cell has three slots. Each slot holds the cell's words (`AtomicU32` each: the target and its
-    ramp, one unit) and an `AtomicU64` sequence number.
-  - A `middle: AtomicU32` holds a slot index and a `FRESH` bit. The writer (control) owns a
-    private back index and next sequence. The reader (render) owns a private front index and the
-    last sequence it applied.
-  - **Write:** store the words and the sequence into the back slot (`Relaxed`). Then
-    `prev = middle.swap(back | FRESH, AcqRel)`; the back index becomes `prev`'s index. Then
-    `fetch_or` the cell's bit into its stage's dirty word (`Release`). Writes cannot fail.
-  - **Read (render, at the drain):** `dirty.swap(0, Acquire)`. For each set bit whose `middle`
-    has `FRESH`: `prev = middle.swap(front, AcqRel)`; the front index becomes `prev`'s index; read
-    the front slot. The three indices are always distinct, so render never reads a slot the
-    writer is writing. Render reads the newest completed write in one pass: no retry, no spin, no
-    skip.
-  - A write that completes before a block's drain begins is applied in that block. That is D15-2
-    condition 2 and D15-2's ack meaning.
-  - **Peek (carry only):** `peek_unread(&self) -> Option<(words, sequence)>` returns the `middle`
-    slot's words and sequence when `middle` has `FRESH`, and `None` otherwise. It changes nothing:
-    `middle`, the front index, the last applied sequence and the dirty word stay as they were, so
-    a later read still applies the value. It is valid only once the writer is quiescent (no write
-    to this cell can start before the peek ends), because a write after the peek began may reuse
-    that slot. The plan-swap carry (*Carry live-controlled effect lanes across a plan swap*, #1280
-    D2) is its only caller; it peeks a predecessor whose cells no control write reaches once its
-    successor is published (D15-17; #1053 D7). The reader also exposes `last_applied(&self) -> u64`.
+- **D1. The cell** is #1432's D1 (Amendment 1): a safe-Rust triple buffer in
+  `crates/engine/src/realtime/latest_cell.rs` whose writes cannot fail, whose read takes the
+  newest completed write in one pass, and whose `peek_unread` changes nothing. A write that
+  completes before a block's drain begins is applied in that block. That is D15-2 condition 2 and
+  D15-2's ack meaning. This slice builds the strip stages' cells and dirty words on it (D3).
 - **D2. One counter unit: cell values replaced unread.** `live_values_superseded` counts, per
   cell, committed values that a later write to the **same cell** replaced before render read them.
-  When render reads sequence `s` after `p`, it adds `s - p - 1`. A record that writes two cells
-  (a `Both` record writes the left and right cells) counts in each. So 40 `Both` fader edits before
-  one block add `2 × 39 = 78`. #1345, #1346 and #1347 count in this unit. The counter is one
+  When render reads sequence `s` after `p`, it adds `s - p - 1` (the count #1432 D2 reports). A
+  record that writes two cells (a `Both` record writes the left and right cells) counts in each.
+  So 40 `Both` fader edits before one block add `2 × 39 = 78`. #1345, #1346 and #1347 count in
+  this unit. The counter is one
   `Arc<AtomicU64>` per session, passed to every plan the session prepares. Render is its only
   writer (load, saturating add, store) and the control thread reads it.
 - **D3. Cells per strip.** Fader stage: four cells (fader left, fader right, mute left, mute
@@ -131,14 +113,20 @@ drain strip cells alike* (#1399).
 
 ## Deliverables
 
-1. The cell module (with `peek_unread`) and its loom model.
+1. (Moved to #1432 by Amendment 1: the cell module, `peek_unread` and its loom model.)
 2. Fader and matrix lanes on cells in `builtins-compiler` (bank and test-only scalar processors),
    with D6's `apply_pending`.
 3. The C ABI and browser admission changes, the C ABI counter, header and docs text.
 
 ## Authorized paths
 
-- `crates/engine/src/realtime/latest_cell.rs` (new), `crates/engine/src/realtime/mod.rs` (exports).
+- Amendment 1, to move existing fader and matrix pushes onto cell writes only:
+  `crates/builtins-compiler/tests/allocation_tracker.rs`; `crates/graph-compiler/src/lib.rs` (the
+  test `a_banked_fader_command_lands_on_the_block_it_was_admitted_in` and its drain-contract doc
+  text; the test keeps a red mutation, a drain after `bank.process`, now against a cell read);
+  `crates/host-core/tests/live_lanes.rs`, `randomized.rs` (its accept/refuse model for fader and
+  matrix edits becomes "always accepted"), `live_delta.rs`, `symmetry_witness.rs`, `vca_live.rs`,
+  `strip_controls.rs`, `prepare.rs`. No `try_push`-shaped compatibility shim.
 - `crates/builtins-compiler/src/lib.rs`.
 - `crates/host-core/src/live_delta.rs`, `crates/host-core/src/control_provider.rs` (the counter
   setter), `crates/host-core/src/prepare.rs` (the producer and counter plumbing only; stream A's
@@ -176,14 +164,7 @@ drain strip cells alike* (#1399).
 2. **No write before the predicate (new capi test).** Arm `TestStructuralFaultPhase::BeforeLivePush`
    on a fader-and-pan edit: every cell's sequence and the output are unchanged. Mutation (PR
    evidence): move the cell writes above step 5; this test turns red.
-3. **Never skip under a racing writer (loom, new `spsc_loom_cells_*` tests in `latest_cell.rs`).**
-   A writer making two writes racing a reader that reads before and after: the reader never sees
-   a mixed cell, applies each sequence at most once, and, once the writer's last write completed
-   before a read began, that read returns it. The counter equals writes minus applies. Command:
-   `CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test
-   --locked --release -p engine --lib spsc_loom`. A plain unit test in the same module: after
-   three writes and no read, `peek_unread` returns the third write's words and sequence, a second
-   peek returns the same, and the next read then applies that value and adds 2 to the counter.
+3. (Moved to #1432 by Amendment 1: the cell's loom model and its `peek_unread` unit test.)
 4. **`apply_pending` equals the drain (new builtins-compiler test).** Dirty fader, mute and matrix
    cells, then `apply_pending` and an empty-drain block, render bit-identically to a twin whose
    block drains them.
@@ -198,8 +179,7 @@ drain strip cells alike* (#1399).
    (`COMMAND_OBSERVE_SUBSCRIBE`), which stay a FIFO after #1345, or delete one that would
    duplicate an existing observation test.
 6. **Realtime.** `cargo build --locked --release -p audit -p capi && target/release/audit capi`
-   (all violation counts 0); `bash scripts/check-realtime-policy.sh` (no `unsafe` in the new
-   module); `bash scripts/check-web-audioworklet.sh` (its call-graph gate); the browser legs of
+   (all violation counts 0); `bash scripts/check-realtime-policy.sh`; `bash scripts/check-web-audioworklet.sh` (its call-graph gate); the browser legs of
    `qualification.yml`'s `browser` job.
 7. **Workspace.** `cargo test --locked -p capi`; `cargo test --locked -p control-plane --features
    test-support`; `cargo test --locked -p builtins-compiler --features test-support`;
@@ -213,16 +193,25 @@ drain strip cells alike* (#1399).
 
 - Gate 1: a lane left a queue, or a counter in a unit other than D2's.
 - Gate 2: a cell write moved before a fallible check, which with cells destroys an acked value.
-- Gate 3: a cell that tears, applies twice, or skips the latest completed write (the single
-  sequence-word design this replaces would skip it); judged by the interleavings loom reaches.
-- Gate 3's peek case: a `peek_unread` that consumes the value (swaps `middle` or clears `FRESH`
-  or the dirty bit), so a second peek or the next read no longer sees it. #1280 D2's carry and
-  its count rely on a peek that changes nothing.
 - Gate 4: a carry path that applies pending cells differently from the block drain, which #1277
   relies on.
 
+## Amendment 1 (root, 2026-10-05)
+
+The first implementation run stopped before any change; it is not an attempt. Two findings:
+D5's infallible cell writers break every existing `try_push` caller of fader and matrix records
+in nine files outside the authorized paths, and with them the slice exceeds AGENTS.md's half-day
+size. Root ruled: split up front. The cell primitive, `peek_unread`, its loom model and its unit
+test (old D1, deliverable 1 and gate 3) move to *Add the latest-target cell primitive and its loom
+model* (#1432), on which this issue now depends. This issue keeps deliverables 2-3 and gates 1, 2
+and 4-7, and gains the nine files for moving existing fader and matrix pushes onto cell writes,
+with `randomized.rs`'s model becoming "always accepted" and the graph-compiler drain-contract test
+keeping a red mutation against a cell read. A `try_push` shim that always returns `Ok` is refused
+as an interim shortcut.
+
 ## Dependencies
 
+- *Add the latest-target cell primitive and its loom model* (#1432): the cell (D1).
 - *Extract the C ABI control plane into a portable crate both hosts call* (#1309).
 - *Add miso_engine_v1_service for bounded control work between edits* (#1348): the service step
   that refreshes the counter (D8).
