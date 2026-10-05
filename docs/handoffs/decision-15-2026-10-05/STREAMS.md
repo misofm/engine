@@ -79,7 +79,8 @@ never overrides an issue's "## Dependencies": where they seem to disagree, the d
 | `hosts/host-web/web/miso-engine-v1-audio-worklet-host.{js,d.ts}`, `sdk/src/browser/shipped-host.d.ts` | H (#1332, #1294) and B (#1399, #1349) → C #1406 (the ring's in-flight bound and comments only, wherever #1332 leaves them) |
 | `scripts/check-web-audioworklet-callgraph.py` | J #1234 and H #1333: either order, the second rebases; then J #1417 and H #1333 the same way |
 | `scripts/build-web-audioworklet.sh` | H #1334 → H #1380 → H #1332 |
-| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`) in any order, the later slice rebases |
+| `rust-toolchain.toml`, `.github/workflows/*.yml` | #877 (stable bump) and H #1334 (nightly entry): either order, #877 never touches the browser-artifact entry; J #1422 (two doctest steps in `qualification.yml`), G #1428 (one `test-release` step in `qualification.yml`, or a `nightly.yml` job under its D2) and J #1427 (`nightly.yml`'s checkout-path job; the release build steps of `audit-native` and `test-release`) in any order, the later slice rebases |
+| `fixtures/builtins/v1/reference/filter-response.csv` | J #1427 owns any re-pin; until it lands, no slice commits an `audit fixture-builtins --write` re-pin of this file (the written bytes depend on the checkout path) |
 
 Hot-file note (2026-10-05, after #1329 attempt 1): #1408 changes the D11 ramp law that the trim,
 fader and matrix share, in the ramp kernels and their twin. Stream B's cells (#1312, #1346) and
@@ -262,25 +263,26 @@ readers for #1411 by named exception.
 | 5 | #1339 | Give the delay a live bypass shunt | — | #1282, #1315, #1341 |
 | 6 | #1368 | Lower the link mode to per-lane state in the linked effects' banks | — | #1279, #1280 |
 | 7 | #1407 | Retarget a live input filter only through its designs and their mixtures | — | — |
-| 8 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
-| 9 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
-| 10 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
-| 11 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
-| 12 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
-| 13 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
-| 14 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
-| 15 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
-| 16 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
-| 17 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
-| 18 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
-| 19 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
-| 20 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
-| 21 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
-| 22 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
-| 23 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
-| 24 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
-| 25 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
-| 26 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
+| 8 | #1428 | Run the release reachable-word sweep of the live input filter in required CI | #1407 | — |
+| 9 | #1408 | Keep every trim, fader and matrix ramp inside its endpoints | — | — |
+| 10 | #1409 | Keep every effect parameter ramp inside its endpoints | #1408 | #1301 |
+| 11 | #1411 | Remove the 64-ulp restore slack once every effect ramp is clamped | #1409 | #1301 |
+| 12 | #1329 | State a bounded tail and an exact-rest bound for every node | #1328, #1407, #1408 | — |
+| 13 | #1338 | Make the multiband compressor's crossover live | #1366 | #1069, #1280, #1282 |
+| 14 | #1340 | Give the multiband compressor a live bypass shunt | #1339 | #1069, #1280, #1282, #1315, #1341 |
+| 15 | #1369 | Declare a strip's console link mode in the session, the wire and the SDK | #1368 | — |
+| 16 | #1370 | Ramp a lane's detector link between modes | #1368 | — |
+| 17 | #1377 | Carry each effect's tail and exact-rest bound in its prepared metadata | #1329 | — |
+| 18 | #1371 | Carry the link record from the edit to the lane | #1369, #1370 | #1054, #1279, #1280, #1312, #1345, #1364, #1394 |
+| 19 | #1379 | Define how node tails compose through gain in the graph extent | #1329, #1377 | #1237 |
+| 20 | #1367 | Make the multiband compressor's link mode live | #1371 | #1069, #1280, #1282 |
+| 21 | #1372 | State the parametric EQ's bounded tail and exact-rest bound | #1328, #1329, #1377, #1379 | — |
+| 22 | #1375 | Report a zero tail beyond latency for the compressor and the true-peak limiter | #1377, #1379 | — |
+| 23 | #1236 | Let a strip override a console slot's link mode | #1367, #1368, #1369, #1370, #1371 | #1054, #1196, #1279, #1280, #1345, #1394 |
+| 24 | #1373 | State the multiband compressor's bounded tail and exact-rest bound | #1329, #1338, #1375, #1377, #1379 | — |
+| 25 | #1374 | State the delay's bounded tail and exact-rest bound | #1375, #1377, #1379 | — |
+| 26 | #1376 | State exact-rest bounds for the gate, transient shaper and soft clip | #1375, #1377, #1379 | — |
+| 27 | #1378 | Retire the Infinite tail | #1372, #1373, #1374, #1375, #1376, #1379 | — |
 
 ## Stream H
 
@@ -354,6 +356,7 @@ readers for #1411 by named exception.
 | 19 | #1422 | Run doctests in CI | — | — |
 | 20 | #1416 | Let only host-core build the live route records that hosts push | #1422 | — |
 | 21 | #1423 | Make live strip records valid by construction | #1422 | #1312, #1346 |
+| 22 | #1427 | Make release builds and fixture-builtins --write independent of the checkout path | — | — |
 
 ## Stream K
 
