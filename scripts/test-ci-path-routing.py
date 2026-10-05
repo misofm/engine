@@ -756,9 +756,10 @@ def test_generated_once_mutations(checker) -> None:
                 workflow_mutation_fails("qualification.yml", command + "\n", "true\n")
         workflow_mutation_fails(
             "qualification.yml",
-            "        run: bash scripts/test-web-audioworklet.sh\n",
+            "      - name: Hermetic browser host and worklet tests\n        run: |\n",
+            "      - name: Hermetic browser host and worklet tests\n"
             "        if: needs.route.outputs.math_closure == 'true'\n"
-            "        run: bash scripts/test-web-audioworklet.sh\n")  # the owner made conditional
+            "        run: |\n")  # the owner made conditional (#1429: a block step)
         m3 = "        run: cargo test --locked --release -p lane -p math -p wasm-gates --features math/lane\n"
         for new in (
             m3.replace("run: cargo", "run: RUSTFLAGS='-C target-feature=+fma' cargo"),  # config replaced

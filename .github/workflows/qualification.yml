@@ -345,8 +345,20 @@ jobs:
       # contain it (owner ruling 2026-09-28, decision 3). Read from the named twin (#1109).
       - name: Shipped AudioWorklet module contains no whole-plan scalar path
         run: python3 -B scripts/check-scalar-oracle-absent.py --wasm target/ci/qualification-named-twin/miso-engine-v1-audio-worklet.simd128.named.wasm
+      # Issue #1429: the suite runs with a fresh, private TMPDIR, so anything it or a process it
+      # starts leaves there fails the step (the runner's shared temporary directory hid #1421's
+      # leak). The script's own failure still fails the step first; the trap removes the directory.
       - name: Hermetic browser host and worklet tests
-        run: bash scripts/test-web-audioworklet.sh
+        run: |
+          scratch="$(mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          export TMPDIR="$scratch"
+          bash scripts/test-web-audioworklet.sh
+          leftover="$(find "$scratch" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          if [[ -n "$leftover" ]]; then
+            printf 'scripts/test-web-audioworklet.sh left these entries in its TMPDIR:\n%s\n' "$leftover" >&2
+            exit 1
+          fi
       # Issues #1000/#1009: V8's register allocation of the EQ's stationary cascade loops, read from
       # the downloaded, digest-verified named twin of the artifact (#1109; run-wasm-gates.sh
       # --without-v8-spill leaves it to this job). Register allocation belongs to one V8, so the Node version is exact and the

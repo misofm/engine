@@ -95,3 +95,35 @@ directory hides it.
 - Work only from this body. Read the cited lines first; do not survey the workspace.
 - A test that greps source or prose is refused.
 - Attempt budget: three attempts, one adversarial verdict each.
+
+## Attempt record
+
+### Attempt 1 (implementer)
+
+- **Change.** `qualification.yml`, `artifact-gates`, step "Hermetic browser host and worklet
+  tests" becomes a block: `mktemp -d "$RUNNER_TEMP/test-web-audioworklet-tmp.XXXXXX"`, an `EXIT`
+  trap that removes it, `export TMPDIR="$scratch"`, then `bash scripts/test-web-audioworklet.sh`
+  on its own line, then a `find -mindepth 1 -maxdepth 1` of the directory that, if not empty,
+  prints every entry and exits 1. Under GitHub's `bash -eo pipefail` a script failure ends the step
+  with the script's status before the check (D1: never masked; checked locally with an `exit 3`
+  inserted: step exit 3, directory gone).
+- **D3.** The command stays a line of its own, so `unconditional_step_commands` still finds
+  `bash scripts/test-web-audioworklet.sh` exactly; `check-ci-path-routing.py` is unchanged. Its
+  self-test's "owner made conditional" mutation anchored on the old one-line `run:` and failed with
+  "mutation anchor absent"; `scripts/test-ci-path-routing.py` now inserts the `if:` between the
+  step's `name:` and its `run: |`. The existing "command replaced by `true`" mutation now hits the
+  block line and is still rejected.
+- **D4.** No router or verdict-table change; the step keeps no `if:`.
+- **D2.** None found: gate 1 left nothing in the private TMPDIR (node, the `cargo run` of
+  `parameter-metadata` and the python checkers included). No script change.
+- **Gate 1** (step body extracted from the YAML and run with `bash --noprofile --norc -eo pipefail`,
+  `RUNNER_TEMP` a scratch directory, after `scripts/build-web-audioworklet.sh --named-twin` into
+  `target/ci/qualification-*`): exit 0; `RUNNER_TEMP` empty afterwards.
+- **Gate 2** (`scripts/test-web-audioworklet.sh` from `26208ceaa^`): exit 1,
+  `scripts/test-web-audioworklet.sh left these entries in its TMPDIR: miso-engine-host.DWkmHd`;
+  `RUNNER_TEMP` empty afterwards. Reverted.
+- **Gate 3** (`trap 'true' EXIT` after `:13`): exit 1, naming `miso-engine-host.iSljKf` and
+  `miso-engine-mutation.T1aEIZ`; `RUNNER_TEMP` empty afterwards. Reverted.
+- **Gate 4.** `python3 -B scripts/check-ci-path-routing.py`: passed. `python3 -B
+  scripts/test-ci-path-routing.py`: passed (red before the anchor move, as above).
+  `bash scripts/check-workspace-policy.sh`: ok. The CI half comes from the batch PR run.
